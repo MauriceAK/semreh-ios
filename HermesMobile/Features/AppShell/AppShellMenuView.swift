@@ -5,6 +5,7 @@ import SwiftData
 struct ControlView: View {
     @Bindable var authManager: AuthManager
     let server: URL
+    let projectsEnabled: Bool
     let isActive: Bool
     let onNestedDestinationVisibilityChanged: (Bool) -> Void
 
@@ -47,11 +48,13 @@ struct ControlView: View {
     init(
         authManager: AuthManager,
         server: URL,
+        projectsEnabled: Bool = true,
         isActive: Bool = true,
         onNestedDestinationVisibilityChanged: @escaping (Bool) -> Void = { _ in }
     ) {
         self.authManager = authManager
         self.server = server
+        self.projectsEnabled = projectsEnabled
         self.isActive = isActive
         self.onNestedDestinationVisibilityChanged = onNestedDestinationVisibilityChanged
         _viewModel = State(initialValue: SessionListViewModel(server: server))
@@ -207,7 +210,7 @@ struct ControlView: View {
             memory: showsMemorySection,
             insights: showsInsightsSection,
             activeProfile: showsActiveProfileSection,
-            projects: showsProjectsSection
+            projects: showsProjectsSection && projectsEnabled
         )
     }
 
@@ -260,16 +263,24 @@ struct ControlView: View {
             duplicate: { _ in },
             move: { _, _ in },
             createProject: { _ in },
-            refreshProjects: { Task { await viewModel.loadProjects() } },
-            export: { _, _ in }
+            refreshProjects: {
+                guard projectsEnabled else { return }
+                Task { await viewModel.loadProjects() }
+            },
+            export: { _, _ in },
+            projectsEnabled: projectsEnabled
         )
     }
 
     private func loadSidebarData() async {
         async let sessions: Bool = viewModel.load(modelContext: modelContext)
         async let profile: Void = viewModel.loadActiveProfile()
-        async let projects: Void = viewModel.loadProjects()
-        _ = await (sessions, profile, projects)
+        if projectsEnabled {
+            async let projects: Void = viewModel.loadProjects()
+            _ = await (sessions, profile, projects)
+        } else {
+            _ = await (sessions, profile)
+        }
     }
 
 }

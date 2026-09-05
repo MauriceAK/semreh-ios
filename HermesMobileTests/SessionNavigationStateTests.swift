@@ -390,6 +390,49 @@ final class SessionNavigationStateTests: XCTestCase {
         XCTAssertTrue(state.destination?.loadsInitialMessages == true)
     }
 
+    func testLocalDraftNewChatCompletesWithoutDurableID() {
+        let route = PendingNewChatRoute(initialDraft: "direct draft", autoStartsVoiceInput: true)
+        let draft = SessionSummary(sessionId: nil, title: "New Chat", profile: "default")
+        var state = SessionNavigationState(lastSelectedSessionID: "previous-session")
+
+        XCTAssertTrue(state.beginNewChatCreation(route))
+        XCTAssertTrue(state.completeNewChatCreation(draft, for: route))
+
+        XCTAssertFalse(state.isCreatingNewChat)
+        XCTAssertEqual(state.destination, .newChat(session: draft, route: route))
+        XCTAssertFalse(state.destination?.loadsInitialMessages == true)
+        XCTAssertNil(state.selectedSessionID)
+        XCTAssertEqual(state.lastSelectedSessionID, "previous-session")
+    }
+
+    func testLocalDraftNewChatRejectsStaleRouteWithoutClearingPendingCreation() {
+        let pending = PendingNewChatRoute(initialDraft: "pending")
+        let stale = PendingNewChatRoute(initialDraft: "stale")
+        let draft = SessionSummary(sessionId: nil, title: "New Chat")
+        var state = SessionNavigationState(lastSelectedSessionID: "previous-session")
+
+        XCTAssertTrue(state.beginNewChatCreation(pending))
+        XCTAssertFalse(state.completeNewChatCreation(draft, for: stale))
+
+        XCTAssertTrue(state.isCreatingNewChat)
+        XCTAssertNil(state.destination)
+        XCTAssertEqual(state.lastSelectedSessionID, "previous-session")
+    }
+
+    func testCancelledLocalDraftNewChatRejectsCompletionAfterCancellation() {
+        let route = PendingNewChatRoute(initialDraft: "cancelled")
+        let draft = SessionSummary(sessionId: nil, title: "New Chat")
+        var state = SessionNavigationState(lastSelectedSessionID: "previous-session")
+
+        XCTAssertTrue(state.beginNewChatCreation(route))
+        state.cancelNewChatCreation(for: route)
+        XCTAssertFalse(state.completeNewChatCreation(draft, for: route))
+
+        XCTAssertFalse(state.isCreatingNewChat)
+        XCTAssertNil(state.destination)
+        XCTAssertEqual(state.lastSelectedSessionID, "previous-session")
+    }
+
     func testExternalNewChatRequestsDrainSharedImportBeforeAppIntentAfterCreation() {
         let inFlight = PendingNewChatRoute()
         let sharedImport = PendingNewChatRoute(initialDraft: "shared")

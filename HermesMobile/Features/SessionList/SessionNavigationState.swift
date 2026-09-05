@@ -92,9 +92,9 @@ struct SessionNavigationState: Equatable {
         _ session: SessionSummary,
         for route: PendingNewChatRoute
     ) -> Bool {
-        guard pendingNewChatRoute?.id == route.id,
-              Self.normalized(session.sessionId) != nil
-        else { return false }
+        // Direct New Chat is a local draft until first send. The route owns
+        // navigation identity; a durable server ID is not required to open it.
+        guard pendingNewChatRoute?.id == route.id else { return false }
 
         rootRevision += 1
         pendingNewChatRoute = nil

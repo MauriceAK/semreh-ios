@@ -4,9 +4,12 @@
 Not an external model smoke: no real credentials, no tool calls. Delays let tests
 interrupt a genuinely pending provider request. HTTP request bodies are not logged.
 """
+import argparse
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import time
+
+REASONING_PROBE = False
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -17,7 +20,10 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != '/v1/models':
             self.send_error(404)
             return
-        self.reply({'object': 'list', 'data': [{'id': 'semreh-fixture', 'object': 'model', 'owned_by': 'local-test'}]})
+        models = ['semreh-fixture', 'gpt-5'] if REASONING_PROBE else ['semreh-fixture']
+        self.reply({'object': 'list', 'data': [
+            {'id': model, 'object': 'model', 'owned_by': 'local-test'} for model in models
+        ]})
 
     def reply(self, body):
         data = json.dumps(body).encode()
@@ -41,6 +47,14 @@ class Handler(BaseHTTPRequestHandler):
         if 'SEMREH_INTERRUPT_FIXTURE' in str(last_user):
             time.sleep(15)
         text = 'SEMREH_SLICE1_ACK'
+        if REASONING_PROBE and 'SEMREH_REASONING_PROBE' in str(last_user):
+            # Echo only the synthetic request's effort, not prompts or headers.
+            # gpt-5 is a protocol fixture name here; no OpenAI service is called.
+            reasoning = body.get('reasoning') or {}
+            effort = body.get('reasoning_effort') or reasoning.get('effort')
+            if reasoning.get('enabled') is False:
+                effort = 'none'
+            text = 'SEMREH_REASONING_EFFORT:' + str(effort or 'missing')
         base = {'id': 'chatcmpl-semreh-fixture', 'created': int(time.time()), 'model': 'semreh-fixture'}
         try:
             if body.get('stream'):
@@ -59,5 +73,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--reasoning-probe', action='store_true')
+    REASONING_PROBE = parser.parse_args().reasoning_probe
     print('Deterministic model fixture listening on 127.0.0.1:18792', flush=True)
     ThreadingHTTPServer(('127.0.0.1', 18792), Handler).serve_forever()

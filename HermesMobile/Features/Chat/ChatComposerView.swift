@@ -98,9 +98,11 @@ struct MessageComposerView: View {
     let selectedReasoningEffort: String?
     /// Model-aware effort vocabulary; `nil` → full static list (issue #18).
     let supportedReasoningEfforts: [String]?
-    /// Adds the session-only inheritance action when the server explicitly
-    /// supports session-scoped reasoning writes.
-    let sessionScopedReasoning: Bool
+    /// Draft inheritance and legacy override clearing are distinct from the
+    /// direct gateway's explicit per-session effort choices.
+    let allowsReasoningInheritance: Bool
+    let allowsReasoningChangesWhileStreaming: Bool
+    let isReasoningChangeDeferred: Bool
     /// When false the model has no effort control — hide the reasoning menu.
     let showsReasoningControl: Bool
     let isUpdatingConfiguration: Bool
@@ -826,9 +828,9 @@ struct MessageComposerView: View {
         ComposerReasoningMenu(
             selectedReasoningEffort: selectedReasoningEffort,
             supportedEfforts: supportedReasoningEfforts,
-            includeInherit: sessionScopedReasoning,
+            includeInherit: allowsReasoningInheritance,
             reasoningTitle: reasoningTitle,
-            isDisabled: isConfigurationControlDisabled,
+            isDisabled: isReasoningControlDisabled,
             width: reasoningControlWidth,
             color: metaControlColor,
             controlFont: metaControlFont,
@@ -861,6 +863,8 @@ struct MessageComposerView: View {
             return (configurationErrorMessage, true, false)
         } else if isUpdatingConfiguration {
             return (String(localized: "Updating composer settings..."), false, false)
+        } else if isReasoningChangeDeferred {
+            return (String(localized: "Reasoning applies to the next message."), false, false)
         }
 
         return nil
@@ -944,6 +948,11 @@ struct MessageComposerView: View {
 
     private var isConfigurationControlDisabled: Bool {
         isOfflineReadOnly || isSending || isCompressingSession || isWaitingForStream || isUpdatingConfiguration
+    }
+
+    private var isReasoningControlDisabled: Bool {
+        isOfflineReadOnly || isSending || isCompressingSession || isCancellingStream || isUpdatingConfiguration
+            || (isWaitingForStream && !allowsReasoningChangesWhileStreaming)
     }
 
     private var isVoiceInputDisabled: Bool {

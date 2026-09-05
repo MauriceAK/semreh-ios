@@ -8,6 +8,24 @@ import Observation
 final class GatewayConversationController {
     enum RunState: Equatable { case idle, submitting, running, stopping, deliveryUnknown }
     enum SteerOutcome: String { case accepted, queued, rejected }
+    struct ReasoningConfiguration: Equatable, Sendable {
+        let effort: String
+        let deferred: Bool
+        let supportsSessionChanges: Bool
+    }
+
+    private struct ReasoningCapability {
+        let binding: GatewaySessionBinding
+        let bindingEpoch: Int
+        let connectionGeneration: Int
+        let lifecycle: Int
+        let configuration: ReasoningConfiguration
+    }
+
+    private static let reasoningEfforts: Set<String> = [
+        "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"
+    ]
+    private static let reasoningDisplays: Set<String> = ["show", "hide"]
     typealias TranscriptLoader = @MainActor (String, String, Int, Int) async throws -> DirectHermesTranscriptPage
 
     private(set) var binding: GatewaySessionBinding?
@@ -42,6 +60,9 @@ final class GatewayConversationController {
     private var turnEpoch = 0
     private var durableRowConfirmed: Bool
     private var latestReadGeneration = 0
+    @ObservationIgnored private var reasoningMutationCount = 0
+    @ObservationIgnored private var reasoningMutationTail: Task<Void, Never>?
+    @ObservationIgnored private var reasoningRevision = 0
 
     init(runtime: HermesServerRuntime, storedID: String?, profile: String = "default", loadTranscript: @escaping TranscriptLoader) {
         self.runtime = runtime
@@ -82,7 +103,7 @@ final class GatewayConversationController {
     /// A lost prompt acknowledgement is never automatically replayed.
     func submit(_ text: String, create: [String: JSONValue] = [:]) async throws {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw DirectSessionError.invalidResponse }
-        guard runState == .idle, !promptInFlight else { throw DirectSessionError.ambiguousPrompt }
+        guard runState == .idle, !promptInFlight, reasoningMutationCount == 0 else { throw DirectSessionError.ambiguousPrompt }
         promptInFlight = true
         defer { promptInFlight = false }
         turnEpoch &+= 1
@@ -127,6 +148,81 @@ final class GatewayConversationController {
             }
             throw error
         }
+    }
+
+    /// Reads the live session setting for an already-stored conversation. Drafts
+    /// deliberately remain local and are never created just to read a setting.
+    func reasoningConfiguration() async throws -> ReasoningConfiguration {
+        guard !disposed, hasSubmittedPrompt, storedID != nil else { throw DirectSessionError.invalidBinding }
+        while let mutationTail = reasoningMutationTail {
+            await mutationTail.value
+        }
+        let revision = reasoningRevision
+        try await ensureBinding(create: [:])
+        let configuration = try await readReasoningCapability().configuration
+        guard revision == reasoningRevision else { throw DirectSessionError.staleOperation }
+        return configuration
+    }
+
+    /// Changes the next-turn reasoning setting without changing run state. A
+    /// fresh capability read is required before every write; its binding,
+    /// socket generation, and lifecycle are pinned through the acknowledgement.
+    func setReasoningEffort(_ effort: String) async throws -> ReasoningConfiguration {
+        guard Self.reasoningEfforts.contains(effort), !disposed,
+              hasSubmittedPrompt, storedID != nil,
+              runState == .idle || runState == .running else {
+            throw DirectSessionError.invalidResponse
+        }
+        reasoningRevision &+= 1
+        reasoningMutationCount += 1
+        let previous = reasoningMutationTail
+        let operation: Task<ReasoningConfiguration, Error> = Task { @MainActor [weak self] in
+            if let previous { await previous.value }
+            guard let self else { throw DirectSessionError.stopped }
+            defer {
+                self.reasoningMutationCount -= 1
+                if self.reasoningMutationCount == 0 { self.reasoningMutationTail = nil }
+            }
+            guard !self.disposed, self.runState == .idle || self.runState == .running else {
+                throw DirectSessionError.invalidResponse
+            }
+            try await self.ensureBinding(create: [:])
+            let capability = try await self.readReasoningCapability()
+            guard capability.configuration.supportsSessionChanges,
+                  !self.disposed, self.runState == .idle || self.runState == .running else {
+                throw DirectSessionError.invalidResponse
+            }
+            let result = try await self.runtime.request("config.set", parameters: {
+                try self.checkReasoningCapability(capability)
+                guard self.runState == .idle || self.runState == .running else {
+                    throw DirectSessionError.invalidResponse
+                }
+                return [
+                    "key": .string("reasoning"),
+                    "value": .string(effort),
+                    "scope": .string("session"),
+                    "session_id": .string(capability.binding.runtimeID),
+                    "profile": .string(self.profile)
+                ]
+            })
+            try self.checkReasoningCapability(capability)
+            guard let fields = result?.gatewayFields,
+                  fields["key"] == .string("reasoning"),
+                  fields["value"] == .string(effort),
+                  fields["scope"] == .string("session"),
+                  fields["persisted"] == .bool(true),
+                  let deferredValue = fields["deferred"],
+                  case .bool(let deferred) = deferredValue else {
+                throw DirectSessionError.invalidResponse
+            }
+            return ReasoningConfiguration(
+                effort: effort,
+                deferred: deferred,
+                supportsSessionChanges: true
+            )
+        }
+        reasoningMutationTail = Task { @MainActor in _ = try? await operation.value }
+        return try await operation.value
     }
 
     func steer(_ text: String) async throws -> SteerOutcome {
@@ -293,6 +389,81 @@ final class GatewayConversationController {
     private func invalidateBinding() {
         bindingEpoch &+= 1
         binding = nil
+    }
+
+    private func readReasoningCapability() async throws -> ReasoningCapability {
+        try await runtime.connect()
+        let capability = try reasoningSnapshot()
+        let result = try await runtime.request("config.get", parameters: {
+            try self.checkReasoningCapability(capability)
+            return [
+                "key": .string("reasoning"),
+                "scope": .string("session"),
+                "session_id": .string(capability.binding.runtimeID),
+                "profile": .string(self.profile)
+            ]
+        })
+        try checkReasoningCapability(capability)
+        guard let fields = result?.gatewayFields,
+              let effort = fields["value"]?.gatewayString,
+              Self.reasoningEfforts.contains(effort),
+              let display = fields["display"]?.gatewayString,
+              Self.reasoningDisplays.contains(display) else {
+            throw DirectSessionError.invalidResponse
+        }
+        let supportsSessionChanges: Bool
+        let deferred: Bool
+        if fields["session_reasoning_contract"] == .number(1) {
+            guard let deferredValue = fields["deferred"], case .bool(let value) = deferredValue else {
+                throw DirectSessionError.invalidResponse
+            }
+            supportsSessionChanges = true
+            deferred = value
+        } else {
+            supportsSessionChanges = false
+            deferred = fields["deferred"].flatMap {
+                if case .bool(let value) = $0 { return value }
+                return nil
+            } ?? false
+        }
+        return ReasoningCapability(
+            binding: capability.binding,
+            bindingEpoch: capability.bindingEpoch,
+            connectionGeneration: capability.connectionGeneration,
+            lifecycle: capability.lifecycle,
+            configuration: ReasoningConfiguration(
+                effort: effort,
+                deferred: deferred,
+                supportsSessionChanges: supportsSessionChanges
+            )
+        )
+    }
+
+    private func reasoningSnapshot() throws -> ReasoningCapability {
+        guard !disposed, hasSubmittedPrompt, let storedID, let binding,
+              storedID == binding.storedID, binding.profile == profile else {
+            throw DirectSessionError.invalidBinding
+        }
+        return ReasoningCapability(
+            binding: binding,
+            bindingEpoch: bindingEpoch,
+            connectionGeneration: runtime.connectionGeneration,
+            lifecycle: lifecycle,
+            configuration: ReasoningConfiguration(
+                effort: "",
+                deferred: false,
+                supportsSessionChanges: false
+            )
+        )
+    }
+
+    private func checkReasoningCapability(_ capability: ReasoningCapability) throws {
+        guard !disposed, lifecycle == capability.lifecycle,
+              bindingEpoch == capability.bindingEpoch,
+              runtime.connectionGeneration == capability.connectionGeneration,
+              binding == capability.binding else {
+            throw DirectSessionError.staleOperation
+        }
     }
 
     private func resumeParams() -> [String: JSONValue] {

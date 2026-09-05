@@ -562,6 +562,9 @@ final class ChatViewModel {
     private(set) var responseCompletionNeedsTranscriptRefresh = false
     private(set) var modelCatalogGroups: [ModelCatalogGroup] = []
     private var directModelOptions: DirectHermesModelOptions?
+    private var directSessionReasoningSupported = false
+    private(set) var isReasoningChangeDeferred = false
+    @ObservationIgnored private var directReasoningRefreshTask: Task<Void, Never>?
     private(set) var agentCommands: [AgentCommand] = []
     private(set) var workspaceRoots: [WorkspaceRoot] = []
     private(set) var workspaceSuggestions: [String] = []
@@ -596,8 +599,15 @@ final class ChatViewModel {
         )
     }
     var selectedReasoningSelection: String? {
+        if usesDirectGateway, canonicalSessionID != nil { return selectedReasoningEffort }
         guard sessionScopedReasoning == true else { return selectedReasoningEffort }
         return sessionReasoningEffort ?? ReasoningEffortOption.inheritID
+    }
+    var allowsReasoningInheritance: Bool {
+        usesDirectGateway ? canonicalSessionID == nil : sessionScopedReasoning == true
+    }
+    var allowsReasoningChangesWhileStreaming: Bool {
+        usesDirectGateway && directSessionReasoningSupported
     }
     private(set) var isLoadingComposerConfiguration = false
     private(set) var isUpdatingComposerConfiguration = false
@@ -857,6 +867,7 @@ final class ChatViewModel {
     }
 
     deinit {
+        directReasoningRefreshTask?.cancel()
         backgroundPollTask?.cancel()
         sessionEventReconcileTask?.cancel()
         streamStatusWatchTask?.cancel()
@@ -894,11 +905,105 @@ final class ChatViewModel {
                 currentModelProvider = Self.nonEmpty(options.provider)
             }
             applyDirectReasoningGating()
+            if canonicalSessionID != nil { try await loadDirectSessionReasoning() }
         } catch {
             guard !directInvalidated, profile == (requestProfileName ?? "default"),
                   mutation == composerConfigurationMutationToken else { return }
+            if canonicalSessionID != nil {
+                directSessionReasoningSupported = false
+                isReasoningChangeDeferred = false
+                applyDirectReasoningGating()
+            }
             lastError = error
-            composerConfigurationErrorMessage = "Hermes model settings could not be loaded. Your draft was preserved."
+            composerConfigurationErrorMessage = "Hermes chat settings could not be loaded. Your draft was preserved."
+        }
+    }
+
+    private func loadDirectSessionReasoning() async throws {
+        guard !directInvalidated, let expectedID = canonicalSessionID else { return }
+        let mutation = composerConfigurationMutationToken
+        do {
+            let controller = try await ensureDirectConversation()
+            let configuration = try await controller.reasoningConfiguration()
+            guard !directInvalidated, !Task.isCancelled, expectedID == canonicalSessionID,
+                  mutation == composerConfigurationMutationToken else { return }
+            applyDirectReasoningConfiguration(configuration)
+        } catch {
+            guard !directInvalidated, !Task.isCancelled, expectedID == canonicalSessionID,
+                  mutation == composerConfigurationMutationToken else { return }
+            directSessionReasoningSupported = false
+            isReasoningChangeDeferred = false
+            applyDirectReasoningGating()
+            throw error
+        }
+    }
+
+    private func applyDirectReasoningConfiguration(_ configuration: GatewayConversationController.ReasoningConfiguration) {
+        directSessionReasoningSupported = configuration.supportsSessionChanges
+        selectedReasoningEffort = configuration.effort
+        sessionReasoningEffort = configuration.effort
+        isReasoningChangeDeferred = configuration.deferred
+        applyDirectReasoningGating()
+    }
+
+    private func applyDirectSessionInfo(_ payload: JSONValue?) {
+        guard !directInvalidated else { return }
+        let fields = payload?.gatewayFields ?? [:]
+        if let model = Self.nonEmpty(fields["model"]?.gatewayString) { currentModel = model }
+        if let provider = Self.nonEmpty(fields["provider"]?.gatewayString) { currentModelProvider = provider }
+        if let cwd = Self.nonEmpty(fields["cwd"]?.gatewayString) { currentWorkspace = cwd }
+        // Older metadata must not replace an in-flight optimistic selection.
+        if !isUpdatingComposerConfiguration {
+            if let effort = fields["reasoning_effort"]?.gatewayString {
+                selectedReasoningEffort = Self.nonEmpty(effort)
+                sessionReasoningEffort = selectedReasoningEffort
+            }
+            if case .bool(let deferred) = fields["reasoning_deferred"] {
+                isReasoningChangeDeferred = deferred
+            }
+        }
+        applyDirectReasoningGating()
+    }
+
+    private func selectDirectSessionReasoning(_ effort: String) async -> Bool {
+        guard !directInvalidated, !isViewingCachedData, !isUpdatingComposerConfiguration,
+              directSessionReasoningSupported, supportsReasoningEffort == true,
+              supportedReasoningEfforts?.contains(effort) == true,
+              let expectedID = canonicalSessionID else { return false }
+        guard effort != selectedReasoningSelection else { return false }
+        let previousEffort = selectedReasoningEffort
+        let previousOverride = sessionReasoningEffort
+        let previousDeferred = isReasoningChangeDeferred
+        composerConfigurationMutationToken &+= 1
+        let mutation = composerConfigurationMutationToken
+        selectedReasoningEffort = effort
+        sessionReasoningEffort = effort
+        isUpdatingComposerConfiguration = true
+        composerConfigurationErrorMessage = nil
+        lastError = nil
+        defer {
+            if mutation == composerConfigurationMutationToken { isUpdatingComposerConfiguration = false }
+        }
+        do {
+            let controller = try await ensureDirectConversation()
+            let configuration = try await controller.setReasoningEffort(effort)
+            guard !directInvalidated, expectedID == canonicalSessionID,
+                  mutation == composerConfigurationMutationToken else { return false }
+            applyDirectReasoningConfiguration(configuration)
+            return true
+        } catch {
+            guard !directInvalidated, expectedID == canonicalSessionID,
+                  mutation == composerConfigurationMutationToken else { return false }
+            selectedReasoningEffort = previousEffort
+            sessionReasoningEffort = previousOverride
+            isReasoningChangeDeferred = previousDeferred
+            // A lost acknowledgement can be ambiguous. Never retry the write;
+            // require a fresh settings read before another selection.
+            directSessionReasoningSupported = false
+            applyDirectReasoningGating()
+            lastError = error
+            composerConfigurationErrorMessage = "Reasoning could not be confirmed. Reload chat settings before trying again."
+            return false
         }
     }
 
@@ -909,8 +1014,9 @@ final class ChatViewModel {
         // every provider implements every level without coercion.
         supportedReasoningEfforts = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
             .filter { $0 != "none" || capability?.canDisableReasoning != false }
-        supportsReasoningEffort = capability?.reasoning ?? false
-        sessionScopedReasoning = canonicalSessionID == nil
+        let configurable = canonicalSessionID == nil || directSessionReasoningSupported
+        supportsReasoningEffort = capability?.reasoning == true && configurable
+        sessionScopedReasoning = configurable
     }
 
     private func canConfigureDirectDraft() -> Bool {
@@ -920,7 +1026,7 @@ final class ChatViewModel {
             return false
         }
         guard canonicalSessionID == nil else {
-            composerConfigurationErrorMessage = "Changing settings on an existing direct chat is not available yet. New Chat supports model and reasoning choices before its first send."
+            composerConfigurationErrorMessage = "Model and workspace changes on an existing direct chat are not available yet. Choose them in New Chat before its first send."
             return false
         }
         composerConfigurationErrorMessage = nil
@@ -941,6 +1047,9 @@ final class ChatViewModel {
             controller.isEditing = self.directComposerIsEditing
             controller.onBinding = { [weak self] binding in self?.adoptDirectID(binding.storedID) }
             controller.onCanonicalID = { [weak self] id in self?.adoptDirectID(id) }
+            controller.onResume = { [weak self] result in
+                self?.applyDirectSessionInfo(result?.gatewayFields["info"])
+            }
             controller.onTranscript = { [weak self] page, older in
                 guard let self, !self.directInvalidated else { return }
                 self.applyDirectTranscript(page, older: older)
@@ -966,12 +1075,16 @@ final class ChatViewModel {
     private func adoptDirectID(_ id: String) {
         guard !directInvalidated, sessionID != id else { return }
         sessionID = id
+        applyDirectReasoningGating()
         onDirectCanonicalID?(id)
     }
 
     func invalidateDirectConversation() {
         guard usesDirectGateway else { return }
         directInvalidated = true
+        directReasoningRefreshTask?.cancel()
+        directSessionReasoningSupported = false
+        isReasoningChangeDeferred = false
         directConversation?.invalidate()
         directAttachmentTask?.cancel()
         stopSessionEventSync()
@@ -1090,6 +1203,7 @@ final class ChatViewModel {
     private func sendDirectMessage(_ draft: String, modelContext: ModelContext?) async -> Bool {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !directInvalidated, !isStartingChat,
+              !isUpdatingComposerConfiguration,
               (directConversation?.runState == nil || directConversation?.runState == .idle) else { return false }
         guard pendingAttachments.isEmpty else {
             sendErrorMessage = "Direct Hermes attachments are not available yet. Your draft was kept."
@@ -1104,6 +1218,7 @@ final class ChatViewModel {
             OpenChatSessionStore.shared.noteStreamingStateChanged()
         }
         let localID = "local-\(UUID().uuidString)"
+        let wasDraft = canonicalSessionID == nil
         do {
             let controller = try await ensureDirectConversation()
             // Resume first so its canonical transcript cannot erase this new
@@ -1127,6 +1242,19 @@ final class ChatViewModel {
             if let value = Self.nonEmpty(currentModelProvider) { creation["provider"] = .string(value) }
             if let value = Self.nonEmpty(sessionReasoningEffort) { creation["reasoning_effort"] = .string(value) }
             try await controller.submit(text, create: creation)
+            if wasDraft {
+                // Discover per-session support after acceptance, without holding
+                // up sending or creating another chat merely to read settings.
+                directReasoningRefreshTask?.cancel()
+                directReasoningRefreshTask = Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    do { try await self.loadDirectSessionReasoning() }
+                    catch {
+                        guard !self.directInvalidated, !Task.isCancelled else { return }
+                        self.composerConfigurationErrorMessage = "Session reasoning controls could not be loaded. Open the model picker to reload chat settings."
+                    }
+                }
+            }
             if let sessionID { cacheCurrentMessages(sessionID: sessionID, modelContext: directModelContext) }
             return true
         } catch {
@@ -1193,6 +1321,7 @@ final class ChatViewModel {
                 activity: cancelled ? "Response stopped" : "Response complete", errorSummary: terminal.error)
         case .control(let raw):
             if raw.type == "message.start" {
+                isReasoningChangeDeferred = false
                 directResponseComplete = false
                 streamingAssistantMessageID = nil
                 streamingAssistantMessageIndex = nil
@@ -1200,6 +1329,8 @@ final class ChatViewModel {
                     // A local activity identity is not a gateway runtime ID.
                     liveActivityManager.start(sessionID: sessionID, sessionTitle: displayTitle, streamID: nil)
                 }
+            } else if raw.type == "session.info" {
+                applyDirectSessionInfo(raw.payload)
             } else if raw.type == "error" {
                 sendErrorMessage = raw.payload?.gatewayFields["message"]?.gatewayString ?? "Hermes reported an error."
             } else if ["approval.request", "clarify.request", "sudo.request", "secret.request"].contains(raw.type) {
@@ -2047,6 +2178,9 @@ final class ChatViewModel {
         let selectedEffort = effort.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !selectedEffort.isEmpty else { return false }
         if usesDirectGateway {
+            if canonicalSessionID != nil {
+                return await selectDirectSessionReasoning(selectedEffort.lowercased())
+            }
             guard canConfigureDirectDraft() else { return false }
             let normalized = selectedEffort.lowercased()
             guard normalized == ReasoningEffortOption.inheritID ||

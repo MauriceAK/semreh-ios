@@ -14,6 +14,7 @@ struct SessionListRowActions {
     let createProject: (SessionSummary) -> Void
     let refreshProjects: () -> Void
     let export: (SessionSummary, SessionExportFormat) -> Void
+    var projectsEnabled: Bool = true
 }
 
 enum SessionRowActionPolicy {
@@ -881,19 +882,21 @@ struct SessionRowContextMenu: View {
             }
             .disabled(isViewingCachedData || session.sessionId == nil || isMutating)
 
-            Menu {
-                SessionProjectMoveMenu(
-                    session: session,
-                    projects: projects,
-                    isCreatingProject: isCreatingProject,
-                    isMovingSession: isMovingSession,
-                    isLoadingProjects: isLoadingProjects,
-                    actions: actions
-                )
-            } label: {
-                Label("Move to Project", systemImage: "folder")
+            if actions.projectsEnabled {
+                Menu {
+                    SessionProjectMoveMenu(
+                        session: session,
+                        projects: projects,
+                        isCreatingProject: isCreatingProject,
+                        isMovingSession: isMovingSession,
+                        isLoadingProjects: isLoadingProjects,
+                        actions: actions
+                    )
+                } label: {
+                    Label("Move to Project", systemImage: "folder")
+                }
+                .disabled(isViewingCachedData || session.sessionId == nil || isMutating)
             }
-            .disabled(isViewingCachedData || session.sessionId == nil || isMutating)
         }
 
         // Export works for any session the server can see, including read-only

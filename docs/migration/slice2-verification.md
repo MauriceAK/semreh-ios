@@ -329,3 +329,176 @@ Disjoint-history/large external-append presentation still needs a deliberate
 recovery UX; the current safe reset is not proof of uninterrupted scroll position.
 This checkpoint does not diagnose every reported legacy WebUI glitch or claim
 overall smoothness is solved. No renderer rewrite or new runtime owner was added.
+
+## Per-session reasoning checkpoint, September 5
+
+Slice 2 remains incomplete. The approved backend extension is on the independent
+development branch `fix/semreh-session-reasoning`, commits `a19afe8846d6525a287aa4edcb1ec183e82030bd`
+and `8c50f84522a755d40346e73701a6847fbdde20ec`. The clean baseline at
+`29112bef099274229cadff79cdff7bf7b99c4b77` and personal deployment are untouched.
+The guarded development launcher requires the exact clean development SHA and
+also validates the unchanged baseline. A separate disposable runtime/home/DB
+uses only the prior test fixture's configuration/auth, with a new tool directory.
+
+Backend behavior:
+
+- Explicit missing/stale/closing session IDs and mismatched profiles fail closed,
+  including legacy requests that supply a stale ID without an explicit scope.
+  Display aliases cannot be mistaken for session effort changes.
+- Accepted session choices are saved and read back before a durable ACK. Missing
+  durable rows do not produce false success. Busy choices preserve the current
+  agent and apply at the existing next-turn acceptance boundary; subsequent
+  runtime metadata saves cannot erase the pending choice.
+- Cold/deferred resume preserves stored reasoning even when the stored provider
+  identity must fall back to the configured endpoint. This was a real-network
+  defect missed by initial mocks, not just a speculative hardening change.
+- `config.get key=reasoning` advertises `session_reasoning_contract: 1`. Valid
+  older replies are read-only in the app. The native controller requires a fresh
+  handshake, exact runtime/profile binding and socket generation, and a matching
+  scoped, persisted ACK for each write. Settings writes serialize, stale reads
+  cannot overwrite a newer selection, and sends cannot race an in-flight write.
+- Native VM integration optimistically updates the effort label, rolls back an
+  unconfirmed save without retrying, and supports next-turn choices while running.
+  Model/workspace controls retain their separate idle/draft gating. Inheritance
+  remains a draft choice, not an unsupported existing-session clear operation.
+  Failed support discovery has an explicit reload message; stale capability is
+  disabled after refresh failure. No extra token-driven configuration polling.
+
+Backend verification (evidence root as above):
+
+- `slice2-reasoning-prefixed-tests-v1.log`: pre-fix scope reproduction, four
+  failures/nine passes. Scope-fixed checks then passed 13 tests.
+- `slice2-reasoning-next-turn-v1.log`: focused server/scope/next-turn checks,
+  644 passed. Full gateway suite-v1 had one collection error (missing declared
+  aiohttp test dependency); it was not called green. After installing that
+  declared dependency into the disposable venv, suite-v2 passed 1,556 with one
+  existing skip. No application dependency was added.
+- `slice2-reasoning-cold-build-focused-v1.log`: 44 passed. Final
+  `slice2-reasoning-backend-suite-v3.log`: 100 files, 1,557 passed, zero failed,
+  one existing skip, exit zero. This is the gateway suite, not all Hermes tests.
+- Tests use the repository's `scripts/run_tests_parallel.py` directly under
+  `env -i` with explicit disposable Python/PATH, UTC/C.UTF-8, two workers and
+  `--file-retries 0`. This is a safety deviation from `run_tests.sh`, whose
+  environment bootstrap probes personal Hermes. The same subprocess runner and
+  test conftest isolation are retained; no personal configuration is loaded.
+- `slice2-reasoning-live-v1.json/.log`: retained FAILED cold-resume evidence.
+  Actual model requests used low/medium/low/high, then omitted effort on resume
+  while storage/UI still reported high. The deferred-build fix followed this.
+- `slice2-reasoning-live-v2.json/.log`: PASSED actual dedicated HTTPS login,
+  WS RPCs, delayed old-effort turn, queued high selection, subsequent high turn,
+  stale/missing/profile rejection, unchanged sibling/global configuration, cold
+  close/resume, and exact durable role/content ordering via profiled REST.
+- After root TERM-stopped only the owned backend and relaunched the same guarded
+  SHA, `slice2-reasoning-restart-v2.json/.log` PASSED retained history and actual
+  high/medium requests from both resumed sessions. Restart-v1 failed during
+  authentication because the new process was not ready; retained, then an HTTP
+  readiness check preceded v2. No test assertion was removed to pass.
+- These requests use the local deterministic `--reasoning-probe` fixture, where
+  `gpt-5` is a local protocol-test name, not an external OpenAI model invocation.
+  They prove propagation/persistence, not external-provider reasoning quality.
+
+Native verification so far:
+
+- `slice2-reasoning-controller-focused-v3.xcresult`: 26 passed, no failures/skips.
+  V1 found two fake-call argument-label compile errors; v2 found a test that
+  incorrectly called an already-running response "submitting." Root/worker
+  corrections use an explicit prompt gate and actual state assertions.
+- `slice2-reasoning-native-focused-v1.xcresult`: 44 passed, no failures/skips,
+  signed controller + native VM tests. Includes optimistic state, rollback,
+  running/deferred settings, old-backend read-only behavior, stale refresh, and
+  visible retry guidance after first-send discovery failure.
+- `slice2-reasoning-native-full-v1.xcresult`: 1,983 passed, zero failures,
+  seven intentional opt-in skips. Signed full native suite; latest subsequent
+  shell/UI edits still require a full rerun before the app commit.
+- `slice2-reasoning-native-https-v1.xcresult`: one passed, zero failures/skips.
+  Actual ChatViewModel/production runtime over dedicated HTTPS: low current turn,
+  high queued during a running response, subsequent high, sibling medium, and
+  VM reopen retaining high. Reopening the VM can reuse a live server runtime;
+  separate Python close/resume and process-restart probes establish cold behavior.
+- `slice2-reasoning-ui-lab-v1.xcresult`: one passed, zero failed, one opt-in
+  live-test skip. Root inspected the three fresh 10,000-row screenshots; this
+  remains static scroll/bottom-navigation evidence, not full performance proof.
+- `slice2-live-ui-build-for-testing-v1.log`: signed UI build succeeded.
+  `slice2-production-ui-https-v1.xcresult`: one FAILED real production UI test.
+  Welcome, HTTPS connection and username/password login reached the session
+  shell, but a blocking startup alert prevented opening the local New Chat draft.
+  Root traced automatic legacy `loadProjects()` to `GET /api/projects`; an
+  independent authenticated request confirmed 404 while `/api/profiles` and
+  `/api/sessions` returned 200. The failed result, attachments and diagnostics
+  are retained. The temporary direct-shell project gate is being corrected and
+  must pass the real UI rerun before this checkpoint is complete. Legacy project
+  models/preferences remain for Slice 4's explicit feature disposition.
+
+Luna High supplied bounded backend/client tests and native integration harnesses;
+root implemented backend/VM/UI changes and independently ran verification. Sol
+Low source review identified valid persistence and read/write lifecycle issues,
+which were fixed and regression-tested. Parse/worker review was never treated as
+test execution. The current artifact audit scanned 82,497 files with no known
+fixture-secret/obvious-bearer flags, including development logs; newest XCTest
+console diagnostics still need export and a final rescan.
+
+Live UI artifact handling: the next audit (90,542 files) found the disposable
+test password once in the v1 simulator OS `logdata.LiveData.tracev3`, despite no
+password `typeText` or explicit test logging. No personal credentials are used.
+The v1 raw result bundle and diagnostics were preserved under the owner-only
+`/Users/maurice/workspace/semreh-slice2-runtime/private-ui-diagnostics/` directory,
+outside shareable evidence. This is a documented quarantine, not a clean audit
+claim. Subsequent tests use `-collect-test-diagnostics never`; selected XCTest
+results/attachments still require audit. Opaque/compressed raw bundles must not
+be treated as proven secret-free.
+
+Production UI follow-up:
+
+- The temporary direct shell disables legacy project startup/refresh requests
+  and hides the project section/context submenu. Stored preferences and legacy
+  API/model code remain intact for Slice 4 disposition.
+- UI-v2 completed normal sign-out and login but failed a harness assumption:
+  login retained the You tab. The test now explicitly selects Sessions.
+- UI-v3 reached Sessions/Control but found a real local-draft navigation defect:
+  `SessionNavigationState.completeNewChatCreation` still required a durable ID.
+  It now accepts a matching pending local route without a server ID, retaining
+  stale/cancelled-route guards. Three new navigation regressions cover this.
+- UI-v4 visibly opened New Chat, then failed to find a proposed UIKit-only
+  composer identifier because SwiftUI propagates the parent chat identifier.
+  The test now requires exactly one actual editable text view under that chat
+  identifier. The ineffective new production identifier was removed.
+- Signed UI builds v2–v5 passed. `slice2-production-ui-https-v5.xcresult`
+  passed one test, zero failures/skips: normal scoped sign-out, actual Welcome
+  login, Sessions/Control/Sessions, local draft navigation, typing/send and
+  visible/hittable `SEMREH_SLICE1_ACK` from the dedicated gateway/model fixture.
+  Root inspected `slice2-production-ui-https-v5-attachments/88503F26-B623-49FB-BD54-6BA8F061F6CB.png`:
+  the actual user/assistant rows are visible; an iOS first-use slide-to-type tip
+  overlays the keyboard area. This is functional UI evidence, not a polished
+  device-performance acceptance.
+  Failure artifacts remain recorded, not silently retried into a green claim.
+  V2 raw bundle/attachments also remain in the owner-only private directory;
+  v3 onward use `-collect-test-diagnostics never`. Post-quarantine shareable
+  artifact scan: 89,053 files, zero flags; this excludes private raw diagnostics.
+- Full-native-v2 failed before executing tests: Xcode reported "The test runner
+  hung before establishing connection" after 364 seconds. A host sample showed
+  an idle app main thread and no loaded XCTest test bundle; the exact cause is
+  not established. It was not treated as a passing or code-regression result.
+- `slice2-reasoning-native-full-v3.xcresult`: 1,986 passed, zero failed, seven
+  intentional opt-in skips (1,993 total). Same signed build and original generated
+  `HermesMobile_HermesMobile_iphonesimulator26.5-arm64.xctestrun`, run with
+  `test-without-building`, the same approved Simulator, no Only/Skip filters,
+  parallel testing disabled, 60-second test allowance and
+  `-collect-test-diagnostics never`. No code/test changes between v2 and v3.
+  Full-v3 and live-UI-v5 console diagnostics were exported for final audit.
+- `slice2-reasoning-native-https-v2.xcresult`: final current-build reasoning
+  rerun passed one, zero failures/skips, 23 seconds, using the approved dev SHA
+  and `--https --slice2-reasoning` generated opt-in plan. Diagnostics exported.
+  The signed app was then launched normally on the same owned Simulator.
+- Final checkpoint artifact audit: 93,448 files, zero known-fixture-secret or
+  obvious-bearer flags, including 32 exported XCTest console logs and final
+  live/full/UI diagnostics. The private v1/v2 raw UI quarantine remains excluded
+  and unshareable; this is not a claim that raw OS archives are secret-free.
+
+Still open: actual bidirectional TUI/Desktop use, the real-backend
+cold/deferred/lazy/continuation identity matrix, successful compression lineage
+and ancestor-to-tip recovery, accepted/queued steer outcomes, long multi-chat
+streaming/tab/scroll performance measurements, independent final clean-checkout
+verification, and physical-iPhone responsiveness acceptance. Raw gateway RPC
+probes alone are not proof of actual TUI/Desktop UI acceptance. Draft-only
+model/workspace changes are not themselves a binding Slice 2 gate and must not
+silently expand this checkpoint. No personal deployment or Slice 3 work occurred.

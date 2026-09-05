@@ -8,7 +8,8 @@ import XCTest
 /// runner must set both environment variables, and the credentials file is
 /// required to remain outside the source tree.
 final class DirectHermesLiveSmokeTests: XCTestCase {
-    private static let credentialsPath = "/Users/maurice/workspace/semreh-slice1-runtime/credentials.json"
+    private static let defaultCredentialsPath = "/Users/maurice/workspace/semreh-slice1-runtime/credentials.json"
+    private static let developmentCredentialsPath = "/Users/maurice/workspace/semreh-slice2-runtime/credentials.json"
 
     private enum HostedTransport {
         case loopback
@@ -49,7 +50,7 @@ final class DirectHermesLiveSmokeTests: XCTestCase {
 
         let environment = ProcessInfo.processInfo.environment
         guard environment["SEMREH_SLICE1_LIVE"] == "1",
-              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == Self.credentialsPath
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == Self.defaultCredentialsPath
         else {
             throw XCTSkip("Slice 1 hosted smoke is opt-in.")
         }
@@ -74,7 +75,7 @@ final class DirectHermesLiveSmokeTests: XCTestCase {
         let environment = ProcessInfo.processInfo.environment
         guard environment["SEMREH_SLICE1_LIVE"] == "1",
               environment["SEMREH_SLICE1_HTTPS"] == "1",
-              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == Self.credentialsPath
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == Self.defaultCredentialsPath
         else {
             throw XCTSkip("Slice 2 hosted smoke is opt-in.")
         }
@@ -99,7 +100,7 @@ final class DirectHermesLiveSmokeTests: XCTestCase {
         let environment = ProcessInfo.processInfo.environment
         guard environment["SEMREH_SLICE1_LIVE"] == "1",
               environment["SEMREH_SLICE1_HTTPS"] == "1",
-              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == Self.credentialsPath
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == Self.defaultCredentialsPath
         else {
             throw XCTSkip("Slice 2 native chat smoke is opt-in.")
         }
@@ -110,6 +111,32 @@ final class DirectHermesLiveSmokeTests: XCTestCase {
             XCTFail("Slice 2 native chat smoke failed at \(failure.stage).")
         } catch {
             XCTFail("Slice 2 native chat smoke failed.")
+        }
+    }
+
+    @MainActor
+    func testOptInHostedSlice2NativeReasoning() async throws {
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("Slice 2 reasoning smoke is simulator-only.")
+        #endif
+
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SEMREH_SLICE1_LIVE"] == "1",
+              environment["SEMREH_SLICE1_HTTPS"] == "1",
+              environment["SEMREH_SLICE2_REASONING"] == "1",
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == Self.developmentCredentialsPath,
+              environment["SEMREH_SLICE2_DEVELOPMENT_BACKEND_SHA"]?.isEmpty == false,
+              environment["SEMREH_SLICE2_TOOL_CWD"] == "/Users/maurice/workspace/semreh-slice2-runtime/tools"
+        else {
+            throw XCTSkip("Slice 2 reasoning smoke is opt-in.")
+        }
+
+        do {
+            try await runHostedSlice2NativeReasoning(transport: .https)
+        } catch let failure as LiveSmokeFailure {
+            XCTFail("Slice 2 native reasoning smoke failed at \(failure.stage).")
+        } catch {
+            XCTFail("Slice 2 native reasoning smoke failed.")
         }
     }
 
@@ -215,7 +242,7 @@ final class DirectHermesLiveSmokeTests: XCTestCase {
             throw XCTSkip("Slice 1 cookie phase is opt-in.")
         }
         if requiresCredentials,
-           environment["SEMREH_SLICE1_CREDENTIALS_FILE"] != Self.credentialsPath {
+           environment["SEMREH_SLICE1_CREDENTIALS_FILE"] != Self.defaultCredentialsPath {
             throw XCTSkip("Slice 1 cookie login requires the fixed private credentials path.")
         }
         return .https
@@ -834,6 +861,270 @@ final class DirectHermesLiveSmokeTests: XCTestCase {
     }
 
     @MainActor
+    private func runHostedSlice2NativeReasoning(transport: HostedTransport) async throws {
+        let credentials = try await stage("reasoning credentials") {
+            try Self.readCredentials(development: true)
+        }
+        guard let toolCwd = ProcessInfo.processInfo.environment["SEMREH_SLICE2_TOOL_CWD"],
+              !toolCwd.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { throw LiveSmokeInvariant.failed }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpAdditionalHeaders = [:]
+        configuration.httpShouldSetCookies = true
+        configuration.httpCookieAcceptPolicy = .always
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let api = APIClient(
+            baseURL: transport.baseURL,
+            session: session,
+            publicMediaSession: session,
+            customHeaderProvider: { [] }
+        )
+
+        var runtime: HermesServerRuntime?
+        var firstViewModel: ChatViewModel?
+        var siblingViewModel: ChatViewModel?
+        var resumedViewModel: ChatViewModel?
+        var loggedIn = false
+
+        do {
+            let status = try await stage("reasoning status") { try await api.directStatus() }
+            guard status.authRequired == true else { throw LiveSmokeInvariant.failed }
+            let providers = try await stage("reasoning providers") { try await api.directProviders() }
+            guard providers.providers?.contains(where: { $0.name == "basic" && $0.supportsPassword == true }) == true else {
+                throw LiveSmokeInvariant.failed
+            }
+            let login = try await stage("reasoning login") {
+                try await api.directPasswordLogin(username: credentials.username, password: credentials.password)
+            }
+            guard login.ok == true else { throw LiveSmokeInvariant.failed }
+            loggedIn = true
+            try await stage("reasoning protected probe") { try await api.directProtectedProbe() }
+
+            let serverRuntime = try await stage("reasoning runtime init") {
+                try HermesServerRuntime(origin: transport.baseURL, client: api)
+            }
+            runtime = serverRuntime
+            try await stage("reasoning runtime connect") { try await serverRuntime.connect() }
+
+            let first = ChatViewModel(
+                session: SessionSummary(
+                    title: "Generated reasoning low",
+                    workspace: toolCwd,
+                    model: "gpt-5",
+                    modelProvider: "custom",
+                    reasoningEffort: "low",
+                    profile: "default"
+                ),
+                server: transport.baseURL,
+                client: api,
+                liveActivityManager: NativeSmokeNoopLiveActivityManager(),
+                gatewayRuntimeProvider: { _ in serverRuntime }
+            )
+            firstViewModel = first
+            var firstStoredID: String?
+            first.onDirectCanonicalID = { id in firstStoredID = id }
+
+            try await stage("reasoning first inventory") {
+                await first.loadComposerConfiguration()
+                guard first.composerConfigurationErrorMessage == nil,
+                      first.selectedModelID == "gpt-5",
+                      first.selectedModelProviderID == "custom",
+                      first.supportedReasoningEfforts?.contains("high") == true,
+                      !first.hasServerBackedSession
+                else { throw LiveSmokeInvariant.failed }
+            }
+
+            let firstWarmup = "SEMREH_REASONING_PROBE GENERATED_FIRST_WARMUP"
+            try await stage("reasoning first low send") {
+                guard await first.sendMessage(firstWarmup) else { throw LiveSmokeInvariant.failed }
+            }
+            try await stage("reasoning first low transcript") {
+                try await waitForNativeReasoningTranscript(
+                    in: first,
+                    expected: [(firstWarmup, "SEMREH_REASONING_EFFORT:low")]
+                )
+            }
+            guard first.hasServerBackedSession, firstStoredID?.isEmpty == false else {
+                throw LiveSmokeInvariant.failed
+            }
+            try await stage("reasoning first session capability") {
+                try await waitForNativeReasoningCapability(in: first)
+            }
+
+            let delayed = "SEMREH_INTERRUPT_FIXTURE SEMREH_REASONING_PROBE GENERATED_FIRST_DELAYED"
+            try await stage("reasoning delayed send") {
+                guard await first.sendMessage(delayed) else { throw LiveSmokeInvariant.failed }
+            }
+            try await stage("reasoning delayed run started") {
+                try await waitForNativeDirectRun(in: first)
+            }
+            try await stage("reasoning deferred high selection") {
+                guard await first.selectReasoningEffort("high"),
+                      first.selectedReasoningEffort == "high",
+                      first.sessionReasoningEffort == "high",
+                      first.isReasoningChangeDeferred
+                else { throw LiveSmokeInvariant.failed }
+            }
+
+            try await stage("reasoning delayed low transcript") {
+                try await waitForNativeReasoningTranscript(
+                    in: first,
+                    expected: [
+                        (firstWarmup, "SEMREH_REASONING_EFFORT:low"),
+                        (delayed, "SEMREH_REASONING_EFFORT:low")
+                    ]
+                )
+            }
+            let firstNext = "SEMREH_REASONING_PROBE GENERATED_FIRST_NEXT"
+            try await stage("reasoning next high send") {
+                guard await first.sendMessage(firstNext) else { throw LiveSmokeInvariant.failed }
+            }
+            try await stage("reasoning next high transcript") {
+                try await waitForNativeReasoningTranscript(
+                    in: first,
+                    expected: [
+                        (firstWarmup, "SEMREH_REASONING_EFFORT:low"),
+                        (delayed, "SEMREH_REASONING_EFFORT:low"),
+                        (firstNext, "SEMREH_REASONING_EFFORT:high")
+                    ]
+                )
+            }
+
+            let sibling = ChatViewModel(
+                session: SessionSummary(
+                    title: "Generated reasoning medium",
+                    workspace: toolCwd,
+                    model: "gpt-5",
+                    modelProvider: "custom",
+                    reasoningEffort: "medium",
+                    profile: "default"
+                ),
+                server: transport.baseURL,
+                client: api,
+                liveActivityManager: NativeSmokeNoopLiveActivityManager(),
+                gatewayRuntimeProvider: { _ in serverRuntime }
+            )
+            siblingViewModel = sibling
+            try await stage("reasoning sibling inventory") {
+                await sibling.loadComposerConfiguration()
+                guard sibling.composerConfigurationErrorMessage == nil,
+                      sibling.selectedModelID == "gpt-5",
+                      sibling.selectedModelProviderID == "custom",
+                      sibling.supportedReasoningEfforts?.contains("medium") == true
+                else { throw LiveSmokeInvariant.failed }
+            }
+            let siblingWarmup = "SEMREH_REASONING_PROBE GENERATED_SIBLING_WARMUP"
+            try await stage("reasoning sibling medium send") {
+                guard await sibling.sendMessage(siblingWarmup) else { throw LiveSmokeInvariant.failed }
+            }
+            try await stage("reasoning sibling medium transcript") {
+                try await waitForNativeReasoningTranscript(
+                    in: sibling,
+                    expected: [(siblingWarmup, "SEMREH_REASONING_EFFORT:medium")]
+                )
+            }
+            guard sibling.selectedReasoningEffort == "medium",
+                  sibling.sessionReasoningEffort == "medium"
+            else { throw LiveSmokeInvariant.failed }
+
+            try await stage("reasoning first view model dispose") {
+                await first.disposeDirectConversation()
+            }
+            firstViewModel = nil
+
+            let storedID = try XCTUnwrap(firstStoredID)
+            let resumed = ChatViewModel(
+                session: SessionSummary(
+                    sessionId: storedID,
+                    title: "Generated reasoning low",
+                    workspace: toolCwd,
+                    model: "gpt-5",
+                    modelProvider: "custom",
+                    profile: "default"
+                ),
+                server: transport.baseURL,
+                client: api,
+                liveActivityManager: NativeSmokeNoopLiveActivityManager(),
+                gatewayRuntimeProvider: { _ in serverRuntime }
+            )
+            resumedViewModel = resumed
+            try await stage("reasoning resume transcript") {
+                await resumed.loadMessages()
+                guard resumed.lastError == nil, resumed.errorMessage == nil else {
+                    throw LiveSmokeInvariant.failed
+                }
+                try await waitForNativeReasoningTranscript(
+                    in: resumed,
+                    expected: [
+                        (firstWarmup, "SEMREH_REASONING_EFFORT:low"),
+                        (delayed, "SEMREH_REASONING_EFFORT:low"),
+                        (firstNext, "SEMREH_REASONING_EFFORT:high")
+                    ]
+                )
+            }
+            try await stage("reasoning resume configuration") {
+                await resumed.loadComposerConfiguration()
+                guard resumed.selectedModelID == "gpt-5",
+                      resumed.selectedModelProviderID == "custom",
+                      resumed.selectedReasoningEffort == "high",
+                      resumed.sessionReasoningEffort == "high",
+                      resumed.isReasoningChangeDeferred == false
+                else { throw LiveSmokeInvariant.failed }
+            }
+            let resumedNext = "SEMREH_REASONING_PROBE GENERATED_FIRST_RESUMED"
+            try await stage("reasoning resumed high send") {
+                guard await resumed.sendMessage(resumedNext) else { throw LiveSmokeInvariant.failed }
+            }
+            try await stage("reasoning resumed high transcript") {
+                try await waitForNativeReasoningTranscript(
+                    in: resumed,
+                    expected: [
+                        (firstWarmup, "SEMREH_REASONING_EFFORT:low"),
+                        (delayed, "SEMREH_REASONING_EFFORT:low"),
+                        (firstNext, "SEMREH_REASONING_EFFORT:high"),
+                        (resumedNext, "SEMREH_REASONING_EFFORT:high")
+                    ]
+                )
+            }
+
+            let siblingNext = "SEMREH_REASONING_PROBE GENERATED_SIBLING_NEXT"
+            try await stage("reasoning sibling unchanged send") {
+                guard await sibling.sendMessage(siblingNext) else { throw LiveSmokeInvariant.failed }
+            }
+            try await stage("reasoning sibling unchanged transcript") {
+                try await waitForNativeReasoningTranscript(
+                    in: sibling,
+                    expected: [
+                        (siblingWarmup, "SEMREH_REASONING_EFFORT:medium"),
+                        (siblingNext, "SEMREH_REASONING_EFFORT:medium")
+                    ]
+                )
+            }
+            guard sibling.selectedReasoningEffort == "medium",
+                  sibling.sessionReasoningEffort == "medium"
+            else { throw LiveSmokeInvariant.failed }
+
+            await resumed.disposeDirectConversation()
+            resumedViewModel = nil
+            await sibling.disposeDirectConversation()
+            siblingViewModel = nil
+            await serverRuntime.stop()
+            runtime = nil
+            try await stage("reasoning logout") { try await api.directLogout() }
+            loggedIn = false
+        } catch {
+            if let resumedViewModel { await resumedViewModel.disposeDirectConversation() }
+            if let siblingViewModel { await siblingViewModel.disposeDirectConversation() }
+            if let firstViewModel { await firstViewModel.disposeDirectConversation() }
+            if let runtime { await runtime.stop() }
+            if loggedIn { try? await api.directLogout() }
+            throw error
+        }
+    }
+
+    @MainActor
     private func waitForNativeTranscript(
         in viewModel: ChatViewModel,
         user: String,
@@ -857,8 +1148,56 @@ final class DirectHermesLiveSmokeTests: XCTestCase {
         throw LiveSmokeInvariant.failed
     }
 
-    private static func readCredentials() throws -> LiveCredentials {
-        let data = try Data(contentsOf: URL(fileURLWithPath: credentialsPath), options: [.mappedIfSafe])
+    @MainActor
+    private func waitForNativeDirectRun(in viewModel: ChatViewModel) async throws {
+        for _ in 0..<300 {
+            if viewModel.activeStreamID != nil { return }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        throw LiveSmokeInvariant.failed
+    }
+
+    @MainActor
+    private func waitForNativeReasoningCapability(in viewModel: ChatViewModel) async throws {
+        for _ in 0..<300 {
+            if viewModel.allowsReasoningChangesWhileStreaming,
+               viewModel.supportedReasoningEfforts?.contains("high") == true {
+                return
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        throw LiveSmokeInvariant.failed
+    }
+
+    @MainActor
+    private func waitForNativeReasoningTranscript(
+        in viewModel: ChatViewModel,
+        expected: [(String, String)]
+    ) async throws {
+        for _ in 0..<450 {
+            let durable = viewModel.messages.filter { $0.role == "user" || $0.role == "assistant" }
+            let users = durable.filter { $0.role == "user" }
+            let assistants = durable.filter { $0.role == "assistant" }
+            let pairsMatch = users.count == expected.count
+                && assistants.count == expected.count
+                && durable.map(\.role) == expected.flatMap { _ in ["user", "assistant"] }
+                && zip(users, expected).allSatisfy { $0.0.content == $0.1.0 }
+                && zip(assistants, expected).allSatisfy { $0.0.content == $0.1.1 }
+            let durableIDs = durable.allSatisfy { message in
+                guard let id = message.messageId else { return false }
+                return message.role == "user" ? !id.hasPrefix("local-") : !id.hasPrefix("stream-")
+            }
+            if pairsMatch, durableIDs, viewModel.activeStreamID == nil { return }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        throw LiveSmokeInvariant.failed
+    }
+
+    private static func readCredentials(development: Bool = false) throws -> LiveCredentials {
+        let path = development ? developmentCredentialsPath : defaultCredentialsPath
+        let url = URL(fileURLWithPath: path)
+        guard url.resolvingSymlinksInPath().path == path else { throw LiveSmokeInvariant.failed }
+        let data = try Data(contentsOf: url, options: [.mappedIfSafe])
         return try JSONDecoder().decode(LiveCredentials.self, from: data)
     }
 

@@ -5,6 +5,7 @@ This detects known test secrets and obvious bearer formats. It is not a proof
 that arbitrary opaque secrets cannot occur. Runtime credentials/config/database
 are intentionally private operational state, not shareable verification artifacts.
 """
+import argparse
 import json
 from pathlib import Path
 import re
@@ -15,7 +16,15 @@ EVIDENCE = Path('/Users/maurice/workspace/semreh-slice1-evidence')
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--development-backend-sha')
+    args = parser.parse_args()
     validate()
+    runtimes = [RUNTIME]
+    if args.development_backend_sha:
+        from direct_hermes_development import _validate_all, DEV_RUNTIME
+        _validate_all(args.development_backend_sha)
+        runtimes.append(DEV_RUNTIME)
     credentials = json.loads((RUNTIME / 'credentials.json').read_text())
     config = json.loads((RUNTIME / 'home/config.yaml').read_text())
     known = [credentials['password'], config['dashboard']['basic_auth']['secret'],
@@ -23,8 +32,9 @@ def main():
     patterns = [re.compile(rb'eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+'),
                 re.compile(rb'[?&]ticket=[A-Za-z0-9_-]{20,}')]
     files = list((ROOT / 'docs/migration').rglob('*'))
-    files += list((RUNTIME / 'home/logs').rglob('*'))
-    files += list((RUNTIME / 'logs').rglob('*'))
+    for runtime in runtimes:
+        files += list((runtime / 'home/logs').rglob('*'))
+        files += list((runtime / 'logs').rglob('*'))
     files += list(EVIDENCE.rglob('*'))
     checked, failures = 0, []
     for path in files:

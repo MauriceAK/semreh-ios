@@ -1,7 +1,11 @@
 import XCTest
+import UIKit
+import UniformTypeIdentifiers
 
 final class LongChatScrollUITests: XCTestCase {
     private let performanceLabArgument = "--chat-performance-lab"
+    private let approvedLiveOrigin = "https://semreh-slice1-test.tailda8427.ts.net"
+    private let approvedLiveHost = "semreh-slice1-test.tailda8427.ts.net"
     private let chatIdentifier = "chat-detail:10,000-row performance lab"
     private let scrollToLatestLabel = "Scroll to latest message"
     private let endMarker = "End of 10,000-row conversation."
@@ -61,6 +65,205 @@ final class LongChatScrollUITests: XCTestCase {
             "The scroll-to-latest action must clear after the viewport reaches the bottom."
         )
         attachScreenshot(named: "long-chat-after-scroll-to-latest")
+    }
+
+    @MainActor
+    func testOptInLiveProductionLoginNewChatSend() throws {
+        continueAfterFailure = false
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("Live production UI smoke is simulator-only.")
+        #endif
+
+        let environment = ProcessInfo.processInfo.environment
+        let credentialsPath = "/Users/maurice/workspace/semreh-slice2-runtime/credentials.json"
+        guard environment["SEMREH_SLICE2_UI_LIVE"] == "1",
+              environment["SEMREH_SLICE1_HTTPS"] == "1",
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == credentialsPath
+        else {
+            throw XCTSkip("Live production UI smoke is opt-in.")
+        }
+
+        let credentials = try readCredentials(at: credentialsPath)
+        let app = XCUIApplication()
+        app.terminate()
+        app.launchArguments = []
+        app.launch()
+        defer { clearPasteboard() }
+
+        ensureWelcomeAfterNormalSignOut(app: app)
+        let welcome = app.staticTexts["Control Semreh from iPhone or iPad."]
+        XCTAssertTrue(welcome.waitForExistence(timeout: 15), "Normal sign-out must return to Welcome.")
+        let existingServer = app.buttons["Already have a server?"]
+        XCTAssertTrue(existingServer.waitForExistence(timeout: 5))
+        existingServer.tap()
+
+        let serverURL = app.textFields["onboarding-server-url"]
+        XCTAssertTrue(serverURL.waitForExistence(timeout: 5))
+        replacePublicText(serverURL, with: approvedLiveOrigin, app: app)
+        app.buttons["Test Connection"].tap()
+
+        let username = app.textFields["onboarding-username"]
+        let password = app.secureTextFields["onboarding-password"]
+        XCTAssertTrue(username.waitForExistence(timeout: 30), "The approved HTTPS origin must advertise username auth.")
+        XCTAssertTrue(password.waitForExistence(timeout: 5))
+        username.tap()
+        username.typeText(credentials.username)
+        pasteSecret(credentials.password, into: password, app: app)
+        app.buttons["Connect"].tap()
+        dismissKnownPasswordSavePrompt(app: app)
+
+        // The shell remembers the selected tab across normal sign-out/login.
+        // Successful authentication need not land on Sessions automatically.
+        let sessionsTab = app.buttons["Sessions"]
+        XCTAssertTrue(sessionsTab.waitForExistence(timeout: 45), "Successful login must reach the production shell.")
+        sessionsTab.tap()
+        let newSession = app.buttons["New session"]
+        XCTAssertTrue(newSession.waitForExistence(timeout: 15), "Sessions must expose New session.")
+
+        // Exercise the production shell startup path before creating a chat.
+        app.buttons["Control"].tap()
+        XCTAssertTrue(app.staticTexts["Control"].firstMatch.waitForExistence(timeout: 15))
+        XCTAssertFalse(app.alerts["Session Action Failed"].exists)
+        XCTAssertFalse(app.staticTexts["Projects"].waitForExistence(timeout: 2),
+                       "The normal startup path must not expose a failed Projects section.")
+        app.buttons["Sessions"].tap()
+        XCTAssertTrue(newSession.waitForExistence(timeout: 15))
+        newSession.tap()
+
+        let chat = app.otherElements.matching(
+            NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
+        ).firstMatch
+        XCTAssertTrue(chat.waitForExistence(timeout: 20))
+        // SwiftUI propagates ChatView's identifier onto its UIKit text view.
+        // Target the actual editable descendant observed in the AX hierarchy.
+        let composers = app.textViews.matching(
+            NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
+        )
+        let composer = composers.firstMatch
+        XCTAssertTrue(composer.waitForExistence(timeout: 10))
+        XCTAssertEqual(composers.count, 1, "The open conversation must expose one composer.")
+        composer.tap()
+        composer.typeText("SEMREH_SLICE1_PROMPT")
+        let send = app.buttons["Send"]
+        XCTAssertTrue(send.waitForExistence(timeout: 5))
+        send.tap()
+
+        let acknowledgement = app.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS[c] %@", "SEMREH_SLICE1_ACK")
+        ).firstMatch
+        let appeared = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == true AND hittable == true"),
+            object: acknowledgement
+        )
+        wait(for: [appeared], timeout: 90)
+        XCTAssertTrue(acknowledgement.exists && acknowledgement.isHittable)
+        attachScreenshot(named: "live-production-chat-success")
+    }
+
+    private func ensureWelcomeAfterNormalSignOut(app: XCUIApplication) {
+        let welcome = app.staticTexts["Control Semreh from iPhone or iPad."]
+        if welcome.waitForExistence(timeout: 5) { return }
+
+        // Only dismiss known, non-auth startup surfaces. An unknown alert must
+        // remain visible so the UI smoke reports the actual regression.
+        let actionFailure = app.alerts["Session Action Failed"]
+        if actionFailure.waitForExistence(timeout: 2) {
+            XCTAssertTrue(actionFailure.buttons["OK"].exists)
+            actionFailure.buttons["OK"].tap()
+        }
+        dismissKnownPasswordSavePrompt(app: app)
+
+        let you = app.buttons["You"]
+        if !you.waitForExistence(timeout: 5) {
+            let back = app.navigationBars.buttons.firstMatch
+            XCTAssertTrue(back.waitForExistence(timeout: 5), "The authenticated app must be navigable back to the shell.")
+            back.tap()
+        }
+        XCTAssertTrue(you.waitForExistence(timeout: 10), "The authenticated app must expose the You surface.")
+        you.tap()
+
+        let host = app.staticTexts[approvedLiveHost]
+        XCTAssertTrue(host.waitForExistence(timeout: 15), "The You surface must show the approved test server.")
+        let signOut = app.buttons["Sign Out of This Server"]
+        for _ in 0..<8 where !signOut.isHittable {
+            let scrollView = app.scrollViews.firstMatch
+            XCTAssertTrue(scrollView.exists, "Settings must expose a bounded scroll path to sign out.")
+            scrollView.swipeUp()
+        }
+        XCTAssertTrue(signOut.waitForExistence(timeout: 5))
+        XCTAssertTrue(signOut.isHittable)
+        signOut.tap()
+
+        let confirmation = app.alerts["Sign out of this server?"]
+        XCTAssertTrue(confirmation.waitForExistence(timeout: 5))
+        confirmation.buttons["Sign Out"].tap()
+        XCTAssertTrue(welcome.waitForExistence(timeout: 20), "Normal sign-out must return to Welcome.")
+    }
+
+    private func replacePublicText(_ field: XCUIElement, with value: String, app: XCUIApplication) {
+        let existingValue = (field.value as? String) ?? ""
+        if existingValue == value { return }
+        field.tap()
+        if !existingValue.isEmpty, existingValue != field.placeholderValue {
+            field.press(forDuration: 1.0)
+            let selectAll = app.menuItems["Select All"]
+            XCTAssertTrue(selectAll.waitForExistence(timeout: 3), "Existing public URL text must be replaceable without appending.")
+            selectAll.tap()
+        }
+        field.typeText(value)
+    }
+
+    private func dismissKnownPasswordSavePrompt(app: XCUIApplication) {
+        for title in ["Save Password?", "Save This Password?"] {
+            // iOS can present this as a remote sheet, not an AX alert.
+            let prompt = app.staticTexts[title]
+            if prompt.waitForExistence(timeout: 1) {
+                let notNow = app.buttons["Not Now"]
+                XCTAssertTrue(notNow.exists)
+                notNow.tap()
+                return
+            }
+        }
+    }
+
+    private struct DisposableCredentials: Decodable {
+        let username: String
+        let password: String
+    }
+
+    private func readCredentials(at path: String) throws -> DisposableCredentials {
+        let url = URL(fileURLWithPath: path)
+        guard url.resolvingSymlinksInPath().path == path else {
+            throw NSError(domain: "LongChatScrollUITests", code: 2,
+                          userInfo: [NSLocalizedDescriptionKey: "Unexpected disposable credentials path."])
+        }
+        let data = try Data(contentsOf: url)
+        let credentials = try JSONDecoder().decode(DisposableCredentials.self, from: data)
+        guard !credentials.username.isEmpty, !credentials.password.isEmpty else {
+            throw NSError(domain: "LongChatScrollUITests", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "Disposable credentials are incomplete."])
+        }
+        return credentials
+    }
+
+    private func pasteSecret(_ value: String, into field: XCUIElement, app: XCUIApplication) {
+        UIPasteboard.general.setItems(
+            [[UTType.utf8PlainText.identifier: value]],
+            options: [.localOnly: true, .expirationDate: Date().addingTimeInterval(60)]
+        )
+        field.tap()
+        field.press(forDuration: 1.1)
+        let paste = app.menuItems["Paste"]
+        XCTAssertTrue(paste.waitForExistence(timeout: 5), "Password must be entered through the local paste action.")
+        paste.tap()
+        let allowPaste = app.alerts.buttons["Allow Paste"]
+        if allowPaste.waitForExistence(timeout: 2) {
+            allowPaste.tap()
+        }
+    }
+
+    private func clearPasteboard() {
+        UIPasteboard.general.setItems([], options: [.localOnly: true])
     }
 
     private func attachScreenshot(named name: String) {

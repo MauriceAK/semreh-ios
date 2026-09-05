@@ -96,6 +96,254 @@ final class GatewayConversationControllerTests: XCTestCase {
         await runtime.stop()
     }
 
+    func testStoredChatReasoningGetterUsesExactSessionAndProfileScope() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setReasoningGetResponse(.object([
+            "value": .string("high"),
+            "display": .string("show"),
+            "session_reasoning_contract": .number(1),
+            "deferred": .bool(false)
+        ]))
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime, storedID: "stored-chat", profile: "work")
+
+        let configuration = try await controller.reasoningConfiguration()
+
+        XCTAssertEqual(configuration, .init(effort: "high", deferred: false, supportsSessionChanges: true))
+        let call = try XCTUnwrap(fake.calls().first(where: { $0.method == "config.get" }))
+        XCTAssertEqual(objectFields(call.params), [
+            "key": .string("reasoning"),
+            "scope": .string("session"),
+            "session_id": .string("runtime-resumed"),
+            "profile": .string("work")
+        ])
+        await runtime.stop()
+    }
+
+    func testDelayedReasoningReadIsInvalidatedByAQueuedWrite() async throws {
+        let fake = ControllerFakeTransport()
+        let readGate = AsyncGate()
+        fake.setReasoningGetGate(readGate)
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime, storedID: "stored-chat")
+
+        let read = Task { try await controller.reasoningConfiguration() }
+        await yieldUntil { fake.calls().contains { $0.method == "config.get" } }
+        let write = Task { try await controller.setReasoningEffort("high") }
+        _ = try await write.value
+        await readGate.release()
+        do {
+            _ = try await read.value
+            XCTFail("A read started before a setting write must not return stale state")
+        } catch DirectSessionError.staleOperation { }
+        await runtime.stop()
+    }
+
+    func testReasoningReadStartedDuringQueuedWritesWaitsForTheLatestWrite() async throws {
+        let fake = ControllerFakeTransport()
+        let firstWrite = AsyncGate()
+        fake.setReasoningSetGate(firstWrite)
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime, storedID: "stored-chat")
+
+        let first = Task { try await controller.setReasoningEffort("high") }
+        await yieldUntil { fake.calls().filter { $0.method == "config.set" }.count == 1 }
+        let second = Task { try await controller.setReasoningEffort("max") }
+        await Task.yield()
+        let read = Task { try await controller.reasoningConfiguration() }
+        await firstWrite.release()
+
+        _ = try await first.value
+        _ = try await second.value
+        let configuration = try await read.value
+        XCTAssertEqual(configuration.effort, "max")
+        await runtime.stop()
+    }
+
+    func testStoredChatReasoningSetterPreservesRunningStateAndAcceptsDeferredAck() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setReasoningGetResponse(.object([
+            "value": .string("medium"),
+            "display": .string("show"),
+            "session_reasoning_contract": .number(1),
+            "deferred": .bool(false)
+        ]))
+        fake.setReasoningSetResponse(.object([
+            "key": .string("reasoning"),
+            "value": .string("high"),
+            "scope": .string("session"),
+            "deferred": .bool(true),
+            "persisted": .bool(true)
+        ]))
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime, storedID: "stored-chat")
+        try await controller.open()
+        fake.emit(event(sessionID: "runtime-resumed", type: "message.start", sequence: 1))
+        await Task.yield()
+
+        let configuration = try await controller.setReasoningEffort("high")
+
+        XCTAssertEqual(configuration, .init(effort: "high", deferred: true, supportsSessionChanges: true))
+        XCTAssertEqual(controller.runState, .running)
+        let call = try XCTUnwrap(fake.calls().first(where: { $0.method == "config.set" }))
+        XCTAssertEqual(objectFields(call.params)?["scope"], .string("session"))
+        XCTAssertEqual(objectFields(call.params)?["session_id"], .string("runtime-resumed"))
+        XCTAssertEqual(objectFields(call.params)?["profile"], .string("default"))
+        await runtime.stop()
+    }
+
+    func testReasoningDoesNotCreateAnUnsentDraftAndRejectsDisposedController() async throws {
+        let fake = ControllerFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let draft = makeController(runtime: runtime, storedID: nil)
+
+        do {
+            _ = try await draft.reasoningConfiguration()
+            XCTFail("A draft must not attach just to read reasoning")
+        } catch DirectSessionError.invalidBinding { }
+        do {
+            _ = try await draft.setReasoningEffort("high")
+            XCTFail("A draft must not write reasoning")
+        } catch DirectSessionError.invalidResponse { }
+        XCTAssertTrue(fake.calls().isEmpty)
+
+        let stored = makeController(runtime: runtime, storedID: "stored-chat")
+        stored.invalidate()
+        do {
+            _ = try await stored.reasoningConfiguration()
+            XCTFail("A disposed controller must not read reasoning")
+        } catch DirectSessionError.invalidBinding { }
+        XCTAssertTrue(fake.calls().isEmpty)
+        await runtime.stop()
+    }
+
+    func testOldBackendCapabilityFailsClosedBeforeReasoningWrite() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setReasoningGetResponse(.object([
+            "value": .string("medium"),
+            "display": .string("show"),
+            "deferred": .bool(false)
+        ]))
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime, storedID: "stored-chat")
+
+        let configuration = try await controller.reasoningConfiguration()
+        XCTAssertEqual(configuration, .init(effort: "medium", deferred: false, supportsSessionChanges: false))
+        do {
+            _ = try await controller.setReasoningEffort("high")
+            XCTFail("An old backend without the feature handshake must fail closed")
+        } catch DirectSessionError.invalidResponse { }
+        XCTAssertFalse(fake.calls().contains { $0.method == "config.set" })
+        await runtime.stop()
+    }
+
+    func testMalformedReasoningAckFailsClosed() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setReasoningSetResponse(.object([
+            "key": .string("reasoning"),
+            "value": .string("high"),
+            "scope": .string("session"),
+            "deferred": .bool(false)
+        ]))
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime, storedID: "stored-chat")
+
+        do {
+            _ = try await controller.setReasoningEffort("high")
+            XCTFail("A missing persisted acknowledgement must fail closed")
+        } catch DirectSessionError.invalidResponse { }
+        await runtime.stop()
+    }
+
+    func testInvalidReasoningValuesAndRunStatesAreRejected() async throws {
+        let fake = ControllerFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime, storedID: "stored-chat")
+
+        for effort in ["show", "inherit", "default", "unknown"] {
+            do {
+                _ = try await controller.setReasoningEffort(effort)
+                XCTFail("Unexpectedly accepted reasoning effort")
+            } catch DirectSessionError.invalidResponse { }
+        }
+        let promptGate = AsyncGate()
+        fake.setPromptResponseGate(promptGate)
+        let submitting = Task { try? await controller.submit("busy") }
+        await yieldUntil { controller.runState == .submitting }
+        do {
+            _ = try await controller.setReasoningEffort("high")
+            XCTFail("Submitting state must reject a setting mutation")
+        } catch DirectSessionError.invalidResponse { }
+        await promptGate.release()
+        _ = await submitting.value
+        XCTAssertEqual(controller.runState, .running)
+        fake.setInterruptResponse(.object(["status": .string("interrupted")]))
+        let stopping = Task { try? await controller.interrupt() }
+        await yieldUntil { controller.runState == .stopping }
+        do {
+            _ = try await controller.setReasoningEffort("high")
+            XCTFail("Stopping state must reject a setting mutation")
+        } catch DirectSessionError.invalidResponse { }
+        stopping.cancel()
+        _ = await stopping.value
+        let unknownFake = ControllerFakeTransport()
+        let unknownRuntime = try makeRuntime(unknownFake)
+        let unknown = makeController(runtime: unknownRuntime, storedID: "unknown-chat")
+        try await unknown.submit("unknown delivery")
+        unknownFake.emit(event(sessionID: "runtime-resumed", type: "transport.closed", sequence: 2, method: "local"))
+        await Task.yield()
+        do {
+            XCTAssertEqual(unknown.runState, .deliveryUnknown)
+            _ = try await unknown.setReasoningEffort("high")
+            XCTFail("Unknown delivery state must reject a setting mutation")
+        } catch DirectSessionError.invalidResponse { }
+        await runtime.stop()
+        await unknownRuntime.stop()
+    }
+
+    func testCompetingReasoningWritesRemainOrderedAndBlockSubmit() async throws {
+        let fake = ControllerFakeTransport()
+        let firstWrite = AsyncGate()
+        fake.setReasoningSetGate(firstWrite)
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime, storedID: "stored-chat")
+
+        let first = Task { try await controller.setReasoningEffort("high") }
+        await yieldUntil { fake.calls().filter { $0.method == "config.set" }.count == 1 }
+        let second = Task { try await controller.setReasoningEffort("max") }
+        do {
+            try await controller.submit("racing send")
+            XCTFail("Submit must wait for queued reasoning writes")
+        } catch DirectSessionError.ambiguousPrompt { }
+        await firstWrite.release()
+        _ = try await first.value
+        _ = try await second.value
+
+        let values = fake.calls().filter { $0.method == "config.set" }.compactMap {
+            objectFields($0.params)?["value"]?.gatewayString
+        }
+        XCTAssertEqual(values, ["high", "max"])
+        await runtime.stop()
+    }
+
+    func testRebindDuringReasoningWriteRejectsStaleCapability() async throws {
+        let fake = ControllerFakeTransport()
+        let setGate = AsyncGate()
+        fake.setReasoningSetGate(setGate)
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime, storedID: "stored-chat")
+
+        let write = Task { try await controller.setReasoningEffort("high") }
+        await yieldUntil { fake.calls().contains { $0.method == "config.set" } }
+        try await runtime.reconnect()
+        await setGate.release()
+        do {
+            _ = try await write.value
+            XCTFail("A capability from the old socket must not be accepted")
+        } catch DirectSessionError.staleOperation { }
+        await runtime.stop()
+    }
+
     func testInterleavedConversationEventsAreFilteredByRuntimeSessionID() async throws {
         let fake = ControllerFakeTransport()
         let runtime = try makeRuntime(fake)
@@ -419,10 +667,11 @@ final class GatewayConversationControllerTests: XCTestCase {
         sessionID: String,
         type: String,
         sequence: Int,
-        payload: JSONValue? = nil
+        payload: JSONValue? = nil,
+        method: String = "gateway.event"
     ) -> HermesGatewayEvent {
         HermesGatewayEvent(
-            method: "gateway.event",
+            method: method,
             type: type,
             sessionID: sessionID,
             sequence: sequence,
@@ -487,9 +736,19 @@ private final class ControllerFakeTransport: HermesGatewayTransport, @unchecked 
     private var sinkConsumedGate: AsyncGate?
     private var steerResponse: JSONValue = .object(["status": .string("accepted")])
     private var promptTimeout = false
+    private var promptResponseGate: AsyncGate?
     private var promptServerError: HermesGatewayError?
     private var interruptResponse: JSONValue = .object([:])
     private var interruptEvent: HermesGatewayEvent?
+    private var reasoningGetResponse: JSONValue = .object([
+        "value": .string("medium"),
+        "display": .string("show"),
+        "session_reasoning_contract": .number(1),
+        "deferred": .bool(false)
+    ])
+    private var reasoningGetGate: AsyncGate?
+    private var reasoningSetResponse: JSONValue?
+    private var reasoningSetGate: AsyncGate?
 
     func installSink(_ sink: @escaping @Sendable (HermesGatewayEvent) -> Void) {
         let wrapped: @Sendable (HermesGatewayEvent) -> Void = { [weak self] event in
@@ -526,6 +785,10 @@ private final class ControllerFakeTransport: HermesGatewayTransport, @unchecked 
         withLock { promptTimeout = enabled }
     }
 
+    func setPromptResponseGate(_ gate: AsyncGate) {
+        withLock { promptResponseGate = gate }
+    }
+
     func setPromptServerError(_ error: HermesGatewayError) {
         withLock { promptServerError = error }
     }
@@ -536,6 +799,22 @@ private final class ControllerFakeTransport: HermesGatewayTransport, @unchecked 
 
     func setInterruptEvent(_ event: HermesGatewayEvent) {
         withLock { interruptEvent = event }
+    }
+
+    func setReasoningGetResponse(_ response: JSONValue) {
+        withLock { reasoningGetResponse = response }
+    }
+
+    func setReasoningGetGate(_ gate: AsyncGate) {
+        withLock { reasoningGetGate = gate }
+    }
+
+    func setReasoningSetResponse(_ response: JSONValue) {
+        withLock { reasoningSetResponse = response }
+    }
+
+    func setReasoningSetGate(_ gate: AsyncGate) {
+        withLock { reasoningSetGate = gate }
     }
 
     func calls() -> [Call] {
@@ -599,6 +878,12 @@ private final class ControllerFakeTransport: HermesGatewayTransport, @unchecked 
                 "session_key": .string("resumed")
             ])
         case "prompt.submit":
+            let promptGate = withLock {
+                let gate = promptResponseGate
+                promptResponseGate = nil
+                return gate
+            }
+            if let promptGate { await promptGate.wait() }
             if let error = behavior.4 { throw error }
             if behavior.3 {
                 throw HermesGatewayError.timeout(method: method, requestID: "\(behavior.8)")
@@ -611,6 +896,45 @@ private final class ControllerFakeTransport: HermesGatewayTransport, @unchecked 
             return behavior.6
         case "session.status":
             return .object(["output": .string("Agent Running: No")])
+        case "config.get":
+            let (response, gate) = withLock {
+                let gate = reasoningGetGate
+                reasoningGetGate = nil
+                return (reasoningGetResponse, gate)
+            }
+            if let gate { await gate.wait() }
+            return response
+        case "config.set":
+            let (response, gate) = withLock {
+                let gate = reasoningSetGate
+                reasoningSetGate = nil
+                return (reasoningSetResponse, gate)
+            }
+            if let gate { await gate.wait() }
+            guard let params, case .object(let fields) = params,
+                  let value = fields["value"]?.gatewayString else {
+                return response ?? .object([:])
+            }
+            let result = response ?? .object([
+                "key": .string("reasoning"),
+                "value": .string(value),
+                "scope": .string("session"),
+                "deferred": .bool(false),
+                "persisted": .bool(true)
+            ])
+            if case .object(let fields) = result,
+               let value = fields["value"]?.gatewayString {
+                let deferred = fields["deferred"] == .bool(true)
+                withLock {
+                    reasoningGetResponse = .object([
+                        "value": .string(value),
+                        "display": .string("show"),
+                        "session_reasoning_contract": .number(1),
+                        "deferred": .bool(deferred)
+                    ])
+                }
+            }
+            return result
         default:
             return .object([:])
         }

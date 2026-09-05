@@ -25,6 +25,26 @@ prevent same-user access to personal files; that residual risk was accepted.
 Reassess isolation before unrestricted tool execution or expanding test scope.
 Do not assume the reported personal backup is verified or use it as a safety gate.
 
+## Approved Slice 2 reasoning contract extension — September 5, 2026
+
+Maurice requires per-session reasoning changes, including selecting the next
+turn's effort while a response is running. He approved a focused backend fix in
+a separate development branch/runtime when upstream inspection found no safe
+applicable fix. This does not authorize upgrading or modifying personal Hermes.
+
+The independent clean pin remains the baseline. The development branch
+`fix/semreh-session-reasoning` adds a feature-level `session_reasoning_contract: 1`
+handshake, fail-closed session/profile targeting, durable per-chat choices, and
+next-turn application without mutating the active inference. The verified
+backend checkpoint is `8c50f84522a755d40346e73701a6847fbdde20ec`, descended from
+the unchanged pin. Exact tests and evidence are in `slice2-verification.md`.
+
+Existing-chat reasoning writes require that handshake; older backends remain
+read-only for this operation, with no global or WebUI fallback. Draft choices
+still use `session.create`. This is a bounded contract extension, not a general
+backend upgrade or new adapter layer. Deployment of the patch to any personal
+service remains outside the current test scope.
+
 ---
 
 ## 1. Decision

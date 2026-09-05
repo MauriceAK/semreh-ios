@@ -130,6 +130,9 @@ struct AppShellView: View {
             SessionListView(
                 authManager: authManager,
                 server: server,
+                // Slice 2's direct gateway has no projects REST surface yet;
+                // revisit this when Slice 4 settles workspace/project ownership.
+                projectsEnabled: false,
                 pendingSharedImport: $pendingSharedImport,
                 pendingDeepLinkedSessionID: $pendingDeepLinkedSessionID,
                 requestedNewChat: $pendingNewChatRequest,
@@ -146,6 +149,9 @@ struct AppShellView: View {
             ControlView(
                 authManager: authManager,
                 server: server,
+                // Keep the legacy project UI available to other callers while
+                // the direct-gateway shell waits for Slice 4's disposition.
+                projectsEnabled: false,
                 isActive: selectedSurface == .control,
                 onNestedDestinationVisibilityChanged: { isPresented in
                     isControlDestinationPresented = isPresented

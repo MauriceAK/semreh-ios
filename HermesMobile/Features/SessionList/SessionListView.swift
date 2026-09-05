@@ -9,6 +9,7 @@ struct SessionListView: View {
 
     @Bindable var authManager: AuthManager
     let server: URL
+    let projectsEnabled: Bool
     let usesShellChrome: Bool
     let shellSurfaceVisitID: Int
     let onConversationVisibilityChanged: (Bool) -> Void
@@ -77,6 +78,7 @@ struct SessionListView: View {
     init(
         authManager: AuthManager,
         server: URL,
+        projectsEnabled: Bool = true,
         pendingSharedImport: Binding<SharedImport?> = .constant(nil),
         pendingDeepLinkedSessionID: Binding<String?> = .constant(nil),
         requestedNewChat: Binding<NewChatRequest?> = .constant(nil),
@@ -86,6 +88,7 @@ struct SessionListView: View {
     ) {
         self.authManager = authManager
         self.server = server
+        self.projectsEnabled = projectsEnabled
         self.usesShellChrome = usesShellChrome
         self.shellSurfaceVisitID = shellSurfaceVisitID
         self.onConversationVisibilityChanged = onConversationVisibilityChanged
@@ -891,7 +894,7 @@ struct SessionListView: View {
             memory: showsMemorySection,
             insights: showsInsightsSection,
             activeProfile: showsActiveProfileSection,
-            projects: showsProjectsSection
+            projects: showsProjectsSection && projectsEnabled
         )
     }
 
@@ -1094,11 +1097,13 @@ struct SessionListView: View {
                 sessionPendingProjectCreation = session
             },
             refreshProjects: {
+                guard projectsEnabled else { return }
                 Task { await viewModel.loadProjects() }
             },
             export: { session, format in
                 Task { await export(session, format: format) }
-            }
+            },
+            projectsEnabled: projectsEnabled
         )
     }
 
@@ -1225,7 +1230,7 @@ struct SessionListView: View {
         guard !Task.isCancelled else { return }
         handleLastError()
 
-        if !viewModel.isViewingCachedData {
+        if projectsEnabled, !viewModel.isViewingCachedData {
             await viewModel.loadProjects()
             guard !Task.isCancelled else { return }
             handleLastError()
