@@ -1,5 +1,35 @@
 import Foundation
 
+/// Pinned first-party `/api/model/options` inventory. Do not decode the old
+/// WebUI `/api/models` envelope or infer the provider from a model's slash prefix.
+struct DirectHermesModelOptions: Decodable, Sendable {
+    struct Provider: Decodable, Sendable {
+        struct Capability: Decodable, Sendable {
+            let reasoning: Bool?
+            let canDisableReasoning: Bool?
+        }
+        let slug: String?
+        let name: String?
+        let models: [String]?
+        let authenticated: Bool?
+        let capabilities: [String: Capability]?
+    }
+    let model: String?
+    let provider: String?
+    let providers: [Provider]?
+
+    var catalogGroups: [ModelCatalogGroup] {
+        (providers ?? []).compactMap { row in
+            guard let slug = row.slug, !slug.isEmpty, row.authenticated != false else { return nil }
+            var seen = Set<String>()
+            let models = (row.models ?? []).filter { !$0.isEmpty && seen.insert($0).inserted }
+                .map { ModelCatalogOption(id: $0, displayName: $0, providerID: slug) }
+            guard !models.isEmpty else { return nil }
+            return ModelCatalogGroup(id: slug, name: row.name ?? slug, providerID: slug, models: models)
+        }
+    }
+}
+
 /// A direct auth request may contain a password in its body. Header stripping
 /// alone cannot protect a 307/308 redirect, so refuse every off-origin hop.
 final class DirectHermesRedirectGuard: NSObject, URLSessionTaskDelegate, Sendable {
@@ -31,6 +61,21 @@ private struct DirectHermesPasswordLoginRequest: Encodable {
 }
 
 extension APIClient {
+    func directModelOptions(profile: String) async throws -> DirectHermesModelOptions {
+        var path = URLComponents()
+        path.path = "/api/model/options"
+        path.queryItems = [URLQueryItem(name: "profile", value: profile),
+                          URLQueryItem(name: "explicit_only", value: "true")]
+        guard let encodedPath = path.string else { throw APIError.invalidServerURL }
+        let data = try await sendDirectData(path: encodedPath, method: "GET", classifyStructuredAuthExpiry: true)
+        return try decode(DirectHermesModelOptions.self, from: data)
+    }
+
+    func directProfiles() async throws -> ProfilesResponse {
+        let data = try await sendDirectData(path: "/api/profiles", method: "GET", classifyStructuredAuthExpiry: true)
+        return try decode(ProfilesResponse.self, from: data)
+    }
+
     /// Canonical direct-Hermes provider discovery. This does not consult any
     /// legacy WebUI endpoint or fallback transport.
     func directProviders() async throws -> DirectHermesAuthProvidersResponse {

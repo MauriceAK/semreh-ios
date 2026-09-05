@@ -137,10 +137,11 @@ final class HermesServerRuntimeTests: XCTestCase {
         let events = EventProbe()
         let recovery = RecoveryGate()
         var observedStates: [HermesServerRuntime.State] = []
+        var readyStates: [HermesServerRuntime.State] = []
         _ = runtime.observe(event: { event in
             observedStates.append(runtime.state)
             Task { await events.record(event) }
-        }, recover: { _ in await recovery.run() })
+        }, recover: { _ in await recovery.run() }, ready: { readyStates.append(runtime.state) })
 
         try await runtime.connect()
         await recovery.blockNext()
@@ -152,6 +153,7 @@ final class HermesServerRuntimeTests: XCTestCase {
         await Task.yield()
         let countBeforeRecovery = await events.count()
         XCTAssertEqual(countBeforeRecovery, 0)
+        XCTAssertEqual(readyStates, [.ready], "Reconnect readiness must wait for every recovery")
 
         await recovery.release()
         try await reconnect.value
@@ -159,6 +161,7 @@ final class HermesServerRuntimeTests: XCTestCase {
         let receivedTypes = await events.values().map(\.type)
         XCTAssertEqual(receivedTypes, ["buffered"])
         XCTAssertEqual(observedStates, [.ready])
+        XCTAssertEqual(readyStates, [.ready, .ready])
         XCTAssertEqual(runtime.state, .ready)
         await runtime.stop()
     }

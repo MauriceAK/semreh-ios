@@ -258,6 +258,7 @@ struct SessionListView: View {
             }
             .onDisappear {
                 isSessionListVisible = false
+                viewModel.invalidateGatewayObservation()
                 foregroundRefreshTask?.cancel()
                 foregroundRefreshTask = nil
                 newChatCreationTask?.cancel()
@@ -275,9 +276,18 @@ struct SessionListView: View {
             }
             .onAppear {
                 isSessionListVisible = true
+                viewModel.setSidebarEditing(sidebarHasPendingEdit)
+                viewModel.setSidebarDestructiveActionPending(sidebarHasPendingDestructiveAction)
+                viewModel.startGatewayObservation()
                 drainPendingExternalNewChatRequestsIfIdle()
                 refreshAfterReturningIfNeeded()
                 onConversationVisibilityChanged(navigationState.isConversationPresented)
+            }
+            .onChange(of: sidebarHasPendingEdit) { _, editing in
+                viewModel.setSidebarEditing(editing)
+            }
+            .onChange(of: sidebarHasPendingDestructiveAction) { _, pending in
+                viewModel.setSidebarDestructiveActionPending(pending)
             }
             .onChange(of: pendingSharedImport) {
                 drainPendingExternalNewChatRequestsIfIdle()
@@ -330,6 +340,14 @@ struct SessionListView: View {
                 )
             )
             .focusedSceneValue(\.hermexSceneActions, sceneActions)
+    }
+
+    private var sidebarHasPendingEdit: Bool {
+        sessionPendingRename != nil || projectPendingRename != nil || searchFieldIsFocused
+    }
+
+    private var sidebarHasPendingDestructiveAction: Bool {
+        sessionPendingDeletion != nil || projectPendingDeletion != nil
     }
 
     @ViewBuilder

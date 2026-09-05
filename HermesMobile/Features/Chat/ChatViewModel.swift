@@ -558,6 +558,7 @@ final class ChatViewModel {
     private(set) var responseCompletionHapticTrigger = 0
     private(set) var responseCompletionNeedsTranscriptRefresh = false
     private(set) var modelCatalogGroups: [ModelCatalogGroup] = []
+    private var directModelOptions: DirectHermesModelOptions?
     private(set) var agentCommands: [AgentCommand] = []
     private(set) var workspaceRoots: [WorkspaceRoot] = []
     private(set) var workspaceSuggestions: [String] = []
@@ -864,6 +865,64 @@ final class ChatViewModel {
     }
 
     // MARK: - Direct Hermes native bridge
+
+    private func loadDirectComposerConfiguration() async {
+        guard !directInvalidated, !isLoadingComposerConfiguration else { return }
+        let profile = requestProfileName ?? "default"
+        let mutation = composerConfigurationMutationToken
+        isLoadingComposerConfiguration = true
+        composerConfigurationErrorMessage = nil
+        defer { isLoadingComposerConfiguration = false }
+        do {
+            async let inventory = client.directModelOptions(profile: profile)
+            async let profiles = client.directProfiles()
+            let (options, availableProfiles) = try await (inventory, profiles)
+            guard !directInvalidated, profile == (requestProfileName ?? "default"),
+                  mutation == composerConfigurationMutationToken else { return }
+            directModelOptions = options
+            modelCatalogGroups = options.catalogGroups
+            profileOptions = availableProfiles.profiles ?? []
+            isSingleProfileMode = availableProfiles.singleProfileMode ?? false
+            selectedProfileName = profile
+            // The catalog reports profile defaults, not this stored chat's
+            // effective configuration. Only a new local draft inherits them.
+            if canonicalSessionID == nil, currentModel == nil {
+                currentModel = Self.nonEmpty(options.model)
+                currentModelProvider = Self.nonEmpty(options.provider)
+            }
+            applyDirectReasoningGating()
+        } catch {
+            guard !directInvalidated, profile == (requestProfileName ?? "default"),
+                  mutation == composerConfigurationMutationToken else { return }
+            lastError = error
+            composerConfigurationErrorMessage = "Hermes model settings could not be loaded. Your draft was preserved."
+        }
+    }
+
+    private func applyDirectReasoningGating() {
+        let capability = directModelOptions?.providers?.first { $0.slug == currentModelProvider }?
+            .capabilities?[currentModel ?? ""]
+        // These are the pinned create-time parser's levels, not a claim that
+        // every provider implements every level without coercion.
+        supportedReasoningEfforts = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+            .filter { $0 != "none" || capability?.canDisableReasoning != false }
+        supportsReasoningEffort = capability?.reasoning ?? false
+        sessionScopedReasoning = canonicalSessionID == nil
+    }
+
+    private func canConfigureDirectDraft() -> Bool {
+        guard !directInvalidated, !isViewingCachedData, !isUpdatingComposerConfiguration,
+              activeStreamID == nil else {
+            composerConfigurationErrorMessage = "Wait until this chat is idle and connected to change its settings."
+            return false
+        }
+        guard canonicalSessionID == nil else {
+            composerConfigurationErrorMessage = "Changing settings on an existing direct chat is not available yet. New Chat supports model and reasoning choices before its first send."
+            return false
+        }
+        composerConfigurationErrorMessage = nil
+        return true
+    }
 
     private func ensureDirectConversation() async throws -> GatewayConversationController {
         guard !directInvalidated, let gatewayRuntimeProvider else { throw DirectSessionError.stopped }
@@ -1514,9 +1573,7 @@ final class ChatViewModel {
     }
 
     func loadComposerConfiguration() async {
-        // Direct per-session model/profile controls are integrated separately;
-        // never consult WebUI's global configuration as a fallback.
-        guard !usesDirectGateway else { return }
+        if usesDirectGateway { await loadDirectComposerConfiguration(); return }
         if isLoadingComposerConfiguration {
             needsComposerConfigurationReload = true
             return
@@ -1553,6 +1610,7 @@ final class ChatViewModel {
     /// the active provider's live list from `/api/models/live`. Failures are
     /// silent by design — the picker keeps whatever it already shows.
     func refreshModelCatalogForPickerOpen() async {
+        if usesDirectGateway { await loadDirectComposerConfiguration(); return }
         if let response = try? await client.models() {
             let groups = response.catalogGroups
             if !groups.isEmpty {
@@ -1612,6 +1670,18 @@ final class ChatViewModel {
 
     @discardableResult
     func selectComposerModel(_ option: ModelCatalogOption) async -> Bool {
+        if usesDirectGateway {
+            guard canConfigureDirectDraft(),
+                  modelCatalogGroups.flatMap(\.models).contains(option),
+                  !option.matchesSelection(modelID: currentModel, providerID: currentModelProvider) else { return false }
+            composerConfigurationMutationToken &+= 1
+            currentModel = option.id
+            currentModelProvider = option.providerID
+            sessionReasoningEffort = nil
+            selectedReasoningEffort = nil
+            applyDirectReasoningGating()
+            return true
+        }
         guard !option.matchesSelection(modelID: currentModel, providerID: currentModelProvider) else {
             return false
         }
@@ -1695,6 +1765,7 @@ final class ChatViewModel {
     /// model rejects. If the selected effort is no longer supported, snaps to the
     /// server's coerced `reasoning_effort`.
     func refreshReasoningEffortGating() async {
+        if usesDirectGateway { applyDirectReasoningGating(); return }
         guard !isViewingCachedData else { return }
 
         reasoningGatingFetchToken += 1
@@ -1747,6 +1818,7 @@ final class ChatViewModel {
     /// Refetches the workspace registry after the manager sheet mutated it
     /// (issue #22), so the picker reflects adds/removes/renames/reorders.
     func refreshWorkspaceRoots() async {
+        guard !usesDirectGateway else { return }
         guard !isViewingCachedData else { return }
 
         do {
@@ -1759,6 +1831,7 @@ final class ChatViewModel {
     }
 
     func loadWorkspaceSuggestions(prefix: String) async {
+        guard !usesDirectGateway else { return }
         guard !isViewingCachedData else {
             workspaceSuggestions = workspaceRoots.compactMap(\.path)
             return
@@ -1774,6 +1847,7 @@ final class ChatViewModel {
     }
 
     func loadPersonalitySuggestions() async {
+        guard !usesDirectGateway else { return }
         guard !hasLoadedPersonalitySuggestions else { return }
         guard !isLoadingPersonalitySuggestions else { return }
 
@@ -1793,6 +1867,7 @@ final class ChatViewModel {
     }
 
     func loadSkillSlashSuggestions() async {
+        guard !usesDirectGateway else { return }
         guard !hasLoadedSkillSlashSuggestions else { return }
         guard !isLoadingSkillSlashSuggestions else { return }
 
@@ -1812,6 +1887,12 @@ final class ChatViewModel {
     func selectWorkspacePath(_ path: String) async -> Bool {
         let workspace = path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !workspace.isEmpty else { return false }
+        if usesDirectGateway {
+            guard canConfigureDirectDraft(), workspace != currentWorkspace else { return false }
+            composerConfigurationMutationToken &+= 1
+            currentWorkspace = workspace
+            return true
+        }
 
         guard workspace != currentWorkspace else {
             return false
@@ -1860,6 +1941,17 @@ final class ChatViewModel {
     }
 
     func switchProfile(_ profile: ProfileSummary, startNewSession: Bool) async -> ProfileSwitchOutcome? {
+        if usesDirectGateway {
+            guard !directInvalidated, !isViewingCachedData, !isUpdatingComposerConfiguration,
+                  activeStreamID == nil, let name = profile.normalizedName else { return nil }
+            // A profile owns a different durable namespace. Return a new local
+            // draft; never retarget this controller or change the host profile.
+            guard startNewSession else {
+                composerConfigurationErrorMessage = "Choose New Chat to use a different Hermes profile."
+                return nil
+            }
+            return ProfileSwitchOutcome(session: SessionSummary(title: "New Chat", createdAt: Date().timeIntervalSince1970, profile: name))
+        }
         guard !isViewingCachedData else {
             composerConfigurationErrorMessage = String(localized: "Reconnect to the server to change profiles.")
             return nil
@@ -1930,6 +2022,17 @@ final class ChatViewModel {
     func selectReasoningEffort(_ effort: String) async -> Bool {
         let selectedEffort = effort.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !selectedEffort.isEmpty else { return false }
+        if usesDirectGateway {
+            guard canConfigureDirectDraft() else { return false }
+            let normalized = selectedEffort.lowercased()
+            guard normalized == ReasoningEffortOption.inheritID ||
+                    (supportsReasoningEffort == true && supportedReasoningEfforts?.contains(normalized) == true) else { return false }
+            composerConfigurationMutationToken &+= 1
+            sessionScopedReasoning = true
+            sessionReasoningEffort = normalized == ReasoningEffortOption.inheritID ? nil : normalized
+            selectedReasoningEffort = sessionReasoningEffort
+            return true
+        }
 
         let normalizedEffort = selectedEffort.lowercased()
         let clearsSessionOverride = normalizedEffort == ReasoningEffortOption.inheritID
@@ -3567,6 +3670,9 @@ final class ChatViewModel {
     }
 
     private func switchModelFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
+        guard !usesDirectGateway else {
+            return .unsupported(friendlyMessage: "Use the model picker in New Chat before sending its first message.")
+        }
         let requestedModel = args.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !requestedModel.isEmpty else {
             return .unsupported(friendlyMessage: String(localized: "Usage: /model <id>"))
@@ -3610,6 +3716,10 @@ final class ChatViewModel {
     }
 
     private func switchWorkspaceFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
+        if usesDirectGateway {
+            let changed = await selectWorkspacePath(args)
+            return changed ? .executed(message: nil) : .unsupported(friendlyMessage: composerConfigurationErrorMessage ?? "Workspace was not changed.")
+        }
         let requestedWorkspace = args.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !requestedWorkspace.isEmpty else {
             return .unsupported(friendlyMessage: String(localized: "Usage: /workspace <path>"))
@@ -3652,6 +3762,10 @@ final class ChatViewModel {
     }
 
     private func switchReasoningFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
+        if usesDirectGateway {
+            let changed = await selectReasoningEffort(args)
+            return changed ? .executed(message: nil) : .unsupported(friendlyMessage: composerConfigurationErrorMessage ?? "Use a supported reasoning level in New Chat. Server-wide display changes are not available here.")
+        }
         let reasoning = args.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !reasoning.isEmpty else {
             let levels = SlashCommandCatalog.availableReasoningLevels(

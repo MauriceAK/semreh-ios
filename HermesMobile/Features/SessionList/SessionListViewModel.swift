@@ -70,15 +70,25 @@ private struct SessionMutationRejectedError: LocalizedError {
 @MainActor
 @Observable
 final class SessionListViewModel {
+    typealias GatewayRuntimeProvider = @MainActor (APIClient) async throws -> HermesServerRuntime
+
     private(set) var sessions: [SessionSummary] = []
     private(set) var isLoading = false
     private(set) var isCreatingSession = false
     private(set) var isCreatingProject = false
     private(set) var isLoadingProjects = false
-    private(set) var isDeletingProject = false
-    private(set) var isRenamingSession = false
-    private(set) var isRenamingProject = false
-    private(set) var isMovingSession = false
+    private(set) var isDeletingProject = false {
+        didSet { sidebarRefreshStateChanged() }
+    }
+    private(set) var isRenamingSession = false {
+        didSet { sidebarRefreshStateChanged() }
+    }
+    private(set) var isRenamingProject = false {
+        didSet { sidebarRefreshStateChanged() }
+    }
+    private(set) var isMovingSession = false {
+        didSet { sidebarRefreshStateChanged() }
+    }
     private(set) var isViewingCachedData = false
     private(set) var projects: [ProjectSummary] = []
     private(set) var errorMessage: String?
@@ -95,10 +105,18 @@ final class SessionListViewModel {
     private(set) var profileOptions: [ProfileSummary] = []
     private(set) var isSingleProfileMode = false
     private(set) var isLoadingActiveProfile = false
-    private(set) var isSwitchingActiveProfile = false
+    private(set) var isSwitchingActiveProfile = false {
+        didSet { sidebarRefreshStateChanged() }
+    }
     private(set) var switchingActiveProfileName: String?
     private(set) var activeProfileErrorMessage: String?
-    private(set) var mutatingSessionIDs: Set<String> = []
+    private(set) var mutatingSessionIDs: Set<String> = [] {
+        didSet { sidebarRefreshStateChanged() }
+    }
+    /// Set when a shared gateway event invalidates the durable sidebar list.
+    /// It remains set while an edit or destructive action is in progress so a
+    /// refresh cannot replace the user's working rows underneath them.
+    private(set) var isSidebarDirty = false
     /// Total archived sessions reported by the last successful list load
     /// (`archived_count`, issue #17). nil until a load succeeds or when an older
     /// server omits the field — the Archived entry stays hidden then.
@@ -122,12 +140,28 @@ final class SessionListViewModel {
     private var cacheFirstSessionPlaceholder: [SessionSummary]?
     private var sessionsBeforeCacheFirstPlaceholder: [SessionSummary] = []
     private var localDraftSequence: UInt64 = 0
+    @ObservationIgnored private let gatewayRuntimeProvider: GatewayRuntimeProvider
+    @ObservationIgnored private var observedGatewayRuntime: HermesServerRuntime?
+    @ObservationIgnored private var gatewayObserverID: UUID?
+    @ObservationIgnored private var gatewayObservationGeneration = 0
+    @ObservationIgnored private var gatewayObservationTask: Task<Void, Never>?
+    @ObservationIgnored private var sidebarRefreshTask: Task<Void, Never>?
+    private var gatewayObservationEnabled = false
+    private var sidebarEditing = false
+    private var sidebarDestructiveActionPending = false
 
-    init(server: URL, client: APIClient? = nil) {
+    init(
+        server: URL,
+        client: APIClient? = nil,
+        gatewayRuntimeProvider: GatewayRuntimeProvider? = nil
+    ) {
         self.server = server
         let resolvedClient = client ?? APIClient(baseURL: server)
         self.client = resolvedClient
         self.sessionMutator = SessionMutator(client: resolvedClient)
+        self.gatewayRuntimeProvider = gatewayRuntimeProvider ?? { client in
+            try await OpenChatSessionStore.shared.runtime(for: server, client: client)
+        }
 
         // Sweep exports leaked by a previous app run (view dismissed while a
         // download was in flight, so the share sheet — and its on-dismiss
@@ -137,6 +171,61 @@ final class SessionListViewModel {
         // is presenting. The first-ever init always precedes the first export,
         // so the single sweep can never race an in-flight export.
         _ = Self.sweepLeakedExportsOnce
+    }
+
+    /// Defers invalidation refreshes while the sidebar is editing a row or
+    /// preparing a destructive action. The caller should clear this when the
+    /// edit UI closes; a dirty list then refreshes on the next safe turn.
+    func setSidebarEditing(_ editing: Bool) {
+        sidebarEditing = editing
+        sidebarRefreshStateChanged()
+    }
+
+    func setSidebarDestructiveActionPending(_ pending: Bool) {
+        sidebarDestructiveActionPending = pending
+        sidebarRefreshStateChanged()
+    }
+
+    /// Starts the one observation/connect task for the already-owned shared
+    /// runtime. This is intentionally separate from `load`: the sidebar can
+    /// paint its cache/list without waiting for gateway setup, while the first
+    /// direct gateway event is still observed before any chat is opened.
+    func startGatewayObservation() {
+        gatewayObservationEnabled = true
+        guard gatewayObservationTask == nil else { return }
+
+        if gatewayObserverID == nil {
+            gatewayObservationGeneration &+= 1
+        }
+        let generation = gatewayObservationGeneration
+        gatewayObservationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.establishGatewayObservation(generation: generation)
+            if self.gatewayObservationGeneration == generation {
+                self.gatewayObservationTask = nil
+            }
+        }
+    }
+
+    /// Removes the shared-runtime observer when the owning sidebar surface is
+    /// discarded. Old callbacks are generation-checked and cannot refresh a
+    /// replacement account/profile; a later view must explicitly call
+    /// `startGatewayObservation()` before it reattaches.
+    func invalidateGatewayObservation() {
+        gatewayObservationGeneration &+= 1
+        gatewayObservationEnabled = false
+        loadGeneration &+= 1
+        isLoading = false
+        gatewayObservationTask?.cancel()
+        gatewayObservationTask = nil
+        sidebarRefreshTask?.cancel()
+        sidebarRefreshTask = nil
+        if let gatewayObserverID, let observedGatewayRuntime {
+            observedGatewayRuntime.removeObserver(gatewayObserverID)
+        }
+        gatewayObserverID = nil
+        observedGatewayRuntime = nil
+        isSidebarDirty = false
     }
 
     /// Root temp directory holding one UUID subdirectory per export
@@ -255,6 +344,7 @@ final class SessionListViewModel {
         defer {
             if loadGeneration == generation {
                 isLoading = false
+                if isSidebarDirty { sidebarRefreshStateChanged() }
             }
         }
 
@@ -363,6 +453,93 @@ final class SessionListViewModel {
     private func clearCacheFirstSessionPlaceholder() {
         cacheFirstSessionPlaceholder = nil
         sessionsBeforeCacheFirstPlaceholder = []
+    }
+
+    private var sidebarRefreshBlocked: Bool {
+        sidebarEditing || sidebarDestructiveActionPending
+            || isDeletingProject || isRenamingSession || isRenamingProject
+            || isMovingSession || isSwitchingActiveProfile || !mutatingSessionIDs.isEmpty
+    }
+
+    private func sidebarRefreshStateChanged() {
+        guard isSidebarDirty, !sidebarRefreshBlocked else { return }
+        scheduleSidebarRefresh()
+    }
+
+    private func establishGatewayObservation(generation: Int) async {
+        guard gatewayObservationEnabled, generation == gatewayObservationGeneration else { return }
+
+        let runtime: HermesServerRuntime
+        if let observedGatewayRuntime, gatewayObserverID != nil {
+            runtime = observedGatewayRuntime
+        } else {
+            guard let resolved = try? await gatewayRuntimeProvider(client),
+                  gatewayObservationEnabled,
+                  generation == gatewayObservationGeneration,
+                  resolved.origin == server
+            else { return }
+
+            runtime = resolved
+            observedGatewayRuntime = runtime
+            gatewayObserverID = runtime.observe(event: { [weak self] event in
+                guard let self, self.gatewayObservationGeneration == generation else { return }
+                self.receiveGatewayEvent(event)
+            }, recover: { _ in }, ready: { [weak self] in
+                guard let self, self.gatewayObservationEnabled,
+                      self.gatewayObservationGeneration == generation else { return }
+                self.isSidebarDirty = true
+                self.scheduleSidebarRefresh()
+            })
+        }
+
+        do {
+            try await runtime.connect()
+            guard gatewayObservationEnabled, generation == gatewayObservationGeneration else { return }
+        } catch {
+            guard gatewayObservationEnabled, generation == gatewayObservationGeneration else { return }
+            // The shared runtime owns reconnect policy. Keep the observer so a
+            // later explicit start can retry connection without another socket.
+        }
+    }
+
+    private func receiveGatewayEvent(_ event: HermesGatewayEvent) {
+        guard event.method == "event", event.type == "sessions.changed" else { return }
+        isSidebarDirty = true
+        scheduleSidebarRefresh()
+    }
+
+    private func scheduleSidebarRefresh() {
+        guard isSidebarDirty, !sidebarRefreshBlocked else { return }
+        sidebarRefreshTask?.cancel()
+        let observationGeneration = gatewayObservationGeneration
+        sidebarRefreshTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .milliseconds(300))
+                guard let self,
+                      self.gatewayObservationGeneration == observationGeneration,
+                      self.isSidebarDirty,
+                      !self.sidebarRefreshBlocked,
+                      !self.isLoading
+                else { return }
+
+                self.sidebarRefreshTask = nil
+                self.isSidebarDirty = false
+                let refreshed = await self.load()
+                guard self.gatewayObservationEnabled,
+                      self.gatewayObservationGeneration == observationGeneration
+                else { return }
+                if !refreshed {
+                    self.isSidebarDirty = true
+                }
+            } catch {
+                // Cancellation is the normal debounce path. A failed refresh
+                // leaves the dirty bit set for the next safe transition/event.
+                if let self, !Task.isCancelled {
+                    self.sidebarRefreshTask = nil
+                    self.isSidebarDirty = true
+                }
+            }
+        }
     }
 
     func loadActiveProfile() async {

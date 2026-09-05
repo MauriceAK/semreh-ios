@@ -59,7 +59,7 @@ final class HermesServerRuntime {
     @ObservationIgnored private var connectTask: Task<Void, Error>?
     @ObservationIgnored private var recoveryTask: Task<Void, Never>?
     @ObservationIgnored private var eventTask: Task<Void, Never>?
-    @ObservationIgnored private var observers: [UUID: (event: EventSink, recover: Recovery)] = [:]
+    @ObservationIgnored private var observers: [UUID: (event: EventSink, recover: Recovery, ready: @MainActor () -> Void)] = [:]
     @ObservationIgnored private var pendingEvents: [HermesGatewayEvent] = []
     @ObservationIgnored private var bufferOverflowed = false
     @ObservationIgnored private var acceptedTransportGeneration: Int?
@@ -104,9 +104,9 @@ final class HermesServerRuntime {
 
     deinit { eventTask?.cancel(); connectTask?.cancel(); recoveryTask?.cancel() }
 
-    func observe(event: @escaping EventSink, recover: @escaping Recovery) -> UUID {
+    func observe(event: @escaping EventSink, recover: @escaping Recovery, ready: @escaping @MainActor () -> Void = {}) -> UUID {
         let id = UUID()
-        observers[id] = (event, recover)
+        observers[id] = (event, recover, ready)
         return id
     }
 
@@ -162,6 +162,12 @@ final class HermesServerRuntime {
             let buffered = self.pendingEvents
             self.pendingEvents.removeAll()
             for event in buffered { self.deliver(event) }
+            // Read-only consumers can invalidate once the connection-wide
+            // recovery barrier is complete; they need no polling/recovery loop.
+            for id in Array(self.observers.keys) {
+                try self.checkGeneration(generation)
+                self.observers[id]?.ready()
+            }
         }
         connectTask = task
         do {

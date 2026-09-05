@@ -176,3 +176,75 @@ complete stop/steer/event coverage, actual UI navigation/cache/Live Activity
 behavior and responsiveness, physical-iPhone checks, and final independent rerun.
 Native blocking-response controls and broad mobile lifecycle/orphan recovery are
 still Slice 3 work. No custom UI/redesign work was started.
+
+## Composer draft and sidebar checkpoint, September 4
+
+Slice 2 is still incomplete. This checkpoint adds profile-scoped model inventory
+and local draft selections, not completed settings for existing conversations.
+
+- `GET /api/model/options?profile=...&explicit_only=true` is the actual
+  `hermes serve` contract: `hermes_cli/main.py:12294` starts
+  `hermes_cli.web_server`; its handler at 7449–7499 enters `_profile_scope`
+  inside the worker thread. The similarly named standalone API-server adapter
+  is not this deployment's route owner. No `/p/...` routing is used here.
+- Model/provider/reasoning/cwd picks remain local until `session.create`.
+  Inventory capabilities gate reasoning visibility and disabling; the displayed
+  levels are the pinned create parser vocabulary, not model-specific guarantees.
+  Changing profile returns a new local draft without retargeting an existing
+  controller or writing the host's active profile. Legacy composer suggestions
+  and configuration writes are explicitly guarded in direct mode.
+- Sidebar `sessions.changed` uses the existing active-origin runtime, a 300 ms
+  debounce, editing/destructive-action deferral, and view lifecycle invalidation.
+  The shared runtime supplies an optional ready callback after all recovery
+  hooks, avoiding a separate sidebar recovery timer. No extra socket was added.
+
+Important unresolved contract issue: pinned `tui_gateway/server.py:14520–14630`
+implements `config.set` reasoning as a global profile configuration write when
+the runtime session lookup is missing/stale, even if the caller asks for session
+scope. Preflight cannot eliminate that race. `prompt.submit` has no reasoning
+override; no verified fail-closed alternative was found. Root, Luna High, and
+Sol Low independently checked this. Existing-chat reasoning remains unavailable;
+Maurice must approve a temporary restriction or separate backend contract/pin
+work. The backend clone/pin was not modified. Existing-chat model switching with
+an explicit `--session` is separate unfinished integration, not the same blocker.
+
+Verification, evidence rooted at `/Users/maurice/workspace/semreh-slice1-evidence`:
+
+- `slice2-composer-sidebar-focused-v2.xcresult`: 27 passed, zero failures/skips.
+  Covers draft inventory/picks/first-create values, non-reasoning and mandatory
+  reasoning capabilities, legacy/global-write guards, local profile draft,
+  sidebar debounce/deferral/stale-observer/profile behavior, and runtime barrier.
+- `slice2-composer-sidebar-full-v1.xcresult`: 1,962 passed, zero failed, six
+  intentional opt-in skips. Same signed full `xcodebuild test` command as above;
+  focused run adds `-only-testing:HermesMobileTests/ChatViewModelDirectGatewayTests`,
+  `.../SessionListGatewayInvalidationTests`, and `.../HermesServerRuntimeTests`.
+- `slice2-composer-native-live-https-v1.xcresult`: one passed, no skips. Same
+  `--https --slice2-native` generator and signed `test-without-building` procedure;
+  now also reads the actual profiled model inventory before create, then verifies
+  first send and canonical durable rows after reopening in another ChatViewModel.
+  This remains deterministic view-model integration, not UI/physical-device proof.
+- Focused-v1's test compilation failed (global fixture helper referenced as a
+  member; private property assertion). Corrected before further feature work;
+  failed evidence retained. No skipped/disabled assertions to obtain a pass.
+- Exported console diagnostics: `slice2-composer-focused-v2-diagnostics`,
+  `slice2-composer-full-v1-diagnostics`, `slice2-composer-live-v1-diagnostics`.
+- Signed Simulator launch: inspected `slice2-composer-signed-launch-settled.png`.
+  Welcome/onboarding only, not composer/sidebar visual acceptance. The first
+  screenshot caught the launch animation and is retained separately.
+- Guarded fixture/backend/proxy processes stopped afterward. Personal Hermes,
+  routes, and credentials remained out of scope. The artifact audit now also
+  covers private launcher logs in `runtime/logs`, not only Hermes home logs.
+  Audit result: 71,689 files, zero known-secret/obvious-bearer flags, including
+  exported full/live console logs. This remains a heuristic, not proof that
+  arbitrary opaque secrets cannot occur.
+
+Luna supplied the sidebar implementation and contract audit. Root corrected
+lifecycle/recovery integration and test compilation, implemented composer wiring,
+and ran all verification. Sol Low independently reviewed the reasoning issue;
+its initial route concern was retracted after root traced the correct server.
+Reviewer agreement is not used in place of source tracing or executable checks.
+
+Still outstanding: existing-chat controls/disposition decision, late-provider
+observer cancellation and slow recovery/sidebar UI stress coverage, latest/older
+ordering, continuation/cross-client matrix, complete UI/cache/Live Activity
+walkthrough, physical-device responsiveness, and independent final gate rerun.

@@ -24,6 +24,7 @@ def main():
                 re.compile(rb'[?&]ticket=[A-Za-z0-9_-]{20,}')]
     files = list((ROOT / 'docs/migration').rglob('*'))
     files += list((RUNTIME / 'home/logs').rglob('*'))
+    files += list((RUNTIME / 'logs').rglob('*'))
     files += list(EVIDENCE.rglob('*'))
     checked, failures = 0, []
     for path in files:

@@ -759,6 +759,13 @@ final class DirectHermesLiveSmokeTests: XCTestCase {
             first.onDirectCanonicalID = { id in durableID = id }
             firstViewModel = first
 
+            try await stage("native draft profiled model inventory") {
+                await first.loadComposerConfiguration()
+                guard first.composerConfigurationErrorMessage == nil,
+                      first.selectedModelID == "semreh-fixture",
+                      !first.hasServerBackedSession else { throw LiveSmokeInvariant.failed }
+            }
+
             try await stage("native chat first send accepted") {
                 guard await first.sendMessage(prompt) else { throw LiveSmokeInvariant.failed }
             }

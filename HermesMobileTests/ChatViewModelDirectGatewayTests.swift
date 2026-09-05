@@ -3,6 +3,91 @@ import XCTest
 
 @MainActor
 final class ChatViewModelDirectGatewayTests: APIClientTestCase {
+    func testDirectComposerLoadsProfileInventoryAndStagesDraftChoicesUntilFirstSend() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let requests = ChatDirectRequestRecorder()
+        let client = makeClient { request in
+            requests.append(request.url?.path ?? "nil")
+            XCTAssertEqual(request.httpMethod, "GET")
+            if request.url?.path == "/api/model/options" {
+                let query = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.queryItems
+                XCTAssertEqual(query?.first { $0.name == "profile" }?.value, "work")
+                XCTAssertEqual(query?.first { $0.name == "explicit_only" }?.value, "true")
+                return apiTestJSONResponse(#"{"model":"model-a","provider":"fixture","providers":[{"slug":"fixture","name":"Fixture","authenticated":true,"models":["model-a","model-b","model-b"],"capabilities":{"model-a":{"reasoning":false},"model-b":{"reasoning":true,"can_disable_reasoning":false}}},{"slug":"unconfigured","authenticated":false,"models":["hidden"]}]}"#, for: request)
+            }
+            XCTAssertEqual(request.url?.path, "/api/profiles")
+            return apiTestJSONResponse(#"{"profiles":[{"name":"work"}],"active":"default"}"#, for: request)
+        }
+        let vm = makeViewModel(client: client, runtime: runtime, sessionID: nil)
+        await vm.loadComposerConfiguration()
+        XCTAssertEqual(vm.selectedModelID, "model-a")
+        XCTAssertEqual(vm.selectedModelProviderID, "fixture")
+        XCTAssertEqual(vm.selectedProfileName, "work")
+        XCTAssertFalse(vm.showsReasoningEffortControl)
+        XCTAssertEqual(vm.modelCatalogGroups.count, 1)
+        XCTAssertEqual(vm.modelCatalogGroups.first?.models.count, 2)
+        XCTAssertTrue(fake.calls().isEmpty, "Configuration must not pre-create a runtime")
+        let option = try XCTUnwrap(vm.modelCatalogGroups.first?.models.last)
+        let selected = await vm.selectComposerModel(option)
+        XCTAssertTrue(selected)
+        XCTAssertTrue(vm.showsReasoningEffortControl)
+        XCTAssertFalse(vm.supportedReasoningEfforts?.contains("none") ?? true)
+        let invalidEffort = await vm.selectReasoningEffort("none")
+        XCTAssertFalse(invalidEffort)
+        let selectedEffort = await vm.selectReasoningEffort("high")
+        XCTAssertTrue(selectedEffort)
+        XCTAssertTrue(fake.calls().isEmpty)
+        let sent = await vm.sendMessage("hello")
+        XCTAssertTrue(sent)
+        let create = try XCTUnwrap(fake.calls().first)
+        XCTAssertEqual(create.method, "session.create")
+        XCTAssertEqual(fields(create.params)?["model"], .string("model-b"))
+        XCTAssertEqual(fields(create.params)?["provider"], .string("fixture"))
+        XCTAssertEqual(fields(create.params)?["reasoning_effort"], .string("high"))
+        XCTAssertEqual(Set(requests.values()), ["/api/model/options", "/api/profiles"])
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testExistingDirectChatConfigurationAndSuggestionsNeverUseLegacyOrGlobalWrites() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let client = makeClient { _ in XCTFail("No legacy REST or global write is allowed"); throw URLError(.badURL) }
+        let vm = makeViewModel(client: client, runtime: runtime, sessionID: "durable-1")
+        let selected = await vm.selectComposerModel(ModelCatalogOption(id: "new", displayName: "New", providerID: "fixture"))
+        let effort = await vm.selectReasoningEffort("high")
+        let workspace = await vm.selectWorkspacePath("/disposable")
+        XCTAssertFalse(selected)
+        XCTAssertFalse(effort)
+        XCTAssertFalse(workspace)
+        XCTAssertNotNil(vm.composerConfigurationErrorMessage)
+        await vm.refreshWorkspaceRoots()
+        await vm.loadWorkspaceSuggestions(prefix: "/")
+        await vm.loadPersonalitySuggestions()
+        await vm.loadSkillSlashSuggestions()
+        XCTAssertTrue(fake.calls().isEmpty)
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testDirectProfileChangeReturnsLocalDraftWithoutRetargetingOriginalChat() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let client = makeClient { _ in XCTFail("Profile choice is local"); throw URLError(.badURL) }
+        let vm = makeViewModel(client: client, runtime: runtime, sessionID: "durable-1")
+        let profile = try JSONDecoder().decode(ProfileSummary.self, from: Data(#"{"name":"other"}"#.utf8))
+        let outcome = await vm.switchProfile(profile, startNewSession: true)
+        let draft = try XCTUnwrap(outcome?.session)
+        XCTAssertNil(draft.sessionId)
+        XCTAssertEqual(draft.profile, "other")
+        XCTAssertTrue(vm.hasServerBackedSession)
+        XCTAssertEqual(vm.selectedProfileTitle, "work")
+        XCTAssertTrue(fake.calls().isEmpty)
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
     func testLocalDraftLoadDoesNotCreateOrCallREST() async throws {
         let fake = ChatDirectFakeTransport()
         let runtime = try makeRuntime(fake)
