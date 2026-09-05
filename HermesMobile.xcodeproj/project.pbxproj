@@ -7,7 +7,13 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		D2EC70000000000000000006 /* GatewayConversationControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2EC70000000000000000016 /* GatewayConversationControllerTests.swift */; };
+		D2EC70000000000000000003 /* APIClient+DirectSessions.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2EC70000000000000000013 /* APIClient+DirectSessions.swift */; };
+		D2EC70000000000000000004 /* APIClientDirectSessionsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2EC70000000000000000014 /* APIClientDirectSessionsTests.swift */; };
+		D2EC70000000000000000005 /* GatewayConversationController.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2EC70000000000000000015 /* GatewayConversationController.swift */; };
 		D1EC70000000000000000006 /* DirectHermesLiveSmokeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1EC70000000000000000016 /* DirectHermesLiveSmokeTests.swift */; };
+		D2EC70000000000000000001 /* HermesServerRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2EC70000000000000000011 /* HermesServerRuntime.swift */; };
+		D2EC70000000000000000002 /* HermesServerRuntimeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2EC70000000000000000012 /* HermesServerRuntimeTests.swift */; };
 		D1EC70000000000000000004 /* HermesGatewayClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1EC70000000000000000014 /* HermesGatewayClient.swift */; };
 		D1EC70000000000000000005 /* HermesGatewayClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1EC70000000000000000015 /* HermesGatewayClientTests.swift */; };
 		D1EC70000000000000000001 /* APIClient+DirectHermes.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1EC70000000000000000011 /* APIClient+DirectHermes.swift */; };
@@ -380,7 +386,13 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		D2EC70000000000000000016 /* GatewayConversationControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayConversationControllerTests.swift; sourceTree = "<group>"; };
+		D2EC70000000000000000013 /* APIClient+DirectSessions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "APIClient+DirectSessions.swift"; sourceTree = "<group>"; };
+		D2EC70000000000000000014 /* APIClientDirectSessionsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "APIClientDirectSessionsTests.swift"; sourceTree = "<group>"; };
+		D2EC70000000000000000015 /* GatewayConversationController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "GatewayConversationController.swift"; sourceTree = "<group>"; };
 		D1EC70000000000000000016 /* DirectHermesLiveSmokeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectHermesLiveSmokeTests.swift; sourceTree = "<group>"; };
+		D2EC70000000000000000011 /* HermesServerRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HermesServerRuntime.swift; sourceTree = "<group>"; };
+		D2EC70000000000000000012 /* HermesServerRuntimeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HermesServerRuntimeTests.swift; sourceTree = "<group>"; };
 		D1EC70000000000000000014 /* HermesGatewayClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "HermesGatewayClient.swift"; sourceTree = "<group>"; };
 		D1EC70000000000000000015 /* HermesGatewayClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "HermesGatewayClientTests.swift"; sourceTree = "<group>"; };
 		D1EC70000000000000000011 /* APIClient+DirectHermes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "APIClient+DirectHermes.swift"; sourceTree = "<group>"; };
@@ -809,6 +821,9 @@
 				10CA110C0DE000000000C002 /* LocalizationCatalogTests.swift */,
 				1A2B3C4D5E6F7000000000BC /* APIClientTests.swift */,
 				D1EC70000000000000000016 /* DirectHermesLiveSmokeTests.swift */,
+				D2EC70000000000000000012 /* HermesServerRuntimeTests.swift */,
+				D2EC70000000000000000016 /* GatewayConversationControllerTests.swift */,
+				D2EC70000000000000000014 /* APIClientDirectSessionsTests.swift */,
 				D1EC70000000000000000015 /* HermesGatewayClientTests.swift */,
 				D1EC70000000000000000013 /* DirectHermesAuthTests.swift */,
 				B5A1000000000000000000A1 /* ServerRegistryTests.swift */,
@@ -925,6 +940,9 @@
 			children = (
 				1A2B3C4D5E6F7000000000B2 /* APIClient.swift */,
 				D1EC70000000000000000014 /* HermesGatewayClient.swift */,
+				D2EC70000000000000000011 /* HermesServerRuntime.swift */,
+				D2EC70000000000000000013 /* APIClient+DirectSessions.swift */,
+				D2EC70000000000000000015 /* GatewayConversationController.swift */,
 				D1EC70000000000000000011 /* APIClient+DirectHermes.swift */,
 				C04000000000000000000011 /* APIClient+Sessions.swift */,
 				F0FF00000000000000000004 /* OfficialHermesContinuity.swift */,
@@ -1532,6 +1550,9 @@
 				A04500000000000000000003 /* AgentLiveActivityManager.swift in Sources */,
 				1A2B3C4D5E6F7000000000A2 /* APIClient.swift in Sources */,
 				D1EC70000000000000000004 /* HermesGatewayClient.swift in Sources */,
+				D2EC70000000000000000001 /* HermesServerRuntime.swift in Sources */,
+				D2EC70000000000000000003 /* APIClient+DirectSessions.swift in Sources */,
+				D2EC70000000000000000005 /* GatewayConversationController.swift in Sources */,
 				D1EC70000000000000000001 /* APIClient+DirectHermes.swift in Sources */,
 				C04000000000000000000001 /* APIClient+Sessions.swift in Sources */,
 				F0FF00000000000000000003 /* OfficialHermesContinuity.swift in Sources */,
@@ -1739,6 +1760,9 @@
 				10CA110C0DE000000000C001 /* LocalizationCatalogTests.swift in Sources */,
 				1A2B3C4D5E6F7000000000AC /* APIClientTests.swift in Sources */,
 				D1EC70000000000000000006 /* DirectHermesLiveSmokeTests.swift in Sources */,
+				D2EC70000000000000000002 /* HermesServerRuntimeTests.swift in Sources */,
+				D2EC70000000000000000006 /* GatewayConversationControllerTests.swift in Sources */,
+				D2EC70000000000000000004 /* APIClientDirectSessionsTests.swift in Sources */,
 				D1EC70000000000000000005 /* HermesGatewayClientTests.swift in Sources */,
 				D1EC70000000000000000003 /* DirectHermesAuthTests.swift in Sources */,
 				B5A1000000000000000000A0 /* ServerRegistryTests.swift in Sources */,

@@ -65,6 +65,31 @@ final class DirectHermesLiveSmokeTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testOptInHostedSlice2ConversationFoundation() async throws {
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("Slice 2 hosted smoke is simulator-only.")
+        #endif
+
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SEMREH_SLICE1_LIVE"] == "1",
+              environment["SEMREH_SLICE1_HTTPS"] == "1",
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == Self.credentialsPath
+        else {
+            throw XCTSkip("Slice 2 hosted smoke is opt-in.")
+        }
+
+        do {
+            // This foundation gate intentionally never selects the loopback
+            // transport, even when the older Slice 1 smoke does.
+            try await runHostedSlice2ConversationFoundation(transport: .https)
+        } catch let failure as LiveSmokeFailure {
+            XCTFail("Slice 2 conversation foundation failed at \(failure.stage).")
+        } catch {
+            XCTFail("Slice 2 conversation foundation failed.")
+        }
+    }
+
     func testOptInHostedCookieLoginPhase() async throws {
         let transport = try cookiePhase("login", requiresCredentials: true)
         let credentials = try await stage("credentials") {
@@ -455,6 +480,201 @@ final class DirectHermesLiveSmokeTests: XCTestCase {
             if loggedIn {
                 try? await api.directLogout()
             }
+            throw error
+        }
+    }
+
+    @MainActor
+    private func runHostedSlice2ConversationFoundation(transport: HostedTransport) async throws {
+        let credentials = try await stage("slice2 credentials") {
+            try Self.readCredentials()
+        }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpAdditionalHeaders = [:]
+        configuration.httpShouldSetCookies = true
+        configuration.httpCookieAcceptPolicy = .always
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let api = APIClient(
+            baseURL: transport.baseURL,
+            session: session,
+            publicMediaSession: session,
+            customHeaderProvider: { [] }
+        )
+
+        var runtime: HermesServerRuntime?
+        var loggedIn = false
+        var cleanupRuntimeID: String?
+
+        do {
+            let status = try await stage("slice2 status") { try await api.directStatus() }
+            guard status.authRequired == true else { throw LiveSmokeInvariant.failed }
+            let providers = try await stage("slice2 providers") { try await api.directProviders() }
+            guard providers.providers?.contains(where: { $0.name == "basic" && $0.supportsPassword == true }) == true else {
+                throw LiveSmokeInvariant.failed
+            }
+            let login = try await stage("slice2 login") {
+                try await api.directPasswordLogin(username: credentials.username, password: credentials.password)
+            }
+            guard login.ok == true else { throw LiveSmokeInvariant.failed }
+            loggedIn = true
+            try await stage("slice2 protected probe") { try await api.directProtectedProbe() }
+
+            let serverRuntime = try await stage("slice2 runtime init") {
+                try HermesServerRuntime(origin: transport.baseURL, client: api)
+            }
+            runtime = serverRuntime
+            try await stage("slice2 runtime connect") { try await serverRuntime.connect() }
+
+            let events = LiveGatewayEventCapture()
+            let draft = GatewayConversationController(
+                runtime: serverRuntime,
+                storedID: nil,
+                profile: "default",
+                loadTranscript: { id, profile, limit, offset in
+                    try await api.directSessionMessages(
+                        sessionID: id,
+                        profile: profile,
+                        limit: limit,
+                        offset: offset
+                    )
+                }
+            )
+            draft.onEvent = { event in Task { await events.append(event) } }
+
+            // Opening a local draft is deliberately side-effect free; the
+            // first submit is the one operation that creates the durable row.
+            try await stage("slice2 local draft open") { try await draft.open() }
+            try await stage("slice2 first create") { try await draft.submit("SEMREH_SLICE2_TURN_01") }
+            guard let runtimeID = draft.binding?.runtimeID,
+                  let firstStoredID = draft.storedID
+            else { throw LiveSmokeInvariant.failed }
+            cleanupRuntimeID = runtimeID
+
+            let firstComplete = try await stage("slice2 turn 1 terminal") {
+                try await events.wait { event in
+                    event.sessionID == runtimeID
+                        && event.type == "message.complete"
+                        && Self.stringValue(Self.objectValue(event.payload)?["status"]) == "complete"
+                }
+            }
+            var lastSequence = firstComplete.sequence ?? -1
+            for turn in 2...10 {
+                let prompt = String(format: "SEMREH_SLICE2_TURN_%02d", turn)
+                try await stage("slice2 turn \(turn) submit") {
+                    try await draft.submit(prompt)
+                }
+                let minimumSequence = lastSequence
+                let complete = try await stage("slice2 turn \(turn) terminal") {
+                    try await events.wait { event in
+                        event.sessionID == runtimeID
+                            && event.type == "message.complete"
+                            && (event.sequence ?? -1) > minimumSequence
+                            && Self.stringValue(Self.objectValue(event.payload)?["status"]) == "complete"
+                    }
+                }
+                lastSequence = complete.sequence ?? lastSequence
+            }
+
+            let transcript = try await stage("slice2 canonical ten-turn transcript") {
+                try await api.directSessionMessages(
+                    sessionID: firstStoredID,
+                    profile: "default",
+                    limit: 500,
+                    offset: 0
+                )
+            }
+            let canonicalMessages = transcript.messages.filter { $0.role == "user" || $0.role == "assistant" }
+            let users = canonicalMessages.filter { $0.role == "user" }
+            let assistants = canonicalMessages.filter { $0.role == "assistant" }
+            let expectedPrompts = (1...10).map { String(format: "SEMREH_SLICE2_TURN_%02d", $0) }
+            guard users.count == 10,
+                  assistants.count == 10,
+                  users.compactMap(\.content) == expectedPrompts
+            else { throw LiveSmokeInvariant.failed }
+
+            let discovered = try await stage("slice2 direct session discovery") {
+                try await api.directSessions(profile: "default", limit: 500, offset: 0)
+            }
+            guard discovered.sessions.filter({ $0.sessionId == firstStoredID }).count == 1 else {
+                throw LiveSmokeInvariant.failed
+            }
+
+            try await stage("slice2 first controller dispose") { try await draft.dispose() }
+            let resumed = GatewayConversationController(
+                runtime: serverRuntime,
+                storedID: firstStoredID,
+                profile: "default",
+                loadTranscript: { id, profile, limit, offset in
+                    try await api.directSessionMessages(
+                        sessionID: id,
+                        profile: profile,
+                        limit: limit,
+                        offset: offset
+                    )
+                }
+            )
+            resumed.onEvent = { event in Task { await events.append(event) } }
+            try await stage("slice2 second controller resume") { try await resumed.open() }
+            guard resumed.binding?.runtimeID.isEmpty == false,
+                  resumed.storedID == transcript.sessionID
+            else { throw LiveSmokeInvariant.failed }
+
+            let generationBeforeReconnect = serverRuntime.connectionGeneration
+            try await stage("slice2 shared runtime reconnect") { try await serverRuntime.reconnect() }
+            guard serverRuntime.connectionGeneration > generationBeforeReconnect,
+                  resumed.binding?.runtimeID.isEmpty == false,
+                  resumed.storedID == transcript.sessionID
+            else { throw LiveSmokeInvariant.failed }
+
+            let rediscovered = try await stage("slice2 post-reconnect discovery") {
+                try await api.directSessions(profile: "default", limit: 500, offset: 0)
+            }
+            guard rediscovered.sessions.filter({ $0.sessionId == firstStoredID }).count == 1 else {
+                throw LiveSmokeInvariant.failed
+            }
+
+            // The pinned fixture delays this prompt until the controller's
+            // interrupt RPC. This proves the controller's server-side stop
+            // path rather than merely toggling local state.
+            let interruptRuntimeID = try XCTUnwrap(resumed.binding?.runtimeID)
+            cleanupRuntimeID = interruptRuntimeID
+            let interruptMinimumSequence = lastSequence
+            try await stage("slice2 interrupt fixture submit") {
+                try await resumed.submit("SEMREH_INTERRUPT_FIXTURE")
+            }
+            _ = try await stage("slice2 interrupt fixture start") {
+                try await events.wait { event in
+                    event.sessionID == interruptRuntimeID
+                        && event.type == "message.start"
+                        && (event.sequence ?? -1) > interruptMinimumSequence
+                }
+            }
+            try await stage("slice2 controller interrupt") { try await resumed.interrupt() }
+            _ = try await stage("slice2 interrupt fixture terminal") {
+                try await events.wait { event in
+                    event.sessionID == interruptRuntimeID
+                        && event.type == "message.complete"
+                        && Self.stringValue(Self.objectValue(event.payload)?["status"]) == "interrupted"
+                }
+            }
+
+            try await resumed.dispose()
+            await serverRuntime.stop()
+            runtime = nil
+            try await stage("slice2 logout") { try await api.directLogout() }
+            loggedIn = false
+        } catch {
+            if let runtime, let cleanupRuntimeID {
+                _ = try? await runtime.request(
+                    "session.close",
+                    params: ["session_id": .string(cleanupRuntimeID), "profile": .string("default")],
+                    timeout: .seconds(30)
+                )
+            }
+            if let runtime { await runtime.stop() }
+            if loggedIn { try? await api.directLogout() }
             throw error
         }
     }

@@ -17,8 +17,11 @@ Never access or test against Maurice's personal Hermes home, checkout, state,
 credentials, service, or gateway. Never alter existing Tailscale routes. The old
 development-server instructions are not authorization to use those targets.
 
-Only Slice 1 is currently authorized. Record exact commands, sanitized evidence,
-and unverified gates. No dependent Slice 2 implementation before Slice 1 passes.
+Slice 1 passed at 606b8a5. Maurice authorized Slice 2 in the September 4 Codex
+conversation. Record exact commands, sanitized evidence, and unverified gates.
+Do not start Slice 3 or product redesign/custom features without authorization.
+Keep automated backend work within the existing disposable deterministic fixture
+and bounded tool access; expanded tool/provider access requires reassessment.
 Use one writer per shared responsibility and coordinate Simulator ownership.
 Worker reports do not replace independent verification of high-risk claims.
 

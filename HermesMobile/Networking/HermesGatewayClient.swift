@@ -9,6 +9,8 @@ struct HermesGatewayEvent: Equatable, Sendable {
     let sequence: Int?
     let payload: JSONValue?
     let params: JSONValue?
+    /// Local transport generation, never persisted and distinct from server seq.
+    var connectionGeneration: Int? = nil
 }
 
 /// Errors surfaced by the minimal direct-Hermes JSON-RPC transport.
@@ -234,6 +236,13 @@ actor HermesGatewayClient {
         closeState(error: HermesGatewayError.closed)
     }
 
+    /// A closed socket has no active generation. Returning the post-close
+    /// counter here would let the runtime mistake a dead connection for ready.
+    func connectionIdentifier() -> Int? {
+        guard socket != nil, readyGeneration == generation else { return nil }
+        return generation
+    }
+
     /// Sends a JSON-RPC request and returns its arbitrary JSON result.
     /// Cancellation/timeout stops local waiting, not an already-submitted server
     /// operation. Callers must reconcile ambiguous sends, never blindly retry.
@@ -312,6 +321,9 @@ actor HermesGatewayClient {
                 handle(envelope, generation: generation)
             } catch {
                 guard self.generation == generation, self.socket === socket else { return }
+                eventHandler?(HermesGatewayEvent(method: "local", type: "transport.closed",
+                    sessionID: nil, sequence: nil, payload: nil, params: nil,
+                    connectionGeneration: generation))
                 closeState(error: HermesGatewayError.transport("WebSocket receive failed"))
                 return
             }
@@ -332,7 +344,8 @@ actor HermesGatewayClient {
                 sessionID: sessionID,
                 sequence: sequence,
                 payload: payload,
-                params: params
+                params: params,
+                connectionGeneration: generation
             )
             eventHandler?(event)
             if eventType == "gateway.ready" {
