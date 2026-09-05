@@ -12,7 +12,6 @@ import plistlib
 from direct_hermes_probe import validate, RUNTIME
 
 PRODUCTS = Path('/Users/maurice/workspace/semreh-slice1-build/Build/Products')
-SOURCE = PRODUCTS / 'HermesMobile_HermesMobile_iphonesimulator26.5-arm64-x86_64.xctestrun'
 OUTPUT = PRODUCTS / 'SemrehSlice1Live.xctestrun'
 
 
@@ -24,9 +23,15 @@ def main():
     if args.cookie_phase and not args.https:
         parser.error('Cookie phases require --https')
     validate()
-    if PRODUCTS.resolve() != PRODUCTS or SOURCE.is_symlink() or OUTPUT.is_symlink():
+    if PRODUCTS.resolve() != PRODUCTS or OUTPUT.is_symlink():
         raise RuntimeError('Unexpected XCTest artifact path')
-    plan = plistlib.loads(SOURCE.read_bytes())
+    # Xcode varies the runtime/architecture suffix (e.g. arm64 vs arm64-x86_64).
+    # Select the latest build's original plan, never our generated live plan.
+    candidates = list(PRODUCTS.glob('HermesMobile_HermesMobile_iphonesimulator*.xctestrun'))
+    if not candidates or any(p.is_symlink() or not p.is_file() for p in candidates):
+        raise RuntimeError('Missing or unexpected built XCTest run file')
+    source = max(candidates, key=lambda p: p.stat().st_mtime_ns)
+    plan = plistlib.loads(source.read_bytes())
     targets = [target for config in plan['TestConfigurations']
                for target in config['TestTargets']]
     if len(targets) != 1 or targets[0].get('BlueprintName') != 'HermesMobileTests':
@@ -47,6 +52,7 @@ def main():
     target['OnlyTestIdentifiers'] = ['DirectHermesLiveSmokeTests/' + method]
     # Generated build artifact only; no project/scheme or personal configuration changes.
     OUTPUT.write_bytes(plistlib.dumps(plan))
+    print('Built test plan: ' + str(source))
     print(OUTPUT)
 
 

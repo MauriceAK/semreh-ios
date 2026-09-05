@@ -1,6 +1,6 @@
-# Slice 1 verification — in progress
+# Slice 1 verification — transport spike passed
 
-Slice 1 has **not passed**. This is a contract/authentication spike, not the
+Slice 1 **passed its transport-spike gate on September 4, 2026**. This is a contract/authentication spike, not the
 production UI cutover. The retained app still uses WebUI until later authorized
 slices replace those owners. No direct-to-WebUI fallback was added.
 
@@ -164,8 +164,44 @@ not a production login UI cutover or proof of the later AuthManager migration.
 Same-host/different-port account separation remains explicitly unsupported:
 cookies are host-scoped; every logical server must have its own hostname.
 
-## Still required before declaring Slice 1 passed
+## Independent clean-checkout gate
 
-- Independent reviewer rerun from a clean checkout, including secret/artifact scan.
+Luna High independently reran from a newly created, initially clean detached
+worktree at `e75cf939`, `workspace/semreh-slice1-clean-review`. Generated capture
+fixtures changed only in that review worktree. The backend source remained clean
+at the pinned Hermes SHA. No production UI changes or stronger workers were used.
+
+- `reviewer-https-regression.xcresult`: 1899 passed, zero failed, four opt-in skips.
+- `reviewer-https-live.xcresult`: native HTTPS/WSS smoke passed one, no skips.
+- `reviewer-cookie-login.xcresult`, `reviewer-cookie-restore.xcresult`, and
+  `reviewer-cookie-logout.xcresult`: each passed one, no skips. Reviewer confirmed
+  login host PID49377 had exited before restore host PID50140 authenticated.
+- Reviewer reran real HTTPS auth, ticket/reconnect, durable turn and interrupt
+  captures from that checkout. These generated fixtures remain in its docs folder.
+- Reviewer checked exact backend PID37774, stopped it, and restarted PID51217 via
+  the guarded launcher (exec7228). Cookies survived restart; actual 60-second expiry
+  rotated access/refresh cookies. Temporary private cookie jar was removed.
+- Reviewer exported native diagnostics and scanned 28940 files with no flags.
+  This remains a known-secret/bearer-pattern heuristic, not an absolute guarantee.
+- Review found one runner portability defect: Xcode's clean arm64 build produced
+  an `arm64.xctestrun` suffix instead of the hardcoded `arm64-x86_64` name. Reviewer
+  copied that generated plan to the expected generated filename, never modifying
+  source, to complete the rerun. Lead fixed the generator to select the newest
+  original plan under the fixed build directory, with symlink/target checks.
+  Reviewer approved that fix; `slice1-runner-portability-https.xcresult` then passed
+  one native smoke, zero skips/failures, using the corrected runner.
+- Final lead scan after exporting that rerun and stopping test services covered
+  28984 files with no flagged paths.
+
+The relaunch gate is explicitly the real hosted app process using production
+APIClient/shared cookies, not HTTP client recreation. The binding Slice 1 scope
+does not require production AuthManager/onboarding migration; safety review
+confirmed that distinction against the plan. Normal direct-login UI, daily-driver
+chat, external-model behavior, and broader lifecycle/recovery remain later work.
+
+After verification, exact owned backend51217, model37055, and proxy34552 were
+stopped with TERM; their processes and loopback backend/model listeners are gone.
+Private test state, enrollment, certificates, and sanitized evidence are retained.
+No personal Hermes or Tailscale service was stopped or reconfigured.
 
 No Slice 2 work, push, PR, release, or personal-route changes are authorized.
