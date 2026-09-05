@@ -2,6 +2,7 @@
 """Capture sanitized auth/WS fixtures from the exact disposable local backend."""
 import asyncio
 import json
+import os
 from pathlib import Path
 import time
 
@@ -9,11 +10,15 @@ import httpx
 from websockets.asyncio.client import connect
 from websockets.exceptions import InvalidStatus
 
-from direct_hermes_probe import RUNTIME, PIN, validate
+from direct_hermes_probe import RUNTIME, PIN, validate, HTTPS_ORIGIN
 
-OUTPUT = Path(__file__).resolve().parents[1] / 'docs/migration/fixtures/slice1-local-auth.json'
-BASE = 'http://127.0.0.1:18791'
-HEADERS = {'Host': 'semreh-slice1.test:18791'}
+HTTPS = os.environ.get('SEMREH_SLICE1_HTTPS') == '1'
+MODE = 'https' if HTTPS else 'local'
+OUTPUT = Path(__file__).resolve().parents[1] / f'docs/migration/fixtures/slice1-{MODE}-auth.json'
+BASE = HTTPS_ORIGIN if HTTPS else 'http://127.0.0.1:18791'
+ORIGIN = HTTPS_ORIGIN if HTTPS else 'http://semreh-slice1.test:18791'
+WS_BASE = BASE.replace('https://', 'wss://').replace('http://', 'ws://')
+HEADERS = {} if HTTPS else {'Host': 'semreh-slice1.test:18791'}
 SENSITIVE = {'password', 'password_hash', 'secret', 'ticket', 'access_token', 'refresh_token', 'token',
              'authorization', 'api_key', 'cookie', 'set-cookie', 'client_secret', 'system_prompt'}
 
@@ -45,7 +50,9 @@ def write_fixture(path, evidence):
 async def main():
     validate()
     credentials = json.loads((RUNTIME / 'credentials.json').read_text())
-    results = {'configured_source_pin': PIN, 'deployment': 'loopback HTTP with explicit public Host; NOT real HTTPS/proxy gate',
+    config = json.loads((RUNTIME / 'home/config.yaml').read_text())
+    assert config['dashboard']['public_url'] == ORIGIN, 'Probe mode must match test deployment'
+    results = {'configured_source_pin': PIN, 'deployment': ORIGIN if HTTPS else 'loopback HTTP with explicit public Host; NOT real HTTPS/proxy gate',
                'captured_at_unix': int(time.time()), 'http': [], 'websocket': []}
     async with httpx.AsyncClient(base_url=BASE, headers=HEADERS, trust_env=False, follow_redirects=False) as client:
         async def request(method, path, body=None):
@@ -75,13 +82,20 @@ async def main():
         assert not list(client.cookies.jar), 'Invalid credentials created cookies'
         login, _ = await request('POST', '/auth/password-login', {'provider': 'basic', **credentials, 'next': ''})
         assert login.status_code in (200, 302, 303), f'Unexpected login status {login.status_code}'
+        if HTTPS:
+            cookies = list(client.cookies.jar)
+            assert {'__Host-hermes_session_at', '__Host-hermes_session_rt'} <= {c.name for c in cookies}
+            for cookie in cookies:
+                assert cookie.secure and cookie.path == '/' and cookie.has_nonstandard_attr('HttpOnly')
+                assert not cookie.domain_specified, 'HTTPS root cookies must be host-only'
+            results['secure_httponly_root_path_verified'] = True
         protected, _ = await request('GET', '/api/sessions')
         assert protected.status_code == 200
         ticket_response, ticket_data = await request('POST', '/api/auth/ws-ticket')
         assert ticket_response.status_code == 200
         ticket = ticket_data['ticket']
-        ws_url = 'ws://127.0.0.1:18791/api/ws?ticket=' + ticket
-        async with connect(ws_url, origin='http://semreh-slice1.test:18791', proxy=None) as ws:
+        ws_url = WS_BASE + '/api/ws?ticket=' + ticket
+        async with connect(ws_url, origin=ORIGIN, proxy=None) as ws:
             ready = json.loads(await asyncio.wait_for(ws.recv(), 30))
             results['websocket'].append(sanitize(ready))
             assert ready.get('method') == 'event' and ready.get('params', {}).get('type') == 'gateway.ready', 'Expected gateway.ready event'
@@ -93,24 +107,25 @@ async def main():
                     assert 'result' in message
                     break
         try:
-            async with connect(ws_url, origin='http://semreh-slice1.test:18791', proxy=None):
+            async with connect(ws_url, origin=ORIGIN, proxy=None):
                 raise AssertionError('Reused ticket accepted')
         except InvalidStatus as exc:
             assert exc.response.status_code == 403, 'Unexpected ticket-reuse rejection status'
             results['reused_ticket_rejected_http_status'] = exc.response.status_code
         fresh, fresh_data = await request('POST', '/api/auth/ws-ticket')
         assert fresh.status_code == 200 and fresh_data['ticket'] != ticket
-        async with connect('ws://127.0.0.1:18791/api/ws?ticket=' + fresh_data['ticket'],
-                           origin='http://semreh-slice1.test:18791', proxy=None) as ws:
+        async with connect(WS_BASE + '/api/ws?ticket=' + fresh_data['ticket'],
+                           origin=ORIGIN, proxy=None) as ws:
             fresh_ready = json.loads(await asyncio.wait_for(ws.recv(), 30))
             assert fresh_ready.get('params', {}).get('type') == 'gateway.ready'
             results['fresh_ticket_reconnect_ready'] = True
         logout, _ = await request('POST', '/auth/logout')
         assert logout.status_code in (200, 302, 303)
+        assert not list(client.cookies.jar), 'Logout left cookies behind'
         after, _ = await request('GET', '/api/sessions')
         assert after.status_code == 401
     write_fixture(OUTPUT, results)
-    print('Local auth/ready/ping/ticket/logout assertions passed; sanitized fixture: ' + str(OUTPUT))
+    print('Auth/ready/ping/ticket/logout assertions passed; sanitized fixture: ' + str(OUTPUT))
 
 
 if __name__ == '__main__':

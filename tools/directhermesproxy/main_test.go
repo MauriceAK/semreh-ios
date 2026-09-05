@@ -30,12 +30,17 @@ func TestProxyOnlyUsesFixedBackendAndCanonicalForwarding(t *testing.T) {
 		if r.Header.Get("Tailscale-User-Login") != "" {
 			t.Fatal("spoofed identity survived")
 		}
+		if r.Header.Get("Forwarded") != "" || r.Header.Get("X-Forwarded-For") != "192.0.2.1" {
+			t.Fatal("spoofed forwarding chain survived")
+		}
 		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("ok"))}, nil
 	}))
 	r := httptest.NewRequest("POST", "https://"+host+"/api/auth/ws-ticket", nil)
 	r.Header.Set("X-Forwarded-Proto", "http")
 	r.Header.Set("X-Forwarded-Host", "other.test")
 	r.Header.Set("Tailscale-User-Login", "spoofed")
+	r.Header.Set("Forwarded", "for=198.51.100.10")
+	r.Header.Set("X-Forwarded-For", "198.51.100.10")
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, r)
 	if !called || w.Code != 200 {

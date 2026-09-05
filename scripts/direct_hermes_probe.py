@@ -22,6 +22,7 @@ PYTHON = Path('/Users/maurice/workspace/semreh-slice1-venv/bin/python')
 PIN = '29112bef099274229cadff79cdff7bf7b99c4b77'
 PORT = 18791
 MARKER = 'semreh-direct-hermes-slice1-disposable-v1'
+HTTPS_ORIGIN = 'https://semreh-slice1-test.tailda8427.ts.net'
 
 
 def checked_paths():
@@ -106,11 +107,17 @@ def validate():
         raise RuntimeError('Disposable runtime configuration drifted; refusing launch')
     dashboard = config.get('dashboard', {})
     basic = dashboard.get('basic_auth', {})
-    if (dashboard.get('public_url') != 'http://semreh-slice1.test:18791'
+    if (dashboard.get('public_url') not in ('http://semreh-slice1.test:18791', HTTPS_ORIGIN)
             or basic.get('username') != 'semreh-test'
             or not basic.get('password_hash', '').startswith('scrypt$')
             or len(basic.get('secret', '')) < 32):
         raise RuntimeError('Disposable authentication configuration drifted')
+    if dashboard['public_url'] == HTTPS_ORIGIN:
+        endpoint = RUNTIME / 'tailscale-proxy/endpoint.json'
+        if endpoint.is_symlink() or endpoint.resolve() != endpoint:
+            raise RuntimeError('Unexpected HTTPS endpoint path')
+        if json.loads(endpoint.read_text()) != {'origin': HTTPS_ORIGIN, 'upstream': 'http://127.0.0.1:18791'}:
+            raise RuntimeError('HTTPS endpoint does not match the enrolled test node')
     print(json.dumps({'source_sha': PIN, 'hermes_home': str(RUNTIME / 'home'),
                       'tool_cwd': str(RUNTIME / 'tools'), 'port': PORT,
                       'os_isolation': False, 'personal_credentials_inherited': False}))
@@ -119,6 +126,9 @@ def validate():
 def serve():
     validate()
     with socket.socket() as probe:
+        # Match the HTTP server's reuse behavior so a just-stopped test server's
+        # TIME_WAIT sockets do not prevent restart. A live listener still fails.
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         probe.bind(('127.0.0.1', PORT))  # Fail on conflict; never evict a listener.
     # Deliberate allowlist: no inherited provider credentials, Desktop marker,
     # profile selection, SSH agent, or shell initialization environment.

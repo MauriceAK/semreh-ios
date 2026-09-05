@@ -105,13 +105,67 @@ The generated run file contains only opt-in flags and the fixed private credenti
 file path, not credential values. The smoke uses ephemeral cookies deliberately;
 it does not prove production cookie persistence across app relaunches.
 
+## HTTPS route verification — September 4
+
+The separate enrolled node is `semreh-slice1-test.tailda8427.ts.net`. Only the
+disposable runtime's public URL changed. No personal route or Hermes state changed.
+Initial TLS connection timed out during setup; subsequent certificate verification
+passed without bypass flags. With backend stopped the proxy returned bounded HTTP
+502; after starting the backend, the real HTTPS/WSS probes passed.
+
+- `slice1-https-auth.json`: discovery, wrong/right credentials, protected REST,
+  `__Host-` cookies with Secure/HttpOnly/Path=/ and no Domain attribute, logout
+  clearing the jar, ticket reuse HTTP403, fresh ticket reconnect, ready and ping.
+  The first HTTPS assertion incorrectly expected bare localhost cookie names;
+  corrected against pinned `dashboard_auth/cookies.py`, then reran successfully.
+- `slice1-https-turn.json`: actual proxy/WSS transport, exact durable turn counts,
+  matching interrupted terminal event and server non-running state. Model remains
+  the local deterministic fixture, not an external provider.
+- `slice1-https-restart.json`: operator stopped exact owned backend PID37072
+  (exit143), relaunched PID37774 with the same signing secret, then the restored
+  jar passed protected REST. Actual 60-second expiry rotated both access and
+  refresh cookies over HTTPS. The private temporary jar was removed afterward.
+- A disposable listener on localhost18793 was reachable locally but a connection
+  to test-node port18793 was refused. No personal service was probed.
+- Three Go proxy tests passed, including additional spoofed Forwarded/XFF inputs.
+  Standard reverse proxy strips these before constructing canonical forwarding.
+- The restart preflight initially rejected TIME_WAIT sockets after backend exit.
+  Added SO_REUSEADDR to match server bind behavior; a disposable live-listener
+  check still failed bind as required. No listener was evicted.
+- Signed regression `slice1-https-regression.xcresult`: 1899 passed, zero failures,
+  four explicit opt-in skips (full smoke and three cookie-process phases).
+- Native HTTPS/WSS smoke `slice1-live-ios-https.xcresult`: one passed, zero skipped
+  or failed. The native client completed the real-route direct turn and interrupt.
+- Hosted cookie login `slice1-cookie-login.xcresult` and restore
+  `slice1-cookie-restore.xcresult`: one passed each, zero skipped or failed.
+  Login host PID41841 exited; restore host PID42528 successfully made the protected
+  request without reading credentials or calling password login. Exported console
+  diagnostics record both PIDs. This proves the default production transport's
+  shared cookies survive actual hosted app-process termination and relaunch.
+- Hosted cookie logout `slice1-cookie-logout.xcresult`: one passed, zero skipped or
+  failed, including protected request rejection after logout. Exported diagnostics
+  for all native HTTPS/cookie runs are included in the artifact scan.
+
+Run HTTPS Python probes with `SEMREH_SLICE1_HTTPS=1`. Local mode is retained for a
+runtime configured with the original HTTP public URL; auth capture refuses a mode
+that does not match the deployment. The fixed HTTPS origin must match the enrolled
+node's private endpoint record; arbitrary origins are not accepted.
+
+For native HTTPS smoke, generate the run file with
+`python scripts/direct_hermes_ios_smoke.py --https`, then use the existing signed
+`test-without-building` command above. For cookie process tests, use
+`--https --cookie-phase login`, then `restore`, then `logout`, each followed by a
+separate `test-without-building` invocation and unique result bundle. Restore has
+no credentials environment entry and never reads a password or calls login. It
+requires a different host process ID than login and uses APIClient's production
+default cookie-enabled session. These are hosted app-process transport tests,
+not a production login UI cutover or proof of the later AuthManager migration.
+
+Same-host/different-port account separation remains explicitly unsupported:
+cookies are host-scoped; every logical server must have its own hostname.
+
 ## Still required before declaring Slice 1 passed
 
-- Separate test HTTPS hostname and proxy route; Secure/HttpOnly/Path verification
-  through that actual route, with same-host/different-port explicitly unsupported.
-- Real app termination/relaunch without password re-entry; HTTP client recreation
-  is not a substitute.
-- Remote direct turn/interrupt and reconnect through the deployed route.
 - Independent reviewer rerun from a clean checkout, including secret/artifact scan.
 
 No Slice 2 work, push, PR, release, or personal-route changes are authorized.

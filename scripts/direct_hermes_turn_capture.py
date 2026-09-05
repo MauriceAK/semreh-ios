@@ -9,20 +9,20 @@ import time
 import httpx
 from websockets.asyncio.client import connect
 from direct_hermes_probe import RUNTIME, PIN, validate
-from direct_hermes_capture import sanitize, write_fixture, BASE, HEADERS
+from direct_hermes_capture import sanitize, write_fixture, BASE, HEADERS, MODE, ORIGIN, WS_BASE
 
-OUTPUT = Path(__file__).resolve().parents[1] / 'docs/migration/fixtures/slice1-local-turn.json'
+OUTPUT = Path(__file__).resolve().parents[1] / f'docs/migration/fixtures/slice1-{MODE}-turn.json'
 
 
 async def main():
     validate()
     credentials = json.loads((RUNTIME / 'credentials.json').read_text())
-    evidence = {'configured_source_pin': PIN, 'provider': 'deterministic localhost fixture; NOT external LLM proof', 'frames': []}
+    evidence = {'configured_source_pin': PIN, 'deployment': ORIGIN, 'provider': 'deterministic localhost fixture; NOT external LLM proof', 'frames': []}
     async with httpx.AsyncClient(base_url=BASE, headers=HEADERS, trust_env=False) as client:
         response = await client.post('/auth/password-login', json={'provider': 'basic', **credentials, 'next': ''})
         response.raise_for_status()
         ticket = (await client.post('/api/auth/ws-ticket')).json()['ticket']
-        async with connect('ws://127.0.0.1:18791/api/ws?ticket=' + ticket, origin='http://semreh-slice1.test:18791', proxy=None) as ws:
+        async with connect(WS_BASE + '/api/ws?ticket=' + ticket, origin=ORIGIN, proxy=None) as ws:
             next_id = 1
             async def receive():
                 frame = json.loads(await asyncio.wait_for(ws.recv(), 60))
@@ -52,7 +52,10 @@ async def main():
                     if event.get('payload', {}).get('status') == 'error':
                         raise RuntimeError('Hermes reported terminal error: ' + json.dumps(event['payload']))
                     break
-            with sqlite3.connect('file:' + str(RUNTIME / 'home/state.db') + '?mode=ro', uri=True) as db:
+            state_db = RUNTIME / 'home/state.db'
+            if state_db.is_symlink() or state_db.resolve() != state_db or not state_db.is_file():
+                raise RuntimeError('Unexpected disposable state DB path')
+            with sqlite3.connect('file:' + str(state_db) + '?mode=ro', uri=True) as db:
                 rows = db.execute('SELECT role,content FROM messages WHERE session_id=? ORDER BY id', (stored,)).fetchall()
             evidence['durable_rows'] = rows
             assert sum(role == 'user' for role, _ in rows) == 1

@@ -7,10 +7,10 @@ from pathlib import Path
 import time
 import httpx
 from direct_hermes_probe import RUNTIME, PIN, validate
-from direct_hermes_capture import HEADERS, BASE, write_fixture
+from direct_hermes_capture import HEADERS, BASE, write_fixture, MODE, ORIGIN, HTTPS
 
 COOKIE_FILE = RUNTIME / 'restart-cookies.json'
-OUTPUT = Path(__file__).resolve().parents[1] / 'docs/migration/fixtures/slice1-local-restart.json'
+OUTPUT = Path(__file__).resolve().parents[1] / f'docs/migration/fixtures/slice1-{MODE}-restart.json'
 
 
 async def main(action):
@@ -26,6 +26,9 @@ async def main(action):
                 json.dump([{'name': c.name, 'value': c.value, 'domain': c.domain, 'path': c.path} for c in client.cookies.jar], stream)
             print('Stored private cookie jar for backend restart check; no cookie values printed.')
             return
+        if (COOKIE_FILE.is_symlink() or COOKIE_FILE.resolve() != COOKIE_FILE
+                or not COOKIE_FILE.is_file() or COOKIE_FILE.stat().st_mode & 0o077):
+            raise RuntimeError('Unexpected private restart cookie jar')
         for cookie in json.loads(COOKIE_FILE.read_text()):
             client.cookies.set(**cookie)
         response = await client.get('/api/sessions')
@@ -44,9 +47,10 @@ async def main(action):
         response = await client.get('/api/sessions')
         assert response.status_code == 200, 'Refresh failed'
         after = {c.name: c.value for c in client.cookies.jar}
-        assert after['hermes_session_at'] != before['hermes_session_at'], 'Access cookie did not rotate'
-        assert after['hermes_session_rt'] != before['hermes_session_rt'], 'Refresh cookie did not rotate'
-        evidence = {'configured_source_pin': PIN, 'deployment': 'local HTTP only; not iOS or real HTTPS',
+        prefix = '__Host-' if HTTPS else ''
+        assert after[prefix + 'hermes_session_at'] != before[prefix + 'hermes_session_at'], 'Access cookie did not rotate'
+        assert after[prefix + 'hermes_session_rt'] != before[prefix + 'hermes_session_rt'], 'Refresh cookie did not rotate'
+        evidence = {'configured_source_pin': PIN, 'deployment': ORIGIN,
                     'client_recreation_cookie_restore': True,
                     'backend_restart_proof': 'Requires separate operator process evidence; not asserted by this script',
                     'short_access_ttl_seconds': 60, 'expired_access_refresh_status': response.status_code,
@@ -58,7 +62,7 @@ async def main(action):
         if COOKIE_FILE.is_symlink():
             raise RuntimeError('Refusing unexpected cookie-jar symlink')
         COOKIE_FILE.unlink()
-        print('Local client recreation and expired-cookie rotation passed; temporary cookie jar removed.')
+        print('Client recreation and expired-cookie rotation passed; temporary cookie jar removed.')
 
 
 if __name__ == '__main__':

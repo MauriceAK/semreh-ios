@@ -9,8 +9,38 @@ import XCTest
 /// required to remain outside the source tree.
 final class DirectHermesLiveSmokeTests: XCTestCase {
     private static let credentialsPath = "/Users/maurice/workspace/semreh-slice1-runtime/credentials.json"
-    private static let baseURL = URL(string: "http://127.0.0.1:18791")!
-    private static let gatewayURL = URL(string: "ws://127.0.0.1:18791/api/ws")!
+
+    private enum HostedTransport {
+        case loopback
+        case https
+
+        var baseURL: URL {
+            switch self {
+            case .loopback:
+                return URL(string: "http://127.0.0.1:18791")!
+            case .https:
+                return URL(string: "https://semreh-slice1-test.tailda8427.ts.net")!
+            }
+        }
+
+        var gatewayURL: URL {
+            switch self {
+            case .loopback:
+                return URL(string: "ws://127.0.0.1:18791/api/ws")!
+            case .https:
+                return URL(string: "wss://semreh-slice1-test.tailda8427.ts.net/api/ws")!
+            }
+        }
+
+        var hostHeader: String? {
+            switch self {
+            case .loopback:
+                return "semreh-slice1.test:18791"
+            case .https:
+                return nil
+            }
+        }
+    }
 
     func testOptInHostedSlice1AuthGatewayAndDurability() async throws {
         #if !targetEnvironment(simulator)
@@ -25,7 +55,9 @@ final class DirectHermesLiveSmokeTests: XCTestCase {
         }
 
         do {
-            try await runHostedSmoke()
+            try await runHostedSmoke(
+                transport: environment["SEMREH_SLICE1_HTTPS"] == "1" ? .https : .loopback
+            )
         } catch let failure as LiveSmokeFailure {
             XCTFail("Slice 1 hosted smoke failed at \(failure.stage).")
         } catch {
@@ -33,13 +65,149 @@ final class DirectHermesLiveSmokeTests: XCTestCase {
         }
     }
 
-    private func runHostedSmoke() async throws {
+    func testOptInHostedCookieLoginPhase() async throws {
+        let transport = try cookiePhase("login", requiresCredentials: true)
+        let credentials = try await stage("credentials") {
+            try Self.readCredentials()
+        }
+        Self.clearHostedCookies(for: transport.baseURL)
+        let api = Self.makeAPIClient(transport: transport)
+
+        var loggedIn = false
+        do {
+            let login = try await stage("cookie login") {
+                try await api.directPasswordLogin(
+                    username: credentials.username,
+                    password: credentials.password
+                )
+            }
+            guard login.ok == true else {
+                throw LiveSmokeInvariant.failed
+            }
+            loggedIn = true
+
+            try await stage("cookie login protected probe") {
+                try await api.directProtectedProbe()
+            }
+            guard HTTPCookieStorage.shared.cookies(for: transport.baseURL)?.isEmpty == false else {
+                throw LiveSmokeInvariant.failed
+            }
+            UserDefaults.standard.set(ProcessInfo.processInfo.processIdentifier, forKey: "SemrehSlice1CookieLoginPID")
+            print("Slice1 cookie login host PID: \(ProcessInfo.processInfo.processIdentifier)")
+        } catch {
+            if loggedIn {
+                try? await api.directLogout()
+            }
+            throw error
+        }
+    }
+
+    func testOptInHostedCookieRestorePhase() async throws {
+        let transport = try cookiePhase("restore", requiresCredentials: false)
+        let api = Self.makeAPIClient(transport: transport)
+
+        // Deliberately does not read the credentials file or call login.
+        let loginPID = UserDefaults.standard.integer(forKey: "SemrehSlice1CookieLoginPID")
+        guard loginPID > 0, loginPID != Int(ProcessInfo.processInfo.processIdentifier) else {
+            throw LiveSmokeInvariant.failed
+        }
+        try await stage("cookie restore protected probe") {
+            try await api.directProtectedProbe()
+        }
+        print("Slice1 cookie restore host PID: \(ProcessInfo.processInfo.processIdentifier); login PID: \(loginPID)")
+    }
+
+    func testOptInHostedCookieLogoutPhase() async throws {
+        let transport = try cookiePhase("logout", requiresCredentials: false)
+        let api = Self.makeAPIClient(transport: transport)
+
+        var loggedIn = true
+        do {
+            // Deliberately does not read the credentials file or call login.
+            try await stage("cookie cleanup protected probe") {
+                try await api.directProtectedProbe()
+            }
+            try await stage("cookie logout") {
+                try await api.directLogout()
+            }
+            loggedIn = false
+            UserDefaults.standard.removeObject(forKey: "SemrehSlice1CookieLoginPID")
+            try await stage("cookie logout expiry") {
+                do {
+                    try await api.directProtectedProbe()
+                    throw LiveSmokeInvariant.failed
+                } catch let error as DirectHermesAuthError {
+                    guard error == .sessionExpired else {
+                        throw LiveSmokeInvariant.failed
+                    }
+                } catch {
+                    throw LiveSmokeInvariant.failed
+                }
+            }
+        } catch {
+            if loggedIn {
+                try? await api.directLogout()
+            }
+            throw error
+        }
+    }
+
+    private func cookiePhase(
+        _ phase: String,
+        requiresCredentials: Bool
+    ) throws -> HostedTransport {
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("Slice 1 cookie phases are simulator-only.")
+        #else
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SEMREH_SLICE1_LIVE"] == "1",
+              environment["SEMREH_SLICE1_HTTPS"] == "1",
+              environment["SEMREH_SLICE1_COOKIE_PHASE"] == phase
+        else {
+            throw XCTSkip("Slice 1 cookie phase is opt-in.")
+        }
+        if requiresCredentials,
+           environment["SEMREH_SLICE1_CREDENTIALS_FILE"] != Self.credentialsPath {
+            throw XCTSkip("Slice 1 cookie login requires the fixed private credentials path.")
+        }
+        return .https
+        #endif
+    }
+
+    private static func makeAPIClient(
+        transport: HostedTransport
+    ) -> APIClient {
+        // Use APIClient's production default URLSession: it is configured with
+        // URLSessionConfiguration.default and HTTPCookieStorage.shared. Keep
+        // only the custom-header override empty so no personal headers enter
+        // this hosted smoke.
+        APIClient(
+            baseURL: transport.baseURL,
+            customHeaderProvider: { [] }
+        )
+    }
+
+    private static func clearHostedCookies(for baseURL: URL) {
+        let host = baseURL.host ?? ""
+        for cookie in HTTPCookieStorage.shared.cookies ?? [] {
+            let domain = cookie.domain.trimmingCharacters(in: CharacterSet(charactersIn: "."))
+            if domain == host {
+                HTTPCookieStorage.shared.deleteCookie(cookie)
+            }
+        }
+    }
+
+    private func runHostedSmoke(transport: HostedTransport) async throws {
         let credentials = try await stage("credentials") {
             try Self.readCredentials()
         }
 
         let configuration = URLSessionConfiguration.ephemeral
-        configuration.httpAdditionalHeaders = ["Host": "semreh-slice1.test:18791"]
+        if let hostHeader = transport.hostHeader {
+            configuration.httpAdditionalHeaders = ["Host": hostHeader]
+        } else {
+            configuration.httpAdditionalHeaders = [:]
+        }
         // Ephemeral URLSession supplies a private in-memory cookie store. Do
         // not use HTTPCookieStorage.shared: the smoke test must not touch a
         // user's persisted server accounts.
@@ -48,7 +216,7 @@ final class DirectHermesLiveSmokeTests: XCTestCase {
         let session = URLSession(configuration: configuration)
         defer { session.invalidateAndCancel() }
         let api = APIClient(
-            baseURL: Self.baseURL,
+            baseURL: transport.baseURL,
             session: session,
             publicMediaSession: session,
             customHeaderProvider: { [] }
@@ -91,7 +259,7 @@ final class DirectHermesLiveSmokeTests: XCTestCase {
 
             let events = LiveGatewayEventCapture()
             let client = HermesGatewayClient(
-                gatewayURL: Self.gatewayURL,
+                gatewayURL: transport.gatewayURL,
                 ticketProvider: {
                     let response = try await api.directWSTicket()
                     guard let ticket = response.ticket,
@@ -166,6 +334,7 @@ final class DirectHermesLiveSmokeTests: XCTestCase {
             try await stage("durable transcript") {
                 try await Self.verifyDurableTranscript(
                     session: session,
+                    baseURL: transport.baseURL,
                     storedSessionID: storedSessionID
                 )
             }
@@ -297,6 +466,7 @@ final class DirectHermesLiveSmokeTests: XCTestCase {
 
     private static func verifyDurableTranscript(
         session: URLSession,
+        baseURL: URL,
         storedSessionID: String
     ) async throws {
         var components = URLComponents(

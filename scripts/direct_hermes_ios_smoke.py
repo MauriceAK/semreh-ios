@@ -3,9 +3,11 @@
 
 First build-for-testing with signing on the disposable Slice 1 simulator.
 Then run the emitted xctestrun with test-without-building on that same device.
-This enables only the loopback smoke, not remote HTTPS or app-relaunch gates.
+Use --https for the enrolled test route. Cookie phases must be run separately
+in distinct hosted app processes; no production auth UI cutover is implied.
 """
 from pathlib import Path
+import argparse
 import plistlib
 from direct_hermes_probe import validate, RUNTIME
 
@@ -15,6 +17,12 @@ OUTPUT = PRODUCTS / 'SemrehSlice1Live.xctestrun'
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--https', action='store_true')
+    parser.add_argument('--cookie-phase', choices=['login', 'restore', 'logout'])
+    args = parser.parse_args()
+    if args.cookie_phase and not args.https:
+        parser.error('Cookie phases require --https')
     validate()
     if PRODUCTS.resolve() != PRODUCTS or SOURCE.is_symlink() or OUTPUT.is_symlink():
         raise RuntimeError('Unexpected XCTest artifact path')
@@ -28,7 +36,15 @@ def main():
         'SEMREH_SLICE1_LIVE': '1',
         'SEMREH_SLICE1_CREDENTIALS_FILE': str(RUNTIME / 'credentials.json'),
     })
-    target['OnlyTestIdentifiers'] = ['DirectHermesLiveSmokeTests']
+    if args.https:
+        target['EnvironmentVariables']['SEMREH_SLICE1_HTTPS'] = '1'
+    method = 'testOptInHostedSlice1AuthGatewayAndDurability'
+    if args.cookie_phase:
+        target['EnvironmentVariables']['SEMREH_SLICE1_COOKIE_PHASE'] = args.cookie_phase
+        method = 'testOptInHostedCookie' + args.cookie_phase.title() + 'Phase'
+        if args.cookie_phase != 'login':
+            del target['EnvironmentVariables']['SEMREH_SLICE1_CREDENTIALS_FILE']
+    target['OnlyTestIdentifiers'] = ['DirectHermesLiveSmokeTests/' + method]
     # Generated build artifact only; no project/scheme or personal configuration changes.
     OUTPUT.write_bytes(plistlib.dumps(plan))
     print(OUTPUT)
