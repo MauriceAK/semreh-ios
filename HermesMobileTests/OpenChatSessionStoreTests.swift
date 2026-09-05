@@ -1,8 +1,29 @@
 import XCTest
+import Observation
 @testable import HermesMobile
 
 @MainActor
 final class OpenChatSessionStoreTests: XCTestCase {
+    func testExistingGitModelLookupDoesNotInvalidateItsObservingView() throws {
+        let server = try XCTUnwrap(URL(string: "https://example.test"))
+        let session = SessionSummary(sessionId: "observed-existing-chat")
+        let store = OpenChatSessionStore()
+        let model = store.viewModel(session: session, server: server)
+        let gitModel = store.gitAvailabilityViewModel(session: session, server: server, chatViewModel: model)
+        let invalidation = XCTestExpectation(description: "LRU touch must not invalidate the view doing the lookup")
+        invalidation.isInverted = true
+
+        withObservationTracking {
+            _ = store.gitAvailabilityViewModel(session: session, server: server, chatViewModel: model)
+        } onChange: {
+            invalidation.fulfill()
+        }
+        for _ in 0..<3 {
+            XCTAssertTrue(store.gitAvailabilityViewModel(session: session, server: server, chatViewModel: model) === gitModel)
+        }
+        XCTAssertEqual(XCTWaiter.wait(for: [invalidation], timeout: 0.01), .completed)
+    }
+
     override func tearDown() {
         OpenChatSessionStore.shared.resetForTesting()
         ChatViewModel.resetActiveStreamSnapshotsForTesting()

@@ -11,6 +11,7 @@ in distinct hosted app processes; no production auth UI cutover is implied.
 from pathlib import Path
 import argparse
 import plistlib
+import re
 from direct_hermes_probe import validate, RUNTIME
 
 PRODUCTS = Path('/Users/maurice/workspace/semreh-slice1-build/Build/Products')
@@ -24,9 +25,14 @@ def main():
     parser.add_argument('--slice2-native', action='store_true')
     parser.add_argument('--slice2-reasoning', action='store_true')
     parser.add_argument('--slice2-ui', action='store_true')
+    parser.add_argument('--tui-created-session-id')
     parser.add_argument('--development-backend-sha')
     parser.add_argument('--cookie-phase', choices=['login', 'restore', 'logout'])
     args = parser.parse_args()
+    if args.tui_created_session_id and (
+        not args.slice2_ui or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', args.tui_created_session_id)
+    ):
+        parser.error('--tui-created-session-id requires --slice2-ui and a plain durable session ID')
     if args.cookie_phase and not args.https:
         parser.error('Cookie phases require --https')
     if args.slice2_foundation and (not args.https or args.cookie_phase):
@@ -98,6 +104,8 @@ def main():
     test_class = 'DirectHermesLiveSmokeTests'
     if args.slice2_ui:
         target['EnvironmentVariables']['SEMREH_SLICE2_UI_LIVE'] = '1'
+        if args.tui_created_session_id:
+            target['EnvironmentVariables']['SEMREH_SLICE2_TUI_CREATED_SESSION_ID'] = args.tui_created_session_id
         method = 'testOptInLiveProductionLoginNewChatSend'
         test_class = 'LongChatScrollUITests'
     target['OnlyTestIdentifiers'] = [test_class + '/' + method]

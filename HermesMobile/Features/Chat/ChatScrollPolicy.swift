@@ -133,6 +133,29 @@ enum ChatScrollPolicy {
         320_000_000
     ]
 
+    /// Realize the concrete latest row before refining toward the trailing
+    /// sentinel. A lazy transcript can otherwise estimate an off-list target
+    /// after a large append and land short of the actual bottom.
+    static func explicitBottomTargetID(
+        latestMessageID: String?,
+        latestMessageIsVisible: Bool,
+        bottomAnchorID: String
+    ) -> String {
+        guard !latestMessageIsVisible, let latestMessageID else {
+            return bottomAnchorID
+        }
+        return latestMessageID
+    }
+
+    /// Explicit bottom settlement is complete only after both the scroll
+    /// metrics and the concrete tail-row geometry agree.
+    static func shouldFinishExplicitBottomRequest(
+        isNearBottom: Bool,
+        isTailVisible: Bool
+    ) -> Bool {
+        isNearBottom && isTailVisible
+    }
+
     /// Keep the affordance visible until UIKit reports that the viewport
     /// physically arrived. Follow intent alone is not proof of scroll position.
     static func shouldShowScrollToBottomButton(
@@ -162,6 +185,19 @@ enum ChatScrollPolicy {
 /// LazyVStack rows, so this stays bounded to the visible window rather than
 /// walking the entire transcript.
 enum ChatTranscriptVisibilityPolicy {
+    static func isVisible(
+        frame: CGRect?,
+        viewportHeight: CGFloat,
+        bottomInset: CGFloat
+    ) -> Bool {
+        guard let frame, viewportHeight > 0 else { return false }
+
+        let visibleHeight = max(0, viewportHeight - bottomInset)
+        guard visibleHeight > 0 else { return false }
+
+        return frame.height > 0 && frame.maxY > 0 && frame.minY < visibleHeight
+    }
+
     static func firstVisibleMessageID(
         frames: [String: CGRect],
         viewportHeight: CGFloat

@@ -67,6 +67,101 @@ final class LongChatScrollUITests: XCTestCase {
         attachScreenshot(named: "long-chat-after-scroll-to-latest")
     }
 
+    func testMultiChatPerformanceLabSwitchesStreamsAndScrolls() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.terminate()
+        app.launchArguments = ["--chat-performance-multi-lab"]
+        app.launch()
+
+        let firstChat = app.otherElements["chat-detail:10,000-row performance lab 1"]
+        XCTAssertTrue(firstChat.waitForExistence(timeout: 20))
+
+        // Every fixture starts restored in the middle of a 10,000-row transcript.
+        // Reach its existing tail before appending, then prove that the latest
+        // streamed row survives a real away-from-bottom scroll and arrow return.
+        exerciseMultiChat(app: app, chatNumber: 1, screenshotPrefix: "multi-chat-1")
+
+        let switchToSecond = Date()
+        app.buttons["Performance chat 2"].tap()
+        let secondChat = app.otherElements["chat-detail:10,000-row performance lab 2"]
+        XCTAssertTrue(secondChat.waitForExistence(timeout: 15))
+        addTiming(named: "multi-chat-switch-to-chat-2", startedAt: switchToSecond)
+        exerciseMultiChat(app: app, chatNumber: 2, screenshotPrefix: "multi-chat-2")
+
+        let switchToThird = Date()
+        app.buttons["Performance chat 3"].tap()
+        let thirdChat = app.otherElements["chat-detail:10,000-row performance lab 3"]
+        XCTAssertTrue(thirdChat.waitForExistence(timeout: 15))
+        addTiming(named: "multi-chat-switch-to-chat-3", startedAt: switchToThird)
+        exerciseMultiChat(app: app, chatNumber: 3, screenshotPrefix: "multi-chat-3")
+
+        // Revisit all owners after streaming; switching must not recreate a
+        // fixture or lose its appended latest marker.
+        for chatNumber in 1...3 {
+            app.buttons["Performance chat \(chatNumber)"].tap()
+            let chat = app.otherElements["chat-detail:10,000-row performance lab \(chatNumber)"]
+            XCTAssertTrue(chat.waitForExistence(timeout: 15))
+            let marker = app.staticTexts.matching(
+                NSPredicate(format: "label CONTAINS[c] %@", "SEMREH_MULTI_CHAT_STREAM_1")
+            ).firstMatch
+            XCTAssertTrue(marker.waitForExistence(timeout: 10),
+                          "Chat \(chatNumber) must retain its streamed latest marker after switching.")
+        }
+    }
+
+    private func exerciseMultiChat(app: XCUIApplication, chatNumber: Int, screenshotPrefix: String) {
+        let transcript = app.scrollViews.firstMatch
+        XCTAssertTrue(transcript.waitForExistence(timeout: 10), "Chat \(chatNumber) must expose its transcript scroll view.")
+        let scrollToLatest = app.buttons[scrollToLatestLabel]
+        XCTAssertTrue(scrollToLatest.waitForExistence(timeout: 10),
+                      "Chat \(chatNumber) must restore with scroll-to-latest available.")
+
+        let baseMarker = "End of 10,000-row conversation \(chatNumber)."
+        let reachInitialBottom = Date()
+        scrollToLatest.tap()
+        let initialEnd = app.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS[c] %@", baseMarker)
+        ).firstMatch
+        assertHittable(initialEnd, timeout: 25,
+                       message: "Chat \(chatNumber) must expose its original deterministic tail after arrow return.")
+        XCTAssertFalse(scrollToLatest.waitForExistence(timeout: 2),
+                       "Chat \(chatNumber) must clear the arrow at the original bottom.")
+        addTiming(named: "\(screenshotPrefix)-reach-original-bottom", startedAt: reachInitialBottom)
+        attachScreenshot(named: "\(screenshotPrefix)-original-bottom")
+
+        let streamStart = Date()
+        app.buttons["Stream test turn"].tap()
+        let latestMarker = app.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS[c] %@", "SEMREH_MULTI_CHAT_STREAM_1")
+        ).firstMatch
+        assertHittable(latestMarker, timeout: 15,
+                       message: "Chat \(chatNumber) must expose its paced appended stream marker at the bottom.")
+        addTiming(named: "\(screenshotPrefix)-stream-append", startedAt: streamStart)
+        attachScreenshot(named: "\(screenshotPrefix)-streamed-bottom")
+
+        let scrollAwayStart = Date()
+        transcript.swipeDown()
+        XCTAssertTrue(scrollToLatest.waitForExistence(timeout: 10),
+                      "Chat \(chatNumber) must show the arrow after scrolling away from its latest row.")
+        scrollToLatest.tap()
+        assertHittable(latestMarker, timeout: 25,
+                       message: "Chat \(chatNumber) arrow return must reveal the newly appended latest marker.")
+        XCTAssertFalse(scrollToLatest.waitForExistence(timeout: 2),
+                       "Chat \(chatNumber) must clear the arrow after returning to the new bottom.")
+        addTiming(named: "\(screenshotPrefix)-scroll-and-bottom-arrow", startedAt: scrollAwayStart)
+        attachScreenshot(named: "\(screenshotPrefix)-new-bottom-after-arrow")
+    }
+
+    private func assertHittable(_ element: XCUIElement, timeout: TimeInterval, message: String) {
+        let expectation = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == true AND hittable == true"),
+            object: element
+        )
+        wait(for: [expectation], timeout: timeout)
+        XCTAssertTrue(element.exists && element.isHittable, message)
+    }
+
     @MainActor
     func testOptInLiveProductionLoginNewChatSend() throws {
         continueAfterFailure = false
@@ -90,12 +185,14 @@ final class LongChatScrollUITests: XCTestCase {
         app.launch()
         defer { clearPasteboard() }
 
-        ensureWelcomeAfterNormalSignOut(app: app)
+        prepareNormalSignIn(app: app)
         let welcome = app.staticTexts["Control Semreh from iPhone or iPad."]
-        XCTAssertTrue(welcome.waitForExistence(timeout: 15), "Normal sign-out must return to Welcome.")
-        let existingServer = app.buttons["Already have a server?"]
-        XCTAssertTrue(existingServer.waitForExistence(timeout: 5))
-        existingServer.tap()
+        if !app.textFields["onboarding-server-url"].exists {
+            XCTAssertTrue(welcome.waitForExistence(timeout: 15), "Normal sign-out must return to Welcome.")
+            let existingServer = app.buttons["Already have a server?"]
+            XCTAssertTrue(existingServer.waitForExistence(timeout: 5))
+            existingServer.tap()
+        }
 
         let serverURL = app.textFields["onboarding-server-url"]
         XCTAssertTrue(serverURL.waitForExistence(timeout: 5))
@@ -158,11 +255,34 @@ final class LongChatScrollUITests: XCTestCase {
         wait(for: [appeared], timeout: 90)
         XCTAssertTrue(acknowledgement.exists && acknowledgement.isHittable)
         attachScreenshot(named: "live-production-chat-success")
+
+        if let storedID = environment["SEMREH_SLICE2_TUI_CREATED_SESSION_ID"] {
+            XCTAssertNotNil(storedID.range(of: "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$", options: .regularExpression))
+            var link = URLComponents()
+            link.scheme = "semreh"
+            link.host = "session"
+            link.queryItems = [URLQueryItem(name: "id", value: storedID)]
+            app.open(try XCTUnwrap(link.url))
+            let tuiPrompt = app.staticTexts.matching(
+                NSPredicate(format: "label CONTAINS[c] %@", "SEMREH_TUI_CROSS_CLIENT_1")
+            ).firstMatch
+            assertHittable(tuiPrompt, timeout: 30,
+                          message: "The actual TUI-created transcript must open through the production deep link.")
+            assertHittable(acknowledgement, timeout: 15,
+                          message: "The TUI-created assistant reply must also be visible.")
+            attachScreenshot(named: "live-tui-created-session-in-semreh")
+        }
     }
 
-    private func ensureWelcomeAfterNormalSignOut(app: XCUIApplication) {
+    private func prepareNormalSignIn(app: XCUIApplication) {
         let welcome = app.staticTexts["Control Semreh from iPhone or iPad."]
         if welcome.waitForExistence(timeout: 5) { return }
+        // An expired cookie legitimately restores the existing Connect page,
+        // rather than the first onboarding page or an authenticated shell.
+        if app.staticTexts["Your session expired. Sign in again."].exists,
+           app.textFields["onboarding-server-url"].exists {
+            return
+        }
 
         // Only dismiss known, non-auth startup surfaces. An unknown alert must
         // remain visible so the UI smoke reports the actual regression.
@@ -264,6 +384,15 @@ final class LongChatScrollUITests: XCTestCase {
 
     private func clearPasteboard() {
         UIPasteboard.general.setItems([], options: [.localOnly: true])
+    }
+
+    private func addTiming(named name: String, startedAt: Date) {
+        let milliseconds = Date().timeIntervalSince(startedAt) * 1_000
+        let text = String(format: "%@ duration_ms=%.1f", name, milliseconds)
+        let attachment = XCTAttachment(data: Data(text.utf8), uniformTypeIdentifier: "public.plain-text")
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
     }
 
     private func attachScreenshot(named name: String) {

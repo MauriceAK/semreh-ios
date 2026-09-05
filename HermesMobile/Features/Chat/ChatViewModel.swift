@@ -668,6 +668,9 @@ final class ChatViewModel {
     private var directComposerIsEditing = false
     private var directOlderOffset = 0
     private var directHistoryID: String?
+#if DEBUG
+    private var performanceLabStreamingTurnInFlight = false
+#endif
     private var directResponseComplete = false
     private var directModelContext: ModelContext?
     var onDirectCanonicalID: ((String) -> Void)?
@@ -7815,7 +7818,99 @@ extension ChatViewModel {
         return (session, server, viewModel)
     }
 
-    private func seedPerformanceLab(messageCount: Int) {
+    /// A bounded multi-owner variant of the server-free performance fixture. Each
+    /// owner is a real ChatView/ChatTranscriptView with an independent 10,000-row
+    /// model; this remains presentation evidence, not direct-gateway proof.
+    @MainActor
+    static func makePerformanceLabFixtures(count: Int = 3) -> [(
+        session: SessionSummary,
+        server: URL,
+        viewModel: ChatViewModel
+    )] {
+        precondition(count > 1)
+        return (0..<count).map { index in
+            let server = URL(string: "http://127.0.0.1:9")!
+            let chatNumber = index + 1
+            let session = SessionSummary(
+                sessionId: "semreh-chat-performance-lab-\(chatNumber)",
+                title: "10,000-row performance lab \(chatNumber)"
+            )
+            TranscriptRestoreStore.shared.save(
+                TranscriptRestorePoint(
+                    followingLatest: false,
+                    visibleMessageID: "transcript:20"
+                ),
+                server: server,
+                sessionID: session.sessionId ?? session.id
+            )
+
+            let viewModel = ChatViewModel(session: session, server: server)
+            viewModel.seedPerformanceLab(messageCount: 10_000, conversationIndex: chatNumber)
+            return (session, server, viewModel)
+        }
+    }
+
+    /// Appends one deterministic user/assistant turn in small chunks so the
+    /// multi-chat lab exercises the same rendered transcript while content grows.
+    @MainActor
+    func appendPerformanceLabStreamingTurn() async {
+        guard !messages.isEmpty, !performanceLabStreamingTurnInFlight else { return }
+        performanceLabStreamingTurnInFlight = true
+        let started = ContinuousClock.now
+        let fullRecomputesBefore = transcriptFullRecomputeCountForTesting
+        defer {
+            performanceLabStreamingTurnInFlight = false
+            print("SEMREH_LAB_STREAM elapsed=\(started.duration(to: .now)) rows=\(messages.count) full_recomputes=\(transcriptFullRecomputeCountForTesting - fullRecomputesBefore)")
+        }
+        let sequence = (messages.count - 10_000) / 2 + 1
+        let timestamp = (messages.last?.timestamp ?? 10_000) + 1
+        let assistantID = "perf-stream-message-\(sequence)-assistant"
+        appendStreamingMessage(ChatMessage(
+            role: "user",
+            content: "SEMREH multi-chat streaming prompt \(sequence)",
+            timestamp: timestamp,
+            messageId: "perf-stream-message-\(sequence)-user"
+        ))
+        appendStreamingMessage(ChatMessage(
+            role: "assistant",
+            content: "Streaming turn \(sequence): ",
+            timestamp: timestamp + 0.001,
+            messageId: assistantID
+        ))
+
+        let chunks = [
+            "Streaming turn \(sequence): first chunk. ",
+            "Streaming turn \(sequence): first chunk. second chunk. ",
+            "Streaming turn \(sequence): first chunk. second chunk. final chunk. ",
+            "Streaming turn \(sequence): first chunk. second chunk. final chunk. SEMREH_MULTI_CHAT_STREAM_\(sequence)"
+        ]
+        for chunk in chunks {
+            do {
+                try await Task.sleep(nanoseconds: 80_000_000)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            guard let index = messages.lastIndex(where: { $0.messageId == assistantID }) else { return }
+            let current = messages[index]
+            replaceStreamingMessage(at: index, with: ChatMessage(
+                role: current.role,
+                content: chunk,
+                timestamp: current.timestamp,
+                messageId: current.messageId,
+                name: current.name,
+                toolCallId: current.toolCallId,
+                toolUseId: current.toolUseId,
+                toolCalls: current.toolCalls,
+                contentParts: current.contentParts,
+                reasoning: current.reasoning,
+                attachments: current.attachments,
+                turnTps: current.turnTps
+            ))
+        }
+    }
+
+    private func seedPerformanceLab(messageCount: Int, conversationIndex: Int = 0) {
         precondition(messageCount > 20)
 
         messages = (0..<messageCount).map { index in
@@ -7823,7 +7918,7 @@ extension ChatViewModel {
             let content: String
             if index == messageCount - 1 {
                 content = """
-                ## Deterministic long Markdown tail
+                ## Deterministic long Markdown tail \(conversationIndex)
 
                 This final response exercises the production streaming/Markdown surface after the 10,000-row history.
 
@@ -7831,7 +7926,7 @@ extension ChatViewModel {
                 \(String(repeating: "let value = Array(0..<1_000).reduce(0, +)\n", count: 320))
                 ```
 
-                End of 10,000-row conversation.
+                End of 10,000-row conversation\(conversationIndex == 0 ? "" : " \(conversationIndex)").
                 """
             } else if role == "assistant", index.isMultiple(of: 251) {
                 content = """

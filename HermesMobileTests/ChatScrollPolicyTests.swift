@@ -51,6 +51,78 @@ final class ChatScrollPolicyTests: XCTestCase {
         )
     }
 
+    func testTranscriptVisibilityAcceptsPartlyVisibleRow() {
+        XCTAssertTrue(
+            ChatTranscriptVisibilityPolicy.isVisible(
+                frame: CGRect(x: 0, y: -20, width: 300, height: 100),
+                viewportHeight: 400,
+                bottomInset: 40
+            )
+        )
+    }
+
+    func testTranscriptVisibilityRejectsZeroHeightRow() {
+        XCTAssertFalse(
+            ChatTranscriptVisibilityPolicy.isVisible(
+                frame: CGRect(x: 0, y: 100, width: 300, height: 0),
+                viewportHeight: 400,
+                bottomInset: 40
+            )
+        )
+    }
+
+    func testTranscriptVisibilityRejectsMissingFrame() {
+        XCTAssertFalse(
+            ChatTranscriptVisibilityPolicy.isVisible(
+                frame: nil,
+                viewportHeight: 400,
+                bottomInset: 40
+            )
+        )
+    }
+
+    func testTranscriptVisibilityRejectsRowBehindComposerInset() {
+        XCTAssertFalse(
+            ChatTranscriptVisibilityPolicy.isVisible(
+                frame: CGRect(x: 0, y: 360, width: 300, height: 20),
+                viewportHeight: 400,
+                bottomInset: 40
+            )
+        )
+    }
+
+    func testTranscriptVisibilityRejectsRowEntirelyAboveViewport() {
+        XCTAssertFalse(
+            ChatTranscriptVisibilityPolicy.isVisible(
+                frame: CGRect(x: 0, y: -100, width: 300, height: 100),
+                viewportHeight: 400,
+                bottomInset: 40
+            )
+        )
+    }
+
+    func testTranscriptVisibilityRejectsCollapsedViewport() {
+        XCTAssertFalse(
+            ChatTranscriptVisibilityPolicy.isVisible(
+                frame: CGRect(x: 0, y: 1, width: 300, height: 100),
+                viewportHeight: 40,
+                bottomInset: 40
+            )
+        )
+    }
+
+    func testTranscriptVisibilityRejectsNonpositiveViewport() {
+        for viewportHeight in [CGFloat.zero, -1] {
+            XCTAssertFalse(
+                ChatTranscriptVisibilityPolicy.isVisible(
+                    frame: CGRect(x: 0, y: 1, width: 300, height: 100),
+                    viewportHeight: viewportHeight,
+                    bottomInset: 0
+                )
+            )
+        }
+    }
+
     func testComposerResizeOnlyRejoinsLatestWhenReaderStillFollowsBottom() {
         XCTAssertTrue(
             ChatScrollPolicy.shouldFollowAfterComposerResize(
@@ -281,6 +353,74 @@ final class ChatScrollPolicyTests: XCTestCase {
                 ChatScrollPolicy.explicitBottomSettlementDelays,
                 ChatScrollPolicy.explicitBottomSettlementDelays.dropFirst()
             ).allSatisfy(<)
+        )
+    }
+
+    func testExplicitBottomTargetKeepsSelectingLatestRowUntilTailIsVisible() {
+        XCTAssertEqual(
+            ChatScrollPolicy.explicitBottomTargetID(
+                latestMessageID: "message-latest",
+                latestMessageIsVisible: false,
+                bottomAnchorID: "chat-bottom-anchor"
+            ),
+            "message-latest"
+        )
+        XCTAssertEqual(
+            ChatScrollPolicy.explicitBottomTargetID(
+                latestMessageID: "message-latest",
+                latestMessageIsVisible: false,
+                bottomAnchorID: "chat-bottom-anchor"
+            ),
+            "message-latest"
+        )
+    }
+
+    func testExplicitBottomTargetUsesSentinelOnceTailIsVisible() {
+        XCTAssertEqual(
+            ChatScrollPolicy.explicitBottomTargetID(
+                latestMessageID: "message-latest",
+                latestMessageIsVisible: true,
+                bottomAnchorID: "chat-bottom-anchor"
+            ),
+            "chat-bottom-anchor"
+        )
+    }
+
+    func testExplicitBottomTargetFallsBackToSentinelWithoutLatestRow() {
+        XCTAssertEqual(
+            ChatScrollPolicy.explicitBottomTargetID(
+                latestMessageID: nil,
+                latestMessageIsVisible: false,
+                bottomAnchorID: "chat-bottom-anchor"
+            ),
+            "chat-bottom-anchor"
+        )
+    }
+
+    func testExplicitBottomRequestFinishesOnlyWhenMetricsAndTailAgree() {
+        XCTAssertTrue(
+            ChatScrollPolicy.shouldFinishExplicitBottomRequest(
+                isNearBottom: true,
+                isTailVisible: true
+            )
+        )
+        XCTAssertFalse(
+            ChatScrollPolicy.shouldFinishExplicitBottomRequest(
+                isNearBottom: true,
+                isTailVisible: false
+            )
+        )
+        XCTAssertFalse(
+            ChatScrollPolicy.shouldFinishExplicitBottomRequest(
+                isNearBottom: false,
+                isTailVisible: true
+            )
+        )
+        XCTAssertFalse(
+            ChatScrollPolicy.shouldFinishExplicitBottomRequest(
+                isNearBottom: false,
+                isTailVisible: false
+            )
         )
     }
 

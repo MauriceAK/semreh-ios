@@ -308,6 +308,8 @@ struct ChatView: View {
     @State private var followScrollGeneration = 0
     @State private var explicitBottomScrollGeneration = 0
     @State private var isExplicitBottomScrollActive = false
+    @State private var isLatestTranscriptRowVisible = false
+    @State private var isTranscriptBottomVisible = false
     @State private var explicitBottomScrollTask: Task<Void, Never>?
     @State private var isUserInteractingWithScroll = false
     @State private var userScrollCooldownUntil: Date?
@@ -1259,6 +1261,10 @@ struct ChatView: View {
                 guard visibleTranscriptRowID != rowID else { return }
                 visibleTranscriptRowID = rowID
             },
+            onTranscriptTailVisibilityChange: { latestRow, bottom in
+                if isLatestTranscriptRowVisible != latestRow { isLatestTranscriptRowVisible = latestRow }
+                if isTranscriptBottomVisible != bottom { isTranscriptBottomVisible = bottom }
+            },
             onPreviewAttachment: { attachment, localData in
                 presentPreviewRestoringComposerFocusIfNeeded {
                     attachmentPreviewItem = ChatAttachmentPreviewItem(message: attachment, localData: localData)
@@ -1318,7 +1324,9 @@ struct ChatView: View {
 
     private var showsScrollToBottomButton: Bool {
         ChatScrollPolicy.shouldShowScrollToBottomButton(
-            isNearBottom: isScrolledNearBottom,
+            isNearBottom: isScrolledNearBottom && (
+                !isExplicitBottomScrollActive || isLatestTranscriptRowVisible || isTranscriptBottomVisible
+            ),
             hasExplicitBottomRequest: isExplicitBottomScrollActive,
             hasActiveStream: viewModel.activeStreamID != nil,
             shouldFollowLatestMessage: shouldFollowLatestMessage
@@ -2150,8 +2158,10 @@ struct ChatView: View {
         let generation = explicitBottomScrollGeneration
 
         userScrollCooldownUntil = nil
-        shouldFollowLatestMessage = true
-        isReadingOlderTranscript = false
+        // The explicit jump owns positioning until its concrete tail arrives.
+        // Re-enabling automatic anchoring or expanding the composer here races
+        // lazy measurement and can turn an estimated offset into a blank tail.
+        shouldFollowLatestMessage = false
         isExplicitBottomScrollActive = true
 
         explicitBottomScrollTask = Task { @MainActor in
@@ -2167,15 +2177,23 @@ struct ChatView: View {
                       isExplicitBottomScrollActive
                 else { return }
 
-                if isScrolledNearBottom {
-                    finishExplicitBottomScroll(generation: generation)
+                if ChatScrollPolicy.shouldFinishExplicitBottomRequest(
+                    isNearBottom: isScrolledNearBottom,
+                    isTailVisible: isLatestTranscriptRowVisible || isTranscriptBottomVisible
+                ) {
+                    completeExplicitBottomScroll(generation: generation)
                     return
                 }
 
-                // Explicit navigation should land, not animate toward a moving
-                // lazy-layout estimate. Repeating against the stable sentinel
-                // closes over rows/Markdown/media that realize during settlement.
-                proxy.scrollTo(bottomAnchorID, anchor: .bottom)
+                // Realize the concrete last row before refining toward trailing
+                // content. Jumping directly to an off-list sentinel after a lazy
+                // transcript mutation can land in estimated, unrendered space.
+                let target = ChatScrollPolicy.explicitBottomTargetID(
+                    latestMessageID: latestTranscriptMessageID,
+                    latestMessageIsVisible: isLatestTranscriptRowVisible,
+                    bottomAnchorID: bottomAnchorID
+                )
+                proxy.scrollTo(target, anchor: .bottom)
             }
 
             guard generation == explicitBottomScrollGeneration else { return }
@@ -2190,6 +2208,13 @@ struct ChatView: View {
         explicitBottomScrollTask?.cancel()
         explicitBottomScrollTask = nil
         isExplicitBottomScrollActive = false
+    }
+
+    private func completeExplicitBottomScroll(generation: Int? = nil) {
+        guard generation == nil || generation == explicitBottomScrollGeneration else { return }
+        finishExplicitBottomScroll(generation: generation)
+        shouldFollowLatestMessage = true
+        isReadingOlderTranscript = false
     }
 
     private func cancelExplicitBottomScroll() {
@@ -2427,10 +2452,16 @@ struct ChatView: View {
         )
         isScrolledNearBottom = isNearBottom
         isUserInteractingWithScroll = metrics.isUserInteracting
+        let confirmedNearBottom = isNearBottom && (
+            !isExplicitBottomScrollActive || isLatestTranscriptRowVisible || isTranscriptBottomVisible
+        )
 
         if isExplicitBottomScrollActive {
-            if isNearBottom {
-                finishExplicitBottomScroll()
+            if ChatScrollPolicy.shouldFinishExplicitBottomRequest(
+                isNearBottom: isNearBottom,
+                isTailVisible: isLatestTranscriptRowVisible || isTranscriptBottomVisible
+            ) {
+                completeExplicitBottomScroll()
             } else if ChatScrollPolicy.shouldCancelExplicitBottomRequest(
                 isDirectlyInteracting: metrics.isDirectlyInteracting,
                 isDecelerating: metrics.isDecelerating
@@ -2446,7 +2477,7 @@ struct ChatView: View {
             userScrollCooldownUntil = ChatScrollPolicy.cooldownDeadline()
         }
 
-        if isNearBottom {
+        if confirmedNearBottom {
             if ChatScrollPolicy.shouldSnapWhenRejoiningLatest(
                 wasFollowingLatest: shouldFollowLatestMessage,
                 isNearBottom: true

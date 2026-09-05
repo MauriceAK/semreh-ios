@@ -69,6 +69,7 @@ struct ChatTranscriptView: View, Equatable {
     let onScrollToLatestContent: (ScrollViewProxy, Bool) -> Void
     var onScrollToTranscriptMessage: (ScrollViewProxy, String, Bool) -> Void = { _, _, _ in }
     var onVisibleTranscriptRowIDChange: (String?) -> Void = { _ in }
+    var onTranscriptTailVisibilityChange: (_ latestRow: Bool, _ bottom: Bool) -> Void = { _, _ in }
     let onPreviewAttachment: (MessageAttachment, Data?) -> Void
     let onPreviewTranscriptMedia: (TranscriptMediaReference) -> Void
     let onToggleListening: (MessageActionContext) -> Void
@@ -175,17 +176,21 @@ struct ChatTranscriptView: View, Equatable {
                         }
                     )
 
-                    if showsScrollToBottomButton {
-                        ChatScrollToBottomButton(
-                            bottomPadding: scrollToBottomButtonBottomPadding,
-                            onTap: {
-                                onScrollToBottom(proxy)
-                            }
-                        )
-                        .transition(ChatMotion.bottomOverlayTransition(reduceMotion: reduceMotion))
+                    ZStack {
+                        if showsScrollToBottomButton {
+                            ChatScrollToBottomButton(
+                                bottomPadding: scrollToBottomButtonBottomPadding,
+                                onTap: {
+                                    onScrollToBottom(proxy)
+                                }
+                            )
+                            .transition(ChatMotion.bottomOverlayTransition(reduceMotion: reduceMotion))
+                        }
                     }
+                    // Animate the affordance, not coincident lazy transcript
+                    // measurements or content-offset corrections beneath it.
+                    .animation(ChatMotion.quickState(reduceMotion: reduceMotion), value: showsScrollToBottomButton)
                 }
-                .animation(ChatMotion.quickState(reduceMotion: reduceMotion), value: showsScrollToBottomButton)
                 .background(Color.clear)
                 .onChange(of: messages.count) {
                     guard shouldFollowLatestMessage else { return }
@@ -229,8 +234,17 @@ struct ChatTranscriptView: View, Equatable {
                     onScrollToLatestContent(proxy, false)
                 }
                 .onPreferenceChange(VisibleTranscriptRowFramesKey.self) { frames in
+                    let latestFrame = displayedTranscriptMessages.last.flatMap { frames[$0.renderID] }
+                    func isVisible(_ frame: CGRect?) -> Bool {
+                        ChatTranscriptVisibilityPolicy.isVisible(
+                            frame: frame,
+                            viewportHeight: viewport.size.height,
+                            bottomInset: transcriptBottomInsetHeight
+                        )
+                    }
+                    onTranscriptTailVisibilityChange(isVisible(latestFrame), isVisible(frames[bottomAnchorID]))
                     let visibleID = ChatTranscriptVisibilityPolicy.firstVisibleMessageID(
-                        frames: frames,
+                        frames: frames.filter { $0.key != bottomAnchorID },
                         viewportHeight: viewport.size.height
                     )
                     guard trackedVisibleTranscriptRowID != visibleID else { return }
@@ -264,59 +278,63 @@ struct ChatTranscriptView: View, Equatable {
                 let isStreamingRow = streamingAssistantMessageID != nil
                     && transcriptMessage.message.messageId == streamingAssistantMessageID
 
-                ChatTranscriptMessageBlock(
-                    transcriptMessage: transcriptMessage,
-                    transcriptBlockSpacing: transcriptBlockSpacing,
-                    showsThinkingAndToolCards: showsThinkingAndToolCards,
-                    reasoningGroups: reasoningGroupsForAnchor(transcriptMessage.anchorID),
-                    toolCallGroups: completedToolCallGroupsForAnchor(transcriptMessage.anchorID),
-                    liveReasoningText: isReasoningAnchor ? liveReasoningText : "",
-                    reasoningAnchorMessageID: isReasoningAnchor ? reasoningAnchorMessageID : nil,
-                    liveToolCalls: isToolCallAnchor ? liveToolCalls : [],
-                    toolCallAnchorMessageID: isToolCallAnchor ? toolCallAnchorMessageID : nil,
-                    streamingAssistantMessageID: isStreamingRow ? streamingAssistantMessageID : nil,
-                    liveTokensPerSecond: isStreamingRow ? liveTokensPerSecond : nil,
-                    localAttachmentPreviews: localAttachmentPreviews[transcriptMessage.message.id],
-                    listeningMessageID: listeningMessageID,
-                    isViewingCachedData: isViewingCachedData,
-                    hasActiveStream: activeStreamID != nil,
-                    isRegeneratingMessage: isRegeneratingMessage,
-                    isEditingMessage: isEditingMessage,
-                    isForkingMessage: isForkingMessage,
-                    loadAttachmentImage: loadAttachmentImage,
-                    loadAttachmentData: loadAttachmentData,
-                    loadTranscriptMediaImage: loadTranscriptMediaImage,
-                    loadTranscriptMediaData: loadTranscriptMediaData,
-                    transcriptMediaCacheNamespace: transcriptMediaCacheNamespace,
-                    actionContext: actionContext,
-                    shouldRenderMessageRow: shouldRenderMessageRow,
-                    onPreviewAttachment: onPreviewAttachment,
-                    onPreviewTranscriptMedia: onPreviewTranscriptMedia,
-                    onToggleListening: onToggleListening,
-                    onSelectText: onSelectText,
-                    onRegenerate: onRegenerate,
-                    onEdit: onEdit,
-                    onFork: onFork,
-                    onCopy: onCopy
-                )
-                .equatable()
-                .background {
-                    GeometryReader { rowProxy in
-                        Color.clear.preference(
-                            key: VisibleTranscriptRowFramesKey.self,
-                            value: [
-                                transcriptMessage.renderID: rowProxy.frame(
-                                    in: .named(Self.transcriptCoordinateSpaceName)
-                                )
-                            ]
-                        )
+                // One lazy child per transcript item, even when it owns a
+                // compression card. Variable child counts force eager discovery.
+                VStack(alignment: .leading, spacing: transcriptMessageSpacing) {
+                    ChatTranscriptMessageBlock(
+                        transcriptMessage: transcriptMessage,
+                        transcriptBlockSpacing: transcriptBlockSpacing,
+                        showsThinkingAndToolCards: showsThinkingAndToolCards,
+                        reasoningGroups: reasoningGroupsForAnchor(transcriptMessage.anchorID),
+                        toolCallGroups: completedToolCallGroupsForAnchor(transcriptMessage.anchorID),
+                        liveReasoningText: isReasoningAnchor ? liveReasoningText : "",
+                        reasoningAnchorMessageID: isReasoningAnchor ? reasoningAnchorMessageID : nil,
+                        liveToolCalls: isToolCallAnchor ? liveToolCalls : [],
+                        toolCallAnchorMessageID: isToolCallAnchor ? toolCallAnchorMessageID : nil,
+                        streamingAssistantMessageID: isStreamingRow ? streamingAssistantMessageID : nil,
+                        liveTokensPerSecond: isStreamingRow ? liveTokensPerSecond : nil,
+                        localAttachmentPreviews: localAttachmentPreviews[transcriptMessage.message.id],
+                        listeningMessageID: listeningMessageID,
+                        isViewingCachedData: isViewingCachedData,
+                        hasActiveStream: activeStreamID != nil,
+                        isRegeneratingMessage: isRegeneratingMessage,
+                        isEditingMessage: isEditingMessage,
+                        isForkingMessage: isForkingMessage,
+                        loadAttachmentImage: loadAttachmentImage,
+                        loadAttachmentData: loadAttachmentData,
+                        loadTranscriptMediaImage: loadTranscriptMediaImage,
+                        loadTranscriptMediaData: loadTranscriptMediaData,
+                        transcriptMediaCacheNamespace: transcriptMediaCacheNamespace,
+                        actionContext: actionContext,
+                        shouldRenderMessageRow: shouldRenderMessageRow,
+                        onPreviewAttachment: onPreviewAttachment,
+                        onPreviewTranscriptMedia: onPreviewTranscriptMedia,
+                        onToggleListening: onToggleListening,
+                        onSelectText: onSelectText,
+                        onRegenerate: onRegenerate,
+                        onEdit: onEdit,
+                        onFork: onFork,
+                        onCopy: onCopy
+                    )
+                    .equatable()
+                    .background {
+                        GeometryReader { rowProxy in
+                            Color.clear.preference(
+                                key: VisibleTranscriptRowFramesKey.self,
+                                value: [
+                                    transcriptMessage.renderID: rowProxy.frame(
+                                        in: .named(Self.transcriptCoordinateSpaceName)
+                                    )
+                                ]
+                            )
+                        }
                     }
-                }
-                .id(transcriptMessage.renderID)
+                    .id(transcriptMessage.renderID)
 
-                if let compressionReferenceCard,
-                   compressionReferenceCard.afterRenderID == transcriptMessage.renderID {
-                    compressionReferenceCardView(compressionReferenceCard)
+                    if let compressionReferenceCard,
+                       compressionReferenceCard.afterRenderID == transcriptMessage.renderID {
+                        compressionReferenceCardView(compressionReferenceCard)
+                    }
                 }
             }
 
@@ -329,6 +347,14 @@ struct ChatTranscriptView: View, Equatable {
 
             Color.clear
                 .frame(height: 1)
+                .background {
+                    GeometryReader { anchorProxy in
+                        Color.clear.preference(
+                            key: VisibleTranscriptRowFramesKey.self,
+                            value: [bottomAnchorID: anchorProxy.frame(in: .named(Self.transcriptCoordinateSpaceName))]
+                        )
+                    }
+                }
                 .id(bottomAnchorID)
                 .allowsHitTesting(false)
         }

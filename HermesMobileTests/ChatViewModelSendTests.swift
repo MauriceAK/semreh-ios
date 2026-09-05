@@ -8118,6 +8118,56 @@ final class ChatViewModelSendTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testPerformanceLabStreamingUpdatesOnlyTheSelectedTranscriptIncrementally() async throws {
+        let fixtures = ChatViewModel.makePerformanceLabFixtures(count: 3)
+        XCTAssertEqual(fixtures.count, 3)
+
+        for fixture in fixtures {
+            XCTAssertEqual(fixture.viewModel.messages.count, 10_000)
+            XCTAssertTrue(fixture.viewModel.displayedTranscriptMessages.indices.contains(20))
+            let row20 = fixture.viewModel.displayedTranscriptMessages[20]
+            let sessionID = try XCTUnwrap(fixture.session.sessionId)
+            let restorePoint = TranscriptRestoreStore.shared.load(
+                server: fixture.server,
+                sessionID: sessionID
+            )
+            XCTAssertEqual(
+                restorePoint.visibleMessageID,
+                row20.renderID,
+                "Fixture restore target must use the transcript's actual render ID."
+            )
+        }
+
+        let siblingSnapshots = fixtures.dropFirst().map { $0.viewModel.messages }
+        let selected = fixtures[0].viewModel
+        let fullRecomputesBefore = selected.transcriptFullRecomputeCountForTesting
+        let derivedRecomputesBefore = selected.transcriptDerivedStateRecomputeCountForTesting
+
+        await selected.appendPerformanceLabStreamingTurn()
+
+        XCTAssertEqual(selected.messages.count, 10_002)
+        XCTAssertTrue(
+            selected.messages.last?.content?.contains("SEMREH_MULTI_CHAT_STREAM_1") == true,
+            "The selected fixture must finish with the deterministic streamed marker."
+        )
+        XCTAssertEqual(
+            selected.transcriptFullRecomputeCountForTesting,
+            fullRecomputesBefore,
+            "Streaming tail updates must use the incremental transcript mapping."
+        )
+        XCTAssertEqual(
+            selected.transcriptDerivedStateRecomputeCountForTesting,
+            derivedRecomputesBefore,
+            "Streaming tail updates must not trigger full derived-state recomputation."
+        )
+
+        for (fixture, snapshot) in zip(fixtures.dropFirst(), siblingSnapshots) {
+            XCTAssertEqual(fixture.viewModel.messages, snapshot, "A sibling long chat must remain unchanged.")
+            XCTAssertEqual(fixture.viewModel.messages.count, 10_000)
+        }
+    }
+
     private func makeEphemeralUserDefaults() throws -> UserDefaults {
         let suiteName = "HermesMobileTests.\(UUID().uuidString)"
         let userDefaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))

@@ -17,7 +17,9 @@ final class OpenChatSessionStore {
     private var gitAvailabilityViewModels: [OpenChatSessionKey: GitWorkspaceAvailabilityViewModel] = [:]
     /// Oldest first. This is deliberately separate from the dictionary so eviction
     /// remains deterministic instead of depending on dictionary iteration order.
-    private var accessOrder: [OpenChatSessionKey] = []
+    /// Looking up a retained model during view construction touches this list.
+    /// Observing that bookkeeping makes the caller invalidate its own body.
+    @ObservationIgnored private var accessOrder: [OpenChatSessionKey] = []
     /// One canonical refresh task per server. Foreground, pull-to-refresh, reopen,
     /// and event hints may arrive together; they all await the same reconciliation
     /// instead of issuing duplicate `/api/session` loads for every retained chat.

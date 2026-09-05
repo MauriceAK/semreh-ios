@@ -502,3 +502,174 @@ verification, and physical-iPhone responsiveness acceptance. Raw gateway RPC
 probes alone are not proof of actual TUI/Desktop UI acceptance. Draft-only
 model/workspace changes are not themselves a binding Slice 2 gate and must not
 silently expand this checkpoint. No personal deployment or Slice 3 work occurred.
+
+## September 5 continuation — identity, literal TUI preparation, multi-chat lab
+
+Work follows app checkpoint `4e40d40`, backend development checkpoint
+`8c50f84522a755d40346e73701a6847fbdde20ec`, unchanged independent baseline
+`29112bef099274229cadff79cdff7bf7b99c4b77`. This section is not Slice 2 acceptance.
+Evidence paths below are under `/Users/maurice/workspace/semreh-slice1-evidence`.
+
+### Live identity and latest paging
+
+`scripts/direct_hermes_identity_probe.py` reuses the guarded development fixture,
+real password/cookie/ticket HTTPS path, and deterministic localhost model. It
+creates its own disposable chat and closes only owned runtime handles.
+
+```sh
+/Users/maurice/workspace/semreh-slice1-venv/bin/python scripts/direct_hermes_identity_probe.py \
+  --backend-sha 8c50f84522a755d40346e73701a6847fbdde20ec \
+  --output /Users/maurice/workspace/semreh-slice1-evidence/slice2-identity-live-v3.json
+/Users/maurice/workspace/semreh-slice1-venv/bin/python -m unittest scripts.test_direct_hermes_identity_probe -v
+```
+
+- Live-v3 passed: pre-first-send REST404; fresh empty live reuse; first send;
+  persisted live reuse; confirmed close then new runtime for cold, deferred-history,
+  and separate lazy/watch resumes; a successful turn after each; five exact durable
+  user/assistant pairs; four latest-ordered pages reconstruct the exact chronological
+  transcript; logout302 `/login` then protected401; no cleanup errors; unchanged
+  fixture global config. Cold/deferred/lazy RPC acknowledgments were approximately
+  30/31/29ms on this fixture, NOT end-to-end UI or production latency measurements.
+- Six pure Python tests passed independently in worker and root runs.
+- Sol Low reviewed the harness; root strengthened close/new-runtime, fresh REST
+  absence, cleanup and failure-path config evidence. Live-v1 passed weaker checks;
+  live-v2 retained a harness failure because HTTPX treats the source-defined logout
+  redirect as an exceptional status. Live-v3 checks its actual302 contract.
+- No compression/continuation or literal TUI/Semreh UI gate claimed by this probe.
+
+### Real TUI preparation and first turn
+
+- Installed only the existing lockfile's TUI workspace dependencies with `npm ci
+  --workspace ui-tui --include=dev --ignore-scripts --no-fund --no-audit`, using
+  explicit empty inherited environment, disposable HOME/npm cache and `/dev/null`
+  npm user configuration. No new application dependency or lockfile change.
+- `npm run build --workspace ui-tui` passed; self-contained bundle is3.6MB. Logs:
+  `slice2-tui-npm-ci-v1.log` and `slice2-tui-build-v1.log`. Dependencies/cache consumed
+  approximately148/35MB; development tracked tree remained clean.
+- Luna authored `scripts/direct_hermes_tui.py`; root inspected its allowlisted
+  environment and exact dev/runtime/bundle guards, then launched actual PTY52066.
+  Typed `SEMREH_TUI_CROSS_CLIENT_1`, submitted with Enter, and observed rendered
+  `SEMREH_SLICE1_ACK`. Normal `/exit` completed with code0. Official default-profile
+  REST separately confirmed exactly one user/assistant pair at durable ID
+  `20260905_122641_f43016`, including the exact prompt and reply.
+- The TUI active-session hint held runtime ID `ff3f91d2`, not a durable ID. It must
+  not be used as a REST/deep-link identifier. TUI normally owns a separate stdio
+  gateway sharing the disposable DB; this is not same-live-gateway proof.
+- Upstream's automatic update banner may fetch GitHub into the independent
+  checkout's remote refs/cache. No disable flag was found in pinned source. This
+  incidental update check is not model-provider access or personal Hermes access;
+  no backend source upgrade was performed. The deterministic model stays local.
+- Actual TUI↔Semreh handoff remains open; a TUI turn plus REST is not that gate.
+
+### Multi-chat verification failures retained
+
+Luna extended the DEBUG lab to three10,000-row conversations with paced synthetic
+appends and actual ChatView scroll surfaces. These remain presentation fixtures,
+not network streaming, measured FPS, or physical-device acceptance.
+
+- UI-v1 failed initial accessibility lookup: an unnecessary lab ancestor identifier
+  replaced existing child identifiers. Root removed the wrapper ID after inspecting
+  the captured accessibility hierarchy.
+- UI-v2 failed original-tail navigation; review found the fixture used raw message
+  ID `perf-message-000020` instead of rendered restore ID `transcript:20`. Root
+  corrected it; UI-v3 reached the original tail, then froze during the stream step.
+- UI-v4 repeated the stream failure on the same build while root captured a bounded
+  main-thread sample. UI-v5 still failed after switching the lab from full transcript
+  recomputation to the existing incremental row helpers. Thus full-recompute cost
+  alone was not the demonstrated cause of the persistent freeze.
+- The sample directly includes `ChatPerformanceMultiLabView.body → ChatView.init →
+  OpenChatSessionStore.gitAvailabilityViewModel → touch → accessOrder.modify →
+  ObservationRegistrar → ObservationCenter.invalidate`. Internal LRU bookkeeping
+  was observable and repeatedly invalidated the view performing the lookup.
+- New `OpenChatSessionStoreTests.testExistingGitModelLookupDoesNotInvalidateItsObservingView`
+  failed before the fix in `slice2-lru-observation-red-v1.xcresult`, demonstrating
+  unwanted observation invalidation. Root added `@ObservationIgnored` to the one
+  internal access-order field; no cache/eviction algorithm or renderer rewrite.
+  Sol independently confirmed no production UI reader depends on that field.
+- `slice2-lru-observation-green-v1.xcresult`: 40 focused tests passed, zero failed
+  or skipped, including store regression and incremental three-fixture test.
+- UI-v6 opened onboarding for the multi-lab case (cause unproven), but static10k
+  passed. Same-build UI-v7 failed multi with UI-query snapshot timeout; static10k
+  again passed. Its sample implicated SwiftUI lazy child prefetch rather than LRU.
+- Luna made each transcript ForEach item one fixed VStack child while preserving
+  message identity, row geometry and compression-card spacing. Root reviewed;
+  UI-v8 signed build passed and the multi test reached both original tail and
+  appended stream marker. After swipe-away and arrow return it became blank and
+  failed the 25-second visible-marker assertion. Static10k passed. Root inspected
+  `slice2-multi-chat-ui-v8-attachments/F7994C2C-57C8-4BA4-84A4-FDC2387CC002.png`
+  (successful append), video-derived `slice2-multi-chat-ui-v8-away.png`, and blank
+  `slice2-multi-chat-ui-v8-progress.png`. V8 sample was mostly idle, not a CPU loop.
+- UI-v9 lab-only scroll/row-frame diagnostics reproduced the arrow failure:
+  distance=0 while latest frame was nil and no rows were realized, followed by
+  estimated maximum offset1.72M→4.82M. This confirms false metric convergence,
+  without claiming to identify every SwiftUI internal cause of the estimate jump.
+- UI-v10 first targeted the concrete last row, then the sentinel. Chat1/2 completed
+  append/away/arrow, but chat3 failed that same arrow assertion; static10k passed.
+  V10 metrics showed another estimate jump4.4M→10.6M and no realized latest row.
+- UI-v11 failed compilation on root's helper argument order; corrected. UI-v12
+  tested bounded repeated latest-row targeting until visible, and
+  requiring both near-bottom metrics and visible latest-row/bottom-anchor geometry
+  to finish settlement. Luna authored pure policy tests; root owns integration.
+  but still failed multi/static passed. UI-v13 moved explicit identity to the outer
+  lazy row; CPU-heavy prefetch returned and multi failed, static passed. Reverted.
+- UI-v14 scoped arrow animation to a persistent overlay container, excluding the
+  ScrollView; multi still failed/static passed. UI-v15 additionally deferred
+  automatic-follow and composer expansion until explicit navigation had reached
+  the visible tail, and stopped raw near-bottom callbacks from racing that request.
+  **UI-v15 passed both tests, zero failures/skips**, including all three10k chats'
+  append/away/arrow/revisit and the original static lab. Root inspected successful
+  chat1/chat3 arrow screenshots `80F8F79A-582D-4926-8FEE-BA73E4BCA40B.png` and
+  `FD8C58E4-FC49-4EA9-BAEA-D1DE0F87F374.png` in the v15 attachments directory.
+  Synthetic paced append durations .610/.334/.339s include scheduled waits and
+  produced zero full transcript recomputations; these are not FPS measurements.
+- UI-v16 reruns with noisy geometry logs removed and the tested pure visibility
+  helper wired. Final full-native suite, broader live performance/device gates
+  remain pending. Failed evidence retained; no functional assertion removed.
+
+### Completed September 5 performance/cross-client checkpoint
+
+- UI-v16 completed: **2 passed, zero failed/skipped**, repeating v15 after cleanup.
+  Evidence `slice2-multi-chat-ui-v16.xcresult`, log, attachments and diagnostics.
+  Root inspected chat2 arrow screenshot `DBB54DE9-19E8-47ED-8DED-66EC811E7C1C.png`.
+  Paced synthetic append .565/.340/.350s; zero full recomputations, not FPS.
+- `slice2-performance-full-native-v1.xcresult`: **1,999 passed, zero failed,
+  7 intentional opt-in skips**, original unrestricted HermesMobile suite. Signed
+  Debug build, owned Simulator, parallel testing NO, jobs2, diagnostics never,
+  default allowance60. Production sources unchanged after this suite.
+- Real TUI created durable `20260905_122641_f43016` with exact
+  `SEMREH_TUI_CROSS_CLIENT_1` / `SEMREH_SLICE1_ACK` pair. Production UI v3
+  used actual app URL opening and asserted both rows visible/hittable: **1 passed**.
+  Root inspected `slice2-cross-client-production-ui-v3-attachments/6BF97A8F-C566-420C-B9BD-736086EA1CB5.png`.
+  Manual `slice2-tui-created-opened-in-semreh-v1.png` shows only an iOS open
+  confirmation and does not establish this gate.
+- Production UI v2: **1 passed**, actual normal new-chat/send. Before/after REST
+  found exactly one new durable session `20260905_132840_b23b51`, exact
+  `SEMREH_SLICE1_PROMPT` / `SEMREH_SLICE1_ACK` pair. Guarded actual TUI
+  `scripts/direct_hermes_tui.py --backend-sha 8c50f84522a755d40346e73701a6847fbdde20ec
+  --resume-stored-id 20260905_132840_b23b51` rendered that pair twice; normal
+  `/exit`, code0. Capture `slice2-semreh-created-opened-in-tui-v1.txt`.
+  This is bidirectional literal TUI/native-app evidence, not Hermes Desktop or
+  shared-live-gateway proof: TUI owns a stdio gateway sharing disposable state.
+- Cross-client production UI v1 failed a harness assumption: persisted auth had
+  expired and the app legitimately displayed Connect with session-expiry message.
+  Harness now accepts this state before normal login; no production auth changes.
+  v2/v3 logs, result bundles, attachments and v3 exported diagnostics retained.
+  Generate live plan with `direct_hermes_ios_smoke.py --https --slice2-ui
+  --tui-created-session-id 20260905_122641_f43016 --development-backend-sha
+  8c50f84522a755d40346e73701a6847fbdde20ec`, then owned Simulator
+  test-without-building, diagnostics never, allowance180, fresh evidence paths.
+- Root reviewed/corrected Luna's queued-steer probe, then ran
+  `PYTHONPATH=scripts python -m unittest scripts.test_direct_hermes_steer_probe
+  scripts.test_direct_hermes_identity_probe -v`: **9 passed**. Live
+  `scripts/direct_hermes_steer_probe.py --backend-sha 8c50f84522a755d40346e73701a6847fbdde20ec
+  --output <evidence>/slice2-steer-live-v1.json` passed exact three pairs,
+  warmup, normal original/followup terminals, queued correction persisted once,
+  no cleanup errors and unchanged fixture config. Durable `20260905_133411_6f477a`.
+  Pinned session.steer wire returns queued/rejected; accepted is compatibility
+  enum coverage, not a claimed live wire status. No tool-batch/redirect proof.
+- Artifact audit `slice2-performance-cross-client-final-audit-v1.log`: 99,524
+  files scanned, zero flagged paths. Known fixture secrets/obvious bearer formats
+  only; private quarantine and runtime credentials/config/DB remain excluded and
+  are not claimed sanitized. No personal state or routes changed.
+- Slice 2 remains open: actual rotated compression/continuation, broader
+  performance edges, independent clean-checkout rerun and physical iPhone gate.

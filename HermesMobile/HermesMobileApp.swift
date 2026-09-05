@@ -57,6 +57,11 @@ struct HermesMobileApp: App {
                     ChatPerformanceLabView()
                 }
                 .semrehAppTheme()
+            } else if ProcessInfo.processInfo.arguments.contains("--chat-performance-multi-lab") {
+                NavigationStack {
+                    ChatPerformanceMultiLabView()
+                }
+                .semrehAppTheme()
             } else if ProcessInfo.processInfo.arguments.contains("--sidebar-brand-lab") {
                 SidebarBrandLabView()
                     .semrehAppTheme()
@@ -102,6 +107,70 @@ private struct ChatPerformanceLabView: View {
             retainedViewModel: fixture.viewModel,
             disablesExternalLifecycle: true
         )
+    }
+}
+
+private struct ChatPerformanceMultiLabView: View {
+    @State private var fixtures: [(
+        session: SessionSummary,
+        server: URL,
+        viewModel: ChatViewModel
+    )]
+    @State private var selectedChat = 0
+    @State private var isStreamingFixture = false
+    @State private var streamingTask: Task<Void, Never>?
+
+    init() {
+        _fixtures = State(initialValue: ChatViewModel.makePerformanceLabFixtures())
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                ForEach(fixtures.indices, id: \.self) { index in
+                    Button("Performance chat \(index + 1)") {
+                        selectedChat = index
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(selectedChat == index ? .accentColor : .secondary)
+                    .accessibilityLabel("Performance chat \(index + 1)")
+                    .accessibilityAddTraits(selectedChat == index ? .isSelected : [])
+                }
+
+                Button("Stream test turn") {
+                    guard !isStreamingFixture else { return }
+                    isStreamingFixture = true
+                    let viewModel = fixtures[selectedChat].viewModel
+                    streamingTask = Task { @MainActor in
+                        await viewModel.appendPerformanceLabStreamingTurn()
+                        isStreamingFixture = false
+                        streamingTask = nil
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isStreamingFixture)
+                .accessibilityLabel("Stream test turn")
+                .accessibilityValue(isStreamingFixture ? "Streaming" : "Ready")
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+
+            let fixture = fixtures[selectedChat]
+            ChatView(
+                session: fixture.session,
+                server: fixture.server,
+                onAPIError: { _ in },
+                loadsInitialMessages: false,
+                retainedViewModel: fixture.viewModel,
+                disablesExternalLifecycle: true
+            )
+            .id(fixture.session.id)
+        }
+        .onDisappear {
+            streamingTask?.cancel()
+            streamingTask = nil
+            isStreamingFixture = false
+        }
     }
 }
 
