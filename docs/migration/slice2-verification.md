@@ -41,9 +41,14 @@ Evidence directory: `/Users/maurice/workspace/semreh-slice1-evidence`.
 - `slice2-foundation-full-v1.xcresult`: 1,932 passed, zero failed; five deliberately
   opt-in live/cookie tests skipped in the default suite. The new live controller
   test was run separately above with zero skips.
+- `slice2-foundation-full-v2.xcresult`: 1,936 passed, zero failed, the same five
+  intentional opt-in skips, after adding the renderer value mapper. Its tests
+  cover whitespace, stable tool IDs, actual gateway usage fields, and distinguishing
+  control/unknown frames from terminal completion. UI consumers are not wired yet.
 - Known-secret/bearer-pattern audit scanned 34,921 artifact/log/doc files,
   including exported full-suite and live-test console diagnostics: zero flags.
   This heuristic does not prove absence of every possible opaque secret.
+- Repeated audit including full-v2 exported diagnostics: 40,530 files, zero flags.
 
 ### Reproducible commands
 
