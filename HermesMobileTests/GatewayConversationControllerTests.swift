@@ -338,6 +338,61 @@ final class GatewayConversationControllerTests: XCTestCase {
         await runtime.stop()
     }
 
+    func testOlderResponseCrossingNewTailReadIsRejectedWithoutApplyingStaleCursor() async throws {
+        let runtime = try makeRuntime(ControllerFakeTransport())
+        let olderStarted = AsyncGate()
+        let releaseOlder = AsyncGate()
+        let controller = makeController(runtime: runtime, storedID: "durable-1") { id, _, _, offset in
+            if offset > 0 {
+                await olderStarted.release()
+                await releaseOlder.wait()
+            }
+            return self.page(id)
+        }
+        var appliedKinds: [Bool] = []
+        controller.onTranscript = { _, older in appliedKinds.append(older) }
+        let olderRead = Task { try await controller.refresh(offset: 120) }
+        await olderStarted.wait()
+        try await controller.refresh()
+        await releaseOlder.release()
+        do {
+            try await olderRead.value
+            XCTFail("An old backwards cursor must not cross a new tail read")
+        } catch DirectSessionError.staleOperation { }
+        XCTAssertEqual(appliedKinds, [false])
+        // The reader can explicitly retry with the current cursor.
+        try await controller.refresh(offset: 120)
+        XCTAssertEqual(appliedKinds, [false, true])
+        await runtime.stop()
+    }
+
+    func testSlowTailResponseCannotOverwriteMoreRecentTailRead() async throws {
+        let runtime = try makeRuntime(ControllerFakeTransport())
+        let firstStarted = AsyncGate()
+        let releaseFirst = AsyncGate()
+        var readCount = 0
+        let controller = makeController(runtime: runtime, storedID: "durable-1") { id, _, _, _ in
+            readCount += 1
+            if readCount == 1 {
+                await firstStarted.release()
+                await releaseFirst.wait()
+            }
+            return self.page(id)
+        }
+        var appliedCount = 0
+        controller.onTranscript = { _, _ in appliedCount += 1 }
+        let firstRead = Task { try await controller.refresh() }
+        await firstStarted.wait()
+        try await controller.refresh()
+        await releaseFirst.release()
+        do {
+            try await firstRead.value
+            XCTFail("A superseded tail response must not replace newer history")
+        } catch DirectSessionError.staleOperation { }
+        XCTAssertEqual(appliedCount, 1)
+        await runtime.stop()
+    }
+
     private func makeRuntime(_ fake: ControllerFakeTransport) throws -> HermesServerRuntime {
         try HermesServerRuntime(origin: URL(string: "https://fixture.example")!) { sink in
             fake.installSink(sink)

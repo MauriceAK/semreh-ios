@@ -438,7 +438,8 @@ final class ChatViewModel {
         let offset = max(0, messagesOffset)
         let transcriptMessage = TranscriptMessage(
             loadedIndex: loadedIndex,
-            renderID: "transcript:\(offset + loadedIndex)",
+            renderID: Self.transcriptRenderID(for: message, absoluteIndex: offset + loadedIndex,
+                                               preferDurableID: usesDirectGateway),
             anchorID: TranscriptTurnClassifier.anchorID(
                 for: message,
                 at: loadedIndex,
@@ -473,7 +474,9 @@ final class ChatViewModel {
 #endif
         displayedTranscriptMessages = Self.transcriptMessages(
             from: messages,
-            messageOffset: messagesOffset
+            messageOffset: messagesOffset,
+            hidingStreamingAssistantID: nil,
+            preferDurableIDs: usesDirectGateway
         )
         displayedTranscriptRowIndexByLoadedIndex = Dictionary(
             uniqueKeysWithValues: displayedTranscriptMessages.enumerated().map { rowIndex, message in
@@ -1010,6 +1013,8 @@ final class ChatViewModel {
             try await controller.open()
             if wasAttached, controller.runState == .idle { try await controller.refresh() }
             errorMessage = nil
+        } catch DirectSessionError.staleOperation {
+            // A newer turn/read owns presentation; this is not a load failure.
         } catch {
             lastError = error
             errorMessage = "Could not load this Hermes conversation."
@@ -1028,6 +1033,10 @@ final class ChatViewModel {
             let controller = try await ensureDirectConversation()
             try await controller.refresh(limit: 120, offset: directOlderOffset)
             return messages.count > count
+        } catch DirectSessionError.staleOperation {
+            // A newer tail/rebind won the race. Its cursor is authoritative;
+            // leave the current rows in place and allow another explicit page.
+            return false
         } catch { lastError = error; errorMessage = "Could not load older messages."; return false }
     }
 
@@ -1036,18 +1045,33 @@ final class ChatViewModel {
         flushPendingStreamingContent()
         resetPendingStreamingContentBuffers()
         let canonicalChanged = directHistoryID != nil && directHistoryID != page.sessionID
+        let previouslyHadOlder = hasOlderMessages
+        var retainedPrefix: [ChatMessage] = []
+        if !older, directHistoryID == page.sessionID,
+           let firstID = page.messages.first?.messageId,
+           let overlap = messages.firstIndex(where: { $0.messageId == firstID }) {
+            // The REST page owns its suffix, not all previously loaded history.
+            // Only a durable overlap proves continuity. Never union a disjoint
+            // tail, retain optimistic rows, or carry history across a new tip.
+            let prefix = messages[..<overlap]
+            let isCanonicalPrefix = prefix.allSatisfy { message in
+                guard let id = message.messageId else { return false }
+                return !id.isEmpty && !id.hasPrefix("local-")
+            }
+            if isCanonicalPrefix { retainedPrefix = Array(prefix) }
+        }
         adoptDirectID(page.sessionID)
         directHistoryID = page.sessionID
         withBatchedTranscriptDerivedState {
             messages = older && !canonicalChanged
-                ? Self.prependingOlderMessages(page.messages, to: messages) : page.messages
+                ? Self.prependingOlderMessages(page.messages, to: messages) : retainedPrefix + page.messages
             // WebUI's forward absolute offset is not the direct backwards cursor.
             // Stable durable row IDs own transcript identity on this path.
             messagesOffset = 0
         }
         let returned = page.pagination?.returned ?? page.messages.count
-        directOlderOffset = (page.pagination?.offset ?? (older ? directOlderOffset : 0)) + returned
-        hasOlderMessages = returned >= (page.pagination?.limit ?? 120)
+        directOlderOffset = (page.pagination?.offset ?? (older ? directOlderOffset : 0)) + returned + retainedPrefix.count
+        hasOlderMessages = !retainedPrefix.isEmpty ? previouslyHadOlder : returned >= (page.pagination?.limit ?? 120)
         setCompletedToolCallGroups(ToolCallGroup.groups(persistedToolCalls: [], messages: messages, messageOffset: 0))
         completedReasoningGroups = []
         streamingAssistantMessageID = nil
@@ -7135,7 +7159,8 @@ extension ChatViewModel {
     nonisolated static func transcriptMessages(
         from messages: [ChatMessage],
         messageOffset: Int? = nil,
-        hidingStreamingAssistantID streamingAssistantID: String?
+        hidingStreamingAssistantID streamingAssistantID: String?,
+        preferDurableIDs: Bool = false
     ) -> [TranscriptMessage] {
         let offset = max(0, messageOffset ?? 0)
         var transcriptMessages: [TranscriptMessage] = []
@@ -7154,7 +7179,8 @@ extension ChatViewModel {
                 messageOffset: messageOffset
             )
             let absoluteIndex = offset + loadedIndex
-            let renderID = "transcript:\(absoluteIndex)"
+            let renderID = transcriptRenderID(for: message, absoluteIndex: absoluteIndex,
+                                              preferDurableID: preferDurableIDs)
 
             transcriptMessages.append(TranscriptMessage(
                 loadedIndex: loadedIndex,
@@ -7165,6 +7191,18 @@ extension ChatViewModel {
         }
 
         return transcriptMessages
+    }
+
+    nonisolated private static func transcriptRenderID(
+        for message: ChatMessage, absoluteIndex: Int, preferDurableID: Bool
+    ) -> String {
+        // Direct pages have backwards cursors, not WebUI's stable absolute
+        // offsets. Position-based IDs would retarget scroll anchors on prepend.
+        // Keep legacy identity unchanged until that path is removed in Slice 4.
+        if preferDurableID, let id = message.messageId, !id.isEmpty {
+            return "transcript:row:\(id)"
+        }
+        return "transcript:\(absoluteIndex)"
     }
 
     nonisolated static func compressionReferenceCard(
@@ -7658,8 +7696,10 @@ extension ChatViewModel {
                 ```swift
                 \(String(repeating: "let value = Array(0..<1_000).reduce(0, +)\n", count: 320))
                 ```
+
+                End of 10,000-row conversation.
                 """
-            } else if role == "assistant", index.isMultiple(of: 250) {
+            } else if role == "assistant", index.isMultiple(of: 251) {
                 content = """
                 ### Checkpoint \(index)
 

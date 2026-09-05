@@ -248,3 +248,84 @@ Still outstanding: existing-chat controls/disposition decision, late-provider
 observer cancellation and slow recovery/sidebar UI stress coverage, latest/older
 ordering, continuation/cross-client matrix, complete UI/cache/Live Activity
 walkthrough, physical-device responsiveness, and independent final gate rerun.
+
+## Long-chat paging and UI verification checkpoint, September 5
+
+Slice 2 remains incomplete. Maurice authorized several very long synthetic
+conversations and responsiveness checks before the slice gate. He also approved
+bounded existing-session reasoning backend work in a separate development
+checkout/runtime; that work remains outstanding, not blocked on another approval.
+The clean backend pin and personal Hermes deployment are unchanged.
+
+Implemented:
+
+- Direct transcript render IDs now use durable message IDs, both for full
+  projection and incremental live-row updates. The previous index-based IDs
+  changed on prepend because direct paging has no stable forward absolute offset;
+  this could retarget the saved scroll anchor. Legacy row IDs are unchanged.
+- An overlapping, same-session canonical tail replaces its authoritative suffix
+  without dropping the already-loaded durable prefix. Deleted rows within that
+  suffix are removed, optimistic rows replaced, and the backward cursor adjusted.
+  Disjoint tails reset to bounded canonical history rather than inventing
+  continuity. Retained prefix rows are cached, not revalidated by the tail read.
+- Latest-read generations reject superseded tail responses and older pages that
+  cross a new tail read. Supersession does not show a misleading connection error.
+- Generated fixtures provide three independent 2,000-row histories with Markdown
+  and code. These are synthetic test inputs, not captured backend fixtures. Tests
+  cover full paging, switching/reopening owners, stable render IDs, streamed-turn
+  reconciliation to exactly 2,002 durable rows, removed suffix/cursor alignment,
+  and disjoint-tail reset. Paging loops are bounded and fail on stalled progress.
+- A separate opt-in `HermesMobileUIVerification` scheme and native UI-test target
+  exercise the existing server-free 10,000-row DEBUG lab with real swipe/tap
+  automation. The default unit-test scheme is unchanged. The lab gained an end
+  marker after its 320-line code block and a corrected mixed-Markdown seed branch.
+
+Verification (artifacts under the evidence root named above):
+
+- `slice2-long-chat-focused-v2.xcresult`: 87 passed, zero failures/skips. Same
+  signed test command, selecting ChatViewModelDirectGatewayTests,
+  GatewayConversationControllerTests, ChatViewModelStreamingPaceTests, and
+  ChatScrollPolicyTests. Export: `slice2-long-chat-focused-v2-diagnostics`.
+- `slice2-long-chat-full-v1.xcresult`: 1,968 passed, zero failed, six existing
+  intentional opt-in skips. Same signed full-suite command as previous checkpoints.
+- `slice2-long-chat-native-live-v1.xcresult`: one passed, zero failures/skips,
+  using the existing `--https --slice2-native` generator and signed
+  test-without-building command. Actual disposable pinned backend/proxy,
+  production VM/runtime, inventory/create/send/canonical durable rows/reopen;
+  deterministic provider only, not a long-history real-backend or UI test.
+- `slice2-long-chat-ui-v3.xcresult`: one passed, zero failures/skips. Same signed
+  Simulator/destination/DerivedData command with scheme
+  `HermesMobileUIVerification` and a 120-second test allowance. Assertions require
+  a real transcript swipe, the bottom-arrow tap, a visible/hittable end marker,
+  and disappearance of the arrow. Root inspected all three screenshots in
+  `slice2-long-chat-ui-v3-attachments`: before scroll, after swipe, and at the
+  actual end of the large code block. This is real UI interaction, not just VM
+  assertions, but still a static single-chat render lab, not a direct-gateway
+  multi-chat/send/tab-switch or physical-device performance gate.
+- Failed evidence retained: focused-v1 failed test-fixture compilation because
+  optional query values produced String??. Root corrected the fixture; parser
+  success and worker review had not established compilation. UI-v1 reached
+  welcome; an explicit app termination now precedes launch. UI-v2 reached the
+  lab but incorrectly asserted the SwiftUI grouping container was hittable;
+  the test now targets the actual scroll view. No product gate was skipped.
+- Exported full/UI/live diagnostics are `slice2-long-chat-full-v1-diagnostics`,
+  `slice2-long-chat-ui-v3-diagnostics`, and
+  `slice2-long-chat-native-live-v1-diagnostics`. Artifact audit: 81,207 files,
+  zero known-test-secret/obvious-bearer flags. This remains a heuristic, not
+  proof of all opaque-secret absence. Guarded model/backend/proxy processes
+  60553/60570/60593 were TERM-stopped and absent afterward; ports 18791/18792 free.
+
+Luna High implemented bounded fixture/UI-test work and found the direct row-ID
+issue during read-only review. Root implemented the production fixes, strengthened
+the regression cases, corrected fixture compilation and UI-test targeting,
+independently reviewed screenshots, and ran all tests. No model upgrade was used
+for this checkpoint. Review/parse claims were not treated as executable proof.
+
+Remaining performance work: multiple direct chats and tab changes while actively
+streaming in native UI, repeated scroll/arrow/older-page cycles, measurements of
+frame hitches and memory, and physical-device acceptance. The existing 1k/10k VM
+hot-path scaling test passed, but does not measure SwiftUI diff/layout or FPS.
+Disjoint-history/large external-append presentation still needs a deliberate
+recovery UX; the current safe reset is not proof of uninterrupted scroll position.
+This checkpoint does not diagnose every reported legacy WebUI glitch or claim
+overall smoothness is solved. No renderer rewrite or new runtime owner was added.

@@ -202,6 +202,212 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         await runtime.stop()
     }
 
+    func testLongHistoriesPageChronologicallyAcrossThreeChatsAndReopenWithoutCrossRouting() async throws {
+        let fixture = ChatLongHistoryFixture(chatIDs: ["chat-a", "chat-b", "chat-c"])
+        let fake = ChatLongFixtureTransport(fixture: fixture)
+        let runtime = try makeRuntime(fake)
+        let client = makeLongHistoryClient(fixture: fixture)
+
+        let first = makeViewModel(client: client, runtime: runtime, sessionID: "chat-a")
+        await first.loadMessages()
+        XCTAssertEqual(first.messages.count, 120)
+        XCTAssertEqual(first.messages.first?.messageId, "chat-a-row-1880")
+        XCTAssertEqual(first.messages.last?.messageId, "chat-a-row-1999")
+        XCTAssertTrue(first.messages.allSatisfy { $0.messageId?.hasPrefix("chat-a-") == true })
+        let firstTailRowID = try XCTUnwrap(first.messages.first?.messageId)
+        let firstTailRenderID = try XCTUnwrap(
+            first.displayedTranscriptMessages.first { $0.message.messageId == firstTailRowID }?.renderID
+        )
+
+        var firstOlderPageCount = 0
+        while first.hasOlderMessages {
+            guard firstOlderPageCount < 20 else {
+                XCTFail("Long-history cursor exceeded the bounded 20-page guard")
+                throw ChatLongFixtureError.pagingLimitExceeded
+            }
+            let countBeforePage = first.messages.count
+            let didLoad = await first.loadOlderMessages()
+            guard didLoad, first.messages.count > countBeforePage else {
+                XCTFail("Long-history older-page load made no progress")
+                throw ChatLongFixtureError.pagingStalled
+            }
+            firstOlderPageCount += 1
+            if firstOlderPageCount == 1 {
+                let renderIDAfterPrepend = try XCTUnwrap(
+                    first.displayedTranscriptMessages.first { $0.message.messageId == firstTailRowID }?.renderID
+                )
+                XCTAssertEqual(renderIDAfterPrepend, firstTailRenderID,
+                    "Prepending an older page must preserve the first tail row's render ID")
+            }
+        }
+        XCTAssertEqual(firstOlderPageCount, 16)
+        XCTAssertEqual(first.messages.count, 2_000)
+        XCTAssertEqual(first.messages.compactMap(\.messageId), fixture.messageIDs(for: "chat-a"))
+        XCTAssertTrue(first.messages[0].content?.contains("```swift") == true)
+        XCTAssertTrue(first.messages[0].content?.contains("**markdown**") == true)
+
+        // Switching to two other long conversations must not reuse the first
+        // controller's transcript or cursor. One older page is enough to prove
+        // both the latest and backwards-offset requests are scoped correctly.
+        let second = makeViewModel(client: client, runtime: runtime, sessionID: "chat-b")
+        await second.loadMessages()
+        XCTAssertEqual(second.messages.compactMap(\.messageId), Array(fixture.messageIDs(for: "chat-b").suffix(120)))
+        let didLoadSecondOlderPage = await second.loadOlderMessages()
+        XCTAssertTrue(didLoadSecondOlderPage)
+        XCTAssertEqual(second.messages.count, 240)
+        XCTAssertTrue(second.messages.allSatisfy { $0.messageId?.hasPrefix("chat-b-") == true })
+        XCTAssertFalse(second.messages.contains { $0.messageId?.hasPrefix("chat-a-") == true })
+
+        let third = makeViewModel(client: client, runtime: runtime, sessionID: "chat-c")
+        await third.loadMessages()
+        XCTAssertEqual(third.messages.count, 120)
+        XCTAssertTrue(third.messages.allSatisfy { $0.messageId?.hasPrefix("chat-c-") == true })
+        XCTAssertFalse(third.messages.contains { $0.messageId?.hasPrefix("chat-a-") == true })
+        XCTAssertFalse(third.messages.contains { $0.messageId?.hasPrefix("chat-b-") == true })
+
+        // Reopening B in a fresh VM must start from B's bounded latest page,
+        // then prepend B's older page rather than inheriting A/C state.
+        await second.disposeDirectConversation()
+        let reopened = makeViewModel(client: client, runtime: runtime, sessionID: "chat-b")
+        await reopened.loadMessages()
+        XCTAssertEqual(reopened.messages.compactMap(\.messageId), Array(fixture.messageIDs(for: "chat-b").suffix(120)))
+        let didLoadReopenedOlderPage = await reopened.loadOlderMessages()
+        XCTAssertTrue(didLoadReopenedOlderPage)
+        XCTAssertEqual(reopened.messages.count, 240)
+        XCTAssertEqual(reopened.messages.compactMap(\.messageId), Array(fixture.messageIDs(for: "chat-b").suffix(240)))
+
+        let transcriptRequests = fake.restRequests()
+        XCTAssertTrue(transcriptRequests.count >= 1 + 16 + 1 + 1 + 1 + 1,
+            "Expected bounded latest and older reads for A, B, C, and reopened B")
+        for request in transcriptRequests {
+            XCTAssertEqual(request.limit, 120)
+            XCTAssertEqual(request.order, "latest")
+            XCTAssertEqual(request.includeCompacted, "true")
+            XCTAssertEqual(request.profile, "work")
+        }
+        XCTAssertEqual(Array(transcriptRequests.filter { $0.chatID == "chat-a" }.map(\.offset).prefix(3)), [0, 120, 240])
+        XCTAssertEqual(Array(transcriptRequests.filter { $0.chatID == "chat-b" }.map(\.offset).prefix(3)), [0, 120, 0])
+        XCTAssertEqual(transcriptRequests.filter { $0.chatID == "chat-c" }.count, 1)
+
+        await first.disposeDirectConversation()
+        await third.disposeDirectConversation()
+        await reopened.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testLongPagedHistoryKeepsOlderRowsWhenStreamingCompletionReconcilesLatestTail() async throws {
+        let fixture = ChatLongHistoryFixture(chatIDs: ["chat-send"])
+        let fake = ChatLongFixtureTransport(fixture: fixture)
+        let runtime = try makeRuntime(fake)
+        let client = makeLongHistoryClient(fixture: fixture)
+        let viewModel = makeViewModel(client: client, runtime: runtime, sessionID: "chat-send")
+
+        await viewModel.loadMessages()
+        var olderPageCount = 0
+        while viewModel.hasOlderMessages {
+            guard olderPageCount < 20 else {
+                XCTFail("Long-history send fixture exceeded the bounded 20-page guard")
+                throw ChatLongFixtureError.pagingLimitExceeded
+            }
+            let countBeforePage = viewModel.messages.count
+            let didLoad = await viewModel.loadOlderMessages()
+            guard didLoad, viewModel.messages.count > countBeforePage else {
+                XCTFail("Long-history send fixture older-page load made no progress")
+                throw ChatLongFixtureError.pagingStalled
+            }
+            olderPageCount += 1
+        }
+        XCTAssertEqual(olderPageCount, 16)
+        XCTAssertEqual(viewModel.messages.count, 2_000)
+        let originalIDs = viewModel.messages.compactMap(\.messageId)
+        XCTAssertEqual(originalIDs, fixture.messageIDs(for: "chat-send"))
+        let originalOldestRenderID = try XCTUnwrap(
+            viewModel.displayedTranscriptMessages.first { $0.message.messageId == originalIDs.first }?.renderID
+        )
+
+        let didSend = await viewModel.sendMessage("new question with **markdown** and `code`")
+        XCTAssertTrue(didSend)
+        await waitUntil { viewModel.messages.contains { $0.content == "streamed answer" } }
+        XCTAssertEqual(viewModel.messages.filter { $0.content == "new question with **markdown** and `code`" }.count, 1)
+        XCTAssertEqual(viewModel.messages.filter { $0.content == "streamed answer" }.count, 1)
+
+        fake.emitCompletion(for: "chat-send")
+        await waitUntil {
+            viewModel.messages.contains { $0.messageId == "chat-send-row-2001" }
+        }
+
+        let finalIDs = viewModel.messages.compactMap(\.messageId)
+        XCTAssertEqual(finalIDs.count, 2_002)
+        XCTAssertEqual(Set(finalIDs).count, 2_002, "Canonical completion must not duplicate durable rows")
+        XCTAssertEqual(Array(finalIDs.prefix(2_000)), originalIDs,
+            "A latest-tail reconcile must retain every already-loaded older row")
+        XCTAssertEqual(finalIDs.suffix(2), ["chat-send-row-2000", "chat-send-row-2001"])
+        XCTAssertEqual(viewModel.messages.filter { $0.content == "new question with **markdown** and `code`" }.count, 1)
+        XCTAssertEqual(viewModel.messages.filter { $0.content == "streamed answer" }.count, 0,
+            "The durable terminal answer replaces the optimistic streamed row")
+        XCTAssertEqual(viewModel.messages.last?.content, "canonical terminal answer")
+        let reconciledOldestRenderID = try XCTUnwrap(
+            viewModel.displayedTranscriptMessages.first { $0.message.messageId == originalIDs.first }?.renderID
+        )
+        XCTAssertEqual(reconciledOldestRenderID, originalOldestRenderID,
+            "Latest-tail completion reconciliation must preserve an older row's render ID")
+
+        let requests = fake.restRequests().filter { $0.chatID == "chat-send" }
+        XCTAssertTrue(requests.contains { $0.offset == 0 && $0.limit == 120 })
+        XCTAssertTrue(requests.contains { $0.offset == 1_920 && $0.limit == 120 })
+        XCTAssertTrue(requests.filter { $0.offset == 0 }.allSatisfy { $0.order == "latest" })
+
+        await viewModel.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testTailRefreshHonorsRemovedSuffixAndKeepsBackwardCursorAligned() async throws {
+        let fixture = ChatLongHistoryFixture(chatIDs: ["chat-delete"])
+        let fake = ChatLongFixtureTransport(fixture: fixture)
+        let runtime = try makeRuntime(fake)
+        let vm = makeViewModel(client: makeLongHistoryClient(fixture: fixture), runtime: runtime, sessionID: "chat-delete")
+        await vm.loadMessages()
+        for _ in 0..<2 {
+            let loaded = await vm.loadOlderMessages()
+            XCTAssertTrue(loaded)
+        }
+        XCTAssertEqual(vm.messages.count, 360)
+        let firstID = vm.messages.first?.messageId
+        fixture.removeNewestRows(2, from: "chat-delete")
+        await vm.loadMessages()
+        XCTAssertEqual(vm.messages.count, 358)
+        XCTAssertEqual(vm.messages.first?.messageId, firstID)
+        XCTAssertEqual(vm.messages.last?.messageId, "chat-delete-row-1997")
+        XCTAssertFalse(vm.messages.contains { $0.messageId == "chat-delete-row-1998" })
+        let loaded = await vm.loadOlderMessages()
+        XCTAssertTrue(loaded)
+        XCTAssertEqual(fixture.requests().last?.offset, 358)
+        XCTAssertEqual(vm.messages.compactMap(\.messageId), Array(fixture.messageIDs(for: "chat-delete").suffix(478)))
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testDisjointCanonicalTailDoesNotInventContinuityWithPreviouslyLoadedRows() async throws {
+        let fixture = ChatLongHistoryFixture(chatIDs: ["chat-replaced"])
+        let fake = ChatLongFixtureTransport(fixture: fixture)
+        let runtime = try makeRuntime(fake)
+        let vm = makeViewModel(client: makeLongHistoryClient(fixture: fixture), runtime: runtime, sessionID: "chat-replaced")
+        await vm.loadMessages()
+        let loaded = await vm.loadOlderMessages()
+        XCTAssertTrue(loaded)
+        fixture.replaceRowIdentities(in: "chat-replaced")
+        await vm.loadMessages()
+        // No overlap means we cannot claim the old window still belongs to
+        // this transcript. Reset to a bounded canonical tail, never blind-union.
+        XCTAssertEqual(vm.messages.compactMap(\.messageId), Array(fixture.messageIDs(for: "chat-replaced").suffix(120)))
+        XCTAssertTrue(vm.hasOlderMessages)
+        let reloaded = await vm.loadOlderMessages()
+        XCTAssertTrue(reloaded)
+        XCTAssertEqual(fixture.requests().last?.offset, 120)
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
     func testRejectedDirectSteerDoesNotInterruptOrResendPrompt() async throws {
         let fake = ChatDirectFakeTransport()
         fake.setSteerResponse(.object(["status": .string("rejected")]))
@@ -274,6 +480,26 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         }
     }
 
+    private func makeRuntime(_ fake: ChatLongFixtureTransport) throws -> HermesServerRuntime {
+        try HermesServerRuntime(origin: testServer) { sink in
+            fake.installSink(sink)
+            return fake
+        }
+    }
+
+    private func makeLongHistoryClient(fixture: ChatLongHistoryFixture) -> APIClient {
+        makeClient { request in
+            guard request.url?.path.contains("/api/sessions/") == true,
+                  request.url?.path.hasSuffix("/messages") == true,
+                  let chatID = request.url?.path.split(separator: "/").dropLast().last.map(String.init)
+            else {
+                XCTFail("Unexpected long-history REST path: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+            return fixture.response(for: request, chatID: chatID)
+        }
+    }
+
     private func fields(_ value: JSONValue?) -> [String: JSONValue]? {
         guard let value, case .object(let fields) = value else { return nil }
         return fields
@@ -335,6 +561,11 @@ private final class ChatDirectRequestRecorder: @unchecked Sendable {
         defer { lock.unlock() }
         return paths
     }
+}
+
+private enum ChatLongFixtureError: Error {
+    case pagingLimitExceeded
+    case pagingStalled
 }
 
 private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked Sendable {
@@ -414,6 +645,210 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
     func emit(_ event: HermesGatewayEvent) {
         let sink = withLock { self.sink }
         sink?(event)
+    }
+
+    private func withLock<T>(_ body: () -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
+    }
+}
+
+/// A bounded, deterministic REST fixture for long-history direct-chat tests.
+/// It intentionally serves only 120 rows per request, including the final
+/// short page, so the tests exercise the production backwards cursor rather
+/// than a large unbounded response.
+private final class ChatLongHistoryFixture: @unchecked Sendable {
+    struct Request: Equatable {
+        let chatID: String
+        let profile: String?
+        let limit: Int?
+        let offset: Int
+        let order: String?
+        let includeCompacted: String?
+    }
+
+    private let lock = NSLock()
+    private var rowsByChat: [String: [[String: Any]]]
+    private var requestsValue: [Request] = []
+
+    init(chatIDs: [String]) {
+        rowsByChat = Dictionary(uniqueKeysWithValues: chatIDs.map { chatID in
+            let rows = (0..<2_000).map { index -> [String: Any] in
+                let content: String
+                if index % 5 == 0 {
+                    content = "\(chatID) row \(index) **markdown**\n```swift\nlet value = \(index)\n```"
+                } else if index % 2 == 0 {
+                    content = "\(chatID) row \(index) with `inline code` and **bold** text"
+                } else {
+                    content = "\(chatID) row \(index) plain chronological content"
+                }
+                return [
+                    "id": "\(chatID)-row-\(index)",
+                    "role": index.isMultiple(of: 2) ? "user" : "assistant",
+                    "content": content,
+                    "timestamp": 1_770_000_000 + index
+                ]
+            }
+            return (chatID, rows)
+        })
+    }
+
+    func messageIDs(for chatID: String) -> [String] {
+        withLock { rowsByChat[chatID, default: []].compactMap { $0["id"] as? String } }
+    }
+
+    func removeNewestRows(_ count: Int, from chatID: String) {
+        withLock { rowsByChat[chatID]?.removeLast(count) }
+    }
+
+    func replaceRowIdentities(in chatID: String) {
+        withLock {
+            rowsByChat[chatID] = rowsByChat[chatID]?.enumerated().map { index, value in
+                var row = value
+                row["id"] = "replacement-\(chatID)-\(index)"
+                return row
+            }
+        }
+    }
+
+    func appendCompletionTurn(for chatID: String) {
+        withLock {
+            guard var rows = rowsByChat[chatID], rows.count == 2_000 else { return }
+            rows.append([
+                "id": "\(chatID)-row-2000",
+                "role": "user",
+                "content": "new question with **markdown** and `code`",
+                "timestamp": 1_770_002_000
+            ])
+            rows.append([
+                "id": "\(chatID)-row-2001",
+                "role": "assistant",
+                "content": "canonical terminal answer",
+                "timestamp": 1_770_002_001
+            ])
+            rowsByChat[chatID] = rows
+        }
+    }
+
+    func response(for request: URLRequest, chatID: String) -> (HTTPURLResponse, Data) {
+        let components = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)
+        let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).compactMap { item -> (String, String)? in
+            guard let value = item.value else { return nil }
+            return (item.name, value)
+        })
+        let limit = Int(query["limit"] ?? "0")
+        let offset = max(0, Int(query["offset"] ?? "0") ?? 0)
+        let rows = withLock { rowsByChat[chatID] ?? [] }
+        let boundedLimit = min(max(limit ?? 0, 1), 120)
+        let end = max(0, rows.count - offset)
+        let start = max(0, end - boundedLimit)
+        let page = Array(rows[start..<end])
+        let result: [String: Any] = [
+            "session_id": chatID,
+            "messages": page,
+            "pagination": [
+                "limit": boundedLimit,
+                "offset": offset,
+                "order": query["order"] ?? "",
+                "returned": page.count
+            ]
+        ]
+        let data = try! JSONSerialization.data(withJSONObject: result, options: [])
+        let recorded = Request(
+            chatID: chatID,
+            profile: query["profile"],
+            limit: limit,
+            offset: offset,
+            order: query["order"],
+            includeCompacted: query["include_compacted"]
+        )
+        withLock { requestsValue.append(recorded) }
+        return (HTTPURLResponse(
+            url: request.url!, statusCode: 200, httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        )!, data)
+    }
+
+    func requests() -> [Request] {
+        withLock { requestsValue }
+    }
+
+    private func withLock<T>(_ body: () -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
+    }
+}
+
+private final class ChatLongFixtureTransport: HermesGatewayTransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private let fixture: ChatLongHistoryFixture
+    private var sink: (@Sendable (HermesGatewayEvent) -> Void)?
+    private var connected = false
+    private var generation = 0
+
+    init(fixture: ChatLongHistoryFixture) {
+        self.fixture = fixture
+    }
+
+    func installSink(_ sink: @escaping @Sendable (HermesGatewayEvent) -> Void) {
+        withLock { self.sink = sink }
+    }
+
+    func connect() async throws {
+        withLock {
+            generation += 1
+            connected = true
+        }
+    }
+
+    func close() async {
+        withLock { connected = false }
+    }
+
+    func connectionIdentifier() async -> Int? {
+        withLock { connected ? generation : nil }
+    }
+
+    func request(method: String, params: JSONValue?, timeout: Duration?) async throws -> JSONValue? {
+        let values = params.flatMap { value -> [String: JSONValue]? in
+            guard case .object(let fields) = value else { return nil }
+            return fields
+        } ?? [:]
+        switch method {
+        case "session.resume":
+            let chatID = values["session_id"]?.gatewayString ?? "unknown"
+            return .object([
+                "session_id": .string("runtime-" + chatID),
+                "session_key": .string(chatID)
+            ])
+        case "prompt.submit":
+            let runtimeID = values["session_id"]?.gatewayString ?? ""
+            let chatID = runtimeID.hasPrefix("runtime-") ? String(runtimeID.dropFirst("runtime-".count)) : runtimeID
+            fixture.appendCompletionTurn(for: chatID)
+            let sink = withLock { self.sink }
+            Task {
+                sink?(ChatDirectEventFactory.event(sessionID: runtimeID, type: "message.start", sequence: 1))
+                sink?(ChatDirectEventFactory.event(sessionID: runtimeID, type: "message.delta", sequence: 2,
+                    payload: ["text": .string("streamed answer")]))
+            }
+            return .object(["status": .string("streaming")])
+        default:
+            return .object([:])
+        }
+    }
+
+    func emitCompletion(for chatID: String) {
+        let sink = withLock { self.sink }
+        sink?(ChatDirectEventFactory.event(
+            sessionID: "runtime-" + chatID, type: "message.complete", sequence: 3,
+            payload: ["text": .string("streamed answer")]
+        ))
+    }
+
+    func restRequests() -> [ChatLongHistoryFixture.Request] {
+        fixture.requests()
     }
 
     private func withLock<T>(_ body: () -> T) -> T {

@@ -41,6 +41,7 @@ final class GatewayConversationController {
     private var bindingEpoch = 0
     private var turnEpoch = 0
     private var durableRowConfirmed: Bool
+    private var latestReadGeneration = 0
 
     init(runtime: HermesServerRuntime, storedID: String?, profile: String = "default", loadTranscript: @escaping TranscriptLoader) {
         self.runtime = runtime
@@ -173,9 +174,15 @@ final class GatewayConversationController {
         let generation = lifecycle
         let epoch = bindingEpoch
         let turn = turnEpoch
+        // Backwards offsets belong to a particular tail. An older request
+        // crossing a new tail read must not rewind its cursor or prepend stale
+        // rows. Likewise, a slow tail response cannot replace a newer one.
+        if offset == 0 { latestReadGeneration &+= 1 }
+        let readGeneration = latestReadGeneration
         let page = try await loadTranscript(storedID, profile, limit, offset)
         try checkLifecycle(generation)
-        guard epoch == bindingEpoch, turn == turnEpoch, storedID == self.storedID else { throw DirectSessionError.staleOperation }
+        guard epoch == bindingEpoch, turn == turnEpoch, storedID == self.storedID,
+              readGeneration == latestReadGeneration else { throw DirectSessionError.staleOperation }
         let canonical = page.sessionID
         guard !canonical.isEmpty else { throw DirectSessionError.invalidBinding }
         durableRowConfirmed = true
@@ -337,6 +344,7 @@ final class GatewayConversationController {
             reconciliationTask?.cancel()
             reconciliationTask = Task { [weak self] in
                 do { try await self?.refresh() }
+                catch DirectSessionError.staleOperation { /* A newer read/turn owns reconciliation. */ }
                 catch { if !Task.isCancelled { self?.onError?(error) } }
             }
             return
@@ -353,7 +361,8 @@ final class GatewayConversationController {
                 try await Task.sleep(for: .milliseconds(300))
                 guard let self, self.isVisible, !self.isEditing, self.runState == .idle else { return }
                 try await self.refresh()
-            } catch { if !Task.isCancelled { self?.onError?(error) } }
+            } catch DirectSessionError.staleOperation { /* A newer read/turn owns reconciliation. */ }
+            catch { if !Task.isCancelled { self?.onError?(error) } }
         }
     }
 }
