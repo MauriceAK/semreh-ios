@@ -43,12 +43,9 @@ struct ContentView: View {
     }
 
     private func reconcileOrphanedLiveActivities(notifiesOnCompletion: Bool) async {
-        guard case let .loggedIn(server) = authManager.state else { return }
-        await LiveActivityReconciler.reconcileOrphanedActivities(
-            server: server,
-            notifiesOnCompletion: notifiesOnCompletion,
-            preferenceEnabled: isResponseCompletionNotificationsEnabled
-        )
+        // The WebUI reconciler queries process-local stream IDs. Direct Hermes
+        // recovery is owned by the active runtime; mobile orphan reconciliation
+        // is integrated with durable identities in Slice 3, never via this route.
     }
 
     @ViewBuilder

@@ -13,6 +13,7 @@ final class OpenChatSessionStore {
     /// the lifetime of the process. Active streams are never counted as evictable.
     private let retentionPolicy: OpenChatSessionStoreRetentionPolicy
     private var viewModels: [OpenChatSessionKey: ChatViewModel] = [:]
+    private var canonicalAliases: [OpenChatSessionKey: OpenChatSessionKey] = [:]
     private var gitAvailabilityViewModels: [OpenChatSessionKey: GitWorkspaceAvailabilityViewModel] = [:]
     /// Oldest first. This is deliberately separate from the dictionary so eviction
     /// remains deterministic instead of depending on dictionary iteration order.
@@ -23,6 +24,47 @@ final class OpenChatSessionStore {
     private var refreshTasks: [String: Task<Int, Never>] = [:]
     private var deferredRetentionTrimTask: Task<Void, Never>?
     private(set) var liveOwnershipGeneration = 0
+    private var activeGatewayOrigin: URL?
+    private var gatewayRuntime: HermesServerRuntime?
+    @ObservationIgnored private var gatewayTeardown: Task<Void, Never>?
+    private var gatewayGeneration = 0
+
+    /// Authentication owns activation. A stale chat cannot reactivate a server
+    /// after sign-out or an account switch. New sockets await the old teardown.
+    func activateGateway(server: URL?) {
+        guard activeGatewayOrigin != server else { return }
+        activeGatewayOrigin = server
+        gatewayGeneration &+= 1
+        let previousTeardown = gatewayTeardown
+        let previousRuntime = gatewayRuntime
+        gatewayRuntime = nil
+        let previousModels = Array(viewModels.values)
+        viewModels.removeAll()
+        canonicalAliases.removeAll()
+        gitAvailabilityViewModels.removeAll()
+        accessOrder.removeAll()
+        refreshTasks.values.forEach { $0.cancel() }
+        refreshTasks.removeAll()
+        // Invalidate immediately, before any asynchronous close can suspend.
+        previousModels.forEach { $0.invalidateDirectConversation() }
+        gatewayTeardown = Task {
+            await previousTeardown?.value
+            for model in previousModels { await model.disposeDirectConversation() }
+            await previousRuntime?.stop()
+        }
+        noteStreamingStateChanged()
+    }
+
+    func runtime(for server: URL, client: APIClient) async throws -> HermesServerRuntime {
+        guard activeGatewayOrigin == server else { throw DirectSessionError.stopped }
+        let generation = gatewayGeneration
+        await gatewayTeardown?.value
+        guard generation == gatewayGeneration, activeGatewayOrigin == server else { throw DirectSessionError.staleOperation }
+        if let gatewayRuntime { return gatewayRuntime }
+        let created = try HermesServerRuntime(origin: server, client: client)
+        gatewayRuntime = created
+        return created
+    }
 
     var retainedSessionCountForTesting: Int { viewModels.count }
 
@@ -36,7 +78,8 @@ final class OpenChatSessionStore {
         showsLiveActivityResponseExcerpts: Bool = false,
         sessionEventStreamClient: SSEStreamingClient? = nil
     ) -> ChatViewModel {
-        let key = OpenChatSessionKey(server: server, sessionID: Self.normalizedSessionID(session))
+        let requestedKey = OpenChatSessionKey(server: server, sessionID: Self.normalizedSessionID(session), profile: session.profile)
+        let key = canonicalAliases[requestedKey] ?? requestedKey
         if let existing = viewModels[key] {
             touch(key)
             existing.markReusedFromOpenSessionStore()
@@ -51,12 +94,41 @@ final class OpenChatSessionStore {
             session: session,
             server: server,
             sessionEventStreamClient: sessionEventStreamClient,
-            showsLiveActivityResponseExcerpts: showsLiveActivityResponseExcerpts
+            showsLiveActivityResponseExcerpts: showsLiveActivityResponseExcerpts,
+            gatewayRuntimeProvider: { [weak self] client in
+                guard let self else { throw DirectSessionError.stopped }
+                return try await self.runtime(for: server, client: client)
+            }
         )
+        created.onDirectCanonicalID = { [weak self, weak created] id in
+            guard let self, let created else { return }
+            self.rekey(created, server: server, sessionID: id, profile: session.profile)
+        }
         viewModels[key] = created
         touch(key)
         trimIdleViewModels(forServer: key.server)
         return created
+    }
+
+    private func rekey(_ model: ChatViewModel, server: URL, sessionID: String, profile: String?) {
+        let target = OpenChatSessionKey(server: server, sessionID: sessionID, profile: profile)
+        // Aliases are redirects, not extra retained models or refresh entries.
+        let oldKeys = viewModels.keys.filter { viewModels[$0] === model }
+        if let displaced = viewModels[target], displaced !== model {
+            displaced.invalidateDirectConversation()
+            Task { await displaced.disposeDirectConversation() }
+        }
+        for key in oldKeys where key != target {
+            viewModels.removeValue(forKey: key)
+            if let git = gitAvailabilityViewModels.removeValue(forKey: key) { gitAvailabilityViewModels[target] = git }
+            accessOrder.removeAll { $0 == key }
+            canonicalAliases[key] = target
+            for alias in Array(canonicalAliases.keys) where canonicalAliases[alias] == key {
+                canonicalAliases[alias] = target
+            }
+        }
+        viewModels[target] = model
+        touch(target)
     }
 
     func gitAvailabilityViewModel(
@@ -64,7 +136,8 @@ final class OpenChatSessionStore {
         server: URL,
         chatViewModel: ChatViewModel
     ) -> GitWorkspaceAvailabilityViewModel {
-        let key = OpenChatSessionKey(server: server, sessionID: Self.normalizedSessionID(session))
+        let requestedKey = OpenChatSessionKey(server: server, sessionID: Self.normalizedSessionID(session), profile: session.profile)
+        let key = canonicalAliases[requestedKey] ?? requestedKey
         if let existing = gitAvailabilityViewModels[key] {
             touch(key)
             return existing
@@ -96,7 +169,8 @@ final class OpenChatSessionStore {
         server: URL,
         creating viewModel: ChatViewModel
     ) -> ChatViewModel {
-        let key = OpenChatSessionKey(server: server, sessionID: Self.normalizedSessionID(session))
+        let requestedKey = OpenChatSessionKey(server: server, sessionID: Self.normalizedSessionID(session), profile: session.profile)
+        let key = canonicalAliases[requestedKey] ?? requestedKey
         viewModels[key] = viewModel
         touch(key)
         noteStreamingStateChanged()
@@ -129,7 +203,9 @@ final class OpenChatSessionStore {
         let serverKey = OpenChatSessionKey.normalizedServer(server)
         return viewModels
             .compactMap { key, viewModel in
-                guard key.server == serverKey else { return nil }
+                // This list feeds the legacy sidebar status watcher. Direct UI
+                // liveness values are not WebUI RPC IDs and must never go there.
+                guard key.server == serverKey, !viewModel.usesDirectGateway else { return nil }
                 return viewModel.activeStreamID?.trimmingCharacters(in: .whitespacesAndNewlines)
             }
             .filter { !$0.isEmpty }
@@ -215,6 +291,7 @@ final class OpenChatSessionStore {
     }
 
     func resetForTesting() {
+        activateGateway(server: nil)
         deferredRetentionTrimTask?.cancel()
         deferredRetentionTrimTask = nil
         refreshTasks.values.forEach { $0.cancel() }
@@ -222,6 +299,7 @@ final class OpenChatSessionStore {
         viewModels.values.forEach { $0.stopSessionEventSync() }
         gitAvailabilityViewModels.removeAll()
         viewModels.removeAll()
+        canonicalAliases.removeAll()
         accessOrder.removeAll()
         liveOwnershipGeneration = 0
     }
@@ -265,9 +343,15 @@ final class OpenChatSessionStore {
         viewModel.stopSessionEventSync()
         viewModel.cancelOwnedStreamStatusWatch()
         viewModel.cleanupPollingTasks()
-        viewModels.removeValue(forKey: key)
-        gitAvailabilityViewModels.removeValue(forKey: key)
-        accessOrder.removeAll { $0 == key }
+        viewModel.invalidateDirectConversation()
+        Task { await viewModel.disposeDirectConversation() }
+        let aliases = viewModels.keys.filter { viewModels[$0] === viewModel }
+        for alias in aliases {
+            viewModels.removeValue(forKey: alias)
+            gitAvailabilityViewModels.removeValue(forKey: alias)
+        }
+        accessOrder.removeAll { aliases.contains($0) }
+        canonicalAliases = canonicalAliases.filter { !aliases.contains($0.value) }
     }
     private static func normalizedSessionID(_ session: SessionSummary) -> String {
         let raw = session.sessionId?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -606,10 +690,13 @@ private extension String {
 private struct OpenChatSessionKey: Hashable {
     let server: String
     let sessionID: String
+    let profile: String
 
-    init(server: URL, sessionID: String) {
+    init(server: URL, sessionID: String, profile: String? = nil) {
         self.server = Self.normalizedServer(server)
         self.sessionID = sessionID
+        let normalized = profile?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self.profile = normalized.isEmpty ? "default" : normalized
     }
 
     static func normalizedServer(_ server: URL) -> String {

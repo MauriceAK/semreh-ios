@@ -221,6 +221,100 @@ final class OpenChatSessionStoreTests: XCTestCase {
     }
 
     @MainActor
+    func testActivatedGatewaySharesDisconnectedRuntimeWithoutConnecting() async throws {
+        let server = try XCTUnwrap(URL(string: "https://gateway.example.test"))
+        let store = OpenChatSessionStore.shared
+        store.activateGateway(server: server)
+
+        let first = try await store.runtime(for: server, client: APIClient(baseURL: server))
+        let second = try await store.runtime(for: server, client: APIClient(baseURL: server))
+
+        XCTAssertTrue(first === second)
+        XCTAssertEqual(first.state, .disconnected)
+        await first.stop()
+        store.activateGateway(server: nil)
+    }
+
+    @MainActor
+    func testInactiveAndStaleGatewayOriginsAreRejected() async throws {
+        let serverA = try XCTUnwrap(URL(string: "https://gateway-a.example.test"))
+        let serverB = try XCTUnwrap(URL(string: "https://gateway-b.example.test"))
+        let store = OpenChatSessionStore.shared
+
+        do {
+            _ = try await store.runtime(for: serverA, client: APIClient(baseURL: serverA))
+            XCTFail("An inactive origin must not create a runtime.")
+        } catch let error as DirectSessionError {
+            XCTAssertEqual(error, .stopped)
+        }
+
+        store.activateGateway(server: serverA)
+        let oldRuntime = try await store.runtime(for: serverA, client: APIClient(baseURL: serverA))
+        store.activateGateway(server: serverB)
+
+        do {
+            _ = try await store.runtime(for: serverA, client: APIClient(baseURL: serverA))
+            XCTFail("A stale origin must not reacquire the active runtime.")
+        } catch let error as DirectSessionError {
+            XCTAssertEqual(error, .stopped)
+        }
+
+        let newRuntime = try await store.runtime(for: serverB, client: APIClient(baseURL: serverB))
+        XCTAssertEqual(oldRuntime.state, .stopped)
+        XCTAssertEqual(newRuntime.state, .disconnected)
+        await newRuntime.stop()
+        store.activateGateway(server: nil)
+    }
+
+    @MainActor
+    func testCanonicalRekeyRedirectsAncestorToOneRetainedOwner() async throws {
+        let server = try XCTUnwrap(URL(string: "https://gateway.example.test"))
+        let store = OpenChatSessionStore.shared
+        store.activateGateway(server: server)
+
+        let ancestor = SessionSummary(sessionId: nil, title: "draft", createdAt: 1, profile: "alpha")
+        let model = store.viewModel(session: ancestor, server: server)
+        let ancestorKeyID = ancestor.id
+        model.onDirectCanonicalID?("canonical-alpha")
+
+        XCTAssertEqual(store.retainedSessionIDsForTesting(for: server), ["canonical-alpha"])
+        let reopened = store.viewModel(session: ancestor, server: server)
+        XCTAssertTrue(reopened === model)
+        XCTAssertNotEqual(ancestorKeyID, "canonical-alpha")
+        XCTAssertEqual(store.retainedViewModelCountForTesting(for: server), 1)
+
+        await model.disposeDirectConversation()
+        store.activateGateway(server: nil)
+    }
+
+    @MainActor
+    func testSameSessionIDInDifferentProfilesHasSeparateOwners() throws {
+        let server = try XCTUnwrap(URL(string: "https://gateway.example.test"))
+        let store = OpenChatSessionStore.shared
+        store.activateGateway(server: server)
+
+        let alpha = store.viewModel(
+            session: SessionSummary(sessionId: "same-session", profile: "alpha"),
+            server: server
+        )
+        let beta = store.viewModel(
+            session: SessionSummary(sessionId: "same-session", profile: "beta"),
+            server: server
+        )
+
+        XCTAssertFalse(alpha === beta)
+        XCTAssertTrue(
+            store.viewModel(
+                session: SessionSummary(sessionId: "same-session", profile: "alpha"),
+                server: server
+            ) === alpha
+        )
+        XCTAssertEqual(store.retainedViewModelCountForTesting(for: server), 2)
+
+        store.activateGateway(server: nil)
+    }
+
+    @MainActor
     func testStoreReusesTheSameViewModelForTheSameServerAndSession() throws {
         let first = try makeViewModel(sessionID: "session-abc")
         let reused = OpenChatSessionStore.shared.adoptedViewModel(
@@ -343,18 +437,37 @@ final class OpenChatSessionStoreTests: XCTestCase {
         // Always-on streams for every retained chat caused main-thread disk
         // I/O and transcript reloads (build 19 lag regression).
         XCTAssertEqual(streamClient.startedURLs.count, 0)
+        XCTAssertTrue(viewModel.usesDirectGateway)
 
-        // ChatView owns the lifecycle: appearing starts, disappearing stops.
+        // Direct gateway conversations use the shared gateway runtime; they must
+        // never fall back to the legacy WebUI session-event SSE lifecycle.
         viewModel.startSessionEventSync()
-        XCTAssertEqual(streamClient.startedURLs.count, 1)
-        XCTAssertEqual(streamClient.startedURLs.first?.path, "/api/sessions/session-abc/events")
+        XCTAssertEqual(streamClient.startedURLs.count, 0)
+        XCTAssertEqual(streamClient.stopCount, 0)
 
         viewModel.stopSessionEventSync()
-        XCTAssertEqual(streamClient.stopCount, 1)
+        XCTAssertEqual(streamClient.startedURLs.count, 0)
+        XCTAssertEqual(streamClient.stopCount, 0)
 
-        // Re-appearing restarts the stream after an explicit stop.
-        viewModel.startSessionEventSync()
-        XCTAssertEqual(streamClient.startedURLs.count, 2)
+        // Reuse and retention eviction preserve the same no-SSE invariant.
+        let reused = OpenChatSessionStore.shared.viewModel(
+            session: SessionSummary(sessionId: "session-abc"),
+            server: server,
+            sessionEventStreamClient: streamClient
+        )
+        XCTAssertTrue(reused === viewModel)
+        reused.startSessionEventSync()
+        reused.stopSessionEventSync()
+
+        for index in 0..<100 {
+            _ = OpenChatSessionStore.shared.viewModel(
+                session: SessionSummary(sessionId: "retained-\(index)"),
+                server: server
+            )
+        }
+
+        XCTAssertEqual(streamClient.startedURLs.count, 0)
+        XCTAssertEqual(streamClient.stopCount, 0)
     }
 
     @MainActor

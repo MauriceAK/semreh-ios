@@ -31,7 +31,7 @@ final class APIClientAuthAndErrorTests: APIClientTestCase {
     }
 
     @MainActor
-    func testAuthManagerConnectsToNoPasswordTailscaleServerWithoutLogin() async throws {
+    func testAuthManagerConnectsToNoPasswordHTTPSHostWithoutLogin() async throws {
         let keychain = InMemoryKeychainStore()
         let client = MockAuthAPIClient(authStatus: AuthStatusResponse(authEnabled: false, loggedIn: false))
         var requestedURLs: [URL] = []
@@ -44,11 +44,12 @@ final class APIClientAuthAndErrorTests: APIClientTestCase {
             serverRegistry: ServerRegistry.inMemory()
         )
 
-        await manager.configure(serverURLString: "100.96.12.34:9119", password: "")
+        await manager.configure(serverURLString: "https://tailscale.example.test", password: "")
 
-        let expectedURL = try XCTUnwrap(URL(string: "http://100.96.12.34:9119"))
+        let expectedURL = try XCTUnwrap(URL(string: "https://tailscale.example.test"))
         XCTAssertEqual(requestedURLs, [expectedURL])
         XCTAssertEqual(client.loginPasswords, [])
+        XCTAssertEqual(client.protectedProbeCallCount, 1)
         XCTAssertEqual(keychain.savedValues[.serverURL], expectedURL.absoluteString)
         XCTAssertEqual(manager.state, .loggedIn(server: expectedURL))
         XCTAssertNil(manager.lastErrorMessage)
@@ -69,6 +70,102 @@ final class APIClientAuthAndErrorTests: APIClientTestCase {
         )
     }
 
+    func testDirectOriginRequiresHTTPSDistinctRootHost() throws {
+        XCTAssertNoThrow(try AuthManager.validateDirectHermesOrigin(URL(string: "https://hermes.example.test")!))
+        XCTAssertThrowsError(try AuthManager.validateDirectHermesOrigin(URL(string: "http://100.96.12.34:9119")!))
+        XCTAssertThrowsError(try AuthManager.validateDirectHermesOrigin(URL(string: "http://127.0.0.1:18791")!))
+        XCTAssertNoThrow(try AuthManager.validateDirectHermesOrigin(URL(string: "http://127.0.0.1:18791")!, allowLoopbackHTTP: true))
+        XCTAssertThrowsError(try AuthManager.validateDirectHermesOrigin(URL(string: "https://hermes.example.test:8443")!))
+        XCTAssertThrowsError(try AuthManager.validateDirectHermesOrigin(URL(string: "https://user:pass@hermes.example.test")!))
+        XCTAssertThrowsError(try AuthManager.validateDirectHermesInput("https://hermes.example.test/api?profile=default"))
+        XCTAssertEqual(
+            try AuthManager.normalizedServerURL(from: "https://HERmes.example.test.:443"),
+            URL(string: "https://hermes.example.test")
+        )
+    }
+
+    func testUsernameValidationOnlyAppliesWhenAuthIsRequired() {
+        XCTAssertEqual(
+            OnboardingViewModel.usernameValidationMessage(
+                authStatus: AuthStatusResponse(authEnabled: true),
+                username: " \n "
+            ),
+            OnboardingViewModel.emptyUsernameMessage
+        )
+        XCTAssertNil(
+            OnboardingViewModel.usernameValidationMessage(
+                authStatus: AuthStatusResponse(authEnabled: false),
+                username: ""
+            )
+        )
+    }
+
+    @MainActor
+    func testAuthManagerRejectsMissingAuthRequiredBeforePersisting() async throws {
+        let keychain = InMemoryKeychainStore()
+        let client = MockAuthAPIClient(
+            authStatus: AuthStatusResponse(authEnabled: false),
+            directStatus: DirectHermesStatusResponse(
+                version: nil,
+                releaseDate: nil,
+                authRequired: nil,
+                authProviders: nil,
+                authFlows: nil,
+                overall: nil
+            )
+        )
+        let manager = AuthManager(
+            keychain: keychain,
+            clientFactory: { _ in client },
+            serverRegistry: ServerRegistry.inMemory()
+        )
+
+        await manager.configure(serverURLString: "https://example.test", password: "")
+
+        XCTAssertEqual(manager.state, .unconfigured)
+        XCTAssertNil(keychain.savedValues[.serverURL])
+        XCTAssertEqual(client.protectedProbeCallCount, 0)
+    }
+
+    @MainActor
+    func testAuthManagerRequiresUsernameBeforeDirectLogin() async throws {
+        let keychain = InMemoryKeychainStore()
+        let client = MockAuthAPIClient(authStatus: AuthStatusResponse(authEnabled: true))
+        let manager = AuthManager(
+            keychain: keychain,
+            clientFactory: { _ in client },
+            serverRegistry: ServerRegistry.inMemory()
+        )
+
+        await manager.configure(serverURLString: "https://example.test", username: " \n ", password: "secret")
+
+        XCTAssertEqual(manager.state, .unconfigured)
+        XCTAssertEqual(manager.lastErrorMessage, OnboardingViewModel.emptyUsernameMessage)
+        XCTAssertEqual(client.loginPasswords, [])
+        XCTAssertEqual(client.protectedProbeCallCount, 0)
+        XCTAssertNil(keychain.savedValues[.serverURL])
+    }
+
+    @MainActor
+    func testAuthManagerRequiresProtectedProbeBeforePersisting() async throws {
+        let keychain = InMemoryKeychainStore()
+        let client = MockAuthAPIClient(
+            authStatus: AuthStatusResponse(authEnabled: false),
+            protectedProbeError: DirectHermesRequestError.http(statusCode: 503, reason: .unavailable)
+        )
+        let manager = AuthManager(
+            keychain: keychain,
+            clientFactory: { _ in client },
+            serverRegistry: ServerRegistry.inMemory()
+        )
+
+        await manager.configure(serverURLString: "https://example.test", password: "")
+
+        XCTAssertEqual(manager.state, .unconfigured)
+        XCTAssertEqual(client.protectedProbeCallCount, 1)
+        XCTAssertNil(keychain.savedValues[.serverURL])
+    }
+
     @MainActor
     func testAuthManagerPreservesPasswordRequiredEmptyPasswordBehavior() async throws {
         let keychain = InMemoryKeychainStore()
@@ -79,7 +176,7 @@ final class APIClientAuthAndErrorTests: APIClientTestCase {
             serverRegistry: ServerRegistry.inMemory()
         )
 
-        await manager.configure(serverURLString: "https://example.test", password: "")
+        await manager.configure(serverURLString: "https://example.test", username: "test-user", password: "")
 
         XCTAssertEqual(client.loginPasswords, [])
         XCTAssertNil(keychain.savedValues[.serverURL])
@@ -97,10 +194,11 @@ final class APIClientAuthAndErrorTests: APIClientTestCase {
             serverRegistry: ServerRegistry.inMemory()
         )
 
-        await manager.configure(serverURLString: "https://example.test", password: "secret")
+        await manager.configure(serverURLString: "https://example.test", username: "test-user", password: "secret")
 
         let expectedURL = try XCTUnwrap(URL(string: "https://example.test"))
         XCTAssertEqual(client.loginPasswords, ["secret"])
+        XCTAssertEqual(client.loginUsernames, ["test-user"])
         XCTAssertEqual(keychain.savedValues[.serverURL], expectedURL.absoluteString)
         XCTAssertEqual(manager.state, .loggedIn(server: expectedURL))
         XCTAssertNil(manager.lastErrorMessage)

@@ -99,3 +99,80 @@ compaction and cross-client fixture matrix, complete paging/prepend behavior,
 physical-iPhone responsiveness, and the full Slice 2 gate. Foundation callbacks
 do not replace those checks. Broad ambiguous-delivery/mobile lifecycle coverage
 remains Slice 3 work; the current foundation blocks uncertain automatic resend.
+
+## Native chat integration checkpoint, September 4
+
+This checkpoint advances the production wiring; **Slice 2 remains incomplete**.
+It is not a release or a physical-iPhone acceptance result.
+
+Implemented:
+
+- Direct authentication/provider discovery and username entry in onboarding and
+  Add Server; protected probe before account persistence.
+- Auth-driven active-origin runtime ownership in the retained chat store;
+  synchronous conversation invalidation before asynchronous account teardown.
+- Native ChatViewModel text send, resume/history, stop/retry, steer, and ordered
+  text/reasoning/tool rendering through GatewayConversationController. Local
+  drafts create only on first send; uncertain prompts are not automatically sent
+  again. Native Live Activity updates use durable IDs, not gateway runtime IDs.
+- Canonical-ID store redirects without duplicate retained/refresh entries;
+  profile-scoped retained/cache identity; direct live state excluded from legacy
+  sidebar stream-status RPCs and per-chat WebUI status watches.
+- Direct profiled sidebar list and local draft creation. UI policy tests for
+  legacy-only fields use explicit cached native models rather than pretending
+  official REST provides project/runtime-stream fields.
+- Explicit temporary guards for deferred WebUI actions; blocking gateway waits
+  show an input-required banner, not a silent wait or WebUI fallback.
+
+Verification:
+
+- `slice2-native-integration-focused-v2.xcresult`: 47 passed, no failures/skips.
+- `slice2-native-integration-full-v5.xcresult` and `full-v6.xcresult`: 1,955 passed,
+  zero failed, six intentional opt-in skips. The additional skip is the new
+  separate native ChatViewModel live test.
+- Latest `slice2-native-integration-full-v7.xcresult`: 1,955 passed, zero failed,
+  six intentional skips, including the final direct/legacy polling-boundary
+  regression and ownership notifications restricted to run transitions.
+- `slice2-native-chat-live-https-v2.xcresult`: one passed, zero skipped. Production
+  APIClient/runtime/ChatViewModel sent through the actual disposable HTTPS
+  gateway, reconciled exactly one canonical user/assistant pair with durable row
+  IDs, and reopened the same conversation in a second native view model.
+  This uses ephemeral cookies and an injected runtime, not AuthManager or UI
+  automation. It is a deterministic provider test, not a real-model quality test.
+- Earlier failed runs are retained: mock return/initializer-order compilation
+  errors, old sidebar fixture assumptions, a renderer-wait test race, and a live
+  test incorrectly requiring an unchanged-ID notification were corrected.
+  Full-v4 was interrupted after XCTest failed to attach; only the disposable
+  Simulator was restarted, and the next full run passed. No tests were skipped
+  to make these failures disappear.
+- Signed app launched on the disposable Simulator; the inspected welcome-screen
+  capture is `slice2-native-signed-launch.png`. This is launch evidence, not a
+  completed chat-navigation UI test. Legacy welcome copy remains cleanup work.
+- Artifact audit including exported full-v7 and native-live-v2 console logs:
+  66,120 files scanned, zero known-secret/obvious-bearer flags. This is a heuristic,
+  not proof of absence of arbitrary opaque secrets. Owned fixture/backend/proxy
+  processes were stopped afterward; test ports were confirmed free.
+
+Reproduce the new live test using the same guarded backend and signed build:
+
+```sh
+/Users/maurice/workspace/semreh-slice1-venv/bin/python \
+  scripts/direct_hermes_ios_smoke.py --https --slice2-native
+```
+
+Then use the `test-without-building` command above with a fresh result path.
+Known-secret/bearer audit must include exported latest full/live diagnostics.
+
+Luna High supplied bounded auth/sidebar/test patches; root integrated, corrected
+and ran verification. One Terra Medium read-only review found the stop-retry
+lockout (fixed and regression-tested), silent blocking waits (now surfaced), and
+a remaining latest/older-page presentation race. Worker parsing was not counted
+as a successful compile or runtime test.
+
+Remaining gates: direct composer model/profile/reasoning controls (currently
+guarded), sidebar gateway invalidation and secondary route disposition,
+continuation/compression/cross-client fixtures, paging/reconcile ordering,
+complete stop/steer/event coverage, actual UI navigation/cache/Live Activity
+behavior and responsiveness, physical-iPhone checks, and final independent rerun.
+Native blocking-response controls and broad mobile lifecycle/orphan recovery are
+still Slice 3 work. No custom UI/redesign work was started.

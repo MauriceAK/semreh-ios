@@ -397,7 +397,7 @@ final class CustomHeaderAuthManagerTests: XCTestCase {
         let client = MockAuthAPIClient(authStatus: AuthStatusResponse(authEnabled: true, passwordAuthEnabled: false))
         let manager = makeManager(keychain: keychain, store: CustomHeaderStore(), client: client)
 
-        await manager.configure(serverURLString: "https://example.test", password: "secret")
+        await manager.configure(serverURLString: "https://example.test", username: "test-user", password: "secret")
 
         XCTAssertEqual(manager.lastErrorMessage, AuthManager.passkeyOnlyMessage)
         XCTAssertEqual(manager.state, .unconfigured)
@@ -412,7 +412,7 @@ final class CustomHeaderAuthManagerTests: XCTestCase {
         let client = MockAuthAPIClient(authStatus: AuthStatusResponse(authEnabled: true, loggedIn: false))
         let manager = makeManager(keychain: keychain, store: CustomHeaderStore(), client: client)
 
-        await manager.configure(serverURLString: "https://example.test", password: "secret")
+        await manager.configure(serverURLString: "https://example.test", username: "test-user", password: "secret")
 
         XCTAssertEqual(client.loginPasswords, ["secret"])
         XCTAssertEqual(manager.state, .loggedIn(server: try XCTUnwrap(URL(string: "https://example.test"))))
@@ -424,7 +424,7 @@ final class CustomHeaderAuthManagerTests: XCTestCase {
         let client = MockAuthAPIClient(authStatus: AuthStatusResponse(authEnabled: true, loggedIn: false))
         let manager = makeManager(keychain: keychain, store: CustomHeaderStore(), client: client)
 
-        await manager.configure(serverURLString: "https://example.test", password: "secret")
+        await manager.configure(serverURLString: "https://example.test", username: "test-user", password: "secret")
 
         XCTAssertEqual(manager.state, .loggedIn(server: try XCTUnwrap(URL(string: "https://example.test"))))
         XCTAssertNil(keychain.scopedValue(.customHeaders, scope: "https://example.test"))
@@ -447,7 +447,7 @@ final class CustomHeaderAuthManagerTests: XCTestCase {
         XCTAssertNotNil(keychain.scopedValue(.customHeaders, scope: "https://proxy.test"))
 
         // Session-expiry keeps the headers so re-login behind the proxy still works.
-        manager.handleAPIError(APIError.unauthorized)
+        manager.handleAPIError(DirectHermesAuthError.sessionExpired)
         XCTAssertNotNil(keychain.scopedValue(.customHeaders, scope: "https://proxy.test"))
         XCTAssertEqual(store.snapshot().map(\.name), ["Authorization"])
 

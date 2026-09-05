@@ -121,6 +121,7 @@ final class SessionListViewModel {
     private var confirmedSessionDeletionIDs: Set<String> = []
     private var cacheFirstSessionPlaceholder: [SessionSummary]?
     private var sessionsBeforeCacheFirstPlaceholder: [SessionSummary] = []
+    private var localDraftSequence: UInt64 = 0
 
     init(server: URL, client: APIClient? = nil) {
         self.server = server
@@ -260,17 +261,22 @@ final class SessionListViewModel {
         _ = renderCachedSessionsBeforeReload(modelContext: modelContext)
 
         do {
-            let response = try await client.sessions()
+            let response = try await client.directSessions(
+                profile: Self.nonEmpty(activeProfileName) ?? "default",
+                limit: 500,
+                offset: 0,
+                order: .recent
+            )
             guard loadGeneration == generation else { return false }
-            let canonicalVisibleSessions = (response.sessions ?? [])
+            let canonicalVisibleSessions = response.sessions
                 .filter { $0.archived != true && $0.shouldAppearInSessionList }
             for sessionID in pendingSessionDeletions.keys {
                 pendingSessionDeletions[sessionID]?.latestCanonicalSessions = canonicalVisibleSessions
-                pendingSessionDeletions[sessionID]?.latestCanonicalArchivedCount = response.archivedCount
+                pendingSessionDeletions[sessionID]?.latestCanonicalArchivedCount = nil
             }
             let visibleSessions = sessionsAfterOptimisticDeletions(canonicalVisibleSessions)
             successfulLoadGeneration = generation
-            applySessions(visibleSessions, archivedCount: response.archivedCount, animation: animation)
+            applySessions(visibleSessions, archivedCount: nil, animation: animation)
             isViewingCachedData = false
             clearCacheFirstSessionPlaceholder()
 
@@ -400,34 +406,20 @@ final class SessionListViewModel {
             switchingActiveProfileName = nil
         }
 
-        do {
-            let response = try await client.switchProfile(name: profileName)
-            if let error = Self.nonEmpty(response.error) {
-                activeProfileErrorMessage = error
-                return false
-            }
-
-            let resolvedName = Self.nonEmpty(response.active) ?? profileName
-            // The switch response has no `single_profile_mode` field; carry the
-            // last known value forward so the switcher visibility doesn't flap.
-            let profileResponse = ProfilesResponse(
-                profiles: response.profiles ?? profileOptions,
-                active: resolvedName,
-                singleProfileMode: isSingleProfileMode
-            )
-            applyActiveProfile(
-                profileResponse,
-                fallbackProfile: profile,
-                fallbackDefaultModel: response.defaultModel
-            )
-            return true
-        } catch {
-            guard !isCancellationError(error) else { return false }
-
-            lastError = error
-            activeProfileErrorMessage = error.localizedDescription
-            return false
-        }
+        // Profile selection is local UI state. The direct sidebar request
+        // carries this profile explicitly; switching must not mutate a global
+        // server/WebUI profile or issue a legacy `/api/profile/switch` call.
+        let profileResponse = ProfilesResponse(
+            profiles: profileOptions,
+            active: profileName,
+            singleProfileMode: isSingleProfileMode
+        )
+        applyActiveProfile(
+            profileResponse,
+            fallbackProfile: profile,
+            fallbackDefaultModel: profile.model
+        )
+        return true
     }
 
     func searchSessions(
@@ -1021,60 +1013,25 @@ final class SessionListViewModel {
         }
     }
 
-    /// Creates a new session. `profile` pins it to a specific server profile (the "New Chat
-    /// in <Profile>" App Intent, #339); nil keeps the legacy behavior of letting the server
-    /// use its active profile (the "+" button / plain New Chat).
+    /// Opens a local draft. Backend creation is deferred until the first prompt
+    /// is submitted, so opening New Chat performs no workspace/session request.
     func createSession(modelContext: ModelContext? = nil, profile: String? = nil) async -> SessionSummary? {
         isCreatingSession = true
         actionErrorMessage = nil
         lastError = nil
         defer { isCreatingSession = false }
 
-        do {
-            let workspaces = try await client.workspaces()
-            let workspace = workspaces.last ?? workspaces.workspaces?.compactMap(\.path).first
-            let response = try await client.createSession(
-                workspace: workspace,
-                model: nil,
-                modelProvider: nil,
-                profile: Self.nonEmpty(profile)
-            )
-
-            guard let sessionDetail = response.session else {
-                actionErrorMessage = String(localized: "The server did not return the new session.")
-                return nil
-            }
-
-            let newSession = SessionSummary(from: sessionDetail)
-            guard newSession.sessionId?.isEmpty == false else {
-                actionErrorMessage = String(localized: "The server did not return the new session ID.")
-                return nil
-            }
-
-            if newSession.shouldAppearInSessionList {
-                if let existingIndex = sessions.firstIndex(where: { $0.sessionId == newSession.sessionId }) {
-                    sessions[existingIndex] = newSession
-                } else {
-                    sessions.insert(newSession, at: 0)
-                }
-
-                if let modelContext {
-                    do {
-                        try CacheStore.cacheSession(newSession, serverURL: server, in: modelContext)
-                    } catch {
-                        cacheErrorMessage = error.localizedDescription
-                    }
-                }
-            }
-
-            return newSession
-        } catch {
-            guard !isCancellationError(error) else { return nil }
-
-            lastError = error
-            actionErrorMessage = error.localizedDescription
-            return nil
-        }
+        _ = modelContext // Local drafts are deliberately neither cached nor persisted.
+        localDraftSequence &+= 1
+        let timestamp = Date().timeIntervalSince1970
+            + (Double(localDraftSequence) * 0.000001)
+        return SessionSummary(
+            sessionId: nil,
+            title: "New Chat",
+            createdAt: timestamp,
+            updatedAt: timestamp,
+            profile: Self.nonEmpty(profile) ?? Self.nonEmpty(activeProfileName) ?? "default"
+        )
     }
 
     func clearActionError() {

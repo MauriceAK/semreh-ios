@@ -33,6 +33,7 @@ final class GatewayConversationController {
     @ObservationIgnored private var idleRefreshTask: Task<Void, Never>?
     private var lifecycle = 0
     private var disposed = false
+    private var didDispose = false
     private var hasSubmittedPrompt: Bool
     private var transcriptDirty = false
     private var terminalReceipt: String?
@@ -143,7 +144,9 @@ final class GatewayConversationController {
     /// The interrupt acknowledgement is not evidence the server has stopped.
     /// Confirm both a matching terminal event and the pinned status contract.
     func interrupt() async throws {
-        guard !disposed, let binding, runState == .running else { throw DirectSessionError.invalidResponse }
+        // An unconfirmed interrupt must remain retryable, without reopening
+        // ordinary send/steer or treating a lost acknowledgement as success.
+        guard !disposed, let binding, runState == .running || runState == .stopping else { throw DirectSessionError.invalidResponse }
         let generation = lifecycle
         runState = .stopping
         let result = try await runtime.request("session.interrupt", parameters: {
@@ -186,7 +189,9 @@ final class GatewayConversationController {
         onTranscript?(page, offset > 0)
     }
 
-    func dispose() async throws {
+    /// Synchronous invalidation closes the await gap on account switches. RPC
+    /// parameter closures and pending attachments fail before async cleanup runs.
+    func invalidate() {
         guard !disposed else { return }
         disposed = true
         lifecycle &+= 1
@@ -194,6 +199,12 @@ final class GatewayConversationController {
         reconciliationTask?.cancel()
         idleRefreshTask?.cancel()
         if let observerID { runtime.removeObserver(observerID) }
+    }
+
+    func dispose() async throws {
+        guard !didDispose else { return }
+        didDispose = true
+        invalidate()
         // Never close a persisted conversation or interrupt a background run.
         let abandonedBinding = binding
         binding = nil

@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		D2EC7000000000000000000A /* ChatViewModelDirectGatewayTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2EC7000000000000000001A /* ChatViewModelDirectGatewayTests.swift */; };
+		D2EC70000000000000000009 /* SessionListDirectTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2EC70000000000000000019 /* SessionListDirectTests.swift */; };
 		D2EC70000000000000000007 /* GatewayConversationController+Events.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2EC70000000000000000017 /* GatewayConversationController+Events.swift */; };
 		D2EC70000000000000000008 /* GatewayConversationEventMappingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2EC70000000000000000018 /* GatewayConversationEventMappingTests.swift */; };
 		D2EC70000000000000000006 /* GatewayConversationControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2EC70000000000000000016 /* GatewayConversationControllerTests.swift */; };
@@ -388,6 +390,8 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		D2EC7000000000000000001A /* ChatViewModelDirectGatewayTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatViewModelDirectGatewayTests.swift; sourceTree = "<group>"; };
+		D2EC70000000000000000019 /* SessionListDirectTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListDirectTests.swift; sourceTree = "<group>"; };
 		D2EC70000000000000000017 /* GatewayConversationController+Events.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "GatewayConversationController+Events.swift"; sourceTree = "<group>"; };
 		D2EC70000000000000000018 /* GatewayConversationEventMappingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayConversationEventMappingTests.swift; sourceTree = "<group>"; };
 		D2EC70000000000000000016 /* GatewayConversationControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayConversationControllerTests.swift; sourceTree = "<group>"; };
@@ -827,6 +831,8 @@
 				D1EC70000000000000000016 /* DirectHermesLiveSmokeTests.swift */,
 				D2EC70000000000000000012 /* HermesServerRuntimeTests.swift */,
 				D2EC70000000000000000018 /* GatewayConversationEventMappingTests.swift */,
+				D2EC70000000000000000019 /* SessionListDirectTests.swift */,
+				D2EC7000000000000000001A /* ChatViewModelDirectGatewayTests.swift */,
 				D2EC70000000000000000016 /* GatewayConversationControllerTests.swift */,
 				D2EC70000000000000000014 /* APIClientDirectSessionsTests.swift */,
 				D1EC70000000000000000015 /* HermesGatewayClientTests.swift */,
@@ -1769,6 +1775,8 @@
 				D1EC70000000000000000006 /* DirectHermesLiveSmokeTests.swift in Sources */,
 				D2EC70000000000000000002 /* HermesServerRuntimeTests.swift in Sources */,
 				D2EC70000000000000000008 /* GatewayConversationEventMappingTests.swift in Sources */,
+				D2EC70000000000000000009 /* SessionListDirectTests.swift in Sources */,
+				D2EC7000000000000000000A /* ChatViewModelDirectGatewayTests.swift in Sources */,
 				D2EC70000000000000000006 /* GatewayConversationControllerTests.swift in Sources */,
 				D2EC70000000000000000004 /* APIClientDirectSessionsTests.swift in Sources */,
 				D1EC70000000000000000005 /* HermesGatewayClientTests.swift in Sources */,

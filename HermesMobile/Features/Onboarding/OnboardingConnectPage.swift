@@ -2,6 +2,7 @@ import SwiftUI
 
 enum OnboardingConnectField: Hashable {
     case serverURL
+    case username
     case password
 }
 
@@ -56,6 +57,31 @@ struct OnboardingConnectPage: View {
                                 .tint(OnboardingTheme.action(for: colorScheme, palette: palette))
                                 .focused($focusedField, equals: .serverURL)
                                 .onSubmit(submitConnection)
+                        }
+                    }
+
+                    if viewModel.isUsernameRequired {
+                        OnboardingField(systemImage: "person.fill", title: String(localized: "Username")) {
+                            TextField(
+                                "",
+                                text: $viewModel.username,
+                                prompt: Text("Server username")
+                                    .foregroundStyle(OnboardingTheme.tertiaryText(for: colorScheme, palette: palette))
+                            )
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .textContentType(.username)
+                            .foregroundStyle(OnboardingTheme.primaryText(for: colorScheme, palette: palette))
+                            .submitLabel(.next)
+                            .tint(OnboardingTheme.action(for: colorScheme, palette: palette))
+                            .focused($focusedField, equals: .username)
+                            .onSubmit {
+                                if viewModel.isPasswordRequired {
+                                    focusedField = .password
+                                } else {
+                                    submitConnection()
+                                }
+                            }
                         }
                     }
 

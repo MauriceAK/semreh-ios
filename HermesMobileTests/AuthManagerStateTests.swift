@@ -33,7 +33,7 @@ final class AuthManagerStateTests: XCTestCase {
         let cookieStorage = HTTPCookieStorage.shared
         cookieStorage.setCookie(try makeSessionCookie(for: server))
 
-        manager.handleAPIError(APIError.unauthorized)
+        manager.handleAPIError(DirectHermesAuthError.sessionExpired)
 
         XCTAssertEqual(manager.state, .loggedOut(server: server))
         XCTAssertEqual(keychain.savedValues[.serverURL], server.absoluteString)
@@ -46,8 +46,8 @@ final class AuthManagerStateTests: XCTestCase {
         let manager = try await makeLoggedInManager(keychain: keychain, serverURLString: "https://example.test")
         let server = try XCTUnwrap(URL(string: "https://example.test"))
 
-        manager.handleAPIError(APIError.unauthorized)
-        manager.handleAPIError(APIError.unauthorized)
+        manager.handleAPIError(DirectHermesAuthError.sessionExpired)
+        manager.handleAPIError(DirectHermesAuthError.sessionExpired)
 
         XCTAssertEqual(manager.state, .loggedOut(server: server))
         XCTAssertEqual(keychain.savedValues[.serverURL], server.absoluteString)
@@ -59,7 +59,7 @@ final class AuthManagerStateTests: XCTestCase {
             MockAuthAPIClient(authStatus: AuthStatusResponse(authEnabled: true, loggedIn: false))
         }
 
-        manager.handleAPIError(APIError.unauthorized)
+        manager.handleAPIError(DirectHermesAuthError.sessionExpired)
 
         XCTAssertEqual(manager.state, .unconfigured)
         XCTAssertNil(keychain.savedValues[.serverURL])
@@ -72,6 +72,17 @@ final class AuthManagerStateTests: XCTestCase {
         let server = try XCTUnwrap(URL(string: "https://example.test"))
 
         manager.handleAPIError(APIError.http(statusCode: 502, body: ""))
+
+        XCTAssertEqual(manager.state, .loggedIn(server: server))
+        XCTAssertEqual(keychain.savedValues[.serverURL], server.absoluteString)
+    }
+
+    func testGenericUnauthorizedDoesNotDemoteDirectAuth() async throws {
+        let keychain = InMemoryKeychainStore()
+        let manager = try await makeLoggedInManager(keychain: keychain, serverURLString: "https://example.test")
+        let server = try XCTUnwrap(URL(string: "https://example.test"))
+
+        manager.handleAPIError(APIError.unauthorized)
 
         XCTAssertEqual(manager.state, .loggedIn(server: server))
         XCTAssertEqual(keychain.savedValues[.serverURL], server.absoluteString)
@@ -181,7 +192,7 @@ final class AuthManagerStateTests: XCTestCase {
         HTTPCookieStorage.shared.setCookie(try makeSessionCookie(for: serverA, value: "a-cookie"))
         HTTPCookieStorage.shared.setCookie(try makeSessionCookie(for: serverB, value: "b-cookie"))
 
-        manager.handleAPIError(APIError.unauthorized)
+        manager.handleAPIError(DirectHermesAuthError.sessionExpired)
 
         // Only the active server's auth is affected by its 401.
         XCTAssertEqual(manager.state, .loggedOut(server: serverA))
@@ -344,7 +355,7 @@ final class AuthManagerStateTests: XCTestCase {
             serverRegistry: ServerRegistry.inMemory()
         )
 
-        let outcome = await manager.addServer(serverURLString: "https://needs-pw.test", password: "")
+        let outcome = await manager.addServer(serverURLString: "https://needs-pw.test", username: "test-user", password: "")
 
         XCTAssertEqual(outcome, .needsPassword)
         XCTAssertEqual(manager.state, .unconfigured)
@@ -405,6 +416,7 @@ final class AuthManagerStateTests: XCTestCase {
         )
         await manager.configure(
             serverURLString: "https://a.test",
+            username: "test-user",
             password: "secret",
             customHeaders: [CustomHeader(name: "X-A", value: "a-token")]
         )
@@ -412,6 +424,7 @@ final class AuthManagerStateTests: XCTestCase {
 
         let outcome = await manager.addServer(
             serverURLString: "https://b.test",
+            username: "test-user",
             password: "wrong",
             customHeaders: [CustomHeader(name: "X-B", value: "b-token")]
         )
@@ -604,7 +617,7 @@ final class AuthManagerStateTests: XCTestCase {
             serverRegistry: ServerRegistry.inMemory()
         )
 
-        await manager.configure(serverURLString: serverURLString, password: "secret")
+        await manager.configure(serverURLString: serverURLString, username: "test-user", password: "secret")
 
         guard case .loggedIn = manager.state else {
             XCTFail("Expected loggedIn state after configure, got \(manager.state)")

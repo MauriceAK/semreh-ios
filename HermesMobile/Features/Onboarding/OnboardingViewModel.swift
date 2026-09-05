@@ -4,9 +4,11 @@ import Observation
 @MainActor
 @Observable
 final class OnboardingViewModel {
+    nonisolated static let emptyUsernameMessage = String(localized: "Enter the server username.")
     nonisolated static let emptyPasswordMessage = String(localized: "Enter the server password.")
 
     var serverURLString = ""
+    var username = ""
     var password = ""
     var customHeaders: [CustomHeader] = []
     var authStatus: AuthStatusResponse?
@@ -32,6 +34,10 @@ final class OnboardingViewModel {
         // message instead. Unknown (nil) keeps today's "show the field" default.
         guard authStatus?.authEnabled != false else { return false }
         return authStatus?.passwordAuthEnabled != false
+    }
+
+    var isUsernameRequired: Bool {
+        authStatus?.authEnabled != false
     }
 
     func testConnection(authManager: AuthManager) async {
@@ -62,6 +68,10 @@ final class OnboardingViewModel {
         errorMessage = nil
         connectionMessage = nil
 
+        if let validationMessage = Self.usernameValidationMessage(authStatus: authStatus, username: username) {
+            errorMessage = validationMessage
+            return
+        }
         if let validationMessage = Self.passwordValidationMessage(authStatus: authStatus, password: password) {
             errorMessage = validationMessage
             return
@@ -81,6 +91,10 @@ final class OnboardingViewModel {
                 return
             }
 
+            if let validationMessage = Self.usernameValidationMessage(authStatus: authStatus, username: username) {
+                errorMessage = validationMessage
+                return
+            }
             if let validationMessage = Self.passwordValidationMessage(authStatus: authStatus, password: password) {
                 errorMessage = validationMessage
                 return
@@ -89,6 +103,7 @@ final class OnboardingViewModel {
 
         await authManager.configure(
             serverURLString: serverURLString,
+            username: username,
             password: password,
             customHeaders: customHeaders
         )
@@ -103,5 +118,11 @@ final class OnboardingViewModel {
 
         let trimmedPassword = password.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmedPassword.isEmpty ? emptyPasswordMessage : nil
+    }
+
+    nonisolated static func usernameValidationMessage(authStatus: AuthStatusResponse?, username: String) -> String? {
+        guard authStatus?.authEnabled == true else { return nil }
+        let trimmedUsername = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmedUsername.isEmpty ? emptyUsernameMessage : nil
     }
 }

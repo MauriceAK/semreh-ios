@@ -236,6 +236,28 @@ final class GatewayConversationControllerTests: XCTestCase {
         await runtime.stop()
     }
 
+    func testUnconfirmedInterruptCanBeRetriedWithoutResubmittingPrompt() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setInterruptResponse(.object(["status": .string("unconfirmed")]))
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime, storedID: nil)
+        try await controller.submit("running")
+        do {
+            try await controller.interrupt()
+            XCTFail("An unconfirmed acknowledgement must not report stopped")
+        } catch {
+            XCTAssertEqual(controller.runState, .stopping)
+        }
+        fake.setInterruptResponse(.object(["status": .string("interrupted")]))
+        fake.setInterruptEvent(event(sessionID: "runtime-1", type: "message.complete", sequence: 3,
+            payload: .object(["status": .string("interrupted")])))
+        try await controller.interrupt()
+        XCTAssertEqual(controller.runState, .idle)
+        XCTAssertEqual(fake.calls().filter { $0.method == "session.interrupt" }.count, 2)
+        XCTAssertEqual(fake.calls().filter { $0.method == "prompt.submit" }.count, 1)
+        await runtime.stop()
+    }
+
     func testDuplicateTerminalEventCausesExactlyOneCanonicalReload() async throws {
         let fake = ControllerFakeTransport()
         let runtime = try makeRuntime(fake)

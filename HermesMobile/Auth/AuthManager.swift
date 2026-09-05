@@ -24,7 +24,15 @@ final class AuthManager {
     nonisolated static let passkeyOnlyMessage =
         String(localized: "This server signs in with passkeys, which Semreh doesn't support yet.")
 
-    private(set) var state: State = .unconfigured
+    private(set) var state: State = .unconfigured {
+        didSet {
+            if case .loggedIn(let server) = state {
+                OpenChatSessionStore.shared.activateGateway(server: server)
+            } else {
+                OpenChatSessionStore.shared.activateGateway(server: nil)
+            }
+        }
+    }
     private(set) var lastErrorMessage: String?
 
     /// Observable snapshot of every configured server, mirrored from the
@@ -100,23 +108,35 @@ final class AuthManager {
             headerStore.replace(with: customHeaders.sanitizedForStorage())
         }
 
+        try Self.validateDirectHermesInput(serverURLString)
         let serverURL = try Self.normalizedServerURL(from: serverURLString)
+        try Self.validateDirectHermesOrigin(serverURL)
         let client = clientFactory(serverURL)
 
         return try await testConnection(client: client)
     }
 
     private func testConnection(client: any AuthAPIClient) async throws -> AuthStatusResponse {
-        let health = try await client.health()
-        guard health.status == "ok" else {
-            throw APIError.http(statusCode: 200, body: "Unexpected health status.")
+        let status = try await client.directStatus()
+        guard let authRequired = status.authRequired else {
+            throw APIError.http(statusCode: 200, body: nil)
         }
-
-        return try await client.authStatus()
+        let providers = try await client.directProviders()
+        let passwordProvider = providers.providers?.first {
+            $0.supportsPassword == true && !($0.name?.isEmpty ?? true)
+        }
+        return AuthStatusResponse(
+            authEnabled: authRequired,
+            loggedIn: nil,
+            passwordAuthEnabled: authRequired ? passwordProvider != nil : false,
+            passkeysEnabled: nil,
+            passwordlessEnabled: nil
+        )
     }
 
     func configure(
         serverURLString: String,
+        username: String = "",
         password: String,
         customHeaders: [CustomHeader]? = nil
     ) async {
@@ -127,7 +147,9 @@ final class AuthManager {
         }
 
         do {
+            try Self.validateDirectHermesInput(serverURLString)
             let serverURL = try Self.normalizedServerURL(from: serverURLString)
+            try Self.validateDirectHermesOrigin(serverURL)
             let client = clientFactory(serverURL)
             let authStatus = try await testConnection(client: client)
 
@@ -141,18 +163,38 @@ final class AuthManager {
             }
 
             if authStatus.authEnabled == true {
+                guard !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    lastErrorMessage = String(localized: "Enter the server username.")
+                    return
+                }
                 guard !password.isEmpty else {
                     lastErrorMessage = String(localized: "Enter the server password.")
                     return
                 }
 
-                let loginResponse = try await client.login(password: password)
+                let providers = try await client.directProviders()
+                guard let provider = providers.providers?.first(where: {
+                    $0.supportsPassword == true && !($0.name?.isEmpty ?? true)
+                })?.name else {
+                    lastErrorMessage = String(localized: "This server does not advertise a supported password provider.")
+                    return
+                }
+                let loginResponse = try await client.directPasswordLogin(
+                    username: username,
+                    password: password,
+                    provider: provider
+                )
                 guard loginResponse.ok == true else {
                     state = .loggedOut(server: serverURL)
-                    lastErrorMessage = APIError.unauthorized.localizedDescription
+                    lastErrorMessage = String(localized: "The Hermes login was not accepted.")
                     return
                 }
             }
+
+            // Do not persist an origin merely because its public bootstrap
+            // endpoints responded. This confirms the current cookie/auth state
+            // for both authenticated and auth-disabled deployments.
+            try await client.directProtectedProbe()
 
             // Persist only on success: the server URL and the headers that reached it.
             try keychain.save(serverURL.absoluteString, forKey: .serverURL)
@@ -165,7 +207,6 @@ final class AuthManager {
             persistCustomHeaders(for: serverURL)
             refreshServers()
             state = .loggedIn(server: serverURL)
-            hydrateOfficialContinuity(for: serverURL)
         } catch {
             lastErrorMessage = error.localizedDescription
         }
@@ -193,6 +234,7 @@ final class AuthManager {
     @discardableResult
     func addServer(
         serverURLString: String,
+        username: String = "",
         password: String,
         customHeaders: [CustomHeader] = []
     ) async -> AddServerOutcome {
@@ -200,7 +242,9 @@ final class AuthManager {
 
         let serverURL: URL
         do {
+            try Self.validateDirectHermesInput(serverURLString)
             serverURL = try Self.normalizedServerURL(from: serverURLString)
+            try Self.validateDirectHermesOrigin(serverURL)
         } catch {
             lastErrorMessage = error.localizedDescription
             return .failed
@@ -225,17 +269,34 @@ final class AuthManager {
             }
 
             if authStatus.authEnabled == true {
+                guard !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    lastErrorMessage = String(localized: "Enter the server username.")
+                    return .failed
+                }
                 guard !password.isEmpty else {
                     // Not an error — the UI reveals the password field and retries.
                     return .needsPassword
                 }
 
-                let loginResponse = try await client.login(password: password)
+                let providers = try await client.directProviders()
+                guard let provider = providers.providers?.first(where: {
+                    $0.supportsPassword == true && !($0.name?.isEmpty ?? true)
+                })?.name else {
+                    lastErrorMessage = String(localized: "This server does not advertise a supported password provider.")
+                    return .failed
+                }
+                let loginResponse = try await client.directPasswordLogin(
+                    username: username,
+                    password: password,
+                    provider: provider
+                )
                 guard loginResponse.ok == true else {
-                    lastErrorMessage = APIError.unauthorized.localizedDescription
+                    lastErrorMessage = String(localized: "The Hermes login was not accepted.")
                     return .failed
                 }
             }
+
+            try await client.directProtectedProbe()
 
             // Commit only now that the add succeeded: the new server becomes
             // active, so its headers move into the live store and persist under its
@@ -250,7 +311,6 @@ final class AuthManager {
             persistCustomHeaders(for: serverURL)
             refreshServers()
             state = .loggedIn(server: serverURL)
-            hydrateOfficialContinuity(for: serverURL)
             return .added(serverURL)
         } catch {
             lastErrorMessage = error.localizedDescription
@@ -287,6 +347,7 @@ final class AuthManager {
         }
 
         if case .loggedIn = state {
+            OpenChatSessionStore.shared.activateGateway(server: nil)
             await attemptBestEffortServerLogout(server: active)
         }
 
@@ -303,6 +364,7 @@ final class AuthManager {
 
         if isActive {
             if case .loggedIn = state {
+                OpenChatSessionStore.shared.activateGateway(server: nil)
                 await attemptBestEffortServerLogout(server: serverURL)
             }
             advanceAfterRemoving(activeServer: serverURL)
@@ -326,7 +388,6 @@ final class AuthManager {
         refreshServers()
         try? keychain.save(serverURL.absoluteString, forKey: .serverURL)
         hydrateCustomHeaders(for: serverURL)
-        hydrateOfficialContinuity(for: serverURL)
         // Drop the App Intents profile picker cache (#339): it holds the previous server's
         // profiles, which would leak into Shortcuts / Siri if the new server's fetch is
         // delayed or fails. The new server's profiles reload on the next foreground fetch.
@@ -371,7 +432,6 @@ final class AuthManager {
         if let nextActive, let nextURL = URL(string: nextActive.urlString) {
             try? keychain.save(nextURL.absoluteString, forKey: .serverURL)
             hydrateCustomHeaders(for: nextURL)
-            hydrateOfficialContinuity(for: nextURL)
             lastErrorMessage = nil
             state = .loggedIn(server: nextURL)
         } else {
@@ -404,7 +464,7 @@ final class AuthManager {
         let timeout = logoutTimeout
 
         let logoutTask = Task { @MainActor in
-            _ = try await client.logout()
+            try await client.directLogout()
         }
         let timeoutTask = Task { @MainActor in
             try? await Task.sleep(for: timeout)
@@ -416,7 +476,8 @@ final class AuthManager {
     }
 
     func handleAPIError(_ error: Error) {
-        guard case APIError.unauthorized = error else {
+        guard let authError = error as? DirectHermesAuthError,
+              authError == .sessionExpired else {
             return
         }
 
@@ -525,7 +586,8 @@ final class AuthManager {
     private func restoreSavedServer() {
         guard
             let savedValue = try? keychain.load(.serverURL),
-            let savedURL = URL(string: savedValue)
+            let savedURL = URL(string: savedValue),
+            (try? Self.validateDirectHermesOrigin(savedURL)) != nil
         else {
             // No saved server: nothing is active, so no scoped headers apply.
             state = .unconfigured
@@ -541,7 +603,6 @@ final class AuthManager {
         // first launch after the split) before any client is built, so the first
         // request after launch carries the saved headers (#255/#16).
         hydrateCustomHeaders(for: savedURL)
-        hydrateOfficialContinuity(for: savedURL)
         state = .loggedIn(server: savedURL)
     }
 
@@ -577,16 +638,55 @@ final class AuthManager {
         }
     }
 
-    private func hydrateOfficialContinuity(for primary: URL) {
-        guard let account = serverRegistry.servers.first(where: { $0.id == primary.absoluteString }),
-              let rawURL = account.officialAPIURLString,
-              let officialURL = URL(string: rawURL),
-              let key = try? keychain.load(.officialAPIKey, scope: primary.absoluteString),
-              !key.isEmpty else {
-            officialStore.remove(primaryURL: primary)
+    /// Direct Hermes auth relies on host-scoped Secure cookies. A configured
+    /// production origin must therefore be HTTPS, root-scoped, and distinguishable
+    /// by hostname; ports cannot isolate cookie jars. Loopback HTTP is available
+    /// only through an explicit test seam and is never used by production calls.
+    nonisolated static func validateDirectHermesOrigin(
+        _ url: URL,
+        allowLoopbackHTTP: Bool = false
+    ) throws {
+        guard let scheme = url.scheme?.lowercased(),
+              let host = url.host?.lowercased(),
+              !host.isEmpty,
+              url.user == nil,
+              url.password == nil,
+              url.path.isEmpty || url.path == "/",
+              url.query == nil,
+              url.fragment == nil
+        else {
+            throw APIError.invalidServerURL
+        }
+
+        if scheme == "http" {
+            guard allowLoopbackHTTP,
+                  host == "localhost" || host == "127.0.0.1" || host == "::1" else {
+                throw APIError.invalidServerURL
+            }
             return
         }
-        officialStore.configure(primaryURL: primary, officialURL: officialURL, bearerKey: key)
+
+        guard scheme == "https",
+              url.port == nil || url.port == 443 else {
+            throw APIError.invalidServerURL
+        }
+    }
+
+    /// Validates the user-entered origin before normalization can erase a
+    /// path/query/fragment that would otherwise turn a non-root deployment into
+    /// a seemingly valid root origin.
+    nonisolated static func validateDirectHermesInput(_ rawValue: String) throws {
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw APIError.invalidServerURL }
+
+        let valueWithScheme = trimmed.contains("://")
+            ? trimmed
+            : "\(defaultScheme(forSchemalessServer: trimmed))://\(trimmed)"
+        guard let components = URLComponents(string: valueWithScheme),
+              let url = components.url else {
+            throw APIError.invalidServerURL
+        }
+        try validateDirectHermesOrigin(url)
     }
 
     nonisolated static func normalizedServerURL(from rawValue: String) throws -> URL {
@@ -601,6 +701,9 @@ final class AuthManager {
         }
 
         components.host = normalizedHost(components.host)
+        if components.scheme?.lowercased() == "https", components.port == 443 {
+            components.port = nil
+        }
         components.path = ""
         components.query = nil
         components.fragment = nil
@@ -615,12 +718,14 @@ final class AuthManager {
     private nonisolated static func normalizedHost(_ host: String?) -> String? {
         guard let host else { return nil }
 
-        let lowercasedHost = host.lowercased()
-        guard lowercasedHost.hasPrefix("www.webui.") else {
-            return host
+        var canonicalHost = host.lowercased()
+        if canonicalHost.hasSuffix(".") {
+            canonicalHost.removeLast()
         }
-
-        return String(host.dropFirst(4))
+        if canonicalHost.hasPrefix("www.webui.") {
+            canonicalHost = String(canonicalHost.dropFirst(4))
+        }
+        return canonicalHost
     }
 
     private nonisolated static func defaultScheme(forSchemalessServer rawValue: String) -> String {
@@ -649,10 +754,15 @@ final class AuthManager {
 }
 
 protocol AuthAPIClient: Sendable {
-    func health() async throws -> HealthResponse
-    func authStatus() async throws -> AuthStatusResponse
-    func login(password: String) async throws -> LoginResponse
-    func logout() async throws -> LoginResponse
+    func directStatus() async throws -> DirectHermesStatusResponse
+    func directProviders() async throws -> DirectHermesAuthProvidersResponse
+    func directPasswordLogin(
+        username: String,
+        password: String,
+        provider: String
+    ) async throws -> DirectHermesPasswordLoginResponse
+    func directProtectedProbe() async throws
+    func directLogout() async throws
 }
 
 extension APIClient: AuthAPIClient {}

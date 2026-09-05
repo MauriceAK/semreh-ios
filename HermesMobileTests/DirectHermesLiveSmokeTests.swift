@@ -90,6 +90,29 @@ final class DirectHermesLiveSmokeTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testOptInHostedSlice2NativeChatFlow() async throws {
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("Slice 2 native chat smoke is simulator-only.")
+        #endif
+
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SEMREH_SLICE1_LIVE"] == "1",
+              environment["SEMREH_SLICE1_HTTPS"] == "1",
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == Self.credentialsPath
+        else {
+            throw XCTSkip("Slice 2 native chat smoke is opt-in.")
+        }
+
+        do {
+            try await runHostedSlice2NativeChatFlow(transport: .https)
+        } catch let failure as LiveSmokeFailure {
+            XCTFail("Slice 2 native chat smoke failed at \(failure.stage).")
+        } catch {
+            XCTFail("Slice 2 native chat smoke failed.")
+        }
+    }
+
     func testOptInHostedCookieLoginPhase() async throws {
         let transport = try cookiePhase("login", requiresCredentials: true)
         let credentials = try await stage("credentials") {
@@ -679,6 +702,154 @@ final class DirectHermesLiveSmokeTests: XCTestCase {
         }
     }
 
+    @MainActor
+    private func runHostedSlice2NativeChatFlow(transport: HostedTransport) async throws {
+        let credentials = try await stage("native chat credentials") {
+            try Self.readCredentials()
+        }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpAdditionalHeaders = [:]
+        configuration.httpShouldSetCookies = true
+        configuration.httpCookieAcceptPolicy = .always
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let api = APIClient(
+            baseURL: transport.baseURL,
+            session: session,
+            publicMediaSession: session,
+            customHeaderProvider: { [] }
+        )
+
+        var runtime: HermesServerRuntime?
+        var firstViewModel: ChatViewModel?
+        var secondViewModel: ChatViewModel?
+        var loggedIn = false
+
+        do {
+            let status = try await stage("native chat status") { try await api.directStatus() }
+            guard status.authRequired == true else { throw LiveSmokeInvariant.failed }
+            let providers = try await stage("native chat providers") { try await api.directProviders() }
+            guard providers.providers?.contains(where: { $0.name == "basic" && $0.supportsPassword == true }) == true else {
+                throw LiveSmokeInvariant.failed
+            }
+            let login = try await stage("native chat login") {
+                try await api.directPasswordLogin(username: credentials.username, password: credentials.password)
+            }
+            guard login.ok == true else { throw LiveSmokeInvariant.failed }
+            loggedIn = true
+            try await stage("native chat protected probe") { try await api.directProtectedProbe() }
+
+            let serverRuntime = try await stage("native chat runtime init") {
+                try HermesServerRuntime(origin: transport.baseURL, client: api)
+            }
+            runtime = serverRuntime
+            try await stage("native chat runtime connect") { try await serverRuntime.connect() }
+
+            let prompt = "SEMREH_SLICE1_PROMPT"
+            let expectedAck = "SEMREH_SLICE1_ACK"
+            var durableID: String?
+            let first = ChatViewModel(
+                session: SessionSummary(sessionId: nil, title: "Native Slice 2 smoke", profile: "default"),
+                server: transport.baseURL,
+                client: api,
+                liveActivityManager: NativeSmokeNoopLiveActivityManager(),
+                gatewayRuntimeProvider: { _ in serverRuntime }
+            )
+            first.onDirectCanonicalID = { id in durableID = id }
+            firstViewModel = first
+
+            try await stage("native chat first send accepted") {
+                guard await first.sendMessage(prompt) else { throw LiveSmokeInvariant.failed }
+            }
+            try await stage("native chat first rendered canonical transcript") {
+                try await waitForNativeTranscript(
+                    in: first,
+                    user: prompt,
+                    assistant: expectedAck
+                )
+            }
+            guard first.hasServerBackedSession,
+                  let durableID,
+                  !durableID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else { throw LiveSmokeInvariant.failed }
+
+            try await stage("native chat first view model dispose") {
+                await first.disposeDirectConversation()
+            }
+            firstViewModel = nil
+
+            var resumedID: String?
+            let second = ChatViewModel(
+                session: SessionSummary(sessionId: durableID, title: "Native Slice 2 smoke", profile: "default"),
+                server: transport.baseURL,
+                client: api,
+                liveActivityManager: NativeSmokeNoopLiveActivityManager(),
+                gatewayRuntimeProvider: { _ in serverRuntime }
+            )
+            second.onDirectCanonicalID = { id in resumedID = id }
+            secondViewModel = second
+
+            try await stage("native chat second view model resume") {
+                await second.loadMessages()
+                guard second.lastError == nil, second.errorMessage == nil else {
+                    throw LiveSmokeInvariant.failed
+                }
+            }
+            try await stage("native chat resumed canonical transcript") {
+                try await waitForNativeTranscript(
+                    in: second,
+                    user: prompt,
+                    assistant: expectedAck
+                )
+            }
+            try await stage("native chat canonical identity unchanged") {
+                // The VM callback reports changes, not a redundant attachment
+                // to the durable ID it already owns from the initializer.
+                guard second.hasServerBackedSession, (resumedID ?? durableID) == durableID else {
+                    throw LiveSmokeInvariant.failed
+                }
+            }
+
+            await second.disposeDirectConversation()
+            secondViewModel = nil
+            await serverRuntime.stop()
+            runtime = nil
+            try await stage("native chat logout") { try await api.directLogout() }
+            loggedIn = false
+        } catch {
+            if let secondViewModel { await secondViewModel.disposeDirectConversation() }
+            if let firstViewModel { await firstViewModel.disposeDirectConversation() }
+            if let runtime { await runtime.stop() }
+            if loggedIn { try? await api.directLogout() }
+            throw error
+        }
+    }
+
+    @MainActor
+    private func waitForNativeTranscript(
+        in viewModel: ChatViewModel,
+        user: String,
+        assistant: String
+    ) async throws {
+        // The controller's terminal event is followed by its canonical REST
+        // refresh. Wait for that replacement rather than treating the local
+        // optimistic row and terminal event as durable proof.
+        for _ in 0..<450 {
+            let users = viewModel.messages.filter { $0.role == "user" }
+            let assistants = viewModel.messages.filter { $0.role == "assistant" }
+            if users.count == 1, assistants.count == 1,
+               users[0].content == user, assistants[0].content == assistant,
+               let userID = users[0].messageId, !userID.hasPrefix("local-"),
+               let assistantID = assistants[0].messageId, !assistantID.hasPrefix("stream-"),
+               viewModel.activeStreamID == nil {
+                return
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        throw LiveSmokeInvariant.failed
+    }
+
     private static func readCredentials() throws -> LiveCredentials {
         let data = try Data(contentsOf: URL(fileURLWithPath: credentialsPath), options: [.mappedIfSafe])
         return try JSONDecoder().decode(LiveCredentials.self, from: data)
@@ -785,6 +956,14 @@ private enum LiveSmokeFailure: Error {
         case let .stage(value): return value
         }
     }
+}
+
+@MainActor
+private final class NativeSmokeNoopLiveActivityManager: AgentLiveActivityManaging {
+    func start(sessionID: String, sessionTitle: String, streamID: String?) {}
+    func update(_ event: AgentLiveActivityEvent) {}
+    func markStale() {}
+    func end(status: AgentRunActivityStatus, activity: String, errorSummary: String?) {}
 }
 
 private actor LiveGatewayEventCapture {

@@ -292,7 +292,12 @@ final class ChatViewModel {
     private(set) var isCompressingSession = false
     private(set) var isCancellingStream = false
     private(set) var isViewingCachedData = false
-    var activeStreamID: String? { streamCoordinator.activeStreamID }
+    var activeStreamID: String? {
+        guard usesDirectGateway else { return streamCoordinator.activeStreamID }
+        guard !directInvalidated, let controller = directConversation, controller.runState != .idle else { return nil }
+        // UI liveness identity only; never a persisted gateway runtime ID.
+        return controller.storedID.map { "direct-run:\($0)" } ?? "direct-draft-run"
+    }
     private(set) var wasReusedFromOpenSessionStore = false
 
     var hasPreservedLiveRun: Bool {
@@ -638,7 +643,20 @@ final class ChatViewModel {
     private(set) var goalErrorMessage: String?
     private(set) var hasActivatedGoalCommand = false
 
-    private let sessionID: String?
+    private var sessionID: String?
+    var usesDirectGateway: Bool { gatewayRuntimeProvider != nil }
+    @ObservationIgnored private let gatewayRuntimeProvider: (@MainActor (APIClient) async throws -> HermesServerRuntime)?
+    private var directConversation: GatewayConversationController?
+    private var directRuntime: HermesServerRuntime?
+    @ObservationIgnored private var directAttachmentTask: Task<GatewayConversationController, Error>?
+    private var directInvalidated = false
+    private var directVisible = false
+    private var directComposerIsEditing = false
+    private var directOlderOffset = 0
+    private var directHistoryID: String?
+    private var directResponseComplete = false
+    private var directModelContext: ModelContext?
+    var onDirectCanonicalID: ((String) -> Void)?
     var hasServerBackedSession: Bool {
         guard let sessionID else { return false }
         return !sessionID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -703,9 +721,9 @@ final class ChatViewModel {
     private(set) var listenPlaybackSpeed: ListenPlaybackSpeed
     @ObservationIgnored private var listenPlaybackTicker: Timer?
     private var showsLiveActivityResponseExcerpts: Bool
-    private var hasCompletedCurrentResponse: Bool { streamCoordinator.hasCompletedCurrentResponse }
-    private var isStreamConnectionSuspended: Bool { streamCoordinator.isConnectionSuspended }
-    var isActiveStreamConnectionSuspended: Bool { streamCoordinator.isConnectionSuspended }
+    private var hasCompletedCurrentResponse: Bool { usesDirectGateway ? directResponseComplete : streamCoordinator.hasCompletedCurrentResponse }
+    private var isStreamConnectionSuspended: Bool { usesDirectGateway ? directRuntime?.state == .disconnected : streamCoordinator.isConnectionSuspended }
+    var isActiveStreamConnectionSuspended: Bool { isStreamConnectionSuspended }
     private var hasLoadedPersonalitySuggestions = false
     private var isLoadingPersonalitySuggestions = false
     private var hasLoadedSkillSlashSuggestions = false
@@ -751,7 +769,8 @@ final class ChatViewModel {
         listenAudioSession: (any ListenAudioSessionControlling)? = nil,
         listenRemoteControlCenter: (any ListenRemoteControlControlling)? = nil,
         serverTTSAudioPlayerFactory: (@MainActor (Data) throws -> any ListenAudioPlaying)? = nil,
-        userDefaults: UserDefaults = .standard
+        userDefaults: UserDefaults = .standard,
+        gatewayRuntimeProvider: (@MainActor (APIClient) async throws -> HermesServerRuntime)? = nil
     ) {
         sessionID = session.sessionId
         currentWorkspace = session.workspace
@@ -761,6 +780,7 @@ final class ChatViewModel {
         sessionReasoningEffort = Self.nonEmpty(session.reasoningEffort)
         isCLISession = session.isCliSession == true
         self.server = server
+        self.gatewayRuntimeProvider = gatewayRuntimeProvider
         #if DEBUG
         self.nativeAuthE2EAutoSubmitController = NativeAuthE2EAutoSubmitController.processController(
             serverURL: server
@@ -809,7 +829,7 @@ final class ChatViewModel {
         let restorePoint = restoreStore.load(server: server, sessionID: session.sessionId ?? session.id)
         savedFollowingLatest = restorePoint.followingLatest
         savedVisibleMessageID = restorePoint.visibleMessageID
-        if let bookmark = liveRunBookmarkStore.load(server: server, sessionID: session.sessionId ?? session.id),
+        if gatewayRuntimeProvider == nil, let bookmark = liveRunBookmarkStore.load(server: server, sessionID: session.sessionId ?? session.id),
            bookmark.streamID == session.activeStreamId {
             liveReasoningText = bookmark.liveReasoningText
             streamingAssistantMessageID = bookmark.streamingAssistantMessageID
@@ -829,7 +849,7 @@ final class ChatViewModel {
         self.streamCoordinator.attach(delegate: self)
         self.pendingActionCoordinator.delegate = self
         self.attachmentCoordinator.delegate = self
-        streamCoordinator.adoptKnownLiveStreamIfNeeded(session.activeStreamId)
+        if gatewayRuntimeProvider == nil { streamCoordinator.adoptKnownLiveStreamIfNeeded(session.activeStreamId) }
     }
 
     deinit {
@@ -841,6 +861,282 @@ final class ChatViewModel {
         connectionVisibilityTask?.cancel()
         listenPreparationTask?.cancel()
         listenPlaybackTicker?.invalidate()
+    }
+
+    // MARK: - Direct Hermes native bridge
+
+    private func ensureDirectConversation() async throws -> GatewayConversationController {
+        guard !directInvalidated, let gatewayRuntimeProvider else { throw DirectSessionError.stopped }
+        if let directConversation { return directConversation }
+        if let directAttachmentTask { return try await directAttachmentTask.value }
+        let task = Task { @MainActor [weak self] in
+            guard let self else { throw DirectSessionError.stopped }
+            let runtime = try await gatewayRuntimeProvider(self.client)
+            guard !self.directInvalidated else { throw DirectSessionError.stopped }
+            let controller = GatewayConversationController(runtime: runtime, client: self.client,
+                storedID: self.canonicalSessionID, profile: Self.nonEmpty(self.currentProfile) ?? "default")
+            controller.isVisible = self.directVisible
+            controller.isEditing = self.directComposerIsEditing
+            controller.onBinding = { [weak self] binding in self?.adoptDirectID(binding.storedID) }
+            controller.onCanonicalID = { [weak self] id in self?.adoptDirectID(id) }
+            controller.onTranscript = { [weak self] page, older in
+                guard let self, !self.directInvalidated else { return }
+                self.applyDirectTranscript(page, older: older)
+            }
+            controller.onEvent = { [weak self] event in
+                guard let self, !self.directInvalidated else { return }
+                self.applyDirectEvent(event)
+            }
+            controller.onError = { [weak self] error in
+                guard let self, !self.directInvalidated else { return }
+                self.lastError = error
+                self.sendErrorMessage = "The Hermes connection needs attention. No message was automatically resent."
+            }
+            self.directRuntime = runtime
+            self.directConversation = controller
+            return controller
+        }
+        directAttachmentTask = task
+        defer { directAttachmentTask = nil }
+        return try await task.value
+    }
+
+    private func adoptDirectID(_ id: String) {
+        guard !directInvalidated, sessionID != id else { return }
+        sessionID = id
+        onDirectCanonicalID?(id)
+    }
+
+    func invalidateDirectConversation() {
+        guard usesDirectGateway else { return }
+        directInvalidated = true
+        directConversation?.invalidate()
+        directAttachmentTask?.cancel()
+        stopSessionEventSync()
+        cleanupPollingTasks()
+        resetPendingStreamingContentBuffers()
+        if directConversation?.runState != .idle { liveActivityManager.markStale() }
+    }
+
+    func setDirectComposerEditing(_ editing: Bool) {
+        directComposerIsEditing = editing
+        directConversation?.isEditing = editing
+    }
+
+    func disposeDirectConversation() async {
+        guard usesDirectGateway else { return }
+        invalidateDirectConversation()
+        do { try await directConversation?.dispose() }
+        catch {
+            lastError = error
+            sendErrorMessage = "The unused Hermes draft could not be confirmed closed."
+        }
+        directConversation = nil
+        directRuntime = nil
+    }
+
+    private func loadDirectMessages(modelContext: ModelContext?) async {
+        guard !directInvalidated else { return }
+        directModelContext = modelContext ?? directModelContext
+        if let sessionID, messages.isEmpty, let modelContext {
+            _ = renderCachedMessagesBeforeReload(sessionID: sessionID, modelContext: modelContext)
+        }
+        beginConnectionWaitIfNeeded()
+        defer { endConnectionWait() }
+        do {
+            let wasAttached = directConversation?.binding != nil
+            let controller = try await ensureDirectConversation()
+            // open/resume already performs one canonical read. A warm idle
+            // refresh needs another; never overwrite an active streamed turn.
+            try await controller.open()
+            if wasAttached, controller.runState == .idle { try await controller.refresh() }
+            errorMessage = nil
+        } catch {
+            lastError = error
+            errorMessage = "Could not load this Hermes conversation."
+            isViewingCachedData = !messages.isEmpty
+        }
+    }
+
+    private func loadOlderDirectMessages(modelContext: ModelContext?) async -> Bool {
+        guard !directInvalidated, !isLoadingOlderMessages, hasOlderMessages,
+              directConversation?.runState == .idle else { return false }
+        directModelContext = modelContext ?? directModelContext
+        isLoadingOlderMessages = true
+        defer { isLoadingOlderMessages = false }
+        let count = messages.count
+        do {
+            let controller = try await ensureDirectConversation()
+            try await controller.refresh(limit: 120, offset: directOlderOffset)
+            return messages.count > count
+        } catch { lastError = error; errorMessage = "Could not load older messages."; return false }
+    }
+
+    private func applyDirectTranscript(_ page: DirectHermesTranscriptPage, older: Bool) {
+        let renderedCache = cacheFirstMessagePlaceholder != nil
+        flushPendingStreamingContent()
+        resetPendingStreamingContentBuffers()
+        let canonicalChanged = directHistoryID != nil && directHistoryID != page.sessionID
+        adoptDirectID(page.sessionID)
+        directHistoryID = page.sessionID
+        withBatchedTranscriptDerivedState {
+            messages = older && !canonicalChanged
+                ? Self.prependingOlderMessages(page.messages, to: messages) : page.messages
+            // WebUI's forward absolute offset is not the direct backwards cursor.
+            // Stable durable row IDs own transcript identity on this path.
+            messagesOffset = 0
+        }
+        let returned = page.pagination?.returned ?? page.messages.count
+        directOlderOffset = (page.pagination?.offset ?? (older ? directOlderOffset : 0)) + returned
+        hasOlderMessages = returned >= (page.pagination?.limit ?? 120)
+        setCompletedToolCallGroups(ToolCallGroup.groups(persistedToolCalls: [], messages: messages, messageOffset: 0))
+        completedReasoningGroups = []
+        streamingAssistantMessageID = nil
+        streamingAssistantMessageIndex = nil
+        liveToolCalls = []
+        liveReasoningText = ""
+        reasoningAnchorMessageID = nil
+        toolCallAnchorMessageID = nil
+        clearCacheFirstMessagePlaceholder()
+        if renderedCache { cacheFirstReconcileScrollToken += 1 }
+        isViewingCachedData = false
+        responseCompletionNeedsTranscriptRefresh = false
+        cacheCurrentMessages(sessionID: page.sessionID, modelContext: directModelContext)
+    }
+
+    private func sendDirectMessage(_ draft: String, modelContext: ModelContext?) async -> Bool {
+        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, !directInvalidated, !isStartingChat,
+              (directConversation?.runState == nil || directConversation?.runState == .idle) else { return false }
+        guard pendingAttachments.isEmpty else {
+            sendErrorMessage = "Direct Hermes attachments are not available yet. Your draft was kept."
+            return false
+        }
+        directModelContext = modelContext ?? directModelContext
+        isStartingChat = true
+        sendErrorMessage = nil
+        lastError = nil
+        defer {
+            isStartingChat = false
+            OpenChatSessionStore.shared.noteStreamingStateChanged()
+        }
+        let localID = "local-\(UUID().uuidString)"
+        do {
+            let controller = try await ensureDirectConversation()
+            // Resume first so its canonical transcript cannot erase this new
+            // optimistic row. Draft open remains completely local.
+            try await controller.open()
+            guard !directInvalidated, controller.runState == .idle else { throw DirectSessionError.ambiguousPrompt }
+            messageLoadGeneration &+= 1
+            archiveLiveReasoningIfNeeded()
+            archiveLiveToolCallsIfNeeded()
+            resetPendingStreamingContentBuffers()
+            streamingAssistantMessageID = nil
+            liveToolCalls = []
+            liveReasoningText = ""
+            reasoningAnchorMessageID = nil
+            toolCallAnchorMessageID = nil
+            directResponseComplete = false
+            messages.append(ChatMessage(role: "user", content: text, timestamp: Date().timeIntervalSince1970, messageId: localID))
+            var creation: [String: JSONValue] = [:]
+            if let value = Self.nonEmpty(currentWorkspace) { creation["cwd"] = .string(value) }
+            if let value = Self.nonEmpty(currentModel) { creation["model"] = .string(value) }
+            if let value = Self.nonEmpty(currentModelProvider) { creation["provider"] = .string(value) }
+            if let value = Self.nonEmpty(sessionReasoningEffort) { creation["reasoning_effort"] = .string(value) }
+            try await controller.submit(text, create: creation)
+            if let sessionID { cacheCurrentMessages(sessionID: sessionID, modelContext: directModelContext) }
+            return true
+        } catch {
+            lastError = error
+            if directConversation?.runState == .deliveryUnknown {
+                // Keep the staged row as uncertain. Restoring the composer would
+                // invite an accidental duplicate; a canonical reload resolves it.
+                sendErrorMessage = "Delivery is uncertain. This message was not resent; reconnect to check the transcript."
+                return true
+            }
+            rollbackOptimisticMessage(id: localID)
+            sendErrorMessage = "Hermes could not accept this message. Your draft was kept."
+            return false
+        }
+    }
+
+    private func applyDirectEvent(_ event: HermesGatewayEvent) {
+        if !["message.delta", "thinking.delta", "reasoning.delta"].contains(event.type) {
+            flushPendingStreamingContent()
+        }
+        defer {
+            // A token is not an ownership transition. Avoid invalidating every
+            // sidebar/live-session consumer and rescheduling retention per delta.
+            if ["message.start", "message.complete", "error"].contains(event.type) {
+                OpenChatSessionStore.shared.noteStreamingStateChanged()
+            }
+        }
+        switch GatewayConversationController.presentationEvent(for: event) {
+        case .textDelta(let text):
+            _ = appendAssistantToken(text)
+            if showsLiveActivityResponseExcerpts { liveActivityManager.update(.token(text)) }
+        case .interim(let text, let alreadyStreamed):
+            _ = appendInterimAssistant(InterimAssistantStreamEvent(text: text, alreadyStreamed: alreadyStreamed))
+        case .thinkingDelta(let text), .reasoningDelta(let text):
+            _ = appendReasoning(text)
+            liveActivityManager.update(.reasoning(text))
+        case .toolStart(let tool):
+            _ = appendToolCall(directToolEvent(tool, completed: false))
+            liveActivityManager.update(.toolStarted(name: tool.name))
+        case .toolComplete(let tool):
+            _ = completeToolCall(directToolEvent(tool, completed: true))
+            liveActivityManager.update(.toolCompleted)
+        case .toolProgress: break // Progress is not a second tool call.
+        case .usage(let usage): contextWindowSnapshot = usage
+        case .terminal(let terminal):
+            flushPendingStreamingContent()
+            if let text = terminal.text, !text.isEmpty { _ = ensureStreamingAssistantMessage() }
+            if let text = terminal.text, !text.isEmpty,
+               let index = messages.indices.last, messages[index].role == "assistant" {
+                let current = messages[index]
+                messages[index] = ChatMessage(role: current.role, content: text,
+                    timestamp: current.timestamp, messageId: current.messageId,
+                    name: current.name, toolCallId: current.toolCallId, toolUseId: current.toolUseId,
+                    toolCalls: current.toolCalls, contentParts: current.contentParts,
+                    reasoning: terminal.reasoning ?? current.reasoning, attachments: current.attachments,
+                    turnTps: terminal.usage?.tokensPerSecond ?? current.turnTps)
+            }
+            if let usage = terminal.usage { contextWindowSnapshot = usage }
+            directResponseComplete = true
+            responseCompletionHapticTrigger += 1
+            sendErrorMessage = terminal.error
+            let cancelled = terminal.status == "cancelled" || terminal.status == "interrupted"
+            liveActivityManager.end(status: terminal.error != nil ? .failed : (cancelled ? .cancelled : .complete),
+                activity: cancelled ? "Response stopped" : "Response complete", errorSummary: terminal.error)
+        case .control(let raw):
+            if raw.type == "message.start" {
+                directResponseComplete = false
+                streamingAssistantMessageID = nil
+                streamingAssistantMessageIndex = nil
+                if let sessionID {
+                    // A local activity identity is not a gateway runtime ID.
+                    liveActivityManager.start(sessionID: sessionID, sessionTitle: displayTitle, streamID: nil)
+                }
+            } else if raw.type == "error" {
+                sendErrorMessage = raw.payload?.gatewayFields["message"]?.gatewayString ?? "Hermes reported an error."
+            } else if ["approval.request", "clarify.request", "sudo.request", "secret.request"].contains(raw.type) {
+                // Native blocking-interaction controls are Slice 3. Until then,
+                // surface the wait explicitly instead of silently dropping it
+                // or trying the WebUI approval/clarification endpoints.
+                sendErrorMessage = "Hermes is waiting for input. This migration build cannot answer that request yet; use the TUI or stop this response."
+            }
+        case .unknown: break
+        }
+    }
+
+    private func directToolEvent(_ tool: GatewayConversationController.PresentationTool, completed: Bool) -> ToolStreamEvent {
+        let resultText: String?
+        if case .string(let text) = tool.result { resultText = text }
+        else if let result = tool.result, let data = try? JSONEncoder().encode(result) { resultText = String(data: data, encoding: .utf8) }
+        else { resultText = nil }
+        return ToolStreamEvent(eventType: completed ? "tool_complete" : "tool_start", name: tool.name,
+            preview: tool.error ?? tool.summary ?? resultText, args: tool.args, duration: tool.duration,
+            isError: tool.error != nil, stableID: tool.toolID)
     }
 
     func setShowsLiveActivityResponseExcerpts(_ shows: Bool) {
@@ -863,6 +1159,11 @@ final class ChatViewModel {
     }
 
     func startSessionEventSync() {
+        if usesDirectGateway {
+            directVisible = true
+            directConversation?.isVisible = true
+            return
+        }
         guard !didStartSessionEventSync else { return }
         didStartSessionEventSync = true
 
@@ -888,6 +1189,9 @@ final class ChatViewModel {
     }
 
     func stopSessionEventSync() {
+        directVisible = false
+        directConversation?.isVisible = false
+        guard !usesDirectGateway else { return }
         didStartSessionEventSync = false
         sessionEventReconcileTask?.cancel()
         sessionEventReconcileTask = nil
@@ -1210,6 +1514,9 @@ final class ChatViewModel {
     }
 
     func loadComposerConfiguration() async {
+        // Direct per-session model/profile controls are integrated separately;
+        // never consult WebUI's global configuration as a fallback.
+        guard !usesDirectGateway else { return }
         if isLoadingComposerConfiguration {
             needsComposerConfigurationReload = true
             return
@@ -1299,6 +1606,7 @@ final class ChatViewModel {
     }
 
     func refreshApprovalBypassState() async {
+        guard !usesDirectGateway else { return }
         await pendingActionCoordinator.refreshApprovalBypassState()
     }
 
@@ -1716,6 +2024,10 @@ final class ChatViewModel {
     }
 
     func uploadAttachment(data: Data, filename: String, previewData: Data? = nil) async {
+        guard !usesDirectGateway else {
+            setUploadAttachmentError("Direct Hermes attachments are not available yet.")
+            return
+        }
         await attachmentCoordinator.uploadAttachment(data: data, filename: filename, previewData: previewData)
     }
 
@@ -1751,6 +2063,10 @@ final class ChatViewModel {
         modelContext: ModelContext? = nil,
         allowApplyDuringLocalStart: Bool = false
     ) async {
+        if usesDirectGateway {
+            await loadDirectMessages(modelContext: modelContext)
+            return
+        }
         guard let sessionID else {
             errorMessage = String(localized: "The server did not provide a session ID.")
             return
@@ -1980,7 +2296,7 @@ final class ChatViewModel {
         do {
             cachedMessages = try CacheStore.cachedMessages(
                 serverURL: server,
-                sessionID: sessionID,
+                sessionID: transcriptCacheID(sessionID),
                 in: modelContext,
                 limit: Self.messagePageLimit
             )
@@ -2032,6 +2348,7 @@ final class ChatViewModel {
 
     @discardableResult
     func loadOlderMessages(modelContext: ModelContext? = nil) async -> Bool {
+        if usesDirectGateway { return await loadOlderDirectMessages(modelContext: modelContext) }
         guard let sessionID else {
             errorMessage = String(localized: "The server did not provide a session ID.")
             return false
@@ -2588,6 +2905,7 @@ final class ChatViewModel {
     }
 
     func sendMessage(_ draft: String, modelContext: ModelContext? = nil) async -> Bool {
+        if usesDirectGateway { return await sendDirectMessage(draft, modelContext: modelContext) }
         guard !isViewingCachedData else {
             sendErrorMessage = String(localized: "Reconnect to the server to send a message.")
             return false
@@ -2623,6 +2941,10 @@ final class ChatViewModel {
     /// returns nothing. Returns true only if the chat send started.
     @discardableResult
     func sendVoiceNote(audioData: Data, filename: String, modelContext: ModelContext? = nil) async -> Bool {
+        guard !usesDirectGateway else {
+            sendErrorMessage = "Direct Hermes voice attachments are not available yet."
+            return false
+        }
         // Reentrancy guard: bail if a voice note OR a regular chat send is already
         // in flight. `performChatSend` has no internal guard, so two overlapping
         // sends would both flip `isStartingChat`/`isSendingVoiceNote` and race their
@@ -2805,6 +3127,12 @@ final class ChatViewModel {
     }
 
     func submitGoal(args rawArgs: String, modelContext: ModelContext? = nil) async -> Bool {
+        guard !usesDirectGateway else {
+            goalErrorMessage = String(localized: "Goals are not available in direct Hermes mode yet.")
+            sendErrorMessage = goalErrorMessage
+            return false
+        }
+
         guard !isViewingCachedData else {
             goalErrorMessage = String(localized: "Reconnect to the server to manage goals.")
             sendErrorMessage = goalErrorMessage
@@ -2872,6 +3200,12 @@ final class ChatViewModel {
     }
 
     private func attachGoalKickoffStream(noticeMessage: String?, modelContext: ModelContext?) async -> Bool {
+        guard !usesDirectGateway else {
+            goalErrorMessage = String(localized: "Goals are not available in direct Hermes mode yet.")
+            sendErrorMessage = goalErrorMessage
+            return false
+        }
+
         await loadMessages(modelContext: modelContext)
 
         if let errorMessage {
@@ -2910,11 +3244,17 @@ final class ChatViewModel {
         attachmentCoordinator.restorePendingAttachments(attachments)
     }
 
+    private func transcriptCacheID(_ durableID: String) -> String {
+        guard usesDirectGateway else { return durableID }
+        let profile = Self.nonEmpty(currentProfile) ?? "default"
+        return "direct:\(profile.utf8.count):\(profile):\(durableID)"
+    }
+
     private func cacheCurrentMessages(sessionID: String, modelContext: ModelContext?) {
         guard let modelContext else { return }
 
         do {
-            try CacheStore.cacheMessages(Self.cacheMessageWindow(from: messages), serverURL: server, sessionID: sessionID, in: modelContext)
+            try CacheStore.cacheMessages(Self.cacheMessageWindow(from: messages), serverURL: server, sessionID: transcriptCacheID(sessionID), in: modelContext)
         } catch {
             cacheErrorMessage = error.localizedDescription
         }
@@ -3040,6 +3380,20 @@ final class ChatViewModel {
     }
 
     private func steerResponseFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
+        if usesDirectGateway {
+            do {
+                let controller = try await ensureDirectConversation()
+                let outcome = try await controller.steer(args)
+                switch outcome {
+                case .accepted: return .executed(message: "Steering hint delivered.")
+                case .queued: return .executed(message: "Steering hint queued by Hermes.")
+                case .rejected: return .unsupported(friendlyMessage: "Hermes rejected this steering hint; the current response was not interrupted.")
+                }
+            } catch {
+                lastError = error
+                return .unsupported(friendlyMessage: "Could not deliver the steering hint. The message was not resent.")
+            }
+        }
         let message = args.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !message.isEmpty else {
             return .unsupported(friendlyMessage: String(localized: "Usage: /steer <message>"))
@@ -3118,6 +3472,10 @@ final class ChatViewModel {
     }
 
     private func askBtwFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
+        guard !usesDirectGateway else {
+            return .unsupported(friendlyMessage: String(localized: "/btw is not available in direct Hermes mode yet."))
+        }
+
         let question = args.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !question.isEmpty else {
             return .unsupported(friendlyMessage: String(localized: "Usage: /btw <question>"))
@@ -3162,6 +3520,10 @@ final class ChatViewModel {
     }
 
     private func startBackgroundFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
+        guard !usesDirectGateway else {
+            return .unsupported(friendlyMessage: String(localized: "/background is not available in direct Hermes mode yet."))
+        }
+
         let prompt = args.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else {
             return .unsupported(friendlyMessage: String(localized: "Usage: /background <prompt>"))
@@ -3379,6 +3741,10 @@ final class ChatViewModel {
     }
 
     private func renameSessionFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
+        guard !usesDirectGateway else {
+            return .unsupported(friendlyMessage: String(localized: "/title is not available in direct Hermes mode yet."))
+        }
+
         let title = args.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty else {
             return .executed(message: String(localized: "Current title: **\(displayTitle)**\n\nUse `/title <text>` to rename this session."))
@@ -3409,6 +3775,10 @@ final class ChatViewModel {
     }
 
     private func setPersonalityFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
+        guard !usesDirectGateway else {
+            return .unsupported(friendlyMessage: String(localized: "/personality is not available in direct Hermes mode yet."))
+        }
+
         let requestedPersonality = args.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !requestedPersonality.isEmpty else {
             return await personalityListMessage()
@@ -3446,6 +3816,10 @@ final class ChatViewModel {
     }
 
     private func personalityListMessage() async -> SlashCommandExecutionResult {
+        guard !usesDirectGateway else {
+            return .unsupported(friendlyMessage: String(localized: "/personality is not available in direct Hermes mode yet."))
+        }
+
         do {
             let personalities = (try await client.personalities()).personalities ?? []
             guard !personalities.isEmpty else {
@@ -3469,6 +3843,10 @@ final class ChatViewModel {
     }
 
     private func searchSkillsFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
+        guard !usesDirectGateway else {
+            return .unsupported(friendlyMessage: String(localized: "Skills are not available in direct Hermes mode yet."))
+        }
+
         do {
             let suggestions = try await skillSuggestionsForSlashCommand()
             if let invocation = SlashSkillFormatter.invocation(from: args, suggestions: suggestions) {
@@ -3487,6 +3865,10 @@ final class ChatViewModel {
     }
 
     func executeSkillShortcutCommand(name: String, args: String) async -> SlashCommandExecutionResult? {
+        guard !usesDirectGateway else {
+            return .unsupported(friendlyMessage: String(localized: "Skills are not available in direct Hermes mode yet."))
+        }
+
         do {
             let suggestions = try await skillSuggestionsForSlashCommand()
             guard let skill = SlashSkillFormatter.skill(named: name, in: suggestions) else {
@@ -3523,6 +3905,10 @@ final class ChatViewModel {
     }
 
     private func branchSessionFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
+        guard !usesDirectGateway else {
+            return .unsupported(friendlyMessage: String(localized: "Forking is not available in direct Hermes mode yet."))
+        }
+
         guard !isViewingCachedData else {
             return .unsupported(friendlyMessage: String(localized: "Reconnect to the server to fork a conversation."))
         }
@@ -3573,6 +3959,10 @@ final class ChatViewModel {
     }
 
     private func createSessionFromSlashCommand() async -> SlashCommandExecutionResult {
+        guard !usesDirectGateway else {
+            return .unsupported(friendlyMessage: String(localized: "Use New Chat; direct Hermes creates sessions on first send."))
+        }
+
         guard !isViewingCachedData else {
             return .unsupported(friendlyMessage: String(localized: "Reconnect to the server to start a new session."))
         }
@@ -3607,6 +3997,10 @@ final class ChatViewModel {
     }
 
     private func compressSessionFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
+        guard !usesDirectGateway else {
+            return .unsupported(friendlyMessage: String(localized: "Compression is not available in direct Hermes mode yet."))
+        }
+
         guard !isViewingCachedData else {
             return .unsupported(friendlyMessage: String(localized: "Reconnect to the server to compress context."))
         }
@@ -3700,6 +4094,10 @@ final class ChatViewModel {
     }
 
     private func undoLastExchangeFromSlashCommand() async -> SlashCommandExecutionResult {
+        guard !usesDirectGateway else {
+            return .unsupported(friendlyMessage: String(localized: "Undo is not available in direct Hermes mode yet."))
+        }
+
         guard !isViewingCachedData else {
             return .unsupported(friendlyMessage: String(localized: "Reconnect to the server to undo messages."))
         }
@@ -3738,6 +4136,10 @@ final class ChatViewModel {
     }
 
     private func retryLastTurnFromSlashCommand() async -> SlashCommandExecutionResult {
+        guard !usesDirectGateway else {
+            return .unsupported(friendlyMessage: String(localized: "Retry is not available in direct Hermes mode yet."))
+        }
+
         guard !isViewingCachedData else {
             return .unsupported(friendlyMessage: String(localized: "Reconnect to the server to retry messages."))
         }
@@ -3947,6 +4349,11 @@ final class ChatViewModel {
     }
 
     func forkFromMessage(_ context: MessageActionContext, modelContext: ModelContext? = nil) async -> SessionSummary? {
+        guard !usesDirectGateway else {
+            messageActionErrorMessage = String(localized: "Forking is not available in direct Hermes mode yet.")
+            return nil
+        }
+
         guard !isViewingCachedData else {
             messageActionErrorMessage = String(localized: "Reconnect to the server to fork a conversation.")
             return nil
@@ -4007,6 +4414,11 @@ final class ChatViewModel {
 
     /// Edit a user message: truncate to just before the selected message, then send the edited text.
     func editMessage(_ context: MessageActionContext, newText: String, modelContext: ModelContext? = nil) async -> Bool {
+        guard !usesDirectGateway else {
+            messageActionErrorMessage = String(localized: "Editing is not available in direct Hermes mode yet.")
+            return false
+        }
+
         guard context.role == .user else {
             messageActionErrorMessage = String(localized: "Only user messages can be edited.")
             return false
@@ -4115,6 +4527,11 @@ final class ChatViewModel {
         _ context: MessageActionContext,
         modelContext: ModelContext? = nil
     ) async -> Bool {
+        guard !usesDirectGateway else {
+            messageActionErrorMessage = String(localized: "Regeneration is not available in direct Hermes mode yet.")
+            return false
+        }
+
         guard context.role == .assistant else {
             messageActionErrorMessage = String(localized: "Only assistant messages can be regenerated.")
             return false
@@ -4208,6 +4625,21 @@ final class ChatViewModel {
 
     @discardableResult
     func cancelActiveStream() async -> Bool {
+        if usesDirectGateway {
+            guard !isCancellingStream else { return false }
+            isCancellingStream = true
+            defer { isCancellingStream = false }
+            do {
+                let controller = try await ensureDirectConversation()
+                try await controller.interrupt()
+                OpenChatSessionStore.shared.noteStreamingStateChanged()
+                return true
+            } catch {
+                lastError = error
+                sendErrorMessage = "Hermes has not confirmed that the response stopped."
+                return false
+            }
+        }
         guard activeStreamID != nil else { return false }
 
         isCancellingStream = true
@@ -4372,10 +4804,12 @@ final class ChatViewModel {
     }
 
     func cancelStreamReconnectRetry() {
+        guard !usesDirectGateway else { return }
         streamCoordinator.cancelReconnectRetry()
     }
 
     func ensureOwnedStreamStatusWatch() {
+        guard !usesDirectGateway else { return }
         guard streamStatusWatchTask == nil, activeStreamID != nil else { return }
         streamStatusWatchTask = Task { @MainActor [weak self] in
             while let self, !Task.isCancelled {
@@ -4398,6 +4832,7 @@ final class ChatViewModel {
     }
 
     private func suspendActiveStreamConnection() {
+        guard !usesDirectGateway else { return }
         streamCoordinator.suspendActiveStreamConnection()
     }
 
@@ -4418,13 +4853,21 @@ final class ChatViewModel {
 
     @discardableResult
     func reconnectStreamIfNeeded(modelContext: ModelContext? = nil) async -> Bool {
-        await streamCoordinator.reconnectIfNeeded(modelContext: modelContext)
+        if usesDirectGateway {
+            do {
+                let controller = try await ensureDirectConversation()
+                try await controller.open()
+                return activeStreamID != nil
+            } catch { lastError = error; return false }
+        }
+        return await streamCoordinator.reconnectIfNeeded(modelContext: modelContext)
     }
 
     func refreshTranscriptIfActiveStreamCompleted(
         streamID expectedStreamID: String,
         modelContext: ModelContext? = nil
     ) async {
+        guard !usesDirectGateway else { return }
         await streamCoordinator.refreshTranscriptIfCompleted(
             streamID: expectedStreamID,
             modelContext: modelContext
@@ -4435,6 +4878,7 @@ final class ChatViewModel {
         now: Date = Date(),
         modelContext: ModelContext? = nil
     ) async {
+        guard !usesDirectGateway else { return }
         await streamCoordinator.recoverStaleStreamIfNeeded(now: now, modelContext: modelContext)
     }
 
@@ -4443,6 +4887,7 @@ final class ChatViewModel {
     }
 
     private func saveActiveStreamSnapshotIfNeeded() {
+        guard !usesDirectGateway else { return }
         guard let sessionID,
               let activeStreamID,
               !hasCompletedCurrentResponse

@@ -648,7 +648,12 @@ struct ChatView: View {
                 .zIndex(20)
             }
         }
-        .background { SemrehBackdrop().ignoresSafeArea() }
+        .background {
+            SemrehBackdrop().ignoresSafeArea()
+                .onChange(of: draftMessage) {
+                    viewModel.setDirectComposerEditing(!draftMessage.isEmpty)
+                }
+        }
         .overlay(alignment: .top) {
             GitActionToastOverlay(state: gitToastState)
         }
@@ -1506,6 +1511,7 @@ struct ChatView: View {
     }
 
     private func loadInitialGitAvailability() async {
+        guard !viewModel.usesDirectGateway else { return }
         let availabilityViewModel = GitWorkspaceAvailabilityViewModel(session: session, server: server)
         gitAvailabilityViewModel = availabilityViewModel
         await availabilityViewModel.loadIfNeeded()
@@ -2060,6 +2066,7 @@ struct ChatView: View {
     }
 
     private func startActiveStreamStatusRefreshTask(streamID: String) {
+        guard !viewModel.usesDirectGateway else { return }
         activeStreamStatusRefreshTask?.cancel()
         activeStreamStatusRefreshTask = Task { @MainActor in
             while !Task.isCancelled {
