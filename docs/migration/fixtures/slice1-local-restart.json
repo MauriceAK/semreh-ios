@@ -1,0 +1,11 @@
+{
+  "configured_source_pin": "29112bef099274229cadff79cdff7bf7b99c4b77",
+  "deployment": "local HTTP only; not iOS or real HTTPS",
+  "client_recreation_cookie_restore": true,
+  "backend_restart_proof": "Requires separate operator process evidence; not asserted by this script",
+  "short_access_ttl_seconds": 60,
+  "expired_access_refresh_status": 200,
+  "access_cookie_rotated": true,
+  "refresh_cookie_rotated": true,
+  "captured_at_unix": 1788564177
+}

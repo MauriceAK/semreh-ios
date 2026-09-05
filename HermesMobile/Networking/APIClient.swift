@@ -227,6 +227,66 @@ actor APIClient {
         return (data, httpResponse)
     }
 
+    /// Direct-Hermes transport kept separate from the legacy endpoint transport.
+    ///
+    /// The legacy path maps every HTTP 401 to `APIError.unauthorized`, which is
+    /// intentionally not suitable for the direct auth contract: password-login
+    /// uses 401 for invalid credentials, while protected routes use structured
+    /// 401 bodies for an expired session. Direct callers opt into that narrower
+    /// classification explicitly.
+    func sendDirectData(
+        path: String,
+        method: String,
+        encodedBody: Data? = nil,
+        classifyStructuredAuthExpiry: Bool = false,
+        acceptsRedirect: Bool = false
+    ) async throws -> Data {
+        guard let url = URL(string: path, relativeTo: baseURL) else {
+            throw APIError.invalidServerURL
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        customHeaderProvider().apply(to: &request)
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        if let encodedBody {
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = encodedBody
+        }
+
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(
+                for: request, delegate: DirectHermesRedirectGuard(origin: baseURL)
+            )
+        } catch {
+            throw APIError.network(underlying: error)
+        }
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw APIError.http(statusCode: -1, body: nil)
+        }
+
+        if classifyStructuredAuthExpiry,
+           DirectHermesAuthFailureClassifier.isSessionExpired(
+               statusCode: httpResponse.statusCode,
+               body: data
+           ) {
+            throw DirectHermesAuthError.sessionExpired
+        }
+
+        let isSuccess = (200..<300).contains(httpResponse.statusCode)
+            || (acceptsRedirect && (300..<400).contains(httpResponse.statusCode))
+        guard isSuccess else {
+            throw DirectHermesRequestError.from(statusCode: httpResponse.statusCode, body: data)
+        }
+
+        return data
+    }
+
     func boundedData(
         endpoint: Endpoint,
         maximumBytes: Int,
