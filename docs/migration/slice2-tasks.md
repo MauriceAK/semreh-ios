@@ -1,6 +1,7 @@
 # Slice 2 task sheet
 
-Status: AWAITING IPHONE ACCEPTANCE. Updated September 6, 2026.
+Status: RESIDUAL FUNCTIONAL PHONE CHECKS OPEN; PERFORMANCE LIMITATION ACCEPTED.
+Updated September 6, 2026. Independent Slice 3 work may proceed by owner approval.
 Integrator owns this sheet. Non-device checks complete with documented exception.
 
 This is a progress index, not a new specification. The
@@ -15,7 +16,7 @@ passed, not that broader behavior or the entire slice is accepted.
 - No private backend requirement, personal Hermes changes, routes or deployment.
   Only the focused upstream compaction contribution is authorized for publication
   after review; Semreh push/release is not authorized.
-- No Slice 3, redesign or future integrations. Luna handles bounded tasks;
+- Slice 3 authorized September 6; no redesign or future integrations. Luna handles bounded tasks;
   integrator reviews and independently verifies. No Astra trial currently planned.
 - One Simulator/DerivedData owner: integrator. Workers do not edit shared notes.
 
@@ -107,18 +108,21 @@ App checkpoints: `a4e8257` and `4d040a3`. Evidence directory:
   on repeated switching. Root full native2018PASS/0FAIL/7intentional skips and
   long-chat UI4PASS/0skip; original failing switch test also failed on unchanged
   production baseline, then passed with correction. Physical retest still required;
-  no universal lag/FPS improvement claim.
+  no universal lag/FPS improvement claim. Build8/ad3ddbc subsequently installed;
+  Maurice confirmed mid-scroll arrow now works and accepted remaining jump/switch
+  lag temporarily. See `performance-followups.md`; no further performance pass now.
   Record device/build and observed failures; Simulator success cannot check this box.
   - [x] Approve delivery/install of a separate test build and record device/build.
   - [ ] Scroll long chats up/down; jump-to-bottom; interrupt jump with a gesture.
   - [ ] Switch among multiple long chats and Sessions/Control/You, then return.
   - [ ] Send/stop; verify transcript stability and thinking/tool-card lifecycle.
   - [ ] Change reasoning while idle/busy; confirm pending/applied feedback.
-  - [ ] Record observed responsiveness/glitches and Maurice's acceptance or fixes.
+  - [x] Record observed responsiveness/glitches and Maurice's temporary acceptance.
 - [ ] **S2-E — Final acceptance and handoff.**
   Owner: integrator. Status: pending S2-D; UP-1 merge/release is independent.
   Reconcile every binding gate with evidence, unresolved risks and user decisions.
-  Report implemented versus tested versus still unverified. No automatic Slice 3.
+  Report implemented versus tested versus still unverified. Maurice explicitly
+  authorized independent Slice 3 progress; these remaining boxes are not waived.
 
 ## Next update format
 

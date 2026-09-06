@@ -8,6 +8,7 @@ struct ContentView: View {
     @State private var pendingDeepLinkedSessionID: String?
     @State private var pendingNewChatRequest: NewChatRequest?
     @State private var didCheckInitialPendingShare = false
+    @State private var needsGatewayForegroundRecovery = false
     @State private var intentRouter = AppIntentRouter.shared
     @State private var selectedSurface: AppShellSurface = .sessions
 
@@ -34,12 +35,24 @@ struct ContentView: View {
                 await reconcileOrphanedLiveActivities(notifiesOnCompletion: true)
             }
             .onChange(of: scenePhase) {
+                if scenePhase == .background {
+                    needsGatewayForegroundRecovery = true
+                    return
+                }
                 guard scenePhase == .active else { return }
                 importPendingSharedDraftIfAvailable()
                 // #248: the foreground pass stays silent — the in-session completion
                 // paths own notifications while the app is alive.
                 Task { await reconcileOrphanedLiveActivities(notifiesOnCompletion: false) }
+                guard needsGatewayForegroundRecovery else { return }
+                needsGatewayForegroundRecovery = false
+                Task { await recoverActiveGatewayOnForeground() }
             }
+    }
+
+    private func recoverActiveGatewayOnForeground() async {
+        guard case .loggedIn(let server) = authManager.state else { return }
+        _ = await OpenChatSessionStore.shared.recoverGatewayOnForeground(for: server)
     }
 
     private func reconcileOrphanedLiveActivities(notifiesOnCompletion: Bool) async {

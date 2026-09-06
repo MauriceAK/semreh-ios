@@ -30,11 +30,16 @@ final class OpenChatSessionStore {
     private var gatewayRuntime: HermesServerRuntime?
     @ObservationIgnored private var gatewayTeardown: Task<Void, Never>?
     private var gatewayGeneration = 0
+    @ObservationIgnored private var foregroundRecoveryTask: Task<Error?, Never>?
+    @ObservationIgnored private var foregroundRecoveryGeneration: Int?
 
     /// Authentication owns activation. A stale chat cannot reactivate a server
     /// after sign-out or an account switch. New sockets await the old teardown.
     func activateGateway(server: URL?) {
         guard activeGatewayOrigin != server else { return }
+        foregroundRecoveryTask?.cancel()
+        foregroundRecoveryTask = nil
+        foregroundRecoveryGeneration = nil
         activeGatewayOrigin = server
         gatewayGeneration &+= 1
         let previousTeardown = gatewayTeardown
@@ -57,6 +62,53 @@ final class OpenChatSessionStore {
         noteStreamingStateChanged()
     }
 
+    /// Rebinds the single active gateway after the app becomes foregrounded.
+    ///
+    /// This is intentionally a store-level trigger rather than a second recovery
+    /// loop: the runtime owns socket generations, observer resume hooks, and
+    /// reconnect deduplication. A missing runtime is a normal cold-start state;
+    /// the first visible direct conversation will create and attach it later.
+    /// Errors are returned to the caller and never change authentication state.
+    @discardableResult
+    func recoverGatewayOnForeground(for server: URL) async -> Error? {
+        guard activeGatewayOrigin == server, let runtime = gatewayRuntime else { return nil }
+        let generation = gatewayGeneration
+        if let foregroundRecoveryTask,
+           foregroundRecoveryGeneration == generation {
+            return await foregroundRecoveryTask.value
+        }
+
+        foregroundRecoveryTask?.cancel()
+        let task = Task { @MainActor [weak self, runtime] () -> Error? in
+            guard let self,
+                  self.activeGatewayOrigin == server,
+                  self.gatewayGeneration == generation,
+                  self.gatewayRuntime === runtime else { return nil }
+            do {
+                try Task.checkCancellation()
+                // Force a fresh ticket/socket even when the old runtime still
+                // reports ready; iOS can suspend a socket without delivering a
+                // close callback. HermesServerRuntime deduplicates concurrent
+                // reconnects and runs the registered resume barrier.
+                try await runtime.reconnect()
+                return nil
+            } catch {
+                // Connectivity failures remain connectivity failures. The
+                // auth owner decides whether a structured auth response merits
+                // demotion; foreground recovery never logs the user out.
+                return error
+            }
+        }
+        foregroundRecoveryTask = task
+        foregroundRecoveryGeneration = generation
+        let result = await task.value
+        if foregroundRecoveryGeneration == generation {
+            foregroundRecoveryTask = nil
+            foregroundRecoveryGeneration = nil
+        }
+        return result
+    }
+
     func runtime(for server: URL, client: APIClient) async throws -> HermesServerRuntime {
         guard activeGatewayOrigin == server else { throw DirectSessionError.stopped }
         let generation = gatewayGeneration
@@ -67,6 +119,15 @@ final class OpenChatSessionStore {
         gatewayRuntime = created
         return created
     }
+
+#if DEBUG
+    /// Installs an already-constructed runtime for focused lifecycle tests.
+    /// Production code always obtains the runtime through `runtime(for:client:)`.
+    func installGatewayRuntimeForTesting(_ runtime: HermesServerRuntime, for server: URL) {
+        guard activeGatewayOrigin == server else { return }
+        gatewayRuntime = runtime
+    }
+#endif
 
     var retainedSessionCountForTesting: Int { viewModels.count }
 
@@ -294,6 +355,9 @@ final class OpenChatSessionStore {
 
     func resetForTesting() {
         activateGateway(server: nil)
+        foregroundRecoveryTask?.cancel()
+        foregroundRecoveryTask = nil
+        foregroundRecoveryGeneration = nil
         deferredRetentionTrimTask?.cancel()
         deferredRetentionTrimTask = nil
         refreshTasks.values.forEach { $0.cancel() }

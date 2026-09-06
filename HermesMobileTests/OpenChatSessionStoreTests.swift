@@ -257,6 +257,141 @@ final class OpenChatSessionStoreTests: XCTestCase {
     }
 
     @MainActor
+    func testForegroundRecoverySharesOneForceReconnect() async throws {
+        let server = try XCTUnwrap(URL(string: "https://foreground.example.test"))
+        let store = OpenChatSessionStore()
+        let transport = ForegroundRecoveryTransport()
+        let runtime = try makeForegroundRuntime(transport)
+        try await runtime.connect()
+        store.activateGateway(server: server)
+        store.installGatewayRuntimeForTesting(runtime, for: server)
+        await transport.blockConnection(2)
+
+        let first = Task { await store.recoverGatewayOnForeground(for: server) }
+        await transport.waitForConnection(2)
+        let second = Task { await store.recoverGatewayOnForeground(for: server) }
+        await Task.yield()
+        await transport.releaseConnection(2)
+
+        let firstResult = await first.value
+        let secondResult = await second.value
+        let connectionCount = await transport.connectionCount()
+        XCTAssertNil(firstResult)
+        XCTAssertNil(secondResult)
+        XCTAssertEqual(connectionCount, 2)
+        XCTAssertEqual(runtime.state, .ready)
+
+        await runtime.stop()
+        store.activateGateway(server: nil)
+    }
+
+    @MainActor
+    func testForegroundRecoveryReturnsConnectivityFailureAndCanRetry() async throws {
+        let server = try XCTUnwrap(URL(string: "https://foreground-failure.example.test"))
+        let store = OpenChatSessionStore()
+        let transport = ForegroundRecoveryTransport()
+        let runtime = try makeForegroundRuntime(transport)
+        try await runtime.connect()
+        store.activateGateway(server: server)
+        store.installGatewayRuntimeForTesting(runtime, for: server)
+        await transport.failNextConnections(1)
+
+        let failure = await store.recoverGatewayOnForeground(for: server)
+        XCTAssertNotNil(failure)
+        XCTAssertEqual(runtime.state, .disconnected)
+
+        let retryResult = await store.recoverGatewayOnForeground(for: server)
+        XCTAssertNil(retryResult)
+        XCTAssertEqual(runtime.state, .ready)
+        await runtime.stop()
+        store.activateGateway(server: nil)
+    }
+
+    @MainActor
+    func testForegroundRecoveryReplacesReadyButStaleSocket() async throws {
+        let server = try XCTUnwrap(URL(string: "https://foreground-stale.example.test"))
+        let store = OpenChatSessionStore()
+        let transport = ForegroundRecoveryTransport()
+        let runtime = try makeForegroundRuntime(transport)
+        try await runtime.connect()
+        store.activateGateway(server: server)
+        store.installGatewayRuntimeForTesting(runtime, for: server)
+        await transport.markConnectionStale()
+
+        let result = await store.recoverGatewayOnForeground(for: server)
+        let connectionCount = await transport.connectionCount()
+        XCTAssertNil(result)
+        XCTAssertEqual(connectionCount, 2)
+        XCTAssertEqual(runtime.state, .ready)
+        await runtime.stop()
+        store.activateGateway(server: nil)
+    }
+
+    @MainActor
+    func testForegroundRecoveryCannotReviveStoppedOrOldServerRuntime() async throws {
+        let serverA = try XCTUnwrap(URL(string: "https://foreground-a.example.test"))
+        let serverB = try XCTUnwrap(URL(string: "https://foreground-b.example.test"))
+        let store = OpenChatSessionStore()
+        let transport = ForegroundRecoveryTransport()
+        let runtime = try makeForegroundRuntime(transport)
+        try await runtime.connect()
+        store.activateGateway(server: serverA)
+        store.installGatewayRuntimeForTesting(runtime, for: serverA)
+        await runtime.stop()
+
+        let stopped = await store.recoverGatewayOnForeground(for: serverA)
+        let stoppedConnectionCount = await transport.connectionCount()
+        XCTAssertEqual(stopped as? DirectSessionError, .stopped)
+        XCTAssertEqual(stoppedConnectionCount, 1)
+
+        store.activateGateway(server: serverB)
+        let staleResult = await store.recoverGatewayOnForeground(for: serverA)
+        let staleConnectionCount = await transport.connectionCount()
+        XCTAssertNil(staleResult)
+        XCTAssertEqual(staleConnectionCount, 1)
+        store.activateGateway(server: nil)
+    }
+
+    @MainActor
+    func testForegroundRecoveryCannotReviveAfterInFlightServerSwitchOrLogout() async throws {
+        let serverA = try XCTUnwrap(URL(string: "https://foreground-in-flight-a.example.test"))
+        let serverB = try XCTUnwrap(URL(string: "https://foreground-in-flight-b.example.test"))
+
+        for destination in [serverB, nil] as [URL?] {
+            let store = OpenChatSessionStore()
+            let transport = ForegroundRecoveryTransport()
+            let runtime = try makeForegroundRuntime(transport)
+            try await runtime.connect()
+            store.activateGateway(server: serverA)
+            store.installGatewayRuntimeForTesting(runtime, for: serverA)
+            await transport.blockConnection(2)
+
+            let recovery = Task { await store.recoverGatewayOnForeground(for: serverA) }
+            await transport.waitForConnection(2)
+            store.activateGateway(server: destination)
+            // Force reconnect closes the old socket once before connect #2;
+            // wait for the teardown close as well before releasing connect #2.
+            await transport.waitForClose(2)
+            await transport.releaseConnection(2)
+
+            _ = await recovery.value
+            let connectionCount = await transport.connectionCount()
+            XCTAssertEqual(runtime.state, .stopped)
+            XCTAssertEqual(connectionCount, 2)
+            if let destination {
+                let currentRuntime = try await store.runtime(for: destination, client: APIClient(baseURL: destination))
+                XCTAssertTrue(currentRuntime !== runtime)
+            }
+            await runtime.stop()
+            store.activateGateway(server: nil)
+        }
+    }
+
+    private func makeForegroundRuntime(_ transport: ForegroundRecoveryTransport) throws -> HermesServerRuntime {
+        try HermesServerRuntime(origin: URL(string: "https://foreground.example.test")!) { _ in transport }
+    }
+
+    @MainActor
     func testInactiveAndStaleGatewayOriginsAreRejected() async throws {
         let serverA = try XCTUnwrap(URL(string: "https://gateway-a.example.test"))
         let serverB = try XCTUnwrap(URL(string: "https://gateway-b.example.test"))
@@ -1227,6 +1362,79 @@ final class OpenChatSessionStoreTests: XCTestCase {
         }
         return viewModel
     }
+}
+
+private actor ForegroundRecoveryTransport: HermesGatewayTransport {
+    private var connections = 0
+    private var closes = 0
+    private var activeConnection: Int?
+    private var staleConnection = false
+    private var failuresRemaining = 0
+    private var blockedConnections: Set<Int> = []
+    private var blockedWaiters: [Int: [CheckedContinuation<Void, Never>]] = [:]
+    private var connectionWaiters: [Int: [CheckedContinuation<Void, Never>]] = [:]
+    private var closeWaiters: [Int: [CheckedContinuation<Void, Never>]] = [:]
+
+    func connect() async throws {
+        connections += 1
+        let number = connections
+        let waiters = connectionWaiters.keys.filter { $0 <= number }
+        for expected in waiters {
+            connectionWaiters.removeValue(forKey: expected)?.forEach { $0.resume() }
+        }
+        if blockedConnections.contains(number) {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                blockedWaiters[number, default: []].append(continuation)
+            }
+        }
+        if failuresRemaining > 0 {
+            failuresRemaining -= 1
+            throw HermesGatewayError.transport("foreground fixture")
+        }
+        activeConnection = number
+        staleConnection = false
+    }
+
+    func close() async {
+        closes += 1
+        activeConnection = nil
+        let waiters = closeWaiters.keys.filter { $0 <= closes }
+        for expected in waiters {
+            closeWaiters.removeValue(forKey: expected)?.forEach { $0.resume() }
+        }
+    }
+
+    func connectionIdentifier() async -> Int? {
+        guard !staleConnection else { return nil }
+        return activeConnection
+    }
+
+    func request(method: String, params: JSONValue?, timeout: Duration?) async throws -> JSONValue? {
+        .object(["ok": .bool(true)])
+    }
+
+    func blockConnection(_ number: Int) { blockedConnections.insert(number) }
+
+    func releaseConnection(_ number: Int) {
+        blockedConnections.remove(number)
+        blockedWaiters.removeValue(forKey: number)?.forEach { $0.resume() }
+    }
+
+    func waitForConnection(_ number: Int) async {
+        guard connections < number else { return }
+        await withCheckedContinuation { connectionWaiters[number, default: []].append($0) }
+    }
+
+    func waitForClose(_ number: Int) async {
+        guard closes < number else { return }
+        await withCheckedContinuation { closeWaiters[number, default: []].append($0) }
+    }
+
+    func failNextConnections(_ count: Int) { failuresRemaining = count }
+
+    func markConnectionStale() { staleConnection = true }
+
+    func connectionCount() -> Int { connections }
 }
 
 private final class SpySSEStreamingClient: SSEStreamingClient {

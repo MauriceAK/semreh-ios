@@ -725,6 +725,160 @@ final class APIClientWorkspaceFileTests: APIClientTestCase {
         XCTAssertEqual(response, expectedData)
     }
 
+    func testMediaDataDecodesStockJSONImageEnvelope() async throws {
+        let expectedData = Data([0x89, 0x50, 0x4E, 0x47])
+        let dataURL = "data:image/png;base64,\(expectedData.base64EncodedString())"
+        let client = makeClient { request in
+            XCTAssertEqual(request.url?.path, "/api/media")
+            return apiTestJSONResponse(
+                #"{"data_url":"\#(dataURL)"}"#,
+                for: request
+            )
+        }
+
+        let response = try await client.mediaData(sessionID: "abc123", path: "images/result.png")
+
+        XCTAssertEqual(response, expectedData)
+    }
+
+    func testMediaDataRejectsMalformedJSONEnvelope() async throws {
+        let client = makeClient { request in
+            apiTestJSONResponse("{not-json", for: request)
+        }
+
+        do {
+            _ = try await client.mediaData(sessionID: "abc123", path: "images/result.png")
+            XCTFail("Expected malformed media JSON to be rejected.")
+        } catch APIError.decoding {
+            // The JSON decoding detail is intentionally kept out of the public
+            // error surface; callers only need a safe decoding failure.
+        } catch {
+            XCTFail("Expected APIError.decoding, got \(error)")
+        }
+    }
+
+    func testMediaDataRejectsMissingDataURL() async throws {
+        let client = makeClient { request in
+            apiTestJSONResponse(#"{"unexpected":"field"}"#, for: request)
+        }
+
+        do {
+            _ = try await client.mediaData(sessionID: "abc123", path: "images/result.png")
+            XCTFail("Expected a missing data_url to be rejected.")
+        } catch APIError.decoding {
+            // Missing data_url is a decoding failure, not raw media bytes.
+        } catch {
+            XCTFail("Expected APIError.decoding, got \(error)")
+        }
+    }
+
+    func testMediaDataRejectsInvalidBase64AndNonImageDataURLs() async throws {
+        let cases = [
+            #"{"data_url":"data:image/png;base64,not valid base64"}"#,
+            #"{"data_url":"data:application/pdf;base64,JVBERi0="}"#
+        ]
+
+        for body in cases {
+            let client = makeClient { request in
+                apiTestJSONResponse(body, for: request)
+            }
+
+            do {
+                _ = try await client.mediaData(sessionID: "abc123", path: "images/result.png")
+                XCTFail("Expected invalid media data URL to be rejected.")
+            } catch APIError.decoding {
+                // Invalid base64 and non-image MIME types are decoding failures.
+            } catch {
+                XCTFail("Expected APIError.decoding, got \(error)")
+            }
+        }
+    }
+
+    func testMediaPreviewRejectsDecodedImageAboveLimit() async throws {
+        let imageData = Data([0x89, 0x50, 0x4E, 0x47])
+        let body = #"{"data_url":"data:image/png;base64,\#(imageData.base64EncodedString())"}"#
+        let client = makeClient { request in
+            apiTestJSONResponse(body, for: request)
+        }
+
+        do {
+            _ = try await client.mediaPreviewData(
+                sessionID: "abc123",
+                path: "images/result.png",
+                maximumBytes: imageData.count - 1
+            )
+            XCTFail("Expected decoded image limit to be enforced.")
+        } catch let PreviewDownloadError.responseTooLarge(maximumBytes) {
+            XCTAssertEqual(maximumBytes, imageData.count - 1)
+        }
+    }
+
+    func testMediaPreviewBoundsEncodedJSONEnvelopeBeforeDecoding() async throws {
+        let payload = Data(repeating: 0x41, count: 600).base64EncodedString()
+        let body = #"{"data_url":"data:image/png;base64,\#(payload)"}"#
+        let client = makeClient { request in
+            apiTestJSONResponse(body, for: request)
+        }
+        // ceil(1 / 3) * 4 plus the adapter's fixed 512-byte envelope allowance.
+        let expectedEnvelopeLimit = 516
+
+        do {
+            _ = try await client.mediaPreviewData(
+                sessionID: "abc123",
+                path: "images/result.png",
+                maximumBytes: 1
+            )
+            XCTFail("Expected encoded media envelope limit to be enforced.")
+        } catch let PreviewDownloadError.responseTooLarge(maximumBytes) {
+            XCTAssertEqual(maximumBytes, expectedEnvelopeLimit)
+        }
+    }
+
+    func testMediaPreviewPreservesRawByteLimitForLegacyResponse() async throws {
+        let rawData = Data(repeating: 0x41, count: 5)
+        let client = makeClient { request in
+            let response = HTTPURLResponse(
+                url: try XCTUnwrap(request.url),
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "image/png"]
+            )
+            return (try XCTUnwrap(response), rawData)
+        }
+
+        do {
+            _ = try await client.mediaPreviewData(
+                sessionID: "abc123",
+                path: "images/result.png",
+                maximumBytes: 4
+            )
+            XCTFail("Expected legacy raw media preview limit to be enforced.")
+        } catch let PreviewDownloadError.responseTooLarge(maximumBytes) {
+            XCTAssertEqual(maximumBytes, 4)
+        }
+    }
+
+    func testMediaDataPreservesAuthenticatedUnauthorizedError() async throws {
+        let client = makeClient { request in
+            let response = HTTPURLResponse(
+                url: try XCTUnwrap(request.url),
+                statusCode: 401,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )
+            return (try XCTUnwrap(response), Data(#"{"detail":"unauthorized"}"#.utf8))
+        }
+
+        do {
+            _ = try await client.mediaData(sessionID: "abc123", path: "images/result.png")
+            XCTFail("Expected unauthorized media response to fail.")
+        } catch APIError.unauthorized {
+            // boundedData maps same-origin 401 responses to APIError.unauthorized.
+        } catch {
+            XCTFail("Expected APIError.unauthorized, got \(error)")
+        }
+    }
+
     @MainActor
     func testFilePreviewExportPayloadUsesLoadedTextContent() async throws {
         let client = makeClient { request in

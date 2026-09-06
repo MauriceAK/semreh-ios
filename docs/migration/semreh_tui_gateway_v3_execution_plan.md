@@ -61,6 +61,24 @@ the three-worker ceiling in Section 6. Actual session capacity may be lower.
 Keep one writer per responsibility and one Simulator/DerivedData owner; worker
 handoffs do not replace independent integration verification.
 
+## Approved performance deferral and continued migration — September 6, 2026
+
+After testing Semreh Dev build8, Maurice confirmed the bottom arrow now works
+during scrolling. Large jumps and chat switching still lag. He explicitly accepted
+that residual responsiveness as manageable for now and authorized continuing the
+migration, including preparation/implementation of later slices, rather than
+prolonging the performance pass. Track deferred work in
+`performance-followups.md`; no renderer redesign or animation-polish pass now.
+An optimized-build comparison is also deferred, not silently recorded as passed.
+This is not a waiver of missing messages, broken controls, lost reading position,
+unsafe targeting, or the remaining functional/device verification requirements.
+Slice 2 residual checks remain visible while independent Slice 3 work proceeds.
+
+Maurice permits additional bounded workers when useful. Actual harness capacity
+and independent file/runtime ownership still constrain concurrency; increasing a
+configuration value is not evidence that a running session's capacity changed.
+Personal Hermes/backend/routes, publication, and test-tool boundaries are unchanged.
+
 ## Historical Slice 2 reasoning experiment — September 5, 2026
 
 Maurice requires per-session reasoning changes, including selecting the next
