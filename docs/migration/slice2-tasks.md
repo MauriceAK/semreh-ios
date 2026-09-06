@@ -1,6 +1,6 @@
 # Slice 2 task sheet
 
-Status: OPEN. Updated September 5, 2026. Integrator owns this sheet.
+Status: OPEN. Updated September 6, 2026. Integrator owns this sheet.
 
 This is a progress index, not a new specification. The
 [execution plan](semreh_tui_gateway_v3_execution_plan.md) owns scope and acceptance;
@@ -40,10 +40,9 @@ App checkpoints: `a4e8257` and `4d040a3`. Evidence directory:
 
 ## Remaining work
 
-- [ ] **S2-A — Stock production login/chat and cross-client gate.**
+- [x] **S2-A — Stock production login/chat and cross-client gate.**
   Owner: Luna preparation/implementation; integrator execution/review.
-  Status: Luna stock_ui_enable and stock_tui_enable implementing disjoint launcher
-  and test guards; integrator retains all live execution and acceptance.
+  Status: implemented, independently reviewed and executed against stock.
   Adapt only the existing smoke launcher/test guards to explicitly accept stock
   mode. Preserve exact source/runtime guards and all product assertions. Exercise
   actual signed app navigation and stock bidirectional TUI continuity, not only a
@@ -52,19 +51,24 @@ App checkpoints: `a4e8257` and `4d040a3`. Evidence directory:
     `slice2-stock-production-ui-v1.xcresult`, 1 pass / 0 skips; screenshot inspected.
   - [x] Semreh-created durable `20260906_000301_0be890` rendered by literal stock
     TUI, exact prompt/ACK observed by integrator (PTY95629, normal exit).
-  - [ ] TUI-created durable `20260906_000444_8a36c3` opened in native app. Literal
-    stock TUI creation and REST exact pair verified; app deep-link rerun pending.
+  - [x] TUI-created durable `20260906_000444_8a36c3` opened in native app:
+    `slice2-stock-cross-client-ui-v1.xcresult`, 1 pass / 0 skips; screenshots inspected.
 - [ ] **S2-B — Independent clean-checkout final verification.**
-  Owner: integrator with bounded worker review. Status: pending S2-A.
+  Owner: integrator with bounded worker review. Status: clean-worktree run active
+  at committed `30e22ff`; reuses existing DerivedData/package cache for storage.
   Verify the exact committed source and all binding Slice 2 gates against the
   pinned stock backend. Label prior dev-only evidence, skips and blockers honestly;
   do not turn this into another broad implementation pass.
   - [x] Stock foundation and native-flow reruns: each 1 pass / 0 skips;
     `slice2-stock-foundation-v1.xcresult`, `slice2-stock-native-flow-v1.xcresult`.
-  - [ ] Stock identity and queued/rejected steer probes: Luna adapting guards;
-    root caught missing dev validation and requested correction before live use.
-  - [ ] Stock rotation/ancestor probe: Luna adapting explicit stock validation.
-  - [ ] Final full native run: v1 interrupted after no test output; v2 pending.
+  - [x] Stock identity and queued/rejected steer probes: both live PASS, empty
+    cleanup errors and unchanged config (`slice2-stock-{identity,steer}-live-v1.json`).
+    Root caught missing dev validation; corrected and regression-tested before use.
+  - [x] Stock rotation/ancestor probe: live PASS, actual24→22rows, child canonical
+    paging/continuation/cold reload (`slice2-stock-rotation-live-v1.json`). This
+    does not claim full original-parent transcript reconstruction.
+  - [x] Final full native run: v1 interrupted after no test output; v2 PASS,
+    2014 passed / 0 failed / 7 intentional opt-in skips.
     Retain v1 failure/runner evidence; no infrastructure-only diagnosis claimed.
 - [x] **S2-C — Document accepted compacted-history chronology limitation.**
   Owner: integrator. Status: Maurice explicitly accepted temporary exception.
@@ -73,10 +77,13 @@ App checkpoints: `a4e8257` and `4d040a3`. Evidence directory:
   The chronology check remains failed on the tested pin; this checkbox records
   the documented acceptance decision, not a fix. No private-fork adoption or
   weakened assertions. Other paging/identity/duplicate gates remain required.
-- [ ] **UP-1 — Separate upstream contribution (not a Slice 2 blocker).**
-  Owner: Luna upstream_contribution_check + integrator. Status: existing PR being
-  checked read-only before publication. Contribute original evidence/tests to the
-  existing PR if sufficient, otherwise independently verify and submit focused fix.
+- [x] **UP-1 — Separate upstream contribution (not a Slice 2 blocker).**
+  Owner: Luna upstream_contribution_check + integrator. Posted independently
+  reproduced stock failure/local-fix success and targeted5test results on the
+  existing author's PR; no duplicate fix PR or private-fork adoption:
+  https://github.com/NousResearch/hermes-agent/pull/93869#issuecomment-5557664077 .
+  This completes the evidence contribution, not upstream merge/release. Additional
+  test-code contribution can follow maintainer feedback separately.
 - [ ] **S2-D — Physical iPhone responsiveness acceptance.**
   Owner: Maurice + integrator. Status: not requested yet; prepare automated gates
   first. Arrange an explicitly approved test-build delivery method. Guide long-chat

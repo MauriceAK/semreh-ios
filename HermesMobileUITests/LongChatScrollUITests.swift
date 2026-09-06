@@ -232,10 +232,15 @@ final class LongChatScrollUITests: XCTestCase {
         app.buttons["Connect"].tap()
         dismissKnownPasswordSavePrompt(app: app)
 
+        // A persisted deep link can legitimately restore an authenticated chat
+        // detail instead of the shell root. Return through that known chat's
+        // navigation control before asserting the shell tabs.
+        waitForPostLoginDestination(app: app)
+
         // The shell remembers the selected tab across normal sign-out/login.
         // Successful authentication need not land on Sessions automatically.
         let sessionsTab = app.buttons["Sessions"]
-        XCTAssertTrue(sessionsTab.waitForExistence(timeout: 45), "Successful login must reach the production shell.")
+        XCTAssertTrue(sessionsTab.waitForExistence(timeout: 10), "Successful login must reach the production shell.")
         sessionsTab.tap()
         let newSession = app.buttons["New session"]
         XCTAssertTrue(newSession.waitForExistence(timeout: 15), "Sessions must expose New session.")
@@ -295,6 +300,38 @@ final class LongChatScrollUITests: XCTestCase {
                           message: "The TUI-created assistant reply must also be visible.")
             attachScreenshot(named: "live-tui-created-session-in-semreh")
         }
+    }
+
+    private func waitForPostLoginDestination(app: XCUIApplication) {
+        let sessions = app.buttons["Sessions"]
+        let chat = app.otherElements.matching(
+            NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
+        ).firstMatch
+        let deadline = Date().addingTimeInterval(45)
+        while !sessions.exists && !chat.exists && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        }
+        guard sessions.exists || chat.exists else {
+            XCTFail("Successful login must expose Sessions or a known restored chat detail.")
+            return
+        }
+        guard chat.exists else { return }
+
+        let backButton = app.navigationBars.buttons["BackButton"]
+        XCTAssertTrue(
+            backButton.waitForExistence(timeout: 5),
+            "A restored chat detail must expose its known NavigationStack BackButton."
+        )
+        XCTAssertTrue(backButton.isHittable, "The restored chat BackButton must be hittable.")
+        guard backButton.exists && backButton.isHittable else { return }
+        backButton.tap()
+
+        let leftChat = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"),
+            object: chat
+        )
+        wait(for: [leftChat], timeout: 10)
+        XCTAssertFalse(chat.exists, "BackButton must return from the restored chat detail to the shell.")
     }
 
     private func prepareNormalSignIn(app: XCUIApplication) {

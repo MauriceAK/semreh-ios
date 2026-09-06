@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from collections import Counter
 from dataclasses import dataclass
 import hashlib
 import json
@@ -117,6 +118,32 @@ def row_text(row: dict) -> str:
             for item in content
         )
     return str(content or "")
+
+
+def original_fixture_multiset_evidence(
+    rows: list[dict], prompts: list[str], assistant_texts: list[str]
+) -> dict[str, int | bool]:
+    """Return scalar-only fixture counts, without persisting message content."""
+    expected = Counter(
+        pair
+        for user, assistant in zip(prompts, assistant_texts, strict=True)
+        for pair in (("user", user), ("assistant", assistant))
+    )
+    expected_text = {text for _, text in expected}
+    observed = Counter(
+        (str(row.get("role", "")), row_text(row))
+        for row in rows
+        if row_text(row) in expected_text
+    )
+    missing = expected - observed
+    duplicate = observed - expected
+    return {
+        "original_fixture_multiset_match": observed == expected,
+        "original_fixture_expected_rows": sum(expected.values()),
+        "original_fixture_observed_rows": sum(observed.values()),
+        "original_fixture_missing_rows": sum(missing.values()),
+        "original_fixture_duplicate_rows": sum(duplicate.values()),
+    }
 
 
 def assert_originals_once_in_order(
@@ -349,14 +376,23 @@ async def exercise(mode: str, credentials: dict, evidence: dict) -> None:
                         raise AssertionError("in-place history changed canonical identity")
                     if active_canonical != ancestor:
                         raise AssertionError("in-place active history changed canonical identity")
-                    assert_originals_once_in_order(display, prompts, assistant_texts)
+                    evidence.update(
+                        original_fixture_multiset_evidence(
+                            display, prompts, assistant_texts
+                        )
+                    )
                     if not any(bool(row.get("compacted")) for row in display):
                         raise AssertionError("include_compacted exposed no archived row")
+                    evidence["archived_rows_present"] = True
                     rebuilt = await reconstructed_latest(
                         client, ancestor, ancestor, include_compacted=True, total=len(display)
                     )
                     if rebuilt != display:
                         raise AssertionError("latest compacted pages did not reconstruct oldest display set")
+                    evidence["latest_pages_reconstruct_display"] = True
+                    # Preserve the strict chronology gate, but first expose
+                    # independent row-preservation/pagination evidence.
+                    assert_originals_once_in_order(display, prompts, assistant_texts)
                     evidence["checks"] = [
                         "actual non-aborted row/token reduction",
                         "in-place original history ordered exactly once",

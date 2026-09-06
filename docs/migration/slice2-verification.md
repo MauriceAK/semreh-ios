@@ -2,6 +2,29 @@
 
 ## September 6 — stock gate closure checkpoint
 
+Subsequent clean-worktree checks at `30e22ff`:
+- `slice2-clean-stock-native-v1.xcresult`: 2014 passed, 0 failed, 7 intentional
+  opt-in skips. Clean detached worktree, shared DerivedData/package cache reused
+  for disk headroom; not a fresh dependency-download environment.
+- `slice2-clean-stock-cross-client-ui-v1.xcresult`: FAILED1 at expected Sessions
+  after login. Exported failure AX shows an authenticated prior chat (#18), exact
+  TUI prompt/ACK and normal BackButton; no login-error screen. This exposes the
+  test's assumption that successful login lands on root tabs. Persisted selection
+  is the inferred restoration cause, not proof of a specific OS mechanism.
+  Test-only correction waits for shell OR known chat, uses that exact chat's
+  BackButton, then requires shell tabs before all existing flow assertions.
+  No production navigation code changed; correction awaits executed UI results.
+- Stock in-place probes `slice2-stock-inplace-counts-v{1,2}.json`: expected strict
+  chronology FAILURE retained. V2 independently records all24original fixture
+  rows exactly once, zero missing/duplicate, archived rows present and latest
+  pages reconstructing the display set. Config unchanged, cleanup empty. This
+  narrows the accepted limitation to ordering on this deterministic fixture,
+  not arbitrary real-user histories. Root validated source/runtime before fixed
+  localhost18793 launch, inspected owned PID12981/cwd and stopped it afterward.
+  Chronology assertion remains strict; independent paging checks now run first
+  so a known ordering failure does not conceal their evidence.
+- Pure helper discovery after diagnostic change:55passed/0failed.
+
 Maurice accepted the reproduced compacted-row chronology bug on the tested stock
 pin as a temporary documented limitation, not a blocking requirement. The failing
 assertions remain intact. This does not exempt other paging/identity gates or

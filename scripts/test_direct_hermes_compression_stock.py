@@ -14,6 +14,44 @@ import direct_hermes_compression_probe as probe  # noqa: E402
 
 
 class CompressionStockTests(unittest.TestCase):
+    def test_in_place_multiset_diagnostic_separates_order_from_row_loss(self):
+        prompts = ["p1", "p2"]
+        assistants = ["a1", "a2"]
+        reordered = [
+            {"role": "user", "content": "p2"},
+            {"role": "assistant", "content": "a2"},
+            {"role": "user", "content": "p1"},
+            {"role": "assistant", "content": "a1"},
+        ]
+
+        evidence = probe.original_fixture_multiset_evidence(
+            reordered, prompts, assistants
+        )
+
+        self.assertTrue(evidence["original_fixture_multiset_match"])
+        self.assertEqual(evidence["original_fixture_expected_rows"], 4)
+        self.assertEqual(evidence["original_fixture_observed_rows"], 4)
+        self.assertEqual(evidence["original_fixture_missing_rows"], 0)
+        self.assertEqual(evidence["original_fixture_duplicate_rows"], 0)
+        with self.assertRaises(AssertionError):
+            probe.assert_originals_once_in_order(reordered, prompts, assistants)
+
+    def test_in_place_multiset_diagnostic_reports_missing_and_duplicate_rows(self):
+        evidence = probe.original_fixture_multiset_evidence(
+            [
+                {"role": "user", "content": "p1"},
+                {"role": "assistant", "content": "a1"},
+                {"role": "user", "content": "p1"},
+                {"role": "user", "content": "p2"},
+            ],
+            ["p1", "p2"],
+            ["a1", "a2"],
+        )
+
+        self.assertFalse(evidence["original_fixture_multiset_match"])
+        self.assertEqual(evidence["original_fixture_missing_rows"], 1)
+        self.assertEqual(evidence["original_fixture_duplicate_rows"], 1)
+
     def test_stock_fixture_selects_exact_pin_and_requested_sibling(self):
         fixture = probe.select_fixture(
             "rotate", stock_backend=True, backend_sha=None
