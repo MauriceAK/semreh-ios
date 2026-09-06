@@ -151,9 +151,10 @@ enum ChatScrollPolicy {
     /// metrics and the concrete tail-row geometry agree.
     static func shouldFinishExplicitBottomRequest(
         isNearBottom: Bool,
-        isTailVisible: Bool
+        isTailVisible: Bool,
+        isDirectlyInteracting: Bool = false
     ) -> Bool {
-        isNearBottom && isTailVisible
+        !isDirectlyInteracting && isNearBottom && isTailVisible
     }
 
     /// Keep the affordance visible until UIKit reports that the viewport
@@ -177,6 +178,53 @@ enum ChatScrollPolicy {
     ) -> Bool {
         _ = isDecelerating
         return isDirectlyInteracting
+    }
+
+    /// Deceleration inherited from the button's preceding gesture is not a new
+    /// user scroll. Do not let it install a cooldown after explicit settlement;
+    /// a genuinely new direct touch still records the normal cooldown.
+    static func shouldRecordUserScrollCooldown(
+        isUserInteracting: Bool,
+        isDirectlyInteracting: Bool,
+        isDecelerating: Bool,
+        isExplicitBottomScrollContext: Bool
+    ) -> Bool {
+        isEffectiveUserInteraction(
+            isUserInteracting: isUserInteracting,
+            isDirectlyInteracting: isDirectlyInteracting,
+            isDecelerating: isDecelerating,
+            isExplicitBottomScrollContext: isExplicitBottomScrollContext
+        )
+    }
+
+    /// Mirrors cooldown ownership for the follow-state branches. Inherited
+    /// deceleration from an explicit bottom request is not a fresh user scroll,
+    /// so it must not make the transcript stop following through a separate
+    /// `isUserInteracting` path.
+    static func isEffectiveUserInteraction(
+        isUserInteracting: Bool,
+        isDirectlyInteracting: Bool,
+        isDecelerating: Bool,
+        isExplicitBottomScrollContext: Bool
+    ) -> Bool {
+        guard isUserInteracting else { return false }
+        let isInheritedExplicitDeceleration = isExplicitBottomScrollContext
+            && isDecelerating
+            && !isDirectlyInteracting
+        return !isInheritedExplicitDeceleration
+    }
+
+    /// Carries explicit-scroll ownership across observer callbacks until
+    /// deceleration ends. A new direct touch always drops that ownership.
+    static func nextExplicitBottomDecelerationContext(
+        wasExplicitBottomScrollActive: Bool,
+        wasExplicitBottomDecelerationActive: Bool,
+        isDirectlyInteracting: Bool,
+        isDecelerating: Bool
+    ) -> Bool {
+        !isDirectlyInteracting
+            && isDecelerating
+            && (wasExplicitBottomScrollActive || wasExplicitBottomDecelerationActive)
     }
 }
 

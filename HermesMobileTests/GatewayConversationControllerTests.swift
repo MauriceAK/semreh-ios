@@ -217,23 +217,217 @@ final class GatewayConversationControllerTests: XCTestCase {
         await runtime.stop()
     }
 
-    func testOldBackendCapabilityFailsClosedBeforeReasoningWrite() async throws {
+    func testStockBackendUsesIdleStatusExactAckAndReadback() async throws {
         let fake = ControllerFakeTransport()
         fake.setReasoningGetResponse(.object([
             "value": .string("medium"),
-            "display": .string("show"),
-            "deferred": .bool(false)
+            "display": .string("show")
+        ]))
+        fake.setReasoningSetResponse(.object([
+            "key": .string("reasoning"), "value": .string("high")
         ]))
         let runtime = try makeRuntime(fake)
         let controller = makeController(runtime: runtime, storedID: "stored-chat")
 
         let configuration = try await controller.reasoningConfiguration()
-        XCTAssertEqual(configuration, .init(effort: "medium", deferred: false, supportsSessionChanges: false))
-        do {
-            _ = try await controller.setReasoningEffort("high")
-            XCTFail("An old backend without the feature handshake must fail closed")
-        } catch DirectSessionError.invalidResponse { }
+        XCTAssertEqual(configuration, .init(effort: "medium", deferred: false, supportsSessionChanges: true))
+        let applied = try await controller.setReasoningEffort("high")
+        XCTAssertEqual(applied, .init(effort: "high", deferred: false, supportsSessionChanges: true))
+        XCTAssertEqual(fake.calls().map(\.method), [
+            "session.resume", "config.get", "config.get", "session.status", "config.set", "config.get"
+        ])
+        await runtime.stop()
+    }
+
+    func testUnknownOrMalformedReasoningExtensionDoesNotFallBackToStock() async throws {
+        for response in [
+            JSONValue.object([
+                "value": .string("medium"), "display": .string("show"),
+                "session_reasoning_contract": .number(2), "deferred": .bool(false)
+            ]),
+            JSONValue.object([
+                "value": .string("medium"), "display": .string("show"),
+                "deferred": .bool(false)
+            ]),
+            JSONValue.object([
+                "value": .string("medium"), "display": .string("show"),
+                "session_reasoning_contract": .number(1)
+            ])
+        ] {
+            let fake = ControllerFakeTransport()
+            fake.setReasoningGetResponse(response)
+            let runtime = try makeRuntime(fake)
+            let controller = makeController(runtime: runtime, storedID: "stored-chat")
+            do { _ = try await controller.reasoningConfiguration(); XCTFail("Malformed extension accepted") }
+            catch DirectSessionError.invalidResponse { }
+            XCTAssertFalse(fake.calls().contains { $0.method == "config.set" })
+            await runtime.stop()
+        }
+    }
+
+    func testStockAckToleratesUnknownFieldsButRejectsContradictoryKnownFields() async throws {
+        let accepted = ControllerFakeTransport()
+        accepted.setReasoningGetResponse(.object([
+            "value": .string("medium"), "display": .string("show")
+        ]))
+        accepted.setReasoningSetResponse(.object([
+            "key": .string("reasoning"), "value": .string("high"),
+            "scope": .string("session"), "persisted": .bool(true),
+            "deferred": .bool(false), "future": .string("ignored")
+        ]))
+        let acceptedRuntime = try makeRuntime(accepted)
+        _ = try await makeController(runtime: acceptedRuntime, storedID: "stored-chat")
+            .setReasoningEffort("high")
+        await acceptedRuntime.stop()
+
+        let rejected = ControllerFakeTransport()
+        rejected.setReasoningGetResponse(.object([
+            "value": .string("medium"), "display": .string("show")
+        ]))
+        rejected.setReasoningSetResponse(.object([
+            "key": .string("reasoning"), "value": .string("high"),
+            "scope": .string("global")
+        ]))
+        let rejectedRuntime = try makeRuntime(rejected)
+        let controller = makeController(runtime: rejectedRuntime, storedID: "stored-chat")
+        do { _ = try await controller.setReasoningEffort("high"); XCTFail("Contradictory ACK accepted") }
+        catch DirectSessionError.invalidResponse { }
+        XCTAssertEqual(rejected.calls().filter { $0.method == "config.set" }.count, 1)
+        await rejectedRuntime.stop()
+    }
+
+    func testStockRunningChoiceQueuesWithoutWriteAndAppliesBeforeNextSubmit() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setReasoningGetResponse(.object([
+            "value": .string("medium"), "display": .string("show")
+        ]))
+        fake.setReasoningSetResponse(.object([
+            "key": .string("reasoning"), "value": .string("max")
+        ]))
+        let setGate = AsyncGate()
+        fake.setReasoningSetGate(setGate)
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime, storedID: "stored-chat")
+        try await controller.open()
+        fake.emit(event(sessionID: "runtime-resumed", type: "message.start", sequence: 1))
+        await Task.yield()
+
+        let queued = try await controller.setReasoningEffort("high")
+        XCTAssertTrue(queued.deferred)
+        XCTAssertEqual(controller.pendingReasoningEffort, "high")
         XCTAssertFalse(fake.calls().contains { $0.method == "config.set" })
+        let latest = try await controller.setReasoningEffort("max")
+        XCTAssertEqual(latest.effort, "max")
+        XCTAssertEqual(controller.pendingReasoningEffort, "max")
+        XCTAssertFalse(fake.calls().contains { $0.method == "config.set" })
+
+        fake.emit(event(sessionID: "runtime-resumed", type: "message.complete", sequence: 2))
+        await yieldUntil { fake.calls().contains { $0.method == "config.set" } }
+        let submit = Task { try await controller.submit("next") }
+        await Task.yield()
+        XCTAssertFalse(fake.calls().contains { $0.method == "prompt.submit" })
+        await setGate.release()
+        try await submit.value
+        let methods = fake.calls().map(\.method)
+        XCTAssertLessThan(try XCTUnwrap(methods.firstIndex(of: "config.set")),
+                          try XCTUnwrap(methods.firstIndex(of: "prompt.submit")))
+        XCTAssertNil(controller.pendingReasoningEffort)
+        await runtime.stop()
+    }
+
+    func testStockBusyPreflightRetainsPendingAndNeverWrites() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setReasoningGetResponse(.object([
+            "value": .string("medium"), "display": .string("show")
+        ]))
+        fake.setSessionStatusResponse(.object(["output": .string("Agent Running: Yes")]))
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime, storedID: "stored-chat")
+
+        let result = try await controller.setReasoningEffort("high")
+        XCTAssertTrue(result.deferred)
+        XCTAssertEqual(controller.pendingReasoningEffort, "high")
+        XCTAssertFalse(fake.calls().contains { $0.method == "config.set" })
+        await runtime.stop()
+    }
+
+    func testInvalidationClearsStockPendingChoiceWithoutApplyingIt() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setReasoningGetResponse(.object([
+            "value": .string("medium"), "display": .string("show")
+        ]))
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime, storedID: "stored-chat")
+        try await controller.open()
+        fake.emit(event(sessionID: "runtime-resumed", type: "message.start", sequence: 1))
+        await Task.yield()
+
+        _ = try await controller.setReasoningEffort("high")
+        XCTAssertEqual(controller.pendingReasoningEffort, "high")
+        controller.invalidate()
+        XCTAssertNil(controller.pendingReasoningEffort)
+        fake.emit(event(sessionID: "runtime-resumed", type: "message.complete", sequence: 2))
+        await Task.yield()
+        XCTAssertFalse(fake.calls().contains { $0.method == "config.set" })
+        await runtime.stop()
+    }
+
+    func testStockBadAckIsNotRetriedByNextSubmit() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setReasoningGetResponse(.object([
+            "value": .string("medium"), "display": .string("show")
+        ]))
+        fake.setReasoningSetResponse(.object(["key": .string("reasoning")]))
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime, storedID: "stored-chat")
+
+        do { _ = try await controller.setReasoningEffort("high"); XCTFail("Bad ACK accepted") }
+        catch DirectSessionError.invalidResponse { }
+        do { try await controller.submit("must not send"); XCTFail("Ambiguous write was hidden") }
+        catch DirectSessionError.invalidResponse { }
+        XCTAssertEqual(fake.calls().filter { $0.method == "config.set" }.count, 1)
+        XCTAssertFalse(fake.calls().contains { $0.method == "prompt.submit" })
+        await runtime.stop()
+    }
+
+    func testStockBadReadbackFailsAfterOneWrite() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setReasoningGetResponse(.object([
+            "value": .string("medium"), "display": .string("show")
+        ]))
+        fake.setReasoningSetResponse(.object([
+            "key": .string("reasoning"), "value": .string("high")
+        ]))
+        fake.setUpdatesReasoningReadback(false)
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime, storedID: "stored-chat")
+
+        do { _ = try await controller.setReasoningEffort("high"); XCTFail("Bad readback accepted") }
+        catch DirectSessionError.invalidResponse { }
+        XCTAssertEqual(fake.calls().filter { $0.method == "config.set" }.count, 1)
+        await runtime.stop()
+    }
+
+    func testStockRebindDuringWriteRejectsStaleAckWithoutRetry() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setReasoningGetResponse(.object([
+            "value": .string("medium"), "display": .string("show")
+        ]))
+        fake.setReasoningSetResponse(.object([
+            "key": .string("reasoning"), "value": .string("high")
+        ]))
+        let gate = AsyncGate()
+        fake.setReasoningSetGate(gate)
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime, storedID: "stored-chat")
+
+        let write = Task { try await controller.setReasoningEffort("high") }
+        await yieldUntil { fake.calls().contains { $0.method == "config.set" } }
+        try await runtime.reconnect()
+        await gate.release()
+        do { _ = try await write.value; XCTFail("Stale stock ACK accepted") }
+        catch DirectSessionError.staleOperation { }
+        XCTAssertEqual(fake.calls().filter { $0.method == "config.set" }.count, 1)
         await runtime.stop()
     }
 
@@ -749,6 +943,10 @@ private final class ControllerFakeTransport: HermesGatewayTransport, @unchecked 
     private var reasoningGetGate: AsyncGate?
     private var reasoningSetResponse: JSONValue?
     private var reasoningSetGate: AsyncGate?
+    private var sessionStatusResponse: JSONValue = .object([
+        "output": .string("Agent Running: No")
+    ])
+    private var updatesReasoningReadback = true
 
     func installSink(_ sink: @escaping @Sendable (HermesGatewayEvent) -> Void) {
         let wrapped: @Sendable (HermesGatewayEvent) -> Void = { [weak self] event in
@@ -815,6 +1013,14 @@ private final class ControllerFakeTransport: HermesGatewayTransport, @unchecked 
 
     func setReasoningSetGate(_ gate: AsyncGate) {
         withLock { reasoningSetGate = gate }
+    }
+
+    func setSessionStatusResponse(_ response: JSONValue) {
+        withLock { sessionStatusResponse = response }
+    }
+
+    func setUpdatesReasoningReadback(_ enabled: Bool) {
+        withLock { updatesReasoningReadback = enabled }
     }
 
     func calls() -> [Call] {
@@ -895,7 +1101,7 @@ private final class ControllerFakeTransport: HermesGatewayTransport, @unchecked 
             if let event = behavior.7 { emit(event) }
             return behavior.6
         case "session.status":
-            return .object(["output": .string("Agent Running: No")])
+            return withLock { sessionStatusResponse }
         case "config.get":
             let (response, gate) = withLock {
                 let gate = reasoningGetGate
@@ -922,16 +1128,22 @@ private final class ControllerFakeTransport: HermesGatewayTransport, @unchecked 
                 "deferred": .bool(false),
                 "persisted": .bool(true)
             ])
-            if case .object(let fields) = result,
+            if withLock({ updatesReasoningReadback }),
+               case .object(let fields) = result,
                let value = fields["value"]?.gatewayString {
                 let deferred = fields["deferred"] == .bool(true)
                 withLock {
-                    reasoningGetResponse = .object([
+                    var readback: [String: JSONValue] = [
                         "value": .string(value),
                         "display": .string("show"),
-                        "session_reasoning_contract": .number(1),
                         "deferred": .bool(deferred)
-                    ])
+                    ]
+                    if reasoningGetResponse.gatewayFields["session_reasoning_contract"] == .number(1) {
+                        readback["session_reasoning_contract"] = .number(1)
+                    } else {
+                        readback.removeValue(forKey: "deferred")
+                    }
+                    reasoningGetResponse = .object(readback)
                 }
             }
             return result

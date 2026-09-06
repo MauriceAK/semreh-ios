@@ -12,7 +12,7 @@ from pathlib import Path
 import argparse
 import plistlib
 import re
-from direct_hermes_probe import validate, RUNTIME
+from direct_hermes_probe import validate, RUNTIME, PIN
 
 PRODUCTS = Path('/Users/maurice/workspace/semreh-slice1-build/Build/Products')
 OUTPUT = PRODUCTS / 'SemrehSlice1Live.xctestrun'
@@ -27,6 +27,7 @@ def main():
     parser.add_argument('--slice2-ui', action='store_true')
     parser.add_argument('--tui-created-session-id')
     parser.add_argument('--development-backend-sha')
+    parser.add_argument('--stock-backend', action='store_true')
     parser.add_argument('--cookie-phase', choices=['login', 'restore', 'logout'])
     args = parser.parse_args()
     if args.tui_created_session_id and (
@@ -47,7 +48,11 @@ def main():
         not args.https or args.cookie_phase or args.slice2_foundation or args.slice2_native or args.slice2_reasoning
     ):
         parser.error('Slice 2 UI requires --https and no other test phase')
-    development = args.slice2_reasoning or args.slice2_ui
+    if args.stock_backend and not args.slice2_reasoning:
+        parser.error('--stock-backend requires --slice2-reasoning')
+    if args.slice2_reasoning and args.stock_backend == bool(args.development_backend_sha):
+        parser.error('Slice 2 reasoning requires exactly one backend mode')
+    development = args.slice2_ui or (args.slice2_reasoning and not args.stock_backend)
     if development and not args.development_backend_sha:
         parser.error('Development smoke requires --development-backend-sha')
     if args.development_backend_sha and not development:
@@ -92,9 +97,12 @@ def main():
         environment = target['EnvironmentVariables']
         environment.update({
             'SEMREH_SLICE2_REASONING': '1',
-            'SEMREH_SLICE2_DEVELOPMENT_BACKEND_SHA': args.development_backend_sha.lower(),
             'SEMREH_SLICE2_TOOL_CWD': str(runtime / 'tools'),
         })
+        if args.stock_backend:
+            environment['SEMREH_SLICE2_STOCK_BACKEND_SHA'] = PIN
+        else:
+            environment['SEMREH_SLICE2_DEVELOPMENT_BACKEND_SHA'] = args.development_backend_sha.lower()
         method = 'testOptInHostedSlice2NativeReasoning'
     if args.cookie_phase:
         target['EnvironmentVariables']['SEMREH_SLICE1_COOKIE_PHASE'] = args.cookie_phase

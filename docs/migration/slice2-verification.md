@@ -673,3 +673,160 @@ not network streaming, measured FPS, or physical-device acceptance.
   are not claimed sanitized. No personal state or routes changed.
 - Slice 2 remains open: actual rotated compression/continuation, broader
   performance edges, independent clean-checkout rerun and physical iPhone gate.
+
+### Follow-up experiments after 06e7e64 (not slice acceptance)
+
+- Source review identified a latest-message visibility limitation when trailing
+  live/tool/clarification content follows the message, plus direct-drag versus
+  completion precedence. A sentinel-only settlement candidate with cancel-first
+  handling compiled, but `slice2-bottom-sentinel-ui-v1` and same-build `v2` each
+  failed multi-chat appended-marker visibility at chat2; static test passed.
+  Root inspected the failure video frame: old code rows and arrow remained,
+  not the new marker. Candidate rejected and all three native files restored to
+  06e7e64. Patch retained as `slice2-bottom-sentinel-rejected-v1.patch`; failed
+  bundles/logs/attachments retained. Trailing content and follow races remain open.
+  A checkpoint UI recheck is recorded separately when it finishes.
+- In-place and rotating compression fixtures use explicit modes in the existing
+  guarded launcher, separate sibling homes/DBs and port18793. Both pin compression
+  auxiliary requests to the same deterministic localhost18792 model and preserve
+  baseline auth/tools restrictions. Empty auxiliary fallback_chain does not disable
+  the main-model safety fallback; that route is also exact-guarded localhost.
+  Ordinary runtime/hostname/routes remain unchanged. No personal provider used.
+- Root independently ran3 launcher tests and8 compression-probe tests:11 passed.
+  In-place live-v1/v2 both failed the actual-reduction gate with cleanup[] and
+  unchanged config. V2 records status=compressed but removed0,24→24 rows,
+  14462→14462 tokens, summary.refused_would_grow=true. Neither is a compression pass.
+  Source audit found lean summary preserves up to24000 user characters, making
+  a bulky-user/tiny-assistant corpus unsuitable. The bounded replacement corpus
+  uses short unique user markers and bulky synthetic assistant responses; auxiliary
+  summaries remain short. No compressor behavior/assertion is being weakened.
+
+### September 5 compression results and approval boundary
+
+- Root reviewed the marker-only streaming model extension and independently ran
+  16 pure tests:5 model,8 probe,3 fixture guard; all passed. Exactly12 short user
+  markers receive distinct4096-byte assistant bodies. Nonstreaming auxiliary
+  summaries and ordinary/reasoning prompts retain their original response path.
+  Root verified and restarted only owned model PID13767; replacement PID27017,
+  same localhost18792, same --reasoning-probe command. No personal service touched.
+- In-place live-v3 performed actual compression:24→22 rows,14510→14187 tokens,
+  non-aborted/no fallback. However chronological original-history assertion FAILED.
+  Sanitized REST inspection of `20260905_140051_27ad0c` confirmed older archived
+  assistant01(id52) and user02(id53) precede recopied protected user00(id73),
+  assistant00(id74), user01(id75). Original rows remain present but misordered.
+  Cleanup[] and unchanged config. Evidence `slice2-compression-inplace-live-v3.json`.
+- Root and independent Sol review confirmed a backend bug in baseline29112bef
+  and dev8c50f845: `hermes_state.py` include_compacted deduplication selects the
+  desired active/newest copy, then sorts by that copy's new physical row ID.
+  This relocates copied protected head rows behind archived middle rows.
+  Minimal proposed fix: retain preferred representative but sort each dedupe
+  group by its earliest original physical row ID, then page as before. Add
+  first/second-generation chronology, preferred-live-row and latest-page tests.
+  This general backend paging change is outside the specifically approved
+  reasoning patch. Await Maurice's explicit approval; neither backend edited.
+- Rotation live-v1 PASSED:24→22 rows,14501→14183 tokens; ancestor
+  `20260905_140244_5f4794`→tip `20260905_140246_b7cd5a`; exact metadata links,
+  ancestor/child canonical pages agree, distinct cold runtime IDs, continuation
+  exact user/ACK pair once and persisted after second cold resume, latest pages
+  reconstruct child history. Cleanup[]/config unchanged. Child-only history is
+  explicitly NOT claimed to reconstruct full parent originals. Evidence
+  `slice2-compression-rotation-live-v1.json`. Reproduce with
+  `scripts/direct_hermes_compression_probe.py --mode rotate --backend-sha
+  8c50f84522a755d40346e73701a6847fbdde20ec --output <fresh evidence path>` after
+  guarded mode init/serve. Loopback proof, not a new HTTPS/device gate.
+- Both temporary compression backend processes stopped normally via verified
+  owned PIDs18504/28078. Sibling data/logs retained. Original backend52223 and
+  HTTPS13817 unchanged; model replacement27017 remains running.
+- `slice2-performance-checkpoint-recheck-v1` rebuilt original06e7e64 native code:
+  multi-chat arrow-return visibility failed25s; static passed. Thus the earlier
+  v15/v16 passes are retained but do NOT establish repeatable long-chat reliability.
+  Sentinel candidate was rejected; failure is not solely attributable to it.
+  Independent review identified inherited deceleration/cooldown ownership and
+  stale visibility booleans as source-backed risks needing isolated regression
+  tests. No new native fix accepted. UI artifacts/diagnostics retained. Signed
+  original app launched normally on owned Simulator after testing.
+- Final audit `slice2-compression-final-audit-v1.log`:100077files,zero flags,
+  42exported console logs, including both compression sibling log directories.
+  Known-secret/bearer scan only; private quarantine/config/credentials/DB excluded.
+  Local checkpoint remains06e7e64; new fixture tooling and this ledger remain
+  uncommitted pending the backend decision and unresolved live/UI gates.
+
+### Stock-release realignment checkpoint — September 5
+
+- Local fixture checkpoint4d040a3; combined pure fixture/launcher tests25passed.
+  Final known-secret audit `slice2-stock-final-audit-v1.log`:104717files,0flags,
+  45exported test consoles. This includes current stock runtime logs and new
+  native result exports; private exclusions and heuristic limits still apply.
+- Signed full native `slice2-stock-full-native-v1.xcresult`:2014passed,
+  0failed,7intentional opt-in skips (2021total). This rebuilt the explicit stock
+  native reasoning gate. Source remains checkpoint06e7e64 plus scoped dirty diff
+  until the local checkpoint commit; no slice-completion claim.
+- Long-chat UI `slice2-stock-long-chat-ui-v1.xcresult` and same-build v2 each
+  PASS2/0fail/0skip. Signed HermesMobileUIVerification, same owned Simulator,
+  `-collect-test-diagnostics never`; filters select static10k and three-chat10k
+  append/away/arrow/revisit tests. v2 uses test-without-building. Attachments
+  exported under corresponding `*-attachments` directories. Root inspected
+  v1/E1EB563C-260F-49EF-9CEA-EE69A6B59685.png: third chat's streamed marker visible
+  after arrow return. Server-free fixtures, not real long network history/FPS or
+  physical-device proof. Historical failed runs remain in the ledger.
+- Stock native reasoning `slice2-stock-native-reasoning-v1.xcresult` PASS1/0skip.
+  Generated plan with `direct_hermes_ios_smoke.py --https --slice2-reasoning
+  --stock-backend`, then signed test-without-building using SemrehSlice1Live
+  xctestrun, owned Simulator, parallel testingNO, diagnosticsnever. Unmodified
+  baseline29112/PID85233, same HTTPS/deterministic model. Existing assertions
+  retained: actual low request; selection while response running remains deferred;
+  next actual request high; sibling medium; close/resume first remains high and
+  next actual resumed request high. No global reasoning key present afterward.
+  This exercises the named custom-provider fixture, not every provider-healing
+  combination or the concurrent-close race accepted by Maurice.
+- Smoke launcher invalid-mode subprocess tests: root3passed. New native focused,
+  full and live reasoning console diagnostics exported for artifact audit. Signed
+  ordinary app launched with no lab arguments, PID98005. No Simulator gate equals
+  physical iPhone acceptance; compressed-history chronology blocker still open.
+- Signed focused native run `slice2-stock-native-focused-v1.xcresult` PASS:
+  113 tests,0failures,0skips. Classes ChatScrollPolicyTests,
+  GatewayConversationControllerTests,ChatViewModelDirectGatewayTests. Command:
+  canonical signed `xcodebuild test` above, explicit owned Simulator/DerivedData,
+  `-collect-test-diagnostics never`, jobs2, parallel testingNO, three only-testing
+  filters. Exact dirty source snapshot `slice2-stock-native-focused-v1.patch`.
+  Root independently ran and inspected xcresult summary. Authored new regressions
+  were NOT run red against the original checkpoint; no red/green claim.
+- Review corrected initial cooldown-only scroll patch, stock unknown-contract
+  fallback, original-snapshot checking after readback and ambiguous-write retry
+  state before this pass. An independent claimed duplicate-drain counter leak
+  was retracted after root requested an actual interleaving; no speculative
+  deduplication layer added. UI reliability still requires repeated live tests.
+- Subsequent continuation: root independently switched only the disposable
+  listener from dev PID52223 to stock PID85233. Verified old cwd/listener, TERM,
+  exit/free port, then used `direct_hermes_probe.py serve`; new cwd is the baseline
+  runtime tools directory and independent source is clean29112bef. HTTPS13817 and
+  model27017 unchanged. This is external process attestation for the probe below.
+- Root reran revised stock probe pure tests:6passed. Independent worker/root
+  review corrected early terminal-event loss, bounded receive deadlines, exact
+  assistant ACK and failed-cleanup evidence before live use.
+- `SEMREH_SLICE1_HTTPS=1 .../semreh-slice1-venv/bin/python
+  scripts/direct_hermes_stock_compatibility.py --backend-sha
+  29112bef099274229cadff79cdff7bf7b99c4b77 --output
+  .../semreh-slice1-evidence/slice2-stock-compatibility-v1.json`: PASS. Ready,
+  fresh runtime/durable identity, stock reasoning read, normal deterministic turn,
+  idle, canonical exact durable pair, cleanup[],configuration unchanged. This is
+  real HTTPS stock protocol evidence, NOT native UI or reasoning-write proof.
+- Pre-native known-secret audit:100083files,0flags,42previous exported consoles;
+  `slice2-stock-pre-native-audit-v1.log`. Private credential/config/DB and prior
+  quarantined OS diagnostics remain excluded and unshareable.
+- Binding plan now explicitly supersedes the private reasoning extension as a
+  release dependency and records the approved five-worker ceiling. No backend
+  adoption, deployment, push or PR publication occurred.
+- Root independently reran pure fixture checks from app HEAD06e7e648 plus the
+  existing dirty script scope, using `semreh-slice1-venv/bin/python -m unittest
+  discover -s scripts -p 'test_direct_hermes_compression*.py' -v` (11 passed) and
+  the same command with `test_direct_hermes_model_fixture.py` (5 passed).
+  These prove helper behavior, not live compression, stock compatibility or UI.
+- Stock reasoning audit independently source-checked by root: baseline
+  `config.set reasoning` falls back to global when its runtime is missing;
+  stock `config.get`/ACK lack our experimental capability fields. Compatibility
+  changes await the user's residual-risk decision; no guards removed. The audit
+  found normal attached-session eviction protected, but concurrent close/teardown
+  can still race a status preflight. No runtime reproduction claimed here.
+- Long-chat correction and thinking-card audit are in progress. Earlier failed
+  UI runs remain acceptance failures, not superseded by these pure helper passes.

@@ -19,6 +19,7 @@ final class GatewayConversationController {
         let bindingEpoch: Int
         let connectionGeneration: Int
         let lifecycle: Int
+        let extendedContract: Bool
         let configuration: ReasoningConfiguration
     }
 
@@ -31,12 +32,14 @@ final class GatewayConversationController {
     private(set) var binding: GatewaySessionBinding?
     private(set) var storedID: String?
     private(set) var runState: RunState = .idle
+    private(set) var pendingReasoningEffort: String?
     let profile: String
     var onBinding: ((GatewaySessionBinding) -> Void)?
     var onCanonicalID: ((String) -> Void)?
     var onEvent: ((HermesGatewayEvent) -> Void)?
     var onTranscript: ((DirectHermesTranscriptPage, Bool) -> Void)?
     var onResume: ((JSONValue?) -> Void)?
+    var onReasoningConfiguration: ((ReasoningConfiguration) -> Void)?
     var onError: ((Error) -> Void)?
     var isVisible = false
     var isEditing = false {
@@ -63,6 +66,7 @@ final class GatewayConversationController {
     @ObservationIgnored private var reasoningMutationCount = 0
     @ObservationIgnored private var reasoningMutationTail: Task<Void, Never>?
     @ObservationIgnored private var reasoningRevision = 0
+    @ObservationIgnored private var ambiguousReasoningEffort: String?
 
     init(runtime: HermesServerRuntime, storedID: String?, profile: String = "default", loadTranscript: @escaping TranscriptLoader) {
         self.runtime = runtime
@@ -103,9 +107,23 @@ final class GatewayConversationController {
     /// A lost prompt acknowledgement is never automatically replayed.
     func submit(_ text: String, create: [String: JSONValue] = [:]) async throws {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw DirectSessionError.invalidResponse }
+        if pendingReasoningEffort != nil, let mutationTail = reasoningMutationTail {
+            await mutationTail.value
+        }
         guard runState == .idle, !promptInFlight, reasoningMutationCount == 0 else { throw DirectSessionError.ambiguousPrompt }
         promptInFlight = true
         defer { promptInFlight = false }
+        if ambiguousReasoningEffort != nil {
+            // An unacknowledged stock write is never replayed. A read can make
+            // the next attempt safe, but this submit must still surface that
+            // the requested setting's outcome was previously unknown.
+            try await reconcileAmbiguousReasoning()
+            throw DirectSessionError.invalidResponse
+        }
+        if let pendingReasoningEffort {
+            let applied = try await applyStockReasoning(pendingReasoningEffort)
+            guard !applied.deferred else { throw DirectSessionError.invalidResponse }
+        }
         turnEpoch &+= 1
         reconciliationTask?.cancel()
         idleRefreshTask?.cancel()
@@ -157,10 +175,21 @@ final class GatewayConversationController {
         while let mutationTail = reasoningMutationTail {
             await mutationTail.value
         }
+        if let pendingReasoningEffort {
+            let configuration = ReasoningConfiguration(
+                effort: pendingReasoningEffort,
+                deferred: true,
+                supportsSessionChanges: true
+            )
+            onReasoningConfiguration?(configuration)
+            return configuration
+        }
+        if ambiguousReasoningEffort != nil { try await reconcileAmbiguousReasoning() }
         let revision = reasoningRevision
         try await ensureBinding(create: [:])
         let configuration = try await readReasoningCapability().configuration
         guard revision == reasoningRevision else { throw DirectSessionError.staleOperation }
+        onReasoningConfiguration?(configuration)
         return configuration
     }
 
@@ -170,7 +199,7 @@ final class GatewayConversationController {
     func setReasoningEffort(_ effort: String) async throws -> ReasoningConfiguration {
         guard Self.reasoningEfforts.contains(effort), !disposed,
               hasSubmittedPrompt, storedID != nil,
-              runState == .idle || runState == .running else {
+              !promptInFlight, runState == .idle || runState == .running else {
             throw DirectSessionError.invalidResponse
         }
         reasoningRevision &+= 1
@@ -186,11 +215,27 @@ final class GatewayConversationController {
             guard !self.disposed, self.runState == .idle || self.runState == .running else {
                 throw DirectSessionError.invalidResponse
             }
-            try await self.ensureBinding(create: [:])
-            let capability = try await self.readReasoningCapability()
-            guard capability.configuration.supportsSessionChanges,
-                  !self.disposed, self.runState == .idle || self.runState == .running else {
+            if self.ambiguousReasoningEffort != nil {
+                try await self.reconcileAmbiguousReasoning()
                 throw DirectSessionError.invalidResponse
+            }
+            try await self.ensureBinding(create: [:])
+            let selectedWhileRunning = self.runState == .running
+            let capability = try await self.readReasoningCapability()
+            guard !self.disposed, self.runState == .idle || self.runState == .running else {
+                throw DirectSessionError.invalidResponse
+            }
+            if !capability.extendedContract {
+                if selectedWhileRunning || self.runState == .running {
+                    self.pendingReasoningEffort = effort
+                    let configuration = ReasoningConfiguration(
+                        effort: effort, deferred: true, supportsSessionChanges: true
+                    )
+                    self.onReasoningConfiguration?(configuration)
+                    if self.runState == .idle { self.schedulePendingReasoningDrain() }
+                    return configuration
+                }
+                return try await self.applyStockReasoning(effort, capability: capability)
             }
             let result = try await self.runtime.request("config.set", parameters: {
                 try self.checkReasoningCapability(capability)
@@ -215,11 +260,13 @@ final class GatewayConversationController {
                   case .bool(let deferred) = deferredValue else {
                 throw DirectSessionError.invalidResponse
             }
-            return ReasoningConfiguration(
+            let configuration = ReasoningConfiguration(
                 effort: effort,
                 deferred: deferred,
                 supportsSessionChanges: true
             )
+            self.onReasoningConfiguration?(configuration)
+            return configuration
         }
         reasoningMutationTail = Task { @MainActor in _ = try? await operation.value }
         return try await operation.value
@@ -259,7 +306,11 @@ final class GatewayConversationController {
             })
             let stopped = status?.gatewayFields["output"]?.gatewayString?
                 .components(separatedBy: .newlines).contains("Agent Running: No") == true
-            if stopped, terminalReceipt != nil { runState = .idle; return }
+            if stopped, terminalReceipt != nil {
+                runState = .idle
+                schedulePendingReasoningDrain()
+                return
+            }
             try await Task.sleep(for: .milliseconds(250))
         }
         throw DirectSessionError.stopUnconfirmed
@@ -298,6 +349,10 @@ final class GatewayConversationController {
         guard !disposed else { return }
         disposed = true
         lifecycle &+= 1
+        reasoningRevision &+= 1
+        pendingReasoningEffort = nil
+        ambiguousReasoningEffort = nil
+        reasoningMutationTail?.cancel()
         attachmentTask?.cancel()
         reconciliationTask?.cancel()
         idleRefreshTask?.cancel()
@@ -373,7 +428,10 @@ final class GatewayConversationController {
         try await refresh()
         guard binding != nil else { throw DirectSessionError.staleOperation }
         if result?.gatewayFields["running"] == .bool(true) { runState = .running }
-        else if runState != .deliveryUnknown, !promptInFlight { runState = .idle }
+        else if runState != .deliveryUnknown, !promptInFlight {
+            runState = .idle
+            schedulePendingReasoningDrain()
+        }
         onResume?(result)
     }
 
@@ -420,23 +478,127 @@ final class GatewayConversationController {
             supportsSessionChanges = true
             deferred = value
         } else {
-            supportsSessionChanges = false
-            deferred = fields["deferred"].flatMap {
-                if case .bool(let value) = $0 { return value }
-                return nil
-            } ?? false
+            guard fields["session_reasoning_contract"] == nil,
+                  fields["deferred"] == nil,
+                  fields["persisted"] == nil else {
+                throw DirectSessionError.invalidResponse
+            }
+            supportsSessionChanges = true
+            deferred = false
         }
         return ReasoningCapability(
             binding: capability.binding,
             bindingEpoch: capability.bindingEpoch,
             connectionGeneration: capability.connectionGeneration,
             lifecycle: capability.lifecycle,
+            extendedContract: fields["session_reasoning_contract"] == .number(1),
             configuration: ReasoningConfiguration(
                 effort: effort,
                 deferred: deferred,
                 supportsSessionChanges: supportsSessionChanges
             )
         )
+    }
+
+    /// Applies stock reasoning only after the exact attached runtime reports
+    /// idle. Once config.set is attempted, every non-confirmed outcome becomes
+    /// read-reconciliation-only state and is never automatically replayed.
+    private func applyStockReasoning(
+        _ effort: String,
+        capability suppliedCapability: ReasoningCapability? = nil
+    ) async throws -> ReasoningConfiguration {
+        let capability: ReasoningCapability
+        if let suppliedCapability { capability = suppliedCapability }
+        else { capability = try await readReasoningCapability() }
+        guard !capability.extendedContract else { throw DirectSessionError.invalidResponse }
+        let status = try await runtime.request("session.status", parameters: {
+            try self.checkReasoningCapability(capability)
+            return self.rpcParams(capability.binding)
+        })
+        try checkReasoningCapability(capability)
+        guard let output = status?.gatewayFields["output"]?.gatewayString else {
+            throw DirectSessionError.invalidResponse
+        }
+        let lines = Set(output.components(separatedBy: .newlines))
+        if lines.contains("Agent Running: Yes") {
+            pendingReasoningEffort = effort
+            let configuration = ReasoningConfiguration(
+                effort: effort, deferred: true, supportsSessionChanges: true
+            )
+            onReasoningConfiguration?(configuration)
+            return configuration
+        }
+        guard lines.contains("Agent Running: No") else { throw DirectSessionError.invalidResponse }
+
+        do {
+            let result = try await runtime.request("config.set", parameters: {
+                try self.checkReasoningCapability(capability)
+                return [
+                    "key": .string("reasoning"),
+                    "value": .string(effort),
+                    "scope": .string("session"),
+                    "session_id": .string(capability.binding.runtimeID),
+                    "profile": .string(self.profile)
+                ]
+            })
+            try checkReasoningCapability(capability)
+            guard let ack = result?.gatewayFields,
+                  ack["key"] == .string("reasoning"),
+                  ack["value"] == .string(effort),
+                  ack["scope"] == nil || ack["scope"] == .string("session"),
+                  ack["persisted"] == nil || ack["persisted"] == .bool(true),
+                  ack["deferred"] == nil || ack["deferred"] == .bool(false) else {
+                throw DirectSessionError.invalidResponse
+            }
+            let readback = try await readReasoningCapability()
+            try checkReasoningCapability(capability)
+            guard !readback.extendedContract,
+                  readback.binding == capability.binding,
+                  readback.configuration.effort == effort else {
+                throw DirectSessionError.invalidResponse
+            }
+            if pendingReasoningEffort == effort { pendingReasoningEffort = nil }
+            ambiguousReasoningEffort = nil
+            let configuration = ReasoningConfiguration(
+                effort: effort, deferred: false, supportsSessionChanges: true
+            )
+            onReasoningConfiguration?(configuration)
+            return configuration
+        } catch {
+            // Even a cancellation or malformed acknowledgement can follow a
+            // server-side mutation. Retain no replayable intent.
+            pendingReasoningEffort = nil
+            ambiguousReasoningEffort = effort
+            throw error
+        }
+    }
+
+    private func reconcileAmbiguousReasoning() async throws {
+        guard ambiguousReasoningEffort != nil else { return }
+        let configuration = try await readReasoningCapability().configuration
+        ambiguousReasoningEffort = nil
+        onReasoningConfiguration?(configuration)
+    }
+
+    private func schedulePendingReasoningDrain() {
+        guard !disposed, pendingReasoningEffort != nil, ambiguousReasoningEffort == nil else { return }
+        reasoningMutationCount += 1
+        let previous = reasoningMutationTail
+        let operation = Task { @MainActor [weak self] in
+            if let previous { await previous.value }
+            guard let self else { return }
+            defer {
+                self.reasoningMutationCount -= 1
+                if self.reasoningMutationCount == 0 { self.reasoningMutationTail = nil }
+            }
+            guard !self.disposed, self.runState == .idle,
+                  let effort = self.pendingReasoningEffort else { return }
+            do { _ = try await self.applyStockReasoning(effort) }
+            catch {
+                if !Task.isCancelled, !self.disposed { self.onError?(error) }
+            }
+        }
+        reasoningMutationTail = Task { @MainActor in await operation.value }
     }
 
     private func reasoningSnapshot() throws -> ReasoningCapability {
@@ -449,6 +611,7 @@ final class GatewayConversationController {
             bindingEpoch: bindingEpoch,
             connectionGeneration: runtime.connectionGeneration,
             lifecycle: lifecycle,
+            extendedContract: false,
             configuration: ReasoningConfiguration(
                 effort: "",
                 deferred: false,
@@ -504,13 +667,19 @@ final class GatewayConversationController {
             let message = event.payload?.gatewayFields["message"]?.gatewayString
             if message == "Turn cancelled before the agent was ready" || message == "Session no longer running before the agent was ready" {
                 terminalReceipt = "\(event.connectionGeneration ?? -1):\(event.sequence ?? -1)"
-                if runState != .stopping { runState = .idle }
+                if runState != .stopping {
+                    runState = .idle
+                    schedulePendingReasoningDrain()
+                }
             }
         case "message.complete":
             let receipt = "\(event.connectionGeneration ?? -1):\(event.sequence ?? -1)"
             guard terminalReceipt != receipt else { return }
             terminalReceipt = receipt
-            if runState != .stopping { runState = .idle }
+            if runState != .stopping {
+                runState = .idle
+                schedulePendingReasoningDrain()
+            }
             onEvent?(event)
             reconciliationTask?.cancel()
             reconciliationTask = Task { [weak self] in

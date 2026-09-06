@@ -311,6 +311,7 @@ struct ChatView: View {
     @State private var isLatestTranscriptRowVisible = false
     @State private var isTranscriptBottomVisible = false
     @State private var explicitBottomScrollTask: Task<Void, Never>?
+    @State private var isExplicitBottomDecelerationActive = false
     @State private var isUserInteractingWithScroll = false
     @State private var userScrollCooldownUntil: Date?
     /// While set and in the future, auto-follow scrolls snap instead of animating, so
@@ -2158,6 +2159,7 @@ struct ChatView: View {
         let generation = explicitBottomScrollGeneration
 
         userScrollCooldownUntil = nil
+        isExplicitBottomDecelerationActive = false
         // The explicit jump owns positioning until its concrete tail arrives.
         // Re-enabling automatic anchoring or expanding the composer here races
         // lazy measurement and can turn an estimated offset into a blank tail.
@@ -2219,6 +2221,7 @@ struct ChatView: View {
 
     private func cancelExplicitBottomScroll() {
         explicitBottomScrollGeneration &+= 1
+        isExplicitBottomDecelerationActive = false
         finishExplicitBottomScroll()
     }
 
@@ -2451,28 +2454,58 @@ struct ChatView: View {
             isStreaming: isStreaming
         )
         isScrolledNearBottom = isNearBottom
-        isUserInteractingWithScroll = metrics.isUserInteracting
-        let confirmedNearBottom = isNearBottom && (
-            !isExplicitBottomScrollActive || isLatestTranscriptRowVisible || isTranscriptBottomVisible
+
+        // Direct touch is a new user decision, even if a stale geometry sample
+        // still says that the tail is visible. Inherited deceleration belongs to
+        // the explicit jump and must not create a fresh follow cooldown.
+        let wasExplicitBottomScrollActive = isExplicitBottomScrollActive
+        let wasExplicitBottomDecelerationActive = isExplicitBottomDecelerationActive
+        var cancelledExplicitBottomScroll = false
+
+        isExplicitBottomDecelerationActive = ChatScrollPolicy.nextExplicitBottomDecelerationContext(
+            wasExplicitBottomScrollActive: wasExplicitBottomScrollActive,
+            wasExplicitBottomDecelerationActive: wasExplicitBottomDecelerationActive,
+            isDirectlyInteracting: metrics.isDirectlyInteracting,
+            isDecelerating: metrics.isDecelerating
         )
 
+        let isExplicitBottomScrollContext = wasExplicitBottomScrollActive
+            || wasExplicitBottomDecelerationActive
+        let isEffectiveUserInteraction = ChatScrollPolicy.isEffectiveUserInteraction(
+            isUserInteracting: metrics.isUserInteracting,
+            isDirectlyInteracting: metrics.isDirectlyInteracting,
+            isDecelerating: metrics.isDecelerating,
+            isExplicitBottomScrollContext: isExplicitBottomScrollContext
+        )
+        isUserInteractingWithScroll = isEffectiveUserInteraction
+
         if isExplicitBottomScrollActive {
-            if ChatScrollPolicy.shouldFinishExplicitBottomRequest(
-                isNearBottom: isNearBottom,
-                isTailVisible: isLatestTranscriptRowVisible || isTranscriptBottomVisible
-            ) {
-                completeExplicitBottomScroll()
-            } else if ChatScrollPolicy.shouldCancelExplicitBottomRequest(
+            if ChatScrollPolicy.shouldCancelExplicitBottomRequest(
                 isDirectlyInteracting: metrics.isDirectlyInteracting,
                 isDecelerating: metrics.isDecelerating
             ) {
                 cancelExplicitBottomScroll()
+                cancelledExplicitBottomScroll = true
+            } else if ChatScrollPolicy.shouldFinishExplicitBottomRequest(
+                isNearBottom: isNearBottom,
+                isTailVisible: isLatestTranscriptRowVisible || isTranscriptBottomVisible
+            ) {
+                completeExplicitBottomScroll()
             }
         }
 
+        let confirmedNearBottom = !cancelledExplicitBottomScroll && isNearBottom && (
+            !isExplicitBottomScrollActive || isLatestTranscriptRowVisible || isTranscriptBottomVisible
+        )
+
         // Touching the scroll view pauses auto-follow for a short window so
         // streaming layout growth cannot yank the viewport mid-gesture.
-        if metrics.isUserInteracting {
+        if ChatScrollPolicy.shouldRecordUserScrollCooldown(
+            isUserInteracting: metrics.isUserInteracting,
+            isDirectlyInteracting: metrics.isDirectlyInteracting,
+            isDecelerating: metrics.isDecelerating,
+            isExplicitBottomScrollContext: isExplicitBottomScrollContext
+        ) {
             followScrollGeneration += 1
             userScrollCooldownUntil = ChatScrollPolicy.cooldownDeadline()
         }
@@ -2490,7 +2523,7 @@ struct ChatView: View {
                     isReadingOlderTranscript = false
                 }
             }
-        } else if metrics.isUserInteracting {
+        } else if isEffectiveUserInteraction {
             shouldFollowLatestMessage = false
             if !isReadingOlderTranscript,
                ChatScrollPolicy.shouldEnterReadingOlder(

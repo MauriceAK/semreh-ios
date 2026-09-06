@@ -956,7 +956,7 @@ final class ChatViewModel {
         if let provider = Self.nonEmpty(fields["provider"]?.gatewayString) { currentModelProvider = provider }
         if let cwd = Self.nonEmpty(fields["cwd"]?.gatewayString) { currentWorkspace = cwd }
         // Older metadata must not replace an in-flight optimistic selection.
-        if !isUpdatingComposerConfiguration {
+        if !isUpdatingComposerConfiguration, directConversation?.pendingReasoningEffort == nil {
             if let effort = fields["reasoning_effort"]?.gatewayString {
                 selectedReasoningEffort = Self.nonEmpty(effort)
                 sessionReasoningEffort = selectedReasoningEffort
@@ -1052,6 +1052,13 @@ final class ChatViewModel {
             controller.onCanonicalID = { [weak self] id in self?.adoptDirectID(id) }
             controller.onResume = { [weak self] result in
                 self?.applyDirectSessionInfo(result?.gatewayFields["info"])
+            }
+            controller.onReasoningConfiguration = { [weak self, weak controller] configuration in
+                guard let self, let controller,
+                      !self.directInvalidated,
+                      self.directConversation === controller,
+                      controller.storedID == self.canonicalSessionID else { return }
+                self.applyDirectReasoningConfiguration(configuration)
             }
             controller.onTranscript = { [weak self] page, older in
                 guard let self, !self.directInvalidated else { return }
@@ -1324,6 +1331,7 @@ final class ChatViewModel {
                 activity: cancelled ? "Response stopped" : "Response complete", errorSummary: terminal.error)
         case .control(let raw):
             if raw.type == "message.start" {
+                archiveDirectLiveTurnBeforeNewStart()
                 isReasoningChangeDeferred = false
                 directResponseComplete = false
                 streamingAssistantMessageID = nil
@@ -1344,6 +1352,67 @@ final class ChatViewModel {
             }
         case .unknown: break
         }
+    }
+
+    /// A direct session can receive the next turn from another client while the
+    /// previous terminal refresh is still in flight (or has failed). Keep the
+    /// previous turn's live cards anchored before resetting the streaming row;
+    /// otherwise the old state is merged into the new turn or rendered as a
+    /// loose bottom card.
+    private func archiveDirectLiveTurnBeforeNewStart() {
+        guard !liveReasoningText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !liveToolCalls.isEmpty
+        else {
+            return
+        }
+
+        let anchorMessageID = directLiveTurnAnchorMessageID()
+        if !directLiveAnchorBelongsToCurrentTurn(reasoningAnchorMessageID) {
+            reasoningAnchorMessageID = anchorMessageID
+        }
+        if !directLiveAnchorBelongsToCurrentTurn(toolCallAnchorMessageID) {
+            toolCallAnchorMessageID = anchorMessageID
+        }
+
+        archiveLiveReasoningIfNeeded()
+        archiveLiveToolCallsIfNeeded()
+        liveReasoningText = ""
+        liveToolCalls = []
+        reasoningAnchorMessageID = nil
+        toolCallAnchorMessageID = nil
+    }
+
+    private func directLiveTurnAnchorMessageID() -> String {
+        let currentTurnAnchors = TranscriptTurnClassifier.currentTurnAssistantAnchorIDs(
+            in: messages,
+            messageOffset: messagesOffset
+        )
+        if let streamingAssistantMessageID,
+           messages.contains(where: { message in
+               message.role == "assistant" && message.messageId == streamingAssistantMessageID
+           }), currentTurnAnchors.contains(streamingAssistantMessageID) {
+            return streamingAssistantMessageID
+        }
+
+        if let currentTurnAnchor = currentTurnAnchors.last {
+            return currentTurnAnchor
+        }
+
+        // Direct live cards are normally created with an assistant row first.
+        // If a reconnect/cache transition left that row unavailable, create a
+        // concrete row before archiving so the old cards cannot become loose
+        // bottom groups.
+        streamingAssistantMessageID = nil
+        streamingAssistantMessageIndex = nil
+        return ensureStreamingAssistantMessage()
+    }
+
+    private func directLiveAnchorBelongsToCurrentTurn(_ anchorMessageID: String?) -> Bool {
+        guard let anchorMessageID else { return false }
+        return TranscriptTurnClassifier.currentTurnAssistantAnchorIDs(
+            in: messages,
+            messageOffset: messagesOffset
+        ).contains(anchorMessageID)
     }
 
     private func directToolEvent(_ tool: GatewayConversationController.PresentationTool, completed: Bool) -> ToolStreamEvent {

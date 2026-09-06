@@ -10,6 +10,9 @@ import XCTest
 final class DirectHermesLiveSmokeTests: XCTestCase {
     private static let defaultCredentialsPath = "/Users/maurice/workspace/semreh-slice1-runtime/credentials.json"
     private static let developmentCredentialsPath = "/Users/maurice/workspace/semreh-slice2-runtime/credentials.json"
+    private static let stockBackendSHA = "29112bef099274229cadff79cdff7bf7b99c4b77"
+    private static let stockToolCwd = "/Users/maurice/workspace/semreh-slice1-runtime/tools"
+    private static let developmentToolCwd = "/Users/maurice/workspace/semreh-slice2-runtime/tools"
 
     private enum HostedTransport {
         case loopback
@@ -123,16 +126,22 @@ final class DirectHermesLiveSmokeTests: XCTestCase {
         let environment = ProcessInfo.processInfo.environment
         guard environment["SEMREH_SLICE1_LIVE"] == "1",
               environment["SEMREH_SLICE1_HTTPS"] == "1",
-              environment["SEMREH_SLICE2_REASONING"] == "1",
-              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == Self.developmentCredentialsPath,
-              environment["SEMREH_SLICE2_DEVELOPMENT_BACKEND_SHA"]?.isEmpty == false,
-              environment["SEMREH_SLICE2_TOOL_CWD"] == "/Users/maurice/workspace/semreh-slice2-runtime/tools"
+              environment["SEMREH_SLICE2_REASONING"] == "1"
         else {
             throw XCTSkip("Slice 2 reasoning smoke is opt-in.")
         }
+        let stock = environment["SEMREH_SLICE2_STOCK_BACKEND_SHA"] == Self.stockBackendSHA
+            && environment["SEMREH_SLICE2_DEVELOPMENT_BACKEND_SHA"] == nil
+            && environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == Self.defaultCredentialsPath
+            && environment["SEMREH_SLICE2_TOOL_CWD"] == Self.stockToolCwd
+        let development = environment["SEMREH_SLICE2_STOCK_BACKEND_SHA"] == nil
+            && environment["SEMREH_SLICE2_DEVELOPMENT_BACKEND_SHA"]?.isEmpty == false
+            && environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == Self.developmentCredentialsPath
+            && environment["SEMREH_SLICE2_TOOL_CWD"] == Self.developmentToolCwd
+        guard stock != development else { throw XCTSkip("Slice 2 reasoning backend mode is invalid.") }
 
         do {
-            try await runHostedSlice2NativeReasoning(transport: .https)
+            try await runHostedSlice2NativeReasoning(transport: .https, stockBackend: stock)
         } catch let failure as LiveSmokeFailure {
             XCTFail("Slice 2 native reasoning smoke failed at \(failure.stage).")
         } catch {
@@ -861,9 +870,12 @@ final class DirectHermesLiveSmokeTests: XCTestCase {
     }
 
     @MainActor
-    private func runHostedSlice2NativeReasoning(transport: HostedTransport) async throws {
+    private func runHostedSlice2NativeReasoning(
+        transport: HostedTransport,
+        stockBackend: Bool
+    ) async throws {
         let credentials = try await stage("reasoning credentials") {
-            try Self.readCredentials(development: true)
+            try Self.readCredentials(development: !stockBackend)
         }
         guard let toolCwd = ProcessInfo.processInfo.environment["SEMREH_SLICE2_TOOL_CWD"],
               !toolCwd.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty

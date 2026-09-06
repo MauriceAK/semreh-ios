@@ -424,6 +424,112 @@ final class ChatScrollPolicyTests: XCTestCase {
         )
     }
 
+    func testDirectTouchWinsOverNearBottomGeometryWhenExplicitJumpIsSettling() {
+        XCTAssertFalse(
+            ChatScrollPolicy.shouldFinishExplicitBottomRequest(
+                isNearBottom: true,
+                isTailVisible: true,
+                isDirectlyInteracting: true
+            )
+        )
+        XCTAssertTrue(
+            ChatScrollPolicy.shouldFinishExplicitBottomRequest(
+                isNearBottom: true,
+                isTailVisible: true,
+                isDirectlyInteracting: false
+            )
+        )
+    }
+
+    func testInheritedExplicitDecelerationDoesNotInstallFollowCooldown() {
+        XCTAssertFalse(
+            ChatScrollPolicy.shouldRecordUserScrollCooldown(
+                isUserInteracting: true,
+                isDirectlyInteracting: false,
+                isDecelerating: true,
+                isExplicitBottomScrollContext: true
+            )
+        )
+        XCTAssertTrue(
+            ChatScrollPolicy.shouldRecordUserScrollCooldown(
+                isUserInteracting: true,
+                isDirectlyInteracting: true,
+                isDecelerating: true,
+                isExplicitBottomScrollContext: true
+            )
+        )
+        XCTAssertTrue(
+            ChatScrollPolicy.shouldRecordUserScrollCooldown(
+                isUserInteracting: true,
+                isDirectlyInteracting: false,
+                isDecelerating: true,
+                isExplicitBottomScrollContext: false
+            )
+        )
+        XCTAssertFalse(
+            ChatScrollPolicy.isEffectiveUserInteraction(
+                isUserInteracting: true,
+                isDirectlyInteracting: false,
+                isDecelerating: true,
+                isExplicitBottomScrollContext: true
+            )
+        )
+    }
+
+    func testOrdinaryDecelerationStillCountsAsUserInteraction() {
+        XCTAssertTrue(
+            ChatScrollPolicy.isEffectiveUserInteraction(
+                isUserInteracting: true,
+                isDirectlyInteracting: false,
+                isDecelerating: true,
+                isExplicitBottomScrollContext: false
+            )
+        )
+        XCTAssertTrue(
+            ChatScrollPolicy.isEffectiveUserInteraction(
+                isUserInteracting: true,
+                isDirectlyInteracting: true,
+                isDecelerating: true,
+                isExplicitBottomScrollContext: true
+            )
+        )
+    }
+
+    func testExplicitDecelerationContextCarriesUntilItEndsOrDirectTouchStarts() {
+        XCTAssertTrue(
+            ChatScrollPolicy.nextExplicitBottomDecelerationContext(
+                wasExplicitBottomScrollActive: true,
+                wasExplicitBottomDecelerationActive: false,
+                isDirectlyInteracting: false,
+                isDecelerating: true
+            )
+        )
+        XCTAssertTrue(
+            ChatScrollPolicy.nextExplicitBottomDecelerationContext(
+                wasExplicitBottomScrollActive: false,
+                wasExplicitBottomDecelerationActive: true,
+                isDirectlyInteracting: false,
+                isDecelerating: true
+            )
+        )
+        XCTAssertFalse(
+            ChatScrollPolicy.nextExplicitBottomDecelerationContext(
+                wasExplicitBottomScrollActive: false,
+                wasExplicitBottomDecelerationActive: true,
+                isDirectlyInteracting: false,
+                isDecelerating: false
+            )
+        )
+        XCTAssertFalse(
+            ChatScrollPolicy.nextExplicitBottomDecelerationContext(
+                wasExplicitBottomScrollActive: false,
+                wasExplicitBottomDecelerationActive: true,
+                isDirectlyInteracting: true,
+                isDecelerating: true
+            )
+        )
+    }
+
     func testTrailingDecelerationDoesNotCancelExplicitBottomJump() {
         XCTAssertFalse(
             ChatScrollPolicy.shouldCancelExplicitBottomRequest(

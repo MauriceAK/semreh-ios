@@ -1,3 +1,4 @@
+import Foundation
 import XCTest
 @testable import HermesMobile
 
@@ -124,16 +125,21 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         oldFake.setReasoningGetResponse(.object([
             "value": .string("medium"), "display": .string("show")
         ]))
+        oldFake.setReasoningSetResponse(.object([
+            "key": .string("reasoning"), "value": .string("high")
+        ]))
+        oldFake.setUpdatesReasoningReadback(true)
         let oldRuntime = try makeRuntime(oldFake)
         let oldRequests = ChatDirectRequestRecorder()
         let oldClient = makeExistingComposerClient(requests: oldRequests)
         let oldVM = makeViewModel(client: oldClient, runtime: oldRuntime, sessionID: "durable-1")
         await oldVM.loadComposerConfiguration()
-        XCTAssertFalse(oldVM.showsReasoningEffortControl, "A valid old payload is read-only, not a write-capable contract")
-        XCTAssertFalse(oldVM.allowsReasoningChangesWhileStreaming)
+        XCTAssertTrue(oldVM.showsReasoningEffortControl, "Stock Hermes reasoning remains configurable without the extension")
+        XCTAssertTrue(oldVM.allowsReasoningChangesWhileStreaming)
         let oldSelection = await oldVM.selectReasoningEffort("high")
-        XCTAssertFalse(oldSelection)
-        XCTAssertFalse(oldFake.calls().contains { $0.method == "config.set" })
+        XCTAssertTrue(oldSelection)
+        XCTAssertEqual(oldVM.selectedReasoningEffort, "high")
+        XCTAssertEqual(oldFake.calls().filter { $0.method == "config.set" }.count, 1)
         await oldVM.disposeDirectConversation()
         await oldRuntime.stop()
     }
@@ -157,6 +163,45 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         XCTAssertEqual(vm.selectedReasoningEffort, "high")
         XCTAssertTrue(vm.isReasoningChangeDeferred, "A busy gateway may acknowledge persistence for the next turn")
         XCTAssertFalse(vm.isUpdatingComposerConfiguration)
+
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testStockDeferredReasoningIgnoresStaleSessionInfoEffort() async throws {
+        let fake = ChatDirectFakeTransport()
+        fake.setReasoningGetResponse(.object([
+            "value": .string("medium"), "display": .string("show")
+        ]))
+        fake.setSessionStatusResponse(.object(["output": .string("Agent Running: Yes")]))
+        let runtime = try makeRuntime(fake)
+        let vm = makeViewModel(
+            client: makeExistingComposerClient(requests: ChatDirectRequestRecorder()),
+            runtime: runtime,
+            sessionID: "durable-1"
+        )
+        await vm.loadComposerConfiguration()
+
+        fake.emit(ChatDirectEventFactory.event(sessionID: "runtime-1", type: "message.start", sequence: 9))
+        await yieldUntil { vm.activeStreamID != nil }
+        let selected = await vm.selectReasoningEffort("high")
+        XCTAssertTrue(selected)
+        XCTAssertEqual(vm.selectedReasoningEffort, "high")
+        XCTAssertTrue(vm.isReasoningChangeDeferred)
+
+        fake.emit(ChatDirectEventFactory.event(
+            sessionID: "runtime-1",
+            type: "session.info",
+            sequence: 10,
+            payload: [
+                "reasoning_effort": .string("medium"),
+                "reasoning_deferred": .bool(false)
+            ]
+        ))
+        await Task.yield()
+        XCTAssertEqual(vm.selectedReasoningEffort, "high")
+        XCTAssertEqual(vm.sessionReasoningEffort, "high")
+        XCTAssertTrue(vm.isReasoningChangeDeferred)
 
         await vm.disposeDirectConversation()
         await runtime.stop()
@@ -322,10 +367,184 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         await waitUntil { viewModel.messages.contains { $0.content == "streamed answer" } }
         XCTAssertTrue(viewModel.messages.contains { $0.content == "streamed answer" })
 
+        fake.emit(ChatDirectEventFactory.event(
+            sessionID: "runtime-1",
+            type: "reasoning.delta",
+            sequence: 10,
+            payload: ["text": .string("ephemeral plan")]
+        ))
+        fake.emit(ChatDirectEventFactory.event(
+            sessionID: "runtime-1",
+            type: "tool.start",
+            sequence: 11,
+            payload: ["tool_id": .string("ephemeral-tool"), "name": .string("lookup")]
+        ))
+        await waitUntil {
+            viewModel.liveReasoningText == "ephemeral plan"
+                && viewModel.liveToolCalls.count == 1
+        }
+
         fake.emitCompletion()
         await waitUntil { viewModel.messages.contains { $0.content == "canonical answer" } }
 
         XCTAssertEqual(viewModel.messages.compactMap(\.content), ["hello", "canonical answer"])
+        XCTAssertTrue(viewModel.liveReasoningText.isEmpty)
+        XCTAssertTrue(viewModel.liveToolCalls.isEmpty)
+        XCTAssertTrue(viewModel.completedReasoningGroups.isEmpty)
+        XCTAssertTrue(viewModel.completedToolCallGroups.isEmpty)
+        await viewModel.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testDirectTerminalRefreshFailureArchivesLiveCardsBeforeExternalNextTurn() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let client = makeClient { request in
+            XCTAssertTrue(request.url?.path.contains("/api/sessions/durable-1/messages") == true)
+            throw URLError(.networkConnectionLost)
+        }
+        let viewModel = makeViewModel(client: client, runtime: runtime, sessionID: nil)
+
+        let didSend = await viewModel.sendMessage("hello")
+        XCTAssertTrue(didSend)
+        await waitUntil { viewModel.messages.contains { $0.content == "streamed answer" } }
+
+        fake.emit(ChatDirectEventFactory.event(
+            sessionID: "runtime-1",
+            type: "reasoning.delta",
+            sequence: 10,
+            payload: ["text": .string("old plan")]
+        ))
+        fake.emit(ChatDirectEventFactory.event(
+            sessionID: "runtime-1",
+            type: "tool.start",
+            sequence: 11,
+            payload: [
+                "tool_id": .string("old-tool"),
+                "name": .string("read_file"),
+                "summary": .string("old result")
+            ]
+        ))
+        fake.emit(ChatDirectEventFactory.event(
+            sessionID: "runtime-1",
+            type: "tool.complete",
+            sequence: 12,
+            payload: [
+                "tool_id": .string("old-tool"),
+                "name": .string("read_file"),
+                "summary": .string("old result")
+            ]
+        ))
+        await waitUntil {
+            viewModel.liveReasoningText == "old plan"
+                && viewModel.liveToolCalls.count == 1
+                && viewModel.reasoningAnchorMessageID != nil
+                && viewModel.toolCallAnchorMessageID != nil
+        }
+        let oldAnchor = try XCTUnwrap(viewModel.reasoningAnchorMessageID)
+
+        fake.emit(ChatDirectEventFactory.event(
+            sessionID: "runtime-1",
+            type: "message.complete",
+            sequence: 13,
+            payload: ["text": .string("old answer")]
+        ))
+        await waitUntil { viewModel.activeStreamID == nil }
+        XCTAssertEqual(viewModel.liveReasoningText, "old plan")
+        XCTAssertEqual(viewModel.liveToolCalls.count, 1)
+
+        // This is an externally originated next turn. The failed terminal read
+        // must not let the previous cards bleed into the new live turn.
+        fake.emit(ChatDirectEventFactory.event(
+            sessionID: "runtime-1",
+            type: "message.start",
+            sequence: 14
+        ))
+        await waitUntil { viewModel.activeStreamID != nil && viewModel.liveReasoningText.isEmpty }
+
+        XCTAssertTrue(viewModel.completedReasoningGroups.contains {
+            $0.anchorMessageID == oldAnchor && $0.text == "old plan"
+        })
+        XCTAssertEqual(viewModel.completedToolCallGroupsForAnchor(oldAnchor).flatMap(\.toolCalls).map(\.id), ["old-tool"])
+        XCTAssertTrue(viewModel.liveToolCalls.isEmpty)
+        XCTAssertNil(viewModel.reasoningAnchorMessageID)
+        XCTAssertNil(viewModel.toolCallAnchorMessageID)
+
+        await viewModel.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testDirectTerminalRefreshRaceKeepsOldCardsOutOfNewTurn() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let refreshStarted = expectation(description: "terminal refresh started")
+        let releaseRefresh = DispatchSemaphore(value: 0)
+        defer { releaseRefresh.signal() }
+        let client = makeClient { request in
+            XCTAssertTrue(request.url?.path.contains("/api/sessions/durable-1/messages") == true)
+            refreshStarted.fulfill()
+            _ = releaseRefresh.wait(timeout: .now() + 2)
+            throw URLError(.networkConnectionLost)
+        }
+        let viewModel = makeViewModel(client: client, runtime: runtime, sessionID: nil)
+
+        let didSend = await viewModel.sendMessage("hello")
+        XCTAssertTrue(didSend)
+        await waitUntil { viewModel.messages.contains { $0.content == "streamed answer" } }
+        fake.emit(ChatDirectEventFactory.event(
+            sessionID: "runtime-1",
+            type: "reasoning.delta",
+            sequence: 10,
+            payload: ["text": .string("first turn plan")]
+        ))
+        fake.emit(ChatDirectEventFactory.event(
+            sessionID: "runtime-1",
+            type: "tool.start",
+            sequence: 11,
+            payload: [
+                "tool_id": .string("first-tool"),
+                "name": .string("search")
+            ]
+        ))
+        await waitUntil {
+            viewModel.liveReasoningText == "first turn plan"
+                && viewModel.liveToolCalls.count == 1
+                && viewModel.reasoningAnchorMessageID != nil
+        }
+        let oldAnchor = try XCTUnwrap(viewModel.reasoningAnchorMessageID)
+
+        fake.emit(ChatDirectEventFactory.event(
+            sessionID: "runtime-1",
+            type: "message.complete",
+            sequence: 12,
+            payload: ["text": .string("first answer")]
+        ))
+        await fulfillment(of: [refreshStarted], timeout: 2)
+
+        // The controller cancels the old refresh when this next turn starts,
+        // but the VM must still finalize the old presentation state first.
+        fake.emit(ChatDirectEventFactory.event(
+            sessionID: "runtime-1",
+            type: "message.start",
+            sequence: 13
+        ))
+        await waitUntil { viewModel.activeStreamID != nil && viewModel.liveReasoningText.isEmpty }
+        XCTAssertTrue(viewModel.completedReasoningGroups.contains {
+            $0.anchorMessageID == oldAnchor && $0.text == "first turn plan"
+        })
+        XCTAssertEqual(viewModel.completedToolCallGroupsForAnchor(oldAnchor).flatMap(\.toolCalls).map(\.id), ["first-tool"])
+
+        fake.emit(ChatDirectEventFactory.event(
+            sessionID: "runtime-1",
+            type: "reasoning.delta",
+            sequence: 14,
+            payload: ["text": .string("second turn plan")]
+        ))
+        await waitUntil { viewModel.liveReasoningText == "second turn plan" }
+        let newAnchor = try XCTUnwrap(viewModel.reasoningAnchorMessageID)
+        XCTAssertNotEqual(newAnchor, oldAnchor)
+        XCTAssertEqual(viewModel.liveToolCalls, [])
+
         await viewModel.disposeDirectConversation()
         await runtime.stop()
     }
@@ -784,6 +1003,10 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
     private var reasoningSetResponse: JSONValue?
     private var reasoningSetGate: ChatDirectAsyncGate?
     private var reasoningSetShouldFail = false
+    private var updatesReasoningReadback = false
+    private var sessionStatusResponse: JSONValue = .object([
+        "output": .string("Agent Running: No")
+    ])
 
     func installSink(_ sink: @escaping @Sendable (HermesGatewayEvent) -> Void) {
         withLock { self.sink = sink }
@@ -811,6 +1034,14 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
 
     func setReasoningSetFailure(_ enabled: Bool) {
         withLock { reasoningSetShouldFail = enabled }
+    }
+
+    func setUpdatesReasoningReadback(_ enabled: Bool) {
+        withLock { updatesReasoningReadback = enabled }
+    }
+
+    func setSessionStatusResponse(_ response: JSONValue) {
+        withLock { sessionStatusResponse = response }
     }
 
     func calls() -> [Call] {
@@ -860,7 +1091,7 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
             case "session.interrupt":
                 return (.object(["status": .string("interrupted")]), nil, nil, false, nil, nil)
             case "session.status":
-                return (.object(["output": .string("Agent Running: No")]), nil, nil, false, nil, nil)
+                return (sessionStatusResponse, nil, nil, false, nil, nil)
             default:
                 return (.object([:]), nil, nil, false, nil, nil)
             }
@@ -868,6 +1099,7 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
         if method == "config.set" {
             if let gate = behavior.2 { await gate.wait() }
             if behavior.3 { throw DirectSessionError.invalidResponse }
+            updateReasoningReadbackIfNeeded(params)
             if let response = behavior.1 { return response }
             let value: String
             if case .object(let paramsFields) = params,
@@ -883,6 +1115,19 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
             ])
         }
         return behavior.0
+    }
+
+    private func updateReasoningReadbackIfNeeded(_ params: JSONValue?) {
+        let shouldUpdate = withLock { updatesReasoningReadback }
+        guard shouldUpdate,
+              case .object(let fields) = params,
+              let value = fields["value"]?.gatewayString else { return }
+        withLock {
+            reasoningGetResponse = .object([
+                "value": .string(value),
+                "display": .string("show")
+            ])
+        }
     }
 
     func emitCompletion() {

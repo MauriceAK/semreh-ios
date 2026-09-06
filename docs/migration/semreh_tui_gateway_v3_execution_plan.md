@@ -25,7 +25,35 @@ prevent same-user access to personal files; that residual risk was accepted.
 Reassess isolation before unrestricted tool execution or expanding test scope.
 Do not assume the reported personal backup is verified or use it as a safety gate.
 
-## Approved Slice 2 reasoning contract extension — September 5, 2026
+## Current release compatibility and orchestration decision — September 5, 2026
+
+Maurice clarified that the App Store app must support the official pinned Hermes
+release without requiring a private backend fork. The reasoning extension below
+is development-only evidence, not a release prerequisite. Stock TUI already
+supports per-session reasoning; audit its targeting, busy-turn and cold-resume
+behavior before selecting the minimal safe app implementation. Do not blindly
+remove fail-closed guards or replace per-session settings with global writes.
+Any unresolved contract limitation must be reported, not silently shipped.
+
+Maurice subsequently accepted guarded stock per-session reasoning changes despite
+the upstream missing-runtime fallback-to-global race during concurrent close or
+teardown. Use same-socket status/binding checks, idle writes, confirmed readback
+and no automatic retry of an ambiguous write. Selections made while answering
+remain local pending intent until idle; they must not mutate the active inference.
+Normal attached sessions are protected from ordinary eviction; this does not
+eliminate the concurrent-close race. Do not claim atomic targeting guarantees.
+
+The separate upstream compaction reproduction/fix/draft is authorized for review
+only; no publication, personal deployment or private-fork adoption is authorized.
+App work continues independently. Long-chat scrolling and stale/misplaced thinking
+cards are Slice 2 correctness/performance concerns; cosmetic redesign stays out.
+
+Maurice authorized up to five bounded workers plus the integrator, superseding
+the three-worker ceiling in Section 6. Actual session capacity may be lower.
+Keep one writer per responsibility and one Simulator/DerivedData owner; worker
+handoffs do not replace independent integration verification.
+
+## Historical Slice 2 reasoning experiment — September 5, 2026
 
 Maurice requires per-session reasoning changes, including selecting the next
 turn's effort while a response is running. He approved a focused backend fix in
@@ -39,7 +67,7 @@ next-turn application without mutating the active inference. The verified
 backend checkpoint is `8c50f84522a755d40346e73701a6847fbdde20ec`, descended from
 the unchanged pin. Exact tests and evidence are in `slice2-verification.md`.
 
-Existing-chat reasoning writes require that handshake; older backends remain
+The experimental implementation requires that handshake; older backends remain
 read-only for this operation, with no global or WebUI fallback. Draft choices
 still use `session.create`. This is a bounded contract extension, not a general
 backend upgrade or new adapter layer. Deployment of the patch to any personal
