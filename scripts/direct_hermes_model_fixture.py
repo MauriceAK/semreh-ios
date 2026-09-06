@@ -7,9 +7,54 @@ interrupt a genuinely pending provider request. HTTP request bodies are not logg
 import argparse
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import re
 import time
 
 REASONING_PROBE = False
+COMPRESSION_BULKY_MARKER_PREFIX = 'SEMREH_COMPRESSION_BULKY_MAIN_'
+COMPRESSION_BULKY_MAIN_RE = re.compile(
+    rf'^{re.escape(COMPRESSION_BULKY_MARKER_PREFIX)}(\d{{2}})$'
+)
+COMPRESSION_BULKY_MAIN_BYTES = 4_096
+
+
+def compression_bulky_assistant(index: int) -> str:
+    """Return varied deterministic assistant content of exactly 4096 ASCII bytes."""
+    if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index <= 99:
+        raise ValueError('bulky assistant index must be an integer from 0 through 99')
+    prefix = f'SEMREH_COMPRESSION_BULKY_REPLY_{index:02d}:'
+    remaining = COMPRESSION_BULKY_MAIN_BYTES - len(prefix)
+    if remaining < 0:
+        raise AssertionError('bulky fixture prefix exceeded its byte budget')
+    body = ''.join(chr(ord('A') + ((index + offset) % 26)) for offset in range(remaining))
+    content = prefix + body
+    if len(content) != COMPRESSION_BULKY_MAIN_BYTES:
+        raise AssertionError('bulky fixture content did not meet its byte budget')
+    return content
+
+
+def bulky_main_content(marker: str) -> str:
+    """Return bulky content for one exact short marker."""
+    match = COMPRESSION_BULKY_MAIN_RE.fullmatch(marker)
+    if match is None:
+        raise ValueError('marker is not an exact bulky-main fixture marker')
+    return compression_bulky_assistant(int(match.group(1)))
+
+
+def response_text(body: dict, last_user: object) -> str:
+    """Select the fixture response while keeping non-bulky behavior unchanged."""
+    if body.get('stream') is True and isinstance(last_user, str):
+        if COMPRESSION_BULKY_MAIN_RE.fullmatch(last_user):
+            return bulky_main_content(last_user)
+
+    text = 'SEMREH_SLICE1_ACK'
+    if REASONING_PROBE and 'SEMREH_REASONING_PROBE' in str(last_user):
+        reasoning = body.get('reasoning') or {}
+        effort = body.get('reasoning_effort') or reasoning.get('effort')
+        if reasoning.get('enabled') is False:
+            effort = 'none'
+        text = 'SEMREH_REASONING_EFFORT:' + str(effort or 'missing')
+    return text
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -46,15 +91,10 @@ class Handler(BaseHTTPRequestHandler):
         last_user = next((m.get('content', '') for m in reversed(messages) if m.get('role') == 'user'), '')
         if 'SEMREH_INTERRUPT_FIXTURE' in str(last_user):
             time.sleep(15)
-        text = 'SEMREH_SLICE1_ACK'
-        if REASONING_PROBE and 'SEMREH_REASONING_PROBE' in str(last_user):
-            # Echo only the synthetic request's effort, not prompts or headers.
-            # gpt-5 is a protocol fixture name here; no OpenAI service is called.
-            reasoning = body.get('reasoning') or {}
-            effort = body.get('reasoning_effort') or reasoning.get('effort')
-            if reasoning.get('enabled') is False:
-                effort = 'none'
-            text = 'SEMREH_REASONING_EFFORT:' + str(effort or 'missing')
+        # Bulky compression corpus replies are deliberately stream-only and
+        # exact-marker-only. Auxiliary non-streaming summaries containing these
+        # markers continue to receive the ordinary deterministic ACK.
+        text = response_text(body, last_user)
         base = {'id': 'chatcmpl-semreh-fixture', 'created': int(time.time()), 'model': 'semreh-fixture'}
         try:
             if body.get('stream'):

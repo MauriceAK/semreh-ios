@@ -18,13 +18,20 @@ EVIDENCE = Path('/Users/maurice/workspace/semreh-slice1-evidence')
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--development-backend-sha')
+    parser.add_argument('--compression-mode', action='append', choices=('in-place', 'rotate'), default=[])
     args = parser.parse_args()
+    if args.compression_mode and not args.development_backend_sha:
+        parser.error('--compression-mode requires --development-backend-sha')
     validate()
     runtimes = [RUNTIME]
     if args.development_backend_sha:
         from direct_hermes_development import _validate_all, DEV_RUNTIME
         _validate_all(args.development_backend_sha)
         runtimes.append(DEV_RUNTIME)
+        from direct_hermes_development import _runtime_for_mode
+        for mode in args.compression_mode:
+            _validate_all(args.development_backend_sha, compression_mode=mode)
+            runtimes.append(_runtime_for_mode(mode))
     credentials = json.loads((RUNTIME / 'credentials.json').read_text())
     config = json.loads((RUNTIME / 'home/config.yaml').read_text())
     known = [credentials['password'], config['dashboard']['basic_auth']['secret'],

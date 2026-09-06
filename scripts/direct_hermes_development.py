@@ -22,11 +22,18 @@ import direct_hermes_probe as baseline
 
 DEV_SOURCE = Path('/Users/maurice/workspace/semreh-slice2-backend-dev')
 DEV_RUNTIME = Path('/Users/maurice/workspace/semreh-slice2-runtime')
+COMPRESSION_RUNTIME = Path('/Users/maurice/workspace/semreh-slice2-compression-runtime')
+IN_PLACE_COMPRESSION_RUNTIME = Path('/Users/maurice/workspace/semreh-slice2-compression-inplace-runtime')
 DEV_BRANCH = 'fix/semreh-session-reasoning'
 BASE_PIN = baseline.PIN
 PORT = baseline.PORT
+COMPRESSION_PORT = 18793
 MODEL_PORT = 18792
 MARKER = 'semreh-direct-hermes-slice2-development-v1'
+COMPRESSION_MARKER = 'semreh-direct-hermes-slice2-compression-v1'
+COMPRESSION_MODES = ('rotate', 'in-place')
+COMPRESSION_AUX_BASE_URL = 'http://127.0.0.1:18792/v1'
+COMPRESSION_AUX_API_KEY = 'semreh-compression-fixture-dummy-key'
 SHA_RE = re.compile(r'^[0-9a-fA-F]{40}$')
 RUNTIME_DIRS = ('home', 'tools', 'tmp', 'cache', 'logs')
 
@@ -115,106 +122,173 @@ def _validated_baseline_fixture():
     return config, credentials
 
 
-def _expected_config(baseline_config):
+def _runtime_for_mode(compression_mode=None):
+    """Return the fixed runtime for ordinary, rotating, or in-place mode.
+
+    ``None`` is the unchanged development fixture. Compression modes are
+    deliberately sibling paths so validation cannot fall back across modes.
+    """
+    if compression_mode is None:
+        return DEV_RUNTIME
+    if compression_mode == 'rotate':
+        return COMPRESSION_RUNTIME
+    if compression_mode == 'in-place':
+        return IN_PLACE_COMPRESSION_RUNTIME
+    raise RuntimeError(f'Unsupported compression mode: {compression_mode}')
+
+
+def _port_for_mode(compression_mode=None):
+    if compression_mode is None:
+        return PORT
+    if compression_mode in COMPRESSION_MODES:
+        return COMPRESSION_PORT
+    raise RuntimeError(f'Unsupported compression mode: {compression_mode}')
+
+
+def _expected_config(baseline_config, *, compression_mode=None):
     expected = copy.deepcopy(baseline_config)
     terminal = expected.get('terminal')
     if not isinstance(terminal, dict) or not isinstance(terminal.get('cwd'), str):
         raise RuntimeError('Baseline configuration has no terminal cwd')
-    terminal['cwd'] = str(DEV_RUNTIME / 'tools')
+    runtime = _runtime_for_mode(compression_mode)
+    terminal['cwd'] = str(runtime / 'tools')
+    if compression_mode is not None:
+        compression = expected.setdefault('compression', {})
+        if not isinstance(compression, dict):
+            raise RuntimeError('Baseline compression configuration is not a mapping')
+        compression.update({
+            'in_place': compression_mode == 'in-place',
+            'protect_last_n': 2,
+            'min_tail_user_messages': 1,
+            'target_ratio': 0.10,
+        })
+        auxiliary = expected.setdefault('auxiliary', {})
+        if not isinstance(auxiliary, dict):
+            raise RuntimeError('Baseline auxiliary configuration is not a mapping')
+        auxiliary['compression'] = {
+            'provider': 'custom',
+            'model': 'semreh-fixture',
+            'base_url': COMPRESSION_AUX_BASE_URL,
+            'api_key': COMPRESSION_AUX_API_KEY,
+            'timeout': 120,
+            'reasoning_effort': 'none',
+            'fallback_chain': [],
+        }
+        auxiliary['background_review'] = {'enabled': False}
     return expected
 
 
-def _marker():
-    return {
-        'marker': MARKER,
+def _marker(*, compression_mode=None):
+    runtime = _runtime_for_mode(compression_mode)
+    marker = COMPRESSION_MARKER if compression_mode is not None else MARKER
+    result = {
+        'marker': marker,
         'devsource': str(DEV_SOURCE),
-        'runtime': str(DEV_RUNTIME),
+        'runtime': str(runtime),
         'base_pin': BASE_PIN,
-        'port': PORT,
+        'port': _port_for_mode(compression_mode),
         'model_port': MODEL_PORT,
     }
+    if compression_mode is not None:
+        result['compression_mode'] = compression_mode
+    return result
 
 
-def _validate_runtime(baseline_config, baseline_credentials):
-    _private_dir(DEV_RUNTIME)
+def _validate_runtime(baseline_config, baseline_credentials, *, compression_mode=None):
+    runtime = _runtime_for_mode(compression_mode)
+    _private_dir(runtime)
     for name in RUNTIME_DIRS:
-        _private_dir(DEV_RUNTIME / name)
-    _private_dir(DEV_RUNTIME / 'home' / 'home')
+        _private_dir(runtime / name)
+    _private_dir(runtime / 'home' / 'home')
     for name in ('credentials.json', 'marker.json', 'home/config.yaml'):
-        _private_file(DEV_RUNTIME / name)
-    _exact(DEV_RUNTIME / 'home/state.db')
-    if (DEV_RUNTIME / 'home/.env').exists() or (DEV_RUNTIME / 'home/.env').is_symlink():
+        _private_file(runtime / name)
+    _exact(runtime / 'home/state.db')
+    if (runtime / 'home/.env').exists() or (runtime / 'home/.env').is_symlink():
         raise RuntimeError('Development runtime must use fixture config only, not .env')
 
-    marker = _json_file(DEV_RUNTIME / 'marker.json')
-    if marker != _marker():
-        raise RuntimeError('Development runtime marker does not match approved paths and pin')
-    credentials = _json_file(DEV_RUNTIME / 'credentials.json')
+    marker = _json_file(runtime / 'marker.json')
+    if marker != _marker(compression_mode=compression_mode):
+        raise RuntimeError('Development runtime marker does not match approved paths, mode and pin')
+    credentials = _json_file(runtime / 'credentials.json')
     if credentials != baseline_credentials:
         raise RuntimeError('Development credentials differ from the disposable baseline')
-    actual_config = _json_file(DEV_RUNTIME / 'home' / 'config.yaml')
-    if actual_config != _expected_config(baseline_config):
-        raise RuntimeError('Development configuration differs from baseline beyond terminal.cwd')
+    actual_config = _json_file(runtime / 'home' / 'config.yaml')
+    if actual_config != _expected_config(baseline_config, compression_mode=compression_mode):
+        raise RuntimeError('Development configuration differs from the approved fixture overlay')
 
 
-def _validate_all(backend_sha):
+def _validate_all(backend_sha, *, compression_mode=None):
     baseline_config, baseline_credentials = _validated_baseline_fixture()
     _validate_dev_source(backend_sha)
-    _validate_runtime(baseline_config, baseline_credentials)
-    print(json.dumps({
+    _validate_runtime(
+        baseline_config,
+        baseline_credentials,
+        compression_mode=compression_mode,
+    )
+    runtime = _runtime_for_mode(compression_mode)
+    result = {
         'backend_sha': backend_sha.lower(),
         'base_pin': BASE_PIN,
-        'hermes_home': str(DEV_RUNTIME / 'home'),
-        'tool_cwd': str(DEV_RUNTIME / 'tools'),
-        'port': PORT,
+        'hermes_home': str(runtime / 'home'),
+        'tool_cwd': str(runtime / 'tools'),
+        'port': _port_for_mode(compression_mode),
         'model_port': MODEL_PORT,
-    }))
+    }
+    if compression_mode is not None:
+        result['compression_mode'] = compression_mode
+    print(json.dumps(result))
     return baseline_config, baseline_credentials
 
 
-def initialize(backend_sha):
+def initialize(backend_sha, *, compression_mode=None):
     baseline_config, baseline_credentials = _validated_baseline_fixture()
     _validate_dev_source(backend_sha)
-    if DEV_RUNTIME.exists() or DEV_RUNTIME.is_symlink():
+    runtime = _runtime_for_mode(compression_mode)
+    if runtime.exists() or runtime.is_symlink():
         raise RuntimeError('Development runtime already exists; refusing to overwrite it')
-    _exact(DEV_RUNTIME.parent)
-    DEV_RUNTIME.mkdir(mode=0o700)
+    _exact(runtime.parent)
+    runtime.mkdir(mode=0o700)
     for name in RUNTIME_DIRS:
-        (DEV_RUNTIME / name).mkdir(mode=0o700)
-    (DEV_RUNTIME / 'home' / 'home').mkdir(mode=0o700)
-    baseline.private_json(DEV_RUNTIME / 'credentials.json', baseline_credentials)
-    baseline.private_json(DEV_RUNTIME / 'home' / 'config.yaml', _expected_config(baseline_config))
-    baseline.private_json(DEV_RUNTIME / 'marker.json', _marker())
-    _validate_all(backend_sha)
+        (runtime / name).mkdir(mode=0o700)
+    (runtime / 'home' / 'home').mkdir(mode=0o700)
+    baseline.private_json(runtime / 'credentials.json', baseline_credentials)
+    baseline.private_json(
+        runtime / 'home' / 'config.yaml',
+        _expected_config(baseline_config, compression_mode=compression_mode),
+    )
+    baseline.private_json(runtime / 'marker.json', _marker(compression_mode=compression_mode))
+    _validate_all(backend_sha, compression_mode=compression_mode)
 
 
-def _assert_port_free():
+def _assert_port_free(port=PORT):
     with socket.socket() as probe:
         probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
-            probe.bind(('127.0.0.1', PORT))
+            probe.bind(('127.0.0.1', port))
         except OSError as error:
-            raise RuntimeError(f'Port {PORT} is already in use; refusing to evict a process') from error
+            raise RuntimeError(f'Port {port} is already in use; refusing to evict a process') from error
 
 
-def serve(backend_sha):
-    _validate_all(backend_sha)
-    _assert_port_free()
+def serve(backend_sha, *, compression_mode=None):
+    _validate_all(backend_sha, compression_mode=compression_mode)
+    _assert_port_free(_port_for_mode(compression_mode))
+    runtime = _runtime_for_mode(compression_mode)
+    port = _port_for_mode(compression_mode)
     environment = {
         'PATH': str(baseline.PYTHON.parent) + ':/usr/bin:/bin',
-        'HERMES_HOME': str(DEV_RUNTIME / 'home'),
-        'TMPDIR': str(DEV_RUNTIME / 'tmp'),
-        'XDG_CACHE_HOME': str(DEV_RUNTIME / 'cache'),
+        'HERMES_HOME': str(runtime / 'home'),
+        'TMPDIR': str(runtime / 'tmp'),
+        'XDG_CACHE_HOME': str(runtime / 'cache'),
         'PYTHONPATH': str(DEV_SOURCE),
         'PYTHONUNBUFFERED': '1',
         'PYTHONDONTWRITEBYTECODE': '1',
         'HERMES_SERVE_HEADLESS': '1',
         'HERMES_TUI_TOOLSETS': 'clarify',
     }
-    os.chdir(DEV_RUNTIME / 'tools')
+    os.chdir(runtime / 'tools')
     os.execve(str(baseline.PYTHON), [
         str(baseline.PYTHON), '-m', 'hermes_cli.main', 'serve', '--isolated',
-        '--host', '127.0.0.1', '--port', str(PORT),
+        '--host', '127.0.0.1', '--port', str(port),
     ], environment)
 
 
@@ -228,8 +302,11 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=('init', 'validate', 'serve'))
     parser.add_argument('--backend-sha', required=True, type=_sha_argument)
+    parser.add_argument('--compression-mode', choices=COMPRESSION_MODES)
     args = parser.parse_args()
     try:
-        {'init': initialize, 'validate': _validate_all, 'serve': serve}[args.action](args.backend_sha)
+        {'init': initialize, 'validate': _validate_all, 'serve': serve}[args.action](
+            args.backend_sha, compression_mode=args.compression_mode
+        )
     except RuntimeError as error:
         parser.error(str(error))
