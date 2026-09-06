@@ -5,21 +5,27 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from dataclasses import dataclass
 import hashlib
 import json
 import time
 from contextlib import asynccontextmanager
+import contextlib
+import io
 from pathlib import Path
 
 import httpx
 from websockets.asyncio.client import connect
 
 from direct_hermes_capture import write_fixture
+import direct_hermes_probe as stock_probe
 from direct_hermes_development import (
     COMPRESSION_MODES,
     COMPRESSION_PORT,
     _runtime_for_mode,
+    _validated_baseline_fixture,
     _validate_all,
+    _validate_runtime,
 )
 from direct_hermes_identity_probe import binding
 from direct_hermes_model_fixture import (
@@ -38,10 +44,56 @@ RPC_TIMEOUT = 35.0
 COMPRESSION_TIMEOUT = 150.0
 
 
+@dataclass(frozen=True)
+class CompressionFixture:
+    runtime: Path
+    backend_sha: str
+    stock: bool
+
+
+STOCK_PIN = stock_probe.PIN
+
+
 def runtime(mode: str) -> Path:
     if mode not in COMPRESSION_MODES:
         raise RuntimeError("compression mode must be explicit")
     return _runtime_for_mode(mode)
+
+
+def select_fixture(
+    mode: str, *, stock_backend: bool, backend_sha: str | None
+) -> CompressionFixture:
+    """Resolve the fixed compression sibling and one explicit backend mode."""
+    if mode not in COMPRESSION_MODES:
+        raise ValueError("compression mode must be explicit")
+    if stock_backend:
+        if backend_sha is not None:
+            raise ValueError("--stock-backend cannot be combined with --backend-sha")
+        return CompressionFixture(runtime(mode), STOCK_PIN, True)
+    if not backend_sha:
+        raise ValueError("--backend-sha is required without --stock-backend")
+    return CompressionFixture(runtime(mode), backend_sha.lower(), False)
+
+
+def validate_fixture(fixture: CompressionFixture, mode: str) -> None:
+    """Validate baseline+compression fixtures without exposing credentials."""
+    if fixture.runtime != runtime(mode):
+        raise RuntimeError("compression fixture runtime does not match requested mode")
+    if fixture.stock:
+        if fixture.backend_sha != STOCK_PIN:
+            raise RuntimeError("stock compression fixture must use the approved stock pin")
+        # Baseline validation pins the exact stock source/runtime.  The second
+        # validator checks this mode's fixed sibling against that baseline's
+        # credentials and overlay, including the marker, paths and port.
+        with contextlib.redirect_stdout(io.StringIO()):
+            baseline_config, baseline_credentials = _validated_baseline_fixture()
+            _validate_runtime(
+                baseline_config,
+                baseline_credentials,
+                compression_mode=mode,
+            )
+        return
+    _validate_all(fixture.backend_sha, compression_mode=mode)
 
 
 def config_hash(mode: str) -> str:
@@ -413,12 +465,24 @@ async def exercise(mode: str, credentials: dict, evidence: dict) -> None:
                         evidence["cleanup_errors"].append({"operation": "session.close", "type": type(error).__name__})
 
 
-async def run(mode: str, output: Path, backend_sha: str) -> None:
-    _validate_all(backend_sha, compression_mode=mode)
-    credentials = json.loads((runtime(mode) / "credentials.json").read_text(encoding="utf-8"))
+async def run(
+    mode: str,
+    output: Path,
+    backend_sha: str | None = None,
+    *,
+    stock_backend: bool = False,
+) -> None:
+    fixture = select_fixture(
+        mode,
+        stock_backend=stock_backend,
+        backend_sha=backend_sha,
+    )
+    validate_fixture(fixture, mode)
+    credentials = json.loads((fixture.runtime / "credentials.json").read_text(encoding="utf-8"))
     before = config_hash(mode)
     evidence = {
-        "sanitized": True, "backend_sha": backend_sha, "compression_mode": mode,
+        "sanitized": True, "backend_sha": fixture.backend_sha, "compression_mode": mode,
+        "stock_backend": fixture.stock,
         "deployment": BASE, "provider": "deterministic localhost fixture",
         "cleanup_errors": [], "checks": [],
         "fallback_note": "empty auxiliary chain retains the guarded localhost main-model safety fallback",
@@ -450,7 +514,16 @@ async def run(mode: str, output: Path, backend_sha: str) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", required=True, choices=COMPRESSION_MODES)
-    parser.add_argument("--backend-sha", required=True)
+    backend = parser.add_mutually_exclusive_group(required=True)
+    backend.add_argument("--backend-sha")
+    backend.add_argument("--stock-backend", action="store_true")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
-    asyncio.run(run(args.mode, _output_path(args.output), args.backend_sha))
+    asyncio.run(
+        run(
+            args.mode,
+            _output_path(args.output),
+            args.backend_sha,
+            stock_backend=args.stock_backend,
+        )
+    )

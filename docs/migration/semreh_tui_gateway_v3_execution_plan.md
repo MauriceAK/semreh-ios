@@ -43,8 +43,16 @@ remain local pending intent until idle; they must not mutate the active inferenc
 Normal attached sessions are protected from ordinary eviction; this does not
 eliminate the concurrent-close race. Do not claim atomic targeting guarantees.
 
-The separate upstream compaction reproduction/fix/draft is authorized for review
-only; no publication, personal deployment or private-fork adoption is authorized.
+Maurice subsequently accepted the reproduced stock compacted-history chronology
+bug as a documented temporary limitation of the tested Hermes version, not a
+Slice 2 blocker. Retain the failing chronology evidence and assertions; do not
+claim that gate passed. Other identity, paging and duplicate-prevention gates
+remain required. The app must not bundle or require the private fix.
+
+Maurice authorized an upstream contribution for this bug: check the existing PR
+first and contribute original reproduction/tests there if it already covers the
+fix, otherwise submit the focused fix after independent review. This does not
+authorize personal deployment, unrelated publication or private-fork adoption.
 App work continues independently. Long-chat scrolling and stale/misplaced thinking
 cards are Slice 2 correctness/performance concerns; cosmetic redesign stays out.
 
@@ -448,7 +456,7 @@ Search, rename, pin, archive, delete, and low-use secondary screens do not block
 - A TUI/Desktop-created session opens in Semreh.
 - A Semreh-created session opens in TUI/Desktop.
 - An old compression ancestor resolves to the current durable tip.
-- Initial and older transcript pages include compacted rows, remain chronological, and prepend without duplicates.
+- Initial and older transcript pages include compacted rows, remain chronological, and prepend without duplicates. The reproduced stock compacted-row chronology failure is an explicitly accepted temporary exception (see September 5 decision above), not a passing result; other assertions remain required.
 - Returned resolved session IDs are adopted.
 - Fresh create, live resume, cold resume, lazy resume, and continuation resume identity fixtures pass.
 - If `stored_session_id` and `session_key` disagree, the operation fails safely and canonically reloads.

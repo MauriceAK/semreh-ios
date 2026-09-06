@@ -6,6 +6,12 @@ final class LongChatScrollUITests: XCTestCase {
     private let performanceLabArgument = "--chat-performance-lab"
     private let approvedLiveOrigin = "https://semreh-slice1-test.tailda8427.ts.net"
     private let approvedLiveHost = "semreh-slice1-test.tailda8427.ts.net"
+    private let stockBackendSHA = "29112bef099274229cadff79cdff7bf7b99c4b77"
+    private let developmentBackendSHA = "8c50f84522a755d40346e73701a6847fbdde20ec"
+    private let stockCredentialsPath = "/Users/maurice/workspace/semreh-slice1-runtime/credentials.json"
+    private let stockToolCwd = "/Users/maurice/workspace/semreh-slice1-runtime/tools"
+    private let developmentCredentialsPath = "/Users/maurice/workspace/semreh-slice2-runtime/credentials.json"
+    private let developmentToolCwd = "/Users/maurice/workspace/semreh-slice2-runtime/tools"
     private let chatIdentifier = "chat-detail:10,000-row performance lab"
     private let scrollToLatestLabel = "Scroll to latest message"
     private let endMarker = "End of 10,000-row conversation."
@@ -170,13 +176,30 @@ final class LongChatScrollUITests: XCTestCase {
         #endif
 
         let environment = ProcessInfo.processInfo.environment
-        let credentialsPath = "/Users/maurice/workspace/semreh-slice2-runtime/credentials.json"
         guard environment["SEMREH_SLICE2_UI_LIVE"] == "1",
               environment["SEMREH_SLICE1_HTTPS"] == "1",
-              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == credentialsPath
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] != nil
         else {
             throw XCTSkip("Live production UI smoke is opt-in.")
         }
+
+        let stockBackend = environment["SEMREH_SLICE2_UI_BACKEND_MODE"] == "stock"
+            && environment["SEMREH_SLICE2_UI_BACKEND_SHA"] == stockBackendSHA
+            && environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == stockCredentialsPath
+            && environment["SEMREH_SLICE2_TOOL_CWD"] == stockToolCwd
+        let developmentBackend = environment["SEMREH_SLICE2_UI_BACKEND_MODE"] == "development"
+            && environment["SEMREH_SLICE2_UI_BACKEND_SHA"] == developmentBackendSHA
+            && environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == developmentCredentialsPath
+            && environment["SEMREH_SLICE2_TOOL_CWD"] == developmentToolCwd
+        guard stockBackend || developmentBackend else {
+            XCTFail("Slice 2 UI backend mode is invalid.")
+            return
+        }
+        guard stockBackend != developmentBackend else {
+            XCTFail("Slice 2 UI backend mode is ambiguous.")
+            return
+        }
+        let credentialsPath = stockBackend ? stockCredentialsPath : developmentCredentialsPath
 
         let credentials = try readCredentials(at: credentialsPath)
         let app = XCUIApplication()

@@ -3,7 +3,10 @@
 
 import argparse
 import asyncio
+from dataclasses import dataclass
+import hashlib
 import json
+from pathlib import Path
 import time
 from contextlib import asynccontextmanager
 
@@ -11,11 +14,63 @@ import httpx
 from websockets.asyncio.client import connect
 
 from direct_hermes_capture import write_fixture
+import direct_hermes_probe as stock_probe
 from direct_hermes_reasoning_probe import (
-    BASE, WS_BASE, HTTPS_ORIGIN, PROFILE, TOOLS_CWD, RUNTIME, PIN,
-    RPC_TIMEOUT, Probe, _json_frame, _output_path, _config_hash,
-    _validate_all, _rest_rows, _row_text,
+    BASE, WS_BASE, HTTPS_ORIGIN, PROFILE, TOOLS_CWD, RUNTIME as DEV_RUNTIME, PIN,
+    RPC_TIMEOUT, Probe, _json_frame, _output_path, _rest_rows, _row_text,
+    _validate_all,
 )
+
+
+@dataclass(frozen=True)
+class ProbeFixture:
+    runtime: Path
+    tools_cwd: Path
+    base: str
+    ws_base: str
+    origin: str
+    backend_sha: str
+    stock: bool
+
+
+STOCK_RUNTIME = stock_probe.RUNTIME
+STOCK_TOOLS_CWD = STOCK_RUNTIME / "tools"
+STOCK_BASE = stock_probe.HTTPS_ORIGIN
+STOCK_WS_BASE = STOCK_BASE.replace("https://", "wss://")
+STOCK_PIN = stock_probe.PIN
+
+
+def select_fixture(*, stock_backend: bool, backend_sha: str | None) -> ProbeFixture:
+    if stock_backend:
+        if backend_sha is not None:
+            raise ValueError("--stock-backend cannot be combined with --backend-sha")
+        return ProbeFixture(
+            runtime=STOCK_RUNTIME,
+            tools_cwd=STOCK_TOOLS_CWD,
+            base=STOCK_BASE,
+            ws_base=STOCK_WS_BASE,
+            origin=STOCK_BASE,
+            backend_sha=STOCK_PIN,
+            stock=True,
+        )
+    if not backend_sha:
+        raise ValueError("--backend-sha is required without --stock-backend")
+    return ProbeFixture(
+        runtime=DEV_RUNTIME,
+        tools_cwd=TOOLS_CWD,
+        base=BASE,
+        ws_base=WS_BASE,
+        origin=HTTPS_ORIGIN,
+        backend_sha=backend_sha.lower(),
+        stock=False,
+    )
+
+
+def _config_hash(runtime: Path) -> str:
+    path = runtime / "home" / "config.yaml"
+    if path.is_symlink() or path.resolve() != path or not path.is_file():
+        raise RuntimeError("Unexpected disposable config path")
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def binding(payload, expected=None):
@@ -53,8 +108,8 @@ async def page(client, stored, limit, offset):
 
 
 @asynccontextmanager
-async def authenticated(credentials, evidence):
-    async with httpx.AsyncClient(base_url=BASE, trust_env=False, follow_redirects=False) as client:
+async def authenticated(credentials, evidence, *, base=BASE, origin=HTTPS_ORIGIN):
+    async with httpx.AsyncClient(base_url=base, trust_env=False, follow_redirects=False) as client:
         login = await client.post("/auth/password-login", json={
             "provider": "basic", **credentials, "next": "",
         })
@@ -79,9 +134,17 @@ async def authenticated(credentials, evidence):
                 evidence["cleanup_errors"].append({"operation": "logout", "type": type(error).__name__})
 
 
-async def exercise(credentials, evidence):
-    async with authenticated(credentials, evidence) as (client, ticket):
-        async with connect(f"{WS_BASE}/api/ws?ticket={ticket}", origin=HTTPS_ORIGIN, proxy=None) as ws:
+async def exercise(
+    credentials,
+    evidence,
+    *,
+    base=BASE,
+    ws_base=WS_BASE,
+    origin=HTTPS_ORIGIN,
+    tools_cwd=TOOLS_CWD,
+):
+    async with authenticated(credentials, evidence, base=base, origin=origin) as (client, ticket):
+        async with connect(f"{ws_base}/api/ws?ticket={ticket}", origin=origin, proxy=None) as ws:
             ready = _json_frame(await asyncio.wait_for(ws.recv(), RPC_TIMEOUT))
             if ready.get("params", {}).get("type") != "gateway.ready":
                 raise RuntimeError("missing gateway.ready")
@@ -93,7 +156,7 @@ async def exercise(credentials, evidence):
             try:
                 evidence["phase"] = "fresh unpersisted create and attach"
                 created = await probe.rpc("session.create", {
-                    "profile": PROFILE, "cwd": str(TOOLS_CWD), "model": "gpt-5",
+                    "profile": PROFILE, "cwd": str(tools_cwd), "model": "gpt-5",
                     "provider": "custom", "reasoning_effort": "low",
                 })
                 runtime, stored = binding(created)
@@ -175,28 +238,39 @@ async def exercise(credentials, evidence):
                         evidence["cleanup_errors"].append({"operation": "session.close", "type": type(error).__name__})
 
 
-async def run(output, backend_sha):
-    _validate_all(backend_sha)
-    credentials = json.loads((RUNTIME / "credentials.json").read_text())
-    before = _config_hash()
-    evidence = {"sanitized": True, "base_pin": PIN, "backend_sha": backend_sha,
-                "deployment": HTTPS_ORIGIN, "checks": [], "resume_seconds": {}, "cleanup_errors": [],
+async def run(output, backend_sha=None, *, stock_backend=False):
+    fixture = select_fixture(stock_backend=stock_backend, backend_sha=backend_sha)
+    if fixture.stock:
+        stock_probe.validate()
+    else:
+        _validate_all(fixture.backend_sha)
+    credentials = json.loads((fixture.runtime / "credentials.json").read_text())
+    before = _config_hash(fixture.runtime)
+    evidence = {"sanitized": True, "base_pin": STOCK_PIN, "backend_sha": fixture.backend_sha,
+                "deployment": fixture.origin, "checks": [], "resume_seconds": {}, "cleanup_errors": [],
                 "not_verified": ["compression lineage", "literal TUI/Desktop UI", "physical device"]}
     try:
-        await exercise(credentials, evidence)
+        await exercise(
+            credentials,
+            evidence,
+            base=fixture.base,
+            ws_base=fixture.ws_base,
+            origin=fixture.origin,
+            tools_cwd=fixture.tools_cwd,
+        )
         if evidence["cleanup_errors"]:
             raise AssertionError("fixture cleanup failed")
-        if _config_hash() != before:
+        if _config_hash(fixture.runtime) != before:
             raise AssertionError("global fixture configuration changed")
         evidence["outcome"] = "passed"
     except Exception as error:
         evidence["outcome"] = "failed"
         evidence["error_type"] = type(error).__name__
-        evidence["global_config_unchanged"] = _config_hash() == before
+        evidence["global_config_unchanged"] = _config_hash(fixture.runtime) == before
         write_fixture(output, evidence)
         output.chmod(0o600)
         raise RuntimeError(f"Identity probe failed; evidence: {output}") from None
-    evidence["global_config_unchanged"] = _config_hash() == before
+    evidence["global_config_unchanged"] = _config_hash(fixture.runtime) == before
     write_fixture(output, evidence)
     output.chmod(0o600)
     print(f"Identity probe passed; evidence: {output}")
@@ -204,7 +278,9 @@ async def run(output, backend_sha):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--backend-sha", required=True)
+    backend = parser.add_mutually_exclusive_group(required=True)
+    backend.add_argument("--backend-sha")
+    backend.add_argument("--stock-backend", action="store_true")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
-    asyncio.run(run(_output_path(args.output), args.backend_sha))
+    asyncio.run(run(_output_path(args.output), args.backend_sha, stock_backend=args.stock_backend))

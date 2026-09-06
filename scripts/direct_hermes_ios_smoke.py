@@ -48,11 +48,12 @@ def main():
         not args.https or args.cookie_phase or args.slice2_foundation or args.slice2_native or args.slice2_reasoning
     ):
         parser.error('Slice 2 UI requires --https and no other test phase')
-    if args.stock_backend and not args.slice2_reasoning:
-        parser.error('--stock-backend requires --slice2-reasoning')
-    if args.slice2_reasoning and args.stock_backend == bool(args.development_backend_sha):
-        parser.error('Slice 2 reasoning requires exactly one backend mode')
-    development = args.slice2_ui or (args.slice2_reasoning and not args.stock_backend)
+    backend_phase = args.slice2_reasoning or args.slice2_ui
+    if args.stock_backend and not backend_phase:
+        parser.error('--stock-backend requires --slice2-reasoning or --slice2-ui')
+    if backend_phase and args.stock_backend == bool(args.development_backend_sha):
+        parser.error('Slice 2 backend phase requires exactly one backend mode')
+    development = backend_phase and not args.stock_backend
     if development and not args.development_backend_sha:
         parser.error('Development smoke requires --development-backend-sha')
     if args.development_backend_sha and not development:
@@ -111,6 +112,12 @@ def main():
             del target['EnvironmentVariables']['SEMREH_SLICE1_CREDENTIALS_FILE']
     test_class = 'DirectHermesLiveSmokeTests'
     if args.slice2_ui:
+        environment = target['EnvironmentVariables']
+        environment['SEMREH_SLICE2_UI_BACKEND_MODE'] = 'development' if development else 'stock'
+        environment['SEMREH_SLICE2_UI_BACKEND_SHA'] = (
+            args.development_backend_sha.lower() if development else PIN
+        )
+        environment['SEMREH_SLICE2_TOOL_CWD'] = str(runtime / 'tools')
         target['EnvironmentVariables']['SEMREH_SLICE2_UI_LIVE'] = '1'
         if args.tui_created_session_id:
             target['EnvironmentVariables']['SEMREH_SLICE2_TUI_CREATED_SESSION_ID'] = args.tui_created_session_id

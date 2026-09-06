@@ -1,5 +1,78 @@
 # Slice 2 verification — in progress
 
+## September 6 — stock gate closure checkpoint
+
+Maurice accepted the reproduced compacted-row chronology bug on the tested stock
+pin as a temporary documented limitation, not a blocking requirement. The failing
+assertions remain intact. This does not exempt other paging/identity gates or
+authorize a private backend requirement. Physical iPhone acceptance remains open.
+
+Root independently reviewed Luna's explicit stock-mode launcher/probe changes and
+ran the following against clean stock `29112bef099274229cadff79cdff7bf7b99c4b77`.
+App source is `a4e8257` plus the bounded test/helper changes in this checkpoint;
+no production app or Hermes source changed during this pass. Evidence below is
+under `/Users/maurice/workspace/semreh-slice1-evidence`.
+
+- `slice2-stock-foundation-v1.xcresult`: 1 passed, 0 failed/skipped. Existing
+  `--https --slice2-foundation` launcher and signed test-without-building. Root
+  source-confirmed ten exact durable user/assistant pairs, reconnect binding and
+  discovery, plus server interrupt/terminal assertions in the selected method.
+- `slice2-stock-native-flow-v1.xcresult`: 1 passed, 0 failed/skipped, same command
+  with `--slice2-native`; constructs native view model, not production navigation.
+- `slice2-stock-production-ui-v1.xcresult`: 1 passed, 0 failed/skipped. Signed
+  UIVerification build-for-testing, launcher `--https --slice2-ui --stock-backend`,
+  then test-without-building. Actual sign-in, Control startup, New Chat, send,
+  exact visible ACK. Root inspected exported success screenshot.
+- Stock literal TUI built with locked `npm ci --workspace ui-tui --include=dev
+  --ignore-scripts --no-fund --no-audit`, then `npm run build --workspace ui-tui`.
+  Explicit empty inherited environment, fixed disposable npm cache/TMPDIR and
+  `/dev/null` user config; no HOME reassignment. Tracked backend source stayed
+  clean. Logs `slice2-stock-tui-{npm-ci,build}-v1.log`.
+- `direct_hermes_tui.py --stock-backend`, PTY52512: real input/Enter produced
+  `SEMREH_TUI_CROSS_CLIENT_1` and rendered `SEMREH_SLICE1_ACK`; normal `/exit`.
+  REST independently confirmed exact pair at durable `20260906_000444_8a36c3`.
+- `slice2-stock-cross-client-ui-v1.xcresult`: 1 passed, 0 failed/skipped. Stock UI
+  launcher with `--tui-created-session-id 20260906_000444_8a36c3`, same signed build;
+  actual deep link rendered both markers, screenshots exported and inspected.
+- Reverse direction: production-UI-created `20260906_000301_0be890`, confirmed by
+  REST, then literal stock TUI `--resume-stored-id` displayed the exact app
+  prompt/ACK, root-observed PTY95629; normal exit. TUI owns a separate stdio
+  gateway sharing disposable state; this is not Desktop or shared-live-socket proof.
+- Full native `slice2-stock-final-native-v1` produced no test stdout for ~4.5min.
+  Root interrupted exact owned xcodebuild99457; exit73. Retained bundle/log; no
+  passing-test or infrastructure-only diagnosis. Bounded v2 rerun PASS:
+  `slice2-stock-final-native-v2.xcresult`: 2014 pass, 0 fail, 7 intentional opt-in
+  skips (2021 total). Canonical signed `xcodebuild test`, owned Simulator/DerivedData,
+  jobs2, no parallel tests, diagnosticsnever, test timeouts60/120s.
+- Root pure helper discovery: `PYTHONPATH=scripts .../semreh-slice1-venv/bin/python
+  -m unittest discover -s scripts -p 'test_direct_hermes_*.py' -q`: 53 passed.
+  Root caught and required repair of a dropped development validator in the first
+  steer adapter candidate; added boundary tests prove validation precedes reads.
+- `direct_hermes_identity_probe.py --stock-backend --output <evidence>/slice2-stock-identity-live-v1.json`:
+  PASS; strict fresh/live/cold/deferred/lazy identity, paging and durable assertions
+  retained; HTTPS and unchanged global config, cleanup empty.
+- `direct_hermes_steer_probe.py --stock-backend --output <evidence>/slice2-stock-steer-live-v1.json`:
+  PASS; queued/rejected wire outcomes, exact durable turns; accepted is native
+  compatibility enum coverage, not an invented stock wire status.
+- `direct_hermes_compression_probe.py --mode rotate --stock-backend --output
+  <evidence>/slice2-stock-rotation-live-v1.json`: PASS. Root validated stock source
+  and rotation sibling before starting fixed localhost18793 with empty-env stock
+  `hermes_cli.main serve --isolated`; PID4859/cwd externally checked. Actual24→22
+  rows and14505→14182tokens; parent/child metadata, ancestor→tip pages, continuation
+  and cold reload exactly once, cleanup empty/config unchanged. This proves child
+  canonical pages, NOT reconstruction of every original parent row. PID4859
+  normally TERM-stopped after the test; main stock18791/proxy unchanged.
+- Upstream: no competing fix PR. Root posted independent public-API reproduction
+  and targeted-test evidence on the existing author's PR:
+  https://github.com/NousResearch/hermes-agent/pull/93869#issuecomment-5557664077 .
+  Root reproduced baseline failure/local-fix success with a disposable DB and
+  independently reran5publicAPI tests. Targeted pytest only; canonical upstream
+  wrapper probes personal Hermes paths and was not used. No PR-branch full-suite
+  claim, private-fork adoption or app deployment.
+
+Final clean-checkout verification and physical-device acceptance remain pending.
+Historical sections below retain earlier failures and superseded dev-only results.
+
 Binding plan: `semreh_tui_gateway_v3_execution_plan.md`.
 Hermes pin: `29112bef099274229cadff79cdff7bf7b99c4b77`.
 Semreh branch: `chore/direct-hermes-v3-slice2`, based on verified `606b8a5`.

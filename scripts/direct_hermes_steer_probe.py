@@ -20,17 +20,22 @@ from pathlib import Path
 from websockets.asyncio.client import connect
 
 from direct_hermes_capture import write_fixture
-from direct_hermes_development import DEV_RUNTIME as RUNTIME, _validate_all
-from direct_hermes_identity_probe import assert_rows, authenticated, binding, page
+import direct_hermes_probe as stock_probe
+from direct_hermes_identity_probe import (
+    STOCK_PIN,
+    ProbeFixture,
+    _config_hash,
+    assert_rows,
+    authenticated,
+    binding,
+    page,
+    select_fixture,
+)
 from direct_hermes_reasoning_probe import (
-    HTTPS_ORIGIN,
-    PIN,
     PROFILE,
     RPC_TIMEOUT,
-    TOOLS_CWD,
-    WS_BASE,
     Probe,
-    _config_hash,
+    _validate_all,
     _json_frame,
     _row_text,
     _output_path,
@@ -80,14 +85,16 @@ async def _close_owned(
             )
 
 
-async def _exercise(credentials: dict, evidence: dict) -> None:
+async def _exercise(credentials: dict, evidence: dict, fixture: ProbeFixture) -> None:
     evidence["phase"] = "authentication"
     evidence.setdefault("cleanup_errors", [])
 
-    async with authenticated(credentials, evidence) as (client, ticket):
+    async with authenticated(
+        credentials, evidence, base=fixture.base, origin=fixture.origin
+    ) as (client, ticket):
         async with connect(
-            f"{WS_BASE}/api/ws?ticket={ticket}",
-            origin=HTTPS_ORIGIN,
+            f"{fixture.ws_base}/api/ws?ticket={ticket}",
+            origin=fixture.origin,
             proxy=None,
         ) as ws:
             ready = _json_frame(await asyncio.wait_for(ws.recv(), RPC_TIMEOUT))
@@ -104,7 +111,7 @@ async def _exercise(credentials: dict, evidence: dict) -> None:
                     "session.create",
                     {
                         "profile": PROFILE,
-                        "cwd": str(TOOLS_CWD),
+                        "cwd": str(fixture.tools_cwd),
                         "model": "gpt-5",
                         "provider": "custom",
                     },
@@ -184,14 +191,18 @@ def _persist_failure(output: Path, evidence: dict) -> None:
     output.chmod(0o600)
 
 
-async def _run(output: Path, backend_sha: str) -> None:
-    _validate_all(backend_sha)
-    credentials = json.loads((RUNTIME / "credentials.json").read_text(encoding="utf-8"))
-    config_before = _config_hash()
+async def _run(output: Path, backend_sha: str | None = None, *, stock_backend: bool = False) -> None:
+    fixture = select_fixture(stock_backend=stock_backend, backend_sha=backend_sha)
+    if fixture.stock:
+        stock_probe.validate()
+    else:
+        _validate_all(fixture.backend_sha)
+    credentials = json.loads((fixture.runtime / "credentials.json").read_text(encoding="utf-8"))
+    config_before = _config_hash(fixture.runtime)
     evidence = {
-        "configured_source_pin": PIN,
-        "backend_sha": backend_sha.lower(),
-        "deployment": HTTPS_ORIGIN,
+        "configured_source_pin": STOCK_PIN,
+        "backend_sha": fixture.backend_sha,
+        "deployment": fixture.origin,
         "provider": "deterministic localhost fixture; NOT external-provider proof",
         "profile": PROFILE,
         "sanitized": True,
@@ -203,8 +214,8 @@ async def _run(output: Path, backend_sha: str) -> None:
         ],
     }
     try:
-        await _exercise(credentials, evidence)
-        config_after = _config_hash()
+        await _exercise(credentials, evidence, fixture)
+        config_after = _config_hash(fixture.runtime)
         evidence["config_sha256_before"] = config_before
         evidence["config_sha256_after"] = config_after
         if config_before != config_after:
@@ -216,7 +227,7 @@ async def _run(output: Path, backend_sha: str) -> None:
         evidence["error_type"] = type(error).__name__
         try:
             evidence["config_sha256_before"] = config_before
-            evidence["config_sha256_after"] = _config_hash()
+            evidence["config_sha256_after"] = _config_hash(fixture.runtime)
             evidence["global_config_unchanged"] = (
                 evidence["config_sha256_before"] == evidence["config_sha256_after"]
             )
@@ -231,10 +242,12 @@ async def _run(output: Path, backend_sha: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--backend-sha", required=True)
+    backend = parser.add_mutually_exclusive_group(required=True)
+    backend.add_argument("--backend-sha")
+    backend.add_argument("--stock-backend", action="store_true")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
-    asyncio.run(_run(_output_path(args.output), args.backend_sha))
+    asyncio.run(_run(_output_path(args.output), args.backend_sha, stock_backend=args.stock_backend))
 
 
 if __name__ == "__main__":
