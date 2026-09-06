@@ -300,7 +300,11 @@ struct ChatView: View {
     @State private var draftMessage = ""
     @State private var followRejoinScrollToken = 0
     @State private var restoreScrollToken = 0
+    @State private var transcriptRestoreCancellationToken = 0
     @State private var didRequestTranscriptRestore = false
+    @State private var didInteractBeforeTranscriptRestore = false
+    @State private var isTranscriptRestorePending = false
+    @State private var pendingTranscriptRestoreMessageID: String?
     @State private var isScrolledNearBottom = true
     @State private var isReadingOlderTranscript = false
     @State private var shouldFollowLatestMessage = true
@@ -308,6 +312,7 @@ struct ChatView: View {
     @State private var followScrollGeneration = 0
     @State private var explicitBottomScrollGeneration = 0
     @State private var isExplicitBottomScrollActive = false
+    @State private var hasIssuedExplicitBottomScroll = false
     @State private var isLatestTranscriptRowVisible = false
     @State private var isTranscriptBottomVisible = false
     @State private var explicitBottomScrollTask: Task<Void, Never>?
@@ -388,6 +393,11 @@ struct ChatView: View {
             )
         )
         _viewModel = State(initialValue: resolvedRetainedViewModel)
+        _shouldFollowLatestMessage = State(initialValue: resolvedRetainedViewModel.savedFollowingLatest)
+        let initialRestoreTarget = resolvedRetainedViewModel.transcriptRestoreTarget
+        _visibleTranscriptRowID = State(initialValue: Self.savedTranscriptVisibleMessageID(from: initialRestoreTarget))
+        _pendingTranscriptRestoreMessageID = State(initialValue: Self.savedTranscriptVisibleMessageID(from: initialRestoreTarget))
+        _isTranscriptRestorePending = State(initialValue: Self.savedTranscriptVisibleMessageID(from: initialRestoreTarget) != nil)
         _gitAvailabilityViewModel = State(initialValue: openSessionStore.gitAvailabilityViewModel(
             session: session,
             server: server,
@@ -1244,7 +1254,11 @@ struct ChatView: View {
                 await loadMessages()
             },
             onLoadOlderMessages: {
-                await loadOlderMessages()
+                didInteractBeforeTranscriptRestore = true
+                isTranscriptRestorePending = false
+                pendingTranscriptRestoreMessageID = nil
+                transcriptRestoreCancellationToken &+= 1
+                return await loadOlderMessages()
             },
             onUpdateScrollMetrics: updateScrollMetrics,
             onDismissKeyboard: dismissKeyboard,
@@ -1259,6 +1273,13 @@ struct ChatView: View {
                 scrollToTranscriptMessage(proxy, messageID: messageID, animated: animated)
             },
             onVisibleTranscriptRowIDChange: { rowID in
+                if isTranscriptRestorePending {
+                    guard let rowID, rowID == pendingTranscriptRestoreMessageID else {
+                        return
+                    }
+                    isTranscriptRestorePending = false
+                    pendingTranscriptRestoreMessageID = nil
+                }
                 guard visibleTranscriptRowID != rowID else { return }
                 visibleTranscriptRowID = rowID
             },
@@ -1309,6 +1330,7 @@ struct ChatView: View {
             },
             restoreScrollToken: restoreScrollToken,
             restoreTarget: viewModel.transcriptRestoreTarget,
+            transcriptRestoreCancellationToken: transcriptRestoreCancellationToken,
             followRejoinScrollToken: followRejoinScrollToken,
             isComposerResizing: isComposerResizing,
             transcriptRenderRevision: viewModel.transcriptRenderRevision
@@ -2150,6 +2172,9 @@ struct ChatView: View {
     }
 
     private func scrollToBottom(_ proxy: ScrollViewProxy) {
+        didInteractBeforeTranscriptRestore = true
+        isTranscriptRestorePending = false
+        pendingTranscriptRestoreMessageID = nil
         beginExplicitBottomScroll(proxy)
     }
 
@@ -2160,19 +2185,25 @@ struct ChatView: View {
 
         userScrollCooldownUntil = nil
         isExplicitBottomDecelerationActive = false
+        hasIssuedExplicitBottomScroll = false
+        // Invalidate any previously scheduled automatic follow operation. Its
+        // delayed proxy call must not win after an explicit user jump begins.
+        followScrollGeneration &+= 1
         // The explicit jump owns positioning until its concrete tail arrives.
         // Re-enabling automatic anchoring or expanding the composer here races
         // lazy measurement and can turn an estimated offset into a blank tail.
         shouldFollowLatestMessage = false
         isExplicitBottomScrollActive = true
 
+        // Do not wait for a task hop before the first jump. In particular, an
+        // old near-bottom/tail-visible metrics sample must not make the request
+        // look settled without ever delivering its target to UIKit.
+        issueExplicitBottomScroll(proxy)
+        guard isExplicitBottomScrollActive else { return }
+
         explicitBottomScrollTask = Task { @MainActor in
-            for delay in ChatScrollPolicy.explicitBottomSettlementDelays {
-                if delay > 0 {
-                    try? await Task.sleep(nanoseconds: delay)
-                } else {
-                    await Task.yield()
-                }
+            for delay in ChatScrollPolicy.explicitBottomSettlementDelays.dropFirst() {
+                try? await Task.sleep(nanoseconds: delay)
 
                 guard !Task.isCancelled,
                       generation == explicitBottomScrollGeneration,
@@ -2181,7 +2212,8 @@ struct ChatView: View {
 
                 if ChatScrollPolicy.shouldFinishExplicitBottomRequest(
                     isNearBottom: isScrolledNearBottom,
-                    isTailVisible: isLatestTranscriptRowVisible || isTranscriptBottomVisible
+                    isTailVisible: isLatestTranscriptRowVisible || isTranscriptBottomVisible,
+                    hasIssuedScroll: hasIssuedExplicitBottomScroll
                 ) {
                     completeExplicitBottomScroll(generation: generation)
                     return
@@ -2190,12 +2222,7 @@ struct ChatView: View {
                 // Realize the concrete last row before refining toward trailing
                 // content. Jumping directly to an off-list sentinel after a lazy
                 // transcript mutation can land in estimated, unrendered space.
-                let target = ChatScrollPolicy.explicitBottomTargetID(
-                    latestMessageID: latestTranscriptMessageID,
-                    latestMessageIsVisible: isLatestTranscriptRowVisible,
-                    bottomAnchorID: bottomAnchorID
-                )
-                proxy.scrollTo(target, anchor: .bottom)
+                issueExplicitBottomScroll(proxy)
             }
 
             guard generation == explicitBottomScrollGeneration else { return }
@@ -2205,11 +2232,23 @@ struct ChatView: View {
         }
     }
 
+    private func issueExplicitBottomScroll(_ proxy: ScrollViewProxy) {
+        let target = ChatScrollPolicy.explicitBottomTargetID(
+            latestMessageID: latestTranscriptMessageID,
+            latestMessageIsVisible: isLatestTranscriptRowVisible,
+            bottomAnchorID: bottomAnchorID
+        )
+        proxy.scrollTo(target, anchor: .bottom)
+        guard isExplicitBottomScrollActive else { return }
+        hasIssuedExplicitBottomScroll = true
+    }
+
     private func finishExplicitBottomScroll(generation: Int? = nil) {
         if let generation, generation != explicitBottomScrollGeneration { return }
         explicitBottomScrollTask?.cancel()
         explicitBottomScrollTask = nil
         isExplicitBottomScrollActive = false
+        hasIssuedExplicitBottomScroll = false
     }
 
     private func completeExplicitBottomScroll(generation: Int? = nil) {
@@ -2427,6 +2466,12 @@ struct ChatView: View {
     }
 
     private func persistTranscriptRestore() {
+        guard didRequestTranscriptRestore || didInteractBeforeTranscriptRestore else {
+            // The durable point remains authoritative until appearance
+            // restoration has initialized local state or the user makes a
+            // real gesture.
+            return
+        }
         viewModel.rememberTranscriptRestorePoint(
             followingLatest: shouldFollowLatestMessage,
             // Persist only the row identity, not the high-frequency scroll offset.
@@ -2438,16 +2483,31 @@ struct ChatView: View {
 
     private func requestTranscriptRestoreIfNeeded() {
         guard !didRequestTranscriptRestore else { return }
-        guard ChatTranscriptRestorePolicy.shouldProgrammaticallyRestoreOnAppear(
-            hasMessages: !viewModel.messages.isEmpty
-        ) else { return }
-
+        guard !viewModel.messages.isEmpty else { return }
         didRequestTranscriptRestore = true
+        let restoreTarget = viewModel.transcriptRestoreTarget
+        pendingTranscriptRestoreMessageID = Self.savedTranscriptVisibleMessageID(from: restoreTarget)
+        isTranscriptRestorePending = pendingTranscriptRestoreMessageID != nil
+        guard ChatTranscriptRestorePolicy.shouldStartRestore(
+            hasMessages: true,
+            hasUserInteractedBeforeRestore: didInteractBeforeTranscriptRestore
+        ) else {
+            isTranscriptRestorePending = false
+            pendingTranscriptRestoreMessageID = nil
+            return
+        }
+
         shouldFollowLatestMessage = viewModel.savedFollowingLatest
         restoreScrollToken += 1
     }
 
     private func updateScrollMetrics(_ metrics: ChatScrollMetrics) {
+        if metrics.isDirectlyInteracting {
+            didInteractBeforeTranscriptRestore = true
+            isTranscriptRestorePending = false
+            pendingTranscriptRestoreMessageID = nil
+        }
+
         let isStreaming = viewModel.activeStreamID != nil
         let isNearBottom = ChatScrollPolicy.isNearBottom(
             distanceFromBottom: max(0, metrics.distanceFromBottom),
@@ -2479,6 +2539,15 @@ struct ChatView: View {
         )
         isUserInteractingWithScroll = isEffectiveUserInteraction
 
+        guard ChatTranscriptRestorePolicy.shouldApplyScrollMetricsBeforeRestore(
+            hasRequestedRestore: didRequestTranscriptRestore,
+            hasPendingMessageRestore: isTranscriptRestorePending,
+            hasUserInteractedBeforeRestore: didInteractBeforeTranscriptRestore,
+            isDirectlyInteracting: metrics.isDirectlyInteracting
+        ) else {
+            return
+        }
+
         if isExplicitBottomScrollActive {
             if ChatScrollPolicy.shouldCancelExplicitBottomRequest(
                 isDirectlyInteracting: metrics.isDirectlyInteracting,
@@ -2488,7 +2557,8 @@ struct ChatView: View {
                 cancelledExplicitBottomScroll = true
             } else if ChatScrollPolicy.shouldFinishExplicitBottomRequest(
                 isNearBottom: isNearBottom,
-                isTailVisible: isLatestTranscriptRowVisible || isTranscriptBottomVisible
+                isTailVisible: isLatestTranscriptRowVisible || isTranscriptBottomVisible,
+                hasIssuedScroll: hasIssuedExplicitBottomScroll
             ) {
                 completeExplicitBottomScroll()
             }
@@ -2544,7 +2614,18 @@ struct ChatView: View {
         )
     }
 
+    private static func savedTranscriptVisibleMessageID(
+        from target: ChatTranscriptRestoreTarget
+    ) -> String? {
+        guard case let .message(id) = target else { return nil }
+        return id
+    }
+
     private func prepareTranscriptForExplicitSend() {
+        didInteractBeforeTranscriptRestore = true
+        isTranscriptRestorePending = false
+        pendingTranscriptRestoreMessageID = nil
+        transcriptRestoreCancellationToken &+= 1
         shouldFollowLatestMessage = true
         userScrollCooldownUntil = nil
         followScrollGeneration += 1

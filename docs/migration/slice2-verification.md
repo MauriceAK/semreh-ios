@@ -1,5 +1,47 @@
 # Slice 2 verification — in progress
 
+## September 6 — physical feedback and scroll correction (open)
+
+Owner-approved side-by-side Debug device build7 (`073f561` plus ignored local
+signing config), `com.maurice.semreh.dev`, installed/launched wirelessly on
+iPhone17ProMax/iOS26.6.1. Root verified app/extension signatures and separate
+app group; production app unchanged. Evidence `slice2-phone-local-build-v1.log`,
+`slice2-phone-install-v1.json`, `slice2-phone-launch-v1.json`. Initial friend-team
+signing failure retained in `slice2-phone-branch-build-v1.log`.
+
+Owner reports login, hello/fixture ACK, and reopening with both messages passed.
+Three10k-row server-free lab exposed ignored arrow taps during motion, large-jump
+lag, initial/intermittent chat-switch lag and extreme-scroll slowdown. This is
+NOT physical acceptance or real-network long-history proof. Debug is unoptimized;
+no Release FPS/latency claim. Gate S2-D remains open.
+
+Root baseline existing multi-chat UI test PASS1/0skip:
+`slice2-phone-feedback-baseline-ui-v1.xcresult`, frozen e775814 production.
+First bounded scroll candidate full native PASS2016/0fail/7intentional skips:
+`slice2-phone-scroll-full-v1.xcresult`. Four UI checks3PASS/1FAIL:
+`slice2-phone-scroll-ui-v1.xcresult`; repeated-switch regression lost Chat1's
+expected away-from-bottom state. Same new test against unchanged e775814 production
+FAILS identically: `slice2-phone-switch-baseline-v1.xcresult`. Temporary test-only
+edits in clean verification worktree were restored; no assertion waived.
+
+Code review found pending restore/follow operations can compete with an explicit
+jump; early disappear/default-bottom geometry can overwrite saved reader intent.
+Candidate now addresses both lifecycles. These source findings do not prove the
+exact physical tap event was delivered or resolve all switching/renderer costs.
+Restore correction first failed compilation (missing Bool closure return), retained
+in `slice2-phone-switch-fix-v1.log`; root corrected it. Exact previously failing
+switch test PASS1/0skip in `slice2-phone-switch-fix-v2.xcresult`. Independent review
+also caught missing child-task cancellation on load-older; root corrected before
+final runs. Final native suite PASS2018/0fail/7intentional skips:
+`slice2-phone-scroll-full-v2.xcresult`; final long-chat UI PASS4/0fail/0skip:
+`slice2-phone-scroll-ui-v2.xcresult`. Root exported diagnostics/screenshots and
+inspected the final multi-chat tail/stream marker. Tests retain strict owner,
+away-position, arrow and end-marker assertions; public XCTest synchronization
+still does not prove a tap occurs during deceleration or establish frame latency.
+Test commands use signed Debug, owned Simulator, shared DerivedData,
+`-parallel-testing-enabled NO -collect-test-diagnostics never`. Updated physical
+build/owner retest remains pending. No backend source changes or new dependencies.
+
 ## September 6 — stock gate closure checkpoint
 
 Final non-device status: COMPLETE WITH ACCEPTED CHRONOLOGY LIMITATION; physical

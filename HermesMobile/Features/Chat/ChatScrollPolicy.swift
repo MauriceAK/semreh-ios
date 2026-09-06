@@ -147,14 +147,15 @@ enum ChatScrollPolicy {
         return latestMessageID
     }
 
-    /// Explicit bottom settlement is complete only after both the scroll
-    /// metrics and the concrete tail-row geometry agree.
+    /// Explicit bottom settlement is complete only after a target was issued
+    /// and both the scroll metrics and concrete tail-row geometry agree.
     static func shouldFinishExplicitBottomRequest(
         isNearBottom: Bool,
         isTailVisible: Bool,
-        isDirectlyInteracting: Bool = false
+        isDirectlyInteracting: Bool = false,
+        hasIssuedScroll: Bool = true
     ) -> Bool {
-        !isDirectlyInteracting && isNearBottom && isTailVisible
+        hasIssuedScroll && !isDirectlyInteracting && isNearBottom && isTailVisible
     }
 
     /// Keep the affordance visible until UIKit reports that the viewport
@@ -333,6 +334,29 @@ enum ChatTranscriptRestorePolicy {
         hasMessages
     }
 
+    /// A view can disappear before its asynchronous appearance task copies the
+    /// durable restore point into local state. Do not replace that point with a
+    /// default latest-position decision when a user has not interacted yet.
+    static func shouldStartRestore(
+        hasMessages: Bool,
+        hasUserInteractedBeforeRestore: Bool
+    ) -> Bool {
+        hasMessages && !hasUserInteractedBeforeRestore
+    }
+
+    /// Initial geometry is not a user decision. Before restore initialization,
+    /// only a real finger interaction may change follow intent.
+    static func shouldApplyScrollMetricsBeforeRestore(
+        hasRequestedRestore: Bool,
+        hasPendingMessageRestore: Bool,
+        hasUserInteractedBeforeRestore: Bool,
+        isDirectlyInteracting: Bool
+    ) -> Bool {
+        hasUserInteractedBeforeRestore
+            || isDirectlyInteracting
+            || (hasRequestedRestore && !hasPendingMessageRestore)
+    }
+
     static func hasReachedTarget(
         _ target: ChatTranscriptRestoreTarget,
         firstVisibleMessageID: String?,
@@ -388,6 +412,10 @@ struct ChatTranscriptRestoreState: Equatable {
 
     mutating func recordRestoreAttempt() {
         hasIssuedRestoreAttempt = true
+    }
+
+    mutating func cancel() {
+        isCancelled = true
     }
 
     mutating func recordMetrics(

@@ -424,6 +424,23 @@ final class ChatScrollPolicyTests: XCTestCase {
         )
     }
 
+    func testExplicitBottomRequestCannotFinishBeforeItsFirstTargetIsIssued() {
+        XCTAssertFalse(
+            ChatScrollPolicy.shouldFinishExplicitBottomRequest(
+                isNearBottom: true,
+                isTailVisible: true,
+                hasIssuedScroll: false
+            )
+        )
+        XCTAssertTrue(
+            ChatScrollPolicy.shouldFinishExplicitBottomRequest(
+                isNearBottom: true,
+                isTailVisible: true,
+                hasIssuedScroll: true
+            )
+        )
+    }
+
     func testDirectTouchWinsOverNearBottomGeometryWhenExplicitJumpIsSettling() {
         XCTAssertFalse(
             ChatScrollPolicy.shouldFinishExplicitBottomRequest(
@@ -543,6 +560,13 @@ final class ChatScrollPolicyTests: XCTestCase {
                 isDecelerating: false
             )
         )
+        XCTAssertTrue(
+            ChatScrollPolicy.shouldCancelExplicitBottomRequest(
+                isDirectlyInteracting: true,
+                isDecelerating: true
+            ),
+            "a new finger-driven gesture must still override an explicit jump"
+        )
     }
 
     func testFirstEnterWithNoSavedPointRestoresLatest() {
@@ -632,6 +656,62 @@ final class ChatScrollPolicyTests: XCTestCase {
         )
     }
 
+    func testInitialRestoreDoesNotOverwriteARealUserDecision() {
+        XCTAssertTrue(
+            ChatTranscriptRestorePolicy.shouldStartRestore(
+                hasMessages: true,
+                hasUserInteractedBeforeRestore: false
+            )
+        )
+        XCTAssertFalse(
+            ChatTranscriptRestorePolicy.shouldStartRestore(
+                hasMessages: true,
+                hasUserInteractedBeforeRestore: true
+            )
+        )
+        XCTAssertFalse(
+            ChatTranscriptRestorePolicy.shouldStartRestore(
+                hasMessages: false,
+                hasUserInteractedBeforeRestore: false
+            )
+        )
+    }
+
+    func testInitialGeometryCannotReplaceSavedRestoreIntent() {
+        XCTAssertFalse(
+            ChatTranscriptRestorePolicy.shouldApplyScrollMetricsBeforeRestore(
+                hasRequestedRestore: false,
+                hasPendingMessageRestore: false,
+                hasUserInteractedBeforeRestore: false,
+                isDirectlyInteracting: false
+            )
+        )
+        XCTAssertTrue(
+            ChatTranscriptRestorePolicy.shouldApplyScrollMetricsBeforeRestore(
+                hasRequestedRestore: false,
+                hasPendingMessageRestore: true,
+                hasUserInteractedBeforeRestore: false,
+                isDirectlyInteracting: true
+            )
+        )
+        XCTAssertTrue(
+            ChatTranscriptRestorePolicy.shouldApplyScrollMetricsBeforeRestore(
+                hasRequestedRestore: true,
+                hasPendingMessageRestore: false,
+                hasUserInteractedBeforeRestore: false,
+                isDirectlyInteracting: false
+            )
+        )
+        XCTAssertFalse(
+            ChatTranscriptRestorePolicy.shouldApplyScrollMetricsBeforeRestore(
+                hasRequestedRestore: true,
+                hasPendingMessageRestore: true,
+                hasUserInteractedBeforeRestore: false,
+                isDirectlyInteracting: false
+            )
+        )
+    }
+
     func testLatestRestoreCannotSettleFromDefaultNearBottomBeforeAnAttemptOrMetrics() {
         var state = ChatTranscriptRestoreState()
 
@@ -706,6 +786,21 @@ final class ChatScrollPolicyTests: XCTestCase {
             isDirectlyInteracting: true,
             isDecelerating: false
         )
+
+        XCTAssertTrue(state.isCancelled)
+        XCTAssertFalse(
+            state.shouldSettle(
+                target: .latest,
+                firstVisibleMessageID: nil,
+                isNearBottom: true
+            )
+        )
+    }
+
+    func testExplicitBottomActionCancelsPendingRestoreSettlement() {
+        var state = ChatTranscriptRestoreState()
+        state.recordRestoreAttempt()
+        state.cancel()
 
         XCTAssertTrue(state.isCancelled)
         XCTAssertFalse(

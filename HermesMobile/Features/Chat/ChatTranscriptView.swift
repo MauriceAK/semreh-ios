@@ -90,6 +90,7 @@ struct ChatTranscriptView: View, Equatable {
     var onOpenTurnFileDiff: (GitFile) -> Void = { _ in }
     var restoreScrollToken: Int = 0
     var restoreTarget: ChatTranscriptRestoreTarget = .latest
+    var transcriptRestoreCancellationToken: Int = 0
     var followRejoinScrollToken: Int = 0
     var isComposerResizing = false
     var transcriptRenderRevision = 0
@@ -181,6 +182,7 @@ struct ChatTranscriptView: View, Equatable {
                             ChatScrollToBottomButton(
                                 bottomPadding: scrollToBottomButtonBottomPadding,
                                 onTap: {
+                                    cancelTranscriptRestore()
                                     onScrollToBottom(proxy)
                                 }
                             )
@@ -209,6 +211,9 @@ struct ChatTranscriptView: View, Equatable {
                 }
                 .onChange(of: restoreScrollToken) {
                     applyTranscriptRestore(proxy)
+                }
+                .onChange(of: transcriptRestoreCancellationToken) {
+                    cancelTranscriptRestore()
                 }
                 .onDisappear {
                     restoreSettlementTask?.cancel()
@@ -433,6 +438,12 @@ struct ChatTranscriptView: View, Equatable {
         }
     }
 
+    private func cancelTranscriptRestore() {
+        restoreSettlementTask?.cancel()
+        restoreSettlementTask = nil
+        restoreSettlementState.cancel()
+    }
+
     private func handleScrollMetrics(_ metrics: ChatScrollMetrics) {
         let isNearBottom = ChatScrollPolicy.isNearBottom(
             distanceFromBottom: max(0, metrics.distanceFromBottom),
@@ -632,6 +643,7 @@ extension ChatTranscriptView {
             lhs.turnChangesSummary == rhs.turnChangesSummary &&
             lhs.restoreScrollToken == rhs.restoreScrollToken &&
             lhs.restoreTarget == rhs.restoreTarget &&
+            lhs.transcriptRestoreCancellationToken == rhs.transcriptRestoreCancellationToken &&
             lhs.followRejoinScrollToken == rhs.followRejoinScrollToken &&
             lhs.isComposerResizing == rhs.isComposerResizing
     }

@@ -97,11 +97,19 @@ App checkpoints: `a4e8257` and `4d040a3`. Evidence directory:
   This completes the evidence contribution, not upstream merge/release. Additional
   test-code contribution can follow maintainer feedback separately.
 - [ ] **S2-D — Physical iPhone responsiveness acceptance.**
-  Owner: Maurice + integrator. Status: ready to arrange a separately approved
-  test-build delivery method; do not replace the installed production app. Guide long-chat
-  scrolling, bottom arrow, chat/tab switching, sending and thinking-card lifecycle.
+  Owner: Maurice + integrator. Status: physical test found responsiveness issues;
+  gate remains open. Separate Semreh Dev Debug build7 at073f561 installed wirelessly
+  on iPhone17ProMax/iOS26.6.1; production app untouched. Login/send fixture ACK and
+  reopening passed by owner report. Three10k-row server-free lab: arrow taps during
+  motion appeared ignored, large bottom jumps lagged, initial/intermittent switching
+  lagged, and extreme rapid scrolling slowed. These are not a performance pass.
+  Follow-up candidate corrects explicit-jump/restore races and saved-position loss
+  on repeated switching. Root full native2018PASS/0FAIL/7intentional skips and
+  long-chat UI4PASS/0skip; original failing switch test also failed on unchanged
+  production baseline, then passed with correction. Physical retest still required;
+  no universal lag/FPS improvement claim.
   Record device/build and observed failures; Simulator success cannot check this box.
-  - [ ] Approve delivery/install of a separate test build and record device/build.
+  - [x] Approve delivery/install of a separate test build and record device/build.
   - [ ] Scroll long chats up/down; jump-to-bottom; interrupt jump with a gesture.
   - [ ] Switch among multiple long chats and Sessions/Control/You, then return.
   - [ ] Send/stop; verify transcript stability and thinking/tool-card lifecycle.

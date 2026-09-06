@@ -73,6 +73,134 @@ final class LongChatScrollUITests: XCTestCase {
         attachScreenshot(named: "long-chat-after-scroll-to-latest")
     }
 
+    func testRepeatedScrollAwayAndArrowReturnKeepsEndMarkerReachable() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.terminate()
+        app.launchArguments = [performanceLabArgument]
+        app.launch()
+
+        let chat = app.otherElements[chatIdentifier]
+        XCTAssertTrue(chat.waitForExistence(timeout: 15),
+                      "The server-free 10,000-row ChatView performance lab must launch.")
+        let transcript = app.scrollViews.firstMatch
+        XCTAssertTrue(transcript.waitForExistence(timeout: 5))
+        let scrollToLatest = app.buttons[scrollToLatestLabel]
+        XCTAssertTrue(scrollToLatest.waitForExistence(timeout: 10))
+
+        // Exercise more than one ordinary away/return cycle. This is a
+        // correctness check for the public XCTest interaction path, not an
+        // FPS or deceleration measurement.
+        for cycle in 1...2 {
+            transcript.swipeDown()
+            XCTAssertTrue(
+                scrollToLatest.waitForExistence(timeout: 10),
+                "Scroll-to-latest must remain available after cycle \(cycle)'s swipe away."
+            )
+            scrollToLatest.tap()
+
+            let endMarker = app.staticTexts.matching(
+                NSPredicate(format: "label CONTAINS[c] %@", self.endMarker)
+            ).firstMatch
+            assertHittable(
+                endMarker,
+                timeout: 25,
+                message: "Cycle \(cycle)'s arrow return must reveal the deterministic end marker."
+            )
+            XCTAssertFalse(
+                scrollToLatest.waitForExistence(timeout: 2),
+                "Cycle \(cycle)'s scroll-to-latest action must clear at the bottom."
+            )
+        }
+    }
+
+    func testRepeatedMultiChatSwitchingRetainsEachOwnerAndMarker() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.terminate()
+        app.launchArguments = ["--chat-performance-multi-lab"]
+        app.launch()
+
+        let firstChat = app.otherElements["chat-detail:10,000-row performance lab 1"]
+        XCTAssertTrue(firstChat.waitForExistence(timeout: 20))
+
+        let initialArrow = app.buttons[scrollToLatestLabel]
+        guard initialArrow.waitForExistence(timeout: 10) else {
+            attachScreenshot(named: "repeated-switch-initial-arrow-missing")
+            attachAccessibilitySnapshot(
+                named: "repeated-switch-initial-arrow-missing-ax",
+                app: app
+            )
+            XCTFail("Chat 1 must initially restore away from the bottom before switching.")
+            return
+        }
+
+        let switchButtons = (1...3).map { app.buttons["Performance chat \($0)"] }
+        for button in switchButtons {
+            XCTAssertTrue(button.waitForExistence(timeout: 5),
+                          "Every performance chat switch must be exposed.")
+            XCTAssertTrue(button.isHittable,
+                          "Every performance chat switch must be hittable before the rapid sequence.")
+        }
+
+        // Deliberately issue a bounded burst without waiting for each ChatView
+        // to settle. XCTest still synchronizes individual actions, so this
+        // does not claim frame-level or exact deceleration timing; it catches
+        // owner loss, stale selection, and fixture replacement under repeated
+        // user-level switching.
+        for chatNumber in [2, 3, 1, 3, 2, 1] {
+            switchButtons[chatNumber - 1].tap()
+        }
+
+        // Verify each owner after the burst. Returning to the bottom makes the
+        // check a stable-content assertion rather than an assertion about a
+        // transient accessibility snapshot during navigation.
+        for chatNumber in 1...3 {
+            let switchButton = switchButtons[chatNumber - 1]
+            switchButton.tap()
+            XCTAssertTrue(switchButton.isSelected,
+                          "Rapid switching must leave chat \(chatNumber) selected when revisited.")
+
+            let chat = app.otherElements["chat-detail:10,000-row performance lab \(chatNumber)"]
+            XCTAssertTrue(chat.waitForExistence(timeout: 15),
+                          "Chat \(chatNumber) must remain the selected owner after rapid switching.")
+
+            let scrollToLatest = app.buttons[scrollToLatestLabel]
+            guard scrollToLatest.waitForExistence(timeout: 10) else {
+                // A missing affordance is the signal under test here: capture
+                // the selected owner, realized rows, and visible chrome before
+                // failing so a restore-to-bottom race is distinguishable from
+                // a stale ChatView or an accessibility lookup failure.
+                let endMarker = app.staticTexts.matching(
+                    NSPredicate(
+                        format: "label CONTAINS[c] %@",
+                        "End of 10,000-row conversation \(chatNumber)."
+                    )
+                ).firstMatch
+                let endMarkerIsVisible = endMarker.exists && endMarker.isHittable
+                attachScreenshot(
+                    named: "repeated-switch-chat-\(chatNumber)-arrow-missing"
+                )
+                attachAccessibilitySnapshot(
+                    named: "repeated-switch-chat-\(chatNumber)-arrow-missing-ax",
+                    app: app
+                )
+                XCTFail("Chat \(chatNumber) must retain its restored away-from-bottom state (endMarkerHittable=\(endMarkerIsVisible)).")
+                return
+            }
+            scrollToLatest.tap()
+
+            let endMarker = app.staticTexts.matching(
+                NSPredicate(format: "label CONTAINS[c] %@", "End of 10,000-row conversation \(chatNumber).")
+            ).firstMatch
+            assertHittable(
+                endMarker,
+                timeout: 25,
+                message: "Chat \(chatNumber) must retain its deterministic end marker after rapid switching."
+            )
+        }
+    }
+
     func testMultiChatPerformanceLabSwitchesStreamsAndScrolls() {
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -457,6 +585,16 @@ final class LongChatScrollUITests: XCTestCase {
 
     private func attachScreenshot(named name: String) {
         let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    private func attachAccessibilitySnapshot(named name: String, app: XCUIApplication) {
+        let attachment = XCTAttachment(
+            data: Data(app.debugDescription.utf8),
+            uniformTypeIdentifier: "public.plain-text"
+        )
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)
