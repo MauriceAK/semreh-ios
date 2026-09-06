@@ -2,6 +2,24 @@
 
 ## September 6 — stock gate closure checkpoint
 
+Final non-device status: COMPLETE WITH ACCEPTED CHRONOLOGY LIMITATION; physical
+iPhone acceptance and separately approved test-build delivery remain pending.
+Final known-secret audit `slice2-final-clean-audit-v1.log`:113390files scanned,
+zero flagged paths,55exported consoles. Private credentials/config/DB and earlier
+quarantined OS diagnostics excluded; no arbitrary opaque-secret or media-OCR
+guarantee. Root inspected final clean UI screenshot. Signed ordinary app launched
+without lab arguments on the owned Simulator (PID19829). No active test/build/TUI
+or compression process remains; main stock test gateway/model/proxy retained.
+Corrected production UI passed in `slice2-restored-chat-stock-ui-v1.xcresult`
+(1 pass/0skip), then clean detached `e775814` rebuilt the signed UI target and
+passed `slice2-clean-stock-cross-client-ui-v2.xcresult` (1 pass/0skip). Both retain
+login, Control startup, new-chat/send and real TUI-created deep-link assertions.
+Clean full native suite was at `30e22ff`; `git diff --quiet 30e22ff e775814 --
+HermesMobile HermesMobileTests` confirmed unchanged production/unit-test source.
+Clean final helper discovery:55passed. Build cache reused, no fresh-package claim.
+Failed clean-UI v1 and stalled full-native v1 remain retained below. No claim of
+physical-device smoothness, universal provider behavior or resolved upstream bug.
+
 Subsequent clean-worktree checks at `30e22ff`:
 - `slice2-clean-stock-native-v1.xcresult`: 2014 passed, 0 failed, 7 intentional
   opt-in skips. Clean detached worktree, shared DerivedData/package cache reused
