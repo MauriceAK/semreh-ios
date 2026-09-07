@@ -147,6 +147,49 @@ not arbitrary opaque secrets, screenshot OCR or quarantined OS diagnostics.
 Potential parallel lanes: feature inventory, independent screen implementations,
 contract tests and deletion audit. Shared chat/history/runtime files stay single-owner.
 
+### Full-session branch contract capture
+
+`slice4-branch-live-v2.json` passed on the pinned stock HTTPS fixture: two-turn
+parent copied exactly to a distinct child runtime/durable ID; authoritative
+detail verified profile/parent linkage; child-only third turn preserved the copied
+prefix and left the parent unchanged. Known owned runtimes closed and auth cleanup
+passed. Request omitted positional `count`. This proves protocol/persistence, not
+native consumers, message-specific fork, compression, or response-loss recovery.
+Six offline probe tests passed. Initial v1 invocation failed before network on a
+stale parser attribute; root corrected it. Root also added unknown-child cleanup
+reporting for malformed ACKs. No automatic branch retry or broad orphan deletion.
+Artifact audit `slice4-branch-audit-v1.jsonl`:257175 files, zero flags,153 exported
+consoles; known fixture secrets/obvious bearer scope only, not arbitrary opaque
+secrets, OCR or quarantined OS diagnostics. No native suite rerun for probe/docs.
+
+### Edit/regenerate contract correction — stock 29112bef
+
+An initial worker audit incorrectly attributed `rewind_to_message`'s transactional
+expected-row/content guards to `prompt.submit`. Root traced the actual call and
+stopped implementation; the worker corrected its finding without making edits.
+`methods_prompt.py:609-639` resolves a durable row, then `:787-854` calls
+`replace_messages`, which checks active leases but does not transactionally compare
+the selected row/content or expected active row set. The stronger checks at
+`hermes_state.py:13480+` are invoked by a different path (`server.py:4259`).
+Consequently external-rewrite safety required by S4-D is not proven for edit/
+regenerate on this pin. A client preflight does not close this window. No new
+destructive UI or submit parameters were implemented. This is a source-identified
+race risk, not yet a live reproduced bug or authorization for a backend patch.
+
+### Deletion safety audit — stock 29112bef
+
+Root and independent review verified `tui_gateway/methods_session.py:1268`:
+`session.delete` accepts exact stored `session_id` and `profile`, returns
+`deleted`, and refuses targets found in the serving gateway's active snapshot
+(4023). REST DELETE has no active-session guard and is not the preferred migration
+contract. The RPC snapshot lock is released before deletion: concurrent resume
+and writers in another process are not atomically excluded. Do not claim universal
+active-session safety or manufacture it with a client preflight. No deletion code
+changed in this audit. A future adapter must use the shared gateway runtime,
+validate the exact returned ID, preserve profile/epoch-safe rollback, avoid automatic
+ambiguous retries, and never fall back to REST. Release treatment of the stock
+concurrency limitation remains unresolved.
+
 ## Preparatory source inventory — September7
 
 Read-only Luna inventory, root checked transport boundary at stock pin29112bef.
