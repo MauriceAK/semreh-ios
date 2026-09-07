@@ -579,3 +579,77 @@ Selector/recovery/canonical Python helper suites: **31 passed** in
 Final audit `slice3-native-recovery-final-audit-v1.jsonl`: **160688 files, 0 flags,
 92 exported consoles**, same known-secret/pattern-only exclusions. Signed ordinary
 dev app verified and launched in the owned Simulator; no phone install or release.
+
+### September 7 — Blocking models and known-stage removal (in progress)
+
+Base `4d37468` plus dirty bounded production/test/fixture changes. Stock pin
+unchanged. Root registered `GatewayBlockingPromptModelTests` in the existing target.
+Signed `xcodebuild test` used the same project/scheme/Simulator/DerivedData,
+jobs2, parallel testing disabled and `-collect-test-diagnostics never`.
+Selected classes: GatewayBlockingPromptModelTests,
+GatewayConversationAttachmentTests, ChatViewModelDirectGatewayTests,
+GatewayConversationBlockingTests.
+
+- `slice3-blocking-removal-focused-v1.xcresult` and `.log`: failed compilation,
+  missing `await` on a new test's actor-isolated gate release. No test pass claim.
+- `slice3-blocking-removal-focused-v2.xcresult` and `.log`: **82 passed, 0 failed,
+  0 skipped** after correction. Independent review still found confirmed-file
+  local-removal and selection-generation races; fixes/tests are pending.
+- Root Python unittest discovery: `test_direct_hermes*fixture.py` **15 passed**
+  (`slice3-blocking-fixture-python-v1.log`); approval-secret probe tests **4 passed**
+  (`slice3-blocking-probe-python-v1.log`). These are not live gateway evidence.
+- `slice3-approval-secret-contract-v1.json` and `.log`: failed before exercising
+  requests. Overriding bundled-plugin discovery removed stock dashboard auth;
+  gateway correctly refused public URL startup. Keep authentication intact and
+  deploy only the reviewed synthetic plugin into the disposable home/plugins
+  instead. Original fixture config unchanged; personal routes/state untouched.
+
+No native response integration, full-suite checkpoint, production blocking UI,
+physical acceptance or final artifact-audit claim for this work yet. Failed
+attempts are retained; root continues integration after bounded corrections.
+
+Further removal checkpoint evidence:
+
+- Focused-v3 failed compilation: new VM tests referenced a private backing error
+  instead of the existing view-facing error projection. Corrected tests, not API
+  visibility. Focused-v4 added recovery-marker/lifecycle classes: **99 passed,
+  0 failed, 0 skipped**.
+- `slice3-blocking-removal-full-v1.xcresult`: **2160 passed, 0 failed, 8 intentional
+  opt-in skips**. Console diagnostics exported. Production diff frozen during run.
+- `slice3-removal-live-build-v1.log`: signed build-for-testing passed. Additive
+  existing `--slice3-recovery` test now also stages a known image, verifies its
+  marker, removes exact acknowledged path, verifies marker gone and byte-equal
+  saved history, then sends plain text with no media. `slice3-removal-live-v1.xcresult`:
+  **1 passed, 0 failed, 0 skipped** on actual stock HTTPS gateway. Diagnostics
+  exported. This is native controller evidence, not physical or removal-button UI.
+- `slice3-removal-app-launch-v1.txt`: ordinary signed dev app launched in the owned
+  Simulator. No phone install or publication.
+
+Retained fixture iterations (not backend/app failures): gateway-blocking-v2 kept
+auth but missing user-plugin enablement; contract-v2 timed out. Gateway-v3 enabled
+the plugin, but handlers lacked stock forwarded kwargs; contract-v3 timed out.
+Root also found namespaced plugin skills bypass secret capture; fixed bare fixture
+skill lookup. Gateway-v4 rejected normal bundled-skill siblings; narrowed checks to
+exact fixture subtree. Gateway-v5 rejected stale nested skill digest during root
+deployment; synchronized the renamed synthetic skill. Gateway-v6 launched;
+contract-v4/v5 timed out because stock tool-search deferral hid plugin schemas.
+Provider safe diagnostics proved exact marker plus bridge tools, not actual fixture
+schemas. Exact fixture-only `tools.tool_search.enabled=off` chosen for gateway-v7.
+All startup logs remain private runtime evidence until audit. No real secret was
+submitted; authentication remained enabled and stock source stayed unchanged.
+
+`slice3-approval-secret-contract-v6.json` **passed** on gateway-blocking-v7 with
+exact fixture plugin/flat skill, stock auth and tool-search deferral off only in
+this disposable runtime. Approval event has request ID/four choices; pending
+registry identity matches (no choices there), resume matches with four choices,
+deny resolves exactly one, and terminal arrives. Secret event has the expected
+synthetic env name; explicit empty response returns ok and terminal arrives.
+Two tool executions, zero cleanup errors, fixture config unchanged during probe.
+Provider diagnostics confirm only clarify and the two approved synthetic schemas
+were advertised for these turns. No live sudo, native prompt UI or phone claim.
+
+Final bounded Python suites: **16+10 passed** in blocking-fixture-python-v3 and
+blocking-probe-python-v3 logs. `slice3-blocking-removal-audit-v1.jsonl` passed:
+**165626 files, 0 flags, 94 exported consoles**. Same exclusions apply: current
+known fixture secrets and obvious bearer patterns only, not arbitrary secrets,
+OCR or quarantined OS diagnostics. No publication of private runtime state.

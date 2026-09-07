@@ -23,6 +23,21 @@ PIN = '29112bef099274229cadff79cdff7bf7b99c4b77'
 PORT = 18791
 MARKER = 'semreh-direct-hermes-slice1-disposable-v1'
 HTTPS_ORIGIN = 'https://semreh-slice1-test.tailda8427.ts.net'
+BLOCKING_FIXTURE_PLUGINS = Path(__file__).resolve().parent / 'fixtures'
+BLOCKING_FIXTURE_DEPLOYED = RUNTIME / 'home' / 'plugins'
+BLOCKING_FIXTURE_SKILL_DEPLOYED = RUNTIME / 'home' / 'skills' / 'semreh-fixture-empty-secret'
+BLOCKING_FIXTURE_TOOLSET = 'semreh_blocking_fixture'
+BLOCKING_FIXTURE_PLUGIN_ID = 'semreh-blocking-fixture'
+BLOCKING_FIXTURE_TOOLS_CONFIG = {'tool_search': {'enabled': 'off'}}
+BLOCKING_FIXTURE_SHA256 = {
+    'semreh-blocking-fixture/plugin.yaml':
+        'd3b40257401e2155498486ed5bc9d947240e30a8ab38d4d1a9e63373c726d2f4',
+    'semreh-blocking-fixture/__init__.py':
+        '23d1fcec78b7bb1c5fec70bc4a66fe21903b3bd3c52b9798ff9ec5ab8280c31d',
+    'semreh-blocking-fixture/skills/empty_secret/SKILL.md':
+        'f35fac54ff7e55b9e3843d73999a48010bf961ced9b1bdda6b0075cfa451d770',
+}
+BLOCKING_FIXTURE_SKILL_SHA256 = 'f35fac54ff7e55b9e3843d73999a48010bf961ced9b1bdda6b0075cfa451d770'
 
 
 def checked_paths():
@@ -123,8 +138,94 @@ def validate():
                       'os_isolation': False, 'personal_credentials_inherited': False}))
 
 
-def serve(*, with_pdf_renderer=False):
+def _validate_fixture_tree(root: Path, *, label: str) -> None:
+    if root.is_symlink() or root.resolve() != root or not root.is_dir():
+        raise RuntimeError(f'{label} fixture root is unavailable or escaped')
+    expected = {
+        'semreh-blocking-fixture',
+        'semreh-blocking-fixture/plugin.yaml',
+        'semreh-blocking-fixture/__init__.py',
+        'semreh-blocking-fixture/skills',
+        'semreh-blocking-fixture/skills/empty_secret',
+        'semreh-blocking-fixture/skills/empty_secret/SKILL.md',
+    }
+    actual = {str(path.relative_to(root)) for path in root.rglob('*')}
+    if actual != expected:
+        raise RuntimeError(f'{label} fixture tree contains unexpected files')
+    for path in root.rglob('*'):
+        if path.is_symlink() or path.resolve() != path:
+            raise RuntimeError(f'{label} fixture tree contains an escaped path')
+    for relative, expected_sha in BLOCKING_FIXTURE_SHA256.items():
+        path = root / relative
+        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != expected_sha:
+            raise RuntimeError(f'{label} fixture content digest mismatch')
+
+
+def _validate_runtime_plugins(*, approval_secret_fixture: bool) -> None:
+    plugins_root = BLOCKING_FIXTURE_DEPLOYED
+    if not plugins_root.exists():
+        if approval_secret_fixture:
+            raise RuntimeError('Opt-in blocking fixture is not installed in disposable runtime')
+        return
+    if approval_secret_fixture:
+        _validate_fixture_tree(plugins_root, label='Deployed')
+    elif plugins_root.is_symlink() or plugins_root.resolve() != plugins_root:
+        raise RuntimeError('Unexpected disposable runtime plugin path')
+    elif any(plugins_root.iterdir()):
+        raise RuntimeError('Default disposable runtime must not contain plugins')
+
+
+def _validate_runtime_skill(*, approval_secret_fixture: bool) -> None:
+    skills_root = BLOCKING_FIXTURE_SKILL_DEPLOYED.parent
+    if not skills_root.exists():
+        if approval_secret_fixture:
+            raise RuntimeError('Opt-in blocking skill is not installed in disposable runtime')
+        return
+    if skills_root.is_symlink() or skills_root.resolve() != skills_root or not skills_root.is_dir():
+        raise RuntimeError('Unexpected disposable runtime skills path')
+    fixture_root = BLOCKING_FIXTURE_SKILL_DEPLOYED
+    if approval_secret_fixture:
+        if fixture_root.is_symlink() or fixture_root.resolve() != fixture_root or not fixture_root.is_dir():
+            raise RuntimeError('Opt-in blocking skill is unavailable or escaped')
+        actual = {str(path.relative_to(fixture_root)) for path in fixture_root.rglob('*')}
+        if actual != {'SKILL.md'}:
+            raise RuntimeError('Opt-in blocking skill contains unexpected files')
+        skill = fixture_root / 'SKILL.md'
+        if (not skill.is_file()
+                or hashlib.sha256(skill.read_bytes()).hexdigest() != BLOCKING_FIXTURE_SKILL_SHA256):
+            raise RuntimeError('Deployed skill content digest mismatch')
+    elif fixture_root.exists():
+        raise RuntimeError('Default disposable runtime must not contain blocking fixture skill')
+
+
+def _validate_plugin_config(*, approval_secret_fixture: bool) -> None:
+    config_path = RUNTIME / 'home' / 'config.yaml'
+    if config_path.is_symlink() or config_path.resolve() != config_path:
+        raise RuntimeError('Unexpected disposable config path')
+    config = json.loads(config_path.read_text())
+    plugins = config.get('plugins')
+    if plugins is None:
+        if approval_secret_fixture:
+            raise RuntimeError('Opt-in blocking fixture is not enabled in disposable config')
+        return
+    if not isinstance(plugins, dict):
+        raise RuntimeError('Disposable plugin config is not an object')
+    enabled = plugins.get('enabled', [])
+    if not isinstance(enabled, list):
+        raise RuntimeError('Disposable plugin allowlist is not a list')
+    if approval_secret_fixture:
+        if plugins != {'enabled': [BLOCKING_FIXTURE_PLUGIN_ID]}:
+            raise RuntimeError('Disposable config enables an unexpected plugin')
+        if config.get('tools') != BLOCKING_FIXTURE_TOOLS_CONFIG:
+            raise RuntimeError('Opt-in disposable config must disable tool_search')
+    elif enabled:
+        raise RuntimeError('Default disposable config must not enable plugins')
+
+
+def serve(*, with_pdf_renderer=False, approval_secret_fixture=False):
     validate()
+    _validate_plugin_config(approval_secret_fixture=approval_secret_fixture)
+    _validate_runtime_skill(approval_secret_fixture=approval_secret_fixture)
     with socket.socket() as probe:
         # Match the HTTP server's reuse behavior so a just-stopped test server's
         # TIME_WAIT sockets do not prevent restart. A live listener still fails.
@@ -144,6 +245,15 @@ def serve(*, with_pdf_renderer=False):
         # platform defaults. Clarification has no terminal/file execution.
         'HERMES_TUI_TOOLSETS': 'clarify',
     }
+    if approval_secret_fixture:
+        _validate_fixture_tree(BLOCKING_FIXTURE_PLUGINS, label='Repository')
+    _validate_runtime_plugins(approval_secret_fixture=approval_secret_fixture)
+    if approval_secret_fixture:
+        # The fixture is installed under this disposable profile only; stock
+        # bundled plugins (including dashboard auth) remain visible.
+        environment['HERMES_TUI_TOOLSETS'] = ','.join(
+            ('clarify', BLOCKING_FIXTURE_TOOLSET)
+        )
     if with_pdf_renderer:
         # Explicitly approved test dependency, not the whole Homebrew PATH.
         # Keep the default fixture launcher unchanged when PDF tests are off.
@@ -164,10 +274,13 @@ if __name__ == '__main__':
     parser.add_argument('action', choices=['init', 'validate', 'serve'])
     parser.add_argument('--with-pdf-renderer', action='store_true',
                         help='Expose the approved Poppler renderer to this disposable gateway only')
+    parser.add_argument('--approval-secret-fixture', action='store_true',
+                        help='Explicitly enable the repository-owned no-op approval/empty-secret fixture')
     args = parser.parse_args()
-    if args.with_pdf_renderer and args.action != 'serve':
-        parser.error('--with-pdf-renderer is only valid with serve')
+    if (args.with_pdf_renderer or args.approval_secret_fixture) and args.action != 'serve':
+        parser.error('fixture serve flags are only valid with serve')
     if args.action == 'serve':
-        serve(with_pdf_renderer=args.with_pdf_renderer)
+        serve(with_pdf_renderer=args.with_pdf_renderer,
+              approval_secret_fixture=args.approval_secret_fixture)
     else:
         {'init': initialize, 'validate': validate}[args.action]()

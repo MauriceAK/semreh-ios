@@ -59,6 +59,219 @@ enum GatewayBlockingError: Error, Equatable, Sendable {
     case responseInFlight
 }
 
+/// Contract errors for blocking request types that are not clarification
+/// prompts. They remain separate from `GatewayBlockingError` so the existing
+/// clarification UI/error mapping stays source-compatible.
+enum GatewayBlockingContractError: Error, Equatable, Sendable {
+    case malformedApproval
+    case unsupportedApprovalChoice
+    case malformedSecret
+    case malformedSudo
+}
+
+enum GatewayApprovalChoice: String, CaseIterable, Equatable, Sendable {
+    case once
+    case session
+    case always
+    case deny
+}
+
+struct GatewayApprovalPrompt: Equatable, Sendable {
+    let identity: GatewayBlockingPromptIdentity
+    let command: String
+    let description: String
+    let patternKey: String
+    let patternKeys: [String]
+    let allowSession: Bool
+    let allowPermanent: Bool
+    let smartDenied: Bool
+    let choices: [GatewayApprovalChoice]
+
+    static func decode(
+        payload: JSONValue?,
+        identity: GatewayBlockingPromptIdentity
+    ) throws -> Self {
+        guard isValidIdentity(identity),
+              case .object(let fields) = payload,
+              fields["request_id"]?.gatewayString == identity.requestID,
+              let command = fields["command"]?.stringValue,
+              let description = fields["description"]?.stringValue,
+              let patternKey = fields["pattern_key"]?.gatewayString,
+              case .array(let rawPatternKeys) = fields["pattern_keys"] else {
+            throw GatewayBlockingContractError.malformedApproval
+        }
+        let allowSession: Bool
+        if let rawAllowSession = fields["allow_session"] {
+            guard let value = rawAllowSession.boolValue else {
+                throw GatewayBlockingContractError.malformedApproval
+            }
+            allowSession = value
+        } else {
+            // The elicitation approval producer omits both flags; stock
+            // `_approval_request_payload` treats omission as enabled.
+            allowSession = true
+        }
+        let allowPermanent: Bool
+        if let rawAllowPermanent = fields["allow_permanent"] {
+            guard let value = rawAllowPermanent.boolValue else {
+                throw GatewayBlockingContractError.malformedApproval
+            }
+            allowPermanent = value
+        } else {
+            allowPermanent = true
+        }
+        let patternKeys = rawPatternKeys.compactMap { value -> String? in
+            guard let string = value.gatewayString else { return nil }
+            return string
+        }
+        guard patternKeys.count == rawPatternKeys.count,
+              !patternKeys.isEmpty,
+              patternKeys.contains(patternKey) else {
+            throw GatewayBlockingContractError.malformedApproval
+        }
+        let smartDenied: Bool
+        if let rawSmartDenied = fields["smart_denied"] {
+            guard let value = rawSmartDenied.boolValue else {
+                throw GatewayBlockingContractError.malformedApproval
+            }
+            smartDenied = value
+        } else {
+            smartDenied = false
+        }
+        let derivedChoices = Self.choices(
+            allowSession: allowSession,
+            allowPermanent: allowPermanent,
+            smartDenied: smartDenied
+        )
+        if let rawChoices = fields["choices"] {
+            guard case .array(let values) = rawChoices else {
+                throw GatewayBlockingContractError.malformedApproval
+            }
+            let choices = values.compactMap { value in
+                value.gatewayString.flatMap(GatewayApprovalChoice.init(rawValue:))
+            }
+            guard choices.count == values.count, choices == derivedChoices else {
+                throw GatewayBlockingContractError.unsupportedApprovalChoice
+            }
+        }
+        return Self(
+            identity: identity,
+            command: command,
+            description: description,
+            patternKey: patternKey,
+            patternKeys: patternKeys,
+            allowSession: allowSession,
+            allowPermanent: allowPermanent,
+            smartDenied: smartDenied,
+            choices: derivedChoices
+        )
+    }
+
+    private static func choices(
+        allowSession: Bool,
+        allowPermanent: Bool,
+        smartDenied: Bool
+    ) -> [GatewayApprovalChoice] {
+        if smartDenied { return [.once, .deny] }
+        var result: [GatewayApprovalChoice] = [.once]
+        if allowSession {
+            result.append(.session)
+            if allowPermanent { result.append(.always) }
+        }
+        result.append(.deny)
+        return result
+    }
+}
+
+struct GatewaySecretPrompt: Equatable, Sendable {
+    let identity: GatewayBlockingPromptIdentity
+    let prompt: String
+    let environmentVariable: String
+    let metadata: JSONValue?
+    let isCancelOnly = true
+
+    private init(
+        identity: GatewayBlockingPromptIdentity,
+        prompt: String,
+        environmentVariable: String,
+        metadata: JSONValue?
+    ) {
+        self.identity = identity
+        self.prompt = prompt
+        self.environmentVariable = environmentVariable
+        self.metadata = metadata
+    }
+
+    static func decode(
+        payload: JSONValue?,
+        identity: GatewayBlockingPromptIdentity
+    ) throws -> Self {
+        guard isValidIdentity(identity),
+              case .object(let fields) = payload,
+              fields["request_id"]?.gatewayString == identity.requestID,
+              let prompt = fields["prompt"]?.gatewayString,
+              let environmentVariable = fields["env_var"]?.gatewayString else {
+            throw GatewayBlockingContractError.malformedSecret
+        }
+        return Self(
+            identity: identity,
+            prompt: prompt,
+            environmentVariable: environmentVariable,
+            metadata: fields["metadata"]
+        )
+    }
+
+    /// Empty is the stock callback's explicit skip/cancel value; never put a
+    /// user-entered secret into a model or transcript field.
+    var cancelValue: String { "" }
+}
+
+struct GatewaySudoPrompt: Equatable, Sendable {
+    let identity: GatewayBlockingPromptIdentity
+    let isCancelOnly = true
+
+    private init(identity: GatewayBlockingPromptIdentity) {
+        self.identity = identity
+    }
+
+    static func decode(
+        payload: JSONValue?,
+        identity: GatewayBlockingPromptIdentity
+    ) throws -> Self {
+        guard isValidIdentity(identity),
+              case .object(let fields) = payload,
+              fields["request_id"]?.gatewayString == identity.requestID else {
+            throw GatewayBlockingContractError.malformedSudo
+        }
+        return Self(identity: identity)
+    }
+
+    /// Empty is the stock sudo callback's explicit cancellation value.
+    var cancelValue: String { "" }
+}
+
+private func isValidIdentity(_ identity: GatewayBlockingPromptIdentity) -> Bool {
+    !identity.origin.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+    !identity.profile.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+    !identity.storedID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+    !identity.runtimeID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+    !identity.requestID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+    URL(string: identity.origin)?.scheme != nil &&
+    !(URL(string: identity.origin)?.host?.isEmpty ?? true)
+}
+
+private extension JSONValue {
+    var stringValue: String? {
+        guard case .string(let value) = self else { return nil }
+        return value
+    }
+
+    var boolValue: Bool? {
+        guard case .bool(let value) = self else { return nil }
+        return value
+    }
+}
+
 extension GatewayBlockingPrompt {
     static func decode(
         payload: JSONValue?,

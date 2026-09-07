@@ -18,6 +18,32 @@ this sheet does not invent contracts or mark unexecuted checks passed.
   implementations. Shared controller/view-model edits are serialized.
 - No sequence replay implementation unless canonical-recovery matrix proves need.
 
+## Current bounded decisions — September 6
+
+- Continue without routine owner check-ins; record choices here. Hard blockers,
+  personal-state access, publication and physical acceptance still require the owner.
+- Synthetic approval and secret-cancellation fixture expansion is approved in the
+  binding plan. Root reviews exact plugin contents before deployment; stock source
+  stays unchanged. Sudo execution and real secret entry are not fixture scope.
+- Use explicit cancel-only native secret/sudo presentation for this migration
+  checkpoint, as allowed by appendix G.2/G.3. Do not add a secret-entry/storage
+  subsystem. Native sudo cancellation can have unit/contract coverage without
+  claiming a live sudo-tool test. Any remaining live gate must stay visible.
+- Reuse approval presentation, restrict buttons to stock-advertised choices and
+  never send bulk approval. Require positive `resolved` acknowledgment; the stock
+  fallback behavior makes captured request/session/generation checks essential.
+- Resume may restore approval/clarification from its authoritative payload;
+  it does not restore secret/sudo. Do not recreate sensitive cards from cache.
+- Known-stage attachment removal uses only exact acknowledged `image.detach`
+  paths. Partial/uncertain cleanup stays quarantined; generic files do not gain an
+  invented detach endpoint. This improves composer behavior, not host-file deletion.
+- Fixture deployment uses the stock user-plugin location and exact `plugins.enabled`
+  allowlist, retaining bundled authentication. The fixed secret fixture uses the
+  ordinary skill lookup because namespaced plugin skills bypass stock secret
+  capture. Disable tool-search deferral only in this deterministic fixture so
+  its two already-authorized synthetic tool schemas are directly advertised;
+  do not broaden toolsets or alter app/backend production behavior.
+
 ## Work packages
 
 - [x] **S3-0 — Contract and current-code gap inventory.** Two Luna High audits
@@ -44,10 +70,12 @@ this sheet does not invent contracts or mark unexecuted checks passed.
   expiry. Key requests by server/session/generation/request; explicit deterministic
   cancellation if full UI unsupported. No sensitive response in persistence/logs.
   Shared event/controller changes coordinated with R1, not overlapping writers.
-  - [ ] **B1 — Freeze request identity/resume contracts.** Capture clarification
-    with the existing bounded fixture. Resolve approval's missing event request ID
-    from the stock pending registry before defining native response targeting.
-    Terminal/sudo or expanded provider tests require scope reassessment first.
+  - [x] **B1 — Freeze request identity/resume contracts.** Existing clarification
+    capture plus approval-secret-contract-v6 passed on stock HTTPS. Approval events
+    contain request IDs; pending registry matches, and resume restores the same
+    request with choices. Deny resolves exactly one request; empty secret response
+    returns ok and the run completes. Sudo remains source/unit-only until a bounded
+    live path is authorized; no sudo tool execution is implied by this checkpoint.
   - [ ] **B2 — Typed direct request lifecycle and responses.** One owner for
     controller/events/VM. Cover answer, cancel, expiry and stale generation/session
     rejection; do not reuse legacy HTTP pending-action endpoints.
@@ -86,6 +114,11 @@ this sheet does not invent contracts or mark unexecuted checks passed.
       native normal image flow passed with no stuck banner. Live native-controller
       reset passed with exact saved rows retained and no image in subsequent text.
       Literal app-kill/physical acceptance are still separate open checks.
+    - [x] **A3b — Known-stage removal checkpoint.** Fresh idle proof and exact
+      image/PDF receipt detach; uncertainty keeps the chip/quarantine. Generic-file
+      receipts remove locally, with no invented endpoint. Focused99/full2160 passed;
+      native live removal preserved exact saved history, cleared the marker, and
+      subsequent plain text had no media. Physical/removal-button UI remains open.
   - [ ] **A1 — Capture stock staging/limits and PDF availability.** Record
     returned references, image/PDF/file failure responses and canonical history.
   - [ ] **A2 — Retain local bytes and stage before prompt.** Attachment owner

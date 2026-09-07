@@ -68,6 +68,7 @@ final class GatewayConversationController {
     @ObservationIgnored private var observerID: UUID?
     @ObservationIgnored private var attachmentTask: Task<Void, Error>?
     @ObservationIgnored private var attachmentStageInFlight = false
+    @ObservationIgnored private var attachmentRemovalInFlight = false
     @ObservationIgnored private var reconciliationTask: Task<Void, Never>?
     @ObservationIgnored private var idleRefreshTask: Task<Void, Never>?
     private var lifecycle = 0
@@ -351,6 +352,7 @@ final class GatewayConversationController {
         let marker = recoveryMarker
         guard !attachmentRecoveryIsBusy,
               !attachmentStageInFlight,
+              !attachmentRemovalInFlight,
               !promptInFlight,
               !hasAmbiguousPromptDelivery,
               runState == .idle,
@@ -469,6 +471,153 @@ final class GatewayConversationController {
         }
     }
 
+    /// Removes one locally confirmed image/PDF stage from the exact idle turn
+    /// that produced its receipt. Generic files have no pinned detach route;
+    /// unknown or stale receipts remain quarantined and are never guessed.
+    func removeStagedAttachment(_ pending: DirectPendingAttachment) async throws {
+        guard !disposed else { throw DirectSessionError.stopped }
+        guard pending.source.kind != .file else { throw DirectSessionError.invalidResponse }
+        guard !hasAmbiguousPromptDelivery,
+              !recoveryMarkerLoadFailed,
+              !recoveryStageUnknown,
+              !attachmentRecoveryIsBusy,
+              !attachmentStageInFlight,
+              !attachmentRemovalInFlight,
+              !promptInFlight,
+              recoveryCleanupTask == nil,
+              recoveryPromptObservation == nil,
+              runState == .idle,
+              let marker = recoveryMarker,
+              let capturedBinding = binding else {
+            throw DirectSessionError.unresolvedAttachment
+        }
+
+        let capturedLifecycle = lifecycle
+        let capturedGeneration = runtime.connectionGeneration
+        let capturedOrigin = runtime.origin
+        let scope = DirectPendingAttachmentStageScope(
+            binding: capturedBinding,
+            connectionGeneration: capturedGeneration,
+            origin: capturedOrigin,
+            turnEpoch: turnEpoch
+        )
+        let paths = pending.serverDetachPaths(for: scope)
+        guard pending.isConfirmed(for: scope), !paths.isEmpty else {
+            throw DirectSessionError.staleOperation
+        }
+
+        var remainingPaths = recoveryDetachPaths
+        for path in paths {
+            guard let index = remainingPaths.firstIndex(of: path) else {
+                throw DirectSessionError.staleOperation
+            }
+            remainingPaths.remove(at: index)
+        }
+        guard locallyConfirmedRecoveryStageCount > 0 else {
+            throw DirectSessionError.staleOperation
+        }
+
+        attachmentRemovalInFlight = true
+        attachmentRecoveryIsBusy = true
+        defer {
+            attachmentRemovalInFlight = false
+            attachmentRecoveryIsBusy = false
+        }
+
+        let isCurrentRemovalScope: () -> Bool = {
+            !self.disposed
+                && self.lifecycle == capturedLifecycle
+                && self.binding == capturedBinding
+                && self.runtime.origin == capturedOrigin
+                && self.runtime.connectionGeneration == capturedGeneration
+                && self.recoveryMarker?.token == marker.token
+        }
+
+        let status = try await runtime.request("session.status", parameters: {
+            guard isCurrentRemovalScope(),
+                  self.runtime.state == .ready,
+                  self.runState == .idle else {
+                throw DirectSessionError.staleOperation
+            }
+            return self.rpcParams(capturedBinding)
+        })
+        guard isCurrentRemovalScope(),
+              status?.gatewayFields["output"]?.gatewayString?
+                .components(separatedBy: .newlines)
+                .contains("Agent Running: No") == true else {
+            throw DirectSessionError.ambiguousPrompt
+        }
+
+        var acknowledgedPaths = 0
+        do {
+            for path in paths {
+                var requestWasDispatched = false
+                do {
+                    let result = try await runtime.request("image.detach", parameters: {
+                        guard !self.disposed,
+                              self.lifecycle == capturedLifecycle,
+                              self.binding == capturedBinding,
+                              self.runtime.origin == capturedOrigin,
+                              self.runtime.connectionGeneration == capturedGeneration,
+                              self.runtime.state == .ready,
+                              self.runState == .idle,
+                              self.recoveryMarker?.token == marker.token else {
+                            throw DirectSessionError.staleOperation
+                        }
+                        requestWasDispatched = true
+                        return [
+                            "session_id": .string(capturedBinding.runtimeID),
+                            "profile": .string(capturedBinding.profile),
+                            "path": .string(path)
+                        ]
+                    })
+                    guard result?.gatewayFields["detached"] == .bool(true) else {
+                        throw DirectSessionError.invalidResponse
+                    }
+                    acknowledgedPaths += 1
+                } catch {
+                    // A dispatched detach, or a partial PDF detach, no longer
+                    // has a safely replayable local receipt. Keep the marker
+                    // and chip visible; explicit reset remains the escape hatch.
+                    if (requestWasDispatched || acknowledgedPaths > 0), isCurrentRemovalScope() {
+                        recoveryStageUnknown = true
+                        attachmentRecoveryNeedsReset = true
+                    }
+                    throw error
+                }
+            }
+
+            guard !disposed,
+                  lifecycle == capturedLifecycle,
+                  binding == capturedBinding,
+                  runtime.origin == capturedOrigin,
+                  runtime.connectionGeneration == capturedGeneration,
+                  runtime.state == .ready,
+                  runState == .idle,
+                  recoveryMarker?.token == marker.token else {
+                throw DirectSessionError.staleOperation
+            }
+
+            recoveryDetachPaths = remainingPaths
+            locallyConfirmedRecoveryStageCount -= 1
+            if locallyConfirmedRecoveryStageCount == 0, recoveryDetachPaths.isEmpty {
+                do {
+                    try clearRecoveryMarker(marker)
+                } catch {
+                    recoveryStageUnknown = true
+                    attachmentRecoveryNeedsReset = true
+                    throw DirectSessionError.attachmentRecoveryUnavailable
+                }
+            }
+        } catch {
+            if acknowledgedPaths > 0, isCurrentRemovalScope() {
+                recoveryStageUnknown = true
+                attachmentRecoveryNeedsReset = true
+            }
+            throw error
+        }
+    }
+
     /// Stages one direct attachment on this conversation's already-owned
     /// runtime. The source bytes are encoded off-main by
     /// `DirectGatewayAttachment.rpcParameters()`; this method only adds the
@@ -522,6 +671,7 @@ final class GatewayConversationController {
         // suspended; a concurrent tap is a local busy rejection, not a
         // recovery-quarantine result.
         guard !attachmentStageInFlight,
+              !attachmentRemovalInFlight,
               !promptInFlight,
               runState == .idle else {
             throw DirectGatewayAttachmentStageError.definiteBeforeStage(
@@ -847,7 +997,7 @@ final class GatewayConversationController {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw DirectSessionError.invalidResponse }
         guard !hasAmbiguousPromptDelivery else { throw DirectSessionError.ambiguousPrompt }
         guard !recoveryMarkerLoadFailed else { throw DirectSessionError.attachmentRecoveryUnavailable }
-        guard !attachmentRecoveryIsBusy, !attachmentStageInFlight else { throw DirectSessionError.ambiguousPrompt }
+        guard !attachmentRecoveryIsBusy, !attachmentStageInFlight, !attachmentRemovalInFlight else { throw DirectSessionError.ambiguousPrompt }
         guard !recoveryStageUnknown else { throw DirectSessionError.unresolvedAttachment }
         if recoveryMarker != nil {
             guard !stagedAttachments.isEmpty,

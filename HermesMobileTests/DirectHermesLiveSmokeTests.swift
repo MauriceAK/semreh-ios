@@ -1073,6 +1073,46 @@ final class DirectHermesLiveSmokeTests: XCTestCase {
             guard reopened.attachmentRecoveryNeedsReset == false else { throw LiveSmokeInvariant.failed }
             let reopenedRuntimeID = try XCTUnwrap(reopened.binding?.runtimeID)
             cleanupRuntimeID = reopenedRuntimeID
+
+            var removable = try DirectPendingAttachment(
+                source: .image(data: Self.recoveryPNGData, filename: "known-removal.png")
+            )
+            let removalStage = try await stage("slice3 recovery known image stage") {
+                try await reopened.stageAttachment(removable)
+            }
+            guard removalStage.receipt.kind == .image,
+                  removalStage.receipt.detachPaths.count == 1,
+                  let detachPath = removalStage.receipt.detachPaths.first,
+                  !detachPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  removable.confirm(
+                    scope: removalStage.scope,
+                    referenceText: removalStage.receipt.referenceText,
+                    serverDetachPaths: removalStage.receipt.detachPaths
+                  ),
+                  let reopenedBinding = reopened.binding else {
+                throw LiveSmokeInvariant.failed
+            }
+            let removalIdentity = try DirectGatewayAttachmentRecoveryIdentity(
+                origin: HostedTransport.https.baseURL,
+                profile: "default",
+                storedID: storedID,
+                runtimeID: reopenedBinding.runtimeID
+            )
+            guard try recreatedStore.load(for: removalIdentity) != nil else {
+                throw LiveSmokeInvariant.failed
+            }
+            try await stage("slice3 recovery known image removal") {
+                try await reopened.removeStagedAttachment(removable)
+            }
+            guard reopened.attachmentRecoveryNeedsReset == false,
+                  try recreatedStore.load(for: removalIdentity) == nil else {
+                throw LiveSmokeInvariant.failed
+            }
+            try await stage("slice3 recovery known removal transcript preserved") {
+                let afterRemoval = try await api.directSessionMessages(sessionID: storedID, profile: "default")
+                guard afterRemoval.messages == baseline.messages else { throw LiveSmokeInvariant.failed }
+                try assertRecoveryTranscript(afterRemoval, users: [seedPrompt], assistant: expectedAck)
+            }
             try await stage("slice3 recovery post-reset plain submit") { try await reopened.submit(postResetPrompt) }
             _ = try await stage("slice3 recovery post-reset terminal") {
                 try await events.wait { event in

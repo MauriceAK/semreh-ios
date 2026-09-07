@@ -2751,14 +2751,54 @@ final class ChatViewModel {
 
     func removePendingAttachment(id: UUID) {
         if usesDirectGateway {
-            guard !isStartingChat, !attachmentRecoveryNeedsReset, !attachmentRecoveryIsBusy else {
+            guard !isStartingChat, !attachmentRecoveryIsBusy else {
                 directAttachmentPreparationErrorMessage = "Wait for the current direct message to finish before changing attachments."
                 return
             }
             guard let index = directPendingAttachments.firstIndex(where: { $0.id == id }) else { return }
-            guard case .pending = directPendingAttachments[index].stageState else { return }
-            directPendingAttachments.remove(at: index)
-            directAttachmentPreparationErrorMessage = nil
+            let attachment = directPendingAttachments[index]
+            switch attachment.stageState {
+            case .pending:
+                guard !attachmentRecoveryNeedsReset else { return }
+                directPendingAttachments.remove(at: index)
+                directAttachmentPreparationErrorMessage = nil
+            case .unknown:
+                // An unknown server receipt is never guessed or removed by a
+                // local chip action; the explicit recovery reset owns it.
+                return
+            case .confirmed:
+                if attachment.isGenericFile {
+                    guard directConversation?.runState == nil || directConversation?.runState == .idle else {
+                        directAttachmentPreparationErrorMessage = "Wait for the current direct message to finish before changing attachments."
+                        return
+                    }
+                    // The stock contract has no file.detach route. A confirmed
+                    // file receipt is therefore only a local composer item;
+                    // remove its chip without inventing a server cleanup RPC.
+                    removeDirectPendingAttachments(ids: [id])
+                    directAttachmentPreparationErrorMessage = nil
+                    return
+                }
+                guard let controller = directConversation else { return }
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    do {
+                        try await controller.removeStagedAttachment(attachment)
+                        guard !self.directInvalidated,
+                              self.directConversation === controller,
+                              self.directPendingAttachments.contains(where: { $0.id == id }) else {
+                            return
+                        }
+                        self.removeDirectPendingAttachments(ids: [id])
+                        self.attachmentRecoveryErrorMessage = nil
+                    } catch {
+                        guard !self.directInvalidated,
+                              self.directConversation === controller else { return }
+                        self.lastError = error
+                        self.attachmentRecoveryErrorMessage = "The attachment could not be removed. It was kept safely; try again or reset the pending upload."
+                    }
+                }
+            }
         } else {
             attachmentCoordinator.removePendingAttachment(id: id)
         }

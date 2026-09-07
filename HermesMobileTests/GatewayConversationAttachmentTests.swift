@@ -137,6 +137,183 @@ final class GatewayConversationAttachmentTests: XCTestCase {
         await runtime.stop()
     }
 
+    func testKnownImageRemovalDetachesExactReceiptAndClearsMarker() async throws {
+        let fake = AttachmentFakeTransport()
+        fake.setResponse("image.attach_bytes", .object([
+            "attached": .bool(true),
+            "path": .string("/profile/images/remove-me.png"),
+            "name": .string("remove-me.png")
+        ]))
+        fake.setImageDetachResponses([.object(["detached": .bool(true), "count": .number(1)])])
+        let runtime = try makeRuntime(fake)
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("GatewayConversationAttachmentKnownRemoval-\(UUID().uuidString)", isDirectory: true)
+        let store = DirectGatewayAttachmentRecoveryMarkerStore(rootURL: root)
+        let controller = makeController(runtime: runtime, markerStore: store)
+        var image = DirectPendingAttachment(source: try .image(data: pngData, filename: "remove-me.png"))
+        let staged = try await controller.stageAttachment(image)
+        XCTAssertTrue(image.confirm(scope: staged.scope, serverDetachPaths: staged.receipt.detachPaths))
+
+        try await controller.removeStagedAttachment(image)
+
+        XCTAssertFalse(controller.attachmentRecoveryNeedsReset)
+        XCTAssertEqual(fake.calls().filter { $0.method == "image.detach" }.count, 1)
+        let detachCall = try XCTUnwrap(fake.calls().last { $0.method == "image.detach" })
+        XCTAssertEqual(objectFields(detachCall.params)?["path"], .string("/profile/images/remove-me.png"))
+        let identity = try DirectGatewayAttachmentRecoveryIdentity(
+            origin: runtime.origin,
+            profile: "default",
+            storedID: "durable-1",
+            runtimeID: "runtime-1"
+        )
+        XCTAssertNil(try store.load(for: identity))
+        await runtime.stop()
+    }
+
+    func testGenericFileRemovalHasNoInventedDetachRoute() async throws {
+        let fake = AttachmentFakeTransport()
+        fake.setResponse("file.attach", .object([
+            "attached": .bool(true),
+            "ref_text": .string("@file:notes.txt"),
+            "name": .string("notes.txt")
+        ]))
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime)
+        let file = DirectPendingAttachment(source: try .file(data: Data("notes".utf8), filename: "notes.txt"))
+        let staged = try await controller.stageAttachment(file)
+        var confirmed = file
+        XCTAssertTrue(confirmed.confirm(scope: staged.scope, referenceText: staged.receipt.referenceText))
+
+        do {
+            try await controller.removeStagedAttachment(confirmed)
+            XCTFail("Generic files have no pinned detach RPC")
+        } catch DirectSessionError.invalidResponse { }
+        XCTAssertFalse(fake.calls().contains { $0.method == "file.detach" })
+        await runtime.stop()
+    }
+
+    func testKnownRemovalRequiresFreshIdleStatusBeforeDetach() async throws {
+        let fake = AttachmentFakeTransport()
+        fake.setResponse("image.attach_bytes", .object([
+            "attached": .bool(true),
+            "path": .string("/profile/images/running.png"),
+            "name": .string("running.png")
+        ]))
+        fake.setResponse("session.status", .object(["output": .string("Agent Running: Yes")]))
+        let runtime = try makeRuntime(fake)
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("GatewayConversationAttachmentRemovalBusy-\(UUID().uuidString)", isDirectory: true)
+        let store = DirectGatewayAttachmentRecoveryMarkerStore(rootURL: root)
+        let controller = makeController(runtime: runtime, markerStore: store)
+        var image = DirectPendingAttachment(source: try .image(data: pngData, filename: "running.png"))
+        let staged = try await controller.stageAttachment(image)
+        XCTAssertTrue(image.confirm(scope: staged.scope, serverDetachPaths: staged.receipt.detachPaths))
+
+        do {
+            try await controller.removeStagedAttachment(image)
+            XCTFail("A running stock session must not detach a staged receipt")
+        } catch DirectSessionError.ambiguousPrompt { }
+        XCTAssertFalse(fake.calls().contains { $0.method == "image.detach" })
+        let identity = try DirectGatewayAttachmentRecoveryIdentity(
+            origin: runtime.origin,
+            profile: "default",
+            storedID: "durable-1",
+            runtimeID: "runtime-1"
+        )
+        XCTAssertNotNil(try store.load(for: identity))
+        await runtime.stop()
+    }
+
+    func testLateRemovalResponseAfterControllerInvalidationCannotClearMarker() async throws {
+        let fake = AttachmentFakeTransport()
+        fake.setResponse("image.attach_bytes", .object([
+            "attached": .bool(true),
+            "path": .string("/profile/images/late.png"),
+            "name": .string("late.png")
+        ]))
+        let detachGate = AttachmentGate()
+        fake.setRequestGate("image.detach", detachGate)
+        let runtime = try makeRuntime(fake)
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("GatewayConversationAttachmentRemovalLate-\(UUID().uuidString)", isDirectory: true)
+        let store = DirectGatewayAttachmentRecoveryMarkerStore(rootURL: root)
+        let controller = makeController(runtime: runtime, markerStore: store)
+        var image = DirectPendingAttachment(source: try .image(data: pngData, filename: "late.png"))
+        let staged = try await controller.stageAttachment(image)
+        XCTAssertTrue(image.confirm(scope: staged.scope, serverDetachPaths: staged.receipt.detachPaths))
+        let identity = try DirectGatewayAttachmentRecoveryIdentity(
+            origin: runtime.origin,
+            profile: "default",
+            storedID: "durable-1",
+            runtimeID: "runtime-1"
+        )
+
+        let removal = Task { try await controller.removeStagedAttachment(image) }
+        await waitUntil { fake.calls().contains { $0.method == "image.detach" } }
+
+        do {
+            _ = try await controller.stageAttachment(
+                DirectPendingAttachment(source: try .image(data: pngData, filename: "blocked.png"))
+            )
+            XCTFail("Stage must remain serialized behind detach")
+        } catch DirectGatewayAttachmentStageError.definiteBeforeStage(.image, .controllerBusy) { }
+        do {
+            try await controller.submit("blocked")
+            XCTFail("Submit must remain serialized behind detach")
+        } catch DirectSessionError.ambiguousPrompt { }
+        do {
+            try await controller.resetPendingAttachments()
+            XCTFail("Reset must remain serialized behind detach")
+        } catch DirectSessionError.ambiguousPrompt { }
+
+        controller.invalidate()
+        await detachGate.release()
+        do {
+            try await removal.value
+            XCTFail("An invalidated controller must reject a late detach response")
+        } catch { }
+
+        XCTAssertNotNil(try store.load(for: identity))
+        await runtime.stop()
+    }
+
+    func testPartialPDFRemovalKeepsMarkerAndDoesNotPretendFullRemoval() async throws {
+        let fake = AttachmentFakeTransport()
+        fake.setResponse("pdf.attach", .object([
+            "attached": .bool(true),
+            "pages_attached": .number(2),
+            "pages": .array([
+                .object(["page": .number(1), "path": .string("/profile/pdf/page-1.png")]),
+                .object(["page": .number(2), "path": .string("/profile/pdf/page-2.png")])
+            ])
+        ]))
+        fake.setImageDetachResponses([
+            .object(["detached": .bool(true), "count": .number(1)]),
+            .object(["detached": .bool(false), "count": .number(0)])
+        ])
+        let runtime = try makeRuntime(fake)
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("GatewayConversationAttachmentPDFRemoval-\(UUID().uuidString)", isDirectory: true)
+        let store = DirectGatewayAttachmentRecoveryMarkerStore(rootURL: root)
+        let controller = makeController(runtime: runtime, markerStore: store)
+        var pdf = DirectPendingAttachment(source: try .pdf(data: pdfData, filename: "report.pdf"))
+        let staged = try await controller.stageAttachment(pdf)
+        XCTAssertTrue(pdf.confirm(scope: staged.scope, serverDetachPaths: staged.receipt.detachPaths))
+
+        do {
+            try await controller.removeStagedAttachment(pdf)
+            XCTFail("A partial PDF detach must not report full removal")
+        } catch {
+            // The local receipt remains quarantined after one page detached.
+        }
+
+        XCTAssertTrue(controller.attachmentRecoveryNeedsReset)
+        XCTAssertEqual(fake.calls().filter { $0.method == "image.detach" }.count, 2)
+        XCTAssertTrue(fake.calls().contains { $0.method == "image.detach" && objectFields($0.params)?["path"] == .string("/profile/pdf/page-1.png") })
+        XCTAssertTrue(fake.calls().contains { $0.method == "image.detach" && objectFields($0.params)?["path"] == .string("/profile/pdf/page-2.png") })
+        await runtime.stop()
+    }
+
     func testStageImageFileAndPDFUseExactRPCShapesAndScope() async throws {
         let fake = AttachmentFakeTransport()
         fake.setResponse("image.attach_bytes", .object([
@@ -807,6 +984,10 @@ final class GatewayConversationAttachmentTests: XCTestCase {
     private var pngData: Data {
         Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")!
     }
+
+    private var pdfData: Data {
+        Data("%PDF-1.4\nfixture\n".utf8)
+    }
 }
 
 private actor AttachmentGate {
@@ -841,6 +1022,7 @@ private final class AttachmentFakeTransport: HermesGatewayTransport, @unchecked 
     private var generationValue = 0
     private var connected = false
     private var responses: [String: JSONValue] = [:]
+    private var imageDetachResponses: [JSONValue] = []
     private var serverErrors: [String: HermesGatewayError] = [:]
     private var attachmentGates: [String: AttachmentGate] = [:]
     private var requestGates: [String: AttachmentGate] = [:]
@@ -856,6 +1038,10 @@ private final class AttachmentFakeTransport: HermesGatewayTransport, @unchecked 
 
     func setResponse(_ method: String, _ response: JSONValue) {
         withLock { responses[method] = response }
+    }
+
+    func setImageDetachResponses(_ responses: [JSONValue]) {
+        withLock { imageDetachResponses = responses }
     }
 
     func setServerError(_ method: String, _ error: HermesGatewayError?) {
@@ -890,9 +1076,15 @@ private final class AttachmentFakeTransport: HermesGatewayTransport, @unchecked 
     }
 
     func request(method: String, params: JSONValue?, timeout: Duration?) async throws -> JSONValue? {
-        let (response, error, gate) = withLock {
+        let (response, error, gate, detachResponse) = withLock {
             callsValue.append(Call(method: method, params: params, timeout: timeout))
-            return (responses[method], serverErrors[method], requestGates[method] ?? attachmentGates[method])
+            let detachResponse: JSONValue?
+            if method == "image.detach", !imageDetachResponses.isEmpty {
+                detachResponse = imageDetachResponses.removeFirst()
+            } else {
+                detachResponse = nil
+            }
+            return (responses[method], serverErrors[method], requestGates[method] ?? attachmentGates[method], detachResponse)
         }
         if let gate { await gate.wait() }
         if let error { throw error }
@@ -905,7 +1097,7 @@ private final class AttachmentFakeTransport: HermesGatewayTransport, @unchecked 
         case "session.close":
             return response ?? .object(["closed": .bool(true)])
         case "image.detach":
-            return .object(["detached": .bool(false), "count": .number(0)])
+            return detachResponse ?? .object(["detached": .bool(false), "count": .number(0)])
         case "session.status":
             return response ?? .object(["output": .string("Agent Running: No")])
         default:

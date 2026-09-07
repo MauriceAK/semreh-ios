@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+import json
 
 import direct_hermes_model_fixture as fixture
 
@@ -82,6 +83,75 @@ class ModelFixtureTests(unittest.TestCase):
                 {'role': 'tool', 'content': '{"answers": {}}'},
             ],
         }, fixture.CLARIFY_BATCH_MARKER))
+
+    def test_exact_blocking_markers_emit_only_advertised_fixture_tools(self) -> None:
+        body = {
+            'tools': [
+                {'type': 'function', 'function': {'name': fixture.APPROVAL_TOOL_NAME}},
+                {'type': 'function', 'function': {'name': fixture.SECRET_TOOL_NAME}},
+            ],
+        }
+        approval = fixture.blocking_tool_call(body, fixture.APPROVAL_MARKER)
+        self.assertEqual(approval['id'], fixture.APPROVAL_TOOL_CALL_ID)
+        self.assertEqual(approval['function']['name'], fixture.APPROVAL_TOOL_NAME)
+        self.assertEqual(
+            approval['function']['arguments'],
+            '{}',
+        )
+        secret = fixture.blocking_tool_call(body, fixture.SECRET_MARKER)
+        self.assertEqual(secret['id'], fixture.SECRET_TOOL_CALL_ID)
+        self.assertEqual(secret['function']['name'], fixture.SECRET_TOOL_NAME)
+        self.assertEqual(secret['function']['arguments'], '{}')
+        self.assertIsNone(fixture.blocking_tool_call(
+            body, 'prefix ' + fixture.APPROVAL_MARKER
+        ))
+        self.assertIsNone(fixture.blocking_tool_call(
+            {'tools': [{'type': 'function', 'function': {'name': 'other'}}]},
+            fixture.SECRET_MARKER,
+        ))
+        self.assertIsNone(fixture.blocking_tool_call({**body, 'messages': [
+            {'role': 'user', 'content': fixture.APPROVAL_MARKER},
+            {'role': 'tool', 'content': 'denied'},
+        ]}, fixture.APPROVAL_MARKER))
+
+    def test_blocking_followups_are_exact_and_ordinary_text_is_unchanged(self) -> None:
+        self.assertEqual(
+            fixture.response_text(
+                {'stream': False}, 'SEMREH_SLICE3_BLOCKING_AFTER_APPROVAL_DENY'
+            ),
+            'SEMREH_SLICE3_BLOCKING_ACK_APPROVAL_DENY',
+        )
+        self.assertEqual(
+            fixture.response_text(
+                {'stream': False}, 'SEMREH_SLICE3_BLOCKING_AFTER_SECRET_CANCEL'
+            ),
+            'SEMREH_SLICE3_BLOCKING_ACK_SECRET_CANCEL',
+        )
+        self.assertEqual(
+            fixture.response_text(
+                {'stream': False},
+                'prefix SEMREH_SLICE3_BLOCKING_AFTER_SECRET_CANCEL',
+            ),
+            'SEMREH_SLICE1_ACK',
+        )
+
+    def test_provider_diagnostics_redact_unknown_tools_and_prompt_content(self) -> None:
+        diagnostics = fixture.safe_request_diagnostics({
+            'tools': [
+                {'type': 'function', 'function': {'name': fixture.APPROVAL_TOOL_NAME}},
+                {'type': 'function', 'function': {'name': 'private_tool'}},
+            ],
+        }, fixture.APPROVAL_MARKER, {
+            'function': {'name': fixture.APPROVAL_TOOL_NAME},
+        })
+        self.assertTrue(diagnostics['exact_approval_marker'])
+        self.assertTrue(diagnostics['contains_approval_marker'])
+        self.assertEqual(diagnostics['advertised_tools'], [
+            fixture.APPROVAL_TOOL_NAME, '<unexpected>'
+        ])
+        self.assertTrue(diagnostics['selected_tool_call'])
+        self.assertEqual(diagnostics['selected_tool_name'], fixture.APPROVAL_TOOL_NAME)
+        self.assertNotIn(fixture.APPROVAL_MARKER, json.dumps(diagnostics))
 
     def test_streaming_exact_bulky_marker_is_varied_and_exactly_4096_bytes(self) -> None:
         first = fixture.response_text(

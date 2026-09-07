@@ -515,6 +515,21 @@ acceptance boundaries are unchanged.
 
 The direct daily driver survives real mobile lifecycle and cannot leave Hermes silently blocked.
 
+### Approved fixture expansion and working autonomy — September 6, 2026
+
+Maurice approved synthetic approval and secret-cancellation test tools in the
+disposable gateway. Use stock public plugin/callback contracts, deterministic
+local provider and exact owned fixture files; no private backend patches, real
+secrets, shell/sudo tool access or personal Hermes state. Root reviews/installs
+the fixture and owns its runtime; worker code alone is not deployment authority
+for any other target. Record exact enabled tool names and captures before native
+response integration. Physical-device acceptance remains separate.
+
+Maurice also requests continuous work: choose and document reasonable engineering
+and verification decisions without repeated check-ins. Pause only for a hard
+blocker or a crucial unresolved choice. This does not authorize personal-state
+changes, publication, arbitrary tool access or silent feature removal.
+
 ### Scope
 
 - Ambiguous prompt-delivery recovery.

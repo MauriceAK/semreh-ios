@@ -1131,9 +1131,11 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         )
 
         await viewModel.uploadAttachment(data: directPNGData, filename: "first.png")
+        await viewModel.uploadAttachment(data: directPNGData, filename: "other.png")
         let firstID = try XCTUnwrap(viewModel.directPendingAttachments.first?.id)
         viewModel.removePendingAttachment(id: firstID)
-        XCTAssertTrue(viewModel.directPendingAttachments.isEmpty)
+        XCTAssertEqual(viewModel.directPendingAttachments.count, 1)
+        XCTAssertEqual(viewModel.directPendingAttachments.first?.displayFilename, "other.png")
 
         await viewModel.uploadAttachment(data: directPNGData, filename: "second.png")
         viewModel.clearPendingAttachments()
@@ -1324,6 +1326,119 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         } else {
             XCTFail("Definite stage rejection must preserve the pending file")
         }
+        viewModel.invalidateDirectConversation()
+        await runtime.stop()
+    }
+
+    func testDirectConfirmedGenericFileRemovalIsLocalOnly() async throws {
+        let fake = ChatDirectFakeTransport()
+        fake.setAttachmentError("image.attach_bytes", .server(
+            code: 4015,
+            message: "path or data_url required",
+            data: nil,
+            method: "image.attach_bytes",
+            requestID: "image-rejected",
+            server: "fixture"
+        ))
+        let runtime = try makeRuntime(fake)
+        let viewModel = makeViewModel(
+            client: makeClient { request in
+                XCTFail("Direct attachment removal must not call REST: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            },
+            runtime: runtime,
+            sessionID: nil
+        )
+        await viewModel.uploadAttachment(data: Data("notes".utf8), filename: "notes.txt")
+        await viewModel.uploadAttachment(data: directPNGData, filename: "rejected.png")
+        let fileID = try XCTUnwrap(viewModel.directPendingAttachments.first?.id)
+
+        let didSend = await viewModel.sendMessage("stage then remove")
+        XCTAssertFalse(didSend)
+        XCTAssertEqual(viewModel.directPendingAttachments.count, 2)
+        if case .confirmed = viewModel.directPendingAttachments[0].stageState {
+            // The file receipt is confirmed locally even though no file.detach
+            // RPC exists in the pinned stock contract.
+        } else {
+            XCTFail("The file must be confirmed before local removal")
+        }
+
+        viewModel.removePendingAttachment(id: fileID)
+
+        XCTAssertEqual(viewModel.directPendingAttachments.map(\.displayFilename), ["rejected.png"])
+        XCTAssertFalse(fake.calls().contains { $0.method == "file.detach" })
+        viewModel.invalidateDirectConversation()
+        await runtime.stop()
+    }
+
+    func testDirectConfirmedImageRemovalSuccessRemovesOnlyItsChip() async throws {
+        let fake = ChatDirectFakeTransport()
+        fake.setAttachmentError("file.attach", .server(
+            code: 4015,
+            message: "path or data_url required",
+            data: nil,
+            method: "file.attach",
+            requestID: "file-rejected",
+            server: "fixture"
+        ))
+        fake.setImageDetachResponse(.object(["detached": .bool(true), "count": .number(0)]))
+        let runtime = try makeRuntime(fake)
+        let viewModel = makeViewModel(
+            client: makeClient { request in
+                XCTFail("Direct attachment removal must not call REST: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            },
+            runtime: runtime,
+            sessionID: nil
+        )
+        await viewModel.uploadAttachment(data: directPNGData, filename: "photo.png")
+        await viewModel.uploadAttachment(data: Data("notes".utf8), filename: "rejected.txt")
+        let imageID = try XCTUnwrap(viewModel.directPendingAttachments.first?.id)
+
+        let didSend = await viewModel.sendMessage("stage then remove")
+        XCTAssertFalse(didSend)
+        viewModel.removePendingAttachment(id: imageID)
+        await waitUntil { !viewModel.directPendingAttachments.contains { $0.id == imageID } }
+
+        XCTAssertEqual(viewModel.directPendingAttachments.map(\.displayFilename), ["rejected.txt"])
+        XCTAssertEqual(fake.calls().filter { $0.method == "image.detach" }.count, 1)
+        XCTAssertNil(viewModel.uploadAttachmentErrorMessage)
+        viewModel.invalidateDirectConversation()
+        await runtime.stop()
+    }
+
+    func testDirectConfirmedImageRemovalFailureKeepsItsChipAndRecoveryBarrier() async throws {
+        let fake = ChatDirectFakeTransport()
+        fake.setAttachmentError("file.attach", .server(
+            code: 4015,
+            message: "path or data_url required",
+            data: nil,
+            method: "file.attach",
+            requestID: "file-rejected",
+            server: "fixture"
+        ))
+        fake.setImageDetachResponse(.object(["detached": .bool(false), "count": .number(0)]))
+        let runtime = try makeRuntime(fake)
+        let viewModel = makeViewModel(
+            client: makeClient { request in
+                XCTFail("Direct attachment removal must not call REST: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            },
+            runtime: runtime,
+            sessionID: nil
+        )
+        await viewModel.uploadAttachment(data: directPNGData, filename: "photo.png")
+        await viewModel.uploadAttachment(data: Data("notes".utf8), filename: "rejected.txt")
+        let imageID = try XCTUnwrap(viewModel.directPendingAttachments.first?.id)
+
+        let didSend = await viewModel.sendMessage("stage then keep")
+        XCTAssertFalse(didSend)
+        viewModel.removePendingAttachment(id: imageID)
+        await waitUntil { viewModel.uploadAttachmentErrorMessage?.contains("could not be removed") == true }
+
+        XCTAssertTrue(viewModel.directPendingAttachments.contains { $0.id == imageID })
+        XCTAssertTrue(viewModel.attachmentRecoveryNeedsReset)
+        XCTAssertTrue(viewModel.uploadAttachmentErrorMessage?.contains("could not be removed") == true)
         viewModel.invalidateDirectConversation()
         await runtime.stop()
     }
@@ -1716,6 +1831,7 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
     private var resumeResponseAfterSessionClose: JSONValue?
     private var clarifyGate: ChatDirectAsyncGate?
     private var attachmentResponses: [String: JSONValue] = [:]
+    private var imageDetachResponse: JSONValue = .object(["detached": .bool(false), "count": .number(0)])
     private var attachmentErrors: [String: HermesGatewayError] = [:]
     private var attachmentGates: [String: ChatDirectAsyncGate] = [:]
     private var promptSubmitGate: ChatDirectAsyncGate?
@@ -1775,6 +1891,10 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
 
     func setAttachmentResponse(_ method: String, _ response: JSONValue) {
         withLock { attachmentResponses[method] = response }
+    }
+
+    func setImageDetachResponse(_ response: JSONValue) {
+        withLock { imageDetachResponse = response }
     }
 
     func setAttachmentError(_ method: String, _ error: HermesGatewayError?) {
@@ -1859,6 +1979,8 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
             case "image.attach_bytes", "file.attach", "pdf.attach":
                 let response = attachmentResponses[method] ?? Self.defaultAttachmentResponse(for: method)
                 return (response, nil, attachmentGates[method], false, nil, nil)
+            case "image.detach":
+                return (imageDetachResponse, nil, nil, false, nil, nil)
             default:
                 return (.object([:]), nil, nil, false, nil, nil)
             }

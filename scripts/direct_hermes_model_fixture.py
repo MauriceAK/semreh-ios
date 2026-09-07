@@ -8,6 +8,7 @@ import argparse
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import re
+import sys
 import time
 from typing import Optional
 
@@ -58,6 +59,24 @@ CLARIFY_FOLLOWUP_RESPONSES = {
         'SEMREH_SLICE3_CLARIFY_ACK_MULTI_SELECT_CANCEL',
 }
 
+# These two markers are deliberately exact and opt-in.  The approval/secret
+# tool schemas are advertised only by the explicit disposable fixture mode;
+# ordinary model requests must never manufacture a blocking callback.
+APPROVAL_MARKER = 'SEMREH_BLOCKING_APPROVAL'
+APPROVAL_TOOL_CALL_ID = 'call_semreh_approval'
+APPROVAL_TOOL_NAME = 'semreh_fixture_approval'
+APPROVAL_ARGUMENTS = {}
+SECRET_MARKER = 'SEMREH_BLOCKING_SECRET'
+SECRET_TOOL_CALL_ID = 'call_semreh_secret'
+SECRET_TOOL_NAME = 'semreh_fixture_secret'
+SECRET_ARGUMENTS = {}
+BLOCKING_FOLLOWUP_RESPONSES = {
+    'SEMREH_SLICE3_BLOCKING_AFTER_APPROVAL_DENY':
+        'SEMREH_SLICE3_BLOCKING_ACK_APPROVAL_DENY',
+    'SEMREH_SLICE3_BLOCKING_AFTER_SECRET_CANCEL':
+        'SEMREH_SLICE3_BLOCKING_ACK_SECRET_CANCEL',
+}
+
 # Keep the marker dispatch explicit so adding a synthetic probe case cannot
 # make ordinary prompts accidentally emit a clarify call.
 CLARIFY_FIXTURES = {
@@ -67,6 +86,14 @@ CLARIFY_FIXTURES = {
         CLARIFY_MULTI_SELECT_ARGUMENTS,
     ),
     CLARIFY_BATCH_MARKER: (CLARIFY_BATCH_TOOL_CALL_ID, CLARIFY_BATCH_ARGUMENTS),
+}
+
+BLOCKING_FIXTURES = {
+    APPROVAL_MARKER: (APPROVAL_TOOL_CALL_ID, APPROVAL_TOOL_NAME, APPROVAL_ARGUMENTS),
+    SECRET_MARKER: (SECRET_TOOL_CALL_ID, SECRET_TOOL_NAME, SECRET_ARGUMENTS),
+}
+_DIAGNOSTIC_TOOL_NAMES = {
+    'clarify', APPROVAL_TOOL_NAME, SECRET_TOOL_NAME,
 }
 
 
@@ -132,16 +159,100 @@ def clarify_tool_call(body: dict, last_user: object) -> Optional[dict]:
     }
 
 
+def blocking_tool_call(body: dict, last_user: object) -> Optional[dict]:
+    """Return one exact synthetic approval/secret tool call when advertised."""
+    if not isinstance(last_user, str) or last_user not in BLOCKING_FIXTURES:
+        return None
+    tools = body.get('tools')
+    if not isinstance(tools, list):
+        return None
+    latest_user = max(
+        (index for index, message in enumerate(body.get('messages', []))
+         if isinstance(message, dict) and message.get('role') == 'user'),
+        default=-1,
+    )
+    if any(isinstance(message, dict) and message.get('role') == 'tool'
+           for message in body.get('messages', [])[latest_user + 1:]):
+        return None
+    call_id, name, arguments = BLOCKING_FIXTURES[last_user]
+    if not any(
+        isinstance(tool, dict)
+        and isinstance(tool.get('function'), dict)
+        and tool['function'].get('name') == name
+        for tool in tools
+    ):
+        return None
+    return {
+        'id': call_id,
+        'type': 'function',
+        'function': {
+            'name': name,
+            'arguments': json.dumps(arguments, separators=(',', ':')),
+        },
+    }
+
+
+def _contains_marker(value: object, marker: str) -> bool:
+    if isinstance(value, str):
+        return marker in value
+    if isinstance(value, list):
+        return any(_contains_marker(item, marker) for item in value)
+    if isinstance(value, dict):
+        return any(_contains_marker(item, marker) for item in value.values())
+    return False
+
+
+def safe_request_diagnostics(body: dict, last_user: object,
+                             selected_tool_call: Optional[dict]) -> dict:
+    """Return bounded provider diagnostics without retaining prompt content."""
+    advertised = []
+    tools = body.get('tools')
+    if isinstance(tools, list):
+        for tool in tools:
+            function = tool.get('function') if isinstance(tool, dict) else None
+            name = function.get('name') if isinstance(function, dict) else None
+            advertised.append(name if name in _DIAGNOSTIC_TOOL_NAMES else '<unexpected>')
+    selected_name = None
+    if isinstance(selected_tool_call, dict):
+        function = selected_tool_call.get('function') or {}
+        raw_name = function.get('name') if isinstance(function, dict) else None
+        selected_name = raw_name if raw_name in _DIAGNOSTIC_TOOL_NAMES else '<unexpected>'
+    return {
+        'last_user_type': type(last_user).__name__,
+        'exact_approval_marker': last_user == APPROVAL_MARKER,
+        'exact_secret_marker': last_user == SECRET_MARKER,
+        'contains_approval_marker': _contains_marker(last_user, APPROVAL_MARKER),
+        'contains_secret_marker': _contains_marker(last_user, SECRET_MARKER),
+        'advertised_tool_count': len(advertised),
+        'advertised_tools': advertised,
+        'selected_tool_call': selected_tool_call is not None,
+        'selected_tool_name': selected_name,
+    }
+
+
 def response_text(body: dict, last_user: object) -> str:
     """Select the fixture response while keeping non-bulky behavior unchanged."""
     if body.get('stream') is True and isinstance(last_user, str):
         if COMPRESSION_BULKY_MAIN_RE.fullmatch(last_user):
             return bulky_main_content(last_user)
 
-    text = (
-        CLARIFY_FOLLOWUP_RESPONSES.get(last_user, 'SEMREH_SLICE1_ACK')
-        if isinstance(last_user, str) else 'SEMREH_SLICE1_ACK'
-    )
+    text = 'SEMREH_SLICE1_ACK'
+    if isinstance(last_user, str):
+        text = {**CLARIFY_FOLLOWUP_RESPONSES, **BLOCKING_FOLLOWUP_RESPONSES}.get(
+            last_user, text
+        )
+        messages = body.get('messages', [])
+        latest_user = max(
+            (index for index, message in enumerate(messages)
+             if isinstance(message, dict) and message.get('role') == 'user'),
+            default=-1,
+        )
+        if any(isinstance(message, dict) and message.get('role') == 'tool'
+               for message in messages[latest_user + 1:]):
+            text = {
+                APPROVAL_MARKER: 'SEMREH_SLICE3_BLOCKING_ACK_APPROVAL_DENY',
+                SECRET_MARKER: 'SEMREH_SLICE3_BLOCKING_ACK_SECRET_CANCEL',
+            }.get(last_user, text)
     if REASONING_PROBE and 'SEMREH_REASONING_PROBE' in str(last_user):
         reasoning = body.get('reasoning') or {}
         effort = body.get('reasoning_effort') or reasoning.get('effort')
@@ -190,6 +301,16 @@ class Handler(BaseHTTPRequestHandler):
         # markers continue to receive the ordinary deterministic ACK.
         text = response_text(body, last_user)
         tool_call = clarify_tool_call(body, last_user)
+        if tool_call is None:
+            tool_call = blocking_tool_call(body, last_user)
+        print(
+            'SEMREH_FIXTURE_DIAGNOSTIC ' + json.dumps(
+                safe_request_diagnostics(body, last_user, tool_call),
+                separators=(',', ':'),
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
         base = {'id': 'chatcmpl-semreh-fixture', 'created': int(time.time()), 'model': 'semreh-fixture'}
         try:
             if body.get('stream'):
