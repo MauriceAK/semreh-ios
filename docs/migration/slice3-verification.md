@@ -458,3 +458,14 @@ restart-persistent per-session safety marker plus an explicit resolution policy,
 or another owner-approved lifecycle change. No queue-list RPC exists, and a
 guessed path/automatic retry is not acceptable. This remains an attachment gate
 blocker; the checkpoint above is not Slice3 completion or release approval.
+
+Root reproduced the server half with
+`python scripts/direct_hermes_orphan_attachment_probe.py --output <evidence>/slice3-orphan-attachment-v1.json`.
+Result: the dedicated stock runtime survived socket replacement, omitted queue
+state from resume, and included exactly one orphan image in the next plain-text
+turn. Cleanup confirmed closing only the probe-created runtime; zero cleanup
+errors. This deliberately forgets a successfully received stage receipt to model
+client state loss; it is not a literal dropped-frame or native app-kill test.
+It confirms the queue behavior underlying the client recovery-policy decision.
+Post-probe artifact audit`slice3-orphan-attachment-audit-v1.json` passed:
+151041files,0flags,85exportedconsoles, same known-secret/pattern-only exclusions.
