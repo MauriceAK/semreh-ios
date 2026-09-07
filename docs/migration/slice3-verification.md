@@ -919,3 +919,55 @@ Final picker/socket artifact auditv1 completed with zero flagged paths. Exact
 counts retained in slice3-picker-socket-final-audit-v1.jsonl. Scope is known
 fixture secrets/obvious bearer formats and exported consoles, not arbitrary
 opaque secrets, image OCR or quarantined OS diagnostics.
+
+Text-file warning diagnosis: Luna read-only audit and root source confirmation
+agree. Stock server.py13897-13922/13987-14026 returns profile-home attachment
+absolute refs. server.py12880-12898 preprocesses with allowed_root=cwd;
+agent/context_references.py471-480 rejects outside paths. Semreh's remote
+data_url/name payload and preserved ref_text match the supported contract.
+No app-only relative-path rewrite is justified: it would address a different or
+missing file. No backend/config change made. Generic-file inference remains an
+explicit open gate even though native selection/storage/readback/preview pass.
+
+## Accepted-run app-kill successor — in progress
+
+Luna changed mixed-attachment regression to exact stock absolute profile-home ref
+and strict outgoing prompt equality (transport only, not ingestion). Root full
+signed absolute-ref-full-v1 passed **2179/0/11 intentional opt-in skips**;
+diagnostics exported. No production changes after2dca7e6.
+Fresh app-kill-seed-v1 created an exact two-row JSON-RPC baseline, then closed its
+owned runtime; no appkill claim. SolLow authors an isolated production UI opt-in
+with separate ephemeral REST observer, accepted-before-kill and completed-while-
+dead assertions. Root requires old idle-relaunch check retained independently.
+
+App-kill signed UIbuildv1 passed with async-context XCTestwait warning; root used
+await fulfillment at the newly async entrypoint, buildv2 passed clean. Root
+selectorv1 omitted PYTHONPATH and failed15imports; correct v2 passed29. Luna
+restored misplaced completed-away assertions to their correctly named test,
+same29 passed. No production code changes.
+
+App-kill productionUIv1 FAILED before submitting the delayed turn. Login reached
+Sessions, then production seed deep-link triggered an app launch and the expected
+seed did not appear; exported AX shows Connect/session-expired. xcresult reports
+both runnerexit75 and seedvisibility timeout, zero passed. No accepted-run or
+process-death claim. Root retains all diagnostics/attachments and is making a
+same-build retry with the still-guarded two-row seed; underlying cause unresolved.
+
+Same-build app-kill productionUIv2 **passed1/0/0**. The separate authenticated
+observer proved exact accepted user/no new assistant before termination, first
+post-termination read still incomplete, and exact completion while the app
+remained notRunning. Relaunch restored the same conversation, one accepted prompt,
+two total ACKs including seed, idle UI and empty composer. Exact canonical prefix
+and durable IDs preserved. Root viewed before F5D45D43-2F04-47D7-9F06-36A772453EA5.png
+and recovered A77E88DF-9D05-43CE-886B-3949AEB3C56A.png. Diagnostics exported.
+Independent app-kill-canonical-v2 passed exact four rows and unchanged baseline
+hash. This proves this short accepted-run process-death case, not physical long
+background, pre-ACK delivery ambiguity, proxy failure, or general auth reliability.
+UIv1 remains a real immediate-launch auth-persistence failure of unresolved cause;
+the passing retry does not erase it or justify adding a sleep to hide the boundary.
+Strict codesign and ordinary signed Simulator launch passed (PID75143).
+
+Final selectorPythonv3 passed29 after assertion-grouping tidy. App-kill artifact
+auditv1 completed with zero flagged paths; exact counts retained in JSONL. Known
+fixture secrets/obvious bearer formats/exported consoles only; same exclusions as
+previous audits. The successful checkpoint does not close R2c auth follow-up.

@@ -1400,8 +1400,19 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         await runtime.stop()
     }
 
-    func testDirectSendStagesMixedAttachmentsAndPreservesExactFileReference() async throws {
+    func testDirectSendStagesMixedAttachmentsAndPreservesExactAbsoluteFileReference() async throws {
         let fake = ChatDirectFakeTransport()
+        // Pinned stock `file.attach` returns the server-owned profile-home path
+        // for a remote byte upload. The app must preserve that exact ref through
+        // prompt.submit; this proves transport only, not model ingestion.
+        fake.setAttachmentResponse("file.attach", .object([
+            "attached": .bool(true),
+            "name": .string("notes.txt"),
+            "path": .string("/fixture/profile/attachments/notes.txt"),
+            "ref_path": .string("/fixture/profile/attachments/notes.txt"),
+            "ref_text": .string("@file:/fixture/profile/attachments/notes.txt"),
+            "uploaded": .bool(true)
+        ]))
         let runtime = try makeRuntime(fake)
         let viewModel = makeViewModel(
             client: makeClient { request in
@@ -1420,8 +1431,7 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         let submit = try XCTUnwrap(fake.calls().last { $0.method == "prompt.submit" })
         let fields = try XCTUnwrap(fields(submit.params))
         let submittedText = try XCTUnwrap(fields["text"]?.gatewayString)
-        XCTAssertTrue(submittedText.contains("@file:attachments/notes.txt"))
-        XCTAssertTrue(submittedText.contains("describe both"))
+        XCTAssertEqual(submittedText, "describe both\n@file:/fixture/profile/attachments/notes.txt")
         XCTAssertEqual(fake.calls().map(\.method), [
             "session.create", "image.attach_bytes", "file.attach", "prompt.submit"
         ])

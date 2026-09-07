@@ -92,6 +92,10 @@ class IOSSmokeGuardTests(unittest.TestCase):
                 seed._validate_seed_text(invalid)
         self.assertTrue(seed.RELAUNCH_PROMPT.fullmatch("SEMREH_SLICE3_RELAUNCH_01234567-89ab-cdef-0123-456789abcdef"))
         self.assertFalse(seed.RELAUNCH_PROMPT.fullmatch("SEMREH_SLICE3_RELAUNCH_extra"))
+        self.assertTrue(seed.APP_KILL_PROMPT.fullmatch(
+            "SEMREH_INTERRUPT_FIXTURE SEMREH_SLICE3_APP_KILL_01234567-89ab-cdef-0123-456789abcdef"
+        ))
+        self.assertFalse(seed.APP_KILL_PROMPT.fullmatch("SEMREH_SLICE3_APP_KILL_extra"))
 
     def assertRejected(self, arguments, message):
         result = subprocess.run(
@@ -265,6 +269,17 @@ class IOSSmokeGuardTests(unittest.TestCase):
             ["--https", "--slice3-completed-away", "--stock-backend", "--slice2-ui"],
             message,
         )
+        self.assertRejected(
+            ["--https", "--slice3-completed-away", "--stock-backend", "--slice3-recovery"],
+            "--slice3-recovery requires --https --stock-backend and no other test phase",
+        )
+        self.assertRejected(
+            [
+                "--https", "--slice3-completed-away",
+                "--development-backend-sha", "8c50f84522a755d40346e73701a6847fbdde20ec",
+            ],
+            "--slice3-completed-away requires --https --stock-backend and no other test phase",
+        )
 
     def test_slice3_gateway_restart_requires_stock_https_nonce_and_is_standalone(self):
         message = "--slice3-gateway-restart requires --https --stock-backend --gateway-restart-nonce and no other test phase"
@@ -309,20 +324,56 @@ class IOSSmokeGuardTests(unittest.TestCase):
                 "--https", "--slice2-ui", "--stock-backend", "--slice3-relaunch",
                 "--tui-created-session-id", "seed-id", "--slice3-relaunch-seed-text", "bad marker",
             ],
-            "--slice3-relaunch-seed-text requires --slice3-relaunch and a bounded synthetic marker",
+            "--slice3-relaunch-seed-text requires --slice3-relaunch or --slice3-app-kill and a bounded synthetic marker",
         )
+
+    def test_slice3_app_kill_requires_seeded_stock_ui_and_is_standalone(self):
+        message = "--slice3-app-kill requires --slice2-ui --https --stock-backend --tui-created-session-id and no other test phase"
+        self.assertRejected(["--slice3-app-kill"], message)
         self.assertRejected(
-            ["--https", "--slice3-completed-away", "--stock-backend", "--slice3-recovery"],
-            "--slice3-recovery requires --https --stock-backend and no other test phase",
+            ["--https", "--slice2-ui", "--stock-backend", "--slice3-app-kill"],
+            message,
         )
         self.assertRejected(
             [
-                "--https", "--slice3-completed-away",
-                "--development-backend-sha", "8c50f84522a755d40346e73701a6847fbdde20ec",
+                "--https", "--slice2-ui", "--stock-backend", "--slice3-app-kill",
+                "--tui-created-session-id", "seed-id", "--slice3-relaunch",
             ],
-            "--slice3-completed-away requires --https --stock-backend and no other test phase",
+            "--slice3-relaunch requires",
         )
 
+    def test_stock_ui_generation_exports_isolated_slice3_app_kill_opt_in(self):
+        smoke = load_smoke_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            products = (Path(temporary) / "products").resolve()
+            products.mkdir()
+            source = products / "HermesMobileUIVerification_HermesMobileUIVerification_iphonesimulator.xctestrun"
+            source.write_bytes(plistlib.dumps({
+                "TestConfigurations": [{"TestTargets": [{"BlueprintName": "HermesMobileUITests"}]}],
+            }))
+            runtime = Path(temporary) / "stock-runtime"
+            with patch.object(smoke, "PRODUCTS", products), \
+                    patch.object(smoke, "RUNTIME", runtime), \
+                    patch.object(smoke, "validate"), \
+                    patch.object(smoke, "PIN", "29112bef099274229cadff79cdff7bf7b99c4b77"), \
+                    patch.object(sys, "argv", [
+                        str(SCRIPT), "--https", "--slice2-ui", "--stock-backend",
+                        "--slice3-app-kill", "--tui-created-session-id", "seed-id",
+                        "--slice3-relaunch-seed-text", "SEMREH_SLICE3_APP_RELAUNCH_SEED_TEST",
+                    ]):
+                with redirect_stdout(StringIO()):
+                    smoke.main()
+
+            plan = plistlib.loads((products / "SemrehSlice2LiveUI.xctestrun").read_bytes())
+            target = plan["TestConfigurations"][0]["TestTargets"][0]
+            environment = target["EnvironmentVariables"]
+            self.assertEqual(environment["SEMREH_SLICE3_APP_KILL_UI"], "1")
+            self.assertNotIn("SEMREH_SLICE3_RELAUNCH_UI", environment)
+            self.assertEqual(environment["SEMREH_SLICE2_TUI_CREATED_SESSION_ID"], "seed-id")
+            self.assertEqual(environment["SEMREH_SLICE3_RELAUNCH_SEED_TEXT"], "SEMREH_SLICE3_APP_RELAUNCH_SEED_TEST")
+            self.assertEqual(target["OnlyTestIdentifiers"], [
+                "LongChatScrollUITests/testOptInLiveProductionLoginNewChatSend",
+            ])
     def test_stock_native_recovery_generation_exports_exact_target_and_guards(self):
         smoke = load_smoke_module()
         with tempfile.TemporaryDirectory() as temporary:

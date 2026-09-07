@@ -1,6 +1,8 @@
 import XCTest
 import UIKit
 import UniformTypeIdentifiers
+import Foundation
+import CoreFoundation
 
 final class LongChatScrollUITests: XCTestCase {
     private let performanceLabArgument = "--chat-performance-lab"
@@ -314,7 +316,7 @@ final class LongChatScrollUITests: XCTestCase {
     }
 
     @MainActor
-    func testOptInLiveProductionLoginNewChatSend() throws {
+    func testOptInLiveProductionLoginNewChatSend() async throws {
         continueAfterFailure = false
         #if !targetEnvironment(simulator)
         throw XCTSkip("Live production UI smoke is simulator-only.")
@@ -384,6 +386,30 @@ final class LongChatScrollUITests: XCTestCase {
 
         // The shell remembers the selected tab across normal sign-out/login.
         // Successful authentication need not land on Sessions automatically.
+        if environment["SEMREH_SLICE3_APP_KILL_UI"] == "1" {
+            guard stockBackend else {
+                XCTFail("Slice 3 app-kill UI requires the pinned stock backend.")
+                return
+            }
+            guard let storedID = environment["SEMREH_SLICE2_TUI_CREATED_SESSION_ID"],
+                  storedID.range(of: "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$", options: .regularExpression) != nil else {
+                XCTFail("Slice 3 app-kill UI requires a valid pre-seeded durable session ID.")
+                return
+            }
+            let seedMarker = environment["SEMREH_SLICE3_RELAUNCH_SEED_TEXT"] ?? tuiSeedMarker
+            guard seedMarker.range(of: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$", options: .regularExpression) != nil else {
+                XCTFail("Slice 3 app-kill UI requires a bounded synthetic seed marker.")
+                return
+            }
+            try await exerciseOptInActiveAppKill(
+                app: app,
+                storedID: storedID,
+                seedMarker: seedMarker,
+                credentials: credentials
+            )
+            return
+        }
+
         if environment["SEMREH_SLICE3_RELAUNCH_UI"] == "1" {
             guard stockBackend else {
                 XCTFail("Slice 3 relaunch UI requires the pinned stock backend.")
@@ -444,7 +470,7 @@ final class LongChatScrollUITests: XCTestCase {
             predicate: NSPredicate(format: "exists == true AND hittable == true"),
             object: acknowledgement
         )
-        wait(for: [appeared], timeout: 90)
+        await fulfillment(of: [appeared], timeout: 90)
         XCTAssertTrue(acknowledgement.exists && acknowledgement.isHittable)
         attachScreenshot(named: "live-production-chat-success")
 
@@ -507,8 +533,6 @@ final class LongChatScrollUITests: XCTestCase {
         assertSeededTranscriptVisible(app: app, seedMarker: seedMarker, context: "before app termination")
         attachScreenshot(named: "slice3-relaunch-before-terminate")
 
-        // This is the real XCTest process-death operation. No launch argument
-        // resets the app's persisted server/auth state on the second launch.
         app.terminate()
         app.launchArguments = []
         app.launch()
@@ -527,6 +551,208 @@ final class LongChatScrollUITests: XCTestCase {
         )
         waitForIdle(app: app)
         attachScreenshot(named: "slice3-relaunch-follow-up-complete")
+    }
+
+    @MainActor
+    private func exerciseOptInActiveAppKill(
+        app: XCUIApplication,
+        storedID: String,
+        seedMarker: String,
+        credentials: DisposableCredentials
+    ) async throws {
+        try openSeededSession(app: app, storedID: storedID)
+        assertSeededTranscriptVisible(app: app, seedMarker: seedMarker, context: "before app termination")
+        let observer = try await RelaunchCanonicalObserver(
+            origin: try XCTUnwrap(URL(string: approvedLiveOrigin)),
+            credentials: credentials
+        )
+        defer { observer.invalidate() }
+        let baseline = try await observer.transcript(storedID: storedID)
+        try assertExactCanonicalRows(
+            baseline,
+            storedID: storedID,
+            users: [seedMarker],
+            assistants: [slice1Acknowledgement]
+        )
+
+        let uniquePrompt = "SEMREH_INTERRUPT_FIXTURE SEMREH_SLICE3_APP_KILL_\(UUID().uuidString)"
+        sendLivePrompt(uniquePrompt, app: app, screenshotPrefix: "slice3-app-kill-accepted")
+        attachPlainText(uniquePrompt, named: "slice3-app-kill-marker")
+        let accepted = try await waitForCanonicalTranscript(
+            observer: observer,
+            storedID: storedID,
+            timeout: 8
+        ) { page in
+            self.matchesExactCanonicalRows(
+                page,
+                storedID: storedID,
+                users: [seedMarker, uniquePrompt],
+                assistants: [self.slice1Acknowledgement]
+            )
+        }
+        XCTAssertTrue(accepted.rows.prefix(baseline.rows.count).elementsEqual(baseline.rows, by: canonicalRowsEqual))
+        attachScreenshot(named: "slice3-app-kill-before-terminate")
+
+        // This is the real XCTest process-death operation. No launch argument
+        // resets the app's persisted server/auth state on the second launch.
+        app.terminate()
+        XCTAssertEqual(app.state, .notRunning, "The accepted run must outlive an actually terminated app process.")
+
+        // A first still-incomplete read after termination removes the race where
+        // the fixture could have completed just before XCTest killed the app.
+        let firstPostKill = try await observer.transcript(storedID: storedID)
+        XCTAssertEqual(app.state, .notRunning)
+        try assertExactCanonicalRows(
+            firstPostKill,
+            storedID: storedID,
+            users: [seedMarker, uniquePrompt],
+            assistants: [slice1Acknowledgement]
+        )
+        XCTAssertTrue(firstPostKill.rows.prefix(baseline.rows.count).elementsEqual(baseline.rows, by: canonicalRowsEqual))
+
+        let completedWhileDead = try await waitForCanonicalTranscript(
+            observer: observer,
+            storedID: storedID,
+            timeout: 30,
+            beforeEachRead: {
+                XCTAssertEqual(app.state, .notRunning, "The app must remain dead until canonical completion.")
+            }
+        ) { page in
+            self.matchesExactCanonicalRows(
+                page,
+                storedID: storedID,
+                users: [seedMarker, uniquePrompt],
+                assistants: [self.slice1Acknowledgement, self.slice1Acknowledgement]
+            )
+        }
+        XCTAssertEqual(app.state, .notRunning)
+        XCTAssertTrue(completedWhileDead.rows.prefix(baseline.rows.count).elementsEqual(baseline.rows, by: canonicalRowsEqual))
+
+        app.launchArguments = []
+        app.launch()
+        waitForPostLoginDestination(app: app)
+
+        try openSeededSession(app: app, storedID: storedID)
+        assertSeededTranscriptVisible(app: app, seedMarker: seedMarker, context: "after app relaunch")
+        let uniqueUserRows = app.staticTexts.matching(NSPredicate(format: "label == %@", uniquePrompt))
+        XCTAssertEqual(uniqueUserRows.count, 1, "Relaunch must render the accepted prompt exactly once.")
+        waitForAcknowledgementCount(
+            2,
+            app: app,
+            message: "Relaunch must render exactly the seeded and recovered fixture ACKs."
+        )
+        waitForIdle(app: app)
+        let composer = app.textViews.matching(
+            NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
+        ).firstMatch
+        XCTAssertTrue(composer.waitForExistence(timeout: 10))
+        let composerValue = (composer.value as? String) ?? ""
+        XCTAssertTrue(
+            composerValue.isEmpty || composerValue == composer.placeholderValue,
+            "The submitted prompt must not return as a stale composer draft."
+        )
+        XCTAssertFalse(composerValue.contains(uniquePrompt))
+
+        let finalCanonical = try await observer.transcript(storedID: storedID)
+        try assertExactCanonicalRows(
+            finalCanonical,
+            storedID: storedID,
+            users: [seedMarker, uniquePrompt],
+            assistants: [slice1Acknowledgement, slice1Acknowledgement]
+        )
+        XCTAssertTrue(finalCanonical.rows.prefix(baseline.rows.count).elementsEqual(baseline.rows, by: canonicalRowsEqual))
+        XCTAssertTrue(finalCanonical.rows.elementsEqual(completedWhileDead.rows, by: canonicalRowsEqual))
+        attachScreenshot(named: "slice3-app-kill-recovered")
+    }
+
+    @MainActor
+    private func waitForCanonicalTranscript(
+        observer: RelaunchCanonicalObserver,
+        storedID: String,
+        timeout: TimeInterval,
+        beforeEachRead: () -> Void = {},
+        matches: (RelaunchCanonicalTranscript) -> Bool
+    ) async throws -> RelaunchCanonicalTranscript {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            beforeEachRead()
+            let page = try await observer.transcript(storedID: storedID)
+            if matches(page) { return page }
+            try await Task.sleep(for: .milliseconds(100))
+        } while Date() < deadline
+        throw NSError(
+            domain: "LongChatScrollUITests",
+            code: 4,
+            userInfo: [NSLocalizedDescriptionKey: "Canonical transcript did not reach the exact expected state before the fixture deadline."]
+        )
+    }
+
+    @MainActor
+    private func assertExactCanonicalRows(
+        _ page: RelaunchCanonicalTranscript,
+        storedID: String,
+        users: [String],
+        assistants: [String]
+    ) throws {
+        guard matchesExactCanonicalRows(page, storedID: storedID, users: users, assistants: assistants) else {
+            throw NSError(
+                domain: "LongChatScrollUITests",
+                code: 5,
+                userInfo: [NSLocalizedDescriptionKey: "Canonical transcript did not contain the exact expected user/assistant rows."]
+            )
+        }
+    }
+
+    @MainActor
+    private func matchesExactCanonicalRows(
+        _ page: RelaunchCanonicalTranscript,
+        storedID: String,
+        users: [String],
+        assistants: [String]
+    ) -> Bool {
+        guard page.sessionID == storedID,
+              page.rows.count == users.count + assistants.count else { return false }
+        let durableIDs = page.rows.compactMap { canonicalDurableRowID($0["id"]) }
+        guard durableIDs.count == page.rows.count,
+              Set(durableIDs).count == durableIDs.count else { return false }
+        let roles = page.rows.compactMap { $0["role"] as? String }
+        let texts = page.rows.compactMap(canonicalRowText)
+        var expectedRoles: [String] = []
+        var expectedTexts: [String] = []
+        for index in users.indices {
+            expectedRoles.append("user")
+            expectedTexts.append(users[index])
+            if assistants.indices.contains(index) {
+                expectedRoles.append("assistant")
+                expectedTexts.append(assistants[index])
+            }
+        }
+        return roles == expectedRoles && texts == expectedTexts
+    }
+
+    @MainActor
+    private func canonicalDurableRowID(_ value: Any?) -> String? {
+        if let string = value as? String, !string.isEmpty { return "s:" + string }
+        guard let number = value as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+        let double = number.doubleValue
+        guard double.isFinite, double.rounded() == double else { return nil }
+        return "n:" + number.stringValue
+    }
+
+    @MainActor
+    private func canonicalRowText(_ row: [String: Any]) -> String? {
+        if let text = row["content"] as? String { return text }
+        guard let blocks = row["content"] as? [[String: Any]] else { return nil }
+        return blocks.compactMap { block in
+            guard block["type"] as? String == "text" else { return nil }
+            return block["text"] as? String
+        }.joined()
+    }
+
+    @MainActor
+    private func canonicalRowsEqual(_ lhs: [String: Any], _ rhs: [String: Any]) -> Bool {
+        NSDictionary(dictionary: lhs).isEqual(NSDictionary(dictionary: rhs))
     }
 
     @MainActor
@@ -1391,6 +1617,130 @@ final class LongChatScrollUITests: XCTestCase {
     private struct DisposableCredentials: Decodable {
         let username: String
         let password: String
+    }
+
+    private struct RelaunchCanonicalTranscript {
+        let sessionID: String
+        let rows: [[String: Any]]
+    }
+
+    @MainActor
+    private final class RelaunchCanonicalObserver {
+        private let origin: URL
+        private let session: URLSession
+
+        init(origin: URL, credentials: DisposableCredentials) async throws {
+            self.origin = origin
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.httpAdditionalHeaders = [:]
+            configuration.httpShouldSetCookies = true
+            configuration.httpCookieAcceptPolicy = .always
+            configuration.timeoutIntervalForRequest = 5
+            configuration.timeoutIntervalForResource = 5
+            session = URLSession(
+                configuration: configuration,
+                delegate: RelaunchRedirectGuard(origin: origin),
+                delegateQueue: nil
+            )
+
+            let body = try JSONSerialization.data(withJSONObject: [
+                "provider": "basic",
+                "username": credentials.username,
+                "password": credentials.password,
+                "next": "",
+            ])
+            let (data, response) = try await request(path: "/auth/password-login", method: "POST", body: body)
+            let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            guard (200..<300).contains(response.statusCode), payload?["ok"] as? Bool == true else {
+                throw NSError(
+                    domain: "LongChatScrollUITests",
+                    code: 6,
+                    userInfo: [NSLocalizedDescriptionKey: "Private canonical observer authentication failed."]
+                )
+            }
+        }
+
+        func invalidate() {
+            session.invalidateAndCancel()
+        }
+
+        func transcript(storedID: String) async throws -> RelaunchCanonicalTranscript {
+            var components = URLComponents()
+            components.path = "/api/sessions/\(storedID)/messages"
+            components.queryItems = [
+                URLQueryItem(name: "profile", value: "default"),
+                URLQueryItem(name: "include_compacted", value: "true"),
+                URLQueryItem(name: "order", value: "oldest"),
+                URLQueryItem(name: "limit", value: "20"),
+                URLQueryItem(name: "offset", value: "0"),
+            ]
+            guard let path = components.string else {
+                throw NSError(domain: "LongChatScrollUITests", code: 7)
+            }
+            let (data, response) = try await request(path: path, method: "GET")
+            guard (200..<300).contains(response.statusCode),
+                  let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let sessionID = object["session_id"] as? String,
+                  let rows = object["messages"] as? [[String: Any]] else {
+                throw NSError(
+                    domain: "LongChatScrollUITests",
+                    code: 8,
+                    userInfo: [NSLocalizedDescriptionKey: "Canonical transcript response was invalid."]
+                )
+            }
+            return RelaunchCanonicalTranscript(sessionID: sessionID, rows: rows)
+        }
+
+        private func request(
+            path: String,
+            method: String,
+            body: Data? = nil
+        ) async throws -> (Data, HTTPURLResponse) {
+            guard let url = URL(string: path, relativeTo: origin)?.absoluteURL,
+                  url.scheme == origin.scheme,
+                  url.host == origin.host,
+                  url.port == origin.port else {
+                throw NSError(domain: "LongChatScrollUITests", code: 9)
+            }
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 5
+            request.httpMethod = method
+            request.httpBody = body
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+            if body != nil {
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            }
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                throw NSError(domain: "LongChatScrollUITests", code: 10)
+            }
+            return (data, http)
+        }
+    }
+
+    private final class RelaunchRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+        private let origin: URL
+
+        init(origin: URL) {
+            self.origin = origin
+        }
+
+        func urlSession(
+            _ session: URLSession,
+            task: URLSessionTask,
+            willPerformHTTPRedirection response: HTTPURLResponse,
+            newRequest request: URLRequest,
+            completionHandler: @escaping (URLRequest?) -> Void
+        ) {
+            guard let destination = request.url,
+                  destination.scheme == origin.scheme,
+                  destination.host == origin.host,
+                  destination.port == origin.port else {
+                completionHandler(nil)
+                return
+            }
+            completionHandler(request)
+        }
     }
 
     private func readCredentials(at path: String) throws -> DisposableCredentials {

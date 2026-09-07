@@ -30,6 +30,9 @@ ACK = "SEMREH_SLICE1_ACK"
 SAFE_TEXT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
 STORED_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 RELAUNCH_PROMPT = re.compile(r"SEMREH_SLICE3_RELAUNCH_[A-Fa-f0-9-]{36}\Z")
+APP_KILL_PROMPT = re.compile(
+    r"SEMREH_INTERRUPT_FIXTURE SEMREH_SLICE3_APP_KILL_[A-Fa-f0-9-]{36}\Z"
+)
 
 
 def _validate_seed_text(raw: str) -> str:
@@ -150,7 +153,8 @@ async def _seed(credentials: dict, seed_text: str, evidence: dict) -> tuple[str,
                 await ws.close()
 
 
-async def _verify(credentials: dict, stored_id: str, seed_evidence: dict, evidence: dict) -> None:
+async def _verify(credentials: dict, stored_id: str, seed_evidence: dict, evidence: dict,
+                  expected_app_kill: bool = False) -> None:
     base = stock_probe.HTTPS_ORIGIN
     expected_seed = seed_evidence["seed_text"]
     async with authenticated(credentials, evidence, base=base, origin=base) as (client, _ticket):
@@ -174,7 +178,9 @@ async def _verify(credentials: dict, stored_id: str, seed_evidence: dict, eviden
         baseline_match = _canonical_digest(rows[:2]) == seed_evidence["baseline_rows_sha256"]
         if not baseline_match or _row_text(rows[0]) != expected_seed or _row_text(rows[1]) != ACK:
             raise RuntimeError("relaunch canonical transcript changed its seeded prefix")
-        if not RELAUNCH_PROMPT.fullmatch(_row_text(rows[2])) or _row_text(rows[3]) != ACK:
+        follow_up = _row_text(rows[2])
+        prompt_pattern = APP_KILL_PROMPT if expected_app_kill else RELAUNCH_PROMPT
+        if not prompt_pattern.fullmatch(follow_up) or _row_text(rows[3]) != ACK:
             raise RuntimeError("relaunch canonical follow-up was not one exact fixture turn")
         evidence.update({
             "verification_source": "authenticated canonical REST messages",
@@ -190,7 +196,7 @@ async def _verify(credentials: dict, stored_id: str, seed_evidence: dict, eviden
 
 
 async def _run(output: Path, seed_text: str | None, verify_session_id: str | None,
-               seed_evidence_path: Path | None) -> None:
+               seed_evidence_path: Path | None, verify_app_kill: bool = False) -> None:
     stock_probe.validate()
     credentials = json.loads((stock_probe.RUNTIME / "credentials.json").read_text(encoding="utf-8"))
     evidence = {
@@ -205,7 +211,7 @@ async def _run(output: Path, seed_text: str | None, verify_session_id: str | Non
     try:
         if verify_session_id is not None:
             seed_evidence = _load_seed_evidence(seed_evidence_path)  # type: ignore[arg-type]
-            await _verify(credentials, verify_session_id, seed_evidence, evidence)
+            await _verify(credentials, verify_session_id, seed_evidence, evidence, verify_app_kill)
             stored_id = verify_session_id
             marker = seed_evidence["seed_text"]
             evidence["not_verified"] = ["XCUIApplication termination/relaunch process-death attribution"]
@@ -239,6 +245,7 @@ def main() -> None:
     parser.add_argument("--seed-text", default=SEED_PREFIX + "FIXTURE")
     parser.add_argument("--verify-session-id")
     parser.add_argument("--seed-evidence")
+    parser.add_argument("--verify-app-kill", action="store_true")
     args = parser.parse_args()
     try:
         if args.verify_session_id:
@@ -251,12 +258,12 @@ def main() -> None:
             seed_text = None
             seed_evidence = Path(args.seed_evidence)
         else:
-            if args.seed_evidence:
-                raise ValueError("--seed-evidence requires --verify-session-id")
+            if args.seed_evidence or args.verify_app_kill:
+                raise ValueError("--seed-evidence and --verify-app-kill require --verify-session-id")
             seed_text = _validate_seed_text(args.seed_text)
             seed_evidence = None
         output = _output_path(args.output)
-        asyncio.run(_run(output, seed_text, args.verify_session_id, seed_evidence))
+        asyncio.run(_run(output, seed_text, args.verify_session_id, seed_evidence, args.verify_app_kill))
     except ValueError as error:
         parser.error(str(error))
 

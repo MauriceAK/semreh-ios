@@ -32,6 +32,7 @@ def main():
     parser.add_argument('--slice3-recovery', action='store_true')
     parser.add_argument('--slice3-completed-away', action='store_true')
     parser.add_argument('--slice3-relaunch', action='store_true')
+    parser.add_argument('--slice3-app-kill', action='store_true')
     parser.add_argument('--slice3-gateway-restart', action='store_true')
     parser.add_argument('--slice3-active-socket-loss', action='store_true')
     parser.add_argument('--gateway-restart-nonce')
@@ -46,7 +47,7 @@ def main():
         or args.cookie_phase or args.slice2_foundation or args.slice2_native
         or args.slice2_reasoning or args.slice2_ui or args.slice3_clarification
         or args.slice3_attachment or args.slice3_blocking or args.slice3_file_picker
-        or args.slice3_recovery or args.slice3_completed_away or args.slice3_relaunch
+        or args.slice3_recovery or args.slice3_completed_away or args.slice3_relaunch or args.slice3_app_kill
         or args.slice3_gateway_restart or args.gateway_restart_nonce
         or args.tui_created_session_id or args.slice3_relaunch_seed_text
     ):
@@ -56,10 +57,10 @@ def main():
     ):
         parser.error('--tui-created-session-id requires --slice2-ui and a plain durable session ID')
     if args.slice3_relaunch_seed_text and (
-        not args.slice3_relaunch
+        not (args.slice3_relaunch or args.slice3_app_kill)
         or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}', args.slice3_relaunch_seed_text)
     ):
-        parser.error('--slice3-relaunch-seed-text requires --slice3-relaunch and a bounded synthetic marker')
+        parser.error('--slice3-relaunch-seed-text requires --slice3-relaunch or --slice3-app-kill and a bounded synthetic marker')
     if args.gateway_restart_nonce and (
         not args.slice3_gateway_restart
         or not re.fullmatch(r'[A-Za-z0-9_-]{16,128}', args.gateway_restart_nonce)
@@ -113,7 +114,7 @@ def main():
         or args.slice2_native or args.slice2_reasoning or args.slice2_ui
         or args.slice3_clarification or args.slice3_attachment or args.slice3_blocking
         or args.slice3_file_picker or args.slice3_completed_away or args.slice3_relaunch
-        or args.slice3_gateway_restart
+        or args.slice3_gateway_restart or args.slice3_app_kill
         or args.tui_created_session_id or args.slice3_relaunch_seed_text
     ):
         parser.error('--slice3-recovery requires --https --stock-backend and no other test phase')
@@ -133,16 +134,26 @@ def main():
         or args.slice2_foundation or args.slice2_native or args.slice2_reasoning
         or args.slice3_clarification or args.slice3_attachment or args.slice3_blocking
         or args.slice3_recovery or args.slice3_completed_away
-        or args.slice3_gateway_restart
+        or args.slice3_gateway_restart or args.slice3_app_kill
         or not args.tui_created_session_id
     ):
         parser.error('--slice3-relaunch requires --slice2-ui --https --stock-backend --tui-created-session-id and no other test phase')
+    if args.slice3_app_kill and (
+        not args.slice2_ui or not args.https or args.cookie_phase
+        or not args.stock_backend or args.development_backend_sha
+        or args.slice2_foundation or args.slice2_native or args.slice2_reasoning
+        or args.slice3_clarification or args.slice3_attachment or args.slice3_blocking
+        or args.slice3_file_picker or args.slice3_recovery or args.slice3_completed_away
+        or args.slice3_relaunch or args.slice3_gateway_restart
+        or not args.tui_created_session_id
+    ):
+        parser.error('--slice3-app-kill requires --slice2-ui --https --stock-backend --tui-created-session-id and no other test phase')
     if args.slice3_gateway_restart and (
         not args.https or args.cookie_phase or not args.stock_backend
         or args.development_backend_sha or args.slice2_foundation
         or args.slice2_native or args.slice2_reasoning or args.slice2_ui
         or args.slice3_clarification or args.slice3_attachment or args.slice3_blocking
-        or args.slice3_file_picker or args.slice3_recovery or args.slice3_completed_away or args.slice3_relaunch
+        or args.slice3_file_picker or args.slice3_recovery or args.slice3_completed_away or args.slice3_relaunch or args.slice3_app_kill
         or not args.gateway_restart_nonce
     ):
         parser.error('--slice3-gateway-restart requires --https --stock-backend --gateway-restart-nonce and no other test phase')
@@ -271,6 +282,8 @@ def main():
             target['EnvironmentVariables']['SEMREH_SLICE3_FILE_PICKER_UI'] = '1'
         if args.slice3_relaunch:
             target['EnvironmentVariables']['SEMREH_SLICE3_RELAUNCH_UI'] = '1'
+        if args.slice3_app_kill:
+            target['EnvironmentVariables']['SEMREH_SLICE3_APP_KILL_UI'] = '1'
         if args.tui_created_session_id:
             target['EnvironmentVariables']['SEMREH_SLICE2_TUI_CREATED_SESSION_ID'] = args.tui_created_session_id
         if args.slice3_relaunch_seed_text:

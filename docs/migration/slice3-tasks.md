@@ -65,6 +65,19 @@ this sheet does not invent contracts or mark unexecuted checks passed.
   PDFs to reuse retained immutable bytes and the existing bounded/off-main PDF
   loader; no new dependency, network upload, host path or disk persistence.
   Generic unsupported-file fallback and metadata-only composer equality remain.
+- September7: text-file inference gap is a pinned stock path-policy mismatch,
+  not an app ref-format error. file.attach stages under profile-home attachments
+  and returns an absolute ref; prompt preprocessing allows only session cwd.
+  Preserve the exact server ref, do not fabricate a relative path, widen server
+  permissions or bundle a backend patch. Record storage/preview as verified and
+  inference as unresolved; continue independent lifecycle gates. A release-level
+  resolution is required before claiming working generic-file context injection.
+- Orphan-policy source review confirms finite grace expiry can interrupt running
+  work, not merely discard idle UI state (server.py1395-1500). Keep this explicit
+  in deployment requirements. No grace change made while short app-kill testing
+  runs; choose a finite value against the eventual physical long-background
+  interval plus reconnect margin. Do not use zero without cleanup/cap evidence
+  or broaden synthetic tools just to exercise delegation-specific reaping.
 
 ## Work packages
 
@@ -104,6 +117,15 @@ this sheet does not invent contracts or mark unexecuted checks passed.
     Relaunch-production-ui-v1 passed1/0/0 actual appterminate/launch/deeplink; separate
     canonical-v1 verified baselinehash and exact-once newturn. Not hostOSreboot,
     servicemanager, in-flight appkill or physicalbackground evidence.
+  - [x] **R2b — Accepted-run actual app termination checkpoint.** App-kill UIv2
+    passed1/0/0 with canonical acceptance before kill, first postkill read still
+    incomplete, completion while notRunning, same-chat relaunch/exact history/
+    empty composer. Independent canonicalv2 four-row prefix check passed.
+    This short Simulator case does not replace physical/long-background gates.
+  - [ ] **R2c — Immediate post-login launch auth failure follow-up.** App-kill UIv1
+    reached Sessions, then initial deep-link launch returned session-expired before
+    any test turn. Unchanged UIv2 passed; cause unresolved. Preserve failed
+    artifacts and investigate without hiding the boundary behind an arbitrary wait.
 - [ ] **S3-B — Blocking interaction.** Approval, clarification, sudo/secret and
   expiry. Key requests by server/session/generation/request; explicit deterministic
   cancellation if full UI unsupported. No sensitive response in persistence/logs.
