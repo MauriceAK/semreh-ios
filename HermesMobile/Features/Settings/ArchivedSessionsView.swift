@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ArchivedSessionsView: View {
     let server: URL
+    let profile: String
     /// Forwarded to `ChatView` and used for load/unarchive failures so a 401
     /// here triggers the same re-login flow as everywhere else.
     let onAPIError: (Error) -> Void
@@ -12,10 +13,15 @@ struct ArchivedSessionsView: View {
     @AppStorage(SessionRowDisplaySettings.showWorkspaceKey) private var showsSessionWorkspace = true
     @AppStorage(AppHaptics.isEnabledKey) private var isHapticsEnabled = true
 
-    init(server: URL, onAPIError: @escaping (Error) -> Void) {
+    init(
+        server: URL,
+        profile: String = "default",
+        onAPIError: @escaping (Error) -> Void
+    ) {
         self.server = server
+        self.profile = profile
         self.onAPIError = onAPIError
-        _viewModel = State(initialValue: ArchivedSessionsViewModel(server: server))
+        _viewModel = State(initialValue: ArchivedSessionsViewModel(server: server, profile: profile))
     }
 
     var body: some View {
@@ -79,9 +85,32 @@ struct ArchivedSessionsView: View {
                     ArchivedStatusRow(title: String(localized: "No archived sessions"), systemImage: "archivebox")
                         .padding(.horizontal, 24)
                 } else {
-                    VStack(spacing: 2) {
-                        ForEach(visibleSessions) { session in
-                            archivedSessionRow(for: session)
+                    VStack(alignment: .leading, spacing: 12) {
+                        if let errorMessage = viewModel.errorMessage {
+                            VStack(alignment: .leading, spacing: 8) {
+                                ArchivedStatusRow(
+                                    title: String(localized: "Could not refresh archived sessions"),
+                                    systemImage: "exclamationmark.triangle"
+                                )
+
+                                Text(errorMessage)
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(3)
+
+                                Button("Try Again") {
+                                    Task { await load() }
+                                }
+                                .font(.subheadline.weight(.medium))
+                                .foregroundStyle(.primary)
+                            }
+                            .padding(.horizontal, 12)
+                        }
+
+                        VStack(spacing: 2) {
+                            ForEach(visibleSessions) { session in
+                                archivedSessionRow(for: session)
+                            }
                         }
                     }
                     .padding(.horizontal, 12)

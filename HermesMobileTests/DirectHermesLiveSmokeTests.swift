@@ -150,6 +150,32 @@ final class DirectHermesLiveSmokeTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testOptInHostedSlice4SessionMetadataConsumers() async throws {
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("Slice 4 session metadata smoke is simulator-only.")
+        #endif
+
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SEMREH_SLICE1_LIVE"] == "1",
+              environment["SEMREH_SLICE1_HTTPS"] == "1",
+              environment["SEMREH_SLICE4_SESSION_METADATA_NATIVE"] == "1",
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == Self.defaultCredentialsPath,
+              environment["SEMREH_SLICE2_STOCK_BACKEND_SHA"] == Self.stockBackendSHA,
+              environment["SEMREH_SLICE2_TOOL_CWD"] == Self.stockToolCwd
+        else {
+            throw XCTSkip("Slice 4 session metadata smoke is opt-in for the pinned stock HTTPS fixture.")
+        }
+
+        do {
+            try await runHostedSlice4SessionMetadataConsumers()
+        } catch let failure as LiveSmokeFailure {
+            XCTFail("Slice 4 session metadata smoke failed at \(failure.stage).")
+        } catch {
+            XCTFail("Slice 4 session metadata smoke failed.")
+        }
+    }
+
     func testOptInHostedCookieLoginPhase() async throws {
         let transport = try cookiePhase("login", requiresCredentials: true)
         let credentials = try await stage("credentials") {
@@ -737,6 +763,224 @@ final class DirectHermesLiveSmokeTests: XCTestCase {
             if loggedIn { try? await api.directLogout() }
             throw error
         }
+    }
+
+    @MainActor
+    private func runHostedSlice4SessionMetadataConsumers() async throws {
+        let credentials = try await stage("slice4 metadata credentials") { try Self.readCredentials() }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpAdditionalHeaders = [:]
+        configuration.httpShouldSetCookies = true
+        configuration.httpCookieAcceptPolicy = .always
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let api = APIClient(
+            baseURL: HostedTransport.https.baseURL,
+            session: session,
+            publicMediaSession: session,
+            customHeaderProvider: { [] }
+        )
+        var runtime: HermesServerRuntime?
+        var controllers: [GatewayConversationController] = []
+        var ownedRuntimeIDs: [String] = []
+        var originals: [String: SessionSummary] = [:]
+        var loggedIn = false
+
+        do {
+            let status = try await stage("slice4 metadata status") { try await api.directStatus() }
+            guard status.authRequired == true else { throw LiveSmokeInvariant.failed }
+            let login = try await stage("slice4 metadata login") {
+                try await api.directPasswordLogin(username: credentials.username, password: credentials.password)
+            }
+            guard login.ok == true else { throw LiveSmokeInvariant.failed }
+            loggedIn = true
+            try await stage("slice4 metadata protected probe") { try await api.directProtectedProbe() }
+
+            let serverRuntime = try await stage("slice4 metadata runtime init") {
+                try HermesServerRuntime(origin: HostedTransport.https.baseURL, client: api)
+            }
+            runtime = serverRuntime
+            try await stage("slice4 metadata runtime connect") { try await serverRuntime.connect() }
+            let create: [String: JSONValue] = [
+                "cwd": .string(Self.stockToolCwd),
+                "model": .string("semreh-fixture"),
+                "provider": .string("custom")
+            ]
+
+            for index in 1...2 {
+                let events = LiveGatewayEventCapture()
+                let controller = GatewayConversationController(
+                    runtime: serverRuntime,
+                    client: api,
+                    storedID: nil,
+                    profile: "default"
+                )
+                controller.onEvent = { event in Task { await events.append(event) } }
+                controller.onBinding = { binding in
+                    if !ownedRuntimeIDs.contains(binding.runtimeID) {
+                        ownedRuntimeIDs.append(binding.runtimeID)
+                    }
+                }
+                controllers.append(controller)
+                try await stage("slice4 metadata create \(index)") {
+                    try await controller.submit("SEMREH_SLICE1_PROMPT", create: create)
+                }
+                let runtimeID = try XCTUnwrap(controller.binding?.runtimeID)
+                if !ownedRuntimeIDs.contains(runtimeID) { ownedRuntimeIDs.append(runtimeID) }
+                _ = try await stage("slice4 metadata terminal \(index)") {
+                    try await events.wait { event in
+                        event.sessionID == runtimeID
+                            && event.type == "message.complete"
+                            && Self.stringValue(Self.objectValue(event.payload)?["status"]) == "complete"
+                    }
+                }
+                let storedID = try XCTUnwrap(controller.storedID)
+                originals[storedID] = try await stage("slice4 metadata baseline detail \(index)") {
+                    try await api.directSessionDetail(sessionID: storedID, profile: "default")
+                }
+            }
+
+            let storedIDs = Array(originals.keys)
+            guard storedIDs.count == 2,
+                  let targetID = storedIDs.first,
+                  let siblingID = storedIDs.last,
+                  targetID != siblingID,
+                  let targetOriginal = originals[targetID],
+                  let siblingOriginal = originals[siblingID],
+                  targetOriginal.title != nil,
+                  targetOriginal.pinned == false,
+                  targetOriginal.archived == false
+            else { throw LiveSmokeInvariant.failed }
+            let baselineTranscript = try await stage("slice4 metadata transcript baseline") {
+                try await api.directSessionMessages(sessionID: targetID, profile: "default")
+            }
+
+            let list = SessionListViewModel(server: HostedTransport.https.baseURL, client: api)
+            guard try await stage("slice4 metadata list load", operation: { await list.load() }),
+                  let target = list.sessions.first(where: { $0.sessionId == targetID })
+            else { throw LiveSmokeInvariant.failed }
+            let changedTitle = "SEMREH_SLICE4_METADATA_\(UUID().uuidString)"
+            guard try await stage("slice4 metadata rename consumer", operation: {
+                await list.rename(target, to: changedTitle)
+            }) else { throw LiveSmokeInvariant.failed }
+            let renamed = try await api.directSessionDetail(sessionID: targetID, profile: "default")
+            guard renamed.title == changedTitle else { throw LiveSmokeInvariant.failed }
+
+            let renamedTarget = list.sessions.first(where: { $0.sessionId == targetID }) ?? renamed
+            guard try await stage("slice4 metadata pin consumer", operation: {
+                await list.setPinned(true, for: renamedTarget)
+            }) else { throw LiveSmokeInvariant.failed }
+            let pinned = try await api.directSessionDetail(sessionID: targetID, profile: "default")
+            guard pinned.title == changedTitle, pinned.pinned == true else { throw LiveSmokeInvariant.failed }
+
+            let pinnedTarget = list.sessions.first(where: { $0.sessionId == targetID }) ?? pinned
+            guard try await stage("slice4 metadata archive consumer", operation: {
+                await list.archive(pinnedTarget)
+            }) else { throw LiveSmokeInvariant.failed }
+            let archived = try await api.directSessionDetail(sessionID: targetID, profile: "default")
+            guard archived.title == changedTitle, archived.pinned == true, archived.archived == true else {
+                throw LiveSmokeInvariant.failed
+            }
+
+            let archivedList = ArchivedSessionsViewModel(
+                server: HostedTransport.https.baseURL,
+                profile: "default",
+                client: api
+            )
+            try await stage("slice4 metadata archived collection") { await archivedList.load() }
+            guard let archivedTarget = archivedList.sessions.first(where: { $0.sessionId == targetID }),
+                  try await stage("slice4 metadata unarchive consumer", operation: {
+                      await archivedList.unarchive(archivedTarget)
+                  })
+            else { throw LiveSmokeInvariant.failed }
+            let unarchived = try await api.directSessionDetail(sessionID: targetID, profile: "default")
+            guard unarchived.title == changedTitle, unarchived.pinned == true, unarchived.archived == false else {
+                throw LiveSmokeInvariant.failed
+            }
+
+            let siblingAfter = try await stage("slice4 metadata sibling unchanged") {
+                try await api.directSessionDetail(sessionID: siblingID, profile: "default")
+            }
+            guard siblingAfter == siblingOriginal else { throw LiveSmokeInvariant.failed }
+            let transcriptAfter = try await stage("slice4 metadata transcript unchanged") {
+                try await api.directSessionMessages(sessionID: targetID, profile: "default")
+            }
+            guard transcriptAfter == baselineTranscript else { throw LiveSmokeInvariant.failed }
+
+            try await stage("slice4 metadata restore") {
+                try await restoreSlice4Metadata(api: api, originals: originals)
+            }
+            originals = [:]
+            try await stage("slice4 metadata owned runtime cleanup") {
+                try await closeSlice4Runtimes(runtime: serverRuntime, runtimeIDs: ownedRuntimeIDs)
+            }
+            ownedRuntimeIDs = []
+            for controller in controllers { try await controller.dispose() }
+            controllers = []
+            await serverRuntime.stop()
+            runtime = nil
+            try await stage("slice4 metadata logout") { try await api.directLogout() }
+            loggedIn = false
+        } catch {
+            try? await restoreSlice4Metadata(api: api, originals: originals)
+            if let runtime { try? await closeSlice4Runtimes(runtime: runtime, runtimeIDs: ownedRuntimeIDs) }
+            for controller in controllers { try? await controller.dispose() }
+            if let runtime { await runtime.stop() }
+            if loggedIn { try? await api.directLogout() }
+            throw error
+        }
+    }
+
+    private func restoreSlice4Metadata(
+        api: APIClient,
+        originals: [String: SessionSummary]
+    ) async throws {
+        var failed = false
+        for (sessionID, original) in originals {
+            guard let title = original.title,
+                  let pinned = original.pinned,
+                  let archived = original.archived else {
+                failed = true
+                continue
+            }
+            do {
+                _ = try await api.directMutateSession(sessionID: sessionID, operation: .title(title))
+                _ = try await api.directMutateSession(sessionID: sessionID, operation: .pinned(pinned))
+                _ = try await api.directMutateSession(sessionID: sessionID, operation: .archived(archived))
+                let restored = try await api.directSessionDetail(sessionID: sessionID)
+                guard restored.title == title,
+                      restored.pinned == pinned,
+                      restored.archived == archived else {
+                    failed = true
+                    continue
+                }
+            } catch {
+                failed = true
+            }
+        }
+        if failed { throw LiveSmokeInvariant.failed }
+    }
+
+    private func closeSlice4Runtimes(
+        runtime: HermesServerRuntime,
+        runtimeIDs: [String]
+    ) async throws {
+        var failed = false
+        for runtimeID in runtimeIDs {
+            do {
+                let result = try await runtime.request("session.close", params: [
+                    "session_id": .string(runtimeID),
+                    "profile": .string("default")
+                ])
+                guard case .bool = result?.gatewayFields["closed"] else {
+                    failed = true
+                    continue
+                }
+            } catch {
+                failed = true
+            }
+        }
+        if failed { throw LiveSmokeInvariant.failed }
     }
 
     @MainActor

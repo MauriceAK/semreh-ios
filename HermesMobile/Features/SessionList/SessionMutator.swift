@@ -17,20 +17,74 @@ struct SessionMoveWhileStreamingError: LocalizedError, Equatable {
 struct SessionMutator {
     let client: APIClient
 
-    func setPinned(_ pinned: Bool, sessionID: String) async throws {
-        _ = try await client.pinSession(id: sessionID, pinned: pinned)
+    func setPinned(_ pinned: Bool, sessionID: String, profile: String = "default") async throws -> SessionSummary {
+        let detail = try await directMetadataSession(
+            sessionID: sessionID,
+            profile: profile,
+            operation: .pinned(pinned)
+        )
+        guard detail.pinned == pinned else {
+            throw DirectHermesSessionMutationError.missingReadback(field: "pinned")
+        }
+        return detail
     }
 
-    func archive(sessionID: String) async throws {
-        _ = try await client.archiveSession(id: sessionID, archived: true)
+    func archive(sessionID: String, profile: String = "default") async throws -> SessionSummary {
+        let detail = try await directMetadataSession(
+            sessionID: sessionID,
+            profile: profile,
+            operation: .archived(true)
+        )
+        guard detail.archived == true else {
+            throw DirectHermesSessionMutationError.missingReadback(field: "archived")
+        }
+        return detail
     }
 
     func delete(sessionID: String) async throws -> SessionMutationResponse {
         try await client.deleteSession(id: sessionID)
     }
 
-    func rename(sessionID: String, title: String) async throws -> SessionMutationResponse {
-        try await client.renameSession(id: sessionID, title: title)
+    func rename(
+        sessionID: String,
+        title: String,
+        profile: String = "default"
+    ) async throws -> SessionMutationResponse {
+        let detail = try await directMetadataSession(
+            sessionID: sessionID,
+            profile: profile,
+            operation: .title(title)
+        )
+        guard detail.title == title else {
+            throw DirectHermesSessionMutationError.missingReadback(field: "title")
+        }
+        return SessionMutationResponse(ok: true, session: detail, error: nil)
+    }
+
+    private func directMetadataSession(
+        sessionID: String,
+        profile rawProfile: String,
+        operation: DirectHermesSessionMutation
+    ) async throws -> SessionSummary {
+        let profile = rawProfile.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "default"
+            : rawProfile.trimmingCharacters(in: .whitespacesAndNewlines)
+        let receipt = try await client.directMutateSession(
+            sessionID: sessionID,
+            operation: operation,
+            profile: profile
+        )
+        guard receipt.sessionID == sessionID, receipt.profile == profile else {
+            throw DirectHermesSessionMutationError.missingReadback(field: "identity")
+        }
+
+        let detail = try await client.directSessionDetail(sessionID: sessionID, profile: profile)
+        guard detail.sessionId == sessionID,
+              (detail.profile ?? profile) == profile
+        else {
+            throw DirectHermesSessionMutationError.missingReadback(field: "identity")
+        }
+        return detail
     }
 
     func move(sessionID: String, to projectID: String?) async throws {

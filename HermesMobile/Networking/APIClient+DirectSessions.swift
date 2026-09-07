@@ -537,6 +537,53 @@ extension APIClient {
         )
     }
 
+    /// Official single-profile session discovery. Unlike the profile-aggregate
+    /// route, this endpoint applies offset inside the selected profile's DB and
+    /// supports true bounded pagination with a requested page size up to 100;
+    /// stock may append pinned rows beyond that requested size.
+    func directSingleProfileSessions(
+        profile: String = "default",
+        limit: Int = 100,
+        offset: Int = 0,
+        order: DirectHermesSessionListOrder = .recent,
+        archived: DirectHermesSessionArchiveFilter = .exclude
+    ) async throws -> DirectHermesSessionPage {
+        let profile = Self.directHermesProfile(profile)
+        let boundedLimit = min(max(limit, 0), 100)
+        let boundedOffset = max(offset, 0)
+        let path = Self.directHermesPath(
+            "/api/sessions",
+            queryItems: [
+                URLQueryItem(name: "profile", value: profile),
+                URLQueryItem(name: "limit", value: String(boundedLimit)),
+                URLQueryItem(name: "offset", value: String(boundedOffset)),
+                URLQueryItem(name: "order", value: order.rawValue),
+                URLQueryItem(name: "archived", value: archived.rawValue)
+            ]
+        )
+        let data = try await sendDirectData(
+            path: path,
+            method: "GET",
+            classifyStructuredAuthExpiry: true
+        )
+        let response = try decode(DirectHermesSessionListEnvelope.self, from: data)
+        for row in response.sessions ?? [] {
+            if let returnedProfile = row.profile,
+               !returnedProfile.isEmpty,
+               returnedProfile != profile {
+                throw DirectHermesRESTError.profileMismatch
+            }
+        }
+        return DirectHermesSessionPage(
+            sessions: response.sessions?.map { $0.summary(defaultProfile: profile) } ?? [],
+            total: response.total,
+            limit: response.limit,
+            offset: response.offset,
+            profileTotals: response.profileTotals,
+            errors: response.errors
+        )
+    }
+
     /// Official read-only session-content/ID search.  The stock route caps a
     /// positive limit at 100; unlike the profile list it does not accept a
     /// meaningful zero-page request, so callers are bounded to 1...100.

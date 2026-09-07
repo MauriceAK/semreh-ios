@@ -1,6 +1,7 @@
 # Slice 4 task outline
 
-Status: bounded S4-S read-only search integration underway; other packages remain
+Status: bounded S4-S search/detail integration verified; metadata and archive
+consumer integration underway. Other packages remain
 open. Refine remaining owners/file boundaries as Slice3 interfaces stabilize.
 The [execution plan](semreh_tui_gateway_v3_execution_plan.md) remains binding.
 This outline supports later parallelism; it is not permission to publish a release.
@@ -21,6 +22,59 @@ This outline supports later parallelism; it is not permission to publish a relea
   native/direct-backend tests and physical product acceptance.
 - [ ] **S4-P — Release-readiness performance review.** Revisit explicitly accepted
   limits in `performance-followups.md`; keep correctness distinct from visual polish.
+
+### Current S4-S integration checklist
+
+- [x] Verify direct search/list and exact linked-detail consumers (checkpoint35d20c3).
+- [x] Capture stock metadata PATCH and authoritative detail contracts.
+- [x] Capture official single-profile `/api/sessions` filters/offset envelope:
+  `slice4-single-profile-list-live-v1.json`, six reads, auth cleanup passed.
+- [x] Finish metadata consumers and independent refresh/profile race review.
+- [x] Switch archives to the verified single-profile paging route; the aggregate
+  route caps source rows at500 and cannot support complete large archives.
+- [x] Run focused native mutation/archive tests and actual-VM stock live smoke.
+- [x] Run integration suite and signed app launch before committing the cohort.
+- [ ] Finish archive count, full-scale search, and separately scoped safe deletion.
+
+First cohort native attempt `slice4-metadata-focused-v1` failed compilation on six
+missing `try` expressions in the new opt-in live test; no tests ran. The owner
+corrected them; a subsequent native result is still required. Python smoke
+selector35/35 and session probe8/8 passed. The live list fixture has82 unarchived
+rows and no archives: it proves route/schema/filter handling, not >500 live scale.
+
+Successor metadata cohort: focused-v5 passed87/0/0; native-live-v1 passed1/0/0
+against stock29112bef. Actual SessionList/Archived view models perform rename,
+pin, archive and unarchive; separate exact detail checks, sibling metadata and
+canonical transcript equality pass. Original metadata restoration and owned runtime
+close/auth cleanup pass. This is native VM evidence, not literal UI or device
+acceptance. Archive501-row/six-page and pinned-backfill coverage is mocked.
+
+Reasonable sync decision (root + independent Sol review): stock REST writes and
+reads the selected SQLite DB synchronously; no eventual response cache is proven.
+Protect only list requests begun before local confirmation using per-field
+confirmation revisions. Fresh post-confirmation reads are authoritative, including
+conflicting Desktop/TUI edits. Never retain indefinite exact-match overlays that
+could mask external changes. Profile/session keys and actual profile-change epoch
+guard metadata mutations. Async-held response tests prove overlap and subsequent
+conflicting title/pin truth; archive test proves subsequent external rearchive.
+Residual coverage: profile-epoch test gates use timeout semaphores, and reused-ID
+cross-profile pending isolation lacks a direct dedicated regression; code reviewed.
+
+Attempt history retained: focused-v2 built and ran80pass/6fail (legacy sanitized
+error expectations, request count including detail GET, fixture interpolation/cwd,
+archive semaphore deadlock). Corrected fixtures and genuine asynchronous response
+gates. v3 invocation failed on root's misspelled DerivedData flag before build;
+v4 compile failed on duplicate test-local `session`, corrected by root; v5 passed.
+No failures are labeled unexplained infrastructure. Full integration
+`slice4-metadata-full-v1` passed2237/0/13 intentional opt-in skips (root inspected
+all skip reasons); metadata opt-in ran separately and passed. Strict signed-app
+verification and ordinary Simulator launch29179 passed. Root exported failed-v2,
+focused-v5, native-live-v1 and full-v1 diagnostics for the artifact audit. No phone
+install, personal-state change or publication. Archive count/search/deletion and
+other S4 packages remain open; this is a bounded cohort, not slice acceptance.
+Artifact audit `slice4-metadata-audit-v1.jsonl`:242758 files,0 flagged paths,
+145 exported consoles. Scope is known disposable secrets/obvious bearer formats;
+not arbitrary opaque secrets, screenshot OCR or quarantined OS diagnostics.
 
 Potential parallel lanes: feature inventory, independent screen implementations,
 contract tests and deletion audit. Shared chat/history/runtime files stay single-owner.

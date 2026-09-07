@@ -61,6 +61,28 @@ private struct PendingSessionDeletion {
     var latestCanonicalArchivedCount: Int?
 }
 
+private enum PendingMetadataField {
+    case title(String)
+    case pinned(Bool)
+    case archived(Bool)
+}
+
+private struct PendingMetadataMutation {
+    var title: PendingMetadataValue<String>?
+    var pinned: PendingMetadataValue<Bool>?
+    var archived: PendingMetadataValue<Bool>?
+}
+
+private struct PendingMetadataValue<Value> {
+    let value: Value
+    let revision: Int
+}
+
+private struct PendingMetadataKey: Hashable {
+    let profile: String
+    let sessionID: String
+}
+
 private struct SessionMutationRejectedError: LocalizedError {
     let message: String
 
@@ -135,6 +157,12 @@ final class SessionListViewModel {
     /// response. Optimistic rollbacks never overwrite a newer server result.
     private var successfulLoadGeneration = 0
     private var pendingSessionDeletions: [String: PendingSessionDeletion] = [:]
+    /// Authoritative metadata received after a PATCH but before a later list
+    /// response. It prevents an older overlapping sidebar response from
+    /// erasing a confirmed pin/title/archive change.
+    private var pendingMetadataMutations: [PendingMetadataKey: PendingMetadataMutation] = [:]
+    private var activeProfileEpoch = 0
+    private var metadataConfirmationRevision = 0
     /// Confirmed deletes remain hidden until a later process/session lifecycle;
     /// this prevents an eventually-consistent list response from resurrecting a
     /// row that the delete endpoint already acknowledged.
@@ -338,6 +366,8 @@ final class SessionListViewModel {
     func load(modelContext: ModelContext? = nil, animation: Animation? = nil) async -> Bool {
         loadGeneration &+= 1
         let generation = loadGeneration
+        let requestedProfile = Self.nonEmpty(activeProfileName) ?? "default"
+        let requestRevision = metadataConfirmationRevision
         isLoading = true
         errorMessage = nil
         cacheErrorMessage = nil
@@ -354,13 +384,28 @@ final class SessionListViewModel {
 
         do {
             let response = try await client.directSessions(
-                profile: Self.nonEmpty(activeProfileName) ?? "default",
+                profile: requestedProfile,
                 limit: 500,
                 offset: 0,
                 order: .recent
             )
-            guard loadGeneration == generation else { return false }
-            let canonicalVisibleSessions = response.sessions
+            guard loadGeneration == generation,
+                  (Self.nonEmpty(activeProfileName) ?? "default") == requestedProfile
+            else { return false }
+            let rawSessions = response.sessions
+            let canonicalVisibleSessions = rawSessions
+                .map { session -> SessionSummary in
+                    guard let sessionID = Self.nonEmpty(session.sessionId),
+                          let pending = pendingMetadataMutations[
+                              PendingMetadataKey(profile: requestedProfile, sessionID: sessionID)
+                          ]
+                    else { return session }
+                    return applyingPendingMetadata(
+                        session,
+                        pending: pending,
+                        newerThan: requestRevision
+                    )
+                }
                 .filter { $0.archived != true && $0.shouldAppearInSessionList }
             for sessionID in pendingSessionDeletions.keys {
                 pendingSessionDeletions[sessionID]?.latestCanonicalSessions = canonicalVisibleSessions
@@ -369,6 +414,17 @@ final class SessionListViewModel {
             let visibleSessions = sessionsAfterOptimisticDeletions(canonicalVisibleSessions)
             successfulLoadGeneration = generation
             applySessions(visibleSessions, archivedCount: nil, animation: animation)
+            for (key, var pending) in Array(pendingMetadataMutations)
+                where key.profile == requestedProfile {
+                if pending.title?.revision ?? .min <= requestRevision { pending.title = nil }
+                if pending.pinned?.revision ?? .min <= requestRevision { pending.pinned = nil }
+                if pending.archived?.revision ?? .min <= requestRevision { pending.archived = nil }
+                if pending.title == nil, pending.pinned == nil, pending.archived == nil {
+                    pendingMetadataMutations.removeValue(forKey: key)
+                } else {
+                    pendingMetadataMutations[key] = pending
+                }
+            }
             isViewingCachedData = false
             clearCacheFirstSessionPlaceholder()
 
@@ -800,16 +856,13 @@ final class SessionListViewModel {
         modelContext: ModelContext? = nil,
         animation: Animation? = nil
     ) async -> Bool {
-        guard let sessionId = Self.nonEmpty(session.sessionId) else {
-            actionErrorMessage = String(localized: "The server did not provide a session ID.")
-            return false
-        }
-
-        guard beginSessionMutation(sessionId) else { return false }
-        defer { endSessionMutation(sessionId) }
-
-        return await mutate(modelContext: modelContext, animation: animation) {
-            try await sessionMutator.setPinned(pinned, sessionID: sessionId)
+        await mutateDirectMetadata(
+            session,
+            modelContext: modelContext,
+            animation: animation,
+            field: .pinned(pinned)
+        ) { [sessionMutator] sessionID, profile in
+            try await sessionMutator.setPinned(pinned, sessionID: sessionID, profile: profile)
         }
     }
 
@@ -818,16 +871,13 @@ final class SessionListViewModel {
         modelContext: ModelContext? = nil,
         animation: Animation? = nil
     ) async -> Bool {
-        guard let sessionId = Self.nonEmpty(session.sessionId) else {
-            actionErrorMessage = String(localized: "The server did not provide a session ID.")
-            return false
-        }
-
-        guard beginSessionMutation(sessionId) else { return false }
-        defer { endSessionMutation(sessionId) }
-
-        return await mutate(modelContext: modelContext, animation: animation) {
-            try await sessionMutator.archive(sessionID: sessionId)
+        await mutateDirectMetadata(
+            session,
+            modelContext: modelContext,
+            animation: animation,
+            field: .archived(true)
+        ) { [sessionMutator] sessionID, profile in
+            try await sessionMutator.archive(sessionID: sessionID, profile: profile)
         }
     }
 
@@ -925,39 +975,19 @@ final class SessionListViewModel {
         }
 
         isRenamingSession = true
-        actionErrorMessage = nil
-        lastError = nil
         defer { isRenamingSession = false }
-
-        do {
-            let response = try await sessionMutator.rename(sessionID: sessionId, title: title)
-            if let error = Self.nonEmpty(response.error) {
-                actionErrorMessage = error
-                return false
-            }
-
-            let resolvedTitle = Self.nonEmpty(response.session?.title) ?? title
-            let baseSession = sessions.first(where: { $0.sessionId == sessionId }) ?? session
-            let updatedSession = baseSession.replacingTitle(with: resolvedTitle)
-            if let existingIndex = sessions.firstIndex(where: { $0.sessionId == sessionId }) {
-                sessions[existingIndex] = updatedSession
-            }
-
-            if let modelContext {
-                do {
-                    try CacheStore.cacheSession(updatedSession, serverURL: server, in: modelContext)
-                } catch {
-                    cacheErrorMessage = error.localizedDescription
-                }
-            }
-
-            return true
-        } catch {
-            guard !isCancellationError(error) else { return false }
-
-            lastError = error
-            actionErrorMessage = error.localizedDescription
-            return false
+        return await mutateDirectMetadata(
+            session,
+            modelContext: modelContext,
+            animation: nil,
+            field: .title(title)
+        ) { [sessionMutator] sessionID, profile in
+            let response = try await sessionMutator.rename(
+                sessionID: sessionID,
+                title: title,
+                profile: profile
+            )
+            return response.session ?? session
         }
     }
 
@@ -1500,6 +1530,7 @@ final class SessionListViewModel {
         let profile = response.profile(matching: profileName) ?? fallbackProfile
 
         if activeProfileName != profileName {
+            activeProfileEpoch &+= 1
             // A response for the previous profile must never repopulate a
             // same-query search after a profile switch.
             remoteSearchGeneration &+= 1
@@ -1533,6 +1564,192 @@ final class SessionListViewModel {
             actionErrorMessage = error.localizedDescription
             return false
         }
+    }
+
+    private func mutateDirectMetadata(
+        _ session: SessionSummary,
+        modelContext: ModelContext?,
+        animation: Animation?,
+        field: PendingMetadataField,
+        operation: (String, String) async throws -> SessionSummary
+    ) async -> Bool {
+        guard !isViewingCachedData else {
+            actionErrorMessage = String(localized: "Reconnect to the server to modify a session.")
+            return false
+        }
+        guard let rawSessionID = session.sessionId,
+              let sessionID = Self.nonEmpty(rawSessionID),
+              rawSessionID == sessionID
+        else {
+            actionErrorMessage = String(localized: "The server did not provide a session ID.")
+            return false
+        }
+
+        let activeProfile = Self.nonEmpty(activeProfileName) ?? "default"
+        let profileEpoch = activeProfileEpoch
+        let sessionProfile = Self.nonEmpty(session.profile) ?? "default"
+        guard activeProfile == sessionProfile else {
+            actionErrorMessage = String(localized: "Switch to this session's profile to modify it.")
+            return false
+        }
+        guard beginSessionMutation(sessionID) else { return false }
+        defer { endSessionMutation(sessionID) }
+
+        actionErrorMessage = nil
+        lastError = nil
+        let capturedServer = server
+
+        do {
+            let authoritative = try await operation(sessionID, activeProfile)
+            guard isCurrentMetadataScope(
+                server: capturedServer,
+                profile: activeProfile,
+                epoch: profileEpoch
+            ),
+                  authoritative.sessionId == sessionID,
+                  (Self.nonEmpty(authoritative.profile) ?? activeProfile) == activeProfile
+            else {
+                return false
+            }
+
+            let base = sessions.first(where: { $0.sessionId == sessionID }) ?? session
+            let updated = mergedMetadataSession(base, authoritative: authoritative)
+            let pendingKey = PendingMetadataKey(profile: activeProfile, sessionID: sessionID)
+            var pending = pendingMetadataMutations[pendingKey]
+                ?? PendingMetadataMutation(title: nil, pinned: nil, archived: nil)
+            metadataConfirmationRevision &+= 1
+            let revision = metadataConfirmationRevision
+            switch field {
+            case let .title(title): pending.title = PendingMetadataValue(value: title, revision: revision)
+            case let .pinned(pinned): pending.pinned = PendingMetadataValue(value: pinned, revision: revision)
+            case let .archived(archived): pending.archived = PendingMetadataValue(value: archived, revision: revision)
+            }
+            pendingMetadataMutations[pendingKey] = pending
+            if updated.archived == true {
+                applySessions(
+                    sessions.filter { $0.sessionId != sessionID },
+                    archivedCount: archivedCount,
+                    animation: animation
+                )
+            } else if let index = sessions.firstIndex(where: { $0.sessionId == sessionID }) {
+                var updatedSessions = sessions
+                updatedSessions[index] = updated
+                applySessions(updatedSessions, archivedCount: archivedCount, animation: animation)
+            }
+
+            if let modelContext {
+                do {
+                    try CacheStore.cacheSession(updated, serverURL: server, in: modelContext)
+                } catch {
+                    cacheErrorMessage = error.localizedDescription
+                }
+            }
+            return true
+        } catch {
+            guard !isCancellationError(error) else { return false }
+            guard isCurrentMetadataScope(
+                server: capturedServer,
+                profile: activeProfile,
+                epoch: profileEpoch
+            ) else { return false }
+            lastError = error
+            actionErrorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    private func isCurrentMetadataScope(
+        server capturedServer: URL,
+        profile: String,
+        epoch: Int
+    ) -> Bool {
+        !Task.isCancelled
+            && server == capturedServer
+            && (Self.nonEmpty(activeProfileName) ?? "default") == profile
+            && activeProfileEpoch == epoch
+    }
+
+    private func applyingPendingMetadata(
+        _ session: SessionSummary,
+        pending: PendingMetadataMutation,
+        newerThan revision: Int
+    ) -> SessionSummary {
+        SessionSummary(
+            sessionId: session.sessionId,
+            title: pending.title.flatMap { $0.revision > revision ? $0.value : nil } ?? session.title,
+            workspace: session.workspace,
+            model: session.model,
+            modelProvider: session.modelProvider,
+            reasoningEffort: session.reasoningEffort,
+            messageCount: session.messageCount,
+            createdAt: session.createdAt,
+            updatedAt: session.updatedAt,
+            lastMessageAt: session.lastMessageAt,
+            pinned: pending.pinned.flatMap { $0.revision > revision ? $0.value : nil } ?? session.pinned,
+            archived: pending.archived.flatMap { $0.revision > revision ? $0.value : nil } ?? session.archived,
+            projectId: session.projectId,
+            profile: session.profile,
+            inputTokens: session.inputTokens,
+            outputTokens: session.outputTokens,
+            estimatedCost: session.estimatedCost,
+            activeStreamId: session.activeStreamId,
+            isStreaming: session.isStreaming,
+            isCliSession: session.isCliSession,
+            userMessageCount: session.userMessageCount,
+            hasPendingUserMessage: session.hasPendingUserMessage,
+            pendingStartedAt: session.pendingStartedAt,
+            worktreePath: session.worktreePath,
+            sourceTag: session.sourceTag,
+            rawSource: session.rawSource,
+            sessionSource: session.sessionSource,
+            sourceLabel: session.sourceLabel,
+            parentSessionId: session.parentSessionId,
+            relationshipType: session.relationshipType,
+            readOnly: session.readOnly,
+            isReadOnly: session.isReadOnly,
+            matchType: session.matchType
+        )
+    }
+
+    private func mergedMetadataSession(
+        _ local: SessionSummary,
+        authoritative: SessionSummary
+    ) -> SessionSummary {
+        SessionSummary(
+            sessionId: local.sessionId ?? authoritative.sessionId,
+            title: authoritative.title ?? local.title,
+            workspace: authoritative.workspace ?? local.workspace,
+            model: authoritative.model ?? local.model,
+            modelProvider: authoritative.modelProvider ?? local.modelProvider,
+            reasoningEffort: authoritative.reasoningEffort ?? local.reasoningEffort,
+            messageCount: authoritative.messageCount ?? local.messageCount,
+            createdAt: authoritative.createdAt ?? local.createdAt,
+            updatedAt: authoritative.updatedAt ?? local.updatedAt,
+            lastMessageAt: authoritative.lastMessageAt ?? local.lastMessageAt,
+            pinned: authoritative.pinned ?? local.pinned,
+            archived: authoritative.archived ?? local.archived,
+            projectId: local.projectId,
+            profile: authoritative.profile ?? local.profile,
+            inputTokens: authoritative.inputTokens ?? local.inputTokens,
+            outputTokens: authoritative.outputTokens ?? local.outputTokens,
+            estimatedCost: authoritative.estimatedCost ?? local.estimatedCost,
+            activeStreamId: local.activeStreamId,
+            isStreaming: local.isStreaming,
+            isCliSession: authoritative.isCliSession ?? local.isCliSession,
+            userMessageCount: local.userMessageCount,
+            hasPendingUserMessage: local.hasPendingUserMessage,
+            pendingStartedAt: local.pendingStartedAt,
+            worktreePath: local.worktreePath,
+            sourceTag: authoritative.sourceTag ?? local.sourceTag,
+            rawSource: authoritative.rawSource ?? local.rawSource,
+            sessionSource: authoritative.sessionSource ?? local.sessionSource,
+            sourceLabel: authoritative.sourceLabel ?? local.sourceLabel,
+            parentSessionId: authoritative.parentSessionId ?? local.parentSessionId,
+            relationshipType: local.relationshipType,
+            readOnly: authoritative.readOnly ?? local.readOnly,
+            isReadOnly: authoritative.isReadOnly ?? local.isReadOnly,
+            matchType: local.matchType
+        )
     }
 
     private func isCancellationError(_ error: Error) -> Bool {

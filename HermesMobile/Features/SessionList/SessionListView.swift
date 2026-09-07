@@ -459,7 +459,11 @@ struct SessionListView: View {
             case .insights:
                 InsightsView(server: server, onAPIError: authManager.handleAPIError)
             case .archived:
-                ArchivedSessionsView(server: server, onAPIError: authManager.handleAPIError)
+                ArchivedSessionsView(
+                    server: server,
+                    profile: viewModel.activeProfileName ?? "default",
+                    onAPIError: authManager.handleAPIError
+                )
             case .scheduled:
                 ScheduledSessionsView(
                     viewModel: viewModel,

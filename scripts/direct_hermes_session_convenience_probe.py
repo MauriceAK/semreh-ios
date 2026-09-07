@@ -2,10 +2,10 @@
 """Bounded read-only stock session-list and search contract probe.
 
 This probe exercises only the pinned disposable HTTPS deployment.  It reads
-the profile-scoped session list with each stock archive filter and performs one
-search for the retained synthetic relaunch seed.  Evidence contains request
-shapes and response schemas/counts, never transcript text, IDs, paths, or
-authentication material.
+the profile-scoped and single-profile session lists with each stock archive
+filter and performs one search for the retained synthetic relaunch seed.
+Evidence contains request shapes and response schemas/counts, never transcript
+text, IDs, paths, or authentication material.
 """
 
 from __future__ import annotations
@@ -26,9 +26,12 @@ from direct_hermes_reasoning_probe import (
 
 
 SESSION_ROUTE = "/api/profiles/sessions"
+SINGLE_PROFILE_SESSION_ROUTE = "/api/sessions"
 SEARCH_ROUTE = "/api/sessions/search"
 ARCHIVED_FILTERS = ("exclude", "only", "include")
 SESSION_LIMIT = 20
+SINGLE_PROFILE_SESSION_LIMIT = 100
+SINGLE_PROFILE_OFFSETS = (0, 100)
 SEARCH_LIMIT = 20
 SEARCH_MARKER = "SEMREH_SLICE3_APP_RELAUNCH_SEED_AUTH_V1"
 
@@ -117,6 +120,74 @@ def _session_summary(payload: Any, *, archived: str, requested_limit: int) -> di
     }
 
 
+def _single_profile_session_summary(
+    payload: Any,
+    *,
+    archived: str,
+    requested_limit: int,
+    requested_offset: int,
+) -> dict:
+    """Validate the official single-profile ``/api/sessions`` envelope.
+
+    This route deliberately has no ``profile_totals`` or ``errors`` fields.
+    Pinned rows may be appended past the requested page limit, so only the
+    source-defined pinned over-fetch is accepted.
+    """
+    if not isinstance(payload, dict):
+        raise AssertionError("single-profile session response is not an object")
+    required = {"sessions", "total", "limit", "offset"}
+    if not required <= set(payload):
+        raise AssertionError("single-profile session envelope is missing required fields")
+    if "profile_totals" in payload or "errors" in payload:
+        raise AssertionError("single-profile route returned the profile-aggregate envelope")
+    rows = payload["sessions"]
+    total = payload["total"]
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        raise AssertionError("single-profile session rows are not objects")
+    if not _is_int(total) or total < 0:
+        raise AssertionError("single-profile session total is not a non-negative integer")
+    if total < len(rows):
+        raise AssertionError("single-profile session total is smaller than its page")
+    if payload["limit"] != requested_limit or payload["offset"] != requested_offset:
+        raise AssertionError("single-profile pagination readback differs from request")
+
+    archived_values: set[bool] = set()
+    pinned_values: list[bool] = []
+    row_keys: set[str] = set()
+    for row in rows:
+        row_keys.update(str(key) for key in row)
+        if row.get("profile") != PROFILE or row.get("is_default_profile") is not True:
+            raise AssertionError("single-profile row escaped the requested profile")
+        value = row.get("archived")
+        if not isinstance(value, bool):
+            raise AssertionError("single-profile archived flag is not boolean")
+        archived_values.add(value)
+        pinned = row.get("pinned")
+        if not isinstance(pinned, bool):
+            raise AssertionError("single-profile pinned flag is not boolean")
+        pinned_values.append(pinned)
+        if archived == "exclude" and value:
+            raise AssertionError("single-profile archived=exclude returned an archived row")
+        if archived == "only" and not value:
+            raise AssertionError("single-profile archived=only returned an unarchived row")
+    if len(rows) > requested_limit and any(not pinned for pinned in pinned_values[requested_limit:]):
+        raise AssertionError("single-profile page exceeded its limit with a non-pinned row")
+
+    return {
+        "top_level_keys": _keys(payload),
+        "row_keys": sorted(row_keys),
+        "row_count": len(rows),
+        "total": total,
+        "archived_values": sorted(archived_values),
+        "pinned_overfetch_count": sum(pinned_values[requested_limit:]),
+        "filter_verified": archived,
+        "filter_positive_rows_observed": bool(rows),
+        "limit": requested_limit,
+        "offset": requested_offset,
+        "profile": PROFILE,
+    }
+
+
 def _search_summary(payload: Any, *, marker: str, requested_limit: int) -> dict:
     """Validate the stock search envelope without retaining result contents."""
     if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
@@ -199,12 +270,42 @@ async def exercise(client, evidence: dict) -> None:
             "response": _session_summary(count_payload, archived=archived, requested_limit=0),
         })
 
+    single_profile_checks = []
+    for archived in ARCHIVED_FILTERS:
+        for offset in SINGLE_PROFILE_OFFSETS:
+            params = {
+                "profile": PROFILE,
+                "limit": SINGLE_PROFILE_SESSION_LIMIT,
+                "offset": offset,
+                "archived": archived,
+                "order": "recent",
+            }
+            response = await client.get(SINGLE_PROFILE_SESSION_ROUTE, params=params)
+            if response.status_code != 200:
+                raise RuntimeError("single-profile session list request failed")
+            payload = response.json()
+            single_profile_checks.append({
+                "request": {
+                    "method": "GET",
+                    "path": SINGLE_PROFILE_SESSION_ROUTE,
+                    "params": dict(params),
+                },
+                "response_status": response.status_code,
+                "response": _single_profile_session_summary(
+                    payload,
+                    archived=archived,
+                    requested_limit=SINGLE_PROFILE_SESSION_LIMIT,
+                    requested_offset=offset,
+                ),
+            })
+
     search_params = {"q": SEARCH_MARKER, "profile": PROFILE, "limit": SEARCH_LIMIT}
     search_response = await client.get(SEARCH_ROUTE, params=search_params)
     if search_response.status_code != 200:
         raise RuntimeError("session search request failed")
     search_payload = search_response.json()
     evidence["session_lists"] = session_checks
+    evidence["single_profile_session_lists"] = single_profile_checks
     evidence["search"] = {
         "request": {"method": "GET", "path": SEARCH_ROUTE, "params": dict(search_params)},
         "response_status": search_response.status_code,
