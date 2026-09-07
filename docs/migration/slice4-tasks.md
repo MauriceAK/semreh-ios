@@ -65,6 +65,45 @@ Count artifact audit passed with zero flagged paths; see
 scope remains known fixture secrets and obvious bearer formats, not opaque-secret
 proof, screenshot OCR, or quarantined OS diagnostics.
 
+### Search beyond the loaded sidebar — active package
+
+Search verification checkpoint: full-v2 passed 2,254/0/13 opt-in skips;
+native-live-v1 passed 1/0/0 on stock Hermes using a fresh search-only view model,
+exact-ID discovery and rename with independent readback and unchanged canonical
+sidebar. Full-v1 retained one real ordering regression (2,253/1/13): remote
+membership had replaced the established recency presentation order. Luna restored
+the previous sort; root and independent review checked it against the committed
+contract. Strict signing and ordinary Simulator launch 59378 passed. Test-only
+successor `slice4-search-stale-patch-focused-v1` passed 11/0/0, including an
+async-held failing rename PATCH released after replacing the search; no stale
+errors or rows publish. Independent review approved this negative control;
+missing-PATCH failures rely on the outer XCTest timeout. No device or >500-row
+live-scale acceptance is implied. Audit-v1 passed 257,105 files with zero flags
+and 152 exported consoles. Final `slice4-search-scale-audit-v2.jsonl` includes the
+new test output and passed with zero flagged paths. Audit scope is known fixture
+secrets and obvious bearer formats, not opaque-secret proof, screenshot OCR, or
+quarantined OS diagnostics.
+
+Secondary-memory decision pending: pinned stock profile SOUL GET/PUT is supported;
+`/api/memory` supplies provider status/file sizes, not MEMORY/USER text. No approved
+profile-scoped content or project-context editing contract was found. Root asked
+whether to migrate SOUL and hide unsupported editors; no feature removal or
+provider activation has been implemented. Do not substitute generic guessed host
+paths or `/api/memory/reset` for a supported editor contract.
+
+Resolve at most the stock search page's 20 exact-ID hits through the existing
+profile-scoped detail contract when they are absent from the loaded sidebar.
+Keep these rows in query-scoped search state, not the canonical list or cache.
+Archived, mismatched, deleted, cancelled, and stale-profile/query results cannot
+appear. Per-hit missing results may be skipped; connection/auth failures must not
+cause a long series of equivalent failing detail calls.
+
+Retain open, copy-title/deeplink, and verified pin/rename/archive behavior on
+search-only rows. Collection-dependent delete/duplicate/move/network export remain
+temporarily unavailable on those newly surfaced rows until their S4-D/F contracts
+are migrated. This is not a permanent feature removal or a claim of full parity.
+Do not fake server read-only metadata to implement this temporary UI constraint.
+
 First cohort native attempt `slice4-metadata-focused-v1` failed compilation on six
 missing `try` expressions in the new opt-in live test; no tests ran. The owner
 corrected them; a subsequent native result is still required. Python smoke

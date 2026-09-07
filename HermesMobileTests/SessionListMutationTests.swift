@@ -2716,6 +2716,18 @@ final class SessionListMutationTests: XCTestCase {
                   "future_field": true
                 }
                 """, for: request)
+            case "/api/sessions/unknown-session", "/api/sessions/title-only":
+                let url = try XCTUnwrap(request.url)
+                XCTAssertEqual(request.httpMethod, "GET")
+                XCTAssertEqual(
+                    URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
+                        .first(where: { $0.name == "profile" })?.value,
+                    "default"
+                )
+                return (
+                    try XCTUnwrap(HTTPURLResponse(url: url, statusCode: 404, httpVersion: nil, headerFields: nil)),
+                    Data(#"{"detail":"Session not found"}"#.utf8)
+                )
             default:
                 XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
                 throw URLError(.badURL)

@@ -153,6 +153,8 @@ final class SessionListViewModel {
     private(set) var remoteContentSearchSessionIDs: [String] = []
     private var activeRemoteSearchQuery: String?
     private var activeRemoteSearchProfile: String?
+    private var remoteResolvedRows: [String: SessionSummary] = [:]
+    private var orderedRemoteIDs: [String] = []
     private var remoteSearchGeneration = 0
 
     private let client: APIClient
@@ -336,12 +338,32 @@ final class SessionListViewModel {
             },
             uniquingKeysWith: { first, _ in first }
         )
-        let remoteMatches = remoteContentSearchSessionIDs.compactMap { sessionID -> SessionSummary? in
+        let remoteMatches = orderedRemoteIDs.compactMap { sessionID -> SessionSummary? in
             guard !localMatchIDs.contains(sessionID) else { return nil }
-            return sessionsByID[sessionID]
+            let candidate = sessionsByID[sessionID] ?? remoteResolvedRows[sessionID]
+            guard let candidate,
+                  candidate.archived != true,
+                  automatedVisibility.shows(candidate),
+                  selectedProjectID == nil || candidate.projectId == selectedProjectID,
+                  !confirmedSessionDeletionIDs.contains(sessionID),
+                  pendingSessionDeletions[sessionID] == nil
+            else { return nil }
+            return candidate
         }
 
+        // Keep the existing transcript/sidebar ordering contract for remote
+        // content matches: the search route determines membership, while the
+        // same recency sort used for local matches determines presentation.
         return sortedLocalMatches + Self.sortedSessions(remoteMatches)
+    }
+
+    /// True when a search result was resolved from Hermes but is not part of
+    /// the canonical sidebar page. Such rows may be opened and have their
+    /// metadata changed, but destructive/legacy-only actions stay unavailable.
+    func isSearchOnlySession(_ session: SessionSummary) -> Bool {
+        guard let sessionID = Self.nonEmpty(session.sessionId) else { return false }
+        return remoteResolvedRows[sessionID] != nil
+            && !sessions.contains { Self.nonEmpty($0.sessionId) == sessionID }
     }
 
     func scheduledSessionGroups(
@@ -774,7 +796,14 @@ final class SessionListViewModel {
         activeRemoteSearchQuery = query
         activeRemoteSearchProfile = profile
         remoteContentSearchSessionIDs = []
+        orderedRemoteIDs = []
+        remoteResolvedRows = [:]
         searchErrorMessage = nil
+        defer {
+            if remoteSearchGeneration == generation {
+                isSearchingRemoteSessions = false
+            }
+        }
 
         guard !query.isEmpty, !isViewingCachedData else {
             isSearchingRemoteSessions = false
@@ -811,12 +840,74 @@ final class SessionListViewModel {
                   (Self.nonEmpty(activeProfileName) ?? "default") == profile
             else { return }
 
-            remoteContentSearchSessionIDs = remoteSearchIDs(
+            let candidateIDs = remoteSearchIDs(
                 from: response.results ?? [],
-                content: content,
-                profile: profile
+                content: content
             )
+            var resolvedRows: [String: SessionSummary] = [:]
+            var acceptedIDs: [String] = []
+            var fatalResolutionError: Error?
+            let knownIDs = Set(sessions.compactMap { session -> String? in
+                guard session.archived != true,
+                      (Self.nonEmpty(session.profile) ?? "default") == profile,
+                      let sessionID = Self.nonEmpty(session.sessionId)
+                else { return nil }
+                return sessionID
+            })
+
+            for sessionID in candidateIDs {
+                guard !Task.isCancelled,
+                      remoteSearchGeneration == generation,
+                      activeRemoteSearchQuery == query,
+                      activeRemoteSearchProfile == profile,
+                      (Self.nonEmpty(activeProfileName) ?? "default") == profile
+                else { return }
+                guard !confirmedSessionDeletionIDs.contains(sessionID),
+                      pendingSessionDeletions[sessionID] == nil
+                else { continue }
+
+                if knownIDs.contains(sessionID) {
+                    acceptedIDs.append(sessionID)
+                    continue
+                }
+
+                do {
+                    let resolved = try await client.directSessionDetail(
+                        sessionID: sessionID,
+                        profile: profile
+                    )
+                    guard resolved.sessionId == sessionID,
+                          (Self.nonEmpty(resolved.profile) ?? profile) == profile,
+                          resolved.archived == false
+                    else { continue }
+                    resolvedRows[sessionID] = resolved
+                    acceptedIDs.append(sessionID)
+                } catch {
+                    if Self.isSearchResolutionAuthFailure(error) {
+                        throw error
+                    }
+                    if !Self.isSearchResolutionMiss(error) {
+                        fatalResolutionError = error
+                        break
+                    }
+                }
+            }
+
+            guard !Task.isCancelled,
+                  remoteSearchGeneration == generation,
+                  activeRemoteSearchQuery == query,
+                  activeRemoteSearchProfile == profile,
+                  (Self.nonEmpty(activeProfileName) ?? "default") == profile
+            else { return }
+
+            orderedRemoteIDs = acceptedIDs
+            remoteContentSearchSessionIDs = acceptedIDs
+            remoteResolvedRows = resolvedRows
             isSearchingRemoteSessions = false
+            if let fatalResolutionError {
+                lastError = fatalResolutionError
+                searchErrorMessage = fatalResolutionError.localizedDescription
+            }
         } catch {
             guard remoteSearchGeneration == generation,
                   activeRemoteSearchQuery == query,
@@ -828,6 +919,8 @@ final class SessionListViewModel {
             guard !isCancellationError(error) else { return }
 
             remoteContentSearchSessionIDs = []
+            orderedRemoteIDs = []
+            remoteResolvedRows = [:]
             searchErrorMessage = error.localizedDescription
             lastError = error
         }
@@ -838,6 +931,8 @@ final class SessionListViewModel {
         activeRemoteSearchQuery = nil
         activeRemoteSearchProfile = nil
         remoteContentSearchSessionIDs = []
+        orderedRemoteIDs = []
+        remoteResolvedRows = [:]
         searchErrorMessage = nil
         isSearchingRemoteSessions = false
     }
@@ -1001,6 +1096,10 @@ final class SessionListViewModel {
             actionErrorMessage = String(localized: "Reconnect to the server to delete a session.")
             return false
         }
+        guard !isSearchOnlySession(session) else {
+            actionErrorMessage = String(localized: "This search result cannot be deleted yet.")
+            return false
+        }
 
         guard let sessionId = Self.nonEmpty(session.sessionId) else {
             actionErrorMessage = String(localized: "The server did not provide a session ID.")
@@ -1103,6 +1202,10 @@ final class SessionListViewModel {
     }
 
     func duplicate(_ session: SessionSummary, modelContext: ModelContext? = nil) async -> SessionSummary? {
+        guard !isSearchOnlySession(session) else {
+            actionErrorMessage = String(localized: "This search result cannot be duplicated yet.")
+            return nil
+        }
         guard let sessionId = Self.nonEmpty(session.sessionId) else {
             actionErrorMessage = String(localized: "The server did not provide a session ID.")
             return nil
@@ -1153,6 +1256,10 @@ final class SessionListViewModel {
     func export(_ session: SessionSummary, format: SessionExportFormat) async -> URL? {
         guard !isViewingCachedData else {
             actionErrorMessage = String(localized: "Reconnect to the server to export a session.")
+            return nil
+        }
+        guard !isSearchOnlySession(session) else {
+            actionErrorMessage = String(localized: "This search result cannot be exported yet.")
             return nil
         }
 
@@ -1211,6 +1318,10 @@ final class SessionListViewModel {
     }
 
     func move(_ session: SessionSummary, to projectID: String?, modelContext: ModelContext? = nil) async {
+        guard !isSearchOnlySession(session) else {
+            actionErrorMessage = String(localized: "This search result cannot be moved yet.")
+            return
+        }
         guard let sessionId = Self.nonEmpty(session.sessionId) else {
             actionErrorMessage = String(localized: "The server did not provide a session ID.")
             return
@@ -1236,6 +1347,10 @@ final class SessionListViewModel {
         actionErrorMessage = nil
         lastError = nil
 
+        guard !isSearchOnlySession(session) else {
+            actionErrorMessage = String(localized: "This search result cannot be moved yet.")
+            return false
+        }
         guard let sessionId = session.sessionId else {
             actionErrorMessage = String(localized: "The server did not provide a session ID.")
             return false
@@ -1500,30 +1615,17 @@ final class SessionListViewModel {
 
     private func remoteSearchIDs(
         from results: [DirectHermesSessionSearchResult],
-        content: Bool,
-        profile: String
+        content: Bool
     ) -> [String] {
-        let locallyVisibleSessionIDs = Set(self.sessions.compactMap { session -> String? in
-            guard session.archived != true,
-                  (Self.nonEmpty(session.profile) ?? "default") == profile,
-                  let sessionID = session.sessionId,
-                  !sessionID.isEmpty
-            else {
-                return nil
-            }
-
-            return sessionID
-        })
         var seenSessionIDs = Set<String>()
 
-        return results.compactMap { result in
+        return results.prefix(20).compactMap { result in
             // The stock route uses a null role for direct session-ID hits. A
             // content-disabled caller keeps those exact ID matches but drops
             // FTS message hits; no lineage fallback is safe here.
             guard content || result.role == nil,
                   result.archived != true,
                   let sessionID = Self.nonEmpty(result.sessionID),
-                  locallyVisibleSessionIDs.contains(sessionID),
                   !seenSessionIDs.contains(sessionID)
             else {
                 return nil
@@ -1532,6 +1634,35 @@ final class SessionListViewModel {
             seenSessionIDs.insert(sessionID)
             return sessionID
         }
+    }
+
+    private static func isSearchResolutionMiss(_ error: Error) -> Bool {
+        if let error = error as? DirectHermesRESTError {
+            switch error {
+            case .invalidSessionID, .missingCanonicalSessionID, .sessionIDMismatch, .profileMismatch:
+                return true
+            }
+        }
+        if case DirectHermesRequestError.http(let statusCode, _) = error {
+            return statusCode == 404
+        }
+        if case APIError.http(let statusCode, _) = error {
+            return statusCode == 404
+        }
+        return false
+    }
+
+    private static func isSearchResolutionAuthFailure(_ error: Error) -> Bool {
+        if error is DirectHermesAuthError {
+            return true
+        }
+        if case APIError.unauthorized = error {
+            return true
+        }
+        if case DirectHermesRequestError.http(let statusCode, _) = error {
+            return statusCode == 401 || statusCode == 403
+        }
+        return false
     }
 
     private func timestamp(for session: SessionSummary) -> Double {
@@ -1650,6 +1781,8 @@ final class SessionListViewModel {
             activeRemoteSearchQuery = nil
             activeRemoteSearchProfile = nil
             remoteContentSearchSessionIDs = []
+            orderedRemoteIDs = []
+            remoteResolvedRows = [:]
             isSearchingRemoteSessions = false
         }
         activeProfileName = profileName
@@ -1705,6 +1838,10 @@ final class SessionListViewModel {
             actionErrorMessage = String(localized: "Switch to this session's profile to modify it.")
             return false
         }
+        let searchOnly = isSearchOnlySession(session)
+        let capturedSearchQuery = activeRemoteSearchQuery
+        let capturedSearchProfile = activeRemoteSearchProfile
+        let capturedSearchGeneration = remoteSearchGeneration
         guard beginSessionMutation(sessionID) else { return false }
         defer { endSessionMutation(sessionID) }
 
@@ -1724,33 +1861,53 @@ final class SessionListViewModel {
             else {
                 return false
             }
+            if searchOnly,
+               !isCurrentRemoteSearchScope(
+                   query: capturedSearchQuery,
+                   profile: capturedSearchProfile,
+                   generation: capturedSearchGeneration
+               ) {
+                return false
+            }
 
             let base = sessions.first(where: { $0.sessionId == sessionID }) ?? session
             let updated = mergedMetadataSession(base, authoritative: authoritative)
-            let pendingKey = PendingMetadataKey(profile: activeProfile, sessionID: sessionID)
-            var pending = pendingMetadataMutations[pendingKey]
-                ?? PendingMetadataMutation(title: nil, pinned: nil, archived: nil)
-            metadataConfirmationRevision &+= 1
-            let revision = metadataConfirmationRevision
-            switch field {
-            case let .title(title): pending.title = PendingMetadataValue(value: title, revision: revision)
-            case let .pinned(pinned): pending.pinned = PendingMetadataValue(value: pinned, revision: revision)
-            case let .archived(archived): pending.archived = PendingMetadataValue(value: archived, revision: revision)
+            if searchOnly {
+                if updated.archived == true {
+                    remoteResolvedRows.removeValue(forKey: sessionID)
+                    orderedRemoteIDs.removeAll { $0 == sessionID }
+                    remoteContentSearchSessionIDs.removeAll { $0 == sessionID }
+                } else {
+                    remoteResolvedRows[sessionID] = updated
+                }
+            } else {
+                let pendingKey = PendingMetadataKey(profile: activeProfile, sessionID: sessionID)
+                var pending = pendingMetadataMutations[pendingKey]
+                    ?? PendingMetadataMutation(title: nil, pinned: nil, archived: nil)
+                metadataConfirmationRevision &+= 1
+                let revision = metadataConfirmationRevision
+                switch field {
+                case let .title(title): pending.title = PendingMetadataValue(value: title, revision: revision)
+                case let .pinned(pinned): pending.pinned = PendingMetadataValue(value: pinned, revision: revision)
+                case let .archived(archived): pending.archived = PendingMetadataValue(value: archived, revision: revision)
+                }
+                pendingMetadataMutations[pendingKey] = pending
             }
-            pendingMetadataMutations[pendingKey] = pending
             if updated.archived == true {
-                applySessions(
-                    sessions.filter { $0.sessionId != sessionID },
-                    archivedCount: archivedCount,
-                    animation: animation
-                )
+                if !searchOnly {
+                    applySessions(
+                        sessions.filter { $0.sessionId != sessionID },
+                        archivedCount: archivedCount,
+                        animation: animation
+                    )
+                }
             } else if let index = sessions.firstIndex(where: { $0.sessionId == sessionID }) {
                 var updatedSessions = sessions
                 updatedSessions[index] = updated
                 applySessions(updatedSessions, archivedCount: archivedCount, animation: animation)
             }
 
-            if let modelContext {
+            if let modelContext, !searchOnly {
                 do {
                     try CacheStore.cacheSession(updated, serverURL: server, in: modelContext)
                 } catch {
@@ -1765,6 +1922,14 @@ final class SessionListViewModel {
                 profile: activeProfile,
                 epoch: profileEpoch
             ) else { return false }
+            if searchOnly,
+               !isCurrentRemoteSearchScope(
+                   query: capturedSearchQuery,
+                   profile: capturedSearchProfile,
+                   generation: capturedSearchGeneration
+               ) {
+                return false
+            }
             lastError = error
             actionErrorMessage = error.localizedDescription
             return false
@@ -1780,6 +1945,17 @@ final class SessionListViewModel {
             && server == capturedServer
             && (Self.nonEmpty(activeProfileName) ?? "default") == profile
             && activeProfileEpoch == epoch
+    }
+
+    private func isCurrentRemoteSearchScope(
+        query: String?,
+        profile: String?,
+        generation: Int
+    ) -> Bool {
+        remoteSearchGeneration == generation
+            && activeRemoteSearchQuery == query
+            && activeRemoteSearchProfile == profile
+            && profile == (Self.nonEmpty(activeProfileName) ?? "default")
     }
 
     private func applyingPendingMetadata(

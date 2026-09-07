@@ -855,6 +855,38 @@ final class DirectHermesLiveSmokeTests: XCTestCase {
                 try await api.directSessionMessages(sessionID: targetID, profile: "default")
             }
 
+            let searchList = SessionListViewModel(server: HostedTransport.https.baseURL, client: api)
+            try await stage("slice4 metadata search-only resolution") {
+                await searchList.searchSessions(query: targetID, debounceNanoseconds: 0)
+            }
+            let searchMatches = searchList.visibleSessions(
+                searchText: targetID,
+                selectedProjectID: nil
+            )
+            guard searchList.sessions.isEmpty,
+                  searchMatches.count == 1,
+                  let searchTarget = searchMatches.first,
+                  searchTarget.sessionId == targetID,
+                  searchList.isSearchOnlySession(searchTarget)
+            else { throw LiveSmokeInvariant.failed }
+            let searchTitle = "SEMREH_SLICE4_SEARCH_\(UUID().uuidString)"
+            guard try await stage("slice4 metadata search-only rename", operation: {
+                await searchList.rename(searchTarget, to: searchTitle)
+            }) else { throw LiveSmokeInvariant.failed }
+            let renamedSearchMatches = searchList.visibleSessions(
+                searchText: targetID,
+                selectedProjectID: nil
+            )
+            let searchDetail = try await stage("slice4 metadata search-only readback") {
+                try await api.directSessionDetail(sessionID: targetID, profile: "default")
+            }
+            guard searchList.sessions.isEmpty,
+                  renamedSearchMatches.count == 1,
+                  renamedSearchMatches.first?.sessionId == targetID,
+                  renamedSearchMatches.first?.title == searchTitle,
+                  searchDetail.title == searchTitle
+            else { throw LiveSmokeInvariant.failed }
+
             let list = SessionListViewModel(server: HostedTransport.https.baseURL, client: api)
             guard try await stage("slice4 metadata list load", operation: { await list.load() }),
                   let target = list.sessions.first(where: { $0.sessionId == targetID }),
