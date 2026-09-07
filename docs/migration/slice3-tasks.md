@@ -76,14 +76,16 @@ this sheet does not invent contracts or mark unexecuted checks passed.
     unknown receipts require durable per-session quarantine and an explicit
     resolution policy. Maurice approved metadata-only persistence and explicit
     confirmed per-chat runtime reset preserving saved history. The live stock
-    `--verify-reset` probe passes (reset-contract-v2); native persistence/reset
-    integration and restart acceptance remain unverified. No personal
+    `--verify-reset` probe passes (reset-contract-v2); native controller/store
+    recreation and reset integration also passed (native-recovery-live-v1).
+    Literal app-kill and physical restart acceptance remain unverified. No personal
     gateway resets, fabricated paths, automatic retries, or safety waiver.
     - [x] **A3a — Persistent marker/reset implementation checkpoint.** Runtime-keyed
       metadata, hot-reopen quarantine, terminal+idle exact-path cleanup, explicit
       reset with lost-ACK/corrupt-marker handling. Focused100/full2144 passed;
       native normal image flow passed with no stuck banner. Live native-controller
-      reset and literal app-kill/physical acceptance are still separate open checks.
+      reset passed with exact saved rows retained and no image in subsequent text.
+      Literal app-kill/physical acceptance are still separate open checks.
   - [ ] **A1 — Capture stock staging/limits and PDF availability.** Record
     returned references, image/PDF/file failure responses and canonical history.
   - [ ] **A2 — Retain local bytes and stage before prompt.** Attachment owner

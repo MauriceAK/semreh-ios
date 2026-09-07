@@ -27,6 +27,7 @@ def main():
     parser.add_argument('--slice2-ui', action='store_true')
     parser.add_argument('--slice3-clarification', action='store_true')
     parser.add_argument('--slice3-attachment', action='store_true')
+    parser.add_argument('--slice3-recovery', action='store_true')
     parser.add_argument('--tui-created-session-id')
     parser.add_argument('--development-backend-sha')
     parser.add_argument('--stock-backend', action='store_true')
@@ -60,7 +61,15 @@ def main():
         or not args.stock_backend or args.development_backend_sha
     ):
         parser.error('--slice3-attachment requires --slice2-ui --https --stock-backend')
-    backend_phase = args.slice2_reasoning or args.slice2_ui
+    if args.slice3_recovery and (
+        not args.https or args.cookie_phase or not args.stock_backend
+        or args.development_backend_sha or args.slice2_foundation
+        or args.slice2_native or args.slice2_reasoning or args.slice2_ui
+        or args.slice3_clarification or args.slice3_attachment
+        or args.tui_created_session_id
+    ):
+        parser.error('--slice3-recovery requires --https --stock-backend and no other test phase')
+    backend_phase = args.slice2_reasoning or args.slice2_ui or args.slice3_recovery
     if args.stock_backend and not backend_phase:
         parser.error('--stock-backend requires --slice2-reasoning or --slice2-ui')
     if backend_phase and args.stock_backend == bool(args.development_backend_sha):
@@ -117,6 +126,14 @@ def main():
         else:
             environment['SEMREH_SLICE2_DEVELOPMENT_BACKEND_SHA'] = args.development_backend_sha.lower()
         method = 'testOptInHostedSlice2NativeReasoning'
+    if args.slice3_recovery:
+        environment = target['EnvironmentVariables']
+        environment.update({
+            'SEMREH_SLICE2_STOCK_BACKEND_SHA': PIN,
+            'SEMREH_SLICE2_TOOL_CWD': str(runtime / 'tools'),
+            'SEMREH_SLICE3_RECOVERY_NATIVE': '1',
+        })
+        method = 'testOptInHostedSlice3NativeAttachmentRecovery'
     if args.cookie_phase:
         target['EnvironmentVariables']['SEMREH_SLICE1_COOKIE_PHASE'] = args.cookie_phase
         method = 'testOptInHostedCookie' + args.cookie_phase.title() + 'Phase'

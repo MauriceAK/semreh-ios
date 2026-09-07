@@ -13,6 +13,7 @@ final class DirectHermesLiveSmokeTests: XCTestCase {
     private static let stockBackendSHA = "29112bef099274229cadff79cdff7bf7b99c4b77"
     private static let stockToolCwd = "/Users/maurice/workspace/semreh-slice1-runtime/tools"
     private static let developmentToolCwd = "/Users/maurice/workspace/semreh-slice2-runtime/tools"
+    private static let recoveryPNGData = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")!
 
     private enum HostedTransport {
         case loopback
@@ -867,6 +868,287 @@ final class DirectHermesLiveSmokeTests: XCTestCase {
             if loggedIn { try? await api.directLogout() }
             throw error
         }
+    }
+
+    @MainActor
+    func testOptInHostedSlice3NativeAttachmentRecovery() async throws {
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("Slice 3 native recovery smoke is simulator-only.")
+        #endif
+
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SEMREH_SLICE1_LIVE"] == "1",
+              environment["SEMREH_SLICE1_HTTPS"] == "1",
+              environment["SEMREH_SLICE3_RECOVERY_NATIVE"] == "1",
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == Self.defaultCredentialsPath,
+              environment["SEMREH_SLICE2_STOCK_BACKEND_SHA"] == Self.stockBackendSHA,
+              environment["SEMREH_SLICE2_TOOL_CWD"] == Self.stockToolCwd
+        else {
+            throw XCTSkip("Slice 3 native recovery smoke is opt-in for the pinned stock HTTPS fixture.")
+        }
+
+        let credentials = try await stage("slice3 recovery credentials") {
+            try Self.readCredentials()
+        }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpAdditionalHeaders = [:]
+        configuration.httpShouldSetCookies = true
+        configuration.httpCookieAcceptPolicy = .always
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let api = APIClient(
+            baseURL: HostedTransport.https.baseURL,
+            session: session,
+            publicMediaSession: session,
+            customHeaderProvider: { [] }
+        )
+
+        let markerRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SemrehSlice3Recovery-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: markerRoot) }
+        let markerStore = DirectGatewayAttachmentRecoveryMarkerStore(rootURL: markerRoot)
+        var runtime: HermesServerRuntime?
+        var first: GatewayConversationController?
+        var second: GatewayConversationController?
+        var resumed: GatewayConversationController?
+        var loggedIn = false
+        var cleanupRuntimeID: String?
+        let events = LiveGatewayEventCapture()
+        let seedPrompt = "SEMREH_SLICE1_PROMPT"
+        let expectedAck = "SEMREH_SLICE1_ACK"
+        let postResetPrompt = "SEMREH_SLICE3_RECOVERY_POST_RESET_\(UUID().uuidString)"
+        let stockFixtureCreate: [String: JSONValue] = [
+            "cwd": .string(Self.stockToolCwd),
+            "model": .string("semreh-fixture"),
+            "provider": .string("custom")
+        ]
+
+        do {
+            let status = try await stage("slice3 recovery status") { try await api.directStatus() }
+            guard status.authRequired == true else { throw LiveSmokeInvariant.failed }
+            let providers = try await stage("slice3 recovery providers") { try await api.directProviders() }
+            guard providers.providers?.contains(where: { $0.name == "basic" && $0.supportsPassword == true }) == true else {
+                throw LiveSmokeInvariant.failed
+            }
+            let login = try await stage("slice3 recovery login") {
+                try await api.directPasswordLogin(username: credentials.username, password: credentials.password)
+            }
+            guard login.ok == true else { throw LiveSmokeInvariant.failed }
+            loggedIn = true
+            try await stage("slice3 recovery protected probe") { try await api.directProtectedProbe() }
+
+            let serverRuntime = try await stage("slice3 recovery runtime init") {
+                try HermesServerRuntime(origin: HostedTransport.https.baseURL, client: api)
+            }
+            runtime = serverRuntime
+            try await stage("slice3 recovery runtime connect") { try await serverRuntime.connect() }
+
+            let initial = GatewayConversationController(
+                runtime: serverRuntime,
+                client: api,
+                storedID: nil,
+                profile: "default",
+                recoveryMarkerStore: markerStore
+            )
+            initial.onEvent = { event in Task { await events.append(event) } }
+            initial.onBinding = { binding in cleanupRuntimeID = binding.runtimeID }
+            first = initial
+            try await stage("slice3 recovery seed submit") {
+                try await initial.submit(seedPrompt, create: stockFixtureCreate)
+            }
+            let seedRuntimeID = try await stage("slice3 recovery seed binding") {
+                try XCTUnwrap(initial.binding?.runtimeID)
+            }
+            cleanupRuntimeID = seedRuntimeID
+            _ = try await stage("slice3 recovery seed terminal") {
+                try await events.wait { event in
+                    event.sessionID == seedRuntimeID
+                        && event.type == "message.complete"
+                        && Self.stringValue(Self.objectValue(event.payload)?["status"]) == "complete"
+                }
+            }
+            let storedID = try await stage("slice3 recovery durable identity") {
+                try XCTUnwrap(initial.storedID)
+            }
+            let baseline = try await stage("slice3 recovery baseline transcript") {
+                try await api.directSessionMessages(sessionID: storedID, profile: "default")
+            }
+            try assertRecoveryTranscript(baseline, users: [seedPrompt], assistant: expectedAck)
+
+            var pending = try DirectPendingAttachment(
+                source: .image(data: Self.recoveryPNGData, filename: "recovery.png")
+            )
+            let staged = try await stage("slice3 recovery image stage") {
+                try await initial.stageAttachment(pending)
+            }
+            guard staged.receipt.kind == .image,
+                  staged.receipt.detachPaths.count == 1,
+                  !staged.receipt.detachPaths[0].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else { throw LiveSmokeInvariant.failed }
+            guard let oldBinding = initial.binding,
+                  let markerToken = initial.unresolvedAttachmentMarkerToken else {
+                throw LiveSmokeInvariant.failed
+            }
+            cleanupRuntimeID = oldBinding.runtimeID
+            let oldIdentity = try DirectGatewayAttachmentRecoveryIdentity(
+                origin: HostedTransport.https.baseURL,
+                profile: "default",
+                storedID: storedID,
+                runtimeID: oldBinding.runtimeID
+            )
+            let recreatedStore = DirectGatewayAttachmentRecoveryMarkerStore(rootURL: markerRoot)
+            guard try recreatedStore.load(for: oldIdentity)?.token == markerToken else {
+                throw LiveSmokeInvariant.failed
+            }
+            _ = pending.confirm(
+                scope: staged.scope,
+                referenceText: staged.receipt.referenceText,
+                serverDetachPaths: staged.receipt.detachPaths
+            )
+
+            try await stage("slice3 recovery first controller disposal") { try await initial.dispose() }
+            first = nil
+
+            let recreated = GatewayConversationController(
+                runtime: serverRuntime,
+                client: api,
+                storedID: storedID,
+                profile: "default",
+                recoveryMarkerStore: recreatedStore
+            )
+            recreated.onEvent = { event in Task { await events.append(event) } }
+            recreated.onBinding = { binding in cleanupRuntimeID = binding.runtimeID }
+            second = recreated
+            try await stage("slice3 recovery recreated controller resume") { try await recreated.open() }
+            guard recreated.attachmentRecoveryNeedsReset,
+                  recreated.unresolvedAttachmentMarkerToken == markerToken else {
+                throw LiveSmokeInvariant.failed
+            }
+            do {
+                _ = try await recreated.stageAttachment(
+                    DirectPendingAttachment(source: .image(data: Self.recoveryPNGData, filename: "retry.png"))
+                )
+                throw LiveSmokeInvariant.failed
+            } catch let error as DirectGatewayAttachmentStageError {
+                guard case .definiteBeforeStage(kind: .image, reason: .unresolvedAttachment) = error else {
+                    throw LiveSmokeInvariant.failed
+                }
+            }
+            do {
+                try await recreated.submit("SEMREH_SLICE3_RECOVERY_BLOCKED")
+                throw LiveSmokeInvariant.failed
+            } catch let error as DirectSessionError {
+                guard case .unresolvedAttachment = error else { throw LiveSmokeInvariant.failed }
+            }
+
+            // This reset abandons the queued attachment. Stock session.close and
+            // image.detach have no contract to delete the host image file, so
+            // this smoke intentionally never attempts host-side file cleanup.
+            try await stage("slice3 recovery explicit reset") {
+                try await recreated.resetPendingAttachments(expectedToken: markerToken)
+            }
+            guard recreated.attachmentRecoveryNeedsReset == false,
+                  try recreatedStore.load(for: oldIdentity) == nil else {
+                throw LiveSmokeInvariant.failed
+            }
+            try await stage("slice3 recovery reset transcript preserved") {
+                let afterReset = try await api.directSessionMessages(sessionID: storedID, profile: "default")
+                guard afterReset.messages == baseline.messages else { throw LiveSmokeInvariant.failed }
+                try assertRecoveryTranscript(afterReset, users: [seedPrompt], assistant: expectedAck)
+            }
+            try await stage("slice3 recovery second controller disposal") { try await recreated.dispose() }
+            second = nil
+
+            let reopened = GatewayConversationController(
+                runtime: serverRuntime,
+                client: api,
+                storedID: storedID,
+                profile: "default",
+                recoveryMarkerStore: recreatedStore
+            )
+            reopened.onEvent = { event in Task { await events.append(event) } }
+            reopened.onBinding = { binding in cleanupRuntimeID = binding.runtimeID }
+            resumed = reopened
+            try await stage("slice3 recovery fresh resume") { try await reopened.open() }
+            guard reopened.attachmentRecoveryNeedsReset == false else { throw LiveSmokeInvariant.failed }
+            let reopenedRuntimeID = try XCTUnwrap(reopened.binding?.runtimeID)
+            cleanupRuntimeID = reopenedRuntimeID
+            try await stage("slice3 recovery post-reset plain submit") { try await reopened.submit(postResetPrompt) }
+            _ = try await stage("slice3 recovery post-reset terminal") {
+                try await events.wait { event in
+                    event.sessionID == reopenedRuntimeID
+                        && event.type == "message.complete"
+                        && Self.stringValue(Self.objectValue(event.payload)?["status"]) == "complete"
+                }
+            }
+            let finalTranscript = try await stage("slice3 recovery final transcript") {
+                try await api.directSessionMessages(sessionID: storedID, profile: "default")
+            }
+            guard finalTranscript.messages.count >= baseline.messages.count,
+                  Array(finalTranscript.messages.prefix(baseline.messages.count)) == baseline.messages else {
+                throw LiveSmokeInvariant.failed
+            }
+            try assertRecoveryTranscript(finalTranscript, users: [seedPrompt, postResetPrompt], assistant: expectedAck)
+
+            try await stage("slice3 recovery owned runtime cleanup") {
+                let closed = try await serverRuntime.request("session.close", params: [
+                    "session_id": .string(reopenedRuntimeID),
+                    "profile": .string("default")
+                ])
+                guard closed?.gatewayFields["closed"] == .bool(true) else {
+                    throw LiveSmokeInvariant.failed
+                }
+            }
+            cleanupRuntimeID = nil
+            try await reopened.dispose()
+            resumed = nil
+            await serverRuntime.stop()
+            runtime = nil
+            try await stage("slice3 recovery logout") { try await api.directLogout() }
+            loggedIn = false
+        } catch {
+            if let cleanupRuntimeID, let runtime {
+                let closeResult = try? await runtime.request(
+                    "session.close",
+                    params: [
+                        "session_id": .string(cleanupRuntimeID),
+                        "profile": .string("default")
+                    ],
+                    timeout: .seconds(30)
+                )
+                if case .bool = closeResult?.gatewayFields["closed"] {
+                    // True closed the owned runtime; false means it was absent.
+                } else {
+                    XCTFail("Owned recovery-test runtime cleanup was not confirmed.")
+                }
+            }
+            if let resumed { try? await resumed.dispose() }
+            if let second { try? await second.dispose() }
+            if let first { try? await first.dispose() }
+            if let runtime { await runtime.stop() }
+            if loggedIn { try? await api.directLogout() }
+            throw error
+        }
+    }
+
+    private func assertRecoveryTranscript(
+        _ page: DirectHermesTranscriptPage,
+        users: [String],
+        assistant: String
+    ) throws {
+        let durable = page.messages.filter { $0.role == "user" || $0.role == "assistant" }
+        let userMessages = durable.filter { $0.role == "user" }
+        let assistantMessages = durable.filter { $0.role == "assistant" }
+        guard userMessages.count == users.count,
+              assistantMessages.count == users.count,
+              userMessages.compactMap(\.content) == users,
+              assistantMessages.allSatisfy({ $0.content == assistant }),
+              durable.allSatisfy({ ($0.attachments ?? []).isEmpty }),
+              durable.allSatisfy({
+                  let content = $0.content ?? ""
+                  return !content.contains("@image:") && !content.contains("@file:")
+              })
+        else { throw LiveSmokeInvariant.failed }
     }
 
     @MainActor

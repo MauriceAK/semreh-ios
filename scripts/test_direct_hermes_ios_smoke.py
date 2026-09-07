@@ -104,6 +104,57 @@ class IOSSmokeGuardTests(unittest.TestCase):
             message,
         )
 
+    def test_slice3_recovery_requires_stock_https_and_is_standalone(self):
+        message = "--slice3-recovery requires --https --stock-backend and no other test phase"
+        self.assertRejected(["--slice3-recovery"], message)
+        self.assertRejected(["--https", "--slice3-recovery"], message)
+        self.assertRejected(["--https", "--slice3-recovery", "--stock-backend", "--slice2-native"], message)
+        self.assertRejected(
+            ["--https", "--slice3-recovery", "--stock-backend", "--development-backend-sha", "abc"],
+            message,
+        )
+
+    def test_stock_native_recovery_generation_exports_exact_target_and_guards(self):
+        smoke = load_smoke_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            products = (Path(temporary) / "products").resolve()
+            products.mkdir()
+            source = products / "HermesMobile_HermesMobile_iphonesimulator.xctestrun"
+            source.write_bytes(plistlib.dumps({
+                "TestConfigurations": [{
+                    "TestTargets": [{"BlueprintName": "HermesMobileTests"}],
+                }],
+            }))
+            runtime = Path(temporary) / "stock-runtime"
+            credentials = runtime / "credentials.json"
+            tool_cwd = runtime / "tools"
+            with patch.object(smoke, "PRODUCTS", products), \
+                    patch.object(smoke, "OUTPUT", products / "SemrehSlice1Live.xctestrun"), \
+                    patch.object(smoke, "RUNTIME", runtime), \
+                    patch.object(smoke, "validate") as validate, \
+                    patch.object(smoke, "PIN", "29112bef099274229cadff79cdff7bf7b99c4b77"), \
+                    patch.object(sys, "argv", [
+                        str(SCRIPT), "--https", "--slice3-recovery", "--stock-backend",
+                    ]):
+                output = StringIO()
+                with redirect_stdout(output):
+                    smoke.main()
+
+            validate.assert_called_once_with()
+            plan = plistlib.loads((products / "SemrehSlice1Live.xctestrun").read_bytes())
+            target = plan["TestConfigurations"][0]["TestTargets"][0]
+            environment = target["EnvironmentVariables"]
+            self.assertEqual(environment["SEMREH_SLICE1_CREDENTIALS_FILE"], str(credentials))
+            self.assertEqual(environment["SEMREH_SLICE2_STOCK_BACKEND_SHA"], "29112bef099274229cadff79cdff7bf7b99c4b77")
+            self.assertEqual(environment["SEMREH_SLICE2_TOOL_CWD"], str(tool_cwd))
+            self.assertEqual(environment["SEMREH_SLICE3_RECOVERY_NATIVE"], "1")
+            self.assertEqual(environment["SEMREH_SLICE1_HTTPS"], "1")
+            self.assertEqual(
+                target["OnlyTestIdentifiers"],
+                ["DirectHermesLiveSmokeTests/testOptInHostedSlice3NativeAttachmentRecovery"],
+            )
+            self.assertNotIn("password", output.getvalue().lower())
+
     def test_stock_ui_generation_exports_exact_mode_and_paths(self):
         smoke = load_smoke_module()
         with tempfile.TemporaryDirectory() as temporary:

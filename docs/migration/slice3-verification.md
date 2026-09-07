@@ -552,3 +552,30 @@ to join actual staging, persisted marker recreation, explicit reset, preserved
 history, and a subsequent plain-text turn. Reset abandons the queue; stock does
 not promise deletion of the physical uploaded file, and no file-deletion claim
 or new backend dependency is introduced.
+
+### Native controller recovery against stock gateway
+
+App production checkpoint `62f9d8a`, plus additive opt-in live test/selector only.
+No production/backend changes for this test. Signed native buildv1 passed.
+`direct_hermes_ios_smoke.py --https --stock-backend --slice3-recovery` selects
+`DirectHermesLiveSmokeTests/testOptInHostedSlice3NativeAttachmentRecovery` in
+`SemrehSlice1Live.xctestrun`; run using test-without-building on the same owned
+Simulator with diagnostics collection disabled.
+
+`slice3-native-recovery-live-v1.xcresult`: **1 passed, 0 failed, 0 skipped**.
+The actual pinned HTTPS gateway completed a seed turn; the native controller
+staged an image and wrote the disk marker before its disposal. A recreated store
+and controller found the marker and rejected plain send/new staging. Explicit
+reset preserved the exact baseline messages; another controller resumed and sent
+ordinary text. Exact baseline prefix, unique user/assistant counts, and absence
+of image/file references or attachments were checked. Only its own final live
+runtime was closed with acknowledgment; transcript retained. Diagnostics exported.
+This proves native controller/store recreation, not literal app process kill,
+dropped frames, reset-dialog interaction or physical-device acceptance.
+
+Selector/recovery/canonical Python helper suites: **31 passed** in
+`slice3-native-recovery-python-v1.log`. Final recovery-full-v2 passed **2144 tests,
+0 failed, 8 intentional opt-in skips** (new live test separately passed above).
+Final audit `slice3-native-recovery-final-audit-v1.jsonl`: **160688 files, 0 flags,
+92 exported consoles**, same known-secret/pattern-only exclusions. Signed ordinary
+dev app verified and launched in the owned Simulator; no phone install or release.
