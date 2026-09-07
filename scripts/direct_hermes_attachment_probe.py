@@ -425,7 +425,6 @@ async def _exercise(credentials: dict, evidence: dict) -> None:
                 _phase(evidence, "file.attach.data_url")
                 file_result = await rpc.call("file.attach", {
                     "session_id": runtime_id,
-                    "path": "client-note.txt",
                     "data_url": f"data:text/plain;base64,{text_b64}",
                     "name": file_name,
                 })

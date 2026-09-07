@@ -8,6 +8,10 @@ import direct_hermes_model_fixture as fixture
 
 
 class ModelFixtureTests(unittest.TestCase):
+    def test_multimodal_user_content_does_not_emit_clarification(self) -> None:
+        body = {'tools': [{'type': 'function', 'function': {'name': 'clarify'}}]}
+        self.assertIsNone(fixture.clarify_tool_call(body, [{'type': 'text', 'text': 'ordinary'}]))
+
     def test_exact_clarify_marker_emits_call_only_when_tool_is_advertised(self) -> None:
         body = {
             'stream': True,
@@ -33,6 +37,51 @@ class ModelFixtureTests(unittest.TestCase):
                 {'role': 'user', 'content': fixture.CLARIFY_MARKER},
             ],
         }, fixture.CLARIFY_MARKER))
+
+    def test_exact_multi_select_marker_emits_advertised_shape_only(self) -> None:
+        body = {
+            'tools': [{'type': 'function', 'function': {'name': 'clarify'}}],
+        }
+        call = fixture.clarify_tool_call(body, fixture.CLARIFY_MULTI_SELECT_MARKER)
+        self.assertEqual(call['id'], fixture.CLARIFY_MULTI_SELECT_TOOL_CALL_ID)
+        self.assertEqual(call['function']['name'], 'clarify')
+        self.assertEqual(
+            call['function']['arguments'],
+            '{"question":"Choose bounded fixture surfaces",'
+            '"choices":["iOS","TUI","desktop"],"multi_select":true}',
+        )
+        self.assertIsNone(fixture.clarify_tool_call(
+            body, 'prefix ' + fixture.CLARIFY_MULTI_SELECT_MARKER
+        ))
+        self.assertIsNone(fixture.clarify_tool_call(
+            {'tools': [{'type': 'function', 'function': {'name': 'other'}}]},
+            fixture.CLARIFY_MULTI_SELECT_MARKER,
+        ))
+
+    def test_exact_batch_marker_emits_questions_and_suppresses_after_tool_result(self) -> None:
+        body = {
+            'tools': [{'type': 'function', 'function': {'name': 'clarify'}}],
+        }
+        call = fixture.clarify_tool_call(body, fixture.CLARIFY_BATCH_MARKER)
+        self.assertEqual(call['id'], fixture.CLARIFY_BATCH_TOOL_CALL_ID)
+        self.assertEqual(
+            call['function']['arguments'],
+            '{"questions":[{"id":"plan","question":"Choose a bounded plan",'
+            '"choices":["answer","cancel"]},{"id":"surfaces",'
+            '"question":"Choose bounded surfaces",'
+            '"choices":["iOS","TUI","desktop"],"multi_select":true}]}',
+        )
+        self.assertIsNone(fixture.clarify_tool_call(
+            body,
+            fixture.CLARIFY_BATCH_MARKER + ' suffix',
+        ))
+        self.assertIsNone(fixture.clarify_tool_call({
+            **body,
+            'messages': [
+                {'role': 'user', 'content': fixture.CLARIFY_BATCH_MARKER},
+                {'role': 'tool', 'content': '{"answers": {}}'},
+            ],
+        }, fixture.CLARIFY_BATCH_MARKER))
 
     def test_streaming_exact_bulky_marker_is_varied_and_exactly_4096_bytes(self) -> None:
         first = fixture.response_text(
@@ -68,6 +117,24 @@ class ModelFixtureTests(unittest.TestCase):
     def test_ordinary_prompt_keeps_ack(self) -> None:
         self.assertEqual(
             fixture.response_text({"stream": True}, "SEMREH_SLICE1_TEST"),
+            "SEMREH_SLICE1_ACK",
+        )
+
+    def test_exact_clarification_followups_have_unique_acknowledgements(self) -> None:
+        expected = {
+            "SEMREH_SLICE3_CLARIFY_AFTER_SINGLE_ANSWER":
+                "SEMREH_SLICE3_CLARIFY_ACK_SINGLE_ANSWER",
+            "SEMREH_SLICE3_CLARIFY_AFTER_SINGLE_CANCEL":
+                "SEMREH_SLICE3_CLARIFY_ACK_SINGLE_CANCEL",
+            "SEMREH_SLICE3_CLARIFY_AFTER_SEMREH_BLOCKING_CLARIFY_BATCH":
+                "SEMREH_SLICE3_CLARIFY_ACK_BATCH_CANCEL",
+            "SEMREH_SLICE3_CLARIFY_AFTER_SEMREH_BLOCKING_CLARIFY_MULTI_SELECT":
+                "SEMREH_SLICE3_CLARIFY_ACK_MULTI_SELECT_CANCEL",
+        }
+        for marker, acknowledgement in expected.items():
+            self.assertEqual(fixture.response_text({"stream": False}, marker), acknowledgement)
+        self.assertEqual(
+            fixture.response_text({"stream": False}, "prefix SEMREH_SLICE3_CLARIFY_AFTER_SINGLE_ANSWER"),
             "SEMREH_SLICE1_ACK",
         )
 

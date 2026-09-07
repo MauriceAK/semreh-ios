@@ -25,6 +25,7 @@ def main():
     parser.add_argument('--slice2-native', action='store_true')
     parser.add_argument('--slice2-reasoning', action='store_true')
     parser.add_argument('--slice2-ui', action='store_true')
+    parser.add_argument('--slice3-clarification', action='store_true')
     parser.add_argument('--tui-created-session-id')
     parser.add_argument('--development-backend-sha')
     parser.add_argument('--stock-backend', action='store_true')
@@ -48,6 +49,11 @@ def main():
         not args.https or args.cookie_phase or args.slice2_foundation or args.slice2_native or args.slice2_reasoning
     ):
         parser.error('Slice 2 UI requires --https and no other test phase')
+    if args.slice3_clarification and (
+        not args.slice2_ui or not args.https or args.cookie_phase
+        or not args.stock_backend or args.development_backend_sha
+    ):
+        parser.error('--slice3-clarification requires --slice2-ui --https --stock-backend')
     backend_phase = args.slice2_reasoning or args.slice2_ui
     if args.stock_backend and not backend_phase:
         parser.error('--stock-backend requires --slice2-reasoning or --slice2-ui')
@@ -119,6 +125,8 @@ def main():
         )
         environment['SEMREH_SLICE2_TOOL_CWD'] = str(runtime / 'tools')
         target['EnvironmentVariables']['SEMREH_SLICE2_UI_LIVE'] = '1'
+        if args.slice3_clarification:
+            target['EnvironmentVariables']['SEMREH_SLICE3_CLARIFICATION_UI'] = '1'
         if args.tui_created_session_id:
             target['EnvironmentVariables']['SEMREH_SLICE2_TUI_CREATED_SESSION_ID'] = args.tui_created_session_id
         method = 'testOptInLiveProductionLoginNewChatSend'

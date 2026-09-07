@@ -21,7 +21,11 @@ from websockets.asyncio.client import connect
 
 from direct_hermes_capture import write_fixture
 import direct_hermes_probe as stock_probe
-from direct_hermes_model_fixture import CLARIFY_MARKER
+from direct_hermes_model_fixture import (
+    CLARIFY_BATCH_MARKER,
+    CLARIFY_MARKER,
+    CLARIFY_MULTI_SELECT_MARKER,
+)
 from direct_hermes_reasoning_probe import (
     PROFILE,
     RPC_TIMEOUT,
@@ -67,6 +71,22 @@ def _request_summary(frame: dict, session_id: str) -> dict:
     params = frame.get("params") or {}
     payload = params.get("payload") or {}
     request_id = payload.get("request_id")
+    safe_payload = {
+        key: payload[key]
+        for key in ("question", "choices", "multi_select")
+        if key in payload
+    }
+    questions = payload.get("questions")
+    if isinstance(questions, list):
+        safe_payload["questions"] = [
+            {
+                key: question[key]
+                for key in ("qid", "question", "choices", "multi_select")
+                if key in question
+            }
+            for question in questions
+            if isinstance(question, dict)
+        ]
     return {
         "event": params.get("type"),
         "session_matches": params.get("session_id") == session_id,
@@ -77,11 +97,7 @@ def _request_summary(frame: dict, session_id: str) -> dict:
         if isinstance(payload.get("choices"), list) else None,
         # The marker's question is synthetic. Persist only DTO fields needed
         # for client rendering; request_id is intentionally excluded.
-        "safe_payload": {
-            key: payload[key]
-            for key in ("question", "choices", "multi_select")
-            if key in payload
-        },
+        "safe_payload": safe_payload,
     }
 
 
@@ -137,9 +153,11 @@ async def _create_session(probe: Probe, tools_cwd: Path) -> tuple[str, str]:
     return _binding(created)
 
 
-async def _start_clarify(probe: Probe, runtime: str) -> tuple[dict, dict]:
+async def _start_clarify(
+    probe: Probe, runtime: str, marker: str = CLARIFY_MARKER
+) -> tuple[dict, dict]:
     start = len(probe.frames)
-    await probe.rpc("prompt.submit", {"session_id": runtime, "text": CLARIFY_MARKER})
+    await probe.rpc("prompt.submit", {"session_id": runtime, "text": marker})
     return await _wait_event(probe, "clarify.request", runtime, start)
 
 
@@ -164,6 +182,16 @@ async def _complete_clarify(probe: Probe, runtime: str, request_id: str,
         "answer": answer,
     })
     return await probe.wait_terminal(runtime, start)
+
+
+def _terminal_ack(frame: dict) -> str:
+    payload = (frame.get("params") or {}).get("payload") or {}
+    if payload.get("status") == "error":
+        raise AssertionError("clarify completion returned an error")
+    text = payload.get("text")
+    if not isinstance(text, str) or "SEMREH_SLICE1_ACK" not in text:
+        raise AssertionError("clarify completion omitted the deterministic ACK")
+    return text
 
 
 async def _exercise(credentials: dict, evidence: dict, *, runtime: Path,
@@ -217,14 +245,83 @@ async def _exercise(credentials: dict, evidence: dict, *, runtime: Path,
             await _complete_clarify(probe, runtime_a, rid_a, "answer")
             evidence["checks"].append({"name": "answer", "result": True})
 
+            # Exercise the advertised single-question multi-select DTO.  The
+            # fixture marker is exact-only; completion keeps this request from
+            # remaining in the disposable runtime's pending registry.
+            runtime_multi, stored_multi = await _create_session(probe, tools_cwd)
+            active.add(runtime_multi)
+            frame_multi, payload_multi = await _start_clarify(
+                probe, runtime_multi, CLARIFY_MULTI_SELECT_MARKER
+            )
+            multi_shape = _request_summary(frame_multi, runtime_multi)
+            multi_payload = multi_shape["safe_payload"]
+            if multi_payload.get("multi_select") is not True:
+                raise AssertionError("multi-select clarify request lost its flag")
+            if multi_shape.get("choices_count") != 3:
+                raise AssertionError("multi-select clarify choices were not preserved")
+            _terminal_ack(await _complete_clarify(
+                probe, runtime_multi, payload_multi["request_id"], ""
+            ))
+            resumed_multi = await probe.rpc("session.resume", {
+                "session_id": stored_multi, "profile": PROFILE,
+            })
+            if resumed_multi.get("pending_clarify"):
+                raise AssertionError("multi-select cancellation left a pending request")
+            evidence["checks"].append({
+                "name": "multi-select shape, empty cancellation, terminal ACK and no pending request",
+                "result": multi_shape,
+            })
+
+            # Verify the batch shape before exercising the app's minimal
+            # supported action: cancelling the entire request with an empty
+            # answer and no question_id.
+            runtime_batch, stored_batch = await _create_session(probe, tools_cwd)
+            active.add(runtime_batch)
+            frame_batch, payload_batch = await _start_clarify(
+                probe, runtime_batch, CLARIFY_BATCH_MARKER
+            )
+            batch_shape = _request_summary(frame_batch, runtime_batch)
+            batch_questions = batch_shape["safe_payload"].get("questions")
+            if (
+                not isinstance(batch_questions, list)
+                or [item.get("qid") for item in batch_questions] != ["q0", "q1"]
+                or batch_questions[1].get("multi_select") is not True
+            ):
+                raise AssertionError("batch clarify questions were not preserved")
+            _terminal_ack(await _complete_clarify(
+                probe, runtime_batch, payload_batch["request_id"], ""
+            ))
+            resumed_batch = await probe.rpc("session.resume", {
+                "session_id": stored_batch, "profile": PROFILE,
+            })
+            if resumed_batch.get("pending_clarify"):
+                raise AssertionError("batch cancellation left a pending request")
+            evidence["checks"].append({
+                "name": "batch shape, empty cancellation, terminal ACK and no pending request",
+                "result": batch_shape,
+            })
+
             # Empty answer is the explicit cancellation contract.
             runtime_b, stored_b = await _create_session(probe, tools_cwd)
             active.add(runtime_b)
             frame_b, payload_b = await _start_clarify(probe, runtime_b)
-            await _complete_clarify(probe, runtime_b, payload_b["request_id"], "")
+            terminal_b = await _complete_clarify(
+                probe, runtime_b, payload_b["request_id"], ""
+            )
+            _terminal_ack(terminal_b)
+            resumed_b = await probe.rpc("session.resume", {
+                "session_id": stored_b, "profile": PROFILE,
+            })
+            pending_after_cancel = resumed_b.get("pending_clarify") or {}
+            if pending_after_cancel:
+                raise AssertionError("empty clarify answer left a pending request")
             evidence["checks"].append({
                 "name": "empty answer cancel",
-                "result": _request_summary(frame_b, runtime_b),
+                "result": {
+                    **_request_summary(frame_b, runtime_b),
+                    "terminal_ack": True,
+                    "pending_after_resume": False,
+                },
             })
 
             # Keep one request pending while the first ticket/websocket closes;

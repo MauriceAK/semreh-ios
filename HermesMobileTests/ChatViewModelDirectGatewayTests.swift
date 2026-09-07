@@ -575,6 +575,193 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         await runtime.stop()
     }
 
+    func testDirectClarificationRoutesAnswerAndCancelWithoutLegacyHTTP() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let client = makeClient { request in
+            XCTFail("Direct clarification must not call legacy HTTP: \(request.url?.path ?? "nil")")
+            throw URLError(.badURL)
+        }
+        let viewModel = makeViewModel(client: client, runtime: runtime, sessionID: nil)
+
+        let didSend = await viewModel.sendMessage("hello")
+        XCTAssertTrue(didSend)
+        await waitUntil { fake.calls().contains { $0.method == "prompt.submit" } }
+        fake.emit(ChatDirectEventFactory.event(
+            sessionID: "runtime-1",
+            type: "clarify.request",
+            sequence: 19,
+            payload: ["question": .string("missing request")]
+        ))
+        await waitUntil { viewModel.sendErrorMessage?.contains("cannot safely display") == true }
+        fake.emit(clarificationEvent(requestID: "request-answer", sequence: 20))
+        await waitUntil { viewModel.clarificationPrompt?.pending.clarifyId == "request-answer" }
+        let answerIdentity = try XCTUnwrap(viewModel.clarificationPrompt?.gatewayIdentity)
+        let answered = await viewModel.respondToDirectClarification("answer", expectedIdentity: answerIdentity)
+        XCTAssertTrue(answered)
+
+        fake.emit(clarificationEvent(requestID: "request-cancel", sequence: 21))
+        await waitUntil { viewModel.clarificationPrompt?.pending.clarifyId == "request-cancel" }
+        let cancelIdentity = try XCTUnwrap(viewModel.clarificationPrompt?.gatewayIdentity)
+        let cancelled = await viewModel.respondToDirectClarification("", expectedIdentity: cancelIdentity)
+        XCTAssertTrue(cancelled)
+
+        let responses = fake.calls().filter { $0.method == "clarify.respond" }
+        XCTAssertEqual(responses.count, 2)
+        XCTAssertEqual(fields(responses[0].params)?["answer"], .string("answer"))
+        XCTAssertEqual(fields(responses[1].params)?["answer"], .string(""))
+        await viewModel.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testDirectClarificationExpiredResponseIsNotReportedAsSuccess() async throws {
+        let fake = ChatDirectFakeTransport()
+        fake.setClarifyResponse(.object(["status": .string("expired")]))
+        let runtime = try makeRuntime(fake)
+        let client = makeClient { request in
+            XCTFail("Expired direct clarification should not call REST: \(request.url?.path ?? "nil")")
+            throw URLError(.badURL)
+        }
+        let viewModel = makeViewModel(client: client, runtime: runtime, sessionID: nil)
+
+        let didSend = await viewModel.sendMessage("hello")
+        XCTAssertTrue(didSend)
+        await waitUntil { fake.calls().contains { $0.method == "prompt.submit" } }
+        fake.emit(clarificationEvent(requestID: "request-expired", sequence: 20))
+        await waitUntil { viewModel.clarificationPrompt?.pending.clarifyId == "request-expired" }
+        let identity = try XCTUnwrap(viewModel.clarificationPrompt?.gatewayIdentity)
+
+        let didRespond = await viewModel.respondToDirectClarification("answer", expectedIdentity: identity)
+
+        XCTAssertFalse(didRespond)
+        XCTAssertNil(viewModel.clarificationPrompt)
+        XCTAssertEqual(viewModel.directClarificationErrorMessage, "That clarification expired before it was answered.")
+        await viewModel.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testDirectClarificationReplacementClearsOwnedErrorButPreservesUnrelatedError() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let client = makeClient { request in
+            XCTFail("Clarification replacement test should not call REST")
+            throw URLError(.badURL)
+        }
+        let viewModel = makeViewModel(client: client, runtime: runtime, sessionID: nil)
+
+        let didSend = await viewModel.sendMessage("hello")
+        XCTAssertTrue(didSend)
+        await waitUntil { fake.calls().contains { $0.method == "prompt.submit" } }
+        fake.emit(clarificationEvent(requestID: "request-expiring", sequence: 20))
+        await waitUntil { viewModel.clarificationPrompt?.pending.clarifyId == "request-expiring" }
+        fake.emit(ChatDirectEventFactory.event(
+            sessionID: "runtime-1",
+            type: "clarify.expire",
+            sequence: 21,
+            payload: ["request_id": .string("request-expiring")]
+        ))
+        await waitUntil { viewModel.sendErrorMessage == "That clarification expired before it was answered." }
+
+        fake.emit(clarificationEvent(requestID: "request-replacement", sequence: 22))
+        await waitUntil { viewModel.clarificationPrompt?.pending.clarifyId == "request-replacement" }
+        XCTAssertNil(viewModel.sendErrorMessage)
+
+        fake.emit(ChatDirectEventFactory.event(
+            sessionID: "runtime-1",
+            type: "clarify.expire",
+            sequence: 23,
+            payload: ["request_id": .string("request-replacement")]
+        ))
+        await waitUntil { viewModel.sendErrorMessage == "That clarification expired before it was answered." }
+        fake.emit(ChatDirectEventFactory.event(
+            sessionID: "runtime-1",
+            type: "approval.request",
+            sequence: 24,
+            payload: ["request_id": .string("unrelated")]
+        ))
+        await waitUntil { viewModel.sendErrorMessage?.contains("cannot answer") == true }
+        fake.emit(clarificationEvent(requestID: "request-after-unrelated", sequence: 25))
+        await waitUntil { viewModel.clarificationPrompt?.pending.clarifyId == "request-after-unrelated" }
+        XCTAssertEqual(
+            viewModel.sendErrorMessage,
+            "Hermes is waiting for input. This migration build cannot answer that request yet; use the TUI or stop this response."
+        )
+
+        await viewModel.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testDirectClarificationDuplicateTapIsSingleFlight() async throws {
+        let fake = ChatDirectFakeTransport()
+        let gate = ChatDirectAsyncGate()
+        fake.setClarifyGate(gate)
+        let runtime = try makeRuntime(fake)
+        let client = makeClient { request in
+            XCTFail("Duplicate direct clarification test should not call REST")
+            throw URLError(.badURL)
+        }
+        let viewModel = makeViewModel(client: client, runtime: runtime, sessionID: nil)
+
+        let didSend = await viewModel.sendMessage("hello")
+        XCTAssertTrue(didSend)
+        await waitUntil { fake.calls().contains { $0.method == "prompt.submit" } }
+        fake.emit(clarificationEvent(requestID: "request-single-flight", sequence: 20))
+        await waitUntil { viewModel.clarificationPrompt != nil }
+        let identity = try XCTUnwrap(viewModel.clarificationPrompt?.gatewayIdentity)
+        let first = Task { await viewModel.respondToDirectClarification("answer", expectedIdentity: identity) }
+        await waitUntil { viewModel.isRespondingToDirectClarification }
+        let secondTap = await viewModel.respondToDirectClarification("second", expectedIdentity: identity)
+        XCTAssertFalse(secondTap)
+        XCTAssertEqual(fake.calls().filter { $0.method == "clarify.respond" }.count, 1)
+        await gate.release()
+        let firstResult = await first.value
+        XCTAssertTrue(firstResult)
+        await viewModel.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testDirectClarificationReplacementAndInvalidationDoNotPolluteNewUI() async throws {
+        let fake = ChatDirectFakeTransport()
+        let gate = ChatDirectAsyncGate()
+        fake.setClarifyGate(gate)
+        let runtime = try makeRuntime(fake)
+        let client = makeClient { request in
+            XCTFail("Replacement direct clarification test should not call REST")
+            throw URLError(.badURL)
+        }
+        let viewModel = makeViewModel(client: client, runtime: runtime, sessionID: nil)
+
+        let didSend = await viewModel.sendMessage("hello")
+        XCTAssertTrue(didSend)
+        await waitUntil { fake.calls().contains { $0.method == "prompt.submit" } }
+        fake.emit(clarificationEvent(requestID: "request-old", sequence: 20))
+        await waitUntil { viewModel.clarificationPrompt?.pending.clarifyId == "request-old" }
+        let oldIdentity = try XCTUnwrap(viewModel.clarificationPrompt?.gatewayIdentity)
+        let first = Task { await viewModel.respondToDirectClarification("answer", expectedIdentity: oldIdentity) }
+        await waitUntil { viewModel.isRespondingToDirectClarification }
+
+        fake.emit(clarificationEvent(requestID: "request-new", sequence: 21))
+        await waitUntil { viewModel.clarificationPrompt?.pending.clarifyId == "request-new" }
+        await gate.release()
+        let firstResult = await first.value
+        XCTAssertFalse(firstResult)
+        XCTAssertEqual(viewModel.clarificationPrompt?.pending.clarifyId, "request-new")
+        XCTAssertNil(viewModel.directClarificationErrorMessage)
+
+        let newIdentity = try XCTUnwrap(viewModel.clarificationPrompt?.gatewayIdentity)
+        let secondGate = ChatDirectAsyncGate()
+        fake.setClarifyGate(secondGate)
+        let second = Task { await viewModel.respondToDirectClarification("answer", expectedIdentity: newIdentity) }
+        await waitUntil { viewModel.isRespondingToDirectClarification }
+        viewModel.invalidateDirectConversation()
+        await secondGate.release()
+        let secondResult = await second.value
+        XCTAssertFalse(secondResult)
+        XCTAssertNil(viewModel.clarificationPrompt)
+        XCTAssertNil(viewModel.directClarificationErrorMessage)
+        await runtime.stop()
+    }
+
     func testLongHistoriesPageChronologicallyAcrossThreeChatsAndReopenWithoutCrossRouting() async throws {
         let fixture = ChatLongHistoryFixture(chatIDs: ["chat-a", "chat-b", "chat-c"])
         let fake = ChatLongFixtureTransport(fixture: fixture)
@@ -830,6 +1017,20 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
 
     private let testServer = URL(string: "https://fixture.example")!
 
+    private func clarificationEvent(requestID: String, sequence: Int) -> HermesGatewayEvent {
+        ChatDirectEventFactory.event(
+            sessionID: "runtime-1",
+            type: "clarify.request",
+            sequence: sequence,
+            payload: [
+                "request_id": .string(requestID),
+                "question": .string("Choose a bounded answer"),
+                "choices": .array([.string("answer"), .string("cancel")]),
+                "multi_select": .bool(false)
+            ]
+        )
+    }
+
     private func makeViewModel(
         client: APIClient,
         runtime: HermesServerRuntime,
@@ -1007,6 +1208,8 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
     private var sessionStatusResponse: JSONValue = .object([
         "output": .string("Agent Running: No")
     ])
+    private var clarifyResponse: JSONValue = .object(["status": .string("ok")])
+    private var clarifyGate: ChatDirectAsyncGate?
 
     func installSink(_ sink: @escaping @Sendable (HermesGatewayEvent) -> Void) {
         withLock { self.sink = sink }
@@ -1042,6 +1245,14 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
 
     func setSessionStatusResponse(_ response: JSONValue) {
         withLock { sessionStatusResponse = response }
+    }
+
+    func setClarifyGate(_ gate: ChatDirectAsyncGate?) {
+        withLock { clarifyGate = gate }
+    }
+
+    func setClarifyResponse(_ response: JSONValue) {
+        withLock { clarifyResponse = response }
     }
 
     func calls() -> [Call] {
@@ -1092,6 +1303,8 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
                 return (.object(["status": .string("interrupted")]), nil, nil, false, nil, nil)
             case "session.status":
                 return (sessionStatusResponse, nil, nil, false, nil, nil)
+            case "clarify.respond":
+                return (clarifyResponse, nil, clarifyGate, false, nil, nil)
             default:
                 return (.object([:]), nil, nil, false, nil, nil)
             }
@@ -1113,6 +1326,9 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
                 "scope": .string("session"), "deferred": .bool(false),
                 "persisted": .bool(true)
             ])
+        }
+        if method == "clarify.respond", let gate = behavior.2 {
+            await gate.wait()
         }
         return behavior.0
     }

@@ -123,7 +123,7 @@ def validate():
                       'os_isolation': False, 'personal_credentials_inherited': False}))
 
 
-def serve():
+def serve(*, with_pdf_renderer=False):
     validate()
     with socket.socket() as probe:
         # Match the HTTP server's reuse behavior so a just-stopped test server's
@@ -144,6 +144,13 @@ def serve():
         # platform defaults. Clarification has no terminal/file execution.
         'HERMES_TUI_TOOLSETS': 'clarify',
     }
+    if with_pdf_renderer:
+        # Explicitly approved test dependency, not the whole Homebrew PATH.
+        # Keep the default fixture launcher unchanged when PDF tests are off.
+        renderer_bin = Path('/opt/homebrew/opt/poppler/bin')
+        if not (renderer_bin / 'pdftoppm').is_file() or not os.access(renderer_bin / 'pdftoppm', os.X_OK):
+            raise RuntimeError('Approved PDF renderer is unavailable')
+        environment['PATH'] += ':' + str(renderer_bin)
     os.chdir(RUNTIME / 'tools')
     # Use the complete first-party serve startup: it bridges terminal settings
     # and discovers the basic-auth plugin before start_server. Explicit custom
@@ -155,5 +162,12 @@ def serve():
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['init', 'validate', 'serve'])
+    parser.add_argument('--with-pdf-renderer', action='store_true',
+                        help='Expose the approved Poppler renderer to this disposable gateway only')
     args = parser.parse_args()
-    {'init': initialize, 'validate': validate, 'serve': serve}[args.action]()
+    if args.with_pdf_renderer and args.action != 'serve':
+        parser.error('--with-pdf-renderer is only valid with serve')
+    if args.action == 'serve':
+        serve(with_pdf_renderer=args.with_pdf_renderer)
+    else:
+        {'init': initialize, 'validate': validate}[args.action]()

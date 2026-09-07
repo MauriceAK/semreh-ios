@@ -56,6 +56,13 @@ this sheet does not invent contracts or mark unexecuted checks passed.
       single-flight responses, expiry and resume reconstruction. Root focused
       64pass and full2047pass/7intentional skips. Not yet connected to native UI;
       approval/sudo/secret and unsupported clarification cancellation remain open.
+    - [x] **B2b — Native clarification checkpoint.** Single answer/explicit empty
+      cancel plus cancel-only batch/multi-select, transient captured identity,
+      stale/duplicate/expiry guards and visible error handling. Signed production
+      navigation through the stock HTTPS fixture passed all four flows in UIv3;
+      full nativev2 passed2067/0fail/7intentional skips. Root inspected screenshots
+      and corrected small-phone keyboard clipping. Approval/sudo/secret, mobile
+      recovery and physical blocking acceptance remain open; this does not close B.
   - [ ] **B3 — Native transient prompt UI.** Secure input stays memory-only;
     reconstruct outstanding requests after resume, clear only matching expiry,
     and prove no secret persistence or diagnostic exposure.
@@ -71,7 +78,13 @@ this sheet does not invent contracts or mark unexecuted checks passed.
       bounded off-main base64 and exact image/file/PDF RPC parameter shapes;
       local validation and cancellation tests pass in focused/full runs above.
       Not yet wired into picker/send staging. Live image/file contract passed;
-      PDF success remains unverified because fixture renderer is unavailable.
+      PDF success subsequently passed attachment-contract-v3 after the approved
+      Poppler install; this does not establish native picker/send integration.
+    - [x] **A2b — Pending/display/receipt foundations.** Memory-only bytes and
+      origin/binding/generation-scoped stage state, metadata-only composer display,
+      exact stock image/file/PDF receipt parsing. Full nativev2 above passes.
+      Picker/send/partial-failure integration is still open. Unexpected PDF errors
+      may follow partial page queueing; do not treat every RPC error as unstaged.
 - [ ] **S3-M — Authenticated media.** Same-origin cookie auth, external credential
   isolation, Range, resource-scoped caching. No tickets in media URLs. Coordinate
   attachment metadata boundary with A; avoid generic speculative DTOs.

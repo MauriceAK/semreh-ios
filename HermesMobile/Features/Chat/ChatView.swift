@@ -668,6 +668,16 @@ struct ChatView: View {
                 .onChange(of: draftMessage) {
                     viewModel.setDirectComposerEditing(!draftMessage.isEmpty)
                 }
+                .onChange(of: viewModel.clarificationPrompt?.gatewayIdentity) { oldIdentity, newIdentity in
+                    guard viewModel.usesDirectGateway,
+                          let newIdentity,
+                          oldIdentity != newIdentity,
+                          composerIsFocused else { return }
+                    // The ordinary composer owns this binding. Do not send a global
+                    // resignFirstResponder action: the clarification card's answer
+                    // field may already be focused and must not be hijacked.
+                    composerIsFocused = false
+                }
         }
         .overlay(alignment: .top) {
             GitActionToastOverlay(state: gitToastState)
@@ -1298,9 +1308,29 @@ struct ChatView: View {
             onToggleListening: { context in
                 viewModel.toggleListening(to: context)
             },
-            onSubmitClarification: { response in
+            onSubmitClarification: { response, identity in
                 Task {
-                    let didRespond = await viewModel.respondToClarification(response)
+                    let didRespond: Bool
+                    if let identity {
+                        didRespond = await viewModel.respondToDirectClarification(
+                            response,
+                            expectedIdentity: identity
+                        )
+                    } else {
+                        didRespond = await viewModel.respondToClarification(response)
+                    }
+                    if didRespond {
+                        ChatHaptics.clarificationSubmitted(isEnabled: isHapticsEnabled)
+                    }
+                }
+            },
+            onCancelClarification: { identity in
+                guard let identity else { return }
+                Task {
+                    let didRespond = await viewModel.respondToDirectClarification(
+                        "",
+                        expectedIdentity: identity
+                    )
                     if didRespond {
                         ChatHaptics.clarificationSubmitted(isEnabled: isHapticsEnabled)
                     }

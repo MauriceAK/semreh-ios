@@ -15,6 +15,15 @@ final class LongChatScrollUITests: XCTestCase {
     private let chatIdentifier = "chat-detail:10,000-row performance lab"
     private let scrollToLatestLabel = "Scroll to latest message"
     private let endMarker = "End of 10,000-row conversation."
+    private let clarificationSingleMarker = "SEMREH_BLOCKING_CLARIFY"
+    private let clarificationMultiSelectMarker = "SEMREH_BLOCKING_CLARIFY_MULTI_SELECT"
+    private let clarificationBatchMarker = "SEMREH_BLOCKING_CLARIFY_BATCH"
+    private let clarificationCardIdentifier = "direct.clarification.card"
+    private let clarificationCancelIdentifier = "direct.clarification.cancel"
+    private let singleAnswerAcknowledgement = "SEMREH_SLICE3_CLARIFY_ACK_SINGLE_ANSWER"
+    private let singleCancelAcknowledgement = "SEMREH_SLICE3_CLARIFY_ACK_SINGLE_CANCEL"
+    private let batchCancelAcknowledgement = "SEMREH_SLICE3_CLARIFY_ACK_BATCH_CANCEL"
+    private let multiSelectCancelAcknowledgement = "SEMREH_SLICE3_CLARIFY_ACK_MULTI_SELECT_CANCEL"
 
     func testTenThousandRowChatScrollsAndScrollToLatestReachesEndMarker() {
         continueAfterFailure = false
@@ -412,6 +421,14 @@ final class LongChatScrollUITests: XCTestCase {
         XCTAssertTrue(acknowledgement.exists && acknowledgement.isHittable)
         attachScreenshot(named: "live-production-chat-success")
 
+        if environment["SEMREH_SLICE3_CLARIFICATION_UI"] == "1" {
+            guard stockBackend else {
+                XCTFail("Slice 3 clarification UI requires the pinned stock backend.")
+                return
+            }
+            exerciseOptInClarificationFlow(app: app)
+        }
+
         if let storedID = environment["SEMREH_SLICE2_TUI_CREATED_SESSION_ID"] {
             XCTAssertNotNil(storedID.range(of: "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$", options: .regularExpression))
             var link = URLComponents()
@@ -428,6 +445,208 @@ final class LongChatScrollUITests: XCTestCase {
                           message: "The TUI-created assistant reply must also be visible.")
             attachScreenshot(named: "live-tui-created-session-in-semreh")
         }
+    }
+
+    @MainActor
+    private func exerciseOptInClarificationFlow(app: XCUIApplication) {
+        // The model fixture uses exact markers. Each response is followed by a
+        // distinct ordinary turn so this test proves the blocking request was
+        // released; a previous ACK alone is not evidence of terminal delivery.
+        runSingleClarificationAnswer(app: app)
+        runSingleClarificationCancel(app: app)
+        runCancelOnlyClarification(
+            marker: clarificationBatchMarker,
+            question: "multi-question clarification",
+            acknowledgement: batchCancelAcknowledgement,
+            screenshotPrefix: "slice3-clarification-batch",
+            app: app
+        )
+        runCancelOnlyClarification(
+            marker: clarificationMultiSelectMarker,
+            question: "multi-select clarification",
+            acknowledgement: multiSelectCancelAcknowledgement,
+            screenshotPrefix: "slice3-clarification-multi-select",
+            app: app
+        )
+    }
+
+    @MainActor
+    private func runSingleClarificationAnswer(app: XCUIApplication) {
+        sendLivePrompt(
+            clarificationSingleMarker,
+            app: app,
+            screenshotPrefix: "slice3-clarification-single-answer-request"
+        )
+        let card = waitForClarificationCard(app: app)
+        assertSingleClarificationQuestion(in: card)
+        let answer = card.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH[c] %@", "answer")
+        ).firstMatch
+        assertHittable(answer, timeout: 10,
+                       message: "Single clarification must expose its advertised answer choice.")
+        answer.tap()
+        waitForClarificationCardToClear(card,
+                                        screenshotName: "slice3-clarification-single-answer-cleared")
+        waitForNextTurnSuccess(
+            prompt: "SEMREH_SLICE3_CLARIFY_AFTER_SINGLE_ANSWER",
+            acknowledgement: singleAnswerAcknowledgement,
+            app: app
+        )
+    }
+
+    @MainActor
+    private func runSingleClarificationCancel(app: XCUIApplication) {
+        sendLivePrompt(
+            clarificationSingleMarker,
+            app: app,
+            screenshotPrefix: "slice3-clarification-single-cancel-request"
+        )
+        let card = waitForClarificationCard(app: app)
+        assertSingleClarificationQuestion(in: card)
+        let cancel = app.buttons[clarificationCancelIdentifier]
+        assertHittable(cancel, timeout: 10,
+                       message: "Single clarification must expose an explicit cancel action.")
+        cancel.tap()
+        waitForClarificationCardToClear(card,
+                                        screenshotName: "slice3-clarification-single-cancel-cleared")
+        waitForNextTurnSuccess(
+            prompt: "SEMREH_SLICE3_CLARIFY_AFTER_SINGLE_CANCEL",
+            acknowledgement: singleCancelAcknowledgement,
+            app: app
+        )
+    }
+
+    @MainActor
+    private func runCancelOnlyClarification(
+        marker: String,
+        question: String,
+        acknowledgement: String,
+        screenshotPrefix: String,
+        app: XCUIApplication
+    ) {
+        sendLivePrompt(
+            marker,
+            app: app,
+            screenshotPrefix: screenshotPrefix + "-request"
+        )
+        let card = waitForClarificationCard(app: app)
+        let unsupportedQuestion = app.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS[c] %@", question)
+        ).firstMatch
+        XCTAssertTrue(
+            unsupportedQuestion.waitForExistence(timeout: 5),
+            "The unsupported clarification must render its cancel-only explanation."
+        )
+        let answer = card.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH[c] %@", "answer")
+        ).firstMatch
+        XCTAssertFalse(answer.exists,
+                       "Unsupported clarification must not expose an answer choice.")
+        XCTAssertFalse(card.buttons["direct.clarification.submit"].exists,
+                       "Unsupported clarification must not expose a submit action.")
+        let cancel = app.buttons[clarificationCancelIdentifier]
+        assertHittable(cancel, timeout: 10,
+                       message: "Unsupported clarification must expose cancel-only dismissal.")
+        attachScreenshot(named: screenshotPrefix + "-card")
+        cancel.tap()
+        waitForClarificationCardToClear(card,
+                                        screenshotName: screenshotPrefix + "-cleared")
+        waitForNextTurnSuccess(
+            prompt: "SEMREH_SLICE3_CLARIFY_AFTER_" + marker,
+            acknowledgement: acknowledgement,
+            app: app
+        )
+    }
+
+    @MainActor
+    private func sendLivePrompt(
+        _ prompt: String,
+        app: XCUIApplication,
+        screenshotPrefix: String
+    ) {
+        let composers = app.textViews.matching(
+            NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
+        )
+        let composer = composers.firstMatch
+        XCTAssertTrue(composer.waitForExistence(timeout: 10), "The production chat must expose its composer.")
+        composer.tap()
+        composer.typeText(prompt)
+        let send = app.buttons["Send"]
+        let sendDeadline = Date().addingTimeInterval(45)
+        while (!send.exists || !send.isEnabled) && Date() < sendDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        }
+        assertHittable(send, timeout: 5, message: "The production chat Send action must be available.")
+        send.tap()
+
+        let marker = app.staticTexts.matching(
+            NSPredicate(format: "label == %@", prompt)
+        ).firstMatch
+        XCTAssertTrue(
+            marker.waitForExistence(timeout: 20),
+            "The exact clarification marker must appear in the transcript."
+        )
+        attachScreenshot(named: screenshotPrefix + "-sent")
+    }
+
+    @MainActor
+    private func waitForClarificationCard(app: XCUIApplication) -> XCUIElement {
+        let card = app.otherElements[clarificationCardIdentifier]
+        XCTAssertTrue(card.waitForExistence(timeout: 30),
+                      "The direct clarification card must appear for the exact marker.")
+        return card
+    }
+
+    @MainActor
+    private func assertSingleClarificationQuestion(in card: XCUIElement) {
+        let question = card.staticTexts["Choose a bounded fixture answer"]
+        assertHittable(
+            question,
+            timeout: 10,
+            message: "Single clarification must expose its exact readable question."
+        )
+    }
+
+    @MainActor
+    private func waitForClarificationCardToClear(
+        _ card: XCUIElement,
+        screenshotName: String
+    ) {
+        let cleared = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"),
+            object: card
+        )
+        wait(for: [cleared], timeout: 30)
+        XCTAssertFalse(card.exists, "The clarification card must clear after its response.")
+        attachScreenshot(named: screenshotName)
+    }
+
+    @MainActor
+    private func waitForNextTurnSuccess(
+        prompt: String,
+        acknowledgement: String,
+        app: XCUIApplication
+    ) {
+        sendLivePrompt(prompt, app: app, screenshotPrefix: "slice3-clarification-follow-up")
+        let uniqueAcknowledgement = app.staticTexts[acknowledgement]
+        assertHittable(uniqueAcknowledgement, timeout: 45,
+                       message: "The clarification follow-up must produce its unique terminal ACK.")
+        waitForIdle(app: app)
+        attachScreenshot(named: "slice3-clarification-follow-up-complete")
+    }
+
+    @MainActor
+    private func waitForIdle(app: XCUIApplication) {
+        let deadline = Date().addingTimeInterval(45)
+        while Date() < deadline {
+            let stop = app.buttons["Stop response"]
+            if !stop.exists {
+                return
+            }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        }
+        XCTAssertFalse(app.buttons["Stop response"].exists,
+                       "Clarification follow-up must settle instead of leaving a running response.")
     }
 
     private func waitForPostLoginDestination(app: XCUIApplication) {

@@ -23,6 +23,51 @@ CLARIFY_ARGUMENTS = {
     'question': 'Choose a bounded fixture answer',
     'choices': ['answer', 'cancel'],
 }
+CLARIFY_MULTI_SELECT_MARKER = 'SEMREH_BLOCKING_CLARIFY_MULTI_SELECT'
+CLARIFY_MULTI_SELECT_TOOL_CALL_ID = 'call_semreh_clarify_multi'
+CLARIFY_MULTI_SELECT_ARGUMENTS = {
+    'question': 'Choose bounded fixture surfaces',
+    'choices': ['iOS', 'TUI', 'desktop'],
+    'multi_select': True,
+}
+CLARIFY_BATCH_MARKER = 'SEMREH_BLOCKING_CLARIFY_BATCH'
+CLARIFY_BATCH_TOOL_CALL_ID = 'call_semreh_clarify_batch'
+CLARIFY_BATCH_ARGUMENTS = {
+    'questions': [
+        {
+            'id': 'plan',
+            'question': 'Choose a bounded plan',
+            'choices': ['answer', 'cancel'],
+        },
+        {
+            'id': 'surfaces',
+            'question': 'Choose bounded surfaces',
+            'choices': ['iOS', 'TUI', 'desktop'],
+            'multi_select': True,
+        },
+    ],
+}
+CLARIFY_FOLLOWUP_RESPONSES = {
+    'SEMREH_SLICE3_CLARIFY_AFTER_SINGLE_ANSWER':
+        'SEMREH_SLICE3_CLARIFY_ACK_SINGLE_ANSWER',
+    'SEMREH_SLICE3_CLARIFY_AFTER_SINGLE_CANCEL':
+        'SEMREH_SLICE3_CLARIFY_ACK_SINGLE_CANCEL',
+    'SEMREH_SLICE3_CLARIFY_AFTER_SEMREH_BLOCKING_CLARIFY_BATCH':
+        'SEMREH_SLICE3_CLARIFY_ACK_BATCH_CANCEL',
+    'SEMREH_SLICE3_CLARIFY_AFTER_SEMREH_BLOCKING_CLARIFY_MULTI_SELECT':
+        'SEMREH_SLICE3_CLARIFY_ACK_MULTI_SELECT_CANCEL',
+}
+
+# Keep the marker dispatch explicit so adding a synthetic probe case cannot
+# make ordinary prompts accidentally emit a clarify call.
+CLARIFY_FIXTURES = {
+    CLARIFY_MARKER: (CLARIFY_TOOL_CALL_ID, CLARIFY_ARGUMENTS),
+    CLARIFY_MULTI_SELECT_MARKER: (
+        CLARIFY_MULTI_SELECT_TOOL_CALL_ID,
+        CLARIFY_MULTI_SELECT_ARGUMENTS,
+    ),
+    CLARIFY_BATCH_MARKER: (CLARIFY_BATCH_TOOL_CALL_ID, CLARIFY_BATCH_ARGUMENTS),
+}
 
 
 def compression_bulky_assistant(index: int) -> str:
@@ -50,7 +95,7 @@ def bulky_main_content(marker: str) -> str:
 
 def clarify_marker_active(body: dict, last_user: object) -> bool:
     """Only expose the clarify call for the exact marker and advertised tool."""
-    if last_user != CLARIFY_MARKER or not isinstance(body.get('tools'), list):
+    if not isinstance(last_user, str) or last_user not in CLARIFY_FIXTURES or not isinstance(body.get('tools'), list):
         return False
     # After the gateway answers the call, the tool result is in the next model
     # request.  End the deterministic turn with an ACK instead of reopening the
@@ -76,12 +121,13 @@ def clarify_tool_call(body: dict, last_user: object) -> Optional[dict]:
     """Return one deterministic OpenAI tool call for the clarify-only probe."""
     if not clarify_marker_active(body, last_user):
         return None
+    call_id, arguments = CLARIFY_FIXTURES[last_user]
     return {
-        'id': CLARIFY_TOOL_CALL_ID,
+        'id': call_id,
         'type': 'function',
         'function': {
             'name': 'clarify',
-            'arguments': json.dumps(CLARIFY_ARGUMENTS, separators=(',', ':')),
+            'arguments': json.dumps(arguments, separators=(',', ':')),
         },
     }
 
@@ -92,7 +138,10 @@ def response_text(body: dict, last_user: object) -> str:
         if COMPRESSION_BULKY_MAIN_RE.fullmatch(last_user):
             return bulky_main_content(last_user)
 
-    text = 'SEMREH_SLICE1_ACK'
+    text = (
+        CLARIFY_FOLLOWUP_RESPONSES.get(last_user, 'SEMREH_SLICE1_ACK')
+        if isinstance(last_user, str) else 'SEMREH_SLICE1_ACK'
+    )
     if REASONING_PROBE and 'SEMREH_REASONING_PROBE' in str(last_user):
         reasoning = body.get('reasoning') or {}
         effort = body.get('reasoning_effort') or reasoning.get('effort')

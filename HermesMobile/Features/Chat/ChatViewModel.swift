@@ -163,6 +163,22 @@ struct ClarificationPromptState: Equatable, Identifiable {
     let sessionID: String
     let pending: PendingClarification
     let pendingCount: Int
+    let gatewayIdentity: GatewayBlockingPromptIdentity?
+    let gatewayCancelOnly: Bool
+
+    init(
+        sessionID: String,
+        pending: PendingClarification,
+        pendingCount: Int,
+        gatewayIdentity: GatewayBlockingPromptIdentity? = nil,
+        gatewayCancelOnly: Bool = false
+    ) {
+        self.sessionID = sessionID
+        self.pending = pending
+        self.pendingCount = pendingCount
+        self.gatewayIdentity = gatewayIdentity
+        self.gatewayCancelOnly = gatewayCancelOnly
+    }
 
     var question: String {
         pending.displayQuestion
@@ -623,9 +639,15 @@ final class ChatViewModel {
     var isRespondingToApproval: Bool { pendingActionCoordinator.isRespondingToApproval }
     var approvalErrorMessage: String? { pendingActionCoordinator.approvalErrorMessage }
     var isSessionApprovalBypassEnabled: Bool { pendingActionCoordinator.isSessionApprovalBypassEnabled }
-    var clarificationPrompt: ClarificationPromptState? { pendingActionCoordinator.clarificationPrompt }
-    var isRespondingToClarification: Bool { pendingActionCoordinator.isRespondingToClarification }
-    var clarificationErrorMessage: String? { pendingActionCoordinator.clarificationErrorMessage }
+    var clarificationPrompt: ClarificationPromptState? {
+        usesDirectGateway ? directClarificationPrompt : pendingActionCoordinator.clarificationPrompt
+    }
+    var isRespondingToClarification: Bool {
+        usesDirectGateway ? isRespondingToDirectClarification : pendingActionCoordinator.isRespondingToClarification
+    }
+    var clarificationErrorMessage: String? {
+        usesDirectGateway ? directClarificationErrorMessage : pendingActionCoordinator.clarificationErrorMessage
+    }
     private(set) var nativeAuthPrompt: NativeAuthPromptState?
     private(set) var nativeAuthErrorMessage: String?
     private var quarantinedNativeAuthContextIDs = Set<String>()
@@ -665,6 +687,10 @@ final class ChatViewModel {
     @ObservationIgnored private var directAttachmentTask: Task<GatewayConversationController, Error>?
     private var directInvalidated = false
     private var directVisible = false
+    private(set) var directClarificationPrompt: ClarificationPromptState? = nil
+    private(set) var isRespondingToDirectClarification = false
+    private(set) var directClarificationErrorMessage: String? = nil
+    private var directClarificationOwnedSendError: String?
     private var directComposerIsEditing = false
     private var directOlderOffset = 0
     private var directHistoryID: String?
@@ -1051,7 +1077,9 @@ final class ChatViewModel {
             controller.onBinding = { [weak self] binding in self?.adoptDirectID(binding.storedID) }
             controller.onCanonicalID = { [weak self] id in self?.adoptDirectID(id) }
             controller.onResume = { [weak self] result in
-                self?.applyDirectSessionInfo(result?.gatewayFields["info"])
+                guard let self else { return }
+                self.applyDirectSessionInfo(result?.gatewayFields["info"])
+                self.syncDirectClarificationPrompt()
             }
             controller.onReasoningConfiguration = { [weak self, weak controller] configuration in
                 guard let self, let controller,
@@ -1066,10 +1094,32 @@ final class ChatViewModel {
             }
             controller.onEvent = { [weak self] event in
                 guard let self, !self.directInvalidated else { return }
+                let previousPrompt = self.directClarificationPrompt
                 self.applyDirectEvent(event)
+                if event.type == "clarify.request",
+                   let currentPrompt = self.directConversation?.pendingBlockingPrompt,
+                   previousPrompt?.gatewayIdentity != currentPrompt.identity {
+                    self.clearDirectClarificationOwnedSendError()
+                    self.directClarificationErrorMessage = nil
+                } else if event.type == "clarify.expire",
+                          let requestID = event.payload?.gatewayFields["request_id"]?.gatewayString,
+                          previousPrompt?.pending.clarifyId == requestID {
+                    let message = "That clarification expired before it was answered."
+                    self.directClarificationErrorMessage = message
+                    self.setDirectClarificationSendError(message)
+                }
+                self.syncDirectClarificationPrompt()
             }
             controller.onError = { [weak self] error in
                 guard let self, !self.directInvalidated else { return }
+                if let blockingError = error as? GatewayBlockingError {
+                    let message = self.directClarificationMessage(for: blockingError)
+                    self.directClarificationErrorMessage = message
+                    if self.directClarificationPrompt == nil {
+                        self.setDirectClarificationSendError(message)
+                    }
+                    return
+                }
                 self.lastError = error
                 self.sendErrorMessage = "The Hermes connection needs attention. No message was automatically resent."
             }
@@ -1095,6 +1145,10 @@ final class ChatViewModel {
         directReasoningRefreshTask?.cancel()
         directSessionReasoningSupported = false
         isReasoningChangeDeferred = false
+        directClarificationPrompt = nil
+        directClarificationErrorMessage = nil
+        directClarificationOwnedSendError = nil
+        isRespondingToDirectClarification = false
         directConversation?.invalidate()
         directAttachmentTask?.cancel()
         stopSessionEventSync()
@@ -1344,13 +1398,66 @@ final class ChatViewModel {
                 applyDirectSessionInfo(raw.payload)
             } else if raw.type == "error" {
                 sendErrorMessage = raw.payload?.gatewayFields["message"]?.gatewayString ?? "Hermes reported an error."
-            } else if ["approval.request", "clarify.request", "sudo.request", "secret.request"].contains(raw.type) {
+            } else if ["approval.request", "sudo.request", "secret.request"].contains(raw.type) {
                 // Native blocking-interaction controls are Slice 3. Until then,
                 // surface the wait explicitly instead of silently dropping it
                 // or trying the WebUI approval/clarification endpoints.
                 sendErrorMessage = "Hermes is waiting for input. This migration build cannot answer that request yet; use the TUI or stop this response."
             }
         case .unknown: break
+        }
+    }
+
+    private func syncDirectClarificationPrompt() {
+        guard usesDirectGateway else { return }
+        guard let prompt = directConversation?.pendingBlockingPrompt else {
+            directClarificationPrompt = nil
+            return
+        }
+
+        let pending = PendingClarification(
+            clarifyId: prompt.identity.requestID,
+            question: prompt.kind.isCancelOnly ? prompt.displayQuestion : prompt.question,
+            choicesOffered: prompt.kind.isCancelOnly ? [] : prompt.choices,
+            sessionId: prompt.identity.storedID,
+            kind: prompt.kind.rawValue
+        )
+        directClarificationPrompt = ClarificationPromptState(
+            sessionID: prompt.identity.storedID,
+            pending: pending,
+            pendingCount: 1,
+            gatewayIdentity: prompt.identity,
+            gatewayCancelOnly: prompt.kind.isCancelOnly
+        )
+    }
+
+    private func setDirectClarificationSendError(_ message: String) {
+        directClarificationOwnedSendError = message
+        sendErrorMessage = message
+    }
+
+    private func clearDirectClarificationOwnedSendError() {
+        guard let ownedError = directClarificationOwnedSendError else { return }
+        if sendErrorMessage == ownedError {
+            sendErrorMessage = nil
+        }
+        directClarificationOwnedSendError = nil
+    }
+
+    private func directClarificationMessage(for error: GatewayBlockingError) -> String {
+        switch error {
+        case .malformedClarification:
+            return "Hermes sent a clarification request this app cannot safely display."
+        case .unsupportedBatchClarification:
+            return "This multi-question clarification can only be cancelled from this app."
+        case .unsupportedMultiSelectClarification:
+            return "This multi-select clarification can only be cancelled from this app."
+        case .noPendingClarification, .staleClarification:
+            return "That clarification is no longer active."
+        case .invalidClarificationResponse:
+            return "This clarification can only be cancelled."
+        case .responseInFlight:
+            return "A clarification response is already being sent."
         }
     }
 
@@ -5344,6 +5451,60 @@ final class ChatViewModel {
     @discardableResult
     func respondToClarification(_ responseText: String) async -> Bool {
         await pendingActionCoordinator.respondToClarification(responseText)
+    }
+
+    @discardableResult
+    func respondToDirectClarification(
+        _ responseText: String,
+        expectedIdentity: GatewayBlockingPromptIdentity
+    ) async -> Bool {
+        guard usesDirectGateway,
+              !directInvalidated,
+              !isRespondingToDirectClarification,
+              directClarificationPrompt?.gatewayIdentity == expectedIdentity,
+              let controller = directConversation else {
+            return false
+        }
+
+        isRespondingToDirectClarification = true
+        directClarificationErrorMessage = nil
+        defer { isRespondingToDirectClarification = false }
+
+        do {
+            let response = try await controller.respondToBlockingPrompt(
+                responseText,
+                expectedIdentity: expectedIdentity
+            )
+            guard !directInvalidated else { return false }
+            syncDirectClarificationPrompt()
+            if response == .expired {
+                guard !directInvalidated,
+                      directClarificationPrompt == nil
+                        || directClarificationPrompt?.gatewayIdentity == expectedIdentity else {
+                    return false
+                }
+                let message = "That clarification expired before it was answered."
+                directClarificationErrorMessage = message
+                setDirectClarificationSendError(message)
+                return false
+            }
+            return true
+        } catch let error as GatewayBlockingError {
+            guard !directInvalidated,
+                  directClarificationPrompt?.gatewayIdentity == expectedIdentity else {
+                return false
+            }
+            directClarificationErrorMessage = directClarificationMessage(for: error)
+            return false
+        } catch {
+            guard !directInvalidated,
+                  directClarificationPrompt?.gatewayIdentity == expectedIdentity else {
+                return false
+            }
+            lastError = error
+            directClarificationErrorMessage = "The clarification could not be delivered. No response was retried."
+            return false
+        }
     }
 
     func applyClarificationUpdate(_ update: ClarificationPendingResponse, sessionID: String) {

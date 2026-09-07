@@ -463,6 +463,9 @@ final class GatewayConversationController {
               let capturedBinding = binding else {
             throw GatewayBlockingError.staleClarification
         }
+        if captured.kind.isCancelOnly, !answer.isEmpty {
+            throw GatewayBlockingError.invalidClarificationResponse
+        }
         let capturedLifecycle = lifecycle
         try await ensureBinding(create: [:])
         guard pendingBlockingPrompt?.identity == expectedIdentity,
@@ -471,6 +474,9 @@ final class GatewayConversationController {
               runtime.connectionGeneration == expectedIdentity.connectionGeneration,
               lifecycle == capturedLifecycle else {
             throw GatewayBlockingError.staleClarification
+        }
+        if pendingBlockingPrompt?.kind.isCancelOnly == true, !answer.isEmpty {
+            throw GatewayBlockingError.invalidClarificationResponse
         }
 
         let result = try await runtime.request("clarify.respond", parameters: {
@@ -481,6 +487,9 @@ final class GatewayConversationController {
                   self.runtime.connectionGeneration == expectedIdentity.connectionGeneration,
                   self.lifecycle == capturedLifecycle else {
                 throw GatewayBlockingError.staleClarification
+            }
+            if pending.kind.isCancelOnly, !answer.isEmpty {
+                throw GatewayBlockingError.invalidClarificationResponse
             }
             return [
                 "session_id": .string(expectedIdentity.runtimeID),

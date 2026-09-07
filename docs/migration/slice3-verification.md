@@ -169,3 +169,116 @@ This is the B2a/A2a foundation checkpoint, not Slice3 completion. Native picker/
 send staging and blocking UI are not wired yet. Successful PDF fixture rendering
 requires unavailable `pdftoppm`; no install authorized/performed. Physical gates,
 orphan policy and remaining blocking interactions stay open.
+
+## B2/B3 and A2 continuation — stock contracts
+
+User approved installing the missing PDF renderer. Root installed Poppler26.08.0
+with Homebrew auto-update and automatic cleanup disabled; install log
+`slice3-poppler-install-v1.log`. Fixture launcher now has explicit
+`serve --with-pdf-renderer`, adding only `/opt/homebrew/opt/poppler/bin` to its
+allowlisted PATH; default launch unchanged. Root validated old gateway42082 and
+restarted only that disposable gateway as99285. No backend source/config change,
+personal Hermes access, personal route change or new model toolset.
+
+- `slice3-attachment-contract-v3.json`/`.log`: **passed**, including real one-page
+  PDF rendering, canonical history roundtrip, and page-range cap4019. Image/file
+  checks also passed. Generic upload now omits `path` exactly as intended by the
+  native adapter. `categorical_errors` contains expected-code constants, not a
+  list of errors encountered; PDF was available in this run. Physical attachment
+  presentation and model vision quality are not established by this fixture.
+- Root reviewed additional exact batch/multiselect markers, fixed unhashable
+  multimodal-input handling, and changed the probe to verify empty cancellation
+  for both unsupported forms instead of merely ordinary batch answers.
+  `slice3-blocking-contract-v2.json`/`.log`: **passed**. Both cancellation forms
+  reached a terminal ACK and `session.resume` showed no pending clarification.
+  Existing single answer/cancel, reconnect, late duplicate and targeting cases
+  retained. Provider restarted only after verifying owned PID18170; existing
+  clarify-only toolset remains unchanged. Native UI verification still pending.
+
+Native focused `slice3-clarification-ui-focused-v1.xcresult`/`.log`: **75 passed,
+1 test crashed, 0 skipped**. Exported console identifies an XCTest expectation
+API violation: a helper retained its already-fulfilled `onEvent` callback, so
+a later malformed event fulfilled it again. This is a test-helper defect, not
+an unexplained infrastructure failure. Fix required before further integration.
+The new direct ViewModel routing/single-flight/replacement/invalidation tests
+passed in this run; failure and diagnostic evidence retained.
+
+After restoring the helper's prior callback, focusedv2 passed **76 tests, 0
+failures, 0 skips**. A subsequent narrow ViewModel guard prevents an expired
+old response from attaching an error to a replacement prompt; full-suite
+verification of that final guard remains pending.
+
+Signed UI buildv1 passed. Production-navigation UIv1 failed **0 passed, 1 failed**
+at a test helper's marker-hittability check, before the clarification card checks.
+Exported accessibility evidence places that marker at y=-117 (offscreen). The
+helper now checks exact-label existence; actual response controls still require
+hittability, card clearing, and unique follow-up terminal acknowledgements.
+Failed evidence is retained in `slice3-clarification-production-ui-v1.xcresult`
+and its attachments directory. This failure does not establish a product pass.
+Signed UI buildv2 passed. Production UIv2 failed **0 passed, 1 failed** at card
+accessibility-container existence. Its exported post-send screenshot proves the
+card renders, but the retained composer keyboard clips the question under the
+navigation bar on iPhone17e. The next bounded fix dismisses ordinary composer
+focus on a new direct request and applies the card identifier after accessibility
+containment. UI assertions now also require the exact single question hittable.
+No physical-device claim. Current artifact auditv1 passes132093files, zero flagged
+paths,71 exported consoles; scope is current known main test secrets and obvious
+bearer formats, excluding private/quarantined diagnostics and arbitrary-secret
+or image-OCR guarantees. Later v3/full-suite artifacts need a fresh audit.
+
+Independent review also corrected expired-response success feedback and cleared
+only clarification-owned stale composer errors on replacement. Two focused VM
+regression tests were added. Receipt helper is now registered with the project;
+required response fields remain strict while optional name metadata is tolerant.
+UI buildv3 failed compilation on a missing pattern-match initializer in that new
+helper; root corrected `case .string(let value) = value`. No UI test ran from
+buildv3. Buildv4 then failed SwiftUI type-check complexity in the existing large
+ChatView body after adding the focus observer. The next fix moves that observer
+to the existing small backdrop modifier chain without changing its behavior.
+All failed artifacts retained; neither failed build ran UI tests.
+
+### Production clarification checkpoint
+
+Signed UI buildv5 passed. `slice3-clarification-production-ui-v3.xcresult`/`.log`
+passed **1 production-navigation test, 0 failures, 0 skips**. It logs in through
+the real test HTTPS proxy, creates a chat, verifies single answer and explicit
+cancel, batch/multi-select cancel-only UI, card clearing and each unique next-turn
+ACK. Root inspected exported single/multi-select screenshots: question and actions
+are visible with the ordinary composer keyboard dismissed. This is deterministic
+stock-backend Simulator evidence, not physical acceptance or other prompt types.
+
+Root reran Python fixture/CLI tests: **18 passed**. Added CLI opt-in/stock/HTTPS
+guards and verified the default plan does not enable clarification tests.
+
+Full nativev1 (`slice3-clarification-foundations-full-v1`) built but the runner
+hung before establishing its connection after roughly363seconds: **0 tests
+executed**, not a product test failure or pass. Result summary records one runner
+failure. Exported diagnostics retained. Fullv2 retries the unchanged native build
+via its generated arm64 xctestrun; no Swift changes between attempts.
+
+Fullv2 passed **2067 tests, 0 failures, 7 intentional opt-in skips**. It includes
+the registered pending/display/receipt tests and final VM regressions. Root
+verified the app signature and launched the ordinary signed development app in
+the owned Simulator after testing. The failed pre-connection attempt is retained;
+its cause is not explained merely by the retry passing. No new phone install.
+
+Reproduction of the unchanged-build retry:
+
+```sh
+xcodebuild test-without-building \
+  -xctestrun /Users/maurice/workspace/semreh-slice1-build/Build/Products/HermesMobile_HermesMobile_iphonesimulator26.5-arm64.xctestrun \
+  -destination 'platform=iOS Simulator,id=D852F8F7-6C05-4FAE-8F05-CBCB7C4B3263' \
+  -parallel-testing-enabled NO -collect-test-diagnostics never \
+  -test-timeouts-enabled YES -default-test-execution-time-allowance 60 \
+  -maximum-test-execution-time-allowance 120 \
+  -resultBundlePath /Users/maurice/workspace/semreh-slice1-evidence/slice3-clarification-foundations-full-v2.xcresult -quiet
+```
+
+Use a fresh result path for any rerun. Native attachment picker/send staging,
+approval/sudo/secret, recovery matrix and physical acceptance remain unverified.
+No private Hermes change or release/push is part of this checkpoint.
+
+Final artifact auditv2 passed **136456 files, 0 flagged paths, 74 exported
+consoles**, including production UIv3 and fullv2 output. Scope remains known main
+test secrets and obvious bearer formats; private/quarantined diagnostics and
+arbitrary opaque-secret/media-OCR guarantees are excluded.

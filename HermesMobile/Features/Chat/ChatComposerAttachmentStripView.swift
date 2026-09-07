@@ -2,9 +2,9 @@ import SwiftUI
 import UIKit
 
 struct ComposerAttachmentStripView: View {
-    let attachments: [PendingAttachment]
+    let attachments: [ComposerAttachmentDisplayItem]
     let onRemove: (UUID) -> Void
-    let onPreview: (PendingAttachment) -> Void
+    let onPreview: (ComposerAttachmentDisplayItem) -> Void
 
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
@@ -34,7 +34,7 @@ struct ComposerAttachmentStripView: View {
 }
 
 private struct ComposerAttachmentThumbnailView: View {
-    let attachment: PendingAttachment
+    let attachment: ComposerAttachmentDisplayItem
     let onRemove: () -> Void
     let onOpen: () -> Void
 

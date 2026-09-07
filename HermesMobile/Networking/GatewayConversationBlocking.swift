@@ -11,11 +11,37 @@ struct GatewayBlockingPromptIdentity: Equatable, Sendable {
     let requestID: String
 }
 
+enum GatewayBlockingPromptKind: String, Equatable, Sendable {
+    case single
+    case unsupportedBatch
+    case unsupportedMultiSelect
+
+    var displayQuestion: String {
+        switch self {
+        case .single:
+            return ""
+        case .unsupportedBatch:
+            return "Hermes is waiting on a multi-question clarification that this app cannot answer yet. Cancel to continue."
+        case .unsupportedMultiSelect:
+            return "Hermes is waiting on a multi-select clarification that this app cannot answer yet. Cancel to continue."
+        }
+    }
+
+    var isCancelOnly: Bool {
+        self != .single
+    }
+}
+
 struct GatewayBlockingPrompt: Equatable, Sendable {
     let identity: GatewayBlockingPromptIdentity
     let question: String
     let choices: [String]
     let multiSelect: Bool
+    let kind: GatewayBlockingPromptKind
+
+    var displayQuestion: String {
+        kind.isCancelOnly ? kind.displayQuestion : question
+    }
 }
 
 enum GatewayBlockingResponse: Equatable, Sendable {
@@ -41,19 +67,39 @@ extension GatewayBlockingPrompt {
         guard case .object(let fields) = payload else {
             throw GatewayBlockingError.malformedClarification
         }
-        if fields["questions"] != nil {
-            throw GatewayBlockingError.unsupportedBatchClarification
+        guard fields["request_id"]?.gatewayString == identity.requestID else {
+            throw GatewayBlockingError.malformedClarification
+        }
+        if let rawQuestions = fields["questions"] {
+            guard case .array = rawQuestions else {
+                throw GatewayBlockingError.malformedClarification
+            }
+            return Self(
+                identity: identity,
+                question: "",
+                choices: [],
+                multiSelect: false,
+                kind: .unsupportedBatch
+            )
         }
         if let rawMultiSelect = fields["multi_select"] {
             guard case .bool(let multiSelect) = rawMultiSelect else {
                 throw GatewayBlockingError.malformedClarification
             }
             if multiSelect {
-                throw GatewayBlockingError.unsupportedMultiSelectClarification
+                guard fields["question"]?.gatewayString != nil else {
+                    throw GatewayBlockingError.malformedClarification
+                }
+                return Self(
+                    identity: identity,
+                    question: "",
+                    choices: [],
+                    multiSelect: true,
+                    kind: .unsupportedMultiSelect
+                )
             }
         }
-        guard fields["request_id"]?.gatewayString == identity.requestID,
-              let question = fields["question"]?.gatewayString else {
+        guard let question = fields["question"]?.gatewayString else {
             throw GatewayBlockingError.malformedClarification
         }
 
@@ -78,7 +124,8 @@ extension GatewayBlockingPrompt {
             identity: identity,
             question: question,
             choices: choices,
-            multiSelect: false
+            multiSelect: false,
+            kind: .single
         )
     }
 }

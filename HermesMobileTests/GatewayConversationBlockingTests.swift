@@ -173,13 +173,12 @@ final class GatewayConversationBlockingTests: XCTestCase {
         await runtime.stop()
     }
 
-    func testMalformedAndBatchClarifyFailClosedWithExplicitErrors() async throws {
+    func testMalformedClarifyFailsClosedWhileBatchRetainsCancelTarget() async throws {
         let fake = BlockingFakeTransport()
         let runtime = try makeRuntime(fake)
         let controller = makeController(runtime: runtime)
         var errors: [GatewayBlockingError] = []
-        let errorsExpectation = expectation(description: "both malformed blocking events are reported")
-        errorsExpectation.expectedFulfillmentCount = 2
+        let errorsExpectation = expectation(description: "malformed blocking event is reported")
         controller.onError = { error in
             if let error = error as? GatewayBlockingError {
                 errors.append(error)
@@ -187,16 +186,37 @@ final class GatewayConversationBlockingTests: XCTestCase {
             }
         }
         try await controller.submit("ask")
-        fake.emit(event(sessionID: "runtime-1", type: "clarify.request", payload: .object([
-            "request_id": .string("batch"),
-            "questions": .array([])
-        ])))
+        await awaitEvent(controller, fake, batchClarifyEvent(sessionID: "runtime-1", requestID: "batch"))
+        XCTAssertEqual(controller.pendingBlockingPrompt?.kind, .unsupportedBatch)
         fake.emit(event(sessionID: "runtime-1", type: "clarify.request", payload: .object([
             "question": .string("missing request")
         ])))
         await fulfillment(of: [errorsExpectation], timeout: 2.0)
-        XCTAssertEqual(errors, [.unsupportedBatchClarification, .malformedClarification])
-        XCTAssertNil(controller.pendingBlockingPrompt)
+        XCTAssertEqual(errors, [.malformedClarification])
+        XCTAssertEqual(controller.pendingBlockingPrompt?.kind, .unsupportedBatch)
+        await runtime.stop()
+    }
+
+    func testUnsupportedBatchAndMultiSelectTargetsAcceptOnlyEmptyCancellation() async throws {
+        let fake = BlockingFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime)
+        try await controller.submit("ask")
+
+        await awaitEvent(controller, fake, batchClarifyEvent(sessionID: "runtime-1", requestID: "batch"))
+        let batchIdentity = try XCTUnwrap(controller.pendingBlockingPrompt?.identity)
+        do {
+            _ = try await controller.respondToBlockingPrompt("answer", expectedIdentity: batchIdentity)
+            XCTFail("unsupported batch must reject ordinary answers")
+        } catch GatewayBlockingError.invalidClarificationResponse { }
+        let batchResponse = try await controller.respondToBlockingPrompt("", expectedIdentity: batchIdentity)
+        XCTAssertEqual(batchResponse, .accepted)
+
+        await awaitEvent(controller, fake, multiSelectClarifyEvent(sessionID: "runtime-1", requestID: "multi"))
+        let multiIdentity = try XCTUnwrap(controller.pendingBlockingPrompt?.identity)
+        XCTAssertEqual(controller.pendingBlockingPrompt?.kind, .unsupportedMultiSelect)
+        let multiResponse = try await controller.respondToBlockingPrompt("", expectedIdentity: multiIdentity)
+        XCTAssertEqual(multiResponse, .accepted)
         await runtime.stop()
     }
 
@@ -232,6 +252,8 @@ final class GatewayConversationBlockingTests: XCTestCase {
     ) async {
         let eventExpectation = expectation(description: "gateway event delivery")
         eventExpectation.expectedFulfillmentCount = expectedCount
+        let previousOnEvent = controller.onEvent
+        defer { controller.onEvent = previousOnEvent }
         controller.onEvent = { _ in eventExpectation.fulfill() }
         for event in events { fake.emit(event) }
         await fulfillment(of: [eventExpectation], timeout: 2.0)
@@ -268,6 +290,29 @@ final class GatewayConversationBlockingTests: XCTestCase {
             "choices": .array([.string("answer"), .string("cancel")]),
             "multi_select": .bool(false)
         ])
+    }
+
+    private func batchClarifyEvent(sessionID: String, requestID: String) -> HermesGatewayEvent {
+        event(sessionID: sessionID, type: "clarify.request", payload: .object([
+            "request_id": .string(requestID),
+            "questions": .array([
+                .object([
+                    "qid": .string("question-1"),
+                    "question": .string("Choose one"),
+                    "choices": .array([.string("one"), .string("two")]),
+                    "multi_select": .bool(false)
+                ])
+            ])
+        ]))
+    }
+
+    private func multiSelectClarifyEvent(sessionID: String, requestID: String) -> HermesGatewayEvent {
+        event(sessionID: sessionID, type: "clarify.request", payload: .object([
+            "request_id": .string(requestID),
+            "question": .string("Choose several"),
+            "choices": .array([.string("one"), .string("two")]),
+            "multi_select": .bool(true)
+        ]))
     }
 
     private func event(

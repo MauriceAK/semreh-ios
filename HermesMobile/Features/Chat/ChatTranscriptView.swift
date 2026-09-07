@@ -73,7 +73,8 @@ struct ChatTranscriptView: View, Equatable {
     let onPreviewAttachment: (MessageAttachment, Data?) -> Void
     let onPreviewTranscriptMedia: (TranscriptMediaReference) -> Void
     let onToggleListening: (MessageActionContext) -> Void
-    let onSubmitClarification: (String) -> Void
+    let onSubmitClarification: (String, GatewayBlockingPromptIdentity?) -> Void
+    let onCancelClarification: (GatewayBlockingPromptIdentity?) -> Void
     let onSelectText: (MessageActionContext) -> Void
     let onRegenerate: (MessageActionContext) -> Void
     let onEdit: (MessageActionContext) -> Void
@@ -526,7 +527,8 @@ struct ChatTranscriptView: View, Equatable {
                 prompt: clarificationPrompt,
                 isResponding: isRespondingToClarification,
                 errorMessage: clarificationErrorMessage,
-                onSubmit: onSubmitClarification
+                onSubmit: onSubmitClarification,
+                onCancel: onCancelClarification
             )
             .id(clarificationPrompt.id)
             .frame(maxWidth: .infinity, alignment: .leading)

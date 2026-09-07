@@ -7,7 +7,13 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		D3A270000000000000000007 /* DirectGatewayAttachmentReceipt.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3A270000000000000000017 /* DirectGatewayAttachmentReceipt.swift */; };
+		D3A270000000000000000008 /* DirectGatewayAttachmentReceiptTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3A270000000000000000018 /* DirectGatewayAttachmentReceiptTests.swift */; };
 		D3A270000000000000000001 /* DirectGatewayAttachment.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3A270000000000000000011 /* DirectGatewayAttachment.swift */; };
+		D3A270000000000000000003 /* DirectPendingAttachment.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3A270000000000000000013 /* DirectPendingAttachment.swift */; };
+		D3A270000000000000000005 /* ComposerAttachmentDisplayItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3A270000000000000000015 /* ComposerAttachmentDisplayItem.swift */; };
+		D3A270000000000000000006 /* ComposerAttachmentDisplayItemTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3A270000000000000000016 /* ComposerAttachmentDisplayItemTests.swift */; };
+		D3A270000000000000000004 /* DirectPendingAttachmentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3A270000000000000000014 /* DirectPendingAttachmentTests.swift */; };
 		D3A270000000000000000002 /* DirectGatewayAttachmentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3A270000000000000000012 /* DirectGatewayAttachmentTests.swift */; };
 		D2EC7000000000000000000B /* SessionListGatewayInvalidationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2EC7000000000000000001B /* SessionListGatewayInvalidationTests.swift */; };
 		D2EC7000000000000000000C /* GatewayConversationBlocking.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2EC7000000000000000001C /* GatewayConversationBlocking.swift */; };
@@ -403,7 +409,13 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		D3A270000000000000000017 /* DirectGatewayAttachmentReceipt.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectGatewayAttachmentReceipt.swift; sourceTree = "<group>"; };
+		D3A270000000000000000018 /* DirectGatewayAttachmentReceiptTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectGatewayAttachmentReceiptTests.swift; sourceTree = "<group>"; };
 		D3A270000000000000000011 /* DirectGatewayAttachment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectGatewayAttachment.swift; sourceTree = "<group>"; };
+		D3A270000000000000000013 /* DirectPendingAttachment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectPendingAttachment.swift; sourceTree = "<group>"; };
+		D3A270000000000000000015 /* ComposerAttachmentDisplayItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerAttachmentDisplayItem.swift; sourceTree = "<group>"; };
+		D3A270000000000000000016 /* ComposerAttachmentDisplayItemTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerAttachmentDisplayItemTests.swift; sourceTree = "<group>"; };
+		D3A270000000000000000014 /* DirectPendingAttachmentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectPendingAttachmentTests.swift; sourceTree = "<group>"; };
 		D3A270000000000000000012 /* DirectGatewayAttachmentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectGatewayAttachmentTests.swift; sourceTree = "<group>"; };
 		D2EC7000000000000000001B /* SessionListGatewayInvalidationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListGatewayInvalidationTests.swift; sourceTree = "<group>"; };
 		D2EC7000000000000000001A /* ChatViewModelDirectGatewayTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatViewModelDirectGatewayTests.swift; sourceTree = "<group>"; };
@@ -866,6 +878,9 @@
 				D2EC70000000000000000016 /* GatewayConversationControllerTests.swift */,
 				D2EC7000000000000000001D /* GatewayConversationBlockingTests.swift */,
 				D3A270000000000000000012 /* DirectGatewayAttachmentTests.swift */,
+				D3A270000000000000000014 /* DirectPendingAttachmentTests.swift */,
+				D3A270000000000000000018 /* DirectGatewayAttachmentReceiptTests.swift */,
+				D3A270000000000000000016 /* ComposerAttachmentDisplayItemTests.swift */,
 				D2EC70000000000000000014 /* APIClientDirectSessionsTests.swift */,
 				D1EC70000000000000000015 /* HermesGatewayClientTests.swift */,
 				D1EC70000000000000000013 /* DirectHermesAuthTests.swift */,
@@ -997,6 +1012,8 @@
 				D2EC70000000000000000015 /* GatewayConversationController.swift */,
 				D2EC7000000000000000001C /* GatewayConversationBlocking.swift */,
 				D3A270000000000000000011 /* DirectGatewayAttachment.swift */,
+				D3A270000000000000000013 /* DirectPendingAttachment.swift */,
+				D3A270000000000000000017 /* DirectGatewayAttachmentReceipt.swift */,
 				D1EC70000000000000000011 /* APIClient+DirectHermes.swift */,
 				C04000000000000000000011 /* APIClient+Sessions.swift */,
 				F0FF00000000000000000004 /* OfficialHermesContinuity.swift */,
@@ -1147,6 +1164,7 @@
 				C0CAM000000000000000B002 /* CameraPickerView.swift */,
 				C0DEC0DE0000000000000002 /* ChatComposerView.swift */,
 				C05000000000000000000002 /* ChatComposerAttachmentStripView.swift */,
+				D3A270000000000000000015 /* ComposerAttachmentDisplayItem.swift */,
 				C04900000000000000000002 /* ChatComposerTextInputView.swift */,
 				C04900000000000000000004 /* ChatComposerVoiceControls.swift */,
 				C042A000000000000000002 /* ChatComposerSelectorControls.swift */,
@@ -1632,6 +1650,9 @@
 				D2EC70000000000000000005 /* GatewayConversationController.swift in Sources */,
 				D2EC7000000000000000000C /* GatewayConversationBlocking.swift in Sources */,
 				D3A270000000000000000001 /* DirectGatewayAttachment.swift in Sources */,
+				D3A270000000000000000003 /* DirectPendingAttachment.swift in Sources */,
+				D3A270000000000000000007 /* DirectGatewayAttachmentReceipt.swift in Sources */,
+				D3A270000000000000000005 /* ComposerAttachmentDisplayItem.swift in Sources */,
 				D1EC70000000000000000001 /* APIClient+DirectHermes.swift in Sources */,
 				C04000000000000000000001 /* APIClient+Sessions.swift in Sources */,
 				F0FF00000000000000000003 /* OfficialHermesContinuity.swift in Sources */,
@@ -1847,6 +1868,9 @@
 				D2EC70000000000000000006 /* GatewayConversationControllerTests.swift in Sources */,
 				D2EC7000000000000000000D /* GatewayConversationBlockingTests.swift in Sources */,
 				D3A270000000000000000002 /* DirectGatewayAttachmentTests.swift in Sources */,
+				D3A270000000000000000004 /* DirectPendingAttachmentTests.swift in Sources */,
+				D3A270000000000000000008 /* DirectGatewayAttachmentReceiptTests.swift in Sources */,
+				D3A270000000000000000006 /* ComposerAttachmentDisplayItemTests.swift in Sources */,
 				D2EC70000000000000000004 /* APIClientDirectSessionsTests.swift in Sources */,
 				D1EC70000000000000000005 /* HermesGatewayClientTests.swift in Sources */,
 				D1EC70000000000000000003 /* DirectHermesAuthTests.swift in Sources */,

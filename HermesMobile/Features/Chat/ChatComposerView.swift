@@ -107,6 +107,9 @@ struct MessageComposerView: View {
     let showsReasoningControl: Bool
     let isUpdatingConfiguration: Bool
     let pendingAttachments: [PendingAttachment]
+    /// Optional direct-mode projection. Legacy callers may continue supplying
+    /// `pendingAttachments`; when this is empty they are mapped locally below.
+    var displayAttachments: [ComposerAttachmentDisplayItem] = []
     let isUploadingAttachment: Bool
     let attachmentUploadCount: Int
     let attachmentUploadGeneration: Int
@@ -137,6 +140,9 @@ struct MessageComposerView: View {
     let onPasteImages: ([UIImage]) -> Void
     let onRemoveAttachment: (UUID) -> Void
     let onPreviewAttachment: (PendingAttachment) -> Void
+    /// Direct-mode owner supplies this callback when it needs the projection's
+    /// local bytes/metadata. Legacy call sites can omit it.
+    var onPreviewDisplayAttachment: ((ComposerAttachmentDisplayItem) -> Void)? = nil
     let onDismissUploadAttachmentError: () -> Void
     let onSelectGitBranch: (GitCheckoutTarget) -> Void
     let onCreateGitBranch: (GitCheckoutTarget) -> Void
@@ -242,6 +248,12 @@ struct MessageComposerView: View {
         }
     }
 
+    private var attachmentDisplayItems: [ComposerAttachmentDisplayItem] {
+        displayAttachments.isEmpty
+            ? pendingAttachments.map(ComposerAttachmentDisplayItem.init(pending:))
+            : displayAttachments
+    }
+
     var body: some View {
         AdaptiveGlassContainer(spacing: 6) {
             VStack(spacing: 6) {
@@ -307,9 +319,15 @@ struct MessageComposerView: View {
 
                 VStack(spacing: 0) {
                     ComposerAttachmentStripView(
-                        attachments: pendingAttachments,
+                        attachments: attachmentDisplayItems,
                         onRemove: onRemoveAttachment,
-                        onPreview: onPreviewAttachment
+                        onPreview: { item in
+                            if let onPreviewDisplayAttachment {
+                                onPreviewDisplayAttachment(item)
+                            } else if let pending = item.legacyPendingAttachment() {
+                                onPreviewAttachment(pending)
+                            }
+                        }
                     )
 
                     ComposerTextInputView(
