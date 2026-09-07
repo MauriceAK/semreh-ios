@@ -176,6 +176,32 @@ final class DirectHermesLiveSmokeTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testOptInHostedSlice4BranchConsumers() async throws {
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("Slice 4 branch smoke is simulator-only.")
+        #endif
+
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SEMREH_SLICE1_LIVE"] == "1",
+              environment["SEMREH_SLICE1_HTTPS"] == "1",
+              environment["SEMREH_SLICE4_BRANCH_NATIVE"] == "1",
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == Self.defaultCredentialsPath,
+              environment["SEMREH_SLICE2_STOCK_BACKEND_SHA"] == Self.stockBackendSHA,
+              environment["SEMREH_SLICE2_TOOL_CWD"] == Self.stockToolCwd
+        else {
+            throw XCTSkip("Slice 4 branch smoke is opt-in for the pinned stock HTTPS fixture.")
+        }
+
+        do {
+            try await runHostedSlice4BranchConsumers()
+        } catch let failure as LiveSmokeFailure {
+            XCTFail("Slice 4 branch smoke failed at \(failure.stage).")
+        } catch {
+            XCTFail("Slice 4 branch smoke failed.")
+        }
+    }
+
     func testOptInHostedCookieLoginPhase() async throws {
         let transport = try cookiePhase("login", requiresCredentials: true)
         let credentials = try await stage("credentials") {
@@ -759,6 +785,222 @@ final class DirectHermesLiveSmokeTests: XCTestCase {
                     timeout: .seconds(30)
                 )
             }
+            if let runtime { await runtime.stop() }
+            if loggedIn { try? await api.directLogout() }
+            throw error
+        }
+    }
+
+    @MainActor
+    private func runHostedSlice4BranchConsumers() async throws {
+        let credentials = try await stage("slice4 branch credentials") { try Self.readCredentials() }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpAdditionalHeaders = [:]
+        configuration.httpShouldSetCookies = true
+        configuration.httpCookieAcceptPolicy = .always
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let api = APIClient(
+            baseURL: HostedTransport.https.baseURL,
+            session: session,
+            publicMediaSession: session,
+            customHeaderProvider: { [] }
+        )
+        let events = LiveGatewayEventCapture()
+        let create: [String: JSONValue] = [
+            "cwd": .string(Self.stockToolCwd),
+            "model": .string("semreh-fixture"),
+            "provider": .string("custom")
+        ]
+        let parentPromptA = "SEMREH_SLICE4_BRANCH_PARENT_A_\(UUID().uuidString)"
+        let parentPromptB = "SEMREH_SLICE4_BRANCH_PARENT_B_\(UUID().uuidString)"
+        let childPrompt = "SEMREH_SLICE4_BRANCH_CHILD_\(UUID().uuidString)"
+        let expectedAck = "SEMREH_SLICE1_ACK"
+        var runtime: HermesServerRuntime?
+        var parent: GatewayConversationController?
+        var child: GatewayConversationController?
+        var ownedRuntimeIDs: [String] = []
+        var loggedIn = false
+
+        do {
+            try await stage("slice4 branch status") { _ = try await api.directStatus() }
+            let login = try await stage("slice4 branch login") {
+                try await api.directPasswordLogin(username: credentials.username, password: credentials.password)
+            }
+            try await stage("slice4 branch login accepted") {
+                guard login.ok == true else { throw LiveSmokeInvariant.failed }
+            }
+            loggedIn = true
+            try await stage("slice4 branch protected probe") { try await api.directProtectedProbe() }
+
+            let serverRuntime = try await stage("slice4 branch runtime init") {
+                try HermesServerRuntime(origin: HostedTransport.https.baseURL, client: api)
+            }
+            runtime = serverRuntime
+            try await stage("slice4 branch runtime connect") { try await serverRuntime.connect() }
+
+            let initial = GatewayConversationController(
+                runtime: serverRuntime,
+                client: api,
+                storedID: nil,
+                profile: "default"
+            )
+            initial.onEvent = { event in Task { await events.append(event) } }
+            initial.onBinding = { binding in
+                if !ownedRuntimeIDs.contains(binding.runtimeID) {
+                    ownedRuntimeIDs.append(binding.runtimeID)
+                }
+            }
+            parent = initial
+
+            for (label, prompt) in [("A", parentPromptA), ("B", parentPromptB)] {
+                let turnEvents = LiveGatewayEventCapture()
+                initial.onEvent = { event in Task { await turnEvents.append(event) } }
+                try await stage("slice4 branch parent submit \(label)") {
+                    try await initial.submit(prompt, create: create)
+                }
+                let runtimeID = try await stage("slice4 branch parent binding \(label)") {
+                    try XCTUnwrap(initial.binding?.runtimeID)
+                }
+                if !ownedRuntimeIDs.contains(runtimeID) { ownedRuntimeIDs.append(runtimeID) }
+                _ = try await stage("slice4 branch parent terminal \(label)") {
+                    try await turnEvents.wait { event in
+                        event.sessionID == runtimeID
+                            && event.type == "message.complete"
+                            && Self.stringValue(Self.objectValue(event.payload)?["status"]) == "complete"
+                    }
+                }
+            }
+
+            let parentStoredID = try await stage("slice4 branch parent durable identity") {
+                try XCTUnwrap(initial.storedID)
+            }
+            let baseline = try await stage("slice4 branch parent baseline") {
+                try await api.directSessionMessages(sessionID: parentStoredID, profile: "default")
+            }
+            try await stage("slice4 branch parent baseline shape") {
+                try assertRecoveryTranscript(
+                    baseline,
+                    users: [parentPromptA, parentPromptB],
+                    assistant: expectedAck
+                )
+            }
+            let baselineRows = Self.branchRows(baseline)
+            try await stage("slice4 branch parent idle before branch") {
+                guard initial.runState == .idle else { throw LiveSmokeInvariant.failed }
+            }
+            let generationBeforeBranch = serverRuntime.connectionGeneration
+
+            let branched = try await stage("slice4 branch controller branch") {
+                try await initial.branch()
+            }
+            child = branched
+            if let childRuntimeID = branched.binding?.runtimeID {
+                if !ownedRuntimeIDs.contains(childRuntimeID) {
+                    ownedRuntimeIDs.append(childRuntimeID)
+                }
+            }
+            branched.onEvent = { event in Task { await events.append(event) } }
+            let childIdentity = try await stage("slice4 branch child identity and shared runtime") {
+                guard branched.storedID != parentStoredID,
+                      branched.binding?.profile == "default",
+                      branched.binding?.runtimeID != initial.binding?.runtimeID,
+                      serverRuntime.connectionGeneration == generationBeforeBranch,
+                      let childStoredID = branched.storedID,
+                      let childRuntimeID = branched.binding?.runtimeID else {
+                    throw LiveSmokeInvariant.failed
+                }
+                return (childStoredID, childRuntimeID)
+            }
+            let childStoredID = childIdentity.0
+            let childRuntimeID = childIdentity.1
+            var childPage: DirectHermesTranscriptPage?
+            branched.onTranscript = { page, older in
+                guard !older else { return }
+                childPage = page
+            }
+            try await stage("slice4 branch child adopted refresh") { try await branched.refresh() }
+            let adoptedPage = try await stage("slice4 branch child adopted page") {
+                try XCTUnwrap(childPage)
+            }
+            try await stage("slice4 branch child copied transcript") {
+                guard adoptedPage.sessionID == childStoredID,
+                      Self.branchRows(adoptedPage) == baselineRows else {
+                    throw LiveSmokeInvariant.failed
+                }
+                try assertRecoveryTranscript(
+                    adoptedPage,
+                    users: [parentPromptA, parentPromptB],
+                    assistant: expectedAck
+                )
+            }
+
+            try await stage("slice4 branch child independent submit") {
+                try await branched.submit(childPrompt, create: create)
+            }
+            _ = try await stage("slice4 branch child terminal") {
+                try await events.wait { event in
+                    event.sessionID == childRuntimeID
+                        && event.type == "message.complete"
+                        && Self.stringValue(Self.objectValue(event.payload)?["status"]) == "complete"
+                }
+            }
+            let childAfter = try await stage("slice4 branch child canonical transcript") {
+                try await api.directSessionMessages(sessionID: childStoredID, profile: "default")
+            }
+            let childAfterRows = Self.branchRows(childAfter)
+            try await stage("slice4 branch child appended transcript") {
+                guard childAfterRows.count == baselineRows.count + 2,
+                      Array(childAfterRows.prefix(baselineRows.count)) == baselineRows,
+                      childAfterRows[baselineRows.count] == "user\u{1}\(childPrompt)",
+                      childAfterRows[baselineRows.count + 1] == "assistant\u{1}\(expectedAck)" else {
+                    throw LiveSmokeInvariant.failed
+                }
+            }
+
+            let parentAfter = try await stage("slice4 branch parent unchanged") {
+                try await api.directSessionMessages(sessionID: parentStoredID, profile: "default")
+            }
+            try await stage("slice4 branch parent unchanged shape") {
+                guard Self.branchRows(parentAfter) == baselineRows else { throw LiveSmokeInvariant.failed }
+                try assertRecoveryTranscript(
+                    parentAfter,
+                    users: [parentPromptA, parentPromptB],
+                    assistant: expectedAck
+                )
+            }
+
+            try await stage("slice4 branch owned runtime cleanup") {
+                for runtimeID in ownedRuntimeIDs {
+                    let result = try await serverRuntime.request("session.close", params: [
+                        "session_id": .string(runtimeID),
+                        "profile": .string("default")
+                    ])
+                    guard result?.gatewayFields["closed"] == .bool(true) else {
+                        throw LiveSmokeInvariant.failed
+                    }
+                }
+            }
+            ownedRuntimeIDs = []
+            try await initial.dispose()
+            try await branched.dispose()
+            parent = nil
+            child = nil
+            await serverRuntime.stop()
+            runtime = nil
+            try await stage("slice4 branch logout") { try await api.directLogout() }
+            loggedIn = false
+        } catch {
+            if let runtime, !ownedRuntimeIDs.isEmpty {
+                for runtimeID in ownedRuntimeIDs {
+                    _ = try? await runtime.request("session.close", params: [
+                        "session_id": .string(runtimeID),
+                        "profile": .string("default")
+                    ])
+                }
+            }
+            if let child { try? await child.dispose() }
+            if let parent { try? await parent.dispose() }
             if let runtime { await runtime.stop() }
             if loggedIn { try? await api.directLogout() }
             throw error
@@ -2427,6 +2669,14 @@ final class DirectHermesLiveSmokeTests: XCTestCase {
                   return !content.contains("@image:") && !content.contains("@file:")
               })
         else { throw LiveSmokeInvariant.failed }
+    }
+
+    private static func branchRows(_ page: DirectHermesTranscriptPage) -> [String] {
+        page.messages.compactMap { message in
+            guard let role = message.role, role == "user" || role == "assistant",
+                  let content = message.content else { return nil }
+            return "\(role)\u{1}\(content)"
+        }
     }
 
     private func assertExactRecoveryTranscript(

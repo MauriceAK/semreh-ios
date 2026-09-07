@@ -5,6 +5,13 @@ enum DirectPromptDeliveryUncertaintyError: Error, Equatable, Sendable {
     case persistenceUnavailable
 }
 
+enum DirectSessionBranchError: Error, Equatable, Sendable {
+    /// The gateway may have created the child, but the client did not receive
+    /// a trustworthy result.  Branching is never retried automatically.
+    case outcomeUnknown
+    case invalidResponse
+}
+
 /// One conversation on the active server's shared socket. The view model owns
 /// rendering/cache; this owner owns identity and RPC delivery, never a socket.
 @MainActor
@@ -135,6 +142,8 @@ final class GatewayConversationController {
     private var promptUncertaintyMarker: DirectPromptDeliveryUncertaintyMarker?
     private var promptUncertaintyLoadFailed = false
     private var promptUncertaintyAbandonInFlight = false
+    private var branchInFlight = false
+    private(set) var branchOutcomeUnknown = false
 
     init(
         runtime: HermesServerRuntime,
@@ -619,8 +628,314 @@ final class GatewayConversationController {
     /// Opening a local draft does not create a backend session.
     func open() async throws {
         guard !disposed else { throw DirectSessionError.stopped }
+        guard !branchInFlight else { throw DirectSessionError.ambiguousPrompt }
         guard storedID != nil, hasSubmittedPrompt else { return }
         try await ensureBinding(create: [:])
+    }
+
+    /// Creates a full-session child on the already-owned gateway socket.
+    /// `session.branch` returns a live child runtime; the child controller is
+    /// therefore adopted directly and must not resume or create another one.
+    /// The parent remains bound and is never mutated by this operation.
+    func branch() async throws -> GatewayConversationController {
+        guard !disposed,
+              !branchOutcomeUnknown,
+              !branchInFlight,
+              hasSubmittedPrompt,
+              let capturedBinding = binding,
+              let storedID,
+              storedID == capturedBinding.storedID,
+              capturedBinding.profile == profile,
+              runState == .idle,
+              !promptInFlight,
+              !hasAmbiguousPromptDelivery,
+              !promptUncertaintyLoadFailed,
+              !attachmentRecoveryIsBusy,
+              !attachmentStageInFlight,
+              !attachmentRemovalInFlight,
+              recoveryMarker == nil,
+              !recoveryMarkerLoadFailed,
+              !recoveryStageUnknown,
+              pendingBlockingPrompt == nil,
+              pendingApprovalPrompt == nil,
+              pendingSecretPrompt == nil,
+              pendingSudoPrompt == nil,
+              !blockingResponseInFlight,
+              !blockingInteractionResponseInFlight,
+              reasoningMutationCount == 0,
+              pendingReasoningEffort == nil,
+              ambiguousReasoningEffort == nil,
+              runtime.state == .ready else {
+            throw DirectSessionError.ambiguousPrompt
+        }
+
+        let capturedLifecycle = lifecycle
+        let capturedBindingEpoch = bindingEpoch
+        let capturedConnectionGeneration = runtime.connectionGeneration
+        let capturedOrigin = runtime.origin
+        branchInFlight = true
+        var requestWasDispatched = false
+        var childController: GatewayConversationController?
+        var knownChildBinding: GatewaySessionBinding?
+        var handoffCompleted = false
+        defer { branchInFlight = false }
+
+        do {
+            try await runtime.withSessionEventsPaused {
+                guard self.isCurrentBranchScope(
+                    binding: capturedBinding,
+                    lifecycle: capturedLifecycle,
+                    bindingEpoch: capturedBindingEpoch,
+                    connectionGeneration: capturedConnectionGeneration,
+                    origin: capturedOrigin
+                ) else {
+                    throw DirectSessionError.staleOperation
+                }
+
+                let result = try await runtime.request("session.branch", parameters: {
+                    guard self.isCurrentBranchScope(
+                        binding: capturedBinding,
+                        lifecycle: capturedLifecycle,
+                        bindingEpoch: capturedBindingEpoch,
+                        connectionGeneration: capturedConnectionGeneration,
+                        origin: capturedOrigin
+                    ) else {
+                        throw DirectSessionError.staleOperation
+                    }
+                    requestWasDispatched = true
+                    return [
+                        "session_id": .string(capturedBinding.runtimeID),
+                        "profile": .string(profile)
+                    ]
+                })
+
+                // Parse the child identity before any post-ACK scope guard so a
+                // later parent rebind can still attempt cleanup of a child that
+                // is known to belong to this branch request.
+                let childBinding = try branchBinding(
+                    from: result,
+                    parent: capturedBinding
+                )
+                knownChildBinding = childBinding
+                guard self.isCurrentBranchScope(
+                    binding: capturedBinding,
+                    lifecycle: capturedLifecycle,
+                    bindingEpoch: capturedBindingEpoch,
+                    connectionGeneration: capturedConnectionGeneration,
+                    origin: capturedOrigin
+                ) else {
+                    throw DirectSessionError.staleOperation
+                }
+
+                let child = try makeBranchedController(childBinding)
+                childController = child
+                // Verify the returned child through the existing canonical
+                // transcript loader before exposing it to the caller.
+                try await child.refresh()
+                guard child.binding == childBinding,
+                      child.storedID == childBinding.storedID,
+                      self.isCurrentBranchScope(
+                          binding: capturedBinding,
+                          lifecycle: capturedLifecycle,
+                          bindingEpoch: capturedBindingEpoch,
+                          connectionGeneration: capturedConnectionGeneration,
+                          origin: capturedOrigin
+                      ) else {
+                    throw DirectSessionBranchError.invalidResponse
+                }
+            }
+
+            // `withSessionEventsPaused` drains buffered events in its defer
+            // before returning here. Revalidate both sides after that drain so
+            // an event-driven rebind cannot turn the already-validated child
+            // into a stale handoff.
+            guard let childController,
+                  let knownChildBinding,
+                  childController.binding == knownChildBinding,
+                  childController.storedID == knownChildBinding.storedID,
+                  isCurrentBranchScope(
+                      binding: capturedBinding,
+                      lifecycle: capturedLifecycle,
+                      bindingEpoch: capturedBindingEpoch,
+                      connectionGeneration: capturedConnectionGeneration,
+                      origin: capturedOrigin
+                  ) else {
+                throw DirectSessionBranchError.invalidResponse
+            }
+            handoffCompleted = true
+            return childController
+        } catch let error as HermesGatewayError {
+            if !requestWasDispatched || Self.isDefinitiveBranchRefusal(error) {
+                throw error
+            }
+            if let knownChildBinding {
+                childController?.invalidate()
+                _ = await closeKnownBranchChild(
+                    knownChildBinding,
+                    parentBinding: capturedBinding,
+                    lifecycle: capturedLifecycle,
+                    connectionGeneration: capturedConnectionGeneration
+                )
+            }
+            branchOutcomeUnknown = true
+            throw DirectSessionBranchError.outcomeUnknown
+        } catch let error as DirectSessionBranchError {
+            if requestWasDispatched, !handoffCompleted,
+               let knownChildBinding {
+                childController?.invalidate()
+                _ = await closeKnownBranchChild(
+                    knownChildBinding,
+                    parentBinding: capturedBinding,
+                    lifecycle: capturedLifecycle,
+                    connectionGeneration: capturedConnectionGeneration
+                )
+            }
+            if case .outcomeUnknown = error {
+                branchOutcomeUnknown = true
+            } else if requestWasDispatched {
+                branchOutcomeUnknown = true
+            }
+            if requestWasDispatched, !handoffCompleted {
+                throw DirectSessionBranchError.outcomeUnknown
+            }
+            throw error
+        } catch {
+            if !requestWasDispatched {
+                throw error
+            }
+            if !handoffCompleted, let knownChildBinding {
+                childController?.invalidate()
+                _ = await closeKnownBranchChild(
+                    knownChildBinding,
+                    parentBinding: capturedBinding,
+                    lifecycle: capturedLifecycle,
+                    connectionGeneration: capturedConnectionGeneration
+                )
+            }
+            branchOutcomeUnknown = true
+            throw DirectSessionBranchError.outcomeUnknown
+        }
+    }
+
+    private func isCurrentBranchScope(
+        binding: GatewaySessionBinding,
+        lifecycle expectedLifecycle: Int,
+        bindingEpoch expectedBindingEpoch: Int,
+        connectionGeneration expectedConnectionGeneration: Int,
+        origin expectedOrigin: URL
+    ) -> Bool {
+        !disposed
+            && !branchOutcomeUnknown
+            && self.binding == binding
+            && storedID == binding.storedID
+            && binding.profile == profile
+            && lifecycle == expectedLifecycle
+            && bindingEpoch == expectedBindingEpoch
+            && runtime.origin == expectedOrigin
+            && runtime.connectionGeneration == expectedConnectionGeneration
+            && runtime.state == .ready
+            && runState == .idle
+            && !promptInFlight
+            && !hasAmbiguousPromptDelivery
+            && !promptUncertaintyLoadFailed
+            && !attachmentRecoveryIsBusy
+            && !attachmentStageInFlight
+            && !attachmentRemovalInFlight
+            && recoveryMarker == nil
+            && !recoveryMarkerLoadFailed
+            && !recoveryStageUnknown
+            && pendingBlockingPrompt == nil
+            && pendingApprovalPrompt == nil
+            && pendingSecretPrompt == nil
+            && pendingSudoPrompt == nil
+            && !blockingResponseInFlight
+            && !blockingInteractionResponseInFlight
+            && reasoningMutationCount == 0
+    }
+
+    private func branchBinding(
+        from result: JSONValue?,
+        parent: GatewaySessionBinding
+    ) throws -> GatewaySessionBinding {
+        guard case .object(let fields) = result,
+              fields["parent"]?.gatewayString == parent.storedID,
+              let messageCount = fields["message_count"],
+              case .number(let count) = messageCount,
+              count.isFinite,
+              count > 0,
+              count.rounded() == count,
+              let infoProfile = fields["info"]?.gatewayFields["profile_name"]?.gatewayString,
+              infoProfile == profile else {
+            throw DirectSessionBranchError.invalidResponse
+        }
+        let child = try GatewaySessionBinding.resolve(result, profile: profile)
+        guard child.storedID != parent.storedID,
+              child.runtimeID != parent.runtimeID,
+              child.profile == profile else {
+            throw DirectSessionBranchError.invalidResponse
+        }
+        return child
+    }
+
+    private func makeBranchedController(
+        _ childBinding: GatewaySessionBinding
+    ) throws -> GatewayConversationController {
+        let child = GatewayConversationController(
+            runtime: runtime,
+            storedID: childBinding.storedID,
+            profile: profile,
+            recoveryMarkerStore: recoveryMarkerStore,
+            promptUncertaintyStore: promptUncertaintyStore,
+            loadTranscript: loadTranscript
+        )
+        try child.adopt(childBinding)
+        return child
+    }
+
+    private func closeKnownBranchChild(
+        _ childBinding: GatewaySessionBinding,
+        parentBinding: GatewaySessionBinding,
+        lifecycle expectedLifecycle: Int,
+        connectionGeneration expectedConnectionGeneration: Int
+    ) async -> Bool {
+        guard !disposed,
+              lifecycle == expectedLifecycle,
+              binding == parentBinding,
+              storedID == parentBinding.storedID,
+              parentBinding.profile == profile,
+              runtime.connectionGeneration == expectedConnectionGeneration,
+              runtime.state == .ready else {
+            return false
+        }
+        do {
+            let result = try await runtime.request("session.close", parameters: {
+                guard !self.disposed,
+                      self.lifecycle == expectedLifecycle,
+                      self.binding == parentBinding,
+                      self.storedID == parentBinding.storedID,
+                      parentBinding.profile == self.profile,
+                      self.runtime.connectionGeneration == expectedConnectionGeneration,
+                      self.runtime.state == .ready else {
+                    throw DirectSessionError.staleOperation
+                }
+                return [
+                    "session_id": .string(childBinding.runtimeID),
+                    "profile": .string(childBinding.profile)
+                ]
+            })
+            return result?.gatewayFields["closed"] == .bool(true)
+        } catch {
+            return false
+        }
+    }
+
+    private static func isDefinitiveBranchRefusal(_ error: HermesGatewayError) -> Bool {
+        guard case .server(let code, _, _, let method, _, _) = error,
+              method == "session.branch" else { return false }
+        // 4001 is a missing runtime and 4008 is the handler's empty-history
+        // refusal; neither can have created a child.  5008 is deliberately
+        // excluded because the handler may fail after child persistence.
+        return code == 4001 || code == 4008
     }
 
     /// Explicitly abandons only the live runtime carrying an unresolved
@@ -629,6 +944,7 @@ final class GatewayConversationController {
     /// next `open()` resumes that stored conversation with a fresh runtime.
     func resetPendingAttachments(expectedToken: UUID? = nil) async throws {
         guard !disposed else { throw DirectSessionError.stopped }
+        guard !branchInFlight else { throw DirectSessionError.ambiguousPrompt }
         guard recoveryMarker != nil || recoveryMarkerLoadFailed else {
             throw DirectSessionError.unresolvedAttachment
         }
@@ -764,6 +1080,7 @@ final class GatewayConversationController {
     /// unknown or stale receipts remain quarantined and are never guessed.
     func removeStagedAttachment(_ pending: DirectPendingAttachment) async throws {
         guard !disposed else { throw DirectSessionError.stopped }
+        guard !branchInFlight else { throw DirectSessionError.ambiguousPrompt }
         guard pending.source.kind != .file else { throw DirectSessionError.invalidResponse }
         guard !hasAmbiguousPromptDelivery,
               !recoveryMarkerLoadFailed,
@@ -919,6 +1236,12 @@ final class GatewayConversationController {
         _ pending: DirectPendingAttachment,
         create: [String: JSONValue] = [:]
     ) async throws -> DirectGatewayAttachmentStageResult {
+        guard !branchInFlight else {
+            throw DirectGatewayAttachmentStageError.definiteBeforeStage(
+                kind: pending.source.kind,
+                reason: .controllerBusy
+            )
+        }
         let kind = pending.source.kind
         switch pending.stageState {
         case .pending:
@@ -1283,6 +1606,7 @@ final class GatewayConversationController {
         create: [String: JSONValue] = [:]
     ) async throws {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw DirectSessionError.invalidResponse }
+        guard !branchInFlight else { throw DirectSessionError.ambiguousPrompt }
         guard !promptUncertaintyLoadFailed else { throw DirectSessionError.staleOperation }
         guard !hasAmbiguousPromptDelivery else { throw DirectSessionError.ambiguousPrompt }
         guard !recoveryMarkerLoadFailed else { throw DirectSessionError.attachmentRecoveryUnavailable }
@@ -1506,10 +1830,11 @@ final class GatewayConversationController {
     /// Reads the live session setting for an already-stored conversation. Drafts
     /// deliberately remain local and are never created just to read a setting.
     func reasoningConfiguration() async throws -> ReasoningConfiguration {
-        guard !disposed, hasSubmittedPrompt, storedID != nil else { throw DirectSessionError.invalidBinding }
+        guard !disposed, !branchInFlight, hasSubmittedPrompt, storedID != nil else { throw DirectSessionError.invalidBinding }
         while let mutationTail = reasoningMutationTail {
             await mutationTail.value
         }
+        guard !branchInFlight else { throw DirectSessionError.staleOperation }
         if let pendingReasoningEffort {
             let configuration = ReasoningConfiguration(
                 effort: pendingReasoningEffort,
@@ -1533,6 +1858,7 @@ final class GatewayConversationController {
     /// socket generation, and lifecycle are pinned through the acknowledgement.
     func setReasoningEffort(_ effort: String) async throws -> ReasoningConfiguration {
         guard Self.reasoningEfforts.contains(effort), !disposed,
+              !branchInFlight,
               hasSubmittedPrompt, storedID != nil,
               !promptInFlight, runState == .idle || runState == .running else {
             throw DirectSessionError.invalidResponse
@@ -1547,7 +1873,8 @@ final class GatewayConversationController {
                 self.reasoningMutationCount -= 1
                 if self.reasoningMutationCount == 0 { self.reasoningMutationTail = nil }
             }
-            guard !self.disposed, self.runState == .idle || self.runState == .running else {
+            guard !self.disposed, !self.branchInFlight,
+                  self.runState == .idle || self.runState == .running else {
                 throw DirectSessionError.invalidResponse
             }
             if self.ambiguousReasoningEffort != nil {
@@ -1608,10 +1935,11 @@ final class GatewayConversationController {
     }
 
     func steer(_ text: String) async throws -> SteerOutcome {
-        guard !disposed, binding != nil, runState == .running,
+        guard !disposed, !branchInFlight, binding != nil, runState == .running,
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw DirectSessionError.invalidResponse }
         let result = try await runtime.request("session.steer", parameters: {
-            guard !self.disposed, let binding = self.binding, self.runState == .running else { throw DirectSessionError.staleOperation }
+            guard !self.disposed, !self.branchInFlight,
+                  let binding = self.binding, self.runState == .running else { throw DirectSessionError.staleOperation }
             return ["session_id": .string(binding.runtimeID), "profile": .string(self.profile), "text": .string(text)]
         })
         guard let status = result?.gatewayFields["status"]?.gatewayString,
@@ -1625,18 +1953,19 @@ final class GatewayConversationController {
     func interrupt() async throws {
         // An unconfirmed interrupt must remain retryable, without reopening
         // ordinary send/steer or treating a lost acknowledgement as success.
-        guard !disposed, let binding, runState == .running || runState == .stopping else { throw DirectSessionError.invalidResponse }
+        guard !disposed, !branchInFlight,
+              let binding, runState == .running || runState == .stopping else { throw DirectSessionError.invalidResponse }
         let generation = lifecycle
         runState = .stopping
         let result = try await runtime.request("session.interrupt", parameters: {
-            guard self.binding == binding, !self.disposed else { throw DirectSessionError.stopUnconfirmed }
+            guard self.binding == binding, !self.disposed, !self.branchInFlight else { throw DirectSessionError.stopUnconfirmed }
             return self.rpcParams(binding)
         })
         guard result?.gatewayFields["status"]?.gatewayString == "interrupted" else { throw DirectSessionError.invalidResponse }
         for _ in 0..<40 {
             try checkLifecycle(generation)
             let status = try await runtime.request("session.status", parameters: {
-                guard self.binding == binding, !self.disposed else { throw DirectSessionError.stopUnconfirmed }
+                guard self.binding == binding, !self.disposed, !self.branchInFlight else { throw DirectSessionError.stopUnconfirmed }
                 return self.rpcParams(binding)
             })
             let stopped = status?.gatewayFields["output"]?.gatewayString?
@@ -1708,6 +2037,7 @@ final class GatewayConversationController {
 
     func dispose() async throws {
         guard !didDispose else { return }
+        guard !branchInFlight else { throw DirectSessionError.ambiguousPrompt }
         didDispose = true
         invalidate()
         // Never close a persisted conversation or interrupt a background run.
@@ -1726,6 +2056,7 @@ final class GatewayConversationController {
     }
 
     private func ensureBinding(create: [String: JSONValue]) async throws {
+        guard !branchInFlight else { throw DirectSessionError.ambiguousPrompt }
         if let attachmentTask { return try await attachmentTask.value }
         let generation = lifecycle
         let task = Task { [weak self] in
@@ -1792,6 +2123,7 @@ final class GatewayConversationController {
         expectedIdentity: GatewayBlockingPromptIdentity
     ) async throws -> GatewayBlockingResponse {
         guard !disposed else { throw DirectSessionError.stopped }
+        guard !branchInFlight else { throw GatewayBlockingError.responseInFlight }
         guard !blockingResponseInFlight else { throw GatewayBlockingError.responseInFlight }
         blockingResponseInFlight = true
         defer { blockingResponseInFlight = false }
@@ -1889,6 +2221,7 @@ final class GatewayConversationController {
         expectedIdentity: GatewayBlockingPromptIdentity
     ) async throws -> GatewayBlockingResponse {
         guard !disposed else { throw DirectSessionError.stopped }
+        guard !branchInFlight else { throw GatewayBlockingError.responseInFlight }
         guard !blockingInteractionResponseInFlight else { throw GatewayBlockingError.responseInFlight }
         blockingInteractionResponseInFlight = true
         blockingInteractionInFlightIdentity = expectedIdentity
@@ -1952,6 +2285,7 @@ final class GatewayConversationController {
         expectedIdentity: GatewayBlockingPromptIdentity
     ) async throws -> GatewayBlockingResponse {
         guard !disposed else { throw DirectSessionError.stopped }
+        guard !branchInFlight else { throw GatewayBlockingError.responseInFlight }
         guard !blockingInteractionResponseInFlight else { throw GatewayBlockingError.responseInFlight }
         blockingInteractionResponseInFlight = true
         blockingInteractionInFlightIdentity = expectedIdentity

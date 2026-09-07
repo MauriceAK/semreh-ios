@@ -38,6 +38,7 @@ def main():
     parser.add_argument('--slice3-pre-ack-loss', action='store_true')
     parser.add_argument('--slice3-uncertainty', action='store_true')
     parser.add_argument('--slice4-session-metadata', action='store_true')
+    parser.add_argument('--slice4-branch', action='store_true')
     parser.add_argument('--gateway-restart-nonce')
     parser.add_argument('--tui-created-session-id')
     parser.add_argument('--slice3-relaunch-seed-text')
@@ -45,6 +46,14 @@ def main():
     parser.add_argument('--stock-backend', action='store_true')
     parser.add_argument('--cookie-phase', choices=['login', 'restore', 'logout'])
     args = parser.parse_args()
+    if args.slice4_branch and (
+        not args.https or not args.stock_backend or args.development_backend_sha
+        or args.cookie_phase or args.gateway_restart_nonce or args.tui_created_session_id
+        or args.slice3_relaunch_seed_text or args.slice4_session_metadata
+        or any(value for name, value in vars(args).items()
+               if name.startswith(('slice2_', 'slice3_')))
+    ):
+        parser.error('--slice4-branch requires --https --stock-backend and no other test phase')
     if args.slice4_session_metadata and (
         not args.https or not args.stock_backend or args.development_backend_sha
         or args.cookie_phase or args.gateway_restart_nonce or args.tui_created_session_id
@@ -204,6 +213,7 @@ def main():
         args.slice3_pre_ack_loss or args.slice3_active_socket_loss or args.slice2_reasoning or args.slice2_ui or args.slice3_file_picker or args.slice3_recovery
         or args.slice3_completed_away or args.slice3_relaunch or args.slice3_gateway_restart
         or args.slice3_uncertainty or args.slice4_session_metadata
+        or args.slice4_branch
     )
     if args.stock_backend and not backend_phase:
         parser.error('--stock-backend requires --slice2-reasoning, --slice2-ui, --slice3-file-picker, --slice3-completed-away, --slice3-relaunch, --slice3-gateway-restart, or --slice3-uncertainty')
@@ -316,6 +326,13 @@ def main():
             'SEMREH_SLICE4_SESSION_METADATA_NATIVE': '1',
         })
         method = 'testOptInHostedSlice4SessionMetadataConsumers'
+    if args.slice4_branch:
+        target['EnvironmentVariables'].update({
+            'SEMREH_SLICE2_STOCK_BACKEND_SHA': PIN,
+            'SEMREH_SLICE2_TOOL_CWD': str(runtime / 'tools'),
+            'SEMREH_SLICE4_BRANCH_NATIVE': '1',
+        })
+        method = 'testOptInHostedSlice4BranchConsumers'
     if args.cookie_phase:
         target['EnvironmentVariables']['SEMREH_SLICE1_COOKIE_PHASE'] = args.cookie_phase
         method = 'testOptInHostedCookie' + args.cookie_phase.title() + 'Phase'

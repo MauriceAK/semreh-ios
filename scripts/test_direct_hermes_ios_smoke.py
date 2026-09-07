@@ -35,6 +35,48 @@ def load_seed_module():
 
 
 class IOSSmokeGuardTests(unittest.TestCase):
+    def test_slice4_branch_requires_standalone_stock_https(self):
+        message = '--slice4-branch requires --https --stock-backend and no other test phase'
+        self.assertRejected(['--slice4-branch'], message)
+        self.assertRejected(['--https', '--slice4-branch'], message)
+        self.assertRejected([
+            '--https', '--stock-backend', '--slice4-branch', '--slice4-session-metadata'
+        ], message)
+        for other in ('--slice2-ui', '--slice3-recovery', '--slice3-active-socket-loss',
+                      '--slice3-pre-ack-loss', '--slice3-gateway-restart'):
+            with self.subTest(other=other):
+                self.assertRejected(
+                    ['--https', '--stock-backend', '--slice4-branch', other], message
+                )
+
+    def test_slice4_branch_exports_exact_native_target(self):
+        smoke = load_smoke_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            products = Path(temporary).resolve()
+            source = products / 'HermesMobile_HermesMobile_iphonesimulator.xctestrun'
+            source.write_bytes(plistlib.dumps({'TestConfigurations': [{
+                'TestTargets': [{'BlueprintName': 'HermesMobileTests'}],
+            }]}))
+            output = products / 'SemrehSlice1Live.xctestrun'
+            with patch.object(smoke, 'PRODUCTS', products), \
+                    patch.object(smoke, 'OUTPUT', output), \
+                    patch.object(smoke, 'validate') as validate, \
+                    patch.object(sys, 'argv', [
+                        str(SCRIPT), '--https', '--stock-backend', '--slice4-branch'
+                    ]):
+                with redirect_stdout(StringIO()):
+                    smoke.main()
+            validate.assert_called_once_with()
+            target = plistlib.loads(output.read_bytes())['TestConfigurations'][0]['TestTargets'][0]
+            self.assertEqual(target['OnlyTestIdentifiers'], [
+                'DirectHermesLiveSmokeTests/testOptInHostedSlice4BranchConsumers',
+            ])
+            environment = target['EnvironmentVariables']
+            self.assertEqual(environment['SEMREH_SLICE4_BRANCH_NATIVE'], '1')
+            self.assertEqual(environment['SEMREH_SLICE2_STOCK_BACKEND_SHA'], smoke.PIN)
+            self.assertEqual(environment['SEMREH_SLICE2_TOOL_CWD'], str(smoke.RUNTIME / 'tools'))
+            self.assertEqual(environment['SEMREH_SLICE1_HTTPS'], '1')
+
     def test_session_metadata_requires_standalone_stock_https(self):
         base = ['--slice4-session-metadata', '--https', '--stock-backend']
         for arguments in (

@@ -388,6 +388,264 @@ final class GatewayConversationControllerTests: XCTestCase {
         await runtime.stop()
     }
 
+    func testBranchAdoptsReturnedChildOnSharedRuntimeWithoutResumeOrCreate() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setResumeResponse(.object([
+            "session_id": .string("runtime-parent"),
+            "session_key": .string("parent")
+        ]))
+        fake.setBranchResponse(.object([
+            "session_id": .string("runtime-child"),
+            "stored_session_id": .string("child"),
+            "session_key": .string("child"),
+            "parent": .string("parent"),
+            "message_count": .number(4),
+            "info": .object(["profile_name": .string("work")])
+        ]))
+        let runtime = try makeRuntime(fake)
+        let parent = makeController(runtime: runtime, storedID: "parent", profile: "work")
+        try await parent.open()
+
+        let child = try await parent.branch()
+
+        XCTAssertEqual(parent.binding, GatewaySessionBinding(
+            storedID: "parent", runtimeID: "runtime-parent", profile: "work"
+        ))
+        XCTAssertEqual(child.binding, GatewaySessionBinding(
+            storedID: "child", runtimeID: "runtime-child", profile: "work"
+        ))
+        XCTAssertEqual(fake.calls().map(\.method), ["session.resume", "session.branch"])
+        let branchCall = try XCTUnwrap(fake.calls().last)
+        XCTAssertEqual(objectFields(branchCall.params), [
+            "session_id": .string("runtime-parent"),
+            "profile": .string("work")
+        ])
+        await runtime.stop()
+    }
+
+    func testBranchChildEventsRouteToChildAndParentRemainsBound() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setResumeResponse(.object([
+            "session_id": .string("runtime-parent"),
+            "session_key": .string("parent")
+        ]))
+        fake.setBranchResponse(.object([
+            "session_id": .string("runtime-child"),
+            "stored_session_id": .string("child"),
+            "session_key": .string("child"),
+            "parent": .string("parent"),
+            "message_count": .number(4),
+            "info": .object(["profile_name": .string("default")])
+        ]))
+        let runtime = try makeRuntime(fake)
+        let parent = makeController(runtime: runtime, storedID: "parent")
+        try await parent.open()
+        let child = try await parent.branch()
+        var parentEvents = 0
+        var childEvents = 0
+        let childEventDelivered = expectation(description: "child event is routed to the adopted child")
+        parent.onEvent = { _ in parentEvents += 1 }
+        child.onEvent = { _ in
+            childEvents += 1
+            childEventDelivered.fulfill()
+        }
+
+        fake.emit(event(sessionID: "runtime-child", type: "message.start", sequence: 1))
+        await fulfillment(of: [childEventDelivered], timeout: 2)
+
+        XCTAssertEqual(parentEvents, 0)
+        XCTAssertEqual(childEvents, 1)
+        XCTAssertEqual(parent.runState, .idle)
+        XCTAssertEqual(child.runState, .running)
+        await runtime.stop()
+    }
+
+    func testBranchRequiresBoundIdleParentWithoutDispatch() async throws {
+        let fake = ControllerFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let parent = makeController(runtime: runtime, storedID: "parent")
+
+        do {
+            _ = try await parent.branch()
+            XCTFail("An unbound parent must not branch")
+        } catch DirectSessionError.ambiguousPrompt { }
+
+        XCTAssertFalse(fake.calls().contains { $0.method == "session.branch" })
+        await runtime.stop()
+    }
+
+    func testBranchUnknownAckIsStickyAndNeverRetried() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setResumeResponse(.object([
+            "session_id": .string("runtime-parent"),
+            "session_key": .string("parent")
+        ]))
+        fake.setBranchServerError(.timeout(method: "session.branch", requestID: "branch-timeout"))
+        let runtime = try makeRuntime(fake)
+        let parent = makeController(runtime: runtime, storedID: "parent")
+        try await parent.open()
+
+        do {
+            _ = try await parent.branch()
+            XCTFail("A lost branch acknowledgement must remain unknown")
+        } catch DirectSessionBranchError.outcomeUnknown { }
+        XCTAssertTrue(parent.branchOutcomeUnknown)
+
+        do {
+            _ = try await parent.branch()
+            XCTFail("Unknown branch outcome must not be retried")
+        } catch DirectSessionError.ambiguousPrompt { }
+        XCTAssertEqual(fake.calls().filter { $0.method == "session.branch" }.count, 1)
+        await runtime.stop()
+    }
+
+    func testBranchRefusalDoesNotSetUnknownBarrier() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setResumeResponse(.object([
+            "session_id": .string("runtime-parent"),
+            "session_key": .string("parent")
+        ]))
+        fake.setBranchServerError(.server(
+            code: 4008,
+            message: "nothing to branch",
+            data: nil,
+            method: "session.branch",
+            requestID: "branch-refused",
+            server: "fixture"
+        ))
+        let runtime = try makeRuntime(fake)
+        let parent = makeController(runtime: runtime, storedID: "parent")
+        try await parent.open()
+
+        do {
+            _ = try await parent.branch()
+            XCTFail("Expected definitive branch refusal")
+        } catch HermesGatewayError.server(let code, _, _, _, _, _) {
+            XCTAssertEqual(code, 4008)
+        }
+        XCTAssertFalse(parent.branchOutcomeUnknown)
+        await runtime.stop()
+    }
+
+    func testBranchHandoffFailureClosesKnownChildButRemainsUnknown() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setResumeResponse(.object([
+            "session_id": .string("runtime-parent"),
+            "session_key": .string("parent")
+        ]))
+        fake.setBranchResponse(.object([
+            "session_id": .string("runtime-child"),
+            "stored_session_id": .string("child"),
+            "session_key": .string("child"),
+            "parent": .string("parent"),
+            "message_count": .number(4),
+            "info": .object(["profile_name": .string("default")])
+        ]))
+        let runtime = try makeRuntime(fake)
+        let parent = makeController(runtime: runtime, storedID: "parent") { id, _, _, _ in
+            if id == "child" { throw DirectSessionError.invalidResponse }
+            return self.page(id)
+        }
+        try await parent.open()
+
+        do {
+            _ = try await parent.branch()
+            XCTFail("A failed child handoff must not claim success")
+        } catch DirectSessionBranchError.outcomeUnknown { }
+        XCTAssertTrue(parent.branchOutcomeUnknown)
+        XCTAssertEqual(fake.calls().map(\.method), ["session.resume", "session.branch", "session.close"])
+        XCTAssertEqual(objectFields(fake.calls().last?.params)?["session_id"], .string("runtime-child"))
+        await runtime.stop()
+    }
+
+    func testMalformedBranchAcknowledgementsBecomeStickyUnknownWithoutRetry() async throws {
+        let validChild: [String: JSONValue] = [
+            "session_id": .string("runtime-child"),
+            "stored_session_id": .string("child"),
+            "parent": .string("parent"),
+            "message_count": .number(4),
+            "info": .object(["profile_name": .string("default")])
+        ]
+        let cases: [(String, JSONValue)] = [
+            ("wrong-parent", .object(validChild.merging(["parent": .string("other")]) { _, new in new })),
+            ("wrong-profile", .object(validChild.merging(["info": .object(["profile_name": .string("work")])]) { _, new in new })),
+            ("missing-profile", .object(validChild.filter { $0.key != "info" })),
+            ("zero-count", .object(validChild.merging(["message_count": .number(0)]) { _, new in new })),
+            ("conflicting-aliases", .object(validChild.merging(["session_key": .string("other-child")]) { _, new in new })),
+            ("duplicate-stored-id", .object(validChild.merging(["stored_session_id": .string("parent")]) { _, new in new })),
+            ("duplicate-runtime-id", .object(validChild.merging(["session_id": .string("runtime-parent")]) { _, new in new }))
+        ]
+
+        for (name, response) in cases {
+            let fake = ControllerFakeTransport()
+            fake.setResumeResponse(.object([
+                "session_id": .string("runtime-parent"),
+                "session_key": .string("parent")
+            ]))
+            fake.setBranchResponse(response)
+            let runtime = try makeRuntime(fake)
+            let parent = makeController(runtime: runtime, storedID: "parent")
+            try await parent.open()
+
+            do {
+                _ = try await parent.branch()
+                XCTFail("Malformed branch response \(name) must not be accepted")
+            } catch DirectSessionBranchError.outcomeUnknown { }
+
+            XCTAssertTrue(parent.branchOutcomeUnknown, name)
+            XCTAssertEqual(
+                fake.calls().filter { $0.method == "session.branch" }.count,
+                1,
+                name
+            )
+            do {
+                _ = try await parent.branch()
+                XCTFail("Malformed branch response \(name) must not be retried")
+            } catch DirectSessionError.ambiguousPrompt { }
+            XCTAssertEqual(
+                fake.calls().filter { $0.method == "session.branch" }.count,
+                1,
+                name
+            )
+            await runtime.stop()
+        }
+    }
+
+    func testPostDispatch5000And5008BranchErrorsBecomeStickyUnknownWithoutRetry() async throws {
+        for code in [5000, 5008] {
+            let fake = ControllerFakeTransport()
+            fake.setResumeResponse(.object([
+                "session_id": .string("runtime-parent"),
+                "session_key": .string("parent")
+            ]))
+            fake.setBranchServerError(.server(
+                code: code,
+                message: "fixture post-dispatch failure",
+                data: nil,
+                method: "session.branch",
+                requestID: "branch-\(code)",
+                server: "fixture"
+            ))
+            let runtime = try makeRuntime(fake)
+            let parent = makeController(runtime: runtime, storedID: "parent")
+            try await parent.open()
+
+            do {
+                _ = try await parent.branch()
+                XCTFail("Branch error \(code) must remain unknown")
+            } catch DirectSessionBranchError.outcomeUnknown { }
+
+            XCTAssertTrue(parent.branchOutcomeUnknown)
+            XCTAssertEqual(fake.calls().filter { $0.method == "session.branch" }.count, 1)
+            do {
+                _ = try await parent.branch()
+                XCTFail("Branch error \(code) must not be retried")
+            } catch DirectSessionError.ambiguousPrompt { }
+            XCTAssertEqual(fake.calls().filter { $0.method == "session.branch" }.count, 1)
+            await runtime.stop()
+        }
+    }
+
     func testStoredChatReasoningGetterUsesExactSessionAndProfileScope() async throws {
         let fake = ControllerFakeTransport()
         fake.setReasoningGetResponse(.object([
@@ -1239,6 +1497,9 @@ private final class ControllerFakeTransport: HermesGatewayTransport, @unchecked 
     private var promptTimeout = false
     private var promptResponseGate: AsyncGate?
     private var promptServerError: HermesGatewayError?
+    private var branchResponse: JSONValue?
+    private var branchResponseGate: AsyncGate?
+    private var branchServerError: HermesGatewayError?
     private var interruptResponse: JSONValue = .object([:])
     private var interruptEvent: HermesGatewayEvent?
     private var reasoningGetResponse: JSONValue = .object([
@@ -1297,6 +1558,18 @@ private final class ControllerFakeTransport: HermesGatewayTransport, @unchecked 
 
     func setPromptServerError(_ error: HermesGatewayError) {
         withLock { promptServerError = error }
+    }
+
+    func setBranchResponse(_ response: JSONValue) {
+        withLock { branchResponse = response }
+    }
+
+    func setBranchResponseGate(_ gate: AsyncGate) {
+        withLock { branchResponseGate = gate }
+    }
+
+    func setBranchServerError(_ error: HermesGatewayError) {
+        withLock { branchServerError = error }
     }
 
     func setInterruptResponse(_ response: JSONValue) {
@@ -1407,6 +1680,13 @@ private final class ControllerFakeTransport: HermesGatewayTransport, @unchecked 
                 throw HermesGatewayError.timeout(method: method, requestID: "\(behavior.8)")
             }
             return .object(["status": .string("streaming")])
+        case "session.branch":
+            let (response, gate, error) = withLock {
+                (branchResponse, branchResponseGate, branchServerError)
+            }
+            if let gate { await gate.wait() }
+            if let error { throw error }
+            return response ?? .object([:])
         case "session.steer":
             return behavior.5
         case "session.interrupt":

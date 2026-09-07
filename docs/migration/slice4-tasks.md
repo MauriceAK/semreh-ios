@@ -149,6 +149,29 @@ contract tests and deletion audit. Shared chat/history/runtime files stay single
 
 ### Full-session branch contract capture
 
+Native controller prerequisite: existing shared runtime now supports
+full-session branch and adopts/refreshed child controller without create/resume.
+Exact parent scope is checked before dispatch and after buffered event delivery;
+child aliases, parent, positive count, and stock `info.profile_name` are validated.
+Unknown/partial outcomes (including5000/5008) block another branch for the lifetime
+of that controller; this is not crash-persistent protection. Known-owned runtime
+cleanup never claims to remove the durable branch. Unproven malformed-response
+IDs are not closed speculatively. UI/store navigation handoff is still outstanding.
+
+Evidence: controller-focused-v2 passed51/0/0; controller-full-v1 passed2261/0/14
+opt-in skips. Native-live-v3 passed1/0/0 with actual parent/child controllers,
+four copied rows, child-only turn to six rows, unchanged parent and owned cleanup.
+Strict signing and ordinary Simulator launch95588 passed. Selector Python37/37.
+Focused-v1 failed one async event test (asserted before callback); corrected with
+an expectation. Live-v1 failed an unlabeled assertion; v2 added stage labels and
+identified child-append comparison. Root fixed optional-role debug interpolation
+in the test helper; v3 passed without changing production. Failed evidence retained.
+Test-only successor focused-v3 passed53/0/0, including malformed-ACK and5000/5008
+unknown/no-retry matrices. Independent review approved the cohort and matrix.
+Artifact audit `slice4-branch-controller-audit-v1.jsonl` passed262353files/zero
+flags/160exportedconsoles (known fixture secrets/obviousbearer only, not opaque
+secrets/OCR/quarantinedOSdiagnostics). No UI/store acceptance is implied.
+
 `slice4-branch-live-v2.json` passed on the pinned stock HTTPS fixture: two-turn
 parent copied exactly to a distinct child runtime/durable ID; authoritative
 detail verified profile/parent linkage; child-only third turn preserved the copied
