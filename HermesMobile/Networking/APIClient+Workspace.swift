@@ -87,6 +87,73 @@ extension APIClient {
         )
     }
 
+    /// Reads one absolute path through the authenticated stock managed-files
+    /// route. The server owns root/sensitive-file policy; the client only
+    /// rejects empty/relative inputs so it never guesses a host path.
+    func directReadManagedFile(path: String) async throws -> DirectHermesManagedFile {
+        let trimmedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPath.isEmpty,
+              trimmedPath.hasPrefix("/"),
+              !trimmedPath.contains("\0")
+        else {
+            throw APIError.invalidServerURL
+        }
+
+        let endpoint = baseURL.appending(path: "/api/files/read")
+        guard var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false) else {
+            throw APIError.invalidServerURL
+        }
+        components.queryItems = [URLQueryItem(name: "path", value: trimmedPath)]
+        guard let url = components.url else {
+            throw APIError.invalidServerURL
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        customHeaderProvider().apply(to: &request)
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        let maximumDecodedBytes = DirectHermesManagedFileResponseAdapter.maximumDecodedBytes
+        let maximumEncodedBytes = GatewayMediaResponseAdapter.encodedEnvelopeMaximumBytes(
+            for: maximumDecodedBytes
+        )
+        let (data, _) = try await boundedData(
+            for: request,
+            using: session,
+            mapsUnauthorized: true,
+            maximumBytes: maximumEncodedBytes
+        )
+        let envelope = try decode(DirectHermesManagedFileEnvelope.self, from: data)
+        guard let dataURL = envelope.dataURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !dataURL.isEmpty
+        else {
+            throw APIError.decoding(
+                underlying: DirectHermesManagedFileResponseAdapter.DecodeError.missingDataURL
+            )
+        }
+
+        let bytes: Data
+        do {
+            bytes = try DirectHermesManagedFileResponseAdapter.decodeDataURL(
+                dataURL,
+                maximumDecodedBytes: maximumDecodedBytes
+            )
+        } catch let error as PreviewDownloadError {
+            throw error
+        } catch {
+            throw APIError.decoding(underlying: error)
+        }
+
+        return DirectHermesManagedFile(
+            data: bytes,
+            mimeType: envelope.mimeType,
+            name: envelope.name,
+            path: envelope.path,
+            size: envelope.size
+        )
+    }
+
     /// `/api/media` has two response contracts in the supported server fleet:
     /// legacy servers return the raw image bytes, while the pinned direct
     /// Hermes server returns an authenticated JSON envelope containing a data
@@ -183,6 +250,92 @@ extension APIClient {
                 return min(maximumBytes, documentMaximumBytes)
             }
         )
+    }
+}
+
+struct DirectHermesManagedFile: Equatable, Sendable {
+    let data: Data
+    let mimeType: String?
+    let name: String?
+    let path: String?
+    let size: Int?
+}
+
+private struct DirectHermesManagedFileEnvelope: Decodable {
+    let dataURL: String?
+    let mimeType: String?
+    let name: String?
+    let path: String?
+    let size: Int?
+
+    enum CodingKeys: String, CodingKey {
+        // APIClient's shared decoder applies convertFromSnakeCase before
+        // matching coding keys: data_url -> dataUrl, mime_type -> mimeType.
+        case dataURL = "dataUrl"
+        case mimeType
+        case name
+        case path
+        case size
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        dataURL = container.decodeLossyStringIfPresent(forKey: .dataURL)
+        mimeType = container.decodeLossyStringIfPresent(forKey: .mimeType)
+        name = container.decodeLossyStringIfPresent(forKey: .name)
+        path = container.decodeLossyStringIfPresent(forKey: .path)
+        size = container.decodeLossyIntIfPresent(forKey: .size)
+    }
+}
+
+private enum DirectHermesManagedFileResponseAdapter {
+    enum DecodeError: Error {
+        case missingDataURL
+        case malformedDataURL
+        case invalidBase64
+    }
+
+    static let maximumDecodedBytes = GatewayMediaResponseAdapter.defaultMaximumDecodedBytes
+
+    static func decodeDataURL(
+        _ dataURL: String,
+        maximumDecodedBytes: Int
+    ) throws -> Data {
+        guard let comma = dataURL.firstIndex(of: ",") else {
+            throw DecodeError.malformedDataURL
+        }
+
+        let header = String(dataURL[..<comma])
+        let lowercasedHeader = header.lowercased()
+        let mimeType = String(header.dropFirst("data:".count).dropLast(";base64".count))
+        guard lowercasedHeader.hasPrefix("data:"),
+              lowercasedHeader.hasSuffix(";base64"),
+              !mimeType.isEmpty,
+              !mimeType.contains(";"),
+              !mimeType.contains(where: { $0.isWhitespace })
+        else {
+            throw DecodeError.malformedDataURL
+        }
+
+        let payload = String(dataURL[dataURL.index(after: comma)...])
+        guard payload.isEmpty || payload.count.isMultiple(of: 4),
+              payload.unicodeScalars.allSatisfy({ scalar in
+                  switch scalar.value {
+                  case 65...90, 97...122, 48...57, 43, 47, 61:
+                      return true
+                  default:
+                      return false
+                  }
+              }),
+              let decoded = Data(base64Encoded: payload) ?? (payload.isEmpty ? Data() : nil)
+        else {
+            throw DecodeError.invalidBase64
+        }
+
+        guard decoded.count <= maximumDecodedBytes else {
+            throw PreviewDownloadError.responseTooLarge(maximumBytes: maximumDecodedBytes)
+        }
+        return decoded
     }
 }
 

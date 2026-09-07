@@ -69,6 +69,13 @@ this sheet does not invent contracts or mark unexecuted checks passed.
 - [ ] **S3-A — Attachment staging.** Capture image/text-code/PDF stock contracts,
   limits, references and failure behavior before implementation. Stage bytes before
   prompt; failure preserves draft and prevents submit. No host use of phone paths.
+  - [ ] **A3 — Restart-safe unresolved staging (decision required).** Stock live
+    resume retains queued images but does not report them. Memory-only pending
+    state can disappear on app kill/eviction, allowing the next ordinary prompt
+    to consume an unknown staged image. Known receipts need exact-path detach;
+    unknown receipts require durable per-session quarantine and an explicit
+    resolution policy, or another owner-approved lifecycle change. No personal
+    gateway resets, fabricated paths, automatic retries, or safety waiver.
   - [ ] **A1 — Capture stock staging/limits and PDF availability.** Record
     returned references, image/PDF/file failure responses and canonical history.
   - [ ] **A2 — Retain local bytes and stage before prompt.** Attachment owner
@@ -85,6 +92,12 @@ this sheet does not invent contracts or mark unexecuted checks passed.
       exact stock image/file/PDF receipt parsing. Full nativev2 above passes.
       Picker/send/partial-failure integration is still open. Unexpected PDF errors
       may follow partial page queueing; do not treat every RPC error as unstaged.
+    - [x] **A2c — Native stage/send checkpoint (not attachment gate).** Sequential
+      stage/confirm, exact file references, PDF timeout and final dispatch scope
+      guards; root135focused tests passed. Signed production Paste/preview/send
+      UIv2 passed and exact turn/image reference found in canonical REST. Photos/
+      Files/PDF picker flows, known-stage removal, late-ACK safety correction,
+      transcript media rendering, final fullsuite and device checks remain open.
 - [ ] **S3-M — Authenticated media.** Same-origin cookie auth, external credential
   isolation, Range, resource-scoped caching. No tickets in media URLs. Coordinate
   attachment metadata boundary with A; avoid generic speculative DTOs.

@@ -32,6 +32,12 @@ final class GatewayConversationController {
     private(set) var binding: GatewaySessionBinding?
     private(set) var storedID: String?
     private(set) var runState: RunState = .idle
+    /// A dispatched prompt whose outcome is not proven must remain a hard
+    /// barrier even if a concurrent/queued terminal event temporarily makes
+    /// `runState` idle. Canonical recovery or controller replacement owns the
+    /// eventual resolution; this controller never clears it from a generic
+    /// refresh or status response.
+    private(set) var hasAmbiguousPromptDelivery = false
     private(set) var pendingReasoningEffort: String?
     /// One renderer-facing blocking prompt. It is transient and always scoped
     /// to the exact server/runtime/connection/request identity below.
@@ -53,6 +59,7 @@ final class GatewayConversationController {
     @ObservationIgnored private let loadTranscript: TranscriptLoader
     @ObservationIgnored private var observerID: UUID?
     @ObservationIgnored private var attachmentTask: Task<Void, Error>?
+    @ObservationIgnored private var attachmentStageInFlight = false
     @ObservationIgnored private var reconciliationTask: Task<Void, Never>?
     @ObservationIgnored private var idleRefreshTask: Task<Void, Never>?
     private var lifecycle = 0
@@ -109,14 +116,307 @@ final class GatewayConversationController {
         try await ensureBinding(create: [:])
     }
 
+    /// Stages one direct attachment on this conversation's already-owned
+    /// runtime. The source bytes are encoded off-main by
+    /// `DirectGatewayAttachment.rpcParameters()`; this method only adds the
+    /// runtime binding fields and validates that the same origin, binding,
+    /// lifecycle, and socket generation survive the request.
+    ///
+    /// A failed request is never retried here. Validation failures proven to
+    /// happen before the gateway can queue the attachment are distinct from
+    /// failures whose server-side effect is unknown.
+    func stageAttachment(
+        _ pending: DirectPendingAttachment,
+        create: [String: JSONValue] = [:]
+    ) async throws -> DirectGatewayAttachmentStageResult {
+        let kind = pending.source.kind
+        switch pending.stageState {
+        case .pending:
+            break
+        case .confirmed:
+            throw DirectGatewayAttachmentStageError.definiteBeforeStage(
+                kind: kind,
+                reason: .alreadyStaged
+            )
+        case .unknown(let scope):
+            throw DirectGatewayAttachmentStageError.unknown(
+                kind: kind,
+                scope: scope,
+                reason: .priorAttemptUnknown
+            )
+        }
+
+        guard !disposed else {
+            throw DirectGatewayAttachmentStageError.definiteBeforeStage(
+                kind: kind,
+                reason: .staleBeforeDispatch
+            )
+        }
+        guard !hasAmbiguousPromptDelivery else {
+            throw DirectGatewayAttachmentStageError.definiteBeforeStage(
+                kind: kind,
+                reason: .ambiguousPromptDelivery
+            )
+        }
+        guard !attachmentStageInFlight,
+              !promptInFlight,
+              runState == .idle else {
+            throw DirectGatewayAttachmentStageError.definiteBeforeStage(
+                kind: kind,
+                reason: .controllerBusy
+            )
+        }
+
+        attachmentStageInFlight = true
+        defer { attachmentStageInFlight = false }
+
+        let operationLifecycle = lifecycle
+        do {
+            // A local draft creates its one runtime session here. This shares
+            // the controller's existing binding singleflight; it never opens
+            // a second socket or a second reconnect loop.
+            try await ensureBinding(create: create)
+        } catch is CancellationError {
+            throw DirectGatewayAttachmentStageError.definiteBeforeStage(
+                kind: kind,
+                reason: .cancelledBeforeDispatch
+            )
+        } catch {
+            // The attachment request has not been dispatched yet. The shared
+            // session-create/bind failure is therefore not an attachment stage
+            // with an unknown queue side effect.
+            throw DirectGatewayAttachmentStageError.definiteBeforeStage(
+                kind: kind,
+                reason: .staleBeforeDispatch
+            )
+        }
+
+        guard !disposed,
+              lifecycle == operationLifecycle,
+              let capturedBinding = binding,
+              capturedBinding.profile == profile,
+              runtime.state == .ready else {
+            throw DirectGatewayAttachmentStageError.definiteBeforeStage(
+                kind: kind,
+                reason: .staleBeforeDispatch
+            )
+        }
+
+        // Attachments belong to the idle turn that was current after binding.
+        // A prompt/event may advance this epoch while bytes are prepared; do
+        // not dispatch into a newer turn or reuse an ambiguous queue result.
+        let operationTurn = turnEpoch
+        guard runState == .idle else {
+            throw DirectGatewayAttachmentStageError.definiteBeforeStage(
+                kind: kind,
+                reason: .controllerBusy
+            )
+        }
+
+        let capturedGeneration = runtime.connectionGeneration
+        let capturedOrigin = runtime.origin
+        let scope = DirectPendingAttachmentStageScope(
+            binding: capturedBinding,
+            connectionGeneration: capturedGeneration,
+            origin: capturedOrigin,
+            turnEpoch: operationTurn
+        )
+
+        let attachmentFields: [String: JSONValue]
+        do {
+            attachmentFields = try await pending.source.rpcParameters()
+        } catch is CancellationError {
+            throw DirectGatewayAttachmentStageError.definiteBeforeStage(
+                kind: kind,
+                reason: .cancelledBeforeDispatch
+            )
+        } catch let error as DirectGatewayAttachmentError {
+            throw DirectGatewayAttachmentStageError.definiteBeforeStage(
+                kind: kind,
+                reason: .sourcePreparation(error)
+            )
+        } catch {
+            throw DirectGatewayAttachmentStageError.definiteBeforeStage(
+                kind: kind,
+                reason: .sourcePreparation(.malformed)
+            )
+        }
+
+        guard !disposed,
+              lifecycle == operationLifecycle,
+              turnEpoch == operationTurn,
+              runState == .idle,
+              binding == capturedBinding,
+              runtime.origin == capturedOrigin,
+              runtime.connectionGeneration == capturedGeneration,
+              runtime.state == .ready else {
+            throw DirectGatewayAttachmentStageError.definiteBeforeStage(
+                kind: kind,
+                reason: .staleBeforeDispatch
+            )
+        }
+
+        let method: String
+        switch kind {
+        case .image:
+            method = "image.attach_bytes"
+        case .file:
+            method = "file.attach"
+        case .pdf:
+            method = "pdf.attach"
+        }
+
+        var requestFields = attachmentFields
+        requestFields["session_id"] = .string(capturedBinding.runtimeID)
+        requestFields["profile"] = .string(profile)
+        // Stock PDF rendering may invoke pdftoppm and is allowed the pinned
+        // 120-second server-side window plus a small transport margin.
+        let requestTimeout: Duration? = kind == .pdf ? .seconds(135) : nil
+        var requestWasDispatched = false
+
+        do {
+            let result = try await runtime.request(method, parameters: {
+                guard !self.disposed,
+                      self.lifecycle == operationLifecycle,
+                      self.turnEpoch == operationTurn,
+                      self.runState == .idle,
+                      self.binding == capturedBinding,
+                      self.runtime.origin == capturedOrigin,
+                      self.runtime.connectionGeneration == capturedGeneration,
+                      self.runtime.state == .ready else {
+                    throw DirectSessionError.staleOperation
+                }
+                requestWasDispatched = true
+                return requestFields
+            }, timeout: requestTimeout)
+
+            guard !disposed,
+                  lifecycle == operationLifecycle,
+                  turnEpoch == operationTurn,
+                  runState == .idle,
+                  binding == capturedBinding,
+                  runtime.origin == capturedOrigin,
+                  runtime.connectionGeneration == capturedGeneration,
+                  runtime.state == .ready else {
+                throw DirectGatewayAttachmentStageError.unknown(
+                    kind: kind,
+                    scope: scope,
+                    reason: .staleAfterDispatch
+                )
+            }
+
+            let receipt: DirectGatewayAttachmentReceipt
+            do {
+                switch kind {
+                case .image:
+                    receipt = try DirectGatewayAttachmentReceipt.image(from: result)
+                case .file:
+                    receipt = try DirectGatewayAttachmentReceipt.file(from: result)
+                case .pdf:
+                    receipt = try DirectGatewayAttachmentReceipt.pdf(from: result)
+                }
+            } catch {
+                throw DirectGatewayAttachmentStageError.unknown(
+                    kind: kind,
+                    scope: scope,
+                    reason: .malformedResponse
+                )
+            }
+
+            return DirectGatewayAttachmentStageResult(scope: scope, receipt: receipt)
+        } catch let error as DirectGatewayAttachmentStageError {
+            throw error
+        } catch let error as HermesGatewayError {
+            if case .server(let code, let message, _, let serverMethod, _, _) = error,
+               requestWasDispatched,
+               serverMethod == method,
+               Self.isDefiniteAttachmentRejection(kind: kind, method: method, code: code) {
+                throw DirectGatewayAttachmentStageError.definiteBeforeStage(
+                    kind: kind,
+                    reason: .serverRejected(code: code, message: message)
+                )
+            }
+
+            guard requestWasDispatched else {
+                let reason: DirectGatewayAttachmentStageDefiniteReason = {
+                    if case .cancelled = error { return .cancelledBeforeDispatch }
+                    return .staleBeforeDispatch
+                }()
+                throw DirectGatewayAttachmentStageError.definiteBeforeStage(
+                    kind: kind,
+                    reason: reason
+                )
+            }
+
+            if case .cancelled = error {
+                throw DirectGatewayAttachmentStageError.unknown(
+                    kind: kind,
+                    scope: scope,
+                    reason: .cancelledAfterDispatch
+                )
+            }
+
+            throw DirectGatewayAttachmentStageError.unknown(
+                kind: kind,
+                scope: scope,
+                reason: Self.attachmentUnknownReason(for: error)
+            )
+        } catch is CancellationError {
+            if requestWasDispatched {
+                throw DirectGatewayAttachmentStageError.unknown(
+                    kind: kind,
+                    scope: scope,
+                    reason: .cancelledAfterDispatch
+                )
+            }
+            throw DirectGatewayAttachmentStageError.definiteBeforeStage(
+                kind: kind,
+                reason: .cancelledBeforeDispatch
+            )
+        } catch is DirectSessionError {
+            if requestWasDispatched {
+                throw DirectGatewayAttachmentStageError.unknown(
+                    kind: kind,
+                    scope: scope,
+                    reason: .staleAfterDispatch
+                )
+            }
+            throw DirectGatewayAttachmentStageError.definiteBeforeStage(
+                kind: kind,
+                reason: .staleBeforeDispatch
+            )
+        } catch {
+            if requestWasDispatched {
+                throw DirectGatewayAttachmentStageError.unknown(
+                    kind: kind,
+                    scope: scope,
+                    reason: .transport
+                )
+            }
+            throw DirectGatewayAttachmentStageError.definiteBeforeStage(
+                kind: kind,
+                reason: .staleBeforeDispatch
+            )
+        }
+    }
+
     /// Creation settings are per draft, not mutations of server configuration.
     /// A lost prompt acknowledgement is never automatically replayed.
-    func submit(_ text: String, create: [String: JSONValue] = [:]) async throws {
+    func submit(
+        _ text: String,
+        stagedAttachments: [DirectPendingAttachment] = [],
+        create: [String: JSONValue] = [:]
+    ) async throws {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw DirectSessionError.invalidResponse }
+        guard !hasAmbiguousPromptDelivery else { throw DirectSessionError.ambiguousPrompt }
         if pendingReasoningEffort != nil, let mutationTail = reasoningMutationTail {
             await mutationTail.value
         }
-        guard runState == .idle, !promptInFlight, reasoningMutationCount == 0 else { throw DirectSessionError.ambiguousPrompt }
+        guard runState == .idle,
+              !promptInFlight,
+              !attachmentStageInFlight,
+              reasoningMutationCount == 0
+        else { throw DirectSessionError.ambiguousPrompt }
         promptInFlight = true
         defer { promptInFlight = false }
         if ambiguousReasoningEffort != nil {
@@ -130,28 +430,109 @@ final class GatewayConversationController {
             let applied = try await applyStockReasoning(pendingReasoningEffort)
             guard !applied.deferred else { throw DirectSessionError.invalidResponse }
         }
+
+        // Confirmed attachment receipts belong to the idle turn in which they
+        // were staged. Bind first, then validate that exact scope before this
+        // submit advances the turn. Pending/unknown receipts are never sent.
+        let preSubmitTurn = turnEpoch
+        var stagedScope: DirectPendingAttachmentStageScope?
+        var stagedReferenceTexts: [String] = []
+        let validationLifecycle = lifecycle
+        if !stagedAttachments.isEmpty {
+            try await ensureBinding(create: create)
+            guard !disposed,
+                  lifecycle == validationLifecycle,
+                  turnEpoch == preSubmitTurn,
+                  runState == .idle,
+                  runtime.state == .ready,
+                  let currentBinding = binding else {
+                throw DirectSessionError.staleOperation
+            }
+            let scope = DirectPendingAttachmentStageScope(
+                binding: currentBinding,
+                connectionGeneration: runtime.connectionGeneration,
+                origin: runtime.origin,
+                turnEpoch: preSubmitTurn
+            )
+            guard stagedAttachments.allSatisfy({ $0.isConfirmed(for: scope) }) else {
+                throw DirectSessionError.invalidResponse
+            }
+            stagedScope = scope
+            stagedReferenceTexts = stagedAttachments.compactMap { $0.referenceText(for: scope) }
+        }
+
         turnEpoch &+= 1
+        let submissionTurn = turnEpoch
         reconciliationTask?.cancel()
         idleRefreshTask?.cancel()
         runState = .submitting
-        do { try await ensureBinding(create: create) }
-        catch { runState = .idle; throw error }
-        guard binding != nil else { runState = .idle; throw DirectSessionError.invalidBinding }
+        if stagedAttachments.isEmpty {
+            do { try await ensureBinding(create: create) }
+            catch { runState = .idle; throw error }
+        }
+        guard let capturedBinding = binding else { runState = .idle; throw DirectSessionError.invalidBinding }
         let generation = lifecycle
+        let capturedOrigin = runtime.origin
+        let capturedConnectionGeneration = runtime.connectionGeneration
+        let previousHasSubmittedPrompt = hasSubmittedPrompt
+        let previousTerminalReceipt = terminalReceipt
+        let submittedText = ([text] + stagedReferenceTexts).joined(separator: "\n")
         terminalReceipt = nil
         hasSubmittedPrompt = true
+        var submitRequestWasDispatched = false
         do {
             let result = try await runtime.request("prompt.submit", parameters: {
                 guard !self.disposed, let binding = self.binding else { throw DirectSessionError.invalidBinding }
-                return ["session_id": .string(binding.runtimeID), "profile": .string(self.profile), "text": .string(text)]
+                if !stagedAttachments.isEmpty {
+                    guard self.lifecycle == generation,
+                          self.turnEpoch == submissionTurn,
+                          self.runState == .submitting,
+                          binding == capturedBinding,
+                          self.runtime.origin == capturedOrigin,
+                          self.runtime.connectionGeneration == capturedConnectionGeneration,
+                          self.runtime.state == .ready,
+                          let stagedScope,
+                          stagedAttachments.allSatisfy({ $0.isConfirmed(for: stagedScope) }) else {
+                        throw DirectSessionError.staleOperation
+                    }
+                }
+                submitRequestWasDispatched = true
+                return ["session_id": .string(binding.runtimeID), "profile": .string(self.profile), "text": .string(submittedText)]
             })
             try checkLifecycle(generation)
+            if !stagedAttachments.isEmpty {
+                guard binding == capturedBinding,
+                      runtime.origin == capturedOrigin,
+                      runtime.connectionGeneration == capturedConnectionGeneration else {
+                    throw DirectSessionError.staleOperation
+                }
+            }
             guard result?.gatewayFields["status"]?.gatewayString == "streaming" else { throw DirectSessionError.invalidResponse }
             // A very short turn can complete before the RPC continuation runs.
             if runState == .submitting { runState = .running }
         } catch {
             guard !disposed, generation == lifecycle else { throw error }
-            if case HermesGatewayError.server = error {
+            if !submitRequestWasDispatched {
+                if !stagedAttachments.isEmpty {
+                    let canReuseConfirmedStage = turnEpoch == submissionTurn &&
+                        runState == .submitting &&
+                        binding == capturedBinding &&
+                        runtime.origin == capturedOrigin &&
+                        runtime.connectionGeneration == capturedConnectionGeneration
+                    if canReuseConfirmedStage {
+                        turnEpoch = preSubmitTurn
+                        runState = .idle
+                        hasSubmittedPrompt = previousHasSubmittedPrompt
+                        terminalReceipt = previousTerminalReceipt
+                    } else if runState == .submitting {
+                        runState = .idle
+                    }
+                } else if runState == .submitting {
+                    runState = .idle
+                }
+                throw error
+            }
+            if Self.isDefinitePromptSubmitRejection(error) {
                 runState = .idle
                 // A definite RPC rejection can precede first-row persistence.
                 // Only a canonical, structured not-found response proves this
@@ -167,8 +548,14 @@ final class GatewayConversationController {
                         }
                     } catch { /* Remain conservative when persistence is unknown. */ }
                 }
-            } else if terminalReceipt == nil {
-                runState = .deliveryUnknown
+            } else {
+                // A terminal event is not proof that this dispatched prompt
+                // was accepted: another client or a queued turn may own it.
+                // Keep the explicit barrier independent from transient
+                // `runState`; this also covers an internal/unknown server
+                // error or a response carrying the wrong RPC method.
+                hasAmbiguousPromptDelivery = true
+                if terminalReceipt == nil { runState = .deliveryUnknown }
             }
             throw error
         }
@@ -820,6 +1207,69 @@ final class GatewayConversationController {
               binding == capability.binding else {
             throw DirectSessionError.staleOperation
         }
+    }
+
+    private static func isDefiniteAttachmentRejection(
+        kind: DirectGatewayAttachmentKind,
+        method: String,
+        code: Int
+    ) -> Bool {
+        switch (kind, method) {
+        case (.image, "image.attach_bytes"):
+            return [4015, 4016, 4017, 4018].contains(code)
+        case (.file, "file.attach"):
+            // 5028 can follow file materialization; it is not a proof that
+            // no server-side artifact was written, so it stays unknown.
+            return code == 4015
+        case (.pdf, "pdf.attach"):
+            // The pinned stock 5028 branches (missing renderer, timeout,
+            // render failure, no pages) happen before the page queue loop.
+            // This is intentionally scoped to pdf.attach, never a global
+            // interpretation of code 5028.
+            return [4015, 4016, 4017, 4018, 4019, 5028].contains(code)
+        default:
+            return false
+        }
+    }
+
+    /// Codes observed in the pinned `prompt.submit` implementation before it
+    /// calls `_start_inflight_turn` (or while rejecting a stale runtime
+    /// session before the method body). This is deliberately an allowlist: a
+    /// generic JSON-RPC server/internal error may be returned after a future
+    /// side effect, so treating every `.server` error as a harmless rejection
+    /// would permit a duplicate prompt.  5008 is intentionally excluded;
+    /// truncation persistence can have partially changed durable state before
+    /// reporting failure.
+    private static let definitePromptSubmitServerCodes: Set<Int> = [
+        4001, // stale runtime session lookup
+        4004, // malformed truncation parameters
+        4009, // subagent still running
+        4018, // stale/missing truncation target
+        4028, // empty truncation target
+        4029, // truncation consent required
+        4090, // active session slot unavailable
+        4091, // hosted room member busy
+        4120, // invalid hosted-room proof
+        4121, // hosted room isolation unsupported
+        4122, // hosted room is gateway-managed
+        5122, // hosted-room verification failure
+    ]
+
+    private static func isDefinitePromptSubmitRejection(_ error: Error) -> Bool {
+        guard let gatewayError = error as? HermesGatewayError,
+              case .server(let code, _, _, let serverMethod, _, _) = gatewayError else {
+            return false
+        }
+        return serverMethod == "prompt.submit" && definitePromptSubmitServerCodes.contains(code)
+    }
+
+    private static func attachmentUnknownReason(
+        for error: HermesGatewayError
+    ) -> DirectGatewayAttachmentStageUnknownReason {
+        if case .server(let code, let message, _, _, _, _) = error {
+            return .server(code: code, message: message)
+        }
+        return .transport
     }
 
     private func resumeParams() -> [String: JSONValue] {

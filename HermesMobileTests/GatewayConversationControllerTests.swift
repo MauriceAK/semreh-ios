@@ -588,10 +588,10 @@ final class GatewayConversationControllerTests: XCTestCase {
         await runtime.stop()
     }
 
-    func testDefinitePromptRejection404MakesDraftCloseable() async throws {
+    func testDefiniteStaleRuntimeRejectionAndREST404MakeDraftCloseable() async throws {
         let fake = ControllerFakeTransport()
         fake.setPromptServerError(.server(
-            code: 404,
+            code: 4001, // Pinned _sess_nowait; REST 404 below is a separate contract.
             message: "session not found",
             data: nil,
             method: "prompt.submit",
@@ -622,7 +622,7 @@ final class GatewayConversationControllerTests: XCTestCase {
     func testDisconnectedDraftCleanupFailsClosedWithoutStaleClose() async throws {
         let fake = ControllerFakeTransport()
         fake.setPromptServerError(.server(
-            code: 404,
+            code: 4001, // Pinned _sess_nowait; do not use an HTTP code as an RPC code.
             message: "session not found",
             data: nil,
             method: "prompt.submit",

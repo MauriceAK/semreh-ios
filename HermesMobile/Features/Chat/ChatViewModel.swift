@@ -49,6 +49,20 @@ struct ListenNowPlayingSnapshot: Equatable {
     let isPlaying: Bool
 }
 
+private enum DirectAttachmentSendFailure: Error {
+    case staging(id: UUID, filename: String, error: DirectGatewayAttachmentStageError)
+
+    var filename: String {
+        if case .staging(_, let filename, _) = self { return filename }
+        return "Attachment"
+    }
+
+    var error: DirectGatewayAttachmentStageError {
+        if case .staging(_, _, let error) = self { return error }
+        preconditionFailure("unreachable")
+    }
+}
+
 @MainActor
 protocol ListenRemoteControlControlling {
     func configure(
@@ -461,7 +475,10 @@ final class ChatViewModel {
                 at: loadedIndex,
                 messageOffset: messagesOffset
             ),
-            message: message
+            message: message,
+            attachmentDisplayContent: usesDirectGateway
+                ? Self.directAttachmentDisplayContent(for: message)
+                : nil
         )
 
         if let rowIndex = displayedTranscriptRowIndexByLoadedIndex[loadedIndex],
@@ -629,10 +646,24 @@ final class ChatViewModel {
     private(set) var isUpdatingComposerConfiguration = false
     private(set) var composerConfigurationErrorMessage: String?
     var pendingAttachments: [PendingAttachment] { attachmentCoordinator.pendingAttachments }
-    var isUploadingAttachment: Bool { attachmentCoordinator.isUploadingAttachment }
-    var attachmentUploadCount: Int { attachmentCoordinator.uploadInFlightCount }
-    var attachmentUploadGeneration: Int { attachmentCoordinator.uploadStartGeneration }
-    var uploadAttachmentErrorMessage: String? { attachmentCoordinator.uploadAttachmentErrorMessage }
+    private(set) var directPendingAttachments: [DirectPendingAttachment] = []
+    var directPendingAttachmentDisplayItems: [ComposerAttachmentDisplayItem] {
+        directPendingAttachments.map { ComposerAttachmentDisplayItem(direct: $0) }
+    }
+    private(set) var isPreparingDirectAttachment = false
+    private(set) var directAttachmentPreparationErrorMessage: String?
+    var isUploadingAttachment: Bool {
+        usesDirectGateway ? isPreparingDirectAttachment : attachmentCoordinator.isUploadingAttachment
+    }
+    var attachmentUploadCount: Int {
+        usesDirectGateway ? directAttachmentPreparationCount : attachmentCoordinator.uploadInFlightCount
+    }
+    var attachmentUploadGeneration: Int {
+        usesDirectGateway ? directAttachmentPreparationStartGeneration : attachmentCoordinator.uploadStartGeneration
+    }
+    var uploadAttachmentErrorMessage: String? {
+        usesDirectGateway ? directAttachmentPreparationErrorMessage : attachmentCoordinator.uploadAttachmentErrorMessage
+    }
     var localAttachmentPreviews: [String: [String: Data]] { attachmentCoordinator.localAttachmentPreviews }
     private(set) var pinnedLocalNotices: [String] = []
     var approvalPrompt: ApprovalPromptState? { pendingActionCoordinator.approvalPrompt }
@@ -682,6 +713,7 @@ final class ChatViewModel {
     private var sessionID: String?
     var usesDirectGateway: Bool { gatewayRuntimeProvider != nil }
     @ObservationIgnored private let gatewayRuntimeProvider: (@MainActor (APIClient) async throws -> HermesServerRuntime)?
+    @ObservationIgnored private let directAttachmentPreparer: (@Sendable (Data, String, Data?) async throws -> DirectPendingAttachment)?
     private var directConversation: GatewayConversationController?
     private var directRuntime: HermesServerRuntime?
     @ObservationIgnored private var directAttachmentTask: Task<GatewayConversationController, Error>?
@@ -691,6 +723,9 @@ final class ChatViewModel {
     private(set) var isRespondingToDirectClarification = false
     private(set) var directClarificationErrorMessage: String? = nil
     private var directClarificationOwnedSendError: String?
+    private var directAttachmentSelectionGeneration = 0
+    private var directAttachmentPreparationStartGeneration = 0
+    private var directAttachmentPreparationCount = 0
     private var directComposerIsEditing = false
     private var directOlderOffset = 0
     private var directHistoryID: String?
@@ -813,7 +848,8 @@ final class ChatViewModel {
         listenRemoteControlCenter: (any ListenRemoteControlControlling)? = nil,
         serverTTSAudioPlayerFactory: (@MainActor (Data) throws -> any ListenAudioPlaying)? = nil,
         userDefaults: UserDefaults = .standard,
-        gatewayRuntimeProvider: (@MainActor (APIClient) async throws -> HermesServerRuntime)? = nil
+        gatewayRuntimeProvider: (@MainActor (APIClient) async throws -> HermesServerRuntime)? = nil,
+        directAttachmentPreparer: (@Sendable (Data, String, Data?) async throws -> DirectPendingAttachment)? = nil
     ) {
         sessionID = session.sessionId
         currentWorkspace = session.workspace
@@ -824,6 +860,7 @@ final class ChatViewModel {
         isCLISession = session.isCliSession == true
         self.server = server
         self.gatewayRuntimeProvider = gatewayRuntimeProvider
+        self.directAttachmentPreparer = directAttachmentPreparer
         #if DEBUG
         self.nativeAuthE2EAutoSubmitController = NativeAuthE2EAutoSubmitController.processController(
             serverURL: server
@@ -1149,6 +1186,7 @@ final class ChatViewModel {
         directClarificationErrorMessage = nil
         directClarificationOwnedSendError = nil
         isRespondingToDirectClarification = false
+        clearDirectPendingAttachments()
         directConversation?.invalidate()
         directAttachmentTask?.cancel()
         stopSessionEventSync()
@@ -1267,9 +1305,13 @@ final class ChatViewModel {
     private func sendDirectMessage(_ draft: String, modelContext: ModelContext?) async -> Bool {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !directInvalidated, !isStartingChat,
-              !isUpdatingComposerConfiguration,
-              (directConversation?.runState == nil || directConversation?.runState == .idle) else { return false }
-        guard pendingAttachments.isEmpty else {
+              !isUpdatingComposerConfiguration else { return false }
+        guard directConversation?.hasAmbiguousPromptDelivery != true else {
+            sendErrorMessage = "Delivery is uncertain. This message was not resent; reconnect to check the transcript."
+            return false
+        }
+        guard directConversation?.runState == nil || directConversation?.runState == .idle else { return false }
+        guard pendingAttachments.isEmpty, !isPreparingDirectAttachment else {
             sendErrorMessage = "Direct Hermes attachments are not available yet. Your draft was kept."
             return false
         }
@@ -1283,12 +1325,33 @@ final class ChatViewModel {
         }
         let localID = "local-\(UUID().uuidString)"
         let wasDraft = canonicalSessionID == nil
+        let attachmentIDs = Set(directPendingAttachments.map(\.id))
+        let selectionGeneration = directAttachmentSelectionGeneration
         do {
             let controller = try await ensureDirectConversation()
             // Resume first so its canonical transcript cannot erase this new
             // optimistic row. Draft open remains completely local.
             try await controller.open()
             guard !directInvalidated, controller.runState == .idle else { throw DirectSessionError.ambiguousPrompt }
+            var creation: [String: JSONValue] = [:]
+            if let value = Self.nonEmpty(currentWorkspace) { creation["cwd"] = .string(value) }
+            if let value = Self.nonEmpty(currentModel) { creation["model"] = .string(value) }
+            if let value = Self.nonEmpty(currentModelProvider) { creation["provider"] = .string(value) }
+            if let value = Self.nonEmpty(sessionReasoningEffort) { creation["reasoning_effort"] = .string(value) }
+
+            try await stageDirectAttachments(
+                attachmentIDs: attachmentIDs,
+                selectionGeneration: selectionGeneration,
+                controller: controller,
+                create: creation
+            )
+            try Task.checkCancellation()
+            guard !directInvalidated,
+                  selectionGeneration == directAttachmentSelectionGeneration,
+                  Set(directPendingAttachments.map(\.id)) == attachmentIDs else {
+                throw DirectSessionError.staleOperation
+            }
+
             messageLoadGeneration &+= 1
             archiveLiveReasoningIfNeeded()
             archiveLiveToolCallsIfNeeded()
@@ -1300,12 +1363,10 @@ final class ChatViewModel {
             toolCallAnchorMessageID = nil
             directResponseComplete = false
             messages.append(ChatMessage(role: "user", content: text, timestamp: Date().timeIntervalSince1970, messageId: localID))
-            var creation: [String: JSONValue] = [:]
-            if let value = Self.nonEmpty(currentWorkspace) { creation["cwd"] = .string(value) }
-            if let value = Self.nonEmpty(currentModel) { creation["model"] = .string(value) }
-            if let value = Self.nonEmpty(currentModelProvider) { creation["provider"] = .string(value) }
-            if let value = Self.nonEmpty(sessionReasoningEffort) { creation["reasoning_effort"] = .string(value) }
-            try await controller.submit(text, create: creation)
+            let stagedAttachments = directPendingAttachments.filter { attachmentIDs.contains($0.id) }
+            guard stagedAttachments.count == attachmentIDs.count else { throw DirectSessionError.staleOperation }
+            try await controller.submit(text, stagedAttachments: stagedAttachments, create: creation)
+            removeDirectPendingAttachments(ids: attachmentIDs)
             if wasDraft {
                 // Discover per-session support after acceptance, without holding
                 // up sending or creating another chat merely to read settings.
@@ -1321,17 +1382,111 @@ final class ChatViewModel {
             }
             if let sessionID { cacheCurrentMessages(sessionID: sessionID, modelContext: directModelContext) }
             return true
+        } catch let failure as DirectAttachmentSendFailure {
+            lastError = failure.error
+            switch failure.error {
+            case .definiteBeforeStage:
+                sendErrorMessage = "\(failure.filename) could not be staged. Your draft was kept."
+            case .unknown:
+                sendErrorMessage = "Staging \(failure.filename) is uncertain. Your draft was kept and will not be retried automatically."
+            }
+            rollbackOptimisticMessage(id: localID)
+            return false
+        } catch is CancellationError {
+            if directConversation?.hasAmbiguousPromptDelivery == true
+                || directConversation?.runState == .deliveryUnknown {
+                removeDirectPendingAttachments(ids: attachmentIDs)
+                sendErrorMessage = "Delivery is uncertain. This message was not resent; reconnect to check the transcript."
+                return true
+            }
+            rollbackOptimisticMessage(id: localID)
+            return false
         } catch {
             lastError = error
-            if directConversation?.runState == .deliveryUnknown {
+            if directConversation?.hasAmbiguousPromptDelivery == true
+                || directConversation?.runState == .deliveryUnknown {
                 // Keep the staged row as uncertain. Restoring the composer would
                 // invite an accidental duplicate; a canonical reload resolves it.
+                removeDirectPendingAttachments(ids: attachmentIDs)
                 sendErrorMessage = "Delivery is uncertain. This message was not resent; reconnect to check the transcript."
                 return true
             }
             rollbackOptimisticMessage(id: localID)
             sendErrorMessage = "Hermes could not accept this message. Your draft was kept."
             return false
+        }
+    }
+
+    private func stageDirectAttachments(
+        attachmentIDs: Set<UUID>,
+        selectionGeneration: Int,
+        controller: GatewayConversationController,
+        create: [String: JSONValue]
+    ) async throws {
+        guard !attachmentIDs.isEmpty else { return }
+        let snapshot = directPendingAttachments.filter { attachmentIDs.contains($0.id) }
+        guard snapshot.count == attachmentIDs.count else { throw DirectSessionError.staleOperation }
+        var passedCreate = false
+
+        for attachment in snapshot {
+            try Task.checkCancellation()
+            guard !directInvalidated,
+                  selectionGeneration == directAttachmentSelectionGeneration,
+                  directPendingAttachments.contains(where: { $0.id == attachment.id }) else {
+                throw DirectSessionError.staleOperation
+            }
+
+            switch attachment.stageState {
+            case .confirmed:
+                continue
+            case .unknown(let scope):
+                // An earlier request may have reached Hermes without a usable
+                // receipt. The controller deliberately rejects blind restage.
+                throw DirectAttachmentSendFailure.staging(
+                    id: attachment.id,
+                    filename: attachment.displayFilename,
+                    error: .unknown(
+                        kind: attachment.source.kind,
+                        scope: scope,
+                        reason: .priorAttemptUnknown
+                    )
+                )
+            case .pending:
+                do {
+                    let result = try await controller.stageAttachment(
+                        attachment,
+                        create: passedCreate ? [:] : create
+                    )
+                    passedCreate = true
+                    guard !directInvalidated,
+                          selectionGeneration == directAttachmentSelectionGeneration,
+                          let index = directPendingAttachments.firstIndex(where: { $0.id == attachment.id }),
+                          case .pending = directPendingAttachments[index].stageState else {
+                        throw DirectSessionError.staleOperation
+                    }
+                    guard directPendingAttachments[index].confirm(
+                        scope: result.scope,
+                        referenceText: result.receipt.referenceText,
+                        serverDetachPaths: result.receipt.detachPaths
+                    ) else {
+                        throw DirectSessionError.staleOperation
+                    }
+                    // Preserve a confirmed receipt if cancellation arrived
+                    // after the server acknowledged the stage.
+                    try Task.checkCancellation()
+                } catch let error as DirectGatewayAttachmentStageError {
+                    if case .unknown(_, let scope, _) = error,
+                       let index = directPendingAttachments.firstIndex(where: { $0.id == attachment.id }),
+                       case .pending = directPendingAttachments[index].stageState {
+                        _ = directPendingAttachments[index].markUnknown(scope: scope)
+                    }
+                    throw DirectAttachmentSendFailure.staging(
+                        id: attachment.id,
+                        filename: attachment.displayFilename,
+                        error: error
+                    )
+                }
+            }
         }
     }
 
@@ -2464,31 +2619,159 @@ final class ChatViewModel {
     }
 
     func uploadAttachment(data: Data, filename: String, previewData: Data? = nil) async {
-        guard !usesDirectGateway else {
-            setUploadAttachmentError("Direct Hermes attachments are not available yet.")
+        guard usesDirectGateway else {
+            await attachmentCoordinator.uploadAttachment(data: data, filename: filename, previewData: previewData)
             return
         }
-        await attachmentCoordinator.uploadAttachment(data: data, filename: filename, previewData: previewData)
+        guard !directInvalidated, !isStartingChat else {
+            directAttachmentPreparationErrorMessage = "Wait for the current direct message to finish before adding an attachment."
+            return
+        }
+
+        let generation = directAttachmentSelectionGeneration
+        directAttachmentPreparationStartGeneration &+= 1
+        directAttachmentPreparationCount += 1
+        isPreparingDirectAttachment = true
+        directAttachmentPreparationErrorMessage = nil
+        defer {
+            if generation == directAttachmentSelectionGeneration {
+                directAttachmentPreparationCount = max(0, directAttachmentPreparationCount - 1)
+                isPreparingDirectAttachment = directAttachmentPreparationCount > 0
+            }
+        }
+
+        let preparation: Task<DirectPendingAttachment, Error>
+        if let directAttachmentPreparer {
+            preparation = Task {
+                try await directAttachmentPreparer(data, filename, previewData)
+            }
+        } else {
+            preparation = Task.detached(priority: .utility) {
+                () throws -> DirectPendingAttachment in
+                try Task.checkCancellation()
+                let source = try DirectGatewayAttachment(data: data, filename: filename)
+                try Task.checkCancellation()
+                let thumbnail: Data?
+                if source.kind == .image {
+                    thumbnail = ImagePreviewDownsampler.previewData(
+                        from: previewData ?? data,
+                        maxPixelSize: ImagePreviewDownsampler.attachmentMaxPixelSize
+                    )
+                } else {
+                    thumbnail = previewData
+                }
+                try Task.checkCancellation()
+                return DirectPendingAttachment(source: source, thumbnailData: thumbnail)
+            }
+        }
+
+        do {
+            let pending = try await withTaskCancellationHandler(operation: {
+                try await preparation.value
+            }, onCancel: {
+                preparation.cancel()
+            })
+            try Task.checkCancellation()
+            guard generation == directAttachmentSelectionGeneration, !directInvalidated else { return }
+            directPendingAttachments.append(pending)
+        } catch is CancellationError {
+            // Caller cancellation is transient and must not erase earlier files.
+        } catch {
+            guard generation == directAttachmentSelectionGeneration, !directInvalidated else { return }
+            directAttachmentPreparationErrorMessage = directAttachmentPreparationMessage(for: error)
+        }
     }
 
     func clearPendingAttachments() {
-        attachmentCoordinator.clearPendingAttachments()
+        if usesDirectGateway {
+            guard !isStartingChat else {
+                directAttachmentPreparationErrorMessage = "Wait for the current direct message to finish before changing attachments."
+                return
+            }
+            clearDirectPendingAttachments()
+        } else {
+            attachmentCoordinator.clearPendingAttachments()
+        }
     }
 
     func removePendingAttachment(id: UUID) {
-        attachmentCoordinator.removePendingAttachment(id: id)
+        if usesDirectGateway {
+            guard !isStartingChat else {
+                directAttachmentPreparationErrorMessage = "Wait for the current direct message to finish before changing attachments."
+                return
+            }
+            guard let index = directPendingAttachments.firstIndex(where: { $0.id == id }) else { return }
+            guard case .pending = directPendingAttachments[index].stageState else { return }
+            directPendingAttachments.remove(at: index)
+            directAttachmentPreparationErrorMessage = nil
+        } else {
+            attachmentCoordinator.removePendingAttachment(id: id)
+        }
+    }
+
+    private func removeDirectPendingAttachments(ids: Set<UUID>) {
+        guard !ids.isEmpty else { return }
+        directAttachmentSelectionGeneration &+= 1
+        directPendingAttachments.removeAll { ids.contains($0.id) }
+    }
+
+    private func clearDirectPendingAttachments() {
+        directAttachmentSelectionGeneration &+= 1
+        directAttachmentPreparationCount = 0
+        isPreparingDirectAttachment = false
+        directAttachmentPreparationErrorMessage = nil
+        directPendingAttachments.removeAll { attachment in
+            if case .pending = attachment.stageState { return true }
+            return false
+        }
+    }
+
+    private func directAttachmentPreparationMessage(for error: Error) -> String {
+        guard let attachmentError = error as? DirectGatewayAttachmentError else {
+            return "The attachment could not be prepared."
+        }
+        switch attachmentError {
+        case .empty:
+            return "The attachment is empty."
+        case .malformed:
+            return "The attachment could not be validated."
+        case .unsupportedType, .unsupportedImageExtension:
+            return "This attachment type is not supported."
+        case .tooLarge:
+            return "This attachment is too large."
+        }
     }
 
     func setUploadAttachmentError(_ message: String?) {
-        attachmentCoordinator.setUploadAttachmentError(message)
+        if usesDirectGateway {
+            directAttachmentPreparationErrorMessage = message
+        } else {
+            attachmentCoordinator.setUploadAttachmentError(message)
+        }
     }
 
     func attachmentImageData(path: String) async -> Data? {
-        await attachmentCoordinator.attachmentImageData(path: path)
+        if usesDirectGateway {
+            guard !directInvalidated, let expectedSessionID = canonicalSessionID else { return nil }
+            do {
+                let data = try await client.mediaData(sessionID: expectedSessionID, path: path)
+                guard !directInvalidated, expectedSessionID == canonicalSessionID else { return nil }
+                let preview = await ImagePreviewDownsampler.previewDataAsync(
+                    from: data,
+                    maxPixelSize: ImagePreviewDownsampler.attachmentMaxPixelSize
+                )
+                guard !directInvalidated, expectedSessionID == canonicalSessionID else { return nil }
+                return preview
+            } catch {
+                return nil
+            }
+        }
+        return await attachmentCoordinator.attachmentImageData(path: path)
     }
 
     func attachmentRawData(path: String) async -> Data? {
-        await attachmentCoordinator.attachmentRawData(path: path)
+        if usesDirectGateway { return nil }
+        return await attachmentCoordinator.attachmentRawData(path: path)
     }
 
     func transcriptMediaThumbnailData(for reference: TranscriptMediaReference) async -> Data? {
@@ -7371,6 +7654,23 @@ struct TranscriptMessage: Identifiable, Equatable {
     let renderID: String
     let anchorID: String
     let message: ChatMessage
+    /// Presentation-only direct attachment projection. `message.content` remains
+    /// the canonical raw text for actions, caching, recovery, and persistence.
+    let attachmentDisplayContent: String?
+
+    init(
+        loadedIndex: Int,
+        renderID: String,
+        anchorID: String,
+        message: ChatMessage,
+        attachmentDisplayContent: String? = nil
+    ) {
+        self.loadedIndex = loadedIndex
+        self.renderID = renderID
+        self.anchorID = anchorID
+        self.message = message
+        self.attachmentDisplayContent = attachmentDisplayContent
+    }
 
     var id: String { renderID }
 }
@@ -7553,11 +7853,30 @@ extension ChatViewModel {
                 loadedIndex: loadedIndex,
                 renderID: renderID,
                 anchorID: anchorID,
-                message: message
+                message: message,
+                attachmentDisplayContent: preferDurableIDs
+                    ? directAttachmentDisplayContent(for: message)
+                    : nil
             ))
         }
 
         return transcriptMessages
+    }
+
+    nonisolated private static func directAttachmentDisplayContent(for message: ChatMessage) -> String? {
+        guard message.role == "user" else { return nil }
+
+        let projection: DirectHermesMessageAttachmentProjection?
+        if let parts = message.contentParts {
+            projection = DirectHermesMessageAttachmentProjection.project(userParts: parts)
+        } else if let content = message.content {
+            projection = DirectHermesMessageAttachmentProjection.project(userContent: content)
+        } else {
+            projection = nil
+        }
+
+        guard let projection, !projection.attachments.isEmpty else { return nil }
+        return projection.cleanedText
     }
 
     nonisolated private static func transcriptRenderID(

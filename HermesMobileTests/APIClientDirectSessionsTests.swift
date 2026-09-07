@@ -117,6 +117,78 @@ final class APIClientDirectSessionsTests: APIClientTestCase {
         XCTAssertEqual(page.pagination?.returned, 3)
     }
 
+    func testDirectSessionMessagesProjectsCanonicalUserAttachmentDirectives() async throws {
+        let client = makeClient { request in
+            XCTAssertEqual(request.url?.path, "/api/sessions/attachment-session/messages")
+            return apiTestJSONResponse(
+                #"""
+                {
+                  "session_id": "attachment-session",
+                  "messages": [
+                    {
+                      "id": 7,
+                      "role": "user",
+                      "content": "Inspect these\n@image:/home/images/upload.jpg\n@file:`attachments/notes with space.txt`"
+                    }
+                  ]
+                }
+                """#,
+                for: request
+            )
+        }
+
+        let page = try await client.directSessionMessages(sessionID: "attachment-session")
+        let message = try XCTUnwrap(page.messages.first)
+
+        XCTAssertEqual(message.content, "Inspect these\n@image:/home/images/upload.jpg\n@file:`attachments/notes with space.txt`")
+        XCTAssertEqual(message.attachments?.map(\.name), ["upload.jpg", "notes with space.txt"])
+        XCTAssertEqual(message.attachments?.map(\.path), [
+            "/home/images/upload.jpg",
+            "attachments/notes with space.txt"
+        ])
+        XCTAssertEqual(message.attachments?.map(\.isImage), [true, false])
+    }
+
+    func testDirectSessionMessagesProjectsCanonicalNativeVisionTextWithoutRewritingParts() async throws {
+        let client = makeClient { request in
+            return apiTestJSONResponse(
+                #"""
+                {
+                  "session_id": "structured-session",
+                  "messages": [
+                    {
+                      "id": 8,
+                      "role": "user",
+                      "content": [
+                        {"type":"text","text":"@image:/local/photo.png"},
+                        {"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}
+                      ]
+                    }
+                  ]
+                }
+                """#,
+                for: request
+            )
+        }
+
+        let page = try await client.directSessionMessages(sessionID: "structured-session")
+        let message = try XCTUnwrap(page.messages.first)
+
+        XCTAssertEqual(message.content, "@image:/local/photo.png")
+        XCTAssertEqual(message.attachments?.map(\.path), ["/local/photo.png"])
+        XCTAssertEqual(message.contentParts?.count, 2)
+        XCTAssertEqual(message.contentParts, [
+            .object([
+                "type": .string("text"),
+                "text": .string("@image:/local/photo.png")
+            ]),
+            .object([
+                "type": .string("image_url"),
+                "image_url": .object(["url": .string("data:image/png;base64,AAAA")])
+            ])
+        ])
+    }
+
     func testDirectSessionMessagesBoundsInputsAndPercentEncodesSessionRoute() async throws {
         let client = makeClient { request in
             let components = try XCTUnwrap(URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false))

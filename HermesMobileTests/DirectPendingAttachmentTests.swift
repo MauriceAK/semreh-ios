@@ -37,7 +37,8 @@ final class DirectPendingAttachmentTests: XCTestCase {
             Self.scope(origin: "https://alpha.example", storedID: "stored-b", runtimeID: "runtime-a", profile: "default", generation: 4),
             Self.scope(origin: "https://alpha.example", storedID: "stored-a", runtimeID: "runtime-b", profile: "default", generation: 4),
             Self.scope(origin: "https://alpha.example", storedID: "stored-a", runtimeID: "runtime-a", profile: "other", generation: 4),
-            Self.scope(origin: "https://alpha.example", storedID: "stored-a", runtimeID: "runtime-a", profile: "default", generation: 5)
+            Self.scope(origin: "https://alpha.example", storedID: "stored-a", runtimeID: "runtime-a", profile: "default", generation: 5),
+            Self.scope(origin: "https://alpha.example", storedID: "stored-a", runtimeID: "runtime-a", profile: "default", generation: 4, turnEpoch: 1)
         ]
         for mismatchedScope in mismatchedScopes {
             XCTAssertFalse(pending.isConfirmed(for: mismatchedScope))
@@ -85,12 +86,14 @@ final class DirectPendingAttachmentTests: XCTestCase {
         storedID: String,
         runtimeID: String,
         profile: String,
-        generation: Int
+        generation: Int,
+        turnEpoch: Int = 0
     ) -> DirectPendingAttachmentStageScope {
         DirectPendingAttachmentStageScope(
             binding: GatewaySessionBinding(storedID: storedID, runtimeID: runtimeID, profile: profile),
             connectionGeneration: generation,
-            origin: URL(string: origin)!
+            origin: URL(string: origin)!,
+            turnEpoch: turnEpoch
         )
     }
 

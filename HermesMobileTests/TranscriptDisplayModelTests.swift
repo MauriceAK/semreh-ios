@@ -68,6 +68,52 @@ final class TranscriptMessageTests: XCTestCase {
         XCTAssertEqual(transcriptMessages.map(\.message.id), ["u1", "a1", "a2"])
     }
 
+    func testDirectTranscriptProjectsAttachmentRefsWithoutMutatingRawMessage() {
+        let rawContent = "Inspect these\n@image:/home/images/upload.jpg\n@file:notes.txt"
+        let message = ChatMessage(role: "user", content: rawContent, timestamp: 1, messageId: "u1")
+
+        let legacy = ChatViewModel.transcriptMessages(from: [message])
+        XCTAssertNil(legacy[0].attachmentDisplayContent)
+
+        let direct = ChatViewModel.transcriptMessages(
+            from: [message],
+            hidingStreamingAssistantID: nil,
+            preferDurableIDs: true
+        )
+        XCTAssertEqual(direct[0].attachmentDisplayContent, "Inspect these")
+        XCTAssertEqual(direct[0].message.content, rawContent)
+    }
+
+    func testDirectTranscriptProjectsStructuredTextPartAndPreservesAttachmentOnlyEmptyText() {
+        let structured = ChatMessage(
+            role: "user",
+            content: "Caption\n@image:/home/images/upload.jpg",
+            timestamp: 1,
+            messageId: "u1",
+            contentParts: [
+                .object([
+                    "type": .string("text"),
+                    "text": .string("Caption\n@image:/home/images/upload.jpg")
+                ]),
+                .object(["type": .string("image")])
+            ]
+        )
+        let attachmentOnly = ChatMessage(
+            role: "user",
+            content: "@image:/home/images/upload.jpg",
+            timestamp: 2,
+            messageId: "u2"
+        )
+
+        let transcript = ChatViewModel.transcriptMessages(
+            from: [structured, attachmentOnly],
+            hidingStreamingAssistantID: nil,
+            preferDurableIDs: true
+        )
+        XCTAssertEqual(transcript[0].attachmentDisplayContent, "Caption")
+        XCTAssertEqual(transcript[1].attachmentDisplayContent, "")
+    }
+
     func testTranscriptMessagesCanHideActiveStreamingAssistantTurn() {
         let messages = [
             ChatMessage(role: "user", content: "Use tools", timestamp: 1, messageId: "u1"),

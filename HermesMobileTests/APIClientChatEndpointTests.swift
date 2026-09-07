@@ -364,6 +364,175 @@ final class APIClientChatEndpointTests: APIClientTestCase {
         XCTAssertFalse(item.isKnownUnsupportedBinary)
     }
 
+    func testChatAttachmentPreviewItemUsesDirectMemoryProjectionWithoutHostPath() throws {
+        let source = try DirectGatewayAttachment.image(
+            data: Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")!,
+            filename: "photo.png"
+        )
+        let display = ComposerAttachmentDisplayItem(
+            direct: DirectPendingAttachment(source: source, thumbnailData: Data([0x01]))
+        )
+        let item = ChatAttachmentPreviewItem(display: display)
+
+        XCTAssertEqual(item.displayName, "photo.png")
+        XCTAssertNil(item.path)
+        XCTAssertEqual(item.mime, source.mimeType)
+        XCTAssertEqual(item.size, source.originalBytes.count)
+        XCTAssertEqual(item.localImageData, source.originalBytes)
+    }
+
+    @MainActor
+    func testChatAttachmentPreviewLoadsDirectImageFromMemoryWithoutSessionOrAPI() async throws {
+        let source = try DirectGatewayAttachment.image(
+            data: Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")!,
+            filename: "photo.png"
+        )
+        let item = ChatAttachmentPreviewItem(
+            display: ComposerAttachmentDisplayItem(
+                direct: DirectPendingAttachment(source: source)
+            )
+        )
+        let client = makeClient { request in
+            XCTFail("Direct memory preview must not request a host/server path: \(request.url?.path ?? "nil")")
+            throw URLError(.badURL)
+        }
+        let viewModel = try ChatAttachmentPreviewViewModel(
+            session: SessionSummary(),
+            server: XCTUnwrap(URL(string: "https://example.test")),
+            item: item,
+            apiClient: client,
+            usesDirectGateway: true
+        )
+
+        await viewModel.load()
+
+        guard case let .image(preview) = viewModel.preview else {
+            return XCTFail("Direct image attachments should load from retained memory bytes.")
+        }
+        XCTAssertEqual(preview.data, source.originalBytes)
+        XCTAssertEqual(preview.originalByteCount, source.originalBytes.count)
+        XCTAssertNil(viewModel.errorMessage)
+    }
+
+    @MainActor
+    func testChatAttachmentPreviewDownsamplesDirectLocalImageAndPreservesOriginalBytes() async throws {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let originalImageData = UIGraphicsImageRenderer(
+            size: CGSize(width: 3_000, height: 2_000),
+            format: format
+        ).pngData { context in
+            UIColor.systemBlue.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 3_000, height: 2_000))
+        }
+        let source = try DirectGatewayAttachment.image(data: originalImageData, filename: "large.png")
+        let pending = DirectPendingAttachment(source: source)
+        let item = ChatAttachmentPreviewItem(
+            display: ComposerAttachmentDisplayItem(direct: pending)
+        )
+        let client = makeClient { request in
+            XCTFail("Direct local preview must not request a session or server path: \(request.url?.path ?? "nil")")
+            throw URLError(.badURL)
+        }
+        let viewModel = try ChatAttachmentPreviewViewModel(
+            session: SessionSummary(),
+            server: XCTUnwrap(URL(string: "https://example.test")),
+            item: item,
+            apiClient: client,
+            usesDirectGateway: true
+        )
+
+        await viewModel.load()
+
+        guard case let .image(preview) = viewModel.preview else {
+            return XCTFail("Direct local image should produce a preview")
+        }
+        let previewImage = try XCTUnwrap(UIImage(data: preview.data)?.cgImage)
+        XCTAssertLessThanOrEqual(max(previewImage.width, previewImage.height), ImagePreviewDownsampler.filePreviewMaxPixelSize)
+        XCTAssertNotEqual(preview.data, originalImageData)
+        XCTAssertEqual(preview.originalByteCount, originalImageData.count)
+        XCTAssertEqual(pending.originalBytes, originalImageData)
+    }
+
+    @MainActor
+    func testChatAttachmentPreviewLoadsDirectImageFromAuthenticatedMediaEnvelope() async throws {
+        let imageData = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")!
+        let dataURL = "data:image/png;base64,\(imageData.base64EncodedString())"
+        MockURLProtocol.requestHandler = { request in
+            XCTAssertEqual(request.url?.path, "/api/media")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer fixture")
+            let query = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.queryItems ?? []
+            XCTAssertEqual(query.first(where: { $0.name == "session_id" })?.value, "session-abc")
+            XCTAssertEqual(query.first(where: { $0.name == "path" })?.value, "images/result.png")
+            return apiTestJSONResponse(#"{"data_url":"\#(dataURL)"}"#, for: request)
+        }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockURLProtocol.self]
+        let client = APIClient(
+            baseURL: try XCTUnwrap(URL(string: "https://example.test")),
+            session: URLSession(configuration: configuration),
+            customHeaderProvider: { [CustomHeader(name: "Authorization", value: "Bearer fixture")] }
+        )
+        let item = ChatAttachmentPreviewItem(
+            message: MessageAttachment(
+                name: "result.png",
+                path: "images/result.png",
+                mime: "image/png",
+                size: imageData.count,
+                isImage: true
+            ),
+            localData: nil
+        )
+        let viewModel = try ChatAttachmentPreviewViewModel(
+            session: try makeFilePreviewSession(),
+            server: XCTUnwrap(URL(string: "https://example.test")),
+            item: item,
+            apiClient: client,
+            usesDirectGateway: true
+        )
+
+        await viewModel.load()
+
+        guard case let .image(preview) = viewModel.preview else {
+            return XCTFail("Direct image preview should decode the authenticated media envelope.")
+        }
+        XCTAssertEqual(preview.data, imageData)
+        XCTAssertEqual(preview.originalByteCount, imageData.count)
+        XCTAssertNil(viewModel.errorMessage)
+    }
+
+    @MainActor
+    func testChatAttachmentPreviewDirectGenericRemoteAttachmentIsUnavailableWithoutLegacyHTTP() async throws {
+        let client = makeClient { request in
+            XCTFail("Direct generic preview must not fall back to legacy HTTP: \(request.url?.path ?? "nil")")
+            throw URLError(.badURL)
+        }
+        let item = ChatAttachmentPreviewItem(
+            message: MessageAttachment(
+                name: "notes.txt",
+                path: "attachments/notes.txt",
+                mime: "text/plain",
+                size: 12,
+                isImage: false
+            ),
+            localData: nil
+        )
+        let viewModel = try ChatAttachmentPreviewViewModel(
+            session: try makeFilePreviewSession(),
+            server: XCTUnwrap(URL(string: "https://example.test")),
+            item: item,
+            apiClient: client,
+            usesDirectGateway: true
+        )
+
+        await viewModel.load()
+
+        guard case let .unavailable(message) = viewModel.preview else {
+            return XCTFail("Direct generic remote attachments must be honestly unavailable.")
+        }
+        XCTAssertTrue(message.localizedCaseInsensitiveContains("direct attachment"))
+    }
+
     func testDocumentPreviewKindRejectsStrongMIMEConflict() {
         XCTAssertNil(DocumentPreviewKind.infer(nameOrPath: "report.pdf", mimeType: "text/html"))
         XCTAssertEqual(

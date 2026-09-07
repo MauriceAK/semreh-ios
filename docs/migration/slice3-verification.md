@@ -282,3 +282,179 @@ Final artifact auditv2 passed **136456 files, 0 flagged paths, 74 exported
 consoles**, including production UIv3 and fullv2 output. Scope remains known main
 test secrets and obvious bearer formats; private/quarantined diagnostics and
 arbitrary opaque-secret/media-OCR guarantees are excluded.
+
+## Canonical socket-recovery probe (after59ec07d)
+
+Root reviewed/hardened the bounded Luna probe: warm nonempty baseline, stable
+complete identity/role/text prefix, unique durable IDs, exact ordered new suffix,
+and matching clarify tool-call/result IDs. Twelve pure negative/positive tests
+passed; no backend/provider/config expansion was needed.
+
+```sh
+PYTHONPATH=scripts /Users/maurice/workspace/semreh-slice1-venv/bin/python \
+  -m unittest scripts.test_direct_hermes_recovery_probe
+/Users/maurice/workspace/semreh-slice1-venv/bin/python \
+  scripts/direct_hermes_recovery_probe.py \
+  --output /Users/maurice/workspace/semreh-slice1-evidence/slice3-canonical-recovery-v1.json
+```
+
+Livev1 **passed**, cleanup_errors empty:
+- Accepted delayed turn: disconnect after explicit streaming ACK/running, fresh
+  ticket/resume, normal terminal. Canonical2-to4rows, unchanged baseline identity,
+  one new user and one terminal assistant row, no duplicate prompt.
+- Clarify wait: disconnect/resume restores exact pending request; empty cancellation
+  completes and pending clears. Canonical2-to6rows; new user, clarify call/result
+  pair and terminal assistant, matching tool IDs and preserved baseline.
+
+This is raw stock HTTPS/WebSocket evidence. It does not prove native foreground/
+background, app kill, host restart, pre-write loss or pre-terminal loss handling,
+nor negative acceptance proof or permission to retry an ambiguous prompt. New
+artifacts have not yet received the next audit. Probe files not yet committed.
+
+## Attachment staging/local selection focused checkpoint
+
+After59ec07d, controller single-attachment staging and VM local-byte selection
+passed `slice3-attachment-stage-focused-v2.xcresult`: **106 passed, 0 failed,
+0 skipped**. Root ran signed Debug on the owned iPhone17e Simulator with
+`-collect-test-diagnostics never`, single-worker execution and the attachment,
+controller, blocking, direct-VM, receipt/display and legacy-coordinator test classes.
+The first attempt had105passes/1failure: the test's synthetic turn event omitted
+the required connection generation and was correctly dropped. Root supplied the
+fake's generation and used a bounded condition deadline; no product assertion was
+weakened. Both attempts are retained.
+
+Covered: three exact RPC shapes, partial/unknown outcome classification, stale
+generation/turn/disposal, concurrent stage/submit, local selection without RPC,
+invalid selection preserving prior bytes, late preparation invalidation, and
+send blocked while preparation remains unfinished. These are mocked native tests,
+not picker/send production integration. The PDF-only135second timeout correction
+and subsequent UI/send edits are newer than this focused result and require rerun.
+
+## Native attachment send integration (pre late-ACK correction)
+
+`slice3-attachment-send-focused-v1.xcresult` passed135/0fail/0skip. Includes
+sequential VM staging, controller turn-scoped submit guards, exact generic-file
+references, PDF135second timeout, partial failures, unknown-stage no-retry,
+selection invalidation, cancellation after dispatch and direct memory preview.
+Python smoke-driver/recovery checks passed22tests. These results predate the
+subsequent sticky late-ACK ambiguity fix; that requires a fresh native run.
+
+Signed UI buildv1 passed. `slice3-attachment-production-ui-v1.xcresult` failed
+one test assertion after actual paste/preview/send: the exact-text selector did
+not allow stock's appended `@image:` canonical reference. Root inspected AX and
+found the new user marker plus new ACK, corrected the selector to the exact
+per-run marker or marker-plus-newline prefix, and retained the failed attempt.
+Signed UI buildv2 and `slice3-attachment-production-ui-v2.xcresult` passed1/0/0.
+Actual production HTTPS login/new-chat, native clipboard Paste, visible chip,
+memory image preview, dismissal, send, chip clearing, second ACK and idle checked.
+This is paste entrypoint evidence, not Photos/Files/PDF picker or device evidence.
+
+Root viewed final screenshot
+`slice3-attachment-production-ui-v2-attachments/D28C9A6B-0A2F-43E6-82BC-6802A439BC51.png`.
+It also demonstrates a remaining product gap: transcript displays raw `@image:`
+reference, not an image bubble. No rendered transcript-media claim is made.
+The exported chat-detail identifier contains the TITLE, not the durable ID.
+
+Root's bounded read-only `scripts/direct_hermes_native_attachment_check.py`
+matched the exact UUID-tagged UI turn in stock REST. Evidence
+`slice3-native-attachment-canonical-v1.json`: canonical session
+`20260906_192050_62a0c9`, four rows with unique durable IDs, final user216 and
+assistant217, exactly one owned image reference and terminal fixture ACK.
+No duplicate marker in the bounded20-session discovery. This supplements native
+UI evidence without inferring durable persistence from a screenshot.
+
+Independent Luna review identified two open issues: known-stage removal silently
+no-ops, and terminal-before-late-submit-error can restore a potentially delivered
+draft. The latter is being corrected; neither attachment/recovery gate is closed.
+New UIv1/v2 exports still need the next artifact audit. Full-suite checkpoint and
+physical acceptance remain pending for this uncommitted batch.
+
+## Attachment media integration review and current verification
+
+`slice3-attachment-media-full-v1` failed compilation at a missing `try` in a new
+test initializer; corrected. Fullv2 executed **2107 pass, 1 fail, 7 intentional
+skips**. Its sole failure was the projection test expectation omitting the closing
+four-backtick fence that the implementation correctly preserved. Root corrected
+that expectation; `slice3-attachment-projection-focused-v1` passed **9/0/0**.
+Both failed attempts remain available. Neither is described as a full-suite pass.
+
+Root review required canonical `ChatMessage.content` to retain raw references;
+cleanup now belongs only to the memoized transcript display field and respects
+the existing attachment-path visibility setting. Luna also added a bounded stock
+`/api/files/read` primitive, not yet generic-file UI acceptance. Independent review
+of prompt-submit errors excluded storage failures5070/5071/5072: they occur after
+inflight state mutation and are not proof that no submission was accepted.
+Unknown/internal/wrong-method errors keep the sticky no-resend barrier.
+
+`slice3-native-attachment-media-contract-v1.json` passed read-only authentication
+and matching decoded image bytes through both `/api/media` and `/api/files/read`,
+using the exact earlier synthetic native turn and its owned image path. Managed
+metadata matched the path and68-byte payload. No named-profile or generic/PDF
+preview claim follows from that image-only capture. Python native-check tests:
+**7 pass**, including malformed metadata rejection and no extra local writes.
+
+`slice3-attachment-media-audit-v1.json` reports141931 files, no flagged paths;
+includes exported fullv2/focused-projection consoles. Scope remains known current
+fixture secrets and obvious bearer patterns, not arbitrary secrets/OCR/private
+quarantined diagnostics. New fullv3/native UI artifacts require a subsequent audit.
+
+Fullv3 failed compilation at a helper accepting `HermesGatewayError` from an
+untyped catch; root corrected conditional casting. Fullv4 executed **2113 pass,
+5 fail, 7 skips**. Three failures exposed a product JSON mapping bug in the new
+managed-file DTO (`data_url` becomes `dataUrl` under the shared decoder); fixed
+without altering wire fixtures. Two old cleanup tests invented RPC404; the pinned
+`_sess_nowait` returns4001, while the separate REST404 assertion remains unchanged.
+Root corrected those mocks. `slice3-attachment-media-corrections-focused-v1`
+passed **54/0/0**, including the affected suites and prompt ambiguity safety tests.
+Python smoke/recovery/native-check suite totals **29 pass**.
+
+Independent Luna review also identified full-resolution local image preview
+decoding and named-profile `/api/media` limitations. Bounded local downsampling
+is the next correction; explicit stock managed-file preview wiring remains next
+batch. Final signed native image rendering/remote-preview, full-suite and physical
+gates remain open. Known-stage removal and positive canonical ambiguity
+reconciliation are still follow-on work, not waived requirements.
+
+## Verified native attachment checkpoint
+
+- Full `slice3-attachment-media-full-v5.xcresult`: **2119 pass, 0 fail,
+  7 intentional opt-in skips**. Includes large local image downsampling and
+  preservation of original send bytes. Root constrained its synthetic renderer
+  to scale1 to avoid needlessly allocating a9000px image in tests.
+- Signed production UI buildv3 passed. UIv3 failed because a broad attachment
+  query switched from the cleared composer chip to the newly rendered canonical
+  cell. Exported AX proves that distinction. Root changed the removal assertion
+  to the exact original composer filename, not a global absence of attachments.
+- Signed UI buildv4 and `slice3-attachment-production-ui-v4.xcresult`:
+  **1 pass, 0 fail, 0 skip**. Actual HTTPS login/new chat, native image Paste,
+  local preview, send, composer clearing, unique new ACK, canonical image cell,
+  authenticated remote image preview and dismissal passed.
+- Root viewed the colored synthetic tile in both canonical transcript and remote
+  preview screenshots, respectively
+  `slice3-attachment-production-ui-v4-attachments/E4639166-4569-463F-B912-9D2B1986218E.png`
+  and `81F5AA8A-CF6C-49FD-9577-C601A20D1DD8.png` in that same directory. Raw
+  attachment references no longer occupy the user bubble; canonical text remains
+  intact for matching/editing/cache.
+- `slice3-native-attachment-canonical-v2.json` passed the exact native UUID turn,
+  ordered unique durable rows, single image reference, and matching authenticated
+  media/managed-file bytes. No phone or named-profile media claim.
+- Artifact audit `slice3-attachment-media-audit-v2.json`: **151039 files,
+  0 flagged paths, 85 exported consoles**. Includes current full-suite and UI
+  attempts. Same known-secret/pattern-only exclusions as above. Signed app
+  verification passed and the ordinary dev app was launched in the owned Simulator.
+
+### Restart safety issue requiring owner alignment
+
+Independent source review found that stock live `session.resume` retains
+`attached_images` but does not expose that queue in its payload. The app's
+memory-only staged receipts disappear on eviction/kill; an unknown queued image
+can then be consumed by the next ordinary text prompt. Source: pinned
+`methods_prompt.py:1135-1193`, `server.py:13851-13869`, live resume payload
+`server.py:10972-11044`, queue consumption`server.py:12753-12755`; app invalidation
+and persisted-controller disposal currently discard only local state.
+
+Known receipts allow exact-path `image.detach`. Unknown receipts require a
+restart-persistent per-session safety marker plus an explicit resolution policy,
+or another owner-approved lifecycle change. No queue-list RPC exists, and a
+guessed path/automatic retry is not acceptable. This remains an attachment gate
+blocker; the checkpoint above is not Slice3 completion or release approval.

@@ -9,13 +9,15 @@ struct DirectPendingAttachmentStageScope: Equatable, Sendable {
     let runtimeID: String
     let profile: String
     let connectionGeneration: Int
+    let turnEpoch: Int
 
-    init(binding: GatewaySessionBinding, connectionGeneration: Int, origin: URL) {
+    init(binding: GatewaySessionBinding, connectionGeneration: Int, origin: URL, turnEpoch: Int = 0) {
         self.origin = origin.absoluteString
         storedID = binding.storedID
         runtimeID = binding.runtimeID
         profile = binding.profile
         self.connectionGeneration = connectionGeneration
+        self.turnEpoch = turnEpoch
     }
 }
 
@@ -111,4 +113,46 @@ struct DirectPendingAttachment: Identifiable, Equatable, Sendable {
         stageState = .unknown(scope: scope)
         return true
     }
+}
+
+/// The result of one server-owned attachment stage. The scope is part of the
+/// result so a later coordinator can confirm it only for the exact runtime,
+/// profile, origin, and connection generation that produced the receipt.
+struct DirectGatewayAttachmentStageResult: Equatable, Sendable {
+    let scope: DirectPendingAttachmentStageScope
+    let receipt: DirectGatewayAttachmentReceipt
+}
+
+enum DirectGatewayAttachmentStageDefiniteReason: Equatable, Sendable {
+    case alreadyStaged
+    case ambiguousPromptDelivery
+    case cancelledBeforeDispatch
+    case controllerBusy
+    case sourcePreparation(DirectGatewayAttachmentError)
+    case serverRejected(code: Int, message: String)
+    case staleBeforeDispatch
+}
+
+enum DirectGatewayAttachmentStageUnknownReason: Equatable, Sendable {
+    case cancelledAfterDispatch
+    case malformedResponse
+    case priorAttemptUnknown
+    case server(code: Int, message: String)
+    case staleAfterDispatch
+    case transport
+}
+
+/// A stage failure is deliberately split between a rejection proven to have
+/// happened before the gateway could queue the attachment and an attempt whose
+/// side effect is unknown. Unknown attempts must never be blindly restaged.
+enum DirectGatewayAttachmentStageError: Error, Equatable, Sendable {
+    case definiteBeforeStage(
+        kind: DirectGatewayAttachmentKind,
+        reason: DirectGatewayAttachmentStageDefiniteReason
+    )
+    case unknown(
+        kind: DirectGatewayAttachmentKind,
+        scope: DirectPendingAttachmentStageScope,
+        reason: DirectGatewayAttachmentStageUnknownReason
+    )
 }

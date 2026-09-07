@@ -446,6 +446,9 @@ struct ChatView: View {
             showsReasoningControl: viewModel.showsReasoningEffortControl,
             isUpdatingConfiguration: viewModel.isUpdatingComposerConfiguration,
             pendingAttachments: viewModel.pendingAttachments,
+            displayAttachments: viewModel.usesDirectGateway
+                ? viewModel.directPendingAttachmentDisplayItems
+                : [],
             isUploadingAttachment: viewModel.isUploadingAttachment,
             attachmentUploadCount: viewModel.attachmentUploadCount,
             attachmentUploadGeneration: viewModel.attachmentUploadGeneration,
@@ -531,6 +534,19 @@ struct ChatView: View {
                     attachmentPreviewItem = ChatAttachmentPreviewItem(pending: attachment)
                 }
             },
+            onPreviewDisplayAttachment: { item in
+                if viewModel.usesDirectGateway {
+                    presentPreviewRestoringComposerFocusIfNeeded {
+                        attachmentPreviewItem = ChatAttachmentPreviewItem(display: item)
+                    }
+                } else if let attachment = item.legacyPendingAttachment() {
+                    // Keep the legacy path available if a display projection is
+                    // ever supplied by a non-direct caller.
+                    presentPreviewRestoringComposerFocusIfNeeded {
+                        attachmentPreviewItem = ChatAttachmentPreviewItem(pending: attachment)
+                    }
+                }
+            },
             onDismissUploadAttachmentError: {
                 viewModel.setUploadAttachmentError(nil)
             },
@@ -581,6 +597,20 @@ struct ChatView: View {
 
     private var transcriptMediaCacheNamespace: String {
         "\(server.absoluteString)|\(transcriptMediaSessionID ?? "local:\(session.id)")"
+    }
+
+    private var attachmentPreviewSession: SessionSummary {
+        guard viewModel.usesDirectGateway,
+              let sessionID = viewModel.attachmentSessionID?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !sessionID.isEmpty else {
+            return session
+        }
+        return SessionSummary(
+            sessionId: sessionID,
+            title: session.title,
+            workspace: session.workspace,
+            profile: session.profile
+        )
     }
 
     var body: some View {
@@ -801,9 +831,10 @@ struct ChatView: View {
             }
             .sheet(item: $attachmentPreviewItem) { item in
                 ChatAttachmentPreviewView(
-                    session: session,
+                    session: attachmentPreviewSession,
                     server: server,
                     item: item,
+                    usesDirectGateway: viewModel.usesDirectGateway,
                     onAPIError: onAPIError
                 )
             }

@@ -744,6 +744,7 @@ private struct ChatTranscriptMessageBlock: View, Equatable {
                     loadTranscriptMediaImage: loadTranscriptMediaImage,
                     loadTranscriptMediaData: loadTranscriptMediaData,
                     transcriptMediaCacheNamespace: transcriptMediaCacheNamespace,
+                    attachmentDisplayContent: transcriptMessage.attachmentDisplayContent,
                     onPreviewAttachment: onPreviewAttachment,
                     onPreviewTranscriptMedia: onPreviewTranscriptMedia,
                     onToggleListening: onToggleListening,
@@ -827,6 +828,7 @@ private struct ChatTranscriptMessageRow: View {
     let loadTranscriptMediaImage: (TranscriptMediaReference) async -> Data?
     let loadTranscriptMediaData: (TranscriptMediaReference) async -> Data?
     let transcriptMediaCacheNamespace: String
+    let attachmentDisplayContent: String?
     let onPreviewAttachment: (MessageAttachment, Data?) -> Void
     let onPreviewTranscriptMedia: (TranscriptMediaReference) -> Void
     let onToggleListening: (MessageActionContext) -> Void
@@ -874,6 +876,7 @@ private struct ChatTranscriptMessageRow: View {
             loadTranscriptMediaImage: loadTranscriptMediaImage,
             loadTranscriptMediaData: loadTranscriptMediaData,
             transcriptMediaCacheNamespace: transcriptMediaCacheNamespace,
+            attachmentDisplayContent: attachmentDisplayContent,
             localAttachmentPreviews: localAttachmentPreviews,
             onPreviewAttachment: onPreviewAttachment,
             onPreviewTranscriptMedia: onPreviewTranscriptMedia,

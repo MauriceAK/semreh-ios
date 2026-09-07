@@ -189,10 +189,30 @@ private struct DirectHermesMessageRow: Decodable {
             value = content
         }
         let parts = isHidden ? nil : Self.parts(from: value)
-        let projection = Self.text(from: value)
+        let rawProjection = Self.text(from: value)
+        let directProjection: DirectHermesMessageAttachmentProjection? = {
+            guard !isHidden, role == "user" else { return nil }
+            switch value {
+            case .string(let text):
+                return DirectHermesMessageAttachmentProjection.project(userContent: text)
+            case .array(let parts):
+                return DirectHermesMessageAttachmentProjection.project(userParts: parts)
+            default:
+                return nil
+            }
+        }()
+        let projectedAttachments = isHidden
+            ? nil
+            : DirectHermesMessageAttachmentProjection.merge(
+                explicit: attachments,
+                inferred: directProjection?.attachments ?? []
+            )
         return ChatMessage(
             role: role,
-            content: projection,
+            // Preserve the server's canonical text. Attachment directives are
+            // display-only and are removed by the transcript presentation
+            // layer; edit/copy/matching/cache paths must retain the raw refs.
+            content: rawProjection,
             timestamp: timestamp,
             messageId: id,
             name: name ?? toolName,
@@ -201,7 +221,7 @@ private struct DirectHermesMessageRow: Decodable {
             toolCalls: isHidden ? nil : toolCalls,
             contentParts: parts,
             reasoning: isHidden ? nil : reasoning ?? reasoningContent,
-            attachments: isHidden ? nil : attachments,
+            attachments: projectedAttachments,
             turnTps: turnTps
         )
     }

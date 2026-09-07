@@ -26,6 +26,7 @@ struct MessageBubbleView: View {
     let loadTranscriptMediaImage: ((TranscriptMediaReference) async -> Data?)?
     let loadTranscriptMediaData: ((TranscriptMediaReference) async -> Data?)?
     let transcriptMediaCacheNamespace: String
+    let attachmentDisplayContent: String?
     let localAttachmentPreviews: [String: Data]?
     let onPreviewAttachment: ((MessageAttachment, Data?) -> Void)?
     let onPreviewTranscriptMedia: ((TranscriptMediaReference) -> Void)?
@@ -39,6 +40,7 @@ struct MessageBubbleView: View {
         loadTranscriptMediaImage: ((TranscriptMediaReference) async -> Data?)? = nil,
         loadTranscriptMediaData: ((TranscriptMediaReference) async -> Data?)? = nil,
         transcriptMediaCacheNamespace: String = "",
+        attachmentDisplayContent: String? = nil,
         localAttachmentPreviews: [String: Data]? = nil,
         onPreviewAttachment: ((MessageAttachment, Data?) -> Void)? = nil,
         onPreviewTranscriptMedia: ((TranscriptMediaReference) -> Void)? = nil,
@@ -51,6 +53,7 @@ struct MessageBubbleView: View {
         self.loadTranscriptMediaImage = loadTranscriptMediaImage
         self.loadTranscriptMediaData = loadTranscriptMediaData
         self.transcriptMediaCacheNamespace = transcriptMediaCacheNamespace
+        self.attachmentDisplayContent = attachmentDisplayContent
         self.localAttachmentPreviews = localAttachmentPreviews
         self.onPreviewAttachment = onPreviewAttachment
         self.onPreviewTranscriptMedia = onPreviewTranscriptMedia
@@ -391,8 +394,8 @@ struct MessageBubbleView: View {
     /// when the user has opted to hide it. Display-only: `message.content` and the
     /// sent payload are untouched.
     private var userBubbleText: String {
-        let content = message.content ?? ""
-        guard hidesAttachmentPaths else { return content }
+        guard hidesAttachmentPaths else { return message.content ?? "" }
+        let content = attachmentDisplayContent ?? message.content ?? ""
         return MessageAttachment.contentWithoutAttachedFilesMarker(in: content)
     }
 

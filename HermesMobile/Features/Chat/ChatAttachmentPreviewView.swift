@@ -28,6 +28,15 @@ struct ChatAttachmentPreviewItem: Identifiable, Equatable {
         localImageData = attachment.thumbnailData
     }
 
+    init(display item: ComposerAttachmentDisplayItem) {
+        name = item.name
+        path = item.serverPath
+        mime = item.mime
+        size = item.size
+        isImage = item.isImage
+        localImageData = item.localPreviewData
+    }
+
     var displayName: String {
         if let name = name?.trimmingCharacters(in: .whitespacesAndNewlines),
            !name.isEmpty {
@@ -96,11 +105,17 @@ struct ChatAttachmentPreviewView: View {
         session: SessionSummary,
         server: URL,
         item: ChatAttachmentPreviewItem,
+        usesDirectGateway: Bool = false,
         onAPIError: @escaping (Error) -> Void
     ) {
         self.item = item
         self.onAPIError = onAPIError
-        _viewModel = State(initialValue: ChatAttachmentPreviewViewModel(session: session, server: server, item: item))
+        _viewModel = State(initialValue: ChatAttachmentPreviewViewModel(
+            session: session,
+            server: server,
+            item: item,
+            usesDirectGateway: usesDirectGateway
+        ))
     }
 
     var body: some View {
@@ -313,6 +328,7 @@ final class ChatAttachmentPreviewViewModel {
     private let session: SessionSummary
     private let item: ChatAttachmentPreviewItem
     private let apiClient: APIClient
+    private let usesDirectGateway: Bool
     private var didLoad = false
 
     private(set) var preview: FilePreviewContent?
@@ -324,11 +340,13 @@ final class ChatAttachmentPreviewViewModel {
         session: SessionSummary,
         server: URL,
         item: ChatAttachmentPreviewItem,
-        apiClient: APIClient? = nil
+        apiClient: APIClient? = nil,
+        usesDirectGateway: Bool = false
     ) {
         self.session = session
         self.item = item
         self.apiClient = apiClient ?? APIClient(baseURL: server)
+        self.usesDirectGateway = usesDirectGateway
     }
 
     func load(force: Bool = false) async {
@@ -336,14 +354,31 @@ final class ChatAttachmentPreviewViewModel {
         didLoad = true
         preview = nil
 
-        guard let sessionID = session.sessionId else {
-            errorMessage = String(localized: "Session ID is missing.")
+        let trimmedPath = item.path?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let path = trimmedPath, !path.isEmpty else {
+            if usesDirectGateway, item.inferredIsImage, let localImageData = item.localImageData {
+                guard !Task.isCancelled else { return }
+                let originalByteCount = localImageData.count
+                guard let previewData = await ImagePreviewDownsampler.previewDataAsync(
+                    from: localImageData,
+                    maxPixelSize: ImagePreviewDownsampler.filePreviewMaxPixelSize
+                ), !Task.isCancelled else {
+                    return
+                }
+                preview = .image(.init(data: previewData, originalByteCount: originalByteCount))
+                return
+            }
+            preview = localFallbackPreview
             return
         }
 
-        let trimmedPath = item.path?.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let path = trimmedPath, !path.isEmpty else {
-            preview = localFallbackPreview
+        if usesDirectGateway && !item.inferredIsImage {
+            preview = .unavailable(String(localized: "Preview is not available for this direct attachment yet."))
+            return
+        }
+
+        guard let sessionID = session.sessionId else {
+            errorMessage = String(localized: "Session ID is missing.")
             return
         }
 
@@ -354,8 +389,13 @@ final class ChatAttachmentPreviewViewModel {
 
         do {
             if item.inferredIsImage {
-                let data = try await apiClient.rawFileData(sessionID: sessionID, path: path)
-                if let previewData = ImagePreviewDownsampler.previewData(
+                let data: Data
+                if usesDirectGateway {
+                    data = try await apiClient.mediaData(sessionID: sessionID, path: path)
+                } else {
+                    data = try await apiClient.rawFileData(sessionID: sessionID, path: path)
+                }
+                if let previewData = await ImagePreviewDownsampler.previewDataAsync(
                     from: data,
                     maxPixelSize: ImagePreviewDownsampler.filePreviewMaxPixelSize
                 ) {

@@ -329,6 +329,7 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         XCTAssertEqual(fields(calls[1].params)?["session_id"], .string("runtime-1"))
         XCTAssertEqual(fields(calls[1].params)?["profile"], .string("work"))
         XCTAssertEqual(canonicalID, "durable-1")
+        XCTAssertEqual(viewModel.attachmentSessionID, "durable-1")
         XCTAssertTrue(viewModel.hasServerBackedSession)
         XCTAssertTrue(requests.values().isEmpty)
         let retained = OpenChatSessionStore()
@@ -1015,7 +1016,454 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         await runtime.stop()
     }
 
+    func testDirectAttachmentSelectionRetainsBytesAndProjectionWithoutRPC() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let client = makeClient { request in
+            XCTFail("Direct attachment selection must not call REST: \(request.url?.path ?? "nil")")
+            throw URLError(.badURL)
+        }
+        let viewModel = makeViewModel(client: client, runtime: runtime, sessionID: nil)
+        let thumbnail = directPNGData
+        let initialUploadGeneration = viewModel.attachmentUploadGeneration
+
+        await viewModel.uploadAttachment(data: directPNGData, filename: "photo.png", previewData: thumbnail)
+
+        XCTAssertTrue(fake.calls().isEmpty, "Selecting a direct attachment must not create a session or call RPC")
+        let pending = try XCTUnwrap(viewModel.directPendingAttachments.first)
+        XCTAssertEqual(pending.originalBytes, directPNGData)
+        XCTAssertEqual(pending.thumbnailData, thumbnail)
+        XCTAssertEqual(viewModel.directPendingAttachmentDisplayItems.first?.name, "photo.png")
+        XCTAssertNil(viewModel.directPendingAttachmentDisplayItems.first?.serverPath)
+        XCTAssertEqual(viewModel.directPendingAttachmentDisplayItems.first?.localPreviewData, directPNGData)
+        XCTAssertFalse(viewModel.isPreparingDirectAttachment)
+        XCTAssertNil(viewModel.directAttachmentPreparationErrorMessage)
+        XCTAssertEqual(viewModel.attachmentUploadGeneration, initialUploadGeneration + 1)
+        viewModel.setUploadAttachmentError("The picker could not read that file.")
+        XCTAssertEqual(viewModel.uploadAttachmentErrorMessage, "The picker could not read that file.")
+        viewModel.setUploadAttachmentError(nil)
+        XCTAssertNil(viewModel.uploadAttachmentErrorMessage)
+
+        viewModel.invalidateDirectConversation()
+        await runtime.stop()
+    }
+
+    func testInvalidDirectAttachmentPreservesEarlierSelection() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let viewModel = makeViewModel(
+            client: makeClient { request in
+                XCTFail("Invalid direct attachment selection must not call REST: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            },
+            runtime: runtime,
+            sessionID: nil
+        )
+
+        await viewModel.uploadAttachment(data: directPNGData, filename: "kept.png")
+        await viewModel.uploadAttachment(data: Data("not an image".utf8), filename: "broken.png")
+
+        XCTAssertEqual(viewModel.directPendingAttachments.count, 1)
+        XCTAssertEqual(viewModel.directPendingAttachments.first?.displayFilename, "kept.png")
+        XCTAssertNotNil(viewModel.directAttachmentPreparationErrorMessage)
+        XCTAssertTrue(fake.calls().isEmpty)
+        viewModel.invalidateDirectConversation()
+        await runtime.stop()
+    }
+
+    func testDirectAttachmentRemovalAndClearRemoveOnlyPendingSelections() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let viewModel = makeViewModel(
+            client: makeClient { request in
+                XCTFail("Direct attachment removal must not call REST: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            },
+            runtime: runtime,
+            sessionID: nil
+        )
+
+        await viewModel.uploadAttachment(data: directPNGData, filename: "first.png")
+        let firstID = try XCTUnwrap(viewModel.directPendingAttachments.first?.id)
+        viewModel.removePendingAttachment(id: firstID)
+        XCTAssertTrue(viewModel.directPendingAttachments.isEmpty)
+
+        await viewModel.uploadAttachment(data: directPNGData, filename: "second.png")
+        viewModel.clearPendingAttachments()
+        XCTAssertTrue(viewModel.directPendingAttachments.isEmpty)
+        XCTAssertFalse(viewModel.isPreparingDirectAttachment)
+        XCTAssertNil(viewModel.directAttachmentPreparationErrorMessage)
+        XCTAssertTrue(fake.calls().isEmpty)
+        viewModel.invalidateDirectConversation()
+        await runtime.stop()
+    }
+
+    func testDirectAttachmentInvalidationRejectsLatePreparationResultAndSendDuringPreparation() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let preparationGate = ChatDirectAsyncGate()
+        let viewModel = makeViewModel(
+            client: makeClient { request in
+                XCTFail("Late direct attachment selection must not call REST: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            },
+            runtime: runtime,
+            sessionID: nil,
+            directAttachmentPreparer: { data, filename, previewData in
+                await preparationGate.wait()
+                try Task.checkCancellation()
+                let source = try DirectGatewayAttachment(data: data, filename: filename)
+                return DirectPendingAttachment(source: source, thumbnailData: previewData)
+            }
+        )
+        let selection = Task {
+            await viewModel.uploadAttachment(
+                data: directPNGData,
+                filename: "late.png"
+            )
+        }
+        await waitUntil { viewModel.isPreparingDirectAttachment }
+        let didSend = await viewModel.sendMessage("must wait")
+        XCTAssertFalse(didSend)
+        XCTAssertTrue(fake.calls().isEmpty)
+        viewModel.invalidateDirectConversation()
+        await preparationGate.release()
+        await selection.value
+
+        XCTAssertTrue(viewModel.directPendingAttachments.isEmpty)
+        XCTAssertFalse(viewModel.isPreparingDirectAttachment)
+        XCTAssertTrue(fake.calls().isEmpty)
+        await runtime.stop()
+    }
+
+    func testDirectAttachmentImageUsesAuthenticatedMediaEnvelopeAndCanonicalSessionPath() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let requests = ChatDirectRequestRecorder()
+        let imageURL = "data:image/png;base64,\(directPNGData.base64EncodedString())"
+        let viewModel = makeViewModel(
+            client: makeClient { request in
+                requests.append(request.url?.path ?? "nil")
+                XCTAssertEqual(request.url?.path, "/api/media")
+                let query = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.queryItems ?? []
+                XCTAssertEqual(query.first(where: { $0.name == "session_id" })?.value, "durable-1")
+                XCTAssertEqual(query.first(where: { $0.name == "path" })?.value, "images/result.png")
+                return apiTestJSONResponse(#"{"data_url":"\#(imageURL)"}"#, for: request)
+            },
+            runtime: runtime,
+            sessionID: "durable-1"
+        )
+
+        let data = await viewModel.attachmentImageData(path: "images/result.png")
+
+        XCTAssertEqual(data, directPNGData)
+        XCTAssertEqual(requests.values(), ["/api/media"])
+        await runtime.stop()
+    }
+
+    func testDirectAttachmentImageDropsResponseAfterConversationInvalidation() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let requests = ChatDirectRequestRecorder()
+        let responseGate = DispatchSemaphore(value: 0)
+        let imageURL = "data:image/png;base64,\(directPNGData.base64EncodedString())"
+        let viewModel = makeViewModel(
+            client: makeClient { request in
+                requests.append(request.url?.path ?? "nil")
+                responseGate.wait()
+                return apiTestJSONResponse(#"{"data_url":"\#(imageURL)"}"#, for: request)
+            },
+            runtime: runtime,
+            sessionID: "durable-1"
+        )
+
+        let load = Task { await viewModel.attachmentImageData(path: "images/result.png") }
+        await waitUntil { requests.values().contains("/api/media") }
+        viewModel.invalidateDirectConversation()
+        responseGate.signal()
+
+        let loaded = await load.value
+        XCTAssertNil(loaded)
+        await runtime.stop()
+    }
+
+    func testDirectSendStagesSelectionAndClearsConsumedBytes() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let viewModel = makeViewModel(
+            client: makeClient { request in
+                XCTFail("Direct attachment send must not call REST: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            },
+            runtime: runtime,
+            sessionID: nil
+        )
+        await viewModel.uploadAttachment(data: directPNGData, filename: "kept.png")
+
+        let didSend = await viewModel.sendMessage("hello")
+
+        XCTAssertTrue(didSend)
+        XCTAssertTrue(viewModel.directPendingAttachments.isEmpty)
+        XCTAssertEqual(fake.calls().map(\.method), ["session.create", "image.attach_bytes", "prompt.submit"])
+        viewModel.invalidateDirectConversation()
+        await runtime.stop()
+    }
+
+    func testDirectSendStagesMixedAttachmentsAndPreservesExactFileReference() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let viewModel = makeViewModel(
+            client: makeClient { request in
+                XCTFail("Direct attachment send must not call REST: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            },
+            runtime: runtime,
+            sessionID: nil
+        )
+        await viewModel.uploadAttachment(data: directPNGData, filename: "photo.png")
+        await viewModel.uploadAttachment(data: Data("notes".utf8), filename: "notes.txt")
+
+        let didSend = await viewModel.sendMessage("describe both")
+
+        XCTAssertTrue(didSend)
+        let submit = try XCTUnwrap(fake.calls().last { $0.method == "prompt.submit" })
+        let fields = try XCTUnwrap(fields(submit.params))
+        let submittedText = try XCTUnwrap(fields["text"]?.gatewayString)
+        XCTAssertTrue(submittedText.contains("@file:attachments/notes.txt"))
+        XCTAssertTrue(submittedText.contains("describe both"))
+        XCTAssertEqual(fake.calls().map(\.method), [
+            "session.create", "image.attach_bytes", "file.attach", "prompt.submit"
+        ])
+        XCTAssertTrue(viewModel.directPendingAttachments.isEmpty)
+        viewModel.invalidateDirectConversation()
+        await runtime.stop()
+    }
+
+    func testDirectStageDefinitePartialFailurePreservesEarlierReceiptWithoutSubmit() async throws {
+        let fake = ChatDirectFakeTransport()
+        fake.setAttachmentError("file.attach", .server(
+            code: 4015,
+            message: "path or data_url required",
+            data: nil,
+            method: "file.attach",
+            requestID: "file-rejected",
+            server: "fixture"
+        ))
+        let runtime = try makeRuntime(fake)
+        let viewModel = makeViewModel(
+            client: makeClient { request in
+                XCTFail("Attachment stage must not call REST: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            },
+            runtime: runtime,
+            sessionID: nil
+        )
+        await viewModel.uploadAttachment(data: directPNGData, filename: "photo.png")
+        await viewModel.uploadAttachment(data: Data("notes".utf8), filename: "notes.txt")
+
+        let didSend = await viewModel.sendMessage("describe")
+
+        XCTAssertFalse(didSend)
+        XCTAssertFalse(fake.calls().contains { $0.method == "prompt.submit" })
+        XCTAssertTrue(viewModel.sendErrorMessage?.contains("notes.txt") == true)
+        XCTAssertEqual(viewModel.directPendingAttachments.count, 2)
+        if case .confirmed = viewModel.directPendingAttachments[0].stageState {
+            // The known server receipt is preserved; it must not be silently detached.
+        } else {
+            XCTFail("Earlier successful stage must remain confirmed")
+        }
+        if case .pending = viewModel.directPendingAttachments[1].stageState {
+            // The definite failure remains locally retryable.
+        } else {
+            XCTFail("Definite stage rejection must preserve the pending file")
+        }
+        viewModel.invalidateDirectConversation()
+        await runtime.stop()
+    }
+
+    func testDirectStageUnknownFailureLocksItemAndNeverRestages() async throws {
+        let fake = ChatDirectFakeTransport()
+        fake.setAttachmentError("image.attach_bytes", .timeout(
+            method: "image.attach_bytes",
+            requestID: "image-unknown"
+        ))
+        let runtime = try makeRuntime(fake)
+        let viewModel = makeViewModel(
+            client: makeClient { request in
+                XCTFail("Attachment stage must not call REST: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            },
+            runtime: runtime,
+            sessionID: nil
+        )
+        await viewModel.uploadAttachment(data: directPNGData, filename: "photo.png")
+
+        let didSend = await viewModel.sendMessage("describe")
+        XCTAssertFalse(didSend)
+        let firstStageCount = fake.calls().filter { $0.method == "image.attach_bytes" }.count
+        XCTAssertEqual(firstStageCount, 1)
+        XCTAssertFalse(fake.calls().contains { $0.method == "prompt.submit" })
+        if case .unknown = viewModel.directPendingAttachments.first?.stageState {
+            // Unknown stage outcome is retained and locked against blind retry.
+        } else {
+            XCTFail("Unknown stage outcome must remain visible and non-retryable")
+        }
+
+        fake.setAttachmentError("image.attach_bytes", nil)
+        let didRetry = await viewModel.sendMessage("retry")
+        XCTAssertFalse(didRetry)
+        XCTAssertEqual(fake.calls().filter { $0.method == "image.attach_bytes" }.count, firstStageCount)
+        XCTAssertFalse(fake.calls().contains { $0.method == "prompt.submit" })
+        viewModel.invalidateDirectConversation()
+        await runtime.stop()
+    }
+
+    func testDirectSendBlocksSelectionMutationWhileStaging() async throws {
+        let fake = ChatDirectFakeTransport()
+        let gate = ChatDirectAsyncGate()
+        fake.setAttachmentGate("image.attach_bytes", gate)
+        let runtime = try makeRuntime(fake)
+        let viewModel = makeViewModel(
+            client: makeClient { request in
+                XCTFail("Direct attachment send must not call REST: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            },
+            runtime: runtime,
+            sessionID: nil
+        )
+        await viewModel.uploadAttachment(data: directPNGData, filename: "photo.png")
+        let send = Task { await viewModel.sendMessage("describe") }
+        await waitUntil { fake.calls().contains { $0.method == "image.attach_bytes" } }
+
+        viewModel.clearPendingAttachments()
+        XCTAssertEqual(viewModel.directPendingAttachments.count, 1)
+        XCTAssertTrue(viewModel.uploadAttachmentErrorMessage?.contains("current direct message") == true)
+        await gate.release()
+        let didSend = await send.value
+        XCTAssertTrue(didSend)
+        XCTAssertTrue(viewModel.directPendingAttachments.isEmpty)
+        viewModel.invalidateDirectConversation()
+        await runtime.stop()
+    }
+
+    func testDirectSendInvalidationPreventsLateStageSubmit() async throws {
+        let fake = ChatDirectFakeTransport()
+        let gate = ChatDirectAsyncGate()
+        fake.setAttachmentGate("image.attach_bytes", gate)
+        let runtime = try makeRuntime(fake)
+        let viewModel = makeViewModel(
+            client: makeClient { request in
+                XCTFail("Invalidated direct send must not call REST: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            },
+            runtime: runtime,
+            sessionID: nil
+        )
+        await viewModel.uploadAttachment(data: directPNGData, filename: "photo.png")
+        let send = Task { await viewModel.sendMessage("describe") }
+        await waitUntil { fake.calls().contains { $0.method == "image.attach_bytes" } }
+
+        viewModel.invalidateDirectConversation()
+        await gate.release()
+        let didSend = await send.value
+        XCTAssertFalse(didSend)
+        XCTAssertTrue(viewModel.directPendingAttachments.isEmpty)
+        XCTAssertFalse(fake.calls().contains { $0.method == "prompt.submit" })
+        await runtime.stop()
+    }
+
+    func testDirectSendCancellationAfterSubmitDispatchKeepsUncertainTranscriptAndClearsConsumed() async throws {
+        let fake = ChatDirectFakeTransport()
+        let gate = ChatDirectAsyncGate()
+        fake.setPromptSubmitGate(gate)
+        fake.setPromptSubmitCancellation(true)
+        let runtime = try makeRuntime(fake)
+        let viewModel = makeViewModel(
+            client: makeClient { request in
+                XCTFail("Direct send cancellation must not call REST: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            },
+            runtime: runtime,
+            sessionID: nil
+        )
+        await viewModel.uploadAttachment(data: directPNGData, filename: "photo.png")
+        let send = Task { await viewModel.sendMessage("describe") }
+        await waitUntil { fake.calls().contains { $0.method == "prompt.submit" } }
+
+        send.cancel()
+        await gate.release()
+        let didSend = await send.value
+
+        XCTAssertTrue(didSend, "A dispatched cancellation remains delivery-uncertain under existing send semantics")
+        XCTAssertTrue(viewModel.directPendingAttachments.isEmpty)
+        XCTAssertTrue(viewModel.sendErrorMessage?.contains("uncertain") == true)
+        XCTAssertTrue(viewModel.messages.contains { $0.role == "user" && $0.content == "describe" })
+        XCTAssertEqual(fake.calls().filter { $0.method == "prompt.submit" }.count, 1)
+        let callsAfterUncertainSend = fake.calls().count
+        let retry = await viewModel.sendMessage("retry")
+        XCTAssertFalse(retry)
+        XCTAssertEqual(fake.calls().count, callsAfterUncertainSend)
+        viewModel.invalidateDirectConversation()
+        await runtime.stop()
+    }
+
+    func testDirectSendLateCancellationAfterTerminalStaysAmbiguousAndCannotRetry() async throws {
+        let fake = ChatDirectFakeTransport()
+        let gate = ChatDirectAsyncGate()
+        fake.setPromptSubmitGate(gate)
+        fake.setPromptSubmitCancellation(true)
+        let runtime = try makeRuntime(fake)
+        let viewModel = makeViewModel(
+            client: makeClient { request in
+                guard request.url?.path == "/api/sessions/durable-1/messages" else {
+                    XCTFail("Unexpected terminal reconciliation path: \(request.url?.path ?? "nil")")
+                    throw URLError(.badURL)
+                }
+                return apiTestJSONResponse(
+                    #"{"session_id":"durable-1","messages":[{"id":1,"role":"user","content":"describe","timestamp":1},{"id":2,"role":"assistant","content":"streamed answer","timestamp":2}],"pagination":{"limit":120,"offset":0,"order":"latest","returned":2}}"#,
+                    for: request
+                )
+            },
+            runtime: runtime,
+            sessionID: nil
+        )
+        await viewModel.uploadAttachment(data: directPNGData, filename: "photo.png")
+        let send = Task { await viewModel.sendMessage("describe") }
+        await waitUntil { fake.calls().contains { $0.method == "prompt.submit" } }
+        await yieldUntil { viewModel.activeStreamID != nil }
+
+        // The terminal event arrives while the RPC acknowledgement is still
+        // gated. Cancelling the late RPC continuation must remain ambiguous
+        // even though a terminal receipt already exists.
+        fake.emitCompletion()
+        await waitUntil { viewModel.activeStreamID == nil }
+        send.cancel()
+        await gate.release()
+        let didSend = await send.value
+
+        XCTAssertTrue(didSend)
+        XCTAssertTrue(viewModel.directPendingAttachments.isEmpty)
+        XCTAssertTrue(viewModel.sendErrorMessage?.contains("uncertain") == true)
+        XCTAssertTrue(viewModel.messages.contains { $0.role == "user" && $0.content == "describe" })
+        XCTAssertEqual(fake.calls().filter { $0.method == "prompt.submit" }.count, 1)
+
+        // A later terminal event does not prove the late acknowledgement safe;
+        // the controller's ambiguity remains sticky and prevents a replay.
+        fake.emitCompletion(sequence: 4)
+        await Task.yield()
+        let callsAfterUncertainSend = fake.calls().count
+        let retry = await viewModel.sendMessage("retry")
+        XCTAssertFalse(retry)
+        XCTAssertEqual(fake.calls().count, callsAfterUncertainSend)
+        viewModel.invalidateDirectConversation()
+        await runtime.stop()
+    }
+
     private let testServer = URL(string: "https://fixture.example")!
+
+    private var directPNGData: Data {
+        Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")!
+    }
 
     private func clarificationEvent(requestID: String, sequence: Int) -> HermesGatewayEvent {
         ChatDirectEventFactory.event(
@@ -1035,7 +1483,8 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         client: APIClient,
         runtime: HermesServerRuntime,
         sessionID: String?,
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        directAttachmentPreparer: (@Sendable (Data, String, Data?) async throws -> DirectPendingAttachment)? = nil
     ) -> ChatViewModel {
         ChatViewModel(
             session: SessionSummary(sessionId: sessionID, title: "New Chat", profile: "work"),
@@ -1043,7 +1492,8 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
             client: client,
             liveActivityManager: ChatDirectNoopLiveActivityManager(),
             userDefaults: defaults,
-            gatewayRuntimeProvider: { _ in runtime }
+            gatewayRuntimeProvider: { _ in runtime },
+            directAttachmentPreparer: directAttachmentPreparer
         )
     }
 
@@ -1210,6 +1660,11 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
     ])
     private var clarifyResponse: JSONValue = .object(["status": .string("ok")])
     private var clarifyGate: ChatDirectAsyncGate?
+    private var attachmentResponses: [String: JSONValue] = [:]
+    private var attachmentErrors: [String: HermesGatewayError] = [:]
+    private var attachmentGates: [String: ChatDirectAsyncGate] = [:]
+    private var promptSubmitGate: ChatDirectAsyncGate?
+    private var promptSubmitShouldCancel = false
 
     func installSink(_ sink: @escaping @Sendable (HermesGatewayEvent) -> Void) {
         withLock { self.sink = sink }
@@ -1255,6 +1710,32 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
         withLock { clarifyResponse = response }
     }
 
+    func setAttachmentResponse(_ method: String, _ response: JSONValue) {
+        withLock { attachmentResponses[method] = response }
+    }
+
+    func setAttachmentError(_ method: String, _ error: HermesGatewayError?) {
+        withLock {
+            if let error { attachmentErrors[method] = error }
+            else { attachmentErrors.removeValue(forKey: method) }
+        }
+    }
+
+    func setAttachmentGate(_ method: String, _ gate: ChatDirectAsyncGate?) {
+        withLock {
+            if let gate { attachmentGates[method] = gate }
+            else { attachmentGates.removeValue(forKey: method) }
+        }
+    }
+
+    func setPromptSubmitGate(_ gate: ChatDirectAsyncGate?) {
+        withLock { promptSubmitGate = gate }
+    }
+
+    func setPromptSubmitCancellation(_ enabled: Bool) {
+        withLock { promptSubmitShouldCancel = enabled }
+    }
+
     func calls() -> [Call] {
         withLock { callsValue }
     }
@@ -1275,6 +1756,7 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
     }
 
     func request(method: String, params: JSONValue?, timeout: Duration?) async throws -> JSONValue? {
+        let attachmentError = withLock { attachmentErrors[method] }
         let behavior = withLock { () -> (JSONValue?, JSONValue?, ChatDirectAsyncGate?, Bool, JSONValue?, JSONValue?) in
             callsValue.append(Call(method: method, params: params))
             switch method {
@@ -1296,7 +1778,7 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
                     sink?(ChatDirectEventFactory.event(sessionID: "runtime-1", type: "message.start", sequence: 1))
                     sink?(ChatDirectEventFactory.event(sessionID: "runtime-1", type: "message.delta", sequence: 2, payload: ["text": .string("streamed answer")]))
                 }
-                return (.object(["status": .string("streaming")]), nil, nil, false, nil, nil)
+                return (.object(["status": .string("streaming")]), nil, promptSubmitGate, false, nil, nil)
             case "session.steer":
                 return (steerResponse, nil, nil, false, nil, nil)
             case "session.interrupt":
@@ -1305,6 +1787,9 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
                 return (sessionStatusResponse, nil, nil, false, nil, nil)
             case "clarify.respond":
                 return (clarifyResponse, nil, clarifyGate, false, nil, nil)
+            case "image.attach_bytes", "file.attach", "pdf.attach":
+                let response = attachmentResponses[method] ?? Self.defaultAttachmentResponse(for: method)
+                return (response, nil, attachmentGates[method], false, nil, nil)
             default:
                 return (.object([:]), nil, nil, false, nil, nil)
             }
@@ -1330,7 +1815,44 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
         if method == "clarify.respond", let gate = behavior.2 {
             await gate.wait()
         }
+        if method == "image.attach_bytes" || method == "file.attach" || method == "pdf.attach",
+           let gate = behavior.2 {
+            await gate.wait()
+        }
+        if method == "prompt.submit", let gate = behavior.2 {
+            await gate.wait()
+            if withLock({ promptSubmitShouldCancel }) { throw CancellationError() }
+        }
+        if let attachmentError { throw attachmentError }
         return behavior.0
+    }
+
+    private static func defaultAttachmentResponse(for method: String) -> JSONValue {
+        switch method {
+        case "image.attach_bytes":
+            return .object([
+                "attached": .bool(true),
+                "path": .string("/profile/images/photo.png"),
+                "name": .string("photo.png")
+            ])
+        case "file.attach":
+            return .object([
+                "attached": .bool(true),
+                "name": .string("notes.txt"),
+                "ref_text": .string("@file:attachments/notes.txt")
+            ])
+        case "pdf.attach":
+            return .object([
+                "attached": .bool(true),
+                "filename": .string("report.pdf"),
+                "pages_attached": .number(1),
+                "pages": .array([
+                    .object(["path": .string("/profile/images/pdf_p1.png"), "page": .number(1)])
+                ])
+            ])
+        default:
+            return .object([:])
+        }
     }
 
     private func updateReasoningReadbackIfNeeded(_ params: JSONValue?) {
@@ -1346,9 +1868,9 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
         }
     }
 
-    func emitCompletion() {
+    func emitCompletion(sequence: Int = 3) {
         let sink = withLock { self.sink }
-        sink?(ChatDirectEventFactory.event(sessionID: "runtime-1", type: "message.complete", sequence: 3, payload: ["text": .string("streamed answer")]))
+        sink?(ChatDirectEventFactory.event(sessionID: "runtime-1", type: "message.complete", sequence: sequence, payload: ["text": .string("streamed answer")]))
     }
 
     func emit(_ event: HermesGatewayEvent) {

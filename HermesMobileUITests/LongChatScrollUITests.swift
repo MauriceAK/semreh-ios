@@ -421,6 +421,14 @@ final class LongChatScrollUITests: XCTestCase {
         XCTAssertTrue(acknowledgement.exists && acknowledgement.isHittable)
         attachScreenshot(named: "live-production-chat-success")
 
+        if environment["SEMREH_SLICE3_ATTACHMENT_UI"] == "1" {
+            guard stockBackend else {
+                XCTFail("Slice 3 attachment UI requires the pinned stock backend.")
+                return
+            }
+            exerciseOptInDirectAttachmentFlow(app: app)
+        }
+
         if environment["SEMREH_SLICE3_CLARIFICATION_UI"] == "1" {
             guard stockBackend else {
                 XCTFail("Slice 3 clarification UI requires the pinned stock backend.")
@@ -445,6 +453,126 @@ final class LongChatScrollUITests: XCTestCase {
                           message: "The TUI-created assistant reply must also be visible.")
             attachScreenshot(named: "live-tui-created-session-in-semreh")
         }
+    }
+
+    @MainActor
+    private func exerciseOptInDirectAttachmentFlow(app: XCUIApplication) {
+        let composers = app.textViews.matching(
+            NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
+        )
+        let composer = composers.firstMatch
+        XCTAssertTrue(composer.waitForExistence(timeout: 10), "The production chat must expose its composer for attachment staging.")
+        let chatDetailIdentifier = composer.identifier
+        XCTAssertTrue(
+            chatDetailIdentifier.hasPrefix("chat-detail:"),
+            "The attachment flow must remain scoped to the actual production chat identifier."
+        )
+
+        composer.tap()
+        pastePNG(knownPNGData, into: composer, app: app)
+
+        let chip = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH[c] 'Open attachment '")
+        ).firstMatch
+        assertHittable(
+            chip,
+            timeout: 15,
+            message: "Pasting a PNG through the native composer must expose an attachment chip."
+        )
+        attachScreenshot(named: "slice3-attachment-chip")
+        let attachmentName = chip.label.replacingOccurrences(of: "Open attachment ", with: "")
+        XCTAssertFalse(attachmentName.isEmpty, "The native attachment chip must expose its generated filename.")
+
+        chip.tap()
+        let previewTitle = app.navigationBars.staticTexts[attachmentName]
+        XCTAssertTrue(
+            previewTitle.waitForExistence(timeout: 10),
+            "Opening the attachment chip must present the native memory preview."
+        )
+        let previewImage = app.images[attachmentName]
+        XCTAssertTrue(
+            previewImage.waitForExistence(timeout: 10),
+            "The direct PNG preview must render from retained memory bytes."
+        )
+        let done = app.buttons["Done"]
+        assertHittable(done, timeout: 5, message: "The attachment preview must expose Done.")
+        done.tap()
+        let dismissed = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"),
+            object: previewImage
+        )
+        wait(for: [dismissed], timeout: 10)
+        XCTAssertFalse(previewImage.exists, "Dismissing the attachment preview must return to the composer.")
+        XCTAssertTrue(chip.waitForExistence(timeout: 5), "Dismissing preview must retain the pending attachment chip.")
+
+        let priorAcknowledgementCount = app.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS[c] %@", "SEMREH_SLICE1_ACK")
+        ).count
+        let prompt = "SEMREH_SLICE3_ATTACHMENT_UI_PROMPT_\(UUID().uuidString)"
+        composer.tap()
+        composer.typeText(prompt)
+        let send = app.buttons["Send"]
+        assertHittable(send, timeout: 10, message: "The composer Send action must be available after attachment staging.")
+        send.tap()
+
+        // Stock canonical history appends its image reference to the user text.
+        // Match this run's exact marker prefix, not a previous warm-up response.
+        let marker = app.staticTexts.matching(
+            NSPredicate(format: "label == %@ OR label BEGINSWITH %@", prompt, prompt + "\n")
+        ).firstMatch
+        XCTAssertTrue(marker.waitForExistence(timeout: 20), "The unique attachment prompt must appear in the transcript.")
+        let cleared = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"),
+            // The broad discovery query can now resolve to the new canonical
+            // transcript cell. Check the exact original composer filename.
+            object: app.buttons["Open attachment " + attachmentName]
+        )
+        wait(for: [cleared], timeout: 20)
+        XCTAssertFalse(app.buttons["Open attachment " + attachmentName].exists,
+                       "Sending must clear the staged attachment chip.")
+
+        let acknowledgement = app.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS[c] %@", "SEMREH_SLICE1_ACK")
+        )
+        let newAcknowledgement = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "count > %d", priorAcknowledgementCount),
+            object: acknowledgement
+        )
+        wait(for: [newAcknowledgement], timeout: 90)
+        XCTAssertGreaterThan(
+            acknowledgement.count,
+            priorAcknowledgementCount,
+            "The attachment turn must produce a new terminal ACK beyond the warm-up response."
+        )
+        waitForIdle(app: app)
+        let canonicalAttachment = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH[c] 'Open attachment upload_'")
+        ).firstMatch
+        XCTAssertTrue(canonicalAttachment.waitForExistence(timeout: 15),
+                      "Canonical image references must become attachment cells.")
+        if !canonicalAttachment.isHittable {
+            app.scrollViews.matching(
+                NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
+            ).firstMatch.swipeDown()
+        }
+        assertHittable(canonicalAttachment, timeout: 10,
+                       message: "The canonical attachment must be reachable in the transcript.")
+        let canonicalName = canonicalAttachment.label.replacingOccurrences(of: "Open attachment ", with: "")
+        canonicalAttachment.tap()
+        let canonicalImage = app.images[canonicalName]
+        XCTAssertTrue(canonicalImage.waitForExistence(timeout: 15),
+                      "The canonical image preview must load through the authenticated stock media route.")
+        attachScreenshot(named: "slice3-attachment-canonical-media-preview")
+        app.buttons["Done"].tap()
+        let canonicalDismissed = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"), object: canonicalImage
+        )
+        wait(for: [canonicalDismissed], timeout: 10)
+        attachPlainText(
+            "\(chatDetailIdentifier)\n\(prompt)",
+            named: "slice3-attachment-chat-title-and-marker"
+        )
+        attachScreenshot(named: "slice3-attachment-send-success")
     }
 
     @MainActor
@@ -789,6 +917,38 @@ final class LongChatScrollUITests: XCTestCase {
         }
     }
 
+    private func pastePNG(_ data: Data, into field: XCUIElement, app: XCUIApplication) {
+        UIPasteboard.general.setItems(
+            [[UTType.png.identifier: data]],
+            options: [.localOnly: true, .expirationDate: Date().addingTimeInterval(60)]
+        )
+        field.tap()
+        field.press(forDuration: 1.1)
+        let paste = app.menuItems["Paste"]
+        XCTAssertTrue(paste.waitForExistence(timeout: 5), "The composer must expose the native Paste action for a PNG.")
+        paste.tap()
+        let allowPaste = app.alerts.buttons["Allow Paste"]
+        if allowPaste.waitForExistence(timeout: 2) {
+            allowPaste.tap()
+        }
+    }
+
+    private var knownPNGData: Data {
+        // A visible synthetic tile makes screenshots useful evidence of actual
+        // image rendering; a transparent single pixel only proves decoding.
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        return UIGraphicsImageRenderer(size: CGSize(width: 64, height: 64), format: format)
+            .pngData { context in
+                UIColor.systemTeal.setFill()
+                context.fill(CGRect(x: 0, y: 0, width: 64, height: 64))
+                UIColor.systemOrange.setFill()
+                context.fill(CGRect(x: 0, y: 0, width: 32, height: 32))
+                context.fill(CGRect(x: 32, y: 32, width: 32, height: 32))
+            }
+    }
+
     private func clearPasteboard() {
         UIPasteboard.general.setItems([], options: [.localOnly: true])
     }
@@ -814,6 +974,13 @@ final class LongChatScrollUITests: XCTestCase {
             data: Data(app.debugDescription.utf8),
             uniformTypeIdentifier: "public.plain-text"
         )
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    private func attachPlainText(_ text: String, named name: String) {
+        let attachment = XCTAttachment(data: Data(text.utf8), uniformTypeIdentifier: "public.plain-text")
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)
