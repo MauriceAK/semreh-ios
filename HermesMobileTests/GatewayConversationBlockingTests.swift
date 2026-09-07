@@ -406,7 +406,12 @@ final class GatewayConversationBlockingTests: XCTestCase {
         let markerRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("GatewayConversationBlockingTests-\(UUID().uuidString)", isDirectory: true)
         let markerStore = DirectGatewayAttachmentRecoveryMarkerStore(rootURL: markerRoot)
-        return GatewayConversationController(runtime: runtime, storedID: storedID, recoveryMarkerStore: markerStore) { id, _, _, _ in
+        return GatewayConversationController(
+            runtime: runtime,
+            storedID: storedID,
+            recoveryMarkerStore: markerStore,
+            promptUncertaintyStore: InMemoryDirectPromptDeliveryUncertaintyStore()
+        ) { id, _, _, _ in
             DirectHermesTranscriptPage(sessionID: id, messages: [], pagination: nil)
         }
     }

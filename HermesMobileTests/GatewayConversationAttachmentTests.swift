@@ -1039,13 +1039,14 @@ final class GatewayConversationAttachmentTests: XCTestCase {
     private func makeController(
         runtime: HermesServerRuntime,
         storedID: String? = nil,
-        markerStore: DirectGatewayAttachmentRecoveryMarkerStore? = nil
+        markerStore: DirectGatewayAttachmentRecoveryMarkerStore? = nil,
+        promptUncertaintyStore: any DirectPromptDeliveryUncertaintyStoreProtocol = InMemoryDirectPromptDeliveryUncertaintyStore()
     ) -> GatewayConversationController {
         let store = markerStore ?? DirectGatewayAttachmentRecoveryMarkerStore(
             rootURL: FileManager.default.temporaryDirectory
                 .appendingPathComponent("GatewayConversationAttachmentTests-\(UUID().uuidString)", isDirectory: true)
         )
-        return GatewayConversationController(runtime: runtime, storedID: storedID, recoveryMarkerStore: store) { id, _, _, _ in
+        return GatewayConversationController(runtime: runtime, storedID: storedID, recoveryMarkerStore: store, promptUncertaintyStore: promptUncertaintyStore) { id, _, _, _ in
             DirectHermesTranscriptPage(sessionID: id, messages: [], pagination: nil)
         }
     }

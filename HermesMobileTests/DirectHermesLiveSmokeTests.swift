@@ -2076,6 +2076,20 @@ final class DirectHermesLiveSmokeTests: XCTestCase {
                 }
             }
 
+            // Public synthetic identity only: a later production UI gate can
+            // reopen this exact chat and exercise its persisted uncertainty
+            // without inserting a marker through a debug-only app hook.
+            let recoverySeed = try JSONSerialization.data(withJSONObject: [
+                "stored_id": storedID,
+                "seed_prompt": seedPrompt,
+                "delayed_prompt": delayedPrompt,
+                "canonical_row_count": finalTranscript.messages.count
+            ], options: [.sortedKeys])
+            let seedAttachment = XCTAttachment(data: recoverySeed, uniformTypeIdentifier: "public.json")
+            seedAttachment.name = "slice3-preack-production-recovery-seed"
+            seedAttachment.lifetime = .keepAlways
+            add(seedAttachment)
+
             if let ownedRuntimeID {
                 let closed = try await stage("slice3 pre-ACK-loss owned cleanup") {
                     try await serverRuntime.request("session.close", params: [

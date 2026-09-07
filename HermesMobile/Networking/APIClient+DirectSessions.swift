@@ -8,6 +8,14 @@ enum DirectHermesSessionListOrder: String, Equatable, Sendable {
     case created
 }
 
+/// The stock profile-aware session list's archive selector.  This is not the
+/// legacy `include_archived` boolean: Hermes accepts exactly these values.
+enum DirectHermesSessionArchiveFilter: String, Equatable, Sendable {
+    case exclude
+    case only
+    case include
+}
+
 struct DirectHermesProfileReadError: Decodable, Equatable, Sendable {
     let profile: String?
     let error: String?
@@ -23,6 +31,84 @@ struct DirectHermesSessionPage: Equatable {
     let offset: Int?
     let profileTotals: [String: Int]?
     let errors: [DirectHermesProfileReadError]?
+}
+
+/// One result from Hermes' official `/api/sessions/search` route.  The
+/// optional fields mirror the stock route's tolerant projection: a hit can be
+/// produced from an ID or message-content match, and older rows may not have
+/// every merged session metadata field.
+struct DirectHermesSessionSearchResult: Decodable, Equatable, Sendable {
+    let sessionID: String?
+    let lineageRoot: String?
+    let snippet: String?
+    let role: String?
+    let source: String?
+    let model: String?
+    let sessionStarted: Double?
+    let id: String?
+    let title: String?
+    let startedAt: Double?
+    let endedAt: Double?
+    let lastActive: Double?
+    let isActive: Bool?
+    let messageCount: Int?
+    let toolCallCount: Int?
+    let inputTokens: Int?
+    let outputTokens: Int?
+    let preview: String?
+    let parentSessionID: String?
+    let archived: Bool?
+
+    private enum CodingKeys: String, CodingKey {
+        case sessionID = "sessionId"
+        case lineageRoot
+        case snippet
+        case role
+        case source
+        case model
+        case sessionStarted
+        case id
+        case title
+        case startedAt
+        case endedAt
+        case lastActive
+        case isActive
+        case messageCount
+        case toolCallCount
+        case inputTokens
+        case outputTokens
+        case preview
+        case parentSessionID = "parentSessionId"
+        case archived
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        sessionID = container.decodeLossyStringIfPresent(forKey: .sessionID)
+        lineageRoot = container.decodeLossyStringIfPresent(forKey: .lineageRoot)
+        snippet = container.decodeLossyStringIfPresent(forKey: .snippet)
+        role = container.decodeLossyStringIfPresent(forKey: .role)
+        source = container.decodeLossyStringIfPresent(forKey: .source)
+        model = container.decodeLossyStringIfPresent(forKey: .model)
+        sessionStarted = container.decodeLossyDoubleIfPresent(forKey: .sessionStarted)
+        id = container.decodeLossyStringIfPresent(forKey: .id)
+        title = container.decodeLossyStringIfPresent(forKey: .title)
+        startedAt = container.decodeLossyDoubleIfPresent(forKey: .startedAt)
+        endedAt = container.decodeLossyDoubleIfPresent(forKey: .endedAt)
+        lastActive = container.decodeLossyDoubleIfPresent(forKey: .lastActive)
+        isActive = container.decodeLossyBoolIfPresent(forKey: .isActive)
+        messageCount = container.decodeLossyIntIfPresent(forKey: .messageCount)
+        toolCallCount = container.decodeLossyIntIfPresent(forKey: .toolCallCount)
+        inputTokens = container.decodeLossyIntIfPresent(forKey: .inputTokens)
+        outputTokens = container.decodeLossyIntIfPresent(forKey: .outputTokens)
+        preview = container.decodeLossyStringIfPresent(forKey: .preview)
+        parentSessionID = container.decodeLossyStringIfPresent(forKey: .parentSessionID)
+        archived = container.decodeLossyBoolIfPresent(forKey: .archived)
+    }
+}
+
+struct DirectHermesSessionSearchResponse: Decodable, Equatable, Sendable {
+    let results: [DirectHermesSessionSearchResult]?
 }
 
 struct DirectHermesTranscriptPagination: Decodable, Equatable, Sendable {
@@ -44,6 +130,8 @@ struct DirectHermesTranscriptPage: Equatable {
 enum DirectHermesRESTError: LocalizedError, Equatable {
     case invalidSessionID
     case missingCanonicalSessionID
+    case sessionIDMismatch
+    case profileMismatch
 
     var errorDescription: String? {
         switch self {
@@ -51,6 +139,10 @@ enum DirectHermesRESTError: LocalizedError, Equatable {
             return String(localized: "Hermes returned an invalid session identifier.")
         case .missingCanonicalSessionID:
             return String(localized: "Hermes did not return a canonical Hermes session identifier.")
+        case .sessionIDMismatch:
+            return String(localized: "Hermes returned a different session than the requested link.")
+        case .profileMismatch:
+            return String(localized: "Hermes returned the linked session from a different profile.")
         }
     }
 }
@@ -111,6 +203,96 @@ private struct DirectHermesSessionRow: Decodable {
             isCliSession: isCliSession,
             userMessageCount: userMessageCount,
             hasPendingUserMessage: nil,
+            sourceTag: source,
+            rawSource: source,
+            sessionSource: source,
+            sourceLabel: source,
+            parentSessionId: parentSessionId,
+            readOnly: readOnly,
+            isReadOnly: isReadOnly
+        )
+    }
+}
+
+/// The detail route returns the raw database row rather than the list
+/// projection. In the pinned stock response, `archived` and `pinned` are
+/// integer 0/1 values and activity is named `last_activity_at`; decode those
+/// fields lossily without weakening the list-row contract above.
+private struct DirectHermesSessionDetailRow: Decodable {
+    let id: String?
+    let title: String?
+    let cwd: String?
+    let model: String?
+    let source: String?
+    let startedAt: Double?
+    let endedAt: Double?
+    let lastActivityAt: Double?
+    let messageCount: Int?
+    let inputTokens: Int?
+    let outputTokens: Int?
+    let estimatedCostUsd: Double?
+    let actualCostUsd: Double?
+    let parentSessionId: String?
+    let pinned: Bool?
+    let archived: Bool?
+    let profile: String?
+    let profileName: String?
+    let isDefaultProfile: Bool?
+    let isCliSession: Bool?
+    let readOnly: Bool?
+    let isReadOnly: Bool?
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = container.decodeLossyStringIfPresent(forKey: .id)
+        title = container.decodeLossyStringIfPresent(forKey: .title)
+        cwd = container.decodeLossyStringIfPresent(forKey: .cwd)
+        model = container.decodeLossyStringIfPresent(forKey: .model)
+        source = container.decodeLossyStringIfPresent(forKey: .source)
+        startedAt = container.decodeLossyDoubleIfPresent(forKey: .startedAt)
+        endedAt = container.decodeLossyDoubleIfPresent(forKey: .endedAt)
+        lastActivityAt = container.decodeLossyDoubleIfPresent(forKey: .lastActivityAt)
+        messageCount = container.decodeLossyIntIfPresent(forKey: .messageCount)
+        inputTokens = container.decodeLossyIntIfPresent(forKey: .inputTokens)
+        outputTokens = container.decodeLossyIntIfPresent(forKey: .outputTokens)
+        estimatedCostUsd = container.decodeLossyDoubleIfPresent(forKey: .estimatedCostUsd)
+        actualCostUsd = container.decodeLossyDoubleIfPresent(forKey: .actualCostUsd)
+        parentSessionId = container.decodeLossyStringIfPresent(forKey: .parentSessionId)
+        pinned = container.decodeLossyBoolIfPresent(forKey: .pinned)
+        archived = container.decodeLossyBoolIfPresent(forKey: .archived)
+        profile = container.decodeLossyStringIfPresent(forKey: .profile)
+        profileName = container.decodeLossyStringIfPresent(forKey: .profileName)
+        isDefaultProfile = container.decodeLossyBoolIfPresent(forKey: .isDefaultProfile)
+        isCliSession = container.decodeLossyBoolIfPresent(forKey: .isCliSession)
+        readOnly = container.decodeLossyBoolIfPresent(forKey: .readOnly)
+        isReadOnly = container.decodeLossyBoolIfPresent(forKey: .isReadOnly)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, title, cwd, model, source, startedAt, endedAt, lastActivityAt
+        case messageCount, inputTokens, outputTokens, estimatedCostUsd, actualCostUsd
+        case parentSessionId, pinned, archived, profile, profileName, isDefaultProfile
+        case isCliSession, readOnly, isReadOnly
+    }
+
+    func summary(defaultProfile: String) -> SessionSummary {
+        let resolvedProfile = profile ?? profileName ?? defaultProfile
+        return SessionSummary(
+            sessionId: id,
+            title: title,
+            workspace: cwd,
+            model: model,
+            messageCount: messageCount,
+            createdAt: startedAt,
+            updatedAt: lastActivityAt ?? endedAt,
+            lastMessageAt: lastActivityAt,
+            pinned: pinned,
+            archived: archived,
+            profile: resolvedProfile,
+            inputTokens: inputTokens,
+            outputTokens: outputTokens,
+            estimatedCost: estimatedCostUsd ?? actualCostUsd,
+            isCliSession: isCliSession,
             sourceTag: source,
             rawSource: source,
             sessionSource: source,
@@ -279,6 +461,43 @@ private struct DirectHermesTranscriptEnvelope: Decodable {
 }
 
 extension APIClient {
+    /// Reads one exact durable session through Hermes' stock detail route.
+    /// The route accepts prefixes, so callers must still receive the exact
+    /// requested identity before using the result for a deep link.
+    func directSessionDetail(
+        sessionID rawSessionID: String,
+        profile rawProfile: String = "default"
+    ) async throws -> SessionSummary {
+        guard let sessionID = Self.validDirectDetailSessionID(rawSessionID) else {
+            throw DirectHermesRESTError.invalidSessionID
+        }
+        let profile = Self.directHermesProfile(rawProfile)
+        let path = Self.directHermesPath(
+            "/api/sessions/\(Self.directHermesPathSegment(sessionID))",
+            queryItems: [URLQueryItem(name: "profile", value: profile)]
+        )
+        let data = try await sendDirectData(
+            path: path,
+            method: "GET",
+            classifyStructuredAuthExpiry: true
+        )
+        let row = try decode(DirectHermesSessionDetailRow.self, from: data)
+        guard let returnedID = row.id?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !returnedID.isEmpty
+        else {
+            throw DirectHermesRESTError.missingCanonicalSessionID
+        }
+        guard returnedID == sessionID else {
+            throw DirectHermesRESTError.sessionIDMismatch
+        }
+        if let returnedProfile = row.profile ?? row.profileName,
+           !returnedProfile.isEmpty,
+           returnedProfile != profile {
+            throw DirectHermesRESTError.profileMismatch
+        }
+        return row.summary(defaultProfile: profile)
+    }
+
     /// Official durable session discovery.  The profile is always explicit;
     /// callers should use the default value rather than the cross-profile
     /// `all` aggregator for the active Semreh server.
@@ -286,7 +505,8 @@ extension APIClient {
         profile: String = "default",
         limit: Int = 20,
         offset: Int = 0,
-        order: DirectHermesSessionListOrder = .recent
+        order: DirectHermesSessionListOrder = .recent,
+        archived: DirectHermesSessionArchiveFilter = .exclude
     ) async throws -> DirectHermesSessionPage {
         let profile = Self.directHermesProfile(profile)
         let boundedLimit = min(max(limit, 0), 500)
@@ -297,7 +517,8 @@ extension APIClient {
                 URLQueryItem(name: "profile", value: profile),
                 URLQueryItem(name: "limit", value: String(boundedLimit)),
                 URLQueryItem(name: "offset", value: String(boundedOffset)),
-                URLQueryItem(name: "order", value: order.rawValue)
+                URLQueryItem(name: "order", value: order.rawValue),
+                URLQueryItem(name: "archived", value: archived.rawValue)
             ]
         )
         let data = try await sendDirectData(
@@ -314,6 +535,32 @@ extension APIClient {
             profileTotals: response.profileTotals,
             errors: response.errors
         )
+    }
+
+    /// Official read-only session-content/ID search.  The stock route caps a
+    /// positive limit at 100; unlike the profile list it does not accept a
+    /// meaningful zero-page request, so callers are bounded to 1...100.
+    func directSearchSessions(
+        query: String,
+        profile: String = "default",
+        limit: Int = 20
+    ) async throws -> DirectHermesSessionSearchResponse {
+        let profile = Self.directHermesProfile(profile)
+        let boundedLimit = min(max(limit, 1), 100)
+        let path = Self.directHermesPath(
+            "/api/sessions/search",
+            queryItems: [
+                URLQueryItem(name: "q", value: query),
+                URLQueryItem(name: "profile", value: profile),
+                URLQueryItem(name: "limit", value: String(boundedLimit))
+            ]
+        )
+        let data = try await sendDirectData(
+            path: path,
+            method: "GET",
+            classifyStructuredAuthExpiry: true
+        )
+        return try decode(DirectHermesSessionSearchResponse.self, from: data)
     }
 
     /// Reads a bounded canonical transcript tail/page.  Hermes resolves old
@@ -362,6 +609,17 @@ extension APIClient {
     private static func directHermesProfile(_ profile: String) -> String {
         let trimmed = profile.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? "default" : trimmed
+    }
+
+    private static func validDirectDetailSessionID(_ value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed == value, !trimmed.isEmpty, trimmed.count <= 128 else { return nil }
+        let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-")
+        guard trimmed.unicodeScalars.allSatisfy({ allowed.contains($0) }),
+              let first = trimmed.unicodeScalars.first,
+              CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789").contains(first)
+        else { return nil }
+        return trimmed
     }
 
     private static func directHermesPathSegment(_ value: String) -> String {

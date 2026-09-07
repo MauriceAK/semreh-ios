@@ -22,6 +22,279 @@ final class GatewayConversationControllerTests: XCTestCase {
         await runtime.stop()
     }
 
+    func testDefinitiveSubmitAckRemovesCrashQuarantineMarker() async throws {
+        let fake = ControllerFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let promptStore = InMemoryDirectPromptDeliveryUncertaintyStore()
+        let controller = makeController(runtime: runtime, storedID: nil, promptUncertaintyStore: promptStore)
+
+        try await controller.submit("healthy")
+
+        XCTAssertNil(promptStore.markers.first)
+        XCTAssertFalse(controller.hasAmbiguousPromptDelivery)
+        await runtime.stop()
+    }
+
+    func testDelayedSubmitAckRemovesMarkerMigratedToCanonicalTip() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setResumeResponse(.object([
+            "session_id": .string("runtime-ancestor"),
+            "session_key": .string("ancestor")
+        ]))
+        let promptGate = AsyncGate()
+        fake.setPromptResponseGate(promptGate)
+        let runtime = try makeRuntime(fake)
+        let promptStore = InMemoryDirectPromptDeliveryUncertaintyStore()
+        var canonicalID = "ancestor"
+        let controller = makeController(
+            runtime: runtime,
+            storedID: "ancestor",
+            promptUncertaintyStore: promptStore
+        ) { _, _, _, _ in
+            self.page(canonicalID)
+        }
+        try await controller.open()
+
+        let submit = Task { try await controller.submit("healthy after compression") }
+        await yieldUntil { fake.calls().contains { $0.method == "prompt.submit" } }
+        let ancestorMarker = try XCTUnwrap(promptStore.markers.first)
+        XCTAssertEqual(ancestorMarker.identity.storedID, "ancestor")
+
+        canonicalID = "tip"
+        try await controller.refresh()
+        XCTAssertEqual(controller.storedID, "tip")
+        XCTAssertEqual(promptStore.markers.count, 1)
+        XCTAssertEqual(promptStore.markers.first?.identity.storedID, "tip")
+        XCTAssertEqual(promptStore.markers.first?.token, ancestorMarker.token)
+
+        await promptGate.release()
+        try await submit.value
+
+        XCTAssertTrue(promptStore.markers.isEmpty)
+        XCTAssertFalse(controller.hasAmbiguousPromptDelivery)
+        XCTAssertNil(controller.promptDeliveryUncertaintyToken)
+        await runtime.stop()
+    }
+
+    func testMarkerWriteFailureIsProvenNondispatchAndDoesNotQuarantineSend() async throws {
+        let fake = ControllerFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let promptStore = InMemoryDirectPromptDeliveryUncertaintyStore()
+        promptStore.failWrite = true
+        let controller = makeController(runtime: runtime, storedID: nil, promptUncertaintyStore: promptStore)
+
+        do {
+            try await controller.submit("preserve draft")
+            XCTFail("A failed safety-marker write must prevent dispatch")
+        } catch DirectPromptDeliveryUncertaintyError.persistenceUnavailable { }
+
+        XCTAssertEqual(controller.runState, .idle)
+        XCTAssertFalse(controller.hasAmbiguousPromptDelivery)
+        XCTAssertFalse(fake.calls().contains { $0.method == "prompt.submit" })
+        await runtime.stop()
+    }
+
+    func testAcceptedPromptWithMarkerCleanupFailureKeepsKnownAcceptanceSeparate() async throws {
+        let fake = ControllerFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let promptStore = InMemoryDirectPromptDeliveryUncertaintyStore()
+        promptStore.failRemove = true
+        let controller = makeController(runtime: runtime, storedID: nil, promptUncertaintyStore: promptStore)
+
+        try await controller.submit("accepted")
+
+        XCTAssertTrue(controller.hasAmbiguousPromptDelivery)
+        XCTAssertTrue(controller.promptDeliveryUncertaintyHasConfirmedAcceptance)
+        XCTAssertEqual(promptStore.markers.count, 1)
+        await runtime.stop()
+    }
+
+    func testAcceptedPromptDoesNotRemoveReplacementPersistedToken() async throws {
+        let fake = ControllerFakeTransport()
+        let promptGate = AsyncGate()
+        fake.setPromptResponseGate(promptGate)
+        let runtime = try makeRuntime(fake)
+        let promptStore = InMemoryDirectPromptDeliveryUncertaintyStore()
+        let controller = makeController(runtime: runtime, storedID: nil, promptUncertaintyStore: promptStore)
+
+        let submit = Task { try await controller.submit("accepted") }
+        await yieldUntil { fake.calls().contains { $0.method == "prompt.submit" } }
+        let original = try XCTUnwrap(promptStore.markers.first)
+        let replacement = DirectPromptDeliveryUncertaintyMarker(identity: original.identity)
+        try promptStore.write(replacement)
+
+        await promptGate.release()
+        try await submit.value
+
+        XCTAssertEqual(promptStore.markers.first?.token, replacement.token)
+        XCTAssertTrue(controller.hasAmbiguousPromptDelivery)
+        XCTAssertFalse(controller.promptDeliveryUncertaintyHasConfirmedAcceptance)
+        await runtime.stop()
+    }
+
+    func testDefiniteRejectionWithMarkerCleanupFailureRestoresSafeBarrier() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setPromptServerError(.server(
+            code: 4001,
+            message: "session not found",
+            data: nil,
+            method: "prompt.submit",
+            requestID: "cleanup-failure",
+            server: "fixture"
+        ))
+        let runtime = try makeRuntime(fake)
+        let promptStore = InMemoryDirectPromptDeliveryUncertaintyStore()
+        promptStore.failRemove = true
+        let controller = makeController(runtime: runtime, storedID: nil, promptUncertaintyStore: promptStore) { id, _, _, _ in
+            throw APIError.http(statusCode: 404, body: #"{"detail":"Session not found"}"#)
+        }
+
+        do {
+            try await controller.submit("rejected")
+            XCTFail("Expected local cleanup failure after definite rejection")
+        } catch DirectPromptDeliveryUncertaintyError.persistenceUnavailable { }
+        XCTAssertTrue(controller.hasAmbiguousPromptDelivery)
+        XCTAssertFalse(controller.promptDeliveryUncertaintyHasConfirmedAcceptance)
+        XCTAssertEqual(promptStore.markers.count, 1)
+        await runtime.stop()
+    }
+
+    func testDispatchedTimeoutPersistsAcrossControllerRecreationAndNewRuntime() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setPromptTimeout(true)
+        let runtime = try makeRuntime(fake)
+        let promptStore = InMemoryDirectPromptDeliveryUncertaintyStore()
+        let controller = makeController(runtime: runtime, storedID: nil, promptUncertaintyStore: promptStore)
+
+        do {
+            try await controller.submit("uncertain")
+            XCTFail("Expected an ambiguous prompt outcome")
+        } catch HermesGatewayError.timeout { }
+        let marker = try XCTUnwrap(promptStore.markers.first)
+        XCTAssertTrue(controller.hasAmbiguousPromptDelivery)
+        await runtime.stop()
+
+        let replacementFake = ControllerFakeTransport()
+        replacementFake.setResumeResponse(.object([
+            "session_id": .string("runtime-replacement"),
+            "session_key": .string("durable-1")
+        ]))
+        let replacementRuntime = try makeRuntime(replacementFake)
+        let replacement = makeController(
+            runtime: replacementRuntime,
+            storedID: "durable-1",
+            promptUncertaintyStore: promptStore
+        )
+        XCTAssertEqual(replacement.promptDeliveryUncertaintyToken, marker.token)
+        XCTAssertTrue(replacement.hasAmbiguousPromptDelivery)
+        try await replacement.open()
+        do {
+            try await replacement.submit("duplicate")
+            XCTFail("A recreated controller must retain the no-resend barrier")
+        } catch DirectSessionError.ambiguousPrompt { }
+        XCTAssertFalse(replacementFake.calls().contains { $0.method == "prompt.submit" })
+        await replacementRuntime.stop()
+    }
+
+    func testManualUncertaintyAbandonRequiresFreshIdleProofAndOnlyClearsMarker() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setPromptTimeout(true)
+        let runtime = try makeRuntime(fake)
+        let promptStore = InMemoryDirectPromptDeliveryUncertaintyStore()
+        let controller = makeController(runtime: runtime, storedID: nil, promptUncertaintyStore: promptStore)
+
+        do { try await controller.submit("uncertain") } catch HermesGatewayError.timeout { }
+        let token = try XCTUnwrap(controller.promptDeliveryUncertaintyToken)
+        try await controller.abandonPromptDeliveryUncertainty(expectedToken: token)
+
+        XCTAssertNil(promptStore.markers.first)
+        XCTAssertFalse(controller.hasAmbiguousPromptDelivery)
+        XCTAssertEqual(controller.runState, .idle)
+        XCTAssertFalse(fake.calls().contains { $0.method == "session.close" })
+        XCTAssertEqual(fake.calls().filter { $0.method == "prompt.submit" }.count, 1)
+        await runtime.stop()
+    }
+
+    func testManualUncertaintyAbandonRejectsWrongTokenAndConcurrentAction() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setPromptTimeout(true)
+        let statusGate = AsyncGate()
+        fake.setSessionStatusGate(statusGate)
+        let runtime = try makeRuntime(fake)
+        let promptStore = InMemoryDirectPromptDeliveryUncertaintyStore()
+        let controller = makeController(runtime: runtime, storedID: nil, promptUncertaintyStore: promptStore)
+
+        do { try await controller.submit("uncertain") } catch HermesGatewayError.timeout { }
+        let token = try XCTUnwrap(controller.promptDeliveryUncertaintyToken)
+        do {
+            try await controller.abandonPromptDeliveryUncertainty(expectedToken: UUID())
+            XCTFail("A replaced token must not clear the marker")
+        } catch DirectSessionError.staleOperation { }
+
+        let abandon = Task { try await controller.abandonPromptDeliveryUncertainty(expectedToken: token) }
+        await yieldUntil { fake.calls().contains { $0.method == "session.status" } }
+        do {
+            try await controller.abandonPromptDeliveryUncertainty(expectedToken: token)
+            XCTFail("Only one abandon operation may own the marker at a time")
+        } catch DirectSessionError.staleOperation { }
+        await statusGate.release()
+        try await abandon.value
+        XCTAssertTrue(promptStore.markers.isEmpty)
+        await runtime.stop()
+    }
+
+    func testManualUncertaintyAbandonRejectsReplacementTokenAfterDelayedStatus() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setPromptTimeout(true)
+        let statusGate = AsyncGate()
+        fake.setSessionStatusGate(statusGate)
+        let runtime = try makeRuntime(fake)
+        let promptStore = InMemoryDirectPromptDeliveryUncertaintyStore()
+        let controller = makeController(runtime: runtime, storedID: nil, promptUncertaintyStore: promptStore)
+
+        do { try await controller.submit("uncertain") } catch HermesGatewayError.timeout { }
+        let token = try XCTUnwrap(controller.promptDeliveryUncertaintyToken)
+        let abandon = Task { try await controller.abandonPromptDeliveryUncertainty(expectedToken: token) }
+        await yieldUntil { fake.calls().contains { $0.method == "session.status" } }
+        let identity = try DirectPromptDeliveryUncertaintyIdentity(
+            origin: URL(string: "https://fixture.example")!,
+            profile: "default",
+            storedID: "durable-1"
+        )
+        let replacement = DirectPromptDeliveryUncertaintyMarker(identity: identity)
+        try promptStore.write(replacement)
+        await statusGate.release()
+        do {
+            try await abandon.value
+            XCTFail("A replaced persisted token must not be cleared by an old operation")
+        } catch DirectSessionError.staleOperation { }
+        XCTAssertEqual(promptStore.markers.first?.token, replacement.token)
+        await runtime.stop()
+    }
+
+    func testManualUncertaintyAbandonRejectsReboundGenerationAfterDelayedStatus() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setPromptTimeout(true)
+        let statusGate = AsyncGate()
+        fake.setSessionStatusGate(statusGate)
+        let runtime = try makeRuntime(fake)
+        let promptStore = InMemoryDirectPromptDeliveryUncertaintyStore()
+        let controller = makeController(runtime: runtime, storedID: nil, promptUncertaintyStore: promptStore)
+
+        do { try await controller.submit("uncertain") } catch HermesGatewayError.timeout { }
+        let token = try XCTUnwrap(controller.promptDeliveryUncertaintyToken)
+        let abandon = Task { try await controller.abandonPromptDeliveryUncertainty(expectedToken: token) }
+        await yieldUntil { fake.calls().contains { $0.method == "session.status" } }
+        try await runtime.reconnect()
+        await statusGate.release()
+        do {
+            try await abandon.value
+            XCTFail("A rebound runtime must invalidate the old abandon operation")
+        } catch DirectSessionError.staleOperation { }
+        XCTAssertEqual(promptStore.markers.first?.token, token)
+        await runtime.stop()
+    }
+
     func testExistingResumeUsesCanonicalTipForBindingAndTranscript() async throws {
         let fake = ControllerFakeTransport()
         fake.setResumeResponse(.object([
@@ -29,8 +302,16 @@ final class GatewayConversationControllerTests: XCTestCase {
             "session_key": .string("tip")
         ]))
         let runtime = try makeRuntime(fake)
+        let promptStore = InMemoryDirectPromptDeliveryUncertaintyStore()
+        let ancestorIdentity = try DirectPromptDeliveryUncertaintyIdentity(
+            origin: URL(string: "https://fixture.example")!,
+            profile: "work",
+            storedID: "ancestor"
+        )
+        let ancestorMarker = DirectPromptDeliveryUncertaintyMarker(identity: ancestorIdentity)
+        try promptStore.write(ancestorMarker)
         var loadedIDs: [String] = []
-        let controller = makeController(runtime: runtime, storedID: "ancestor", profile: "work") { id, _, _, _ in
+        let controller = makeController(runtime: runtime, storedID: "ancestor", profile: "work", promptUncertaintyStore: promptStore) { id, _, _, _ in
             loadedIDs.append(id)
             return self.page(id)
         }
@@ -40,6 +321,13 @@ final class GatewayConversationControllerTests: XCTestCase {
         XCTAssertEqual(loadedIDs, ["tip"])
         XCTAssertEqual(controller.storedID, "tip")
         XCTAssertEqual(controller.binding, GatewaySessionBinding(storedID: "tip", runtimeID: "runtime-tip", profile: "work"))
+        let tipIdentity = try DirectPromptDeliveryUncertaintyIdentity(
+            origin: URL(string: "https://fixture.example")!,
+            profile: "work",
+            storedID: "tip"
+        )
+        XCTAssertEqual(try promptStore.load(for: tipIdentity)?.token, ancestorMarker.token)
+        XCTAssertNil(try promptStore.load(for: ancestorIdentity))
         let resume = try XCTUnwrap(fake.calls().first(where: { $0.method == "session.resume" }))
         XCTAssertEqual(objectFields(resume.params)?["session_id"], .string("ancestor"))
         XCTAssertEqual(objectFields(resume.params)?["profile"], .string("work"))
@@ -567,7 +855,8 @@ final class GatewayConversationControllerTests: XCTestCase {
         let fake = ControllerFakeTransport()
         fake.setPromptTimeout(true)
         let runtime = try makeRuntime(fake)
-        let controller = makeController(runtime: runtime, storedID: nil)
+        let promptStore = InMemoryDirectPromptDeliveryUncertaintyStore()
+        let controller = makeController(runtime: runtime, storedID: nil, promptUncertaintyStore: promptStore)
 
         do {
             try await controller.submit("ambiguous")
@@ -576,6 +865,7 @@ final class GatewayConversationControllerTests: XCTestCase {
             // The server may have accepted the prompt; it must not be replayed.
         }
         XCTAssertEqual(controller.runState, .deliveryUnknown)
+        XCTAssertEqual(promptStore.markers.count, 1)
 
         do {
             try await controller.submit("retry")
@@ -599,8 +889,9 @@ final class GatewayConversationControllerTests: XCTestCase {
             server: "fixture"
         ))
         let runtime = try makeRuntime(fake)
+        let promptStore = InMemoryDirectPromptDeliveryUncertaintyStore()
         var loadedIDs: [String] = []
-        let controller = makeController(runtime: runtime, storedID: nil) { id, _, _, _ in
+        let controller = makeController(runtime: runtime, storedID: nil, promptUncertaintyStore: promptStore) { id, _, _, _ in
             loadedIDs.append(id)
             throw APIError.http(statusCode: 404, body: #"{"detail":"Session not found"}"#)
         }
@@ -616,6 +907,7 @@ final class GatewayConversationControllerTests: XCTestCase {
         XCTAssertEqual(loadedIDs, ["durable-1"])
         XCTAssertEqual(fake.calls().map(\.method), ["session.create", "prompt.submit", "session.close"])
         XCTAssertEqual(objectFields(fake.calls().last?.params)?["session_id"], .string("runtime-1"))
+        XCTAssertTrue(promptStore.markers.isEmpty)
         await runtime.stop()
     }
 
@@ -850,6 +1142,7 @@ final class GatewayConversationControllerTests: XCTestCase {
         runtime: HermesServerRuntime,
         storedID: String?,
         profile: String = "default",
+        promptUncertaintyStore: any DirectPromptDeliveryUncertaintyStoreProtocol = InMemoryDirectPromptDeliveryUncertaintyStore(),
         loader: @escaping GatewayConversationController.TranscriptLoader = { id, _, _, _ in
             DirectHermesTranscriptPage(sessionID: id, messages: [], pagination: nil)
         }
@@ -862,6 +1155,7 @@ final class GatewayConversationControllerTests: XCTestCase {
             storedID: storedID,
             profile: profile,
             recoveryMarkerStore: markerStore,
+            promptUncertaintyStore: promptUncertaintyStore,
             loadTranscript: loader
         )
     }
@@ -959,6 +1253,7 @@ private final class ControllerFakeTransport: HermesGatewayTransport, @unchecked 
     private var sessionStatusResponse: JSONValue = .object([
         "output": .string("Agent Running: No")
     ])
+    private var sessionStatusGate: AsyncGate?
     private var updatesReasoningReadback = true
 
     func installSink(_ sink: @escaping @Sendable (HermesGatewayEvent) -> Void) {
@@ -1030,6 +1325,10 @@ private final class ControllerFakeTransport: HermesGatewayTransport, @unchecked 
 
     func setSessionStatusResponse(_ response: JSONValue) {
         withLock { sessionStatusResponse = response }
+    }
+
+    func setSessionStatusGate(_ gate: AsyncGate) {
+        withLock { sessionStatusGate = gate }
     }
 
     func setUpdatesReasoningReadback(_ enabled: Bool) {
@@ -1114,7 +1413,13 @@ private final class ControllerFakeTransport: HermesGatewayTransport, @unchecked 
             if let event = behavior.7 { emit(event) }
             return behavior.6
         case "session.status":
-            return withLock { sessionStatusResponse }
+            let (response, gate) = withLock {
+                let gate = sessionStatusGate
+                sessionStatusGate = nil
+                return (sessionStatusResponse, gate)
+            }
+            if let gate { await gate.wait() }
+            return response
         case "config.get":
             let (response, gate) = withLock {
                 let gate = reasoningGetGate

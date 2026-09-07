@@ -1,6 +1,10 @@
 import Foundation
 import Observation
 
+enum DirectPromptDeliveryUncertaintyError: Error, Equatable, Sendable {
+    case persistenceUnavailable
+}
+
 /// One conversation on the active server's shared socket. The view model owns
 /// rendering/cache; this owner owns identity and RPC delivery, never a socket.
 @MainActor
@@ -38,6 +42,8 @@ final class GatewayConversationController {
     /// eventual resolution; this controller never clears it from a generic
     /// refresh or status response.
     private(set) var hasAmbiguousPromptDelivery = false
+    var promptDeliveryUncertaintyToken: UUID? { promptUncertaintyMarker?.token }
+    private(set) var promptDeliveryUncertaintyHasConfirmedAcceptance = false
     /// A persisted marker means Hermes may still own an attachment queued for
     /// this durable chat. It is intentionally a cached value, never a file
     /// read from a SwiftUI body.
@@ -72,6 +78,7 @@ final class GatewayConversationController {
     @ObservationIgnored private let runtime: HermesServerRuntime
     @ObservationIgnored private let loadTranscript: TranscriptLoader
     @ObservationIgnored private let recoveryMarkerStore: any DirectGatewayAttachmentRecoveryMarkerStoreProtocol
+    @ObservationIgnored private let promptUncertaintyStore: any DirectPromptDeliveryUncertaintyStoreProtocol
     @ObservationIgnored private var observerID: UUID?
     @ObservationIgnored private var attachmentTask: Task<Void, Error>?
     @ObservationIgnored private var attachmentStageInFlight = false
@@ -125,12 +132,16 @@ final class GatewayConversationController {
         var terminalSequence: Int?
     }
     private var recoveryPromptObservation: RecoveryPromptObservation?
+    private var promptUncertaintyMarker: DirectPromptDeliveryUncertaintyMarker?
+    private var promptUncertaintyLoadFailed = false
+    private var promptUncertaintyAbandonInFlight = false
 
     init(
         runtime: HermesServerRuntime,
         storedID: String?,
         profile: String = "default",
         recoveryMarkerStore: any DirectGatewayAttachmentRecoveryMarkerStoreProtocol = DirectGatewayAttachmentRecoveryMarkerStore(),
+        promptUncertaintyStore: any DirectPromptDeliveryUncertaintyStoreProtocol = DirectPromptDeliveryUncertaintyStore(),
         loadTranscript: @escaping TranscriptLoader
     ) {
         self.runtime = runtime
@@ -138,9 +149,11 @@ final class GatewayConversationController {
         let normalizedProfile = profile.trimmingCharacters(in: .whitespacesAndNewlines)
         self.profile = normalizedProfile.isEmpty ? "default" : normalizedProfile
         self.recoveryMarkerStore = recoveryMarkerStore
+        self.promptUncertaintyStore = promptUncertaintyStore
         self.loadTranscript = loadTranscript
         hasSubmittedPrompt = storedID != nil
         durableRowConfirmed = storedID != nil
+        refreshPromptUncertaintyMarker()
         refreshRecoveryMarker()
         observerID = runtime.observe(event: { [weak self] event in
             self?.receive(event)
@@ -159,9 +172,10 @@ final class GatewayConversationController {
         client: APIClient,
         storedID: String?,
         profile: String = "default",
-        recoveryMarkerStore: any DirectGatewayAttachmentRecoveryMarkerStoreProtocol = DirectGatewayAttachmentRecoveryMarkerStore()
+        recoveryMarkerStore: any DirectGatewayAttachmentRecoveryMarkerStoreProtocol = DirectGatewayAttachmentRecoveryMarkerStore(),
+        promptUncertaintyStore: any DirectPromptDeliveryUncertaintyStoreProtocol = DirectPromptDeliveryUncertaintyStore()
     ) {
-        self.init(runtime: runtime, storedID: storedID, profile: profile, recoveryMarkerStore: recoveryMarkerStore) { id, profile, limit, offset in
+        self.init(runtime: runtime, storedID: storedID, profile: profile, recoveryMarkerStore: recoveryMarkerStore, promptUncertaintyStore: promptUncertaintyStore) { id, profile, limit, offset in
             try await client.directSessionMessages(sessionID: id, profile: profile, limit: limit, offset: offset)
         }
     }
@@ -207,6 +221,262 @@ final class GatewayConversationController {
         }
         attachmentRecoveryNeedsReset = recoveryMarker != nil || recoveryMarkerLoadFailed
         unresolvedAttachmentMarkerToken = recoveryMarker?.token
+    }
+
+    private func promptUncertaintyIdentity(for storedID: String) throws -> DirectPromptDeliveryUncertaintyIdentity {
+        try DirectPromptDeliveryUncertaintyIdentity(
+            origin: runtime.origin,
+            profile: profile,
+            storedID: storedID
+        )
+    }
+
+    private func refreshPromptUncertaintyMarker() {
+        guard let storedID,
+              let identity = try? promptUncertaintyIdentity(for: storedID) else {
+            return
+        }
+        do {
+            promptUncertaintyMarker = try promptUncertaintyStore.load(for: identity)
+            promptUncertaintyLoadFailed = false
+            hasAmbiguousPromptDelivery = promptUncertaintyMarker != nil
+            promptDeliveryUncertaintyHasConfirmedAcceptance = false
+        } catch {
+            promptUncertaintyMarker = nil
+            promptUncertaintyLoadFailed = true
+            // A metadata read failure cannot prove that no barrier exists.
+            hasAmbiguousPromptDelivery = true
+        }
+    }
+
+    private func persistPromptUncertaintyBeforeDispatch() throws -> DirectPromptDeliveryUncertaintyMarker {
+        guard let storedID else { throw DirectSessionError.invalidBinding }
+        let identity: DirectPromptDeliveryUncertaintyIdentity
+        do { identity = try promptUncertaintyIdentity(for: storedID) }
+        catch { throw DirectSessionError.ambiguousPrompt }
+
+        do {
+            // Re-read immediately before writing so another live controller in
+            // this process cannot be silently overwritten with a new token.
+            if let existing = try promptUncertaintyStore.load(for: identity) {
+                promptUncertaintyMarker = existing
+                promptUncertaintyLoadFailed = false
+                hasAmbiguousPromptDelivery = true
+                promptDeliveryUncertaintyHasConfirmedAcceptance = false
+                throw DirectSessionError.ambiguousPrompt
+            }
+            let marker = DirectPromptDeliveryUncertaintyMarker(identity: identity)
+            try promptUncertaintyStore.write(marker)
+            promptUncertaintyMarker = marker
+            promptUncertaintyLoadFailed = false
+            promptDeliveryUncertaintyHasConfirmedAcceptance = false
+            // The on-disk marker is a crash quarantine. Until this request
+            // actually returns, promptInFlight/runState already block another
+            // send and the marker must not render as an unknown outcome.
+            return marker
+        } catch let error as DirectSessionError {
+            throw error
+        } catch {
+            promptUncertaintyLoadFailed = true
+            // This is proven nondispatch: preserve the draft rather than make
+            // the VM treat a local metadata failure as an accepted/unknown
+            // server write. Future sends remain fail-closed until reload.
+            throw DirectPromptDeliveryUncertaintyError.persistenceUnavailable
+        }
+    }
+
+    @discardableResult
+    private func clearPromptUncertainty(
+        _ marker: DirectPromptDeliveryUncertaintyMarker,
+        retainBarrierOnFailure: Bool
+    ) -> Bool {
+        do {
+            guard let current = promptUncertaintyMarker,
+                  current.token == marker.token else {
+                hasAmbiguousPromptDelivery = true
+                promptDeliveryUncertaintyHasConfirmedAcceptance = false
+                return false
+            }
+            // Canonical adoption can migrate the marker while prompt.submit is
+            // awaiting its ACK. Remove a still-present ancestor alias first,
+            // then the exact current identity; never unlock merely because an
+            // old same-token marker was removed.
+            if current.identity != marker.identity,
+               let alias = try promptUncertaintyStore.load(for: marker.identity) {
+                guard alias.token == marker.token else {
+                    hasAmbiguousPromptDelivery = true
+                    promptDeliveryUncertaintyHasConfirmedAcceptance = false
+                    return false
+                }
+                try promptUncertaintyStore.remove(alias)
+            }
+            if let persistedCurrent = try promptUncertaintyStore.load(for: current.identity) {
+                guard persistedCurrent == current else {
+                    hasAmbiguousPromptDelivery = true
+                    promptDeliveryUncertaintyHasConfirmedAcceptance = false
+                    return false
+                }
+                try promptUncertaintyStore.remove(current)
+            }
+            guard promptUncertaintyMarker == current else {
+                hasAmbiguousPromptDelivery = true
+                return false
+            }
+            promptUncertaintyMarker = nil
+            promptUncertaintyLoadFailed = false
+            hasAmbiguousPromptDelivery = false
+            promptDeliveryUncertaintyHasConfirmedAcceptance = false
+            return true
+        } catch {
+            // A successful server acknowledgement must not be presented as a
+            // retryable failure merely because local cleanup could not finish.
+            // Keep the durable barrier and let the next controller reload it.
+            // The durable residue must continue blocking stage/submit even
+            // when the server ACK already proved acceptance. The companion
+            // flag lets the VM explain cleanup residue without saying that
+            // delivery itself was unconfirmed.
+            hasAmbiguousPromptDelivery = true
+            promptDeliveryUncertaintyHasConfirmedAcceptance = !retainBarrierOnFailure
+            return false
+        }
+    }
+
+    private func migratePromptUncertaintyMarkerIfNeeded(to storedID: String) throws {
+        guard let marker = promptUncertaintyMarker,
+              marker.identity.storedID != storedID else { return }
+        let identity: DirectPromptDeliveryUncertaintyIdentity
+        do { identity = try promptUncertaintyIdentity(for: storedID) }
+        catch { throw DirectSessionError.ambiguousPrompt }
+        let migrated = DirectPromptDeliveryUncertaintyMarker(
+            token: marker.token,
+            identity: identity,
+            status: marker.status,
+            createdAt: marker.createdAt
+        )
+        do {
+            if let existing = try promptUncertaintyStore.load(for: identity) {
+                guard existing.token == marker.token else {
+                    throw DirectSessionError.ambiguousPrompt
+                }
+                promptUncertaintyMarker = existing
+            } else {
+                try promptUncertaintyStore.write(migrated)
+                promptUncertaintyMarker = migrated
+            }
+            // The ancestor remains on disk if removal fails; retaining both
+            // aliases is safer than losing the warning during compression.
+            try? promptUncertaintyStore.remove(marker)
+            hasAmbiguousPromptDelivery = true
+            promptDeliveryUncertaintyHasConfirmedAcceptance = false
+        } catch let error as DirectSessionError {
+            hasAmbiguousPromptDelivery = true
+            throw error
+        } catch {
+            hasAmbiguousPromptDelivery = true
+            throw DirectSessionError.ambiguousPrompt
+        }
+    }
+
+    /// Clears only the local uncertainty marker after a fresh canonical read
+    /// and idle status proof. It never closes, resends, or mutates history.
+    func abandonPromptDeliveryUncertainty(expectedToken: UUID) async throws {
+        guard !disposed,
+              let marker = promptUncertaintyMarker,
+              marker.token == expectedToken,
+              let binding,
+              !promptUncertaintyAbandonInFlight,
+              !promptInFlight,
+              !attachmentStageInFlight,
+              !attachmentRemovalInFlight,
+              !blockingInteractionResponseInFlight,
+              pendingBlockingPrompt == nil,
+              pendingApprovalPrompt == nil,
+              pendingSecretPrompt == nil,
+              pendingSudoPrompt == nil,
+              runState == .idle || runState == .deliveryUnknown else {
+            throw DirectSessionError.staleOperation
+        }
+        promptUncertaintyAbandonInFlight = true
+        defer { promptUncertaintyAbandonInFlight = false }
+        let capturedLifecycle = lifecycle
+        let capturedBinding = binding
+        let capturedGeneration = runtime.connectionGeneration
+        let capturedOrigin = runtime.origin
+        guard let storedID,
+              let identity = try? promptUncertaintyIdentity(for: storedID),
+              marker.identity == identity else {
+            throw DirectSessionError.staleOperation
+        }
+
+        let isCurrentAbandonScope: () -> Bool = {
+            guard !self.disposed,
+                  self.lifecycle == capturedLifecycle,
+                  self.binding == capturedBinding,
+                  self.runtime.origin == capturedOrigin,
+                  self.runtime.connectionGeneration == capturedGeneration,
+                  self.promptUncertaintyAbandonInFlight,
+                  self.promptUncertaintyMarker?.token == expectedToken,
+                  self.promptUncertaintyMarker?.identity == identity,
+                  !self.promptInFlight,
+                  !self.attachmentStageInFlight,
+                  !self.attachmentRemovalInFlight,
+                  !self.blockingResponseInFlight,
+                  !self.blockingInteractionResponseInFlight,
+                  self.pendingBlockingPrompt == nil,
+                  self.pendingApprovalPrompt == nil,
+                  self.pendingSecretPrompt == nil,
+                  self.pendingSudoPrompt == nil,
+                  self.runState == .idle || self.runState == .deliveryUnknown else {
+                return false
+            }
+            do {
+                guard let persisted = try self.promptUncertaintyStore.load(for: identity),
+                      persisted.token == expectedToken else { return false }
+            } catch {
+                return false
+            }
+            return true
+        }
+
+        try await refresh()
+        guard isCurrentAbandonScope() else {
+            throw DirectSessionError.staleOperation
+        }
+        let status = try await runtime.request("session.status", parameters: {
+            guard !self.disposed,
+                  self.lifecycle == capturedLifecycle,
+                  self.binding == capturedBinding,
+                  self.runtime.origin == capturedOrigin,
+                  self.runtime.connectionGeneration == capturedGeneration,
+                  self.runState == .idle || self.runState == .deliveryUnknown,
+                  !self.promptInFlight else {
+                throw DirectSessionError.staleOperation
+            }
+            return self.rpcParams(capturedBinding)
+        })
+        guard isCurrentAbandonScope() else {
+            throw DirectSessionError.staleOperation
+        }
+        guard status?.gatewayFields["output"]?.gatewayString?
+            .components(separatedBy: .newlines)
+            .contains("Agent Running: No") == true else {
+            throw DirectSessionError.ambiguousPrompt
+        }
+        do {
+            try promptUncertaintyStore.remove(marker)
+        } catch {
+            throw DirectPromptDeliveryUncertaintyError.persistenceUnavailable
+        }
+        // No await occurs between the scope check and the token-checked local
+        // removal, so the in-memory token is still the one just removed.
+        guard promptUncertaintyMarker?.token == expectedToken else {
+            throw DirectSessionError.staleOperation
+        }
+        promptUncertaintyMarker = nil
+        promptUncertaintyLoadFailed = false
+        hasAmbiguousPromptDelivery = false
+        promptDeliveryUncertaintyHasConfirmedAcceptance = false
+        runState = .idle
     }
 
     private func markRecoveryMarker(_ marker: DirectGatewayAttachmentRecoveryMarker) {
@@ -1013,6 +1283,7 @@ final class GatewayConversationController {
         create: [String: JSONValue] = [:]
     ) async throws {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw DirectSessionError.invalidResponse }
+        guard !promptUncertaintyLoadFailed else { throw DirectSessionError.staleOperation }
         guard !hasAmbiguousPromptDelivery else { throw DirectSessionError.ambiguousPrompt }
         guard !recoveryMarkerLoadFailed else { throw DirectSessionError.attachmentRecoveryUnavailable }
         guard !attachmentRecoveryIsBusy, !attachmentStageInFlight, !attachmentRemovalInFlight else { throw DirectSessionError.ambiguousPrompt }
@@ -1120,7 +1391,12 @@ final class GatewayConversationController {
                 minimumEventSequence: recoveryMinimumEventSequence
             )
         }
+        var promptMarkerForSubmit: DirectPromptDeliveryUncertaintyMarker?
         do {
+            // The marker is written before the transport can dispatch. This
+            // intentionally quarantines the small pre-write crash window; a
+            // proven nondispatch below removes it without retrying.
+            promptMarkerForSubmit = try persistPromptUncertaintyBeforeDispatch()
             let result = try await runtime.request("prompt.submit", parameters: {
                 guard !self.disposed, let binding = self.binding else { throw DirectSessionError.invalidBinding }
                 if !stagedAttachments.isEmpty {
@@ -1150,6 +1426,13 @@ final class GatewayConversationController {
             guard result?.gatewayFields["status"]?.gatewayString == "streaming" else { throw DirectSessionError.invalidResponse }
             // A very short turn can complete before the RPC continuation runs.
             if runState == .submitting { runState = .running }
+            if let promptMarkerForSubmit {
+                // The server has definitively accepted this turn. A local
+                // cleanup failure must not turn a known acceptance into an
+                // unknown-send error; the persisted marker remains a reopen
+                // quarantine and is surfaced as confirmed acceptance.
+                _ = clearPromptUncertainty(promptMarkerForSubmit, retainBarrierOnFailure: false)
+            }
             if recoveryTokenForSubmit != nil,
                recoveryPromptObservation?.token == recoveryTokenForSubmit {
                 recoveryPromptObservation?.accepted = true
@@ -1157,8 +1440,14 @@ final class GatewayConversationController {
             }
         } catch {
             guard !disposed, generation == lifecycle else { throw error }
+            var promptCleanupError: DirectPromptDeliveryUncertaintyError?
             if !submitRequestWasDispatched {
                 recoveryPromptObservation = nil
+                if let promptMarkerForSubmit {
+                    if !clearPromptUncertainty(promptMarkerForSubmit, retainBarrierOnFailure: true) {
+                        promptCleanupError = .persistenceUnavailable
+                    }
+                }
             }
             if !submitRequestWasDispatched {
                 if !stagedAttachments.isEmpty {
@@ -1178,10 +1467,15 @@ final class GatewayConversationController {
                 } else if runState == .submitting {
                     runState = .idle
                 }
-                throw error
+                throw promptCleanupError ?? error
             }
             if Self.isDefinitePromptSubmitRejection(error) {
                 runState = .idle
+                if let promptMarkerForSubmit {
+                    if !clearPromptUncertainty(promptMarkerForSubmit, retainBarrierOnFailure: true) {
+                        promptCleanupError = .persistenceUnavailable
+                    }
+                }
                 // A definite RPC rejection can precede first-row persistence.
                 // Only a canonical, structured not-found response proves this
                 // runtime is still an abandonable draft. Connectivity does not.
@@ -1205,7 +1499,7 @@ final class GatewayConversationController {
                 hasAmbiguousPromptDelivery = true
                 if terminalReceipt == nil { runState = .deliveryUnknown }
             }
-            throw error
+            throw promptCleanupError ?? error
         }
     }
 
@@ -1375,6 +1669,7 @@ final class GatewayConversationController {
         guard !canonical.isEmpty else { throw DirectSessionError.invalidBinding }
         durableRowConfirmed = true
         if canonical != storedID {
+            try migratePromptUncertaintyMarkerIfNeeded(to: canonical)
             self.storedID = canonical
             // A REST continuation must never be paired with the ancestor's live ID.
             invalidateBinding()
@@ -1814,6 +2109,7 @@ final class GatewayConversationController {
 
     private func adopt(_ binding: GatewaySessionBinding) throws {
         guard !disposed else { throw DirectSessionError.stopped }
+        try migratePromptUncertaintyMarkerIfNeeded(to: binding.storedID)
         self.binding = binding
         bindingEpoch &+= 1
         let previousRecoveryIdentity = recoveryMarker?.identity
@@ -1851,6 +2147,10 @@ final class GatewayConversationController {
         } else if previousRecoveryIdentity?.storedID != binding.storedID {
             attachmentRecoveryNeedsReset = true
         }
+        // A fresh draft has no marker until its first durable ID is known, but
+        // another controller may have written one in the meantime. Reload the
+        // tip identity before any submit can proceed.
+        refreshPromptUncertaintyMarker()
     }
 
     private func invalidateBinding() {

@@ -1048,3 +1048,150 @@ Final selectorPythonv1 passed31. Auth-preack-final-audit-v1 completed:
 fixture secrets/obvious bearer formats, not arbitrary opaque secrets, OCR or
 quarantined OS diagnostics. No backend source/config/route change, phone install,
 push or publication. Checkpoint remains part of unfinished Slice3 (~70% overall).
+
+## Persistent uncertainty and direct search successor (uncommitted)
+
+Luna implements atomic metadata-only per-origin/profile/durable-chat uncertainty;
+SolLow implements confirmation UI/VM; separate Luna implements verified direct
+search DTO/list integration and production UI test. Root owns PBX/native/notes.
+Root review corrected an initial filename-interpolation collision, healthy in-flight
+warning publication, pre-write failure classification, and manual-clear stale
+binding/post-await guards before native execution. Independent SolLow review then
+found cleanup-removal failures after definite non-dispatch/rejection still prevented
+draft restoration; fixes/tests in progress. Accepted ACK/local cleanup failure
+must have honest separate wording, not a false claim Hermes did not acknowledge.
+
+uncertainty-search-full-v1 failed compilation: missing `try` on a new test's
+runtime.reconnect. Root corrected that one call. Full-v2 executed2199pass/2fail/
+12intentional opt-in skips: new search tests returned no visible IDs; worker is
+checking their missing visible-session metadata before changing product logic.
+Diagnostics retained. No new native gate is marked passed yet.
+
+Root added synthetic preACK seed identity attachment for a later production UI
+recovery gate: actual prior native lost-ACK execution creates the marker; no debug
+app hook inserts it. Root corrected authored UI async wait and added full original
+canonical prefix equality after the fresh message. UI remains unexecuted.
+Cold opening a compressed tip after backend compression while the app was dead
+still needs authoritative ancestor-to-tip marker discovery; warm migration alone
+does not prove it. Proposed bounded metadata enumeration/canonical ID reads is
+under review, not implemented or accepted as a passed gate.
+
+Full-v3 executed2202pass/3fail/12intentional opt-in skips. The three older VM
+tests still expected the word "uncertain" after the deliberately neutral warning
+changed to "cannot confirm". Sol updated only those five string assertions;
+dispatch counts, draft/optimistic-row behavior and retry barriers are unchanged.
+The new ACK/rejection cleanup-failure tests passed. Diagnostics retained.
+Full-v4 is the next signed full verification; no pass claimed yet. Root's smoke
+selector + session-convenience Python tests passed40/0 in python-v1.
+
+Full-v4 and latest presentation-corrected full-v5 both passed2205/0/12intentional
+opt-in skips. Live uncertainty-preack-v1 passed1/0/0 with the actual persistent
+store and retained synthetic seed20260907_042034_b1b2c5 (four canonical rows).
+Signed uncertainty-production-ui-build-v1 passed. Production-ui-v1 failed:
+the banner's AX identifier propagated onto its children, overriding the dedicated
+button identifier; the test could find neither expected parent nor action. Root
+viewed after-relaunch216D46AE-6181-4771-8646-6E0EC06F5FC4.png: warning and exact
+two-pair history visibly survived. This is not a passed UI action gate. A separate
+runner exit75 also occurred after repeated failed element interactions; cause not
+proven. Full attachments/diagnostics retained. Fixing accessibility before retry.
+
+UI-v2 failed before the AX check: exact seed/warning were already visible after
+login, then the test redundantly called XCUIApplication.open, which launched a
+replacement process; subsequent seed lookup failed. This is not evidence of
+spontaneous crash/auth expiry. Repeated waits exhausted the two-minute allowance.
+Root narrows this gate to restored production navigation: when the exact unique
+seed is already visible, skip redundant URL launch; otherwise retain normal URL
+open with before/after screenshots. Concurrent bounded seed checks now stop on
+failure rather than cascading through recovery actions. Cold-URL replacement
+failure remains separately unverified; not declared fixed. Subsequent UI run uses
+240s allowance for login/relaunch/confirmation/send, not the earlier120s budget.
+Latest full-v6 passed2206/0/12, including store test isolation/decoded identity
+coverage and AX modifier fix. No current production UI gate pass yet.
+
+UI-v3 failed earlier at shared postlogin helper's immediate BackButton hittability
+assertion; runnerexit75 retained separately. Sol isolated uncertainty entry readiness
+from forced-back navigation and replaced prefilled public username rather than
+appending. Signed UIbuild-v4 passed. UI-v4 now passed login/actual relaunch and
+showed exact warning/history (root viewed05582C28-18C0-4B4E-A196-1EC7A62BE4C4.png).
+Button's dedicated AX ID is fixed, but SwiftUI does not expose the banner parent
+as an Other element at all; first warning assertion failed, action gate incomplete.
+Next use the visible heading's own stable identifier plus independently hittable
+button, not an assumed grouping node. All failures/exports retained.
+
+Metadata adapter native full-v7:2208pass/4fail/12skip. New tests incorrectly read
+URLProtocol httpBody instead of stream-aware apiTestBodyData, and expected generic
+unauthorized for structured invalidCredentials. Corrected tests only, added
+malformed/opposite boolean and nondefault-profile coverage; latest native pending.
+
+Latest full-v8 passed2214/0/12intentional opt-in skips; diagnostics exported.
+Signed UIbuild-v5 passed, but UI-v5 used an already-consumed uncertainty fixture:
+UI-v4 continued after its failed parent assertion and confirmed Allow a new message.
+The old chat retaining four rows did not establish that its local marker remained.
+Root traced this reuse error; it is not evidence of a relaunch persistence defect.
+The UI test now requires heading/action before terminating, stops on missing
+controls, and returns through the normal Back control before opening a different
+seed. Production accessibility identifies the visible heading, not a nonexistent
+parent Other element. Failed bundles/exports remain preserved.
+
+Fresh uncertainty-preack-live-v2 passed1/0/0 with the actual persistent store,
+new synthetic chat20260907_045525_f3bb04 and four canonical rows. Signed UIbuild-v6
+passed; production-ui-v6 is running against this fresh fixture. No UI pass claimed
+yet. Root remains sole native owner; personal services and backend pin unchanged.
+
+UI-v6 failed before recovery actions on a real remaining legacy path:
+SessionListViewModel.loadSessionForDeepLink falls back to client.session when the
+fresh linked ID is not yet in list/cache. Root viewed8C4B9CF9...png: Session Action
+Failed, missing endpoint. Normal link-open therefore needs direct detail migration;
+do not dismiss this as a runner issue or bypass it in the test. Separate exit75
+retained. Fresh seed remains unconsumed. Root authorized the bounded app-only fix.
+
+Independent Sol review also caught ACK cleanup using a captured ancestor marker
+after reentrant canonical adoption migrated the same token to a tip: a token-only
+check could unlock while the tip marker remained. Fix exact current identity
+cleanup and add delayed-ACK migration/removal-failure tests before next native run.
+
+Interim artifact audit-v1:229830files, zero flagged paths,138exported console logs.
+Scope remains known disposable secrets and obvious bearer formats; not arbitrary
+opaque secrets, image OCR or private quarantined OS diagnostics. No deletion.
+
+Full-v9 passed2222/0/12intentional opt-in skips, including direct linked-detail
+and delayed-ACK canonical migration fixes. Diagnostics exported. Signed UIbuild-v7
+passed. Independent Sol detail review then found cancelled link tasks could still
+publish row/cache or visible errors despite unchanged generation/profile. Add a
+Task cancellation guard plus cancellation-error suppression/regression before
+the final UI rerun; view-level cancellation checking alone is insufficient.
+
+Full-v10 passed2223/0/12intentional skips with cancellation regression; diagnostics
+exported. Signed UIbuild-v8 passed and fresh-seed production-ui-v7 is running.
+Final Python-v1 passed47/0 using only the existing fixture Python3.13 environment.
+
+## Verified persistent-uncertainty checkpoint — September7
+
+Production-ui-v7 passed1/0/0 on signed UIbuild-v8. Actual production login and
+fresh linked-chat lookup, app terminate/relaunch, visible durable warning, Cancel,
+explicit allow-new-message confirmation, and separate fresh send all passed.
+Independent authenticated canonical observer proved exact original four rows/IDs
+unchanged through relaunch/Cancel/abandon, then six unique rows with the complete
+original prefix after exactly one fresh pair. No old prompt resend/history mutation.
+This is explicit local abandonment, not proven delivery correlation or Retry.
+
+Root viewed exported screenshots C1BC2942-E45F-4290-963D-DB14C408F002.png
+(relaunch),8FC02448-94B8-4EF2-AC28-47B541E066A3.png(Cancel),
+A91E1775-5B82-432B-9416-B65B88B89995.png(abandon), and
+3145377C-4116-4626-BE6F-7DBFD3A1C642.png(fresh completed pair).
+They live under slice3-uncertainty-production-ui-v7-attachments in the owned
+evidence root. Fresh fixture20260907_045525_f3bb04 is now consumed (six rows,
+no uncertainty marker); never reuse it as a four-row uncertainty seed.
+Strict codesign verification and ordinary signed Simulator launch72853 passed.
+Latest full native2223/0/12intentional skips; final Python47/0. Root reviewed
+high-risk store/controller/VM, Sol independently reviewed cleanup and direct
+lookup; cancellation and migrated-ACK fixes included. All failed attempts retained.
+
+No backend source/config/route change, phone install, push or release. Remaining
+cold compressed-tip marker discovery, actual packet/proxy boundaries, physical
+background/orphan policy, host availability and generic-file inference gates stay
+open. Slice3 is not complete; overall migration remains roughly70%.
+
+Final audit-v1 passed238947files/0flagged paths/141exported consoles, under the
+same limited known-secret/bearer scope and exclusions above. Disk~1.4GiB free;
+pause further build-heavy work for storage headroom. No evidence deleted.

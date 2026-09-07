@@ -1,6 +1,7 @@
 # Slice 4 task outline
 
-Status: NOT STARTED. Refine owners/file boundaries after Slice3 interfaces stabilize.
+Status: bounded S4-S read-only search integration underway; other packages remain
+open. Refine remaining owners/file boundaries as Slice3 interfaces stabilize.
 The [execution plan](semreh_tui_gateway_v3_execution_plan.md) remains binding.
 This outline supports later parallelism; it is not permission to publish a release.
 
@@ -67,3 +68,104 @@ contract capture or S4 implementation pass yet.
   focused contract tests; session-list optimistic mutation integration; archived
   collection/count integration; remote search shape/match integration. Preserve
   tombstone/rollback semantics, server/profile/session scoping and visible features.
+
+## Read-only contract probe preparation — September7
+
+Root+Luna are preparing exact disposable GET captures before adapters. No S4
+production change yet. Source profiles.py347-355 deliberately backfills pinned
+rows beyond `limit`; even `limit=0` can include pinned rows. Do not assume a
+zero-row count endpoint, enforce an invalid row_count<=limit invariant, or claim
+strict response bounding from the requested limit alone. Root corrected that
+preliminary assertion suggestion before live execution. Search remains separately
+limited; verify actual stock envelopes and positive/empty archive cases distinctly.
+
+Root read-only live-v1 passed against stock HTTPS/default: exclude/include20rows,
+total78; archive-only0rows/total0; each limit0 request returned0rows in this
+unpinned fixture. Search returned1synthetic user-content match under `results`.
+Cleanup passed; evidence records only exact request shapes/schema/counts. Root
+Python7/7 passed. Positive archived rows and actual pinned overfetch are not live
+verified by this empty/unpinned fixture. Luna now owns direct API adapters/tests
+only; no session UI, mutation or legacy retirement is accepted from this capture.
+
+Successor: direct search/list adapters and SessionList search integration authored
+by Luna, root reviewed. Explicit profile/query/generation guards; server search
+results map only to known visible unarchived IDs, preserving local project filter
+and tombstones. No unsupported legacy content/depth query flags. Native full-v4
+passed2205/0/12opt-in skips, including these tests. Earlier new search fixture
+failures corrected title/message_count, not product visibility. No rename/pin/
+archive mutation or archive screen/count cutover is claimed by this checkpoint.
+
+## Bounded metadata mutation capture — September7
+
+Root reviewed Luna's new session_mutation_probe; corrected a final sibling-map
+argument error before execution and required whole-flow fake coverage, unique
+per-run titles, and guarded metadata restoration on failure. Python-v1:6pass/
+1mock-protocol error; corrected fake connect. Exact fixture Python-v2:7/0.
+Live-v1 passed on clean pin29112bef/unchanged HTTPS fixture: created two own idle
+synthetic chats, title/pin/archive/unarchive PATCH plus independent list readback,
+sibling metadata unchanged, positive archive-only count1, exclude omits archived
+target, original metadata restored, own runtimes closed and auth cleanup passed.
+No DB deletion, personal state, active-run policy or app mutation UI claim.
+Next Luna owns only new typed direct mutation adapter/test files; root registers
+and verifies before consumer cutover. Preserve optimistic rollback and explicit
+profile/full durable target; DELETE/edit/regenerate remain separate.
+
+Typed metadata adapter and tests are now implemented and registered; native
+full-v8 passed2214/0/12, with the live mutation probe providing separate durable
+readback evidence. No production rename/pin/archive consumer cutover yet.
+Receipt identity echoes the requested full ID, not a server-resolved ID; callers
+must supply canonical IDs. Boolean response echo alone is not durable readback.
+
+## Secondary provider/model inventory — September7
+
+Read-only Luna source audit: directProviders() is login-provider discovery at
+/api/auth/providers, not inference-provider status. It cannot replace the visible
+Providers screen's credential/status catalog; no exact /api/providers route exists
+at the pin. Do not combine unrelated env/OAuth/custom-endpoint routes into an
+invented status contract. Providers disposition remains open, not silently hidden.
+Default Model picker can use existing directModelOptions(profile:) for reads,
+but explicit_only policy and stock /api/model/set write need separate verification.
+Legacy /api/models, /api/models/live and /api/default-model remain consumers to
+replace; no live catalog or picker acceptance claim from this source audit.
+
+## Linked-chat detail cutover — September7
+
+Production uncertainty UI-v6 exposed legacy client.session on a linked ID absent
+from list/cache. Replace that miss path with explicit stock detail; cache-first
+opening stays, no auth-capability fallback or latest-descendant guess. Root's
+session-detail-live-v1 GET capture passed on exact synthetic seed in default profile:
+raw top-level row, integer pinned/archived, last_activity_at, exact id/profile and
+four messages. Evidence contains field types only, not prompt/config values.
+Luna owns adapter/consumer and focused tests; native acceptance pending.
+
+Scale follow-up: current remote search admits only IDs in the loaded unarchived
+profile page (up to500 requested rows). Hits outside that page can be omitted.
+Do not describe this as complete unlimited search; use verified exact detail or
+bounded paging to resolve such hits in a later S4-S package without cross-profile
+or lineage guesses. This is not a reason to widen the current recovery fix.
+
+## Legacy retirement ordering — September7
+
+Read-only production audit confirms OpenChatSessionStore supplies the direct
+runtime provider; core direct send/recovery bypass legacy SSE. However legacy
+coordinators are still allocated, sidecar settings remain reachable, and secondary
+actions still have old API consumers. They are not all dead code.
+The binding plan already selects direct-only and removes the continuity sidecar;
+no new decision to retain legacy servers is needed. Preserve account credentials
+and saved chats during app-local configuration migration; never alter host services.
+
+Order: prove release constructors/direct status isolation, finish visible feature
+contracts and destructive/lineage replacements, retire sidecar settings/config,
+then remove legacy chat/SSE/auth code and obsolete fixtures. Old APIClient
+health/authStatus/login/logout have no production callers in this audit and are
+early removal candidates after endpoint-test updates. Live Activity orphan
+reconciler currently sits behind a ContentView no-op; replace/verify its direct
+behavior before deleting its tests. Direct activity start/end remains active.
+No removal or full cutover acceptance is claimed by this source-only audit.
+
+Verified bounded checkpoint: direct search/list and exact linked-detail consumers,
+typed metadata mutation adapter (not yet consumed by rename/pin/archive UI), stock
+read-only/detail and owned mutation probes. Full native2223/0/12; productionUI-v7
+proves a fresh uncached link opens against stock without the legacy detail fallback.
+S4-S remains open for metadata consumers, archive/count, delete and full-scale
+search; no broad WebUI removal or secondary-screen migration claimed yet.

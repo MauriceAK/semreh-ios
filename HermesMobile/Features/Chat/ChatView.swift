@@ -99,6 +99,47 @@ private struct DirectAttachmentRecoveryBanner: View {
     }
 }
 
+private struct DirectPromptDeliveryRecoveryBanner: View {
+    let isBusy: Bool
+    let isActionAvailable: Bool
+    let hasConfirmedAcceptance: Bool
+    let onAllow: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(hasConfirmedAcceptance ? "Message accepted; cleanup needed" : "Message delivery needs attention")
+                    .font(.subheadline.weight(.semibold))
+                    .accessibilityIdentifier("direct-prompt-uncertainty-banner")
+                Text(hasConfirmedAcceptance
+                    ? "Hermes accepted the message, but Semreh could not clear its local safety record. It will not resend it."
+                    : "Semreh cannot confirm the previous send. It may still appear, and Semreh will not resend it.")
+                    .font(.caption)
+            }
+            Spacer(minLength: 8)
+            if isBusy {
+                ProgressView()
+                    .accessibilityLabel("Checking latest conversation")
+            } else if isActionAvailable {
+                Button("Allow a new message…", action: onAllow)
+                    .font(.caption.weight(.semibold))
+                    .accessibilityIdentifier("direct-prompt-uncertainty-allow-new-message")
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.orange.opacity(0.35), lineWidth: 0.5)
+        }
+        .accessibilityElement(children: .contain)
+    }
+}
+
 private struct DirectAttachmentRecoveryAlertModifier: ViewModifier {
     @Binding var target: DirectAttachmentRecoveryTarget?
     let viewModel: ChatViewModel
@@ -125,6 +166,32 @@ private struct DirectAttachmentRecoveryAlertModifier: ViewModifier {
             }
         } message: {
             Text("This resets only the affected live chat and may interrupt an active response. Saved chat history and your draft will be kept. The old staged upload will not be sent again.")
+        }
+    }
+}
+
+private struct DirectPromptDeliveryRecoveryAlertModifier: ViewModifier {
+    @Binding var target: DirectPromptDeliveryRecoveryTarget?
+    let viewModel: ChatViewModel
+
+    func body(content: Content) -> some View {
+        content.alert(
+            "Allow a New Message?",
+            isPresented: Binding(
+                get: { target != nil },
+                set: { if !$0 { target = nil } }
+            )
+        ) {
+            Button("Cancel", role: .cancel) { target = nil }
+            Button("Allow a new message", role: .destructive) {
+                guard let capturedTarget = target else { return }
+                target = nil
+                Task { _ = await viewModel.abandonDirectPromptDeliveryUncertainty(capturedTarget) }
+            }
+        } message: {
+            Text(viewModel.directPromptDeliveryHasConfirmedAcceptance
+                ? "Hermes accepted your previous message, but Semreh could not clear its local safety record. Semreh will not resend it. After checking the latest conversation, continue only if you want to write a different message."
+                : "Semreh cannot confirm the previous send. It may still appear in this conversation, and Semreh will not resend it. After checking the latest conversation, continue only if you want to write a different message.")
         }
     }
 }
@@ -414,6 +481,7 @@ struct ChatView: View {
     @State private var pendingProfileSelection: ProfileSummary?
     @State private var showProfileNewSessionConfirmation = false
     @State private var attachmentRecoveryConfirmationTarget: DirectAttachmentRecoveryTarget?
+    @State private var promptDeliveryRecoveryConfirmationTarget: DirectPromptDeliveryRecoveryTarget?
     @State private var goalDraft = ""
     @State private var showsGoalSheet = false
     @State private var activeGitSheet: ActiveGitSheet?
@@ -713,14 +781,28 @@ struct ChatView: View {
 
             composerAccessoryStack
 
-            if viewModel.attachmentRecoveryNeedsReset {
-                DirectAttachmentRecoveryBanner(
-                    isBusy: viewModel.attachmentRecoveryIsBusy,
-                    isActionAvailable: viewModel.directAttachmentRecoveryTarget != nil,
-                    onDiscard: {
-                        attachmentRecoveryConfirmationTarget = viewModel.directAttachmentRecoveryTarget
+            if viewModel.attachmentRecoveryNeedsReset || viewModel.directConversationHasPromptDeliveryUncertainty {
+                VStack(spacing: 8) {
+                    if viewModel.attachmentRecoveryNeedsReset {
+                        DirectAttachmentRecoveryBanner(
+                            isBusy: viewModel.attachmentRecoveryIsBusy,
+                            isActionAvailable: viewModel.directAttachmentRecoveryTarget != nil,
+                            onDiscard: {
+                                attachmentRecoveryConfirmationTarget = viewModel.directAttachmentRecoveryTarget
+                            }
+                        )
                     }
-                )
+                    if viewModel.directConversationHasPromptDeliveryUncertainty {
+                        DirectPromptDeliveryRecoveryBanner(
+                            isBusy: viewModel.promptDeliveryRecoveryIsBusy,
+                            isActionAvailable: viewModel.directPromptDeliveryRecoveryTarget != nil,
+                            hasConfirmedAcceptance: viewModel.directPromptDeliveryHasConfirmedAcceptance,
+                            onAllow: {
+                                promptDeliveryRecoveryConfirmationTarget = viewModel.directPromptDeliveryRecoveryTarget
+                            }
+                        )
+                    }
+                }
                 .padding(.horizontal)
                 .padding(.bottom, composerHeight + 8)
                 .zIndex(12)
@@ -1103,6 +1185,10 @@ struct ChatView: View {
             }
             .modifier(DirectAttachmentRecoveryAlertModifier(
                 target: $attachmentRecoveryConfirmationTarget,
+                viewModel: viewModel
+            ))
+            .modifier(DirectPromptDeliveryRecoveryAlertModifier(
+                target: $promptDeliveryRecoveryConfirmationTarget,
                 viewModel: viewModel
             ))
     }

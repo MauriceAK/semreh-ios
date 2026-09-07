@@ -260,6 +260,13 @@ struct DirectAttachmentRecoveryTarget: Equatable {
     let markerToken: UUID?
 }
 
+struct DirectPromptDeliveryRecoveryTarget: Equatable {
+    let server: URL
+    let sessionID: String
+    let profile: String
+    let markerToken: UUID
+}
+
 struct ChatPollingIntervals: Equatable {
     let approvalNanoseconds: UInt64
     let clarificationNanoseconds: UInt64
@@ -283,7 +290,11 @@ enum ActiveStreamRecoveryState: Equatable {
 final class ChatViewModel {
     nonisolated private static let messagePageLimit = 50
     private static let directAmbiguousPromptDeliveryMessage =
-        "Delivery is uncertain. This message was not resent; reconnect to check the transcript."
+        "Semreh cannot confirm the previous send. It was not resent; check the latest conversation before allowing a different message."
+    private static let directConfirmedPromptCleanupMessage =
+        "Hermes accepted the previous message, but Semreh could not clear its local safety record. It was not resent."
+    private static let directPromptRecoveryFailureMessage =
+        "The latest conversation could not be checked. The previous message may still appear, and no message was resent."
     @ObservationIgnored private var incrementalTranscriptMessageIndex: Int?
     @ObservationIgnored private var streamingAssistantMessageIndex: Int?
     @ObservationIgnored private var messageLoadGeneration = 0
@@ -687,6 +698,17 @@ final class ChatViewModel {
     var attachmentRecoveryIsBusy: Bool {
         usesDirectGateway && directConversation?.attachmentRecoveryIsBusy == true
     }
+    var directConversationHasPromptDeliveryUncertainty: Bool {
+        usesDirectGateway && directConversation?.hasAmbiguousPromptDelivery == true
+    }
+    var directPromptDeliveryHasConfirmedAcceptance: Bool {
+        usesDirectGateway && directConversation?.promptDeliveryUncertaintyHasConfirmedAcceptance == true
+    }
+    private func promptDeliveryWarning(for controller: GatewayConversationController?) -> String {
+        controller?.promptDeliveryUncertaintyHasConfirmedAcceptance == true
+            ? Self.directConfirmedPromptCleanupMessage
+            : Self.directAmbiguousPromptDeliveryMessage
+    }
     var directAttachmentRecoveryTarget: DirectAttachmentRecoveryTarget? {
         guard usesDirectGateway,
               let controller = directConversation,
@@ -701,6 +723,28 @@ final class ChatViewModel {
             profile: controller.profile,
             runtimeID: runtimeID,
             markerToken: controller.unresolvedAttachmentMarkerToken
+        )
+    }
+    var directPromptDeliveryRecoveryTarget: DirectPromptDeliveryRecoveryTarget? {
+        guard usesDirectGateway,
+              !directInvalidated,
+              !promptDeliveryRecoveryIsBusy,
+              !isStartingChat,
+              !isUpdatingComposerConfiguration,
+              activeStreamID == nil,
+              !attachmentRecoveryIsBusy,
+              let controller = directConversation,
+              controller.hasAmbiguousPromptDelivery,
+              controller.runState == .idle || controller.runState == .deliveryUnknown,
+              let sessionID = controller.storedID,
+              sessionID == canonicalSessionID,
+              controller.profile == (Self.nonEmpty(currentProfile) ?? "default"),
+              let markerToken = controller.promptDeliveryUncertaintyToken else { return nil }
+        return DirectPromptDeliveryRecoveryTarget(
+            server: server,
+            sessionID: sessionID,
+            profile: controller.profile,
+            markerToken: markerToken
         )
     }
     var localAttachmentPreviews: [String: [String: Data]] { attachmentCoordinator.localAttachmentPreviews }
@@ -792,6 +836,7 @@ final class ChatViewModel {
     @ObservationIgnored private let gatewayRuntimeProvider: (@MainActor (APIClient) async throws -> HermesServerRuntime)?
     @ObservationIgnored private let directAttachmentPreparer: (@Sendable (Data, String, Data?) async throws -> DirectPendingAttachment)?
     @ObservationIgnored private let directAttachmentRecoveryMarkerStore: any DirectGatewayAttachmentRecoveryMarkerStoreProtocol
+    @ObservationIgnored private let promptUncertaintyStore: any DirectPromptDeliveryUncertaintyStoreProtocol
     private var directConversation: GatewayConversationController?
     private var directRuntime: HermesServerRuntime?
     @ObservationIgnored private var directAttachmentTask: Task<GatewayConversationController, Error>?
@@ -807,6 +852,7 @@ final class ChatViewModel {
     private var directAttachmentPreparationStartGeneration = 0
     private var directAttachmentPreparationCount = 0
     private var attachmentRecoveryErrorMessage: String?
+    private(set) var promptDeliveryRecoveryIsBusy = false
     private var directComposerIsEditing = false
     private var directOlderOffset = 0
     private var directHistoryID: String?
@@ -931,7 +977,8 @@ final class ChatViewModel {
         userDefaults: UserDefaults = .standard,
         gatewayRuntimeProvider: (@MainActor (APIClient) async throws -> HermesServerRuntime)? = nil,
         directAttachmentPreparer: (@Sendable (Data, String, Data?) async throws -> DirectPendingAttachment)? = nil,
-        directAttachmentRecoveryMarkerStore: any DirectGatewayAttachmentRecoveryMarkerStoreProtocol = DirectGatewayAttachmentRecoveryMarkerStore()
+        directAttachmentRecoveryMarkerStore: any DirectGatewayAttachmentRecoveryMarkerStoreProtocol = DirectGatewayAttachmentRecoveryMarkerStore(),
+        promptUncertaintyStore: any DirectPromptDeliveryUncertaintyStoreProtocol = DirectPromptDeliveryUncertaintyStore()
     ) {
         sessionID = session.sessionId
         currentWorkspace = session.workspace
@@ -944,6 +991,7 @@ final class ChatViewModel {
         self.gatewayRuntimeProvider = gatewayRuntimeProvider
         self.directAttachmentPreparer = directAttachmentPreparer
         self.directAttachmentRecoveryMarkerStore = directAttachmentRecoveryMarkerStore
+        self.promptUncertaintyStore = promptUncertaintyStore
         #if DEBUG
         self.nativeAuthE2EAutoSubmitController = NativeAuthE2EAutoSubmitController.processController(
             serverURL: server
@@ -1195,7 +1243,8 @@ final class ChatViewModel {
                 client: self.client,
                 storedID: self.canonicalSessionID,
                 profile: Self.nonEmpty(self.currentProfile) ?? "default",
-                recoveryMarkerStore: self.directAttachmentRecoveryMarkerStore
+                recoveryMarkerStore: self.directAttachmentRecoveryMarkerStore,
+                promptUncertaintyStore: self.promptUncertaintyStore
             )
             controller.isVisible = self.directVisible
             controller.isEditing = self.directComposerIsEditing
@@ -1211,7 +1260,7 @@ final class ChatViewModel {
                 self.directBlockingInteractionErrorMessage = nil
                 self.directBlockingInteractionErrorIdentity = nil
                 if controller.hasAmbiguousPromptDelivery {
-                    self.sendErrorMessage = Self.directAmbiguousPromptDeliveryMessage
+                    self.sendErrorMessage = self.promptDeliveryWarning(for: controller)
                 }
             }
             controller.onReasoningConfiguration = { [weak self, weak controller] configuration in
@@ -1409,7 +1458,7 @@ final class ChatViewModel {
             return false
         }
         guard directConversation?.hasAmbiguousPromptDelivery != true else {
-            sendErrorMessage = Self.directAmbiguousPromptDeliveryMessage
+            sendErrorMessage = promptDeliveryWarning(for: directConversation)
             return false
         }
         guard directConversation?.runState == nil || directConversation?.runState == .idle else { return false }
@@ -1498,11 +1547,15 @@ final class ChatViewModel {
             }
             rollbackOptimisticMessage(id: localID)
             return false
+        } catch is DirectPromptDeliveryUncertaintyError {
+            rollbackOptimisticMessage(id: localID)
+            sendErrorMessage = "Semreh could not save the delivery safety state, so the message was not sent. Your draft was kept."
+            return false
         } catch is CancellationError {
             if directConversation?.hasAmbiguousPromptDelivery == true
                 || directConversation?.runState == .deliveryUnknown {
                 removeDirectPendingAttachments(ids: attachmentIDs)
-                sendErrorMessage = Self.directAmbiguousPromptDeliveryMessage
+                sendErrorMessage = promptDeliveryWarning(for: directConversation)
                 return true
             }
             rollbackOptimisticMessage(id: localID)
@@ -1511,10 +1564,10 @@ final class ChatViewModel {
             lastError = error
             if directConversation?.hasAmbiguousPromptDelivery == true
                 || directConversation?.runState == .deliveryUnknown {
-                // Keep the staged row as uncertain. Restoring the composer would
-                // invite an accidental duplicate; a canonical reload resolves it.
+                // Keep the staged row as uncertain. Canonical history is refreshed,
+                // but only explicit local abandonment unlocks a different message.
                 removeDirectPendingAttachments(ids: attachmentIDs)
-                sendErrorMessage = Self.directAmbiguousPromptDeliveryMessage
+                sendErrorMessage = promptDeliveryWarning(for: directConversation)
                 return true
             }
             rollbackOptimisticMessage(id: localID)
@@ -1643,7 +1696,7 @@ final class ChatViewModel {
             if let terminalError = terminal.error {
                 sendErrorMessage = terminalError
             } else if directConversation?.hasAmbiguousPromptDelivery == true {
-                sendErrorMessage = Self.directAmbiguousPromptDeliveryMessage
+                sendErrorMessage = promptDeliveryWarning(for: directConversation)
             } else {
                 sendErrorMessage = nil
             }
@@ -2898,6 +2951,49 @@ final class ChatViewModel {
         } catch {
             lastError = error
             attachmentRecoveryErrorMessage = String(localized: "The pending upload could not be reset. Saved chat history was kept; try again.")
+            return false
+        }
+    }
+
+    /// After explicit confirmation, refreshes the canonical conversation and
+    /// removes only the matching local uncertainty barrier. It never resends the
+    /// prior prompt, changes the draft, closes the runtime, or mutates history.
+    func abandonDirectPromptDeliveryUncertainty(_ target: DirectPromptDeliveryRecoveryTarget) async -> Bool {
+        guard usesDirectGateway,
+              !directInvalidated,
+              !promptDeliveryRecoveryIsBusy,
+              target.server == server,
+              target.sessionID == canonicalSessionID,
+              let controller = directConversation,
+              controller.storedID == target.sessionID,
+              controller.profile == target.profile,
+              controller.promptDeliveryUncertaintyToken == target.markerToken else {
+            return false
+        }
+
+        promptDeliveryRecoveryIsBusy = true
+        defer { promptDeliveryRecoveryIsBusy = false }
+        do {
+            try await controller.abandonPromptDeliveryUncertainty(expectedToken: target.markerToken)
+            guard !directInvalidated,
+                  directConversation === controller,
+                  target.server == server,
+                  target.sessionID == canonicalSessionID,
+                  controller.storedID == target.sessionID,
+                  controller.profile == target.profile,
+                  controller.hasAmbiguousPromptDelivery == false else {
+                return false
+            }
+            if sendErrorMessage == Self.directAmbiguousPromptDeliveryMessage
+                || sendErrorMessage == Self.directConfirmedPromptCleanupMessage
+                || sendErrorMessage == Self.directPromptRecoveryFailureMessage {
+                sendErrorMessage = nil
+            }
+            return true
+        } catch {
+            guard !directInvalidated, directConversation === controller else { return false }
+            lastError = error
+            sendErrorMessage = Self.directPromptRecoveryFailureMessage
             return false
         }
     }

@@ -23,6 +23,12 @@ this sheet does not invent contracts or mark unexecuted checks passed.
 
 ## Current bounded decisions — September 6
 
+Verified September7 checkpoint: durable exact-chat warning/explicit abandonment
+passes production login/link-open/relaunch/Cancel/fresh-send gate (UI-v7), full
+native2223/0/12opt-in skips and Python47/0. Details/failures in slice3-verification.
+Cold compressed-tip alias discovery and the remaining physical/proxy matrix are
+not passed by this checkpoint; retain open release gates below.
+
 - Continue without routine owner check-ins; record choices here. Hard blockers,
   personal-state access, publication and physical acceptance still require the owner.
 - Synthetic approval and secret-cancellation fixture expansion is approved in the
@@ -85,6 +91,18 @@ this sheet does not invent contracts or mark unexecuted checks passed.
   expiry may clear cookies; generic probe failures must not log out. This adds one
   bounded protected read only on expiry, not a new auth store/framework or a broad
   callback rewrite. It addresses the race, not a proven cause of UIv1's failure.
+- September7: retain ambiguous-send metadata across controller/process recreation
+  using the existing atomic app-support marker convention, keyed by durable chat
+  identity rather than runtime. No prompt bytes, secrets or new state framework.
+  Persist before dispatch; clear only definite non-dispatch/rejection or matching
+  ACK. Canonical idle, terminal events and text matches are not delivery proof.
+  An explicit local abandonment action may allow a fresh user message after
+  canonical refresh/idle, with wording that the previous message may still appear.
+  It never retries, restores/resends the old prompt, closes a runtime or declares
+  acceptance resolved. Root selected this over a permanent chat lock under the
+  user's reasonable-decision autonomy; it is not a waiver/pass of objective
+  correlation gates or authority for a backend patch. Preserve the stock limitation
+  and present the behavior for physical/product acceptance.
 
 ## Work packages
 

@@ -124,6 +124,8 @@ final class SessionListViewModel {
 
     private(set) var remoteContentSearchSessionIDs: [String] = []
     private var activeRemoteSearchQuery: String?
+    private var activeRemoteSearchProfile: String?
+    private var remoteSearchGeneration = 0
 
     private let client: APIClient
     private let sessionMutator: SessionMutator
@@ -606,7 +608,11 @@ final class SessionListViewModel {
         debounceNanoseconds: UInt64 = 350_000_000
     ) async {
         let query = Self.normalizedSearchQuery(rawQuery)
+        let profile = Self.nonEmpty(activeProfileName) ?? "default"
+        remoteSearchGeneration &+= 1
+        let generation = remoteSearchGeneration
         activeRemoteSearchQuery = query
+        activeRemoteSearchProfile = profile
         remoteContentSearchSessionIDs = []
         searchErrorMessage = nil
 
@@ -620,17 +626,43 @@ final class SessionListViewModel {
                 try await Task.sleep(nanoseconds: debounceNanoseconds)
             }
 
-            guard !Task.isCancelled, activeRemoteSearchQuery == query else { return }
+            guard !Task.isCancelled,
+                  remoteSearchGeneration == generation,
+                  activeRemoteSearchQuery == query,
+                  activeRemoteSearchProfile == profile,
+                  (Self.nonEmpty(activeProfileName) ?? "default") == profile
+            else { return }
 
             isSearchingRemoteSessions = true
-            let response = try await client.searchSessions(query: query, content: content, depth: depth)
+            // The verified stock search route has no content/depth query
+            // flags. `content` remains source-compatible for existing callers;
+            // it controls which returned match kinds are admitted below.
+            _ = depth
+            let response = try await client.directSearchSessions(
+                query: query,
+                profile: profile,
+                limit: 20
+            )
 
-            guard !Task.isCancelled, activeRemoteSearchQuery == query else { return }
+            guard !Task.isCancelled,
+                  remoteSearchGeneration == generation,
+                  activeRemoteSearchQuery == query,
+                  activeRemoteSearchProfile == profile,
+                  (Self.nonEmpty(activeProfileName) ?? "default") == profile
+            else { return }
 
-            remoteContentSearchSessionIDs = contentMatchIDs(from: response.sessions ?? [])
+            remoteContentSearchSessionIDs = remoteSearchIDs(
+                from: response.results ?? [],
+                content: content,
+                profile: profile
+            )
             isSearchingRemoteSessions = false
         } catch {
-            guard activeRemoteSearchQuery == query else { return }
+            guard remoteSearchGeneration == generation,
+                  activeRemoteSearchQuery == query,
+                  activeRemoteSearchProfile == profile,
+                  (Self.nonEmpty(activeProfileName) ?? "default") == profile
+            else { return }
 
             isSearchingRemoteSessions = false
             guard !isCancellationError(error) else { return }
@@ -642,7 +674,9 @@ final class SessionListViewModel {
     }
 
     func clearSearchResults() {
+        remoteSearchGeneration &+= 1
         activeRemoteSearchQuery = nil
+        activeRemoteSearchProfile = nil
         remoteContentSearchSessionIDs = []
         searchErrorMessage = nil
         isSearchingRemoteSessions = false
@@ -685,8 +719,25 @@ final class SessionListViewModel {
     func loadSessionForDeepLink(id rawSessionID: String, modelContext: ModelContext? = nil) async -> SessionSummary? {
         let sessionID = rawSessionID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !sessionID.isEmpty else { return nil }
+        guard !confirmedSessionDeletionIDs.contains(sessionID),
+              pendingSessionDeletions[sessionID] == nil
+        else { return nil }
 
-        if let loadedSession = sessions.first(where: { $0.sessionId == sessionID }) {
+        let requestedProfile = Self.nonEmpty(activeProfileName) ?? "default"
+        let generation = loadGeneration
+        let requestedServer = server
+        let isCurrentRequest: () -> Bool = { [weak self] in
+            guard let self else { return false }
+            return !Task.isCancelled
+                && self.loadGeneration == generation
+                && self.server == requestedServer
+                && (Self.nonEmpty(self.activeProfileName) ?? "default") == requestedProfile
+        }
+
+        if let loadedSession = sessions.first(where: {
+            $0.sessionId == sessionID
+                && (Self.nonEmpty($0.profile) ?? "default") == requestedProfile
+        }) {
             return loadedSession
         }
 
@@ -696,7 +747,10 @@ final class SessionListViewModel {
         if let modelContext {
             do {
                 if let cachedSession = try CacheStore.cachedSessions(serverURL: server, in: modelContext)
-                    .first(where: { $0.sessionId == sessionID }) {
+                    .first(where: {
+                        $0.sessionId == sessionID
+                            && (Self.nonEmpty($0.profile) ?? "default") == requestedProfile
+                    }) {
                     return cachedSession
                 }
             } catch {
@@ -705,13 +759,17 @@ final class SessionListViewModel {
         }
 
         do {
-            let response = try await client.session(id: sessionID, includeMessages: false, messageLimit: nil)
-            guard let sessionDetail = response.session else {
-                actionErrorMessage = String(localized: "The server did not return the linked session.")
-                return nil
-            }
+            let session = try await client.directSessionDetail(
+                sessionID: sessionID,
+                profile: requestedProfile
+            )
+            guard isCurrentRequest(),
+                  session.sessionId == sessionID,
+                  (Self.nonEmpty(session.profile) ?? requestedProfile) == requestedProfile,
+                  !confirmedSessionDeletionIDs.contains(sessionID),
+                  pendingSessionDeletions[sessionID] == nil
+            else { return nil }
 
-            let session = SessionSummary(from: sessionDetail)
             if session.archived != true,
                session.shouldAppearInSessionList,
                !sessions.contains(where: { $0.sessionId == session.sessionId }) {
@@ -728,6 +786,8 @@ final class SessionListViewModel {
 
             return session
         } catch {
+            guard isCurrentRequest() else { return nil }
+            guard !isCancellationError(error) else { return nil }
             lastError = error
             actionErrorMessage = error.localizedDescription
             return nil
@@ -1297,9 +1357,17 @@ final class SessionListViewModel {
         }
     }
 
-    private func contentMatchIDs(from sessions: [SessionSummary]) -> [String] {
+    private func remoteSearchIDs(
+        from results: [DirectHermesSessionSearchResult],
+        content: Bool,
+        profile: String
+    ) -> [String] {
         let locallyVisibleSessionIDs = Set(self.sessions.compactMap { session -> String? in
-            guard session.archived != true, let sessionID = session.sessionId, !sessionID.isEmpty else {
+            guard session.archived != true,
+                  (Self.nonEmpty(session.profile) ?? "default") == profile,
+                  let sessionID = session.sessionId,
+                  !sessionID.isEmpty
+            else {
                 return nil
             }
 
@@ -1307,9 +1375,13 @@ final class SessionListViewModel {
         })
         var seenSessionIDs = Set<String>()
 
-        return sessions.compactMap { session in
-            guard session.matchType?.lowercased() == "content",
-                  let sessionID = session.sessionId,
+        return results.compactMap { result in
+            // The stock route uses a null role for direct session-ID hits. A
+            // content-disabled caller keeps those exact ID matches but drops
+            // FTS message hits; no lineage fallback is safe here.
+            guard content || result.role == nil,
+                  result.archived != true,
+                  let sessionID = Self.nonEmpty(result.sessionID),
                   locallyVisibleSessionIDs.contains(sessionID),
                   !seenSessionIDs.contains(sessionID)
             else {
@@ -1427,6 +1499,15 @@ final class SessionListViewModel {
         let profileName = response.effectiveDefaultProfileName
         let profile = response.profile(matching: profileName) ?? fallbackProfile
 
+        if activeProfileName != profileName {
+            // A response for the previous profile must never repopulate a
+            // same-query search after a profile switch.
+            remoteSearchGeneration &+= 1
+            activeRemoteSearchQuery = nil
+            activeRemoteSearchProfile = nil
+            remoteContentSearchSessionIDs = []
+            isSearchingRemoteSessions = false
+        }
         activeProfileName = profileName
         activeProfileDisplayName = response.displayName(for: profileName)
             ?? profile?.displayName

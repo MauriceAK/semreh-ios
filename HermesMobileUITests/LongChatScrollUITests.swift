@@ -34,6 +34,10 @@ final class LongChatScrollUITests: XCTestCase {
     private let blockingSecretAcknowledgement = "SEMREH_SLICE3_BLOCKING_ACK_SECRET_CANCEL"
     private let tuiSeedMarker = "SEMREH_TUI_CROSS_CLIENT_1"
     private let slice1Acknowledgement = "SEMREH_SLICE1_ACK"
+    private let uncertaintyDelayedPromptPrefix = "SEMREH_INTERRUPT_FIXTURE SEMREH_SLICE3_PRE_ACK_LOSS_"
+    private let uncertaintyNewPromptPrefix = "SEMREH_SLICE3_UNCERTAINTY_NEW_"
+    private let uncertaintyBannerIdentifier = "direct-prompt-uncertainty-banner"
+    private let uncertaintyAllowIdentifier = "direct-prompt-uncertainty-allow-new-message"
 
     func testTenThousandRowChatScrollsAndScrollToLatestReachesEndMarker() {
         continueAfterFailure = false
@@ -373,19 +377,41 @@ final class LongChatScrollUITests: XCTestCase {
         let password = app.secureTextFields["onboarding-password"]
         XCTAssertTrue(username.waitForExistence(timeout: 30), "The approved HTTPS origin must advertise username auth.")
         XCTAssertTrue(password.waitForExistence(timeout: 5))
-        username.tap()
-        username.typeText(credentials.username)
+        replacePublicText(username, with: credentials.username, app: app)
         pasteSecret(credentials.password, into: password, app: app)
         app.buttons["Connect"].tap()
         dismissKnownPasswordSavePrompt(app: app)
+
+        // The shell remembers the selected tab across normal sign-out/login.
+        // Successful authentication need not land on Sessions automatically.
+        if environment["SEMREH_SLICE3_UNCERTAINTY_UI"] == "1" {
+            guard stockBackend else {
+                XCTFail("Slice 3 uncertainty UI requires the pinned stock backend.")
+                return
+            }
+            guard let storedID = environment["SEMREH_SLICE2_TUI_CREATED_SESSION_ID"],
+                  storedID.range(of: "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$", options: .regularExpression) != nil,
+                  let seedMarker = environment["SEMREH_SLICE3_RELAUNCH_SEED_TEXT"],
+                  seedMarker.range(of: "^SEMREH_SLICE3_PRE_ACK_SEED_[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$", options: .regularExpression) != nil
+            else {
+                XCTFail("Slice 3 uncertainty UI requires the exact pre-ACK seed session and marker.")
+                return
+            }
+            try await waitForPromptUncertaintyEntryReadiness(app: app, seedMarker: seedMarker)
+            try await exerciseOptInPromptUncertainty(
+                app: app,
+                storedID: storedID,
+                seedMarker: seedMarker,
+                credentials: credentials
+            )
+            return
+        }
 
         // A persisted deep link can legitimately restore an authenticated chat
         // detail instead of the shell root. Return through that known chat's
         // navigation control before asserting the shell tabs.
         waitForPostLoginDestination(app: app)
 
-        // The shell remembers the selected tab across normal sign-out/login.
-        // Successful authentication need not land on Sessions automatically.
         if environment["SEMREH_SLICE3_APP_KILL_UI"] == "1" {
             guard stockBackend else {
                 XCTFail("Slice 3 app-kill UI requires the pinned stock backend.")
@@ -521,6 +547,128 @@ final class LongChatScrollUITests: XCTestCase {
                           message: "The TUI-created assistant reply must also be visible.")
             attachScreenshot(named: "live-tui-created-session-in-semreh")
         }
+    }
+
+    @MainActor
+    private func exerciseOptInPromptUncertainty(
+        app: XCUIApplication,
+        storedID: String,
+        seedMarker: String,
+        credentials: DisposableCredentials
+    ) async throws {
+        let observer = try await RelaunchCanonicalObserver(
+            origin: try XCTUnwrap(URL(string: approvedLiveOrigin)),
+            credentials: credentials
+        )
+        defer { observer.invalidate() }
+
+        try openPromptUncertaintySeedIfNeeded(app: app, storedID: storedID, seedMarker: seedMarker)
+        let baseline = try await waitForCanonicalTranscript(
+            observer: observer,
+            storedID: storedID,
+            timeout: 15
+        ) { page in
+            self.matchesPromptUncertaintyBaseline(page, storedID: storedID, seedMarker: seedMarker)
+        }
+        try await assertPromptUncertaintyTranscriptVisible(app: app, seedMarker: seedMarker)
+        assertComposerEmpty(app: app)
+        _ = try requirePromptUncertaintyControls(
+            app: app,
+            failureScreenshot: "slice3-uncertainty-warning-missing-before-relaunch",
+            context: "The fresh fixture must expose its uncertainty warning before relaunch."
+        )
+        attachScreenshot(named: "slice3-uncertainty-before-relaunch")
+
+        app.terminate()
+        app.launchArguments = []
+        app.launch()
+        try await waitForPromptUncertaintyEntryReadiness(app: app, seedMarker: seedMarker)
+        try openPromptUncertaintySeedIfNeeded(app: app, storedID: storedID, seedMarker: seedMarker)
+        try await assertPromptUncertaintyTranscriptVisible(app: app, seedMarker: seedMarker)
+        assertComposerEmpty(app: app)
+        attachScreenshot(named: "slice3-uncertainty-after-relaunch")
+        let afterRelaunch = try await observer.transcript(storedID: storedID)
+        try assertPromptUncertaintyBaseline(afterRelaunch, storedID: storedID, seedMarker: seedMarker)
+        XCTAssertTrue(afterRelaunch.rows.elementsEqual(baseline.rows, by: canonicalRowsEqual),
+                      "Relaunch must preserve the exact four canonical seed rows.")
+
+        let (warning, allowNewMessage) = try requirePromptUncertaintyControls(
+            app: app,
+            failureScreenshot: "slice3-uncertainty-warning-not-ready",
+            context: "The recreated chat must expose its visible uncertainty heading and allow-new-message action."
+        )
+        allowNewMessage.tap()
+
+        let confirmation = app.alerts["Allow a New Message?"]
+        assertHittable(confirmation, timeout: 10,
+                       message: "Allow-new-message must require an explicit confirmation.")
+        XCTAssertTrue(confirmation.buttons["Allow a new message"].exists,
+                      "The confirmation must name the explicit new-message action.")
+        XCTAssertTrue(confirmation.buttons["Cancel"].exists,
+                      "The allow-new-message confirmation must expose Cancel.")
+        confirmation.buttons["Cancel"].tap()
+        XCTAssertTrue(warning.waitForExistence(timeout: 10),
+                      "Cancelling the confirmation must preserve the uncertainty warning.")
+        assertHittable(allowNewMessage, timeout: 10,
+                       message: "Cancelling the confirmation must preserve the recovery action.")
+        let afterConfirmationCancel = try await observer.transcript(storedID: storedID)
+        try assertPromptUncertaintyBaseline(
+            afterConfirmationCancel,
+            storedID: storedID,
+            seedMarker: seedMarker
+        )
+        XCTAssertTrue(afterConfirmationCancel.rows.elementsEqual(baseline.rows, by: canonicalRowsEqual),
+                      "Cancelling the confirmation must preserve the exact canonical seed transcript.")
+        attachScreenshot(named: "slice3-uncertainty-confirmation-cancelled")
+
+        allowNewMessage.tap()
+        let confirmed = app.alerts["Allow a New Message?"]
+        assertHittable(confirmed, timeout: 10,
+                       message: "The second allow-new-message attempt must still require confirmation.")
+        XCTAssertTrue(confirmed.buttons["Allow a new message"].exists)
+        confirmed.buttons["Allow a new message"].tap()
+
+        let cleared = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"),
+            object: warning
+        )
+        await fulfillment(of: [cleared], timeout: 20)
+        XCTAssertFalse(warning.exists, "The uncertainty warning must clear after explicit confirmation.")
+        XCTAssertFalse(allowNewMessage.exists, "The uncertainty action must clear after explicit confirmation.")
+        assertComposerEmpty(app: app)
+
+        let afterAbandon = try await observer.transcript(storedID: storedID)
+        try assertPromptUncertaintyBaseline(afterAbandon, storedID: storedID, seedMarker: seedMarker)
+        XCTAssertTrue(afterAbandon.rows.elementsEqual(baseline.rows, by: canonicalRowsEqual),
+                      "Allowing a fresh message must not mutate the canonical seed transcript.")
+        attachScreenshot(named: "slice3-uncertainty-after-abandon")
+
+        let newPrompt = uncertaintyNewPromptPrefix + UUID().uuidString
+        sendLivePrompt(newPrompt, app: app, screenshotPrefix: "slice3-uncertainty-new-message")
+        let final = try await waitForCanonicalTranscript(
+            observer: observer,
+            storedID: storedID,
+            timeout: 30
+        ) { page in
+            self.matchesPromptUncertaintyFinal(
+                page,
+                storedID: storedID,
+                seedMarker: seedMarker,
+                newPrompt: newPrompt
+            )
+        }
+        try assertPromptUncertaintyFinal(
+            final,
+            storedID: storedID,
+            seedMarker: seedMarker,
+            newPrompt: newPrompt
+        )
+        XCTAssertTrue(final.rows.prefix(baseline.rows.count).elementsEqual(baseline.rows, by: canonicalRowsEqual),
+                      "The fresh turn must preserve every original canonical row and ID.")
+        waitForIdle(app: app)
+        assertComposerEmpty(app: app)
+        attachPlainText(newPrompt, named: "slice3-uncertainty-new-marker")
+        attachScreenshot(named: "slice3-uncertainty-new-message-complete")
     }
 
     @MainActor
@@ -786,6 +934,199 @@ final class LongChatScrollUITests: XCTestCase {
             timeout: 15,
             message: "The pre-seeded session must expose its terminal ACK (\(context))."
         )
+    }
+
+    @MainActor
+    private func waitForPromptUncertaintyEntryReadiness(
+        app: XCUIApplication,
+        seedMarker: String
+    ) async throws {
+        let seed = app.staticTexts.matching(NSPredicate(format: "label == %@", seedMarker)).firstMatch
+        let sessions = app.buttons["Sessions"]
+        let knownBackButton = app.navigationBars.buttons["BackButton"]
+        let welcome = app.staticTexts["Control Semreh from iPhone or iPad."]
+        let serverField = app.textFields["onboarding-server-url"]
+        let deadline = Date().addingTimeInterval(45)
+        while Date() < deadline {
+            let onboardingIsAbsent = !welcome.exists && !serverField.exists
+            if onboardingIsAbsent,
+               (seed.exists && seed.isHittable
+                || sessions.exists && sessions.isHittable
+                || knownBackButton.exists && knownBackButton.isHittable) {
+                attachScreenshot(named: "slice3-uncertainty-entry-ready")
+                return
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        attachScreenshot(named: "slice3-uncertainty-entry-not-ready")
+        XCTFail("Uncertainty recovery login must reach the exact seed, the Sessions shell, or a known restored chat without onboarding.")
+        throw NSError(domain: "SemrehUncertaintyUI", code: 2, userInfo: [
+            NSLocalizedDescriptionKey: "The uncertainty recovery entry point was not ready; stopping before navigation assertions."
+        ])
+    }
+
+    @MainActor
+    private func openPromptUncertaintySeedIfNeeded(
+        app: XCUIApplication,
+        storedID: String,
+        seedMarker: String
+    ) throws {
+        let seed = app.staticTexts.matching(NSPredicate(format: "label == %@", seedMarker)).firstMatch
+        // Normal login/relaunch may already restore this exact synthetic chat.
+        // XCUIApplication.open can launch a new process; don't add that distinct
+        // cold-URL boundary to a test of an already-restored conversation.
+        attachScreenshot(named: "slice3-uncertainty-before-ensure-chat")
+        if seed.exists && seed.isHittable { return }
+        let backButton = app.navigationBars.buttons["BackButton"]
+        if backButton.exists && backButton.isHittable {
+            let restoredChat = app.otherElements.matching(
+                NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
+            ).firstMatch
+            backButton.tap()
+            let leftRestoredChat = XCTNSPredicateExpectation(
+                predicate: NSPredicate(format: "exists == false"),
+                object: restoredChat
+            )
+            wait(for: [leftRestoredChat], timeout: 15)
+            let sessions = app.buttons["Sessions"]
+            guard !restoredChat.exists,
+                  sessions.waitForExistence(timeout: 15), sessions.isHittable else {
+                attachScreenshot(named: "slice3-uncertainty-restored-chat-back-failed")
+                XCTFail("The known restored chat must navigate back to the Sessions shell before opening a different seed.")
+                throw NSError(domain: "SemrehUncertaintyUI", code: 4, userInfo: [
+                    NSLocalizedDescriptionKey: "The restored chat could not return to Sessions; stopping before the seed URL launch."
+                ])
+            }
+        }
+        try openSeededSession(app: app, storedID: storedID)
+        attachScreenshot(named: "slice3-uncertainty-after-open-url")
+    }
+
+    @MainActor
+    private func requirePromptUncertaintyControls(
+        app: XCUIApplication,
+        failureScreenshot: String,
+        context: String
+    ) throws -> (warning: XCUIElement, allowNewMessage: XCUIElement) {
+        let warning = app.staticTexts[uncertaintyBannerIdentifier]
+        let allowNewMessage = app.buttons[uncertaintyAllowIdentifier]
+        guard warning.waitForExistence(timeout: 15), warning.isHittable,
+              allowNewMessage.waitForExistence(timeout: 10), allowNewMessage.isHittable else {
+            attachScreenshot(named: failureScreenshot)
+            XCTFail(context)
+            throw NSError(domain: "SemrehUncertaintyUI", code: 3, userInfo: [
+                NSLocalizedDescriptionKey: "The uncertainty warning controls were not ready; stopping before recovery actions."
+            ])
+        }
+        return (warning, allowNewMessage)
+    }
+
+    @MainActor
+    private func assertPromptUncertaintyTranscriptVisible(
+        app: XCUIApplication,
+        seedMarker: String
+    ) async throws {
+        let seed = app.staticTexts.matching(NSPredicate(format: "label == %@", seedMarker)).firstMatch
+        let delayed = app.staticTexts.matching(
+            NSPredicate(format: "label BEGINSWITH[c] %@", uncertaintyDelayedPromptPrefix)
+        ).firstMatch
+        let visible = NSPredicate(format: "exists == true AND hittable == true")
+        await fulfillment(of: [
+            XCTNSPredicateExpectation(predicate: visible, object: seed),
+            XCTNSPredicateExpectation(predicate: visible, object: delayed)
+        ], timeout: 15)
+        guard seed.exists && seed.isHittable && delayed.exists && delayed.isHittable else {
+            attachScreenshot(named: "slice3-uncertainty-missing-seed")
+            throw NSError(domain: "SemrehUncertaintyUI", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "The exact uncertainty chat was not visible; stopping before recovery actions."
+            ])
+        }
+    }
+
+    @MainActor
+    private func assertComposerEmpty(app: XCUIApplication) {
+        let composer = app.textViews.matching(
+            NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
+        ).firstMatch
+        XCTAssertTrue(composer.waitForExistence(timeout: 15),
+                      "The uncertainty chat must expose its production composer.")
+        let value = (composer.value as? String) ?? ""
+        XCTAssertTrue(value.isEmpty || value == composer.placeholderValue,
+                      "The uncertainty recovery action must leave the composer empty.")
+    }
+
+    @MainActor
+    private func matchesPromptUncertaintyBaseline(
+        _ page: RelaunchCanonicalTranscript,
+        storedID: String,
+        seedMarker: String
+    ) -> Bool {
+        guard page.sessionID == storedID, page.rows.count == 4 else { return false }
+        let durableIDs = page.rows.compactMap { canonicalDurableRowID($0["id"]) }
+        guard durableIDs.count == 4, Set(durableIDs).count == 4 else { return false }
+        let roles = page.rows.compactMap { $0["role"] as? String }
+        let texts = page.rows.compactMap(canonicalRowText)
+        guard roles == ["user", "assistant", "user", "assistant"], texts.count == 4 else {
+            return false
+        }
+        return texts[0] == seedMarker
+            && texts[1] == slice1Acknowledgement
+            && texts[2].hasPrefix(uncertaintyDelayedPromptPrefix)
+            && texts[3] == slice1Acknowledgement
+    }
+
+    @MainActor
+    private func assertPromptUncertaintyBaseline(
+        _ page: RelaunchCanonicalTranscript,
+        storedID: String,
+        seedMarker: String
+    ) throws {
+        guard matchesPromptUncertaintyBaseline(page, storedID: storedID, seedMarker: seedMarker) else {
+            throw NSError(
+                domain: "LongChatScrollUITests",
+                code: 11,
+                userInfo: [NSLocalizedDescriptionKey: "The uncertainty seed transcript must contain exactly two canonical user/assistant pairs."]
+            )
+        }
+    }
+
+    @MainActor
+    private func matchesPromptUncertaintyFinal(
+        _ page: RelaunchCanonicalTranscript,
+        storedID: String,
+        seedMarker: String,
+        newPrompt: String
+    ) -> Bool {
+        guard page.sessionID == storedID, page.rows.count == 6 else { return false }
+        let durableIDs = page.rows.compactMap { canonicalDurableRowID($0["id"]) }
+        guard durableIDs.count == 6, Set(durableIDs).count == 6 else { return false }
+        let roles = page.rows.compactMap { $0["role"] as? String }
+        let texts = page.rows.compactMap(canonicalRowText)
+        guard roles == ["user", "assistant", "user", "assistant", "user", "assistant"], texts.count == 6 else {
+            return false
+        }
+        return texts[0] == seedMarker
+            && texts[1] == slice1Acknowledgement
+            && texts[2].hasPrefix(uncertaintyDelayedPromptPrefix)
+            && texts[3] == slice1Acknowledgement
+            && texts[4] == newPrompt
+            && texts[5] == slice1Acknowledgement
+    }
+
+    @MainActor
+    private func assertPromptUncertaintyFinal(
+        _ page: RelaunchCanonicalTranscript,
+        storedID: String,
+        seedMarker: String,
+        newPrompt: String
+    ) throws {
+        guard matchesPromptUncertaintyFinal(page, storedID: storedID, seedMarker: seedMarker, newPrompt: newPrompt) else {
+            throw NSError(
+                domain: "LongChatScrollUITests",
+                code: 12,
+                userInfo: [NSLocalizedDescriptionKey: "The uncertainty new-message turn must contain exactly three canonical user/assistant pairs."]
+            )
+        }
     }
 
     @MainActor

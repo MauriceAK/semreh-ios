@@ -207,9 +207,10 @@ final class GatewayAttachmentRecoveryLifecycleTests: XCTestCase {
     private func makeController(
         runtime: HermesServerRuntime,
         storedID: String? = nil,
-        store: DirectGatewayAttachmentRecoveryMarkerStore
+        store: DirectGatewayAttachmentRecoveryMarkerStore,
+        promptUncertaintyStore: any DirectPromptDeliveryUncertaintyStoreProtocol = InMemoryDirectPromptDeliveryUncertaintyStore()
     ) -> GatewayConversationController {
-        GatewayConversationController(runtime: runtime, storedID: storedID, recoveryMarkerStore: store) { id, _, _, _ in
+        GatewayConversationController(runtime: runtime, storedID: storedID, recoveryMarkerStore: store, promptUncertaintyStore: promptUncertaintyStore) { id, _, _, _ in
             DirectHermesTranscriptPage(sessionID: id, messages: [], pagination: nil)
         }
     }

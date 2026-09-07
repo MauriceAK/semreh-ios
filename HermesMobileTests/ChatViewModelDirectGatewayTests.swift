@@ -4,6 +4,151 @@ import XCTest
 
 @MainActor
 final class ChatViewModelDirectGatewayTests: APIClientTestCase {
+    func testPromptUncertaintyMarkerWriteFailureIsDefiniteNondispatch() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let store = InMemoryDirectPromptDeliveryUncertaintyStore()
+        store.failWrite = true
+        let vm = makeViewModel(
+            client: makeExistingComposerClient(requests: ChatDirectRequestRecorder()),
+            runtime: runtime,
+            sessionID: "durable-1",
+            promptUncertaintyStore: store
+        )
+        await vm.loadMessages()
+
+        let sent = await vm.sendMessage("keep this draft")
+
+        XCTAssertFalse(sent)
+        XCTAssertFalse(vm.messages.contains { $0.role == "user" && $0.content == "keep this draft" })
+        XCTAssertTrue(fake.calls().filter { $0.method == "prompt.submit" }.isEmpty)
+        XCTAssertEqual(
+            vm.sendErrorMessage,
+            "Semreh could not save the delivery safety state, so the message was not sent. Your draft was kept."
+        )
+
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testDefinitePromptRejectionCleanupFailurePreservesDraftSemantics() async throws {
+        let fake = ChatDirectFakeTransport()
+        fake.setBlockingError("prompt.submit", .server(
+            code: 4001,
+            message: "rejected",
+            data: nil,
+            method: "prompt.submit",
+            requestID: "rejected-request",
+            server: "fixture"
+        ))
+        let runtime = try makeRuntime(fake)
+        let store = InMemoryDirectPromptDeliveryUncertaintyStore()
+        store.failRemove = true
+        let vm = makeViewModel(
+            client: makeExistingComposerClient(requests: ChatDirectRequestRecorder()),
+            runtime: runtime,
+            sessionID: "durable-1",
+            promptUncertaintyStore: store
+        )
+        await vm.loadMessages()
+
+        let sent = await vm.sendMessage("rejected draft")
+
+        XCTAssertFalse(sent)
+        XCTAssertFalse(vm.messages.contains { $0.role == "user" && $0.content == "rejected draft" })
+        XCTAssertEqual(fake.calls().filter { $0.method == "prompt.submit" }.count, 1)
+        XCTAssertEqual(
+            vm.sendErrorMessage,
+            "Semreh could not save the delivery safety state, so the message was not sent. Your draft was kept."
+        )
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testAcknowledgedPromptCleanupFailureUsesConfirmedAcceptancePresentation() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let store = InMemoryDirectPromptDeliveryUncertaintyStore()
+        store.failRemove = true
+        let vm = makeViewModel(
+            client: makeExistingComposerClient(requests: ChatDirectRequestRecorder()),
+            runtime: runtime,
+            sessionID: "durable-1",
+            promptUncertaintyStore: store
+        )
+        await vm.loadMessages()
+
+        let sent = await vm.sendMessage("accepted message")
+
+        XCTAssertTrue(sent)
+        XCTAssertTrue(vm.directConversationHasPromptDeliveryUncertainty)
+        XCTAssertTrue(vm.directPromptDeliveryHasConfirmedAcceptance)
+        fake.emit(ChatDirectEventFactory.event(
+            sessionID: "runtime-1",
+            type: "message.complete",
+            sequence: 3,
+            payload: ["text": .string("accepted answer")]
+        ))
+        await waitUntil {
+            vm.sendErrorMessage == "Hermes accepted the previous message, but Semreh could not clear its local safety record. It was not resent."
+        }
+        XCTAssertEqual(
+            vm.sendErrorMessage,
+            "Hermes accepted the previous message, but Semreh could not clear its local safety record. It was not resent."
+        )
+        XCTAssertNotNil(vm.directPromptDeliveryRecoveryTarget)
+        XCTAssertEqual(fake.calls().filter { $0.method == "prompt.submit" }.count, 1)
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testReopenedPromptUncertaintyRequiresExplicitCanonicalIdleAbandonBeforeFreshSend() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let store = InMemoryDirectPromptDeliveryUncertaintyStore()
+        let identity = try DirectPromptDeliveryUncertaintyIdentity(
+            origin: testServer,
+            profile: "work",
+            storedID: "durable-1"
+        )
+        let marker = DirectPromptDeliveryUncertaintyMarker(identity: identity)
+        try store.write(marker)
+        let vm = makeViewModel(
+            client: makeExistingComposerClient(requests: ChatDirectRequestRecorder()),
+            runtime: runtime,
+            sessionID: "durable-1",
+            promptUncertaintyStore: store
+        )
+
+        await vm.loadMessages()
+        XCTAssertTrue(vm.directConversationHasPromptDeliveryUncertainty)
+        let target = try XCTUnwrap(vm.directPromptDeliveryRecoveryTarget)
+        XCTAssertEqual(target.markerToken, marker.token)
+        let blockedSend = await vm.sendMessage("blocked fresh message")
+        XCTAssertFalse(blockedSend)
+        XCTAssertTrue(fake.calls().filter { $0.method == "prompt.submit" }.isEmpty)
+
+        store.failRemove = true
+        let firstAbandon = await vm.abandonDirectPromptDeliveryUncertainty(target)
+        XCTAssertFalse(firstAbandon)
+        XCTAssertEqual(
+            vm.sendErrorMessage,
+            "The latest conversation could not be checked. The previous message may still appear, and no message was resent."
+        )
+        store.failRemove = false
+        let abandoned = await vm.abandonDirectPromptDeliveryUncertainty(target)
+        XCTAssertTrue(abandoned)
+        XCTAssertFalse(vm.directConversationHasPromptDeliveryUncertainty)
+        XCTAssertNil(vm.sendErrorMessage)
+        XCTAssertNil(try store.load(for: identity))
+        let freshSend = await vm.sendMessage("different fresh message")
+        XCTAssertTrue(freshSend)
+        XCTAssertEqual(fake.calls().filter { $0.method == "prompt.submit" }.count, 1)
+
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
     func testReopenedDirectAttachmentRecoveryBlocksNewUploadUntilExplicitReset() async throws {
         let fake = ChatDirectFakeTransport()
         fake.setSessionCloseResponse(.object(["closed": .bool(true)]))
@@ -1710,7 +1855,7 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
 
         XCTAssertTrue(didSend, "A dispatched cancellation remains delivery-uncertain under existing send semantics")
         XCTAssertTrue(viewModel.directPendingAttachments.isEmpty)
-        XCTAssertTrue(viewModel.sendErrorMessage?.contains("uncertain") == true)
+        XCTAssertTrue(viewModel.sendErrorMessage?.contains("cannot confirm") == true)
         XCTAssertTrue(viewModel.messages.contains { $0.role == "user" && $0.content == "describe" })
         XCTAssertEqual(fake.calls().filter { $0.method == "prompt.submit" }.count, 1)
         let callsAfterUncertainSend = fake.calls().count
@@ -1760,7 +1905,7 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
 
         XCTAssertTrue(didSend)
         XCTAssertTrue(viewModel.directPendingAttachments.isEmpty)
-        XCTAssertTrue(viewModel.sendErrorMessage?.contains("uncertain") == true)
+        XCTAssertTrue(viewModel.sendErrorMessage?.contains("cannot confirm") == true)
         XCTAssertTrue(viewModel.messages.contains { $0.role == "user" && $0.content == "describe" })
         XCTAssertEqual(fake.calls().filter { $0.method == "prompt.submit" }.count, 1)
 
@@ -1795,7 +1940,7 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
 
         let didSend = await send.value
         XCTAssertTrue(didSend)
-        XCTAssertTrue(viewModel.sendErrorMessage?.contains("uncertain") == true)
+        XCTAssertTrue(viewModel.sendErrorMessage?.contains("cannot confirm") == true)
         XCTAssertTrue(viewModel.messages.contains { $0.role == "user" && $0.content == "uncertain prompt" })
 
         // A benign terminal event may arrive before the reconnect. It must not
@@ -1806,14 +1951,14 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         await waitUntil {
             viewModel.responseCompletionHapticTrigger > completionCountBeforeTerminal
         }
-        XCTAssertTrue(viewModel.sendErrorMessage?.contains("uncertain") == true)
+        XCTAssertTrue(viewModel.sendErrorMessage?.contains("cannot confirm") == true)
 
         // Reconnect is read-only recovery. The fake canonical transcript is
         // empty, so the unpersisted optimistic row must not become a ghost;
         // the warning and delivery barrier remain.
         viewModel.setSendErrorMessage(nil)
         try await runtime.reconnect()
-        await waitUntil { viewModel.sendErrorMessage?.contains("uncertain") == true }
+        await waitUntil { viewModel.sendErrorMessage?.contains("cannot confirm") == true }
         XCTAssertFalse(viewModel.messages.contains { $0.role == "user" && $0.content == "uncertain prompt" })
         let callsBeforeBlockedDraft = fake.calls().count
         let blocked = await viewModel.sendMessage("next draft")
@@ -1890,7 +2035,8 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         sessionID: String?,
         defaults: UserDefaults = .standard,
         directAttachmentPreparer: (@Sendable (Data, String, Data?) async throws -> DirectPendingAttachment)? = nil,
-        recoveryMarkerStore: (any DirectGatewayAttachmentRecoveryMarkerStoreProtocol)? = nil
+        recoveryMarkerStore: (any DirectGatewayAttachmentRecoveryMarkerStoreProtocol)? = nil,
+        promptUncertaintyStore: (any DirectPromptDeliveryUncertaintyStoreProtocol)? = nil
     ) -> ChatViewModel {
         let isolatedMarkerStore = recoveryMarkerStore ?? DirectGatewayAttachmentRecoveryMarkerStore(
             rootURL: FileManager.default.temporaryDirectory
@@ -1904,7 +2050,8 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
             userDefaults: defaults,
             gatewayRuntimeProvider: { _ in runtime },
             directAttachmentPreparer: directAttachmentPreparer,
-            directAttachmentRecoveryMarkerStore: isolatedMarkerStore
+            directAttachmentRecoveryMarkerStore: isolatedMarkerStore,
+            promptUncertaintyStore: promptUncertaintyStore ?? InMemoryDirectPromptDeliveryUncertaintyStore()
         )
     }
 

@@ -36,6 +36,7 @@ def main():
     parser.add_argument('--slice3-gateway-restart', action='store_true')
     parser.add_argument('--slice3-active-socket-loss', action='store_true')
     parser.add_argument('--slice3-pre-ack-loss', action='store_true')
+    parser.add_argument('--slice3-uncertainty', action='store_true')
     parser.add_argument('--gateway-restart-nonce')
     parser.add_argument('--tui-created-session-id')
     parser.add_argument('--slice3-relaunch-seed-text')
@@ -63,15 +64,37 @@ def main():
         or args.tui_created_session_id or args.slice3_relaunch_seed_text
     ):
         parser.error('--slice3-active-socket-loss requires --https --stock-backend and no other test phase')
+    uncertainty_other_phase = (
+        args.slice2_foundation or args.slice2_native or args.slice2_reasoning
+        or args.slice3_clarification or args.slice3_attachment or args.slice3_blocking
+        or args.slice3_file_picker or args.slice3_recovery or args.slice3_completed_away
+        or args.slice3_relaunch or args.slice3_app_kill or args.slice3_gateway_restart
+        or args.slice3_active_socket_loss or args.slice3_pre_ack_loss
+        or args.cookie_phase or args.gateway_restart_nonce or args.development_backend_sha
+    )
+    if args.slice3_uncertainty and (
+        uncertainty_other_phase or not args.slice2_ui or not args.https
+        or not args.stock_backend or not args.tui_created_session_id
+        or not args.slice3_relaunch_seed_text
+    ):
+        parser.error(
+            '--slice3-uncertainty requires --slice2-ui --https --stock-backend '
+            '--tui-created-session-id --slice3-relaunch-seed-text and no other test phase'
+        )
+    if args.slice3_uncertainty and not re.fullmatch(
+        r'SEMREH_SLICE3_PRE_ACK_SEED_[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}',
+        args.slice3_relaunch_seed_text or ''
+    ):
+        parser.error('--slice3-uncertainty requires a SEMREH_SLICE3_PRE_ACK_SEED_<UUID> marker')
     if args.tui_created_session_id and (
         not args.slice2_ui or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', args.tui_created_session_id)
     ):
         parser.error('--tui-created-session-id requires --slice2-ui and a plain durable session ID')
     if args.slice3_relaunch_seed_text and (
-        not (args.slice3_relaunch or args.slice3_app_kill)
+        not (args.slice3_relaunch or args.slice3_app_kill or args.slice3_uncertainty)
         or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}', args.slice3_relaunch_seed_text)
     ):
-        parser.error('--slice3-relaunch-seed-text requires --slice3-relaunch or --slice3-app-kill and a bounded synthetic marker')
+        parser.error('--slice3-relaunch-seed-text requires --slice3-relaunch, --slice3-app-kill, or --slice3-uncertainty and a bounded synthetic marker')
     if args.gateway_restart_nonce and (
         not args.slice3_gateway_restart
         or not re.fullmatch(r'[A-Za-z0-9_-]{16,128}', args.gateway_restart_nonce)
@@ -145,7 +168,7 @@ def main():
         or args.slice2_foundation or args.slice2_native or args.slice2_reasoning
         or args.slice3_clarification or args.slice3_attachment or args.slice3_blocking
         or args.slice3_recovery or args.slice3_completed_away
-        or args.slice3_gateway_restart or args.slice3_app_kill
+        or args.slice3_gateway_restart or args.slice3_app_kill or args.slice3_uncertainty
         or not args.tui_created_session_id
     ):
         parser.error('--slice3-relaunch requires --slice2-ui --https --stock-backend --tui-created-session-id and no other test phase')
@@ -155,7 +178,7 @@ def main():
         or args.slice2_foundation or args.slice2_native or args.slice2_reasoning
         or args.slice3_clarification or args.slice3_attachment or args.slice3_blocking
         or args.slice3_file_picker or args.slice3_recovery or args.slice3_completed_away
-        or args.slice3_relaunch or args.slice3_gateway_restart
+        or args.slice3_relaunch or args.slice3_gateway_restart or args.slice3_uncertainty
         or not args.tui_created_session_id
     ):
         parser.error('--slice3-app-kill requires --slice2-ui --https --stock-backend --tui-created-session-id and no other test phase')
@@ -171,9 +194,10 @@ def main():
     backend_phase = (
         args.slice3_pre_ack_loss or args.slice3_active_socket_loss or args.slice2_reasoning or args.slice2_ui or args.slice3_file_picker or args.slice3_recovery
         or args.slice3_completed_away or args.slice3_relaunch or args.slice3_gateway_restart
+        or args.slice3_uncertainty
     )
     if args.stock_backend and not backend_phase:
-        parser.error('--stock-backend requires --slice2-reasoning, --slice2-ui, --slice3-file-picker, --slice3-completed-away, --slice3-relaunch, or --slice3-gateway-restart')
+        parser.error('--stock-backend requires --slice2-reasoning, --slice2-ui, --slice3-file-picker, --slice3-completed-away, --slice3-relaunch, --slice3-gateway-restart, or --slice3-uncertainty')
     if backend_phase and args.stock_backend == bool(args.development_backend_sha):
         parser.error('Slice 2 backend phase requires exactly one backend mode')
     development = backend_phase and not args.stock_backend
@@ -302,6 +326,8 @@ def main():
             target['EnvironmentVariables']['SEMREH_SLICE3_RELAUNCH_UI'] = '1'
         if args.slice3_app_kill:
             target['EnvironmentVariables']['SEMREH_SLICE3_APP_KILL_UI'] = '1'
+        if args.slice3_uncertainty:
+            target['EnvironmentVariables']['SEMREH_SLICE3_UNCERTAINTY_UI'] = '1'
         if args.tui_created_session_id:
             target['EnvironmentVariables']['SEMREH_SLICE2_TUI_CREATED_SESSION_ID'] = args.tui_created_session_id
         if args.slice3_relaunch_seed_text:

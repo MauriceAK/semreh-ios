@@ -2197,21 +2197,20 @@ final class SessionListMutationTests: XCTestCase {
                 let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
                 let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
                 XCTAssertEqual(query["q"], "needle")
-                XCTAssertEqual(query["content"], "1")
-                XCTAssertEqual(query["depth"], "5")
+                XCTAssertEqual(query["profile"], "default")
+                XCTAssertEqual(query["limit"], "20")
 
                 return apiTestJSONResponse("""
                 {
-                  "sessions": [
-                    {"session_id": "content-project", "title": "Budget", "match_type": "content"},
-                    {"session_id": "content-other-project", "title": "Roadmap", "match_type": "content"},
-                    {"session_id": "local-title", "title": "Needle planning", "match_type": "content"},
-                    {"session_id": "unknown-session", "title": "Unknown", "match_type": "content"},
-                    {"session_id": "archived-session", "title": "Archived", "match_type": "content"},
-                    {"session_id": "title-only", "title": "Needle remote", "match_type": "title"}
+                  "results": [
+                    {"session_id": "content-project", "lineage_root": "content-project", "snippet": "needle", "role": "user", "archived": false},
+                    {"session_id": "content-other-project", "lineage_root": "content-other-project", "snippet": "needle", "role": "assistant", "archived": false},
+                    {"session_id": "local-title", "lineage_root": "local-title", "snippet": "needle", "role": "user", "archived": false},
+                    {"session_id": "unknown-session", "lineage_root": "unknown-session", "snippet": "needle", "role": "user", "archived": false},
+                    {"session_id": "archived-session", "lineage_root": "archived-session", "snippet": "needle", "role": "user", "archived": true},
+                    {"session_id": "title-only", "lineage_root": "title-only", "snippet": "needle", "role": "user", "archived": false}
                   ],
-                  "query": "needle",
-                  "count": 6
+                  "future_field": true
                 }
                 """, for: request)
             default:
@@ -2274,11 +2273,9 @@ final class SessionListMutationTests: XCTestCase {
                     Thread.sleep(forTimeInterval: 0.15)
                     return apiTestJSONResponse("""
                     {
-                      "sessions": [
-                        {"session_id": "old-content", "title": "First result", "match_type": "content"}
-                      ],
-                      "query": "old",
-                      "count": 1
+                      "results": [
+                        {"session_id": "old-content", "lineage_root": "old-content", "snippet": "old", "role": "user", "archived": false}
+                      ]
                     }
                     """, for: request)
                 }
@@ -2286,11 +2283,9 @@ final class SessionListMutationTests: XCTestCase {
                 if searchQuery == "new" {
                     return apiTestJSONResponse("""
                     {
-                      "sessions": [
-                        {"session_id": "new-content", "title": "Second result", "match_type": "content"}
-                      ],
-                      "query": "new",
-                      "count": 1
+                      "results": [
+                        {"session_id": "new-content", "lineage_root": "new-content", "snippet": "new", "role": "user", "archived": false}
+                      ]
                     }
                     """, for: request)
                 }
@@ -2724,12 +2719,10 @@ final class SessionListMutationTests: XCTestCase {
             case "/api/sessions/search":
                 return apiTestJSONResponse("""
                 {
-                  "sessions": [
-                    {"session_id": "subagent-p1", "title": "Delegated research", "match_type": "content"},
-                    {"session_id": "normal-p2", "title": "Other project", "match_type": "content"}
-                  ],
-                  "query": "needle",
-                  "count": 2
+                  "results": [
+                    {"session_id": "subagent-p1", "lineage_root": "subagent-p1", "snippet": "needle", "role": "user", "archived": false},
+                    {"session_id": "normal-p2", "lineage_root": "normal-p2", "snippet": "needle", "role": "assistant", "archived": false}
+                  ]
                 }
                 """, for: request)
             default:
@@ -2820,12 +2813,10 @@ final class SessionListMutationTests: XCTestCase {
             case "/api/sessions/search":
                 return apiTestJSONResponse("""
                 {
-                  "sessions": [
-                    {"session_id": "claude-p1", "title": "Imported transcript", "match_type": "content"},
-                    {"session_id": "cli-p1", "title": "Terminal chat", "match_type": "content"}
-                  ],
-                  "query": "needle",
-                  "count": 2
+                  "results": [
+                    {"session_id": "claude-p1", "lineage_root": "claude-p1", "snippet": "needle", "role": "user", "archived": false},
+                    {"session_id": "cli-p1", "lineage_root": "cli-p1", "snippet": "needle", "role": "assistant", "archived": false}
+                  ]
                 }
                 """, for: request)
             default:
