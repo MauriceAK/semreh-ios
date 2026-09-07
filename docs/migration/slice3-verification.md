@@ -758,3 +758,57 @@ fallback. This is a suggested launch preflight, not a demonstrated fix.
 Final `slice3-blocking-recovery-audit-v1.jsonl` completed: **172401 files scanned,
 0 flagged paths,103 exported consoles**. Known current fixture secrets/obvious
 bearer formats only; no arbitrary-secret, OCR or quarantined diagnostic guarantee.
+
+## Lifecycle successor to ff5abfd — verified checkpoint
+
+Minimal uncertainty-banner fix retains explanation across benign terminal and
+same-controller resume; no Retry, resend or acceptance heuristic. Stock submit/
+inflight/events expose no durable client-request correlation. Matching text/new
+rowIDs alone cannot prove which concurrent client submitted a turn. R1 remains
+open; the in-memory barrier is not durable across controller recreation.
+
+- lifecycle-banner-focused-v1 compiled **88pass/1fail**: new regression wrongly
+  required unconfirmed optimistic row to survive authoritative empty history.
+  Corrected to canonical removal plus retained uncertainty message/no newsubmit;
+  strengthened terminal synchronization. No ghost-row behavior added.
+- lifecycle-banner-focused-v2: **89pass/0fail/0skip**. Explicit owned-app terminate
+  preflight preceded these unit runs; no runnerhang in either. Not proof of a fix.
+- lifecycle-selector-python-v1: **23pass** (relaunch/restart guards and helper).
+- relaunch-seed-v1 JSONRPC-created stock seed: passed, exact two canonical rows
+  and baselinehash retained. No literalTUI or apprelaunch claim from this helper.
+- gateway-restart-live-v1: **1pass/0fail/0skip**. Native test retained its login,
+  controller and cookiejar while root stopped verified ownedPID63934, observed
+  exit/listenerabsence, relaunched sameguardedheadlessfixture asPID20145, verified
+  HTTP200 and unchanged configSHA. New runtime binding, exact native+REST baseline,
+  unique new postrestart turn/no duplicate and ownedcleanup/logout passed.
+  Root coordination attestation: slice3-gateway-restart-root-v1.json. No personal
+  route/service changed. Not hostOSreboot, servicemanager recovery or in-flight
+  run continuation. Only idle processrestart is proved.
+
+Host restart uses standalone selector --slice3-gateway-restart plus a fresh safe
+--gateway-restart-nonce. Native writes exact private nonce-bound ready marker;
+root verifiesPID/paths, SIGTERMs onlyownedgateway, launches with both
+--with-pdf-renderer --approval-secret-fixture, verifiesstatus/config, writes
+restart-complete ACK viaapply_patch. No credentials or sessionIDs in handshake.
+Full successor suite and actual apprelaunch results follow.
+
+Lifecycle fullv1 passed **2173 tests,0failures,10intentional opt-in skips**.
+Signed relaunch-ui-build-v1 passed. Relaunch-production-ui-v1 passed **1/0/0**:
+actual XCUIApplication terminate/launch, existing auth retained, same seeded stored
+session opened through production deep link, then one unique new message/ACK.
+Relaunch-canonical-v1 passed exact four rows and unchanged two-row baselinehash;
+this is not merely cached UI evidence. Root inspected exported
+8CC0C66A-A34E-44C1-AE5D-ACAF332771F3.png (reopened seed) and
+1904B09F-5C9F-4B36-883A-32E90FFB5EA8.png (newturn). This gate killed an idle app,
+not an accepted in-flight run. Physical/background/orphan-policy gates remain.
+Strict codesign and lifecycle-app-launch-v1 passed on the owned Simulator.
+
+Root located the isolated Simulator's built-in FileProvider.LocalStorage group
+via container metadata and seeded only its new SemrehSyntheticFixtures folder
+with semreh-picker.txt and a461-byte one-page blank PDF (pdfinfo validated).
+No app entitlement, newprovider, iCloud, personalfile or productioncode change.
+This is preparation, not proof that the system picker exposes/selects the files.
+
+Lifecycle artifact audit v1 completed: **177368 files scanned, 0 flagged paths,
+107 exported consoles**. Scope remains known current fixture secrets and obvious
+bearer formats, excluding arbitrary-secret/OCR and quarantined OS diagnostics.

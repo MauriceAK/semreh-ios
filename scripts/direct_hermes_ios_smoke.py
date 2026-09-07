@@ -30,7 +30,11 @@ def main():
     parser.add_argument('--slice3-blocking', action='store_true')
     parser.add_argument('--slice3-recovery', action='store_true')
     parser.add_argument('--slice3-completed-away', action='store_true')
+    parser.add_argument('--slice3-relaunch', action='store_true')
+    parser.add_argument('--slice3-gateway-restart', action='store_true')
+    parser.add_argument('--gateway-restart-nonce')
     parser.add_argument('--tui-created-session-id')
+    parser.add_argument('--slice3-relaunch-seed-text')
     parser.add_argument('--development-backend-sha')
     parser.add_argument('--stock-backend', action='store_true')
     parser.add_argument('--cookie-phase', choices=['login', 'restore', 'logout'])
@@ -39,6 +43,16 @@ def main():
         not args.slice2_ui or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', args.tui_created_session_id)
     ):
         parser.error('--tui-created-session-id requires --slice2-ui and a plain durable session ID')
+    if args.slice3_relaunch_seed_text and (
+        not args.slice3_relaunch
+        or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}', args.slice3_relaunch_seed_text)
+    ):
+        parser.error('--slice3-relaunch-seed-text requires --slice3-relaunch and a bounded synthetic marker')
+    if args.gateway_restart_nonce and (
+        not args.slice3_gateway_restart
+        or not re.fullmatch(r'[A-Za-z0-9_-]{16,128}', args.gateway_restart_nonce)
+    ):
+        parser.error('--gateway-restart-nonce requires --slice3-gateway-restart and 16-128 safe characters')
     if args.cookie_phase and not args.https:
         parser.error('Cookie phases require --https')
     if args.slice2_foundation and (not args.https or args.cookie_phase):
@@ -77,8 +91,9 @@ def main():
         or args.development_backend_sha or args.slice2_foundation
         or args.slice2_native or args.slice2_reasoning or args.slice2_ui
         or args.slice3_clarification or args.slice3_attachment or args.slice3_blocking
-        or args.slice3_completed_away
-        or args.tui_created_session_id
+        or args.slice3_completed_away or args.slice3_relaunch
+        or args.slice3_gateway_restart
+        or args.tui_created_session_id or args.slice3_relaunch_seed_text
     ):
         parser.error('--slice3-recovery requires --https --stock-backend and no other test phase')
     if args.slice3_completed_away and (
@@ -86,12 +101,36 @@ def main():
         or args.development_backend_sha or args.slice2_foundation
         or args.slice2_native or args.slice2_reasoning or args.slice2_ui
         or args.slice3_clarification or args.slice3_attachment or args.slice3_blocking
-        or args.slice3_recovery or args.tui_created_session_id
+        or args.slice3_recovery or args.slice3_relaunch or args.tui_created_session_id
+        or args.slice3_gateway_restart or args.gateway_restart_nonce
+        or args.slice3_relaunch_seed_text
     ):
         parser.error('--slice3-completed-away requires --https --stock-backend and no other test phase')
-    backend_phase = args.slice2_reasoning or args.slice2_ui or args.slice3_recovery or args.slice3_completed_away
+    if args.slice3_relaunch and (
+        not args.slice2_ui or not args.https or args.cookie_phase
+        or not args.stock_backend or args.development_backend_sha
+        or args.slice2_foundation or args.slice2_native or args.slice2_reasoning
+        or args.slice3_clarification or args.slice3_attachment or args.slice3_blocking
+        or args.slice3_recovery or args.slice3_completed_away
+        or args.slice3_gateway_restart
+        or not args.tui_created_session_id
+    ):
+        parser.error('--slice3-relaunch requires --slice2-ui --https --stock-backend --tui-created-session-id and no other test phase')
+    if args.slice3_gateway_restart and (
+        not args.https or args.cookie_phase or not args.stock_backend
+        or args.development_backend_sha or args.slice2_foundation
+        or args.slice2_native or args.slice2_reasoning or args.slice2_ui
+        or args.slice3_clarification or args.slice3_attachment or args.slice3_blocking
+        or args.slice3_recovery or args.slice3_completed_away or args.slice3_relaunch
+        or not args.gateway_restart_nonce
+    ):
+        parser.error('--slice3-gateway-restart requires --https --stock-backend --gateway-restart-nonce and no other test phase')
+    backend_phase = (
+        args.slice2_reasoning or args.slice2_ui or args.slice3_recovery
+        or args.slice3_completed_away or args.slice3_relaunch or args.slice3_gateway_restart
+    )
     if args.stock_backend and not backend_phase:
-        parser.error('--stock-backend requires --slice2-reasoning, --slice2-ui, or --slice3-completed-away')
+        parser.error('--stock-backend requires --slice2-reasoning, --slice2-ui, --slice3-completed-away, --slice3-relaunch, or --slice3-gateway-restart')
     if backend_phase and args.stock_backend == bool(args.development_backend_sha):
         parser.error('Slice 2 backend phase requires exactly one backend mode')
     development = backend_phase and not args.stock_backend
@@ -107,6 +146,14 @@ def main():
         runtime = DEV_RUNTIME
     else:
         validate()
+    coordination_path = None
+    if args.slice3_gateway_restart:
+        runtime_root = runtime
+        if runtime_root.is_symlink() or runtime_root.resolve() != runtime_root:
+            raise RuntimeError('Unexpected gateway restart runtime path')
+        coordination_path = runtime_root / f'slice3-gateway-restart-{args.gateway_restart_nonce}.json'
+        if coordination_path.parent.resolve() != runtime_root or coordination_path.is_symlink() or coordination_path.exists():
+            raise RuntimeError('Gateway restart coordination path already exists or escaped runtime')
     output = PRODUCTS / 'SemrehSlice2LiveUI.xctestrun' if args.slice2_ui else OUTPUT
     if PRODUCTS.resolve() != PRODUCTS or output.is_symlink():
         raise RuntimeError('Unexpected XCTest artifact path')
@@ -162,6 +209,16 @@ def main():
             'SEMREH_SLICE3_COMPLETED_AWAY_NATIVE': '1',
         })
         method = 'testOptInHostedSlice3CompletedWhileAway'
+    if args.slice3_gateway_restart:
+        environment = target['EnvironmentVariables']
+        environment.update({
+            'SEMREH_SLICE2_STOCK_BACKEND_SHA': PIN,
+            'SEMREH_SLICE2_TOOL_CWD': str(runtime / 'tools'),
+            'SEMREH_SLICE3_GATEWAY_RESTART_NATIVE': '1',
+            'SEMREH_SLICE3_GATEWAY_RESTART_NONCE': args.gateway_restart_nonce,
+            'SEMREH_SLICE3_GATEWAY_RESTART_COORDINATION_PATH': str(coordination_path),
+        })
+        method = 'testOptInHostedSlice3NativeGatewayRestart'
     if args.cookie_phase:
         target['EnvironmentVariables']['SEMREH_SLICE1_COOKIE_PHASE'] = args.cookie_phase
         method = 'testOptInHostedCookie' + args.cookie_phase.title() + 'Phase'
@@ -182,8 +239,12 @@ def main():
             target['EnvironmentVariables']['SEMREH_SLICE3_ATTACHMENT_UI'] = '1'
         if args.slice3_blocking:
             target['EnvironmentVariables']['SEMREH_SLICE3_BLOCKING_UI'] = '1'
+        if args.slice3_relaunch:
+            target['EnvironmentVariables']['SEMREH_SLICE3_RELAUNCH_UI'] = '1'
         if args.tui_created_session_id:
             target['EnvironmentVariables']['SEMREH_SLICE2_TUI_CREATED_SESSION_ID'] = args.tui_created_session_id
+        if args.slice3_relaunch_seed_text:
+            target['EnvironmentVariables']['SEMREH_SLICE3_RELAUNCH_SEED_TEXT'] = args.slice3_relaunch_seed_text
         method = 'testOptInLiveProductionLoginNewChatSend'
         test_class = 'LongChatScrollUITests'
     target['OnlyTestIdentifiers'] = [test_class + '/' + method]

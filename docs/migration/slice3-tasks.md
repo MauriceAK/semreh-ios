@@ -78,6 +78,12 @@ this sheet does not invent contracts or mark unexecuted checks passed.
   host restart and connectivity loss. Select finite grace from evidence; no silent
   personal-host configuration change. If zero is proposed, demonstrate cleanup
   and caps first. Record required short/long phone intervals before acceptance.
+  - [x] **R2a — Idle process restart/relaunch checkpoints.** Gateway-restart-live-v1
+    passed1/0/0 with existing native cookie/controller, exact restoredbaseline,
+    newruntime and newturn; root verified ownedprocess exit/restart/configunchanged.
+    Relaunch-production-ui-v1 passed1/0/0 actual appterminate/launch/deeplink; separate
+    canonical-v1 verified baselinehash and exact-once newturn. Not hostOSreboot,
+    servicemanager, in-flight appkill or physicalbackground evidence.
 - [ ] **S3-B — Blocking interaction.** Approval, clarification, sudo/secret and
   expiry. Key requests by server/session/generation/request; explicit deterministic
   cancellation if full UI unsupported. No sensitive response in persistence/logs.

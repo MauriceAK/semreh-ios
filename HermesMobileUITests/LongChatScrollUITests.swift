@@ -30,6 +30,8 @@ final class LongChatScrollUITests: XCTestCase {
     private let blockingSecretCancelIdentifier = "direct-sensitive-prompt-cancel"
     private let blockingApprovalAcknowledgement = "SEMREH_SLICE3_BLOCKING_ACK_APPROVAL_DENY"
     private let blockingSecretAcknowledgement = "SEMREH_SLICE3_BLOCKING_ACK_SECRET_CANCEL"
+    private let tuiSeedMarker = "SEMREH_TUI_CROSS_CLIENT_1"
+    private let slice1Acknowledgement = "SEMREH_SLICE1_ACK"
 
     func testTenThousandRowChatScrollsAndScrollToLatestReachesEndMarker() {
         continueAfterFailure = false
@@ -382,6 +384,25 @@ final class LongChatScrollUITests: XCTestCase {
 
         // The shell remembers the selected tab across normal sign-out/login.
         // Successful authentication need not land on Sessions automatically.
+        if environment["SEMREH_SLICE3_RELAUNCH_UI"] == "1" {
+            guard stockBackend else {
+                XCTFail("Slice 3 relaunch UI requires the pinned stock backend.")
+                return
+            }
+            guard let storedID = environment["SEMREH_SLICE2_TUI_CREATED_SESSION_ID"],
+                  storedID.range(of: "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$", options: .regularExpression) != nil else {
+                XCTFail("Slice 3 relaunch UI requires a valid pre-seeded durable session ID.")
+                return
+            }
+            let seedMarker = environment["SEMREH_SLICE3_RELAUNCH_SEED_TEXT"] ?? tuiSeedMarker
+            guard seedMarker.range(of: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$", options: .regularExpression) != nil else {
+                XCTFail("Slice 3 relaunch UI requires a bounded synthetic seed marker.")
+                return
+            }
+            try exerciseOptInAppRelaunch(app: app, storedID: storedID, seedMarker: seedMarker)
+            return
+        }
+
         let sessionsTab = app.buttons["Sessions"]
         XCTAssertTrue(sessionsTab.waitForExistence(timeout: 10), "Successful login must reach the production shell.")
         sessionsTab.tap()
@@ -458,15 +479,94 @@ final class LongChatScrollUITests: XCTestCase {
             link.host = "session"
             link.queryItems = [URLQueryItem(name: "id", value: storedID)]
             app.open(try XCTUnwrap(link.url))
-            let tuiPrompt = app.staticTexts.matching(
-                NSPredicate(format: "label CONTAINS[c] %@", "SEMREH_TUI_CROSS_CLIENT_1")
-            ).firstMatch
+            let tuiPrompt = app.staticTexts[tuiSeedMarker]
             assertHittable(tuiPrompt, timeout: 30,
                           message: "The actual TUI-created transcript must open through the production deep link.")
             assertHittable(acknowledgement, timeout: 15,
                           message: "The TUI-created assistant reply must also be visible.")
             attachScreenshot(named: "live-tui-created-session-in-semreh")
         }
+    }
+
+    @MainActor
+    private func exerciseOptInAppRelaunch(
+        app: XCUIApplication,
+        storedID: String,
+        seedMarker: String
+    ) throws {
+        try openSeededSession(app: app, storedID: storedID)
+        assertSeededTranscriptVisible(app: app, seedMarker: seedMarker, context: "before app termination")
+        attachScreenshot(named: "slice3-relaunch-before-terminate")
+
+        // This is the real XCTest process-death operation. No launch argument
+        // resets the app's persisted server/auth state on the second launch.
+        app.terminate()
+        app.launchArguments = []
+        app.launch()
+        waitForPostLoginDestination(app: app)
+
+        try openSeededSession(app: app, storedID: storedID)
+        assertSeededTranscriptVisible(app: app, seedMarker: seedMarker, context: "after app relaunch")
+        attachScreenshot(named: "slice3-relaunch-after-terminate")
+
+        let uniquePrompt = "SEMREH_SLICE3_RELAUNCH_\(UUID().uuidString)"
+        sendLivePrompt(uniquePrompt, app: app, screenshotPrefix: "slice3-relaunch-follow-up")
+        waitForAcknowledgementCount(
+            2,
+            app: app,
+            message: "The relaunch follow-up must add exactly one terminal fixture ACK."
+        )
+        waitForIdle(app: app)
+        attachScreenshot(named: "slice3-relaunch-follow-up-complete")
+    }
+
+    @MainActor
+    private func openSeededSession(app: XCUIApplication, storedID: String) throws {
+        var link = URLComponents()
+        link.scheme = "semreh"
+        link.host = "session"
+        link.queryItems = [URLQueryItem(name: "id", value: storedID)]
+        app.open(try XCTUnwrap(link.url))
+    }
+
+    @MainActor
+    private func assertSeededTranscriptVisible(
+        app: XCUIApplication,
+        seedMarker: String,
+        context: String
+    ) {
+        let prompt = app.staticTexts.matching(
+            NSPredicate(format: "label == %@", seedMarker)
+        ).firstMatch
+        assertHittable(
+            prompt,
+            timeout: 30,
+            message: "The pre-seeded session must expose its marker (\(context))."
+        )
+        let acknowledgement = app.staticTexts.matching(
+            NSPredicate(format: "label == %@", slice1Acknowledgement)
+        ).firstMatch
+        assertHittable(
+            acknowledgement,
+            timeout: 15,
+            message: "The pre-seeded session must expose its terminal ACK (\(context))."
+        )
+    }
+
+    @MainActor
+    private func waitForAcknowledgementCount(
+        _ expected: Int,
+        app: XCUIApplication,
+        message: String
+    ) {
+        let deadline = Date().addingTimeInterval(90)
+        let acknowledgements = app.staticTexts.matching(
+            NSPredicate(format: "label == %@", slice1Acknowledgement)
+        )
+        while acknowledgements.count < expected && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        }
+        XCTAssertEqual(acknowledgements.count, expected, message)
     }
 
     @MainActor

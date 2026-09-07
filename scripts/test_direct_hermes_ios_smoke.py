@@ -15,6 +15,7 @@ from unittest.mock import Mock, patch
 
 
 SCRIPT = Path(__file__).resolve().parent / "direct_hermes_ios_smoke.py"
+SEED_SCRIPT = Path(__file__).resolve().parent / "direct_hermes_relaunch_seed.py"
 
 
 def load_smoke_module():
@@ -25,7 +26,27 @@ def load_smoke_module():
     return module
 
 
+def load_seed_module():
+    spec = importlib.util.spec_from_file_location("direct_hermes_relaunch_seed", SEED_SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 class IOSSmokeGuardTests(unittest.TestCase):
+    def test_relaunch_seed_accepts_only_bounded_synthetic_marker(self):
+        seed = load_seed_module()
+        self.assertEqual(
+            seed._validate_seed_text("SEMREH_SLICE3_APP_RELAUNCH_SEED_TEST"),
+            "SEMREH_SLICE3_APP_RELAUNCH_SEED_TEST",
+        )
+        for invalid in ("", "seed with spaces", "seed/with/path", "x" * 129):
+            with self.assertRaises(ValueError):
+                seed._validate_seed_text(invalid)
+        self.assertTrue(seed.RELAUNCH_PROMPT.fullmatch("SEMREH_SLICE3_RELAUNCH_01234567-89ab-cdef-0123-456789abcdef"))
+        self.assertFalse(seed.RELAUNCH_PROMPT.fullmatch("SEMREH_SLICE3_RELAUNCH_extra"))
+
     def assertRejected(self, arguments, message):
         result = subprocess.run(
             [sys.executable, str(SCRIPT), *arguments],
@@ -41,7 +62,7 @@ class IOSSmokeGuardTests(unittest.TestCase):
     def test_stock_requires_backend_phase(self):
         self.assertRejected(
             ["--stock-backend"],
-            "--stock-backend requires --slice2-reasoning, --slice2-ui, or --slice3-completed-away",
+            "--stock-backend requires --slice2-reasoning, --slice2-ui, --slice3-completed-away, --slice3-relaunch, or --slice3-gateway-restart",
         )
 
     def test_reasoning_requires_exactly_one_backend_mode(self):
@@ -148,6 +169,52 @@ class IOSSmokeGuardTests(unittest.TestCase):
             ["--https", "--slice3-completed-away", "--stock-backend", "--slice2-ui"],
             message,
         )
+
+    def test_slice3_gateway_restart_requires_stock_https_nonce_and_is_standalone(self):
+        message = "--slice3-gateway-restart requires --https --stock-backend --gateway-restart-nonce and no other test phase"
+        self.assertRejected(["--slice3-gateway-restart"], message)
+        self.assertRejected(["--https", "--slice3-gateway-restart", "--stock-backend"], message)
+        self.assertRejected(
+            ["--https", "--slice3-gateway-restart", "--stock-backend", "--gateway-restart-nonce", "short"],
+            "--gateway-restart-nonce requires --slice3-gateway-restart and 16-128 safe characters",
+        )
+        self.assertRejected(
+            [
+                "--https", "--slice3-gateway-restart", "--stock-backend",
+                "--gateway-restart-nonce", "ABCDEFGHIJKLMNOP",
+                "--slice3-completed-away",
+            ],
+            "--slice3-completed-away requires --https --stock-backend and no other test phase",
+        )
+
+    def test_slice3_relaunch_requires_seeded_stock_ui_and_is_standalone(self):
+        message = "--slice3-relaunch requires --slice2-ui --https --stock-backend --tui-created-session-id and no other test phase"
+        self.assertRejected(["--slice3-relaunch"], message)
+        self.assertRejected(
+            ["--https", "--slice2-ui", "--stock-backend", "--slice3-relaunch"],
+            message,
+        )
+        self.assertRejected(
+            [
+                "--https", "--slice2-ui", "--stock-backend", "--slice3-relaunch",
+                "--tui-created-session-id", "seed-id", "--slice3-blocking",
+            ],
+            message,
+        )
+        self.assertRejected(
+            [
+                "--https", "--slice2-ui", "--slice3-relaunch",
+                "--tui-created-session-id", "seed-id",
+            ],
+            message,
+        )
+        self.assertRejected(
+            [
+                "--https", "--slice2-ui", "--stock-backend", "--slice3-relaunch",
+                "--tui-created-session-id", "seed-id", "--slice3-relaunch-seed-text", "bad marker",
+            ],
+            "--slice3-relaunch-seed-text requires --slice3-relaunch and a bounded synthetic marker",
+        )
         self.assertRejected(
             ["--https", "--slice3-completed-away", "--stock-backend", "--slice3-recovery"],
             "--slice3-recovery requires --https --stock-backend and no other test phase",
@@ -157,7 +224,7 @@ class IOSSmokeGuardTests(unittest.TestCase):
                 "--https", "--slice3-completed-away",
                 "--development-backend-sha", "8c50f84522a755d40346e73701a6847fbdde20ec",
             ],
-            message,
+            "--slice3-completed-away requires --https --stock-backend and no other test phase",
         )
 
     def test_stock_native_recovery_generation_exports_exact_target_and_guards(self):
@@ -200,7 +267,78 @@ class IOSSmokeGuardTests(unittest.TestCase):
                 ["DirectHermesLiveSmokeTests/testOptInHostedSlice3NativeAttachmentRecovery"],
             )
             self.assertNotIn("SEMREH_SLICE3_COMPLETED_AWAY_NATIVE", environment)
+            self.assertNotIn("SEMREH_SLICE3_RELAUNCH_UI", environment)
             self.assertNotIn("password", output.getvalue().lower())
+
+    def test_stock_ui_generation_exports_slice3_relaunch_seeded_session(self):
+        smoke = load_smoke_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            products = (Path(temporary) / "products").resolve()
+            products.mkdir()
+            source = products / "HermesMobileUIVerification_HermesMobileUIVerification_iphonesimulator.xctestrun"
+            source.write_bytes(plistlib.dumps({
+                "TestConfigurations": [{
+                    "TestTargets": [{"BlueprintName": "HermesMobileUITests"}],
+                }],
+            }))
+            runtime = Path(temporary) / "stock-runtime"
+            credentials = runtime / "credentials.json"
+            with patch.object(smoke, "PRODUCTS", products), \
+                    patch.object(smoke, "RUNTIME", runtime), \
+                    patch.object(smoke, "validate") as validate, \
+                    patch.object(smoke, "PIN", "29112bef099274229cadff79cdff7bf7b99c4b77"), \
+                    patch.object(sys, "argv", [
+                        str(SCRIPT), "--https", "--slice2-ui", "--stock-backend",
+                        "--slice3-relaunch", "--tui-created-session-id", "seed-id",
+                    ]):
+                output = StringIO()
+                with redirect_stdout(output):
+                    smoke.main()
+
+            validate.assert_called_once_with()
+            plan = plistlib.loads((products / "SemrehSlice2LiveUI.xctestrun").read_bytes())
+            target = plan["TestConfigurations"][0]["TestTargets"][0]
+            environment = target["EnvironmentVariables"]
+            self.assertEqual(environment["SEMREH_SLICE1_CREDENTIALS_FILE"], str(credentials))
+            self.assertEqual(environment["SEMREH_SLICE3_RELAUNCH_UI"], "1")
+            self.assertEqual(environment["SEMREH_SLICE2_TUI_CREATED_SESSION_ID"], "seed-id")
+            self.assertNotIn("SEMREH_SLICE3_RELAUNCH_SEED_TEXT", environment)
+            self.assertEqual(
+                target["OnlyTestIdentifiers"],
+                ["LongChatScrollUITests/testOptInLiveProductionLoginNewChatSend"],
+            )
+            self.assertNotIn("password", output.getvalue().lower())
+
+    def test_stock_ui_generation_exports_explicit_relaunch_seed_marker(self):
+        smoke = load_smoke_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            products = (Path(temporary) / "products").resolve()
+            products.mkdir()
+            source = products / "HermesMobileUIVerification_HermesMobileUIVerification_iphonesimulator.xctestrun"
+            source.write_bytes(plistlib.dumps({
+                "TestConfigurations": [{
+                    "TestTargets": [{"BlueprintName": "HermesMobileUITests"}],
+                }],
+            }))
+            runtime = Path(temporary) / "stock-runtime"
+            with patch.object(smoke, "PRODUCTS", products), \
+                    patch.object(smoke, "RUNTIME", runtime), \
+                    patch.object(smoke, "validate"), \
+                    patch.object(smoke, "PIN", "29112bef099274229cadff79cdff7bf7b99c4b77"), \
+                    patch.object(sys, "argv", [
+                        str(SCRIPT), "--https", "--slice2-ui", "--stock-backend",
+                        "--slice3-relaunch", "--tui-created-session-id", "seed-id",
+                        "--slice3-relaunch-seed-text", "SEMREH_SLICE3_APP_RELAUNCH_SEED_TEST",
+                    ]):
+                with redirect_stdout(StringIO()):
+                    smoke.main()
+
+            plan = plistlib.loads((products / "SemrehSlice2LiveUI.xctestrun").read_bytes())
+            environment = plan["TestConfigurations"][0]["TestTargets"][0]["EnvironmentVariables"]
+            self.assertEqual(
+                environment["SEMREH_SLICE3_RELAUNCH_SEED_TEXT"],
+                "SEMREH_SLICE3_APP_RELAUNCH_SEED_TEST",
+            )
 
     def test_stock_native_completed_away_generation_exports_exact_target_and_guards(self):
         smoke = load_smoke_module()
@@ -242,6 +380,74 @@ class IOSSmokeGuardTests(unittest.TestCase):
                 ["DirectHermesLiveSmokeTests/testOptInHostedSlice3CompletedWhileAway"],
             )
             self.assertNotIn("password", output.getvalue().lower())
+
+    def test_stock_native_gateway_restart_generation_exports_coordination_contract(self):
+        smoke = load_smoke_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            products = (Path(temporary) / "products").resolve()
+            products.mkdir()
+            source = products / "HermesMobile_HermesMobile_iphonesimulator.xctestrun"
+            source.write_bytes(plistlib.dumps({
+                "TestConfigurations": [{
+                    "TestTargets": [{"BlueprintName": "HermesMobileTests"}],
+                }],
+            }))
+            runtime = (Path(temporary) / "stock-runtime").resolve()
+            runtime.mkdir()
+            nonce = "ABCDEFGHIJKLMNOP"
+            with patch.object(smoke, "PRODUCTS", products), \
+                    patch.object(smoke, "OUTPUT", products / "SemrehSlice1Live.xctestrun"), \
+                    patch.object(smoke, "RUNTIME", runtime), \
+                    patch.object(smoke, "validate"), \
+                    patch.object(smoke, "PIN", "29112bef099274229cadff79cdff7bf7b99c4b77"), \
+                    patch.object(sys, "argv", [
+                        str(SCRIPT), "--https", "--slice3-gateway-restart", "--stock-backend",
+                        "--gateway-restart-nonce", nonce,
+                    ]):
+                with redirect_stdout(StringIO()):
+                    smoke.main()
+
+            plan = plistlib.loads((products / "SemrehSlice1Live.xctestrun").read_bytes())
+            target = plan["TestConfigurations"][0]["TestTargets"][0]
+            environment = target["EnvironmentVariables"]
+            self.assertEqual(environment["SEMREH_SLICE3_GATEWAY_RESTART_NATIVE"], "1")
+            self.assertEqual(environment["SEMREH_SLICE3_GATEWAY_RESTART_NONCE"], nonce)
+            self.assertEqual(
+                environment["SEMREH_SLICE3_GATEWAY_RESTART_COORDINATION_PATH"],
+                str(runtime / f"slice3-gateway-restart-{nonce}.json"),
+            )
+            self.assertEqual(
+                target["OnlyTestIdentifiers"],
+                ["DirectHermesLiveSmokeTests/testOptInHostedSlice3NativeGatewayRestart"],
+            )
+            self.assertFalse((runtime / f"slice3-gateway-restart-{nonce}.json").exists())
+
+    def test_stock_native_gateway_restart_rejects_preexisting_coordination_marker(self):
+        smoke = load_smoke_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            products = (Path(temporary) / "products").resolve()
+            products.mkdir()
+            source = products / "HermesMobile_HermesMobile_iphonesimulator.xctestrun"
+            source.write_bytes(plistlib.dumps({
+                "TestConfigurations": [{
+                    "TestTargets": [{"BlueprintName": "HermesMobileTests"}],
+                }],
+            }))
+            runtime = (Path(temporary) / "stock-runtime").resolve()
+            runtime.mkdir()
+            marker = runtime / "slice3-gateway-restart-ABCDEFGHIJKLMNOP.json"
+            marker.write_text("occupied")
+            with patch.object(smoke, "PRODUCTS", products), \
+                    patch.object(smoke, "OUTPUT", products / "SemrehSlice1Live.xctestrun"), \
+                    patch.object(smoke, "RUNTIME", runtime), \
+                    patch.object(smoke, "validate"), \
+                    patch.object(smoke, "PIN", "29112bef099274229cadff79cdff7bf7b99c4b77"), \
+                    patch.object(sys, "argv", [
+                        str(SCRIPT), "--https", "--slice3-gateway-restart", "--stock-backend",
+                        "--gateway-restart-nonce", "ABCDEFGHIJKLMNOP",
+                    ]):
+                with self.assertRaisesRegex(RuntimeError, "already exists"):
+                    smoke.main()
 
     def test_stock_ui_generation_exports_exact_mode_and_paths(self):
         smoke = load_smoke_module()

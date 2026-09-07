@@ -1739,8 +1739,11 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         // The terminal event arrives while the RPC acknowledgement is still
         // gated. Cancelling the late RPC continuation must remain ambiguous
         // even though a terminal receipt already exists.
+        let completionCountBeforeTerminal = viewModel.responseCompletionHapticTrigger
         fake.emitCompletion()
-        await waitUntil { viewModel.activeStreamID == nil }
+        await waitUntil {
+            viewModel.responseCompletionHapticTrigger > completionCountBeforeTerminal
+        }
         send.cancel()
         await gate.release()
         let didSend = await send.value
@@ -1759,6 +1762,54 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         let retry = await viewModel.sendMessage("retry")
         XCTAssertFalse(retry)
         XCTAssertEqual(fake.calls().count, callsAfterUncertainSend)
+        viewModel.invalidateDirectConversation()
+        await runtime.stop()
+    }
+
+    func testDirectAmbiguousResumeReassertsBannerAndDropsUnconfirmedOptimisticRow() async throws {
+        let fake = ChatDirectFakeTransport()
+        let gate = ChatDirectAsyncGate()
+        fake.setPromptSubmitGate(gate)
+        fake.setPromptSubmitCancellation(true)
+        let runtime = try makeRuntime(fake)
+        let viewModel = makeViewModel(
+            client: makeExistingComposerClient(requests: ChatDirectRequestRecorder()),
+            runtime: runtime,
+            sessionID: nil
+        )
+
+        let send = Task { await viewModel.sendMessage("uncertain prompt") }
+        await waitUntil { fake.calls().contains { $0.method == "prompt.submit" } }
+        send.cancel()
+        await gate.release()
+
+        let didSend = await send.value
+        XCTAssertTrue(didSend)
+        XCTAssertTrue(viewModel.sendErrorMessage?.contains("uncertain") == true)
+        XCTAssertTrue(viewModel.messages.contains { $0.role == "user" && $0.content == "uncertain prompt" })
+
+        // A benign terminal event may arrive before the reconnect. It must not
+        // erase the sticky delivery warning or make the optimistic row look
+        // like a confirmed ordinary turn.
+        let completionCountBeforeTerminal = viewModel.responseCompletionHapticTrigger
+        fake.emitCompletion()
+        await waitUntil {
+            viewModel.responseCompletionHapticTrigger > completionCountBeforeTerminal
+        }
+        XCTAssertTrue(viewModel.sendErrorMessage?.contains("uncertain") == true)
+
+        // Reconnect is read-only recovery. The fake canonical transcript is
+        // empty, so the unpersisted optimistic row must not become a ghost;
+        // the warning and delivery barrier remain.
+        viewModel.setSendErrorMessage(nil)
+        try await runtime.reconnect()
+        await waitUntil { viewModel.sendErrorMessage?.contains("uncertain") == true }
+        XCTAssertFalse(viewModel.messages.contains { $0.role == "user" && $0.content == "uncertain prompt" })
+        let callsBeforeBlockedDraft = fake.calls().count
+        let blocked = await viewModel.sendMessage("next draft")
+        XCTAssertFalse(blocked)
+        XCTAssertEqual(fake.calls().count, callsBeforeBlockedDraft)
+
         viewModel.invalidateDirectConversation()
         await runtime.stop()
     }

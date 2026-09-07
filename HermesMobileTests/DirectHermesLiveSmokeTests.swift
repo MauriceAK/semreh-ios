@@ -1392,6 +1392,199 @@ final class DirectHermesLiveSmokeTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testOptInHostedSlice3NativeGatewayRestart() async throws {
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("Slice 3 gateway restart smoke is simulator-only.")
+        #endif
+
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SEMREH_SLICE1_LIVE"] == "1",
+              environment["SEMREH_SLICE1_HTTPS"] == "1",
+              environment["SEMREH_SLICE3_GATEWAY_RESTART_NATIVE"] == "1",
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == Self.defaultCredentialsPath,
+              environment["SEMREH_SLICE2_STOCK_BACKEND_SHA"] == Self.stockBackendSHA,
+              environment["SEMREH_SLICE2_TOOL_CWD"] == Self.stockToolCwd,
+              let nonce = environment["SEMREH_SLICE3_GATEWAY_RESTART_NONCE"],
+              let markerURL = try? Self.gatewayRestartMarkerURL(environment: environment, nonce: nonce)
+        else {
+            throw XCTSkip("Slice 3 native gateway restart smoke is opt-in for the pinned stock HTTPS fixture.")
+        }
+
+        let credentials = try await stage("slice3 gateway restart credentials") {
+            try Self.readCredentials()
+        }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpAdditionalHeaders = [:]
+        configuration.httpShouldSetCookies = true
+        configuration.httpCookieAcceptPolicy = .always
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let api = APIClient(
+            baseURL: HostedTransport.https.baseURL,
+            session: session,
+            publicMediaSession: session,
+            customHeaderProvider: { [] }
+        )
+
+        let markerRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SemrehSlice3GatewayRestart-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: markerRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: markerRoot) }
+        let markerStore = DirectGatewayAttachmentRecoveryMarkerStore(rootURL: markerRoot)
+        let events = LiveGatewayEventCapture()
+        let seedPrompt = "SEMREH_SLICE3_GATEWAY_RESTART_SEED_\(UUID().uuidString)"
+        let postRestartPrompt = "SEMREH_SLICE3_GATEWAY_RESTART_POST_\(UUID().uuidString)"
+        let expectedAck = "SEMREH_SLICE1_ACK"
+        let stockFixtureCreate: [String: JSONValue] = [
+            "cwd": .string(Self.stockToolCwd),
+            "model": .string("semreh-fixture"),
+            "provider": .string("custom")
+        ]
+
+        var runtime: HermesServerRuntime?
+        var controller: GatewayConversationController?
+        var loggedIn = false
+        var ownedRuntimeID: String?
+        var initialTranscript: DirectHermesTranscriptPage?
+        do {
+            let status = try await stage("slice3 gateway restart status") { try await api.directStatus() }
+            guard status.authRequired == true else { throw LiveSmokeInvariant.failed }
+            let providers = try await stage("slice3 gateway restart providers") { try await api.directProviders() }
+            guard providers.providers?.contains(where: { $0.name == "basic" && $0.supportsPassword == true }) == true else {
+                throw LiveSmokeInvariant.failed
+            }
+            let login = try await stage("slice3 gateway restart login") {
+                try await api.directPasswordLogin(username: credentials.username, password: credentials.password)
+            }
+            guard login.ok == true else { throw LiveSmokeInvariant.failed }
+            loggedIn = true
+            try await stage("slice3 gateway restart protected probe before") { try await api.directProtectedProbe() }
+
+            let serverRuntime = try await stage("slice3 gateway restart runtime init") {
+                try HermesServerRuntime(origin: HostedTransport.https.baseURL, client: api)
+            }
+            runtime = serverRuntime
+            try await stage("slice3 gateway restart runtime connect") { try await serverRuntime.connect() }
+            let initial = GatewayConversationController(
+                runtime: serverRuntime,
+                client: api,
+                storedID: nil,
+                profile: "default",
+                recoveryMarkerStore: markerStore
+            )
+            initial.onEvent = { event in Task { await events.append(event) } }
+            initial.onBinding = { binding in ownedRuntimeID = binding.runtimeID }
+            initial.onTranscript = { page, _ in initialTranscript = page }
+            controller = initial
+            try await stage("slice3 gateway restart seed submit") {
+                try await initial.submit(seedPrompt, create: stockFixtureCreate)
+            }
+            let seedRuntimeID = try await stage("slice3 gateway restart seed binding") {
+                try XCTUnwrap(initial.binding?.runtimeID)
+            }
+            ownedRuntimeID = seedRuntimeID
+            _ = try await stage("slice3 gateway restart seed terminal") {
+                try await events.wait { event in
+                    event.sessionID == seedRuntimeID
+                        && event.type == "message.complete"
+                        && Self.stringValue(Self.objectValue(event.payload)?["status"]) == "complete"
+                }
+            }
+            guard initial.runState == .idle else { throw LiveSmokeInvariant.failed }
+            let storedID = try await stage("slice3 gateway restart durable identity") {
+                try XCTUnwrap(initial.storedID)
+            }
+            guard initial.storedID == storedID else { throw LiveSmokeInvariant.failed }
+            let baseline = try await stage("slice3 gateway restart baseline transcript") {
+                try await api.directSessionMessages(sessionID: storedID, profile: "default")
+            }
+            try assertRecoveryTranscript(baseline, users: [seedPrompt], assistant: expectedAck)
+            try await initial.refresh()
+            guard initialTranscript?.messages == baseline.messages else { throw LiveSmokeInvariant.failed }
+
+            try Self.writeGatewayRestartMarker(url: markerURL, nonce: nonce, phase: "ready")
+            try await stage("slice3 gateway restart external restart") {
+                try await Self.waitForGatewayRestartMarker(url: markerURL, nonce: nonce)
+            }
+            // The URLSession cookie jar is intentionally retained: this proves
+            // the restarted stock process still accepts the authenticated app
+            // session, rather than hiding a restart failure behind a relogin.
+            try await stage("slice3 gateway restart protected probe after") { try await api.directProtectedProbe() }
+            try await stage("slice3 gateway restart runtime reconnect") { try await serverRuntime.reconnect() }
+            try await stage("slice3 gateway restart controller reopen") { try await initial.open() }
+            let reboundRuntimeID = try await stage("slice3 gateway restart rebound binding") {
+                try XCTUnwrap(initial.binding?.runtimeID)
+            }
+            guard reboundRuntimeID != seedRuntimeID else { throw LiveSmokeInvariant.failed }
+            ownedRuntimeID = reboundRuntimeID
+            guard initial.storedID == storedID, initial.runState == .idle else { throw LiveSmokeInvariant.failed }
+            try await initial.refresh()
+            guard initialTranscript?.messages == baseline.messages else { throw LiveSmokeInvariant.failed }
+            let reboundBaseline = try await stage("slice3 gateway restart canonical baseline") {
+                try await api.directSessionMessages(sessionID: storedID, profile: "default")
+            }
+            guard reboundBaseline.messages == baseline.messages else { throw LiveSmokeInvariant.failed }
+
+            try await stage("slice3 gateway restart post prompt") {
+                try await initial.submit(postRestartPrompt)
+            }
+            _ = try await stage("slice3 gateway restart post terminal") {
+                try await events.wait { event in
+                    event.sessionID == reboundRuntimeID
+                        && event.type == "message.complete"
+                        && Self.stringValue(Self.objectValue(event.payload)?["status"]) == "complete"
+                }
+            }
+            let finalTranscript = try await stage("slice3 gateway restart final transcript") {
+                try await api.directSessionMessages(sessionID: storedID, profile: "default")
+            }
+            guard finalTranscript.messages.count >= baseline.messages.count,
+                  Array(finalTranscript.messages.prefix(baseline.messages.count)) == baseline.messages else {
+                throw LiveSmokeInvariant.failed
+            }
+            try assertRecoveryTranscript(
+                finalTranscript,
+                users: [seedPrompt, postRestartPrompt],
+                assistant: expectedAck
+            )
+            if let ownedRuntimeID {
+                let closed = try await serverRuntime.request("session.close", params: [
+                    "session_id": .string(ownedRuntimeID),
+                    "profile": .string("default")
+                ])
+                guard closed?.gatewayFields["closed"] == .bool(true) else { throw LiveSmokeInvariant.failed }
+            }
+            try await initial.dispose()
+            controller = nil
+            await serverRuntime.stop()
+            runtime = nil
+            try await stage("slice3 gateway restart logout") { try await api.directLogout() }
+            loggedIn = false
+            try Self.writeGatewayRestartMarker(url: markerURL, nonce: nonce, phase: "complete")
+        } catch {
+            if let ownedRuntimeID, let runtime {
+                do {
+                    try await runtime.connect()
+                    let closeResult = try await runtime.request("session.close", params: [
+                        "session_id": .string(ownedRuntimeID),
+                        "profile": .string("default")
+                    ])
+                    guard closeResult?.gatewayFields["closed"] == .bool(true) else {
+                        XCTFail("Owned gateway restart runtime cleanup was not confirmed.")
+                        throw LiveSmokeInvariant.failed
+                        }
+                } catch {
+                    XCTFail("Owned gateway restart runtime cleanup failed.")
+                }
+            }
+            if let controller { try? await controller.dispose() }
+            if let runtime { await runtime.stop() }
+            if loggedIn { try? await api.directLogout() }
+            throw error
+        }
+    }
+
     private func assertRecoveryTranscript(
         _ page: DirectHermesTranscriptPage,
         users: [String],
@@ -1754,6 +1947,62 @@ final class DirectHermesLiveSmokeTests: XCTestCase {
         guard url.resolvingSymlinksInPath().path == path else { throw LiveSmokeInvariant.failed }
         let data = try Data(contentsOf: url, options: [.mappedIfSafe])
         return try JSONDecoder().decode(LiveCredentials.self, from: data)
+    }
+
+    private static func gatewayRestartMarkerURL(
+        environment: [String: String],
+        nonce: String
+    ) throws -> URL {
+        guard nonce.range(of: "^[A-Za-z0-9_-]{16,128}$", options: .regularExpression) != nil else {
+            throw LiveSmokeInvariant.failed
+        }
+        guard let rawPath = environment["SEMREH_SLICE3_GATEWAY_RESTART_COORDINATION_PATH"] else {
+            throw LiveSmokeInvariant.failed
+        }
+        let url = URL(fileURLWithPath: rawPath)
+        let runtimeRoot = URL(fileURLWithPath: Self.defaultCredentialsPath)
+            .deletingLastPathComponent()
+        guard url.isFileURL,
+              url.path == url.standardizedFileURL.path,
+              url.deletingLastPathComponent().path == runtimeRoot.path,
+              url.lastPathComponent == "slice3-gateway-restart-\(nonce).json",
+              url.deletingLastPathComponent().resolvingSymlinksInPath().path == runtimeRoot.path,
+              !FileManager.default.fileExists(atPath: url.path) else {
+            throw LiveSmokeInvariant.failed
+        }
+        return url
+    }
+
+    private static func writeGatewayRestartMarker(
+        url: URL,
+        nonce: String,
+        phase: String
+    ) throws {
+        guard ["ready", "complete"].contains(phase) else { throw LiveSmokeInvariant.failed }
+        let object: [String: String] = [
+            "kind": "semreh-slice3-gateway-restart-v1",
+            "nonce": nonce,
+            "phase": phase
+        ]
+        let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        try data.write(to: url, options: [.atomic])
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+
+    private static func waitForGatewayRestartMarker(url: URL, nonce: String) async throws {
+        let deadline = Date().addingTimeInterval(180)
+        while Date() < deadline {
+            if let data = try? Data(contentsOf: url),
+               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               object.count == 3,
+               object["kind"] as? String == "semreh-slice3-gateway-restart-v1",
+               object["nonce"] as? String == nonce,
+               object["phase"] as? String == "restart-complete" {
+                return
+            }
+            try await Task.sleep(for: .milliseconds(500))
+        }
+        throw LiveSmokeInvariant.failed
     }
 
     private static func verifyDurableTranscript(

@@ -282,6 +282,8 @@ enum ActiveStreamRecoveryState: Equatable {
 @Observable
 final class ChatViewModel {
     nonisolated private static let messagePageLimit = 50
+    private static let directAmbiguousPromptDeliveryMessage =
+        "Delivery is uncertain. This message was not resent; reconnect to check the transcript."
     @ObservationIgnored private var incrementalTranscriptMessageIndex: Int?
     @ObservationIgnored private var streamingAssistantMessageIndex: Int?
     @ObservationIgnored private var messageLoadGeneration = 0
@@ -1199,12 +1201,18 @@ final class ChatViewModel {
             controller.isEditing = self.directComposerIsEditing
             controller.onBinding = { [weak self] binding in self?.adoptDirectID(binding.storedID) }
             controller.onCanonicalID = { [weak self] id in self?.adoptDirectID(id) }
-            controller.onResume = { [weak self] result in
-                guard let self else { return }
+            controller.onResume = { [weak self, weak controller] result in
+                guard let self, let controller,
+                      !self.directInvalidated,
+                      self.directConversation === controller,
+                      controller.storedID == self.canonicalSessionID else { return }
                 self.applyDirectSessionInfo(result?.gatewayFields["info"])
                 self.syncDirectClarificationPrompt()
                 self.directBlockingInteractionErrorMessage = nil
                 self.directBlockingInteractionErrorIdentity = nil
+                if controller.hasAmbiguousPromptDelivery {
+                    self.sendErrorMessage = Self.directAmbiguousPromptDeliveryMessage
+                }
             }
             controller.onReasoningConfiguration = { [weak self, weak controller] configuration in
                 guard let self, let controller,
@@ -1401,7 +1409,7 @@ final class ChatViewModel {
             return false
         }
         guard directConversation?.hasAmbiguousPromptDelivery != true else {
-            sendErrorMessage = "Delivery is uncertain. This message was not resent; reconnect to check the transcript."
+            sendErrorMessage = Self.directAmbiguousPromptDeliveryMessage
             return false
         }
         guard directConversation?.runState == nil || directConversation?.runState == .idle else { return false }
@@ -1494,7 +1502,7 @@ final class ChatViewModel {
             if directConversation?.hasAmbiguousPromptDelivery == true
                 || directConversation?.runState == .deliveryUnknown {
                 removeDirectPendingAttachments(ids: attachmentIDs)
-                sendErrorMessage = "Delivery is uncertain. This message was not resent; reconnect to check the transcript."
+                sendErrorMessage = Self.directAmbiguousPromptDeliveryMessage
                 return true
             }
             rollbackOptimisticMessage(id: localID)
@@ -1506,7 +1514,7 @@ final class ChatViewModel {
                 // Keep the staged row as uncertain. Restoring the composer would
                 // invite an accidental duplicate; a canonical reload resolves it.
                 removeDirectPendingAttachments(ids: attachmentIDs)
-                sendErrorMessage = "Delivery is uncertain. This message was not resent; reconnect to check the transcript."
+                sendErrorMessage = Self.directAmbiguousPromptDeliveryMessage
                 return true
             }
             rollbackOptimisticMessage(id: localID)
@@ -1632,7 +1640,13 @@ final class ChatViewModel {
             if let usage = terminal.usage { contextWindowSnapshot = usage }
             directResponseComplete = true
             responseCompletionHapticTrigger += 1
-            sendErrorMessage = terminal.error
+            if let terminalError = terminal.error {
+                sendErrorMessage = terminalError
+            } else if directConversation?.hasAmbiguousPromptDelivery == true {
+                sendErrorMessage = Self.directAmbiguousPromptDeliveryMessage
+            } else {
+                sendErrorMessage = nil
+            }
             let cancelled = terminal.status == "cancelled" || terminal.status == "interrupted"
             liveActivityManager.end(status: terminal.error != nil ? .failed : (cancelled ? .cancelled : .complete),
                 activity: cancelled ? "Response stopped" : "Response complete", errorSummary: terminal.error)
