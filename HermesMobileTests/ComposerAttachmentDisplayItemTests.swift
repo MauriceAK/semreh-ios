@@ -21,7 +21,7 @@ final class ComposerAttachmentDisplayItemTests: XCTestCase {
         XCTAssertEqual(item.legacyPendingAttachment(), pending)
     }
 
-    func testDirectProjectionHasNoServerPathAndOnlyImageGetsLocalPreviewBytes() throws {
+    func testDirectProjectionHasNoServerPathAndImageAndPDFGetLocalPreviewBytes() throws {
         let image = try DirectGatewayAttachment.image(data: pngData, filename: "photo.png")
         let imageItem = ComposerAttachmentDisplayItem(
             direct: DirectPendingAttachment(source: image, thumbnailData: Data([0x01]))
@@ -33,7 +33,7 @@ final class ComposerAttachmentDisplayItemTests: XCTestCase {
         let pdf = try DirectGatewayAttachment.pdf(data: Data("%PDF-1.4\n".utf8), filename: "report.pdf")
         let pdfItem = ComposerAttachmentDisplayItem(direct: DirectPendingAttachment(source: pdf))
         XCTAssertNil(pdfItem.serverPath)
-        XCTAssertNil(pdfItem.localPreviewData)
+        XCTAssertEqual(pdfItem.localPreviewData, pdf.originalBytes)
     }
 
     func testEqualityExcludesPreviewBytesFromMetadataComparison() throws {

@@ -28,10 +28,12 @@ def main():
     parser.add_argument('--slice3-clarification', action='store_true')
     parser.add_argument('--slice3-attachment', action='store_true')
     parser.add_argument('--slice3-blocking', action='store_true')
+    parser.add_argument('--slice3-file-picker', action='store_true')
     parser.add_argument('--slice3-recovery', action='store_true')
     parser.add_argument('--slice3-completed-away', action='store_true')
     parser.add_argument('--slice3-relaunch', action='store_true')
     parser.add_argument('--slice3-gateway-restart', action='store_true')
+    parser.add_argument('--slice3-active-socket-loss', action='store_true')
     parser.add_argument('--gateway-restart-nonce')
     parser.add_argument('--tui-created-session-id')
     parser.add_argument('--slice3-relaunch-seed-text')
@@ -39,6 +41,16 @@ def main():
     parser.add_argument('--stock-backend', action='store_true')
     parser.add_argument('--cookie-phase', choices=['login', 'restore', 'logout'])
     args = parser.parse_args()
+    if args.slice3_active_socket_loss and (
+        not args.https or not args.stock_backend or args.development_backend_sha
+        or args.cookie_phase or args.slice2_foundation or args.slice2_native
+        or args.slice2_reasoning or args.slice2_ui or args.slice3_clarification
+        or args.slice3_attachment or args.slice3_blocking or args.slice3_file_picker
+        or args.slice3_recovery or args.slice3_completed_away or args.slice3_relaunch
+        or args.slice3_gateway_restart or args.gateway_restart_nonce
+        or args.tui_created_session_id or args.slice3_relaunch_seed_text
+    ):
+        parser.error('--slice3-active-socket-loss requires --https --stock-backend and no other test phase')
     if args.tui_created_session_id and (
         not args.slice2_ui or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', args.tui_created_session_id)
     ):
@@ -86,12 +98,21 @@ def main():
         args.slice3_clarification, args.slice3_attachment, args.slice3_blocking
     )) > 1:
         parser.error('--slice3-clarification, --slice3-attachment, and --slice3-blocking are mutually exclusive')
+    if args.slice3_file_picker and (
+        not args.slice2_ui or not args.https or args.cookie_phase
+        or not args.stock_backend or args.development_backend_sha
+        or args.slice2_foundation or args.slice2_native or args.slice2_reasoning
+        or args.slice3_clarification or args.slice3_attachment or args.slice3_blocking
+        or args.slice3_recovery or args.slice3_completed_away or args.slice3_relaunch
+        or args.slice3_gateway_restart or args.tui_created_session_id
+    ):
+        parser.error('--slice3-file-picker requires --slice2-ui --https --stock-backend and no other test phase')
     if args.slice3_recovery and (
         not args.https or args.cookie_phase or not args.stock_backend
         or args.development_backend_sha or args.slice2_foundation
         or args.slice2_native or args.slice2_reasoning or args.slice2_ui
         or args.slice3_clarification or args.slice3_attachment or args.slice3_blocking
-        or args.slice3_completed_away or args.slice3_relaunch
+        or args.slice3_file_picker or args.slice3_completed_away or args.slice3_relaunch
         or args.slice3_gateway_restart
         or args.tui_created_session_id or args.slice3_relaunch_seed_text
     ):
@@ -101,7 +122,7 @@ def main():
         or args.development_backend_sha or args.slice2_foundation
         or args.slice2_native or args.slice2_reasoning or args.slice2_ui
         or args.slice3_clarification or args.slice3_attachment or args.slice3_blocking
-        or args.slice3_recovery or args.slice3_relaunch or args.tui_created_session_id
+        or args.slice3_file_picker or args.slice3_recovery or args.slice3_relaunch or args.tui_created_session_id
         or args.slice3_gateway_restart or args.gateway_restart_nonce
         or args.slice3_relaunch_seed_text
     ):
@@ -121,16 +142,16 @@ def main():
         or args.development_backend_sha or args.slice2_foundation
         or args.slice2_native or args.slice2_reasoning or args.slice2_ui
         or args.slice3_clarification or args.slice3_attachment or args.slice3_blocking
-        or args.slice3_recovery or args.slice3_completed_away or args.slice3_relaunch
+        or args.slice3_file_picker or args.slice3_recovery or args.slice3_completed_away or args.slice3_relaunch
         or not args.gateway_restart_nonce
     ):
         parser.error('--slice3-gateway-restart requires --https --stock-backend --gateway-restart-nonce and no other test phase')
     backend_phase = (
-        args.slice2_reasoning or args.slice2_ui or args.slice3_recovery
+        args.slice3_active_socket_loss or args.slice2_reasoning or args.slice2_ui or args.slice3_file_picker or args.slice3_recovery
         or args.slice3_completed_away or args.slice3_relaunch or args.slice3_gateway_restart
     )
     if args.stock_backend and not backend_phase:
-        parser.error('--stock-backend requires --slice2-reasoning, --slice2-ui, --slice3-completed-away, --slice3-relaunch, or --slice3-gateway-restart')
+        parser.error('--stock-backend requires --slice2-reasoning, --slice2-ui, --slice3-file-picker, --slice3-completed-away, --slice3-relaunch, or --slice3-gateway-restart')
     if backend_phase and args.stock_backend == bool(args.development_backend_sha):
         parser.error('Slice 2 backend phase requires exactly one backend mode')
     development = backend_phase and not args.stock_backend
@@ -219,6 +240,13 @@ def main():
             'SEMREH_SLICE3_GATEWAY_RESTART_COORDINATION_PATH': str(coordination_path),
         })
         method = 'testOptInHostedSlice3NativeGatewayRestart'
+    if args.slice3_active_socket_loss:
+        target['EnvironmentVariables'].update({
+            'SEMREH_SLICE2_STOCK_BACKEND_SHA': PIN,
+            'SEMREH_SLICE2_TOOL_CWD': str(runtime / 'tools'),
+            'SEMREH_SLICE3_ACTIVE_SOCKET_LOSS_NATIVE': '1',
+        })
+        method = 'testOptInHostedSlice3NativeActiveSocketLoss'
     if args.cookie_phase:
         target['EnvironmentVariables']['SEMREH_SLICE1_COOKIE_PHASE'] = args.cookie_phase
         method = 'testOptInHostedCookie' + args.cookie_phase.title() + 'Phase'
@@ -239,6 +267,8 @@ def main():
             target['EnvironmentVariables']['SEMREH_SLICE3_ATTACHMENT_UI'] = '1'
         if args.slice3_blocking:
             target['EnvironmentVariables']['SEMREH_SLICE3_BLOCKING_UI'] = '1'
+        if args.slice3_file_picker:
+            target['EnvironmentVariables']['SEMREH_SLICE3_FILE_PICKER_UI'] = '1'
         if args.slice3_relaunch:
             target['EnvironmentVariables']['SEMREH_SLICE3_RELAUNCH_UI'] = '1'
         if args.tui_created_session_id:

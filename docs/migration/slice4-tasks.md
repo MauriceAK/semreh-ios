@@ -46,3 +46,24 @@ browser-UI dependency, or assume a route shape without a live capture.
   branches; first prove all production constructors use the direct runtime.
 - History edit/regenerate/fork remain disabled in direct mode pending exact
   row-ID/lineage contracts. No silent feature removal authorized by this inventory.
+
+## Session-convenience preparation — September7
+
+Luna read-only mapping; root checked stock PATCH/DELETE/search source. No live
+contract capture or S4 implementation pass yet.
+
+- Direct list currently uses official `/api/profiles/sessions`, but archive filter/
+  count plumbing remains incomplete. Stock `archived=exclude|only|include` is not
+  legacy `include_archived=1`.
+- Search stock returns `results`; existing SessionSearchResponse expects `sessions`.
+  Adapt explicitly, retaining local search; do not assume legacy content/depth flags.
+- Rename/pin/archive currently use legacy mutation consumers. Stock profile-aware
+  PATCH `/api/sessions/{id}` accepts title/pinned/archived and returns ok/readback.
+- Stock DELETE `/api/sessions/{id}` is idempotent for absent rows, but source alone
+  does not prove safe active-run deletion: it mutates DB without stopping a live
+  runtime. Coordinate active behavior/full durable IDs with S4-D before integration;
+  do not blindly substitute this route for every legacy delete case.
+- Potential disjoint packages after S3 contracts stabilize: direct typed adapters/
+  focused contract tests; session-list optimistic mutation integration; archived
+  collection/count integration; remote search shape/match integration. Preserve
+  tombstone/rollback semantics, server/profile/session scoping and visible features.

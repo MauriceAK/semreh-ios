@@ -812,3 +812,110 @@ This is preparation, not proof that the system picker exposes/selects the files.
 Lifecycle artifact audit v1 completed: **177368 files scanned, 0 flagged paths,
 107 exported consoles**. Scope remains known current fixture secrets and obvious
 bearer formats, excluding arbitrary-secret/OCR and quarantined OS diagnostics.
+
+## Files picker / active socket-loss successor to e1d0099 — in progress
+
+Direct composer now saves its cleared draft before awaiting submission. Existing
+definite-failure restoration/newer-draft preservation remains. Store-only tests
+cover clearing A without touching B and restoring A; they do not prove UI call
+ordering, crash durability or durable ambiguous-delivery resolution.
+
+Root review corrected picker test timing/identity: baseline attachment labels
+captured before selection, exact removal-chip disappearance, one new returned
+cell and PDF local document versus returned page image. Native active socket
+test is separately authored; controlled URLSession socket cancellation is not
+WiFi or proxy-outage evidence. No production backend change.
+
+Picker-ui-build-v1 failed compilation because root used a nonexistent attachment
+helper name; corrected to existing attachPlainText. Picker-ui-build-v2 signed
+build passed. Picker-production-ui-v1 running; no picker gate claimed yet.
+Selector Python suite with active-socket standalone guards passed27 tests.
+
+Picker UIv1 failed on MenuItem selector despite visible Attach File; corrected
+to stock SwiftUI button, signed buildv3 passed. UIv2 reached the synthetic Files
+folder but failed on literal filename selector: Files hides extensions and exposes
+cell identifier `semreh-picker, txt` / `semreh-picker, pdf`. Root inspected live
+screenshot and exported AX hierarchy A7467A99-5574-4BFE-A0ED-838E6BC4A6F9.txt;
+corrected exact cell identifier, buildv4 pending. Both failures retained/exported,
+no product picker failure proved and no pass claimed.
+
+Bounded SolLow review of active-socket test caught misplaced binding counter in
+the previous test and potential cancellation of a stale first socket. Root moved
+the counter into the correct method, reverted unintended previous-test edits and
+requires unchanged connection generation/exactly one socket/still-running before
+cancelling. Native execution pending. This remains controlled socket cancellation,
+not a separate proxy/WiFi loss gate.
+
+Picker buildv4 passed; UIv3 passed actual text selection/send/canonical text
+preview, then failed local-PDF accessibility assertion after selection. Root saw
+authenticated text content in screenshot and preserved AX/video. No PDF pass:
+added explicit systempicker-dismissal wait and diagnostic snapshot on localPDF
+failure to distinguish presentation timing from missing accessibility metadata.
+Buildv5/rerun pending. Not a reason to weaken the PDF gate.
+
+Buildv5 passed. UIv4 confirmed the actual product gap, not just test AX timing:
+localPDF sheet displays `This attachment does not have a server file path.`
+Root inspected screenshot61CA03EC-7414-4398-8658-50F76B2C3E4A.png and
+AX00CA4FCB-322A-46A3-8874-17C34C39E92B.txt. ComposerAttachmentDisplayItem
+intentionally projected original bytes only for images; no-path preview loader
+handled only images. Luna now extends only local PDF preview with retained bytes,
+existing PDF loader/size limits/cancellation guards, no backend or persistence.
+Both text roundtrip and failure evidence retained; full picker gate remains open.
+
+Local PDF projection/preview implementation and tests now integrated. Root full
+signed `slice3-picker-socket-full-v1.xcresult`: **2179 passed, 0 failures,
+11 intentional opt-in skips**. Includes valid/malformed/declared-oversize/cancelled
+local PDF without network, preserved image behavior and direct draft clearing.
+New active-socket live smoke typechecked; standalone live execution still required.
+
+`slice3-active-socket-loss-live-v1.xcresult`: **1 passed,0 failures,0 skips**.
+Native test observes canonical accepted user/no new assistant and running state,
+requires sole original socket/unchanged generation, cancels real URLSession socket,
+then requires a new socket/generation/binding on the same controller/stored ID.
+Scoped terminal, unchanged exact baseline, one new user/ACK pair, native refreshed
+history equal to canonical REST and exactly two prompt-submit attempts (seed plus
+delayed turn) passed. Exact owned close/logout cleanup passed. No automatic retry
+or backend change; not WiFi, proxy loss, app termination or all recovery-matrix cases.
+
+Picker buildv6 passed. UIv5 passed local PDF preview and sent its page, then failed
+global accessibility ACK count (2 versus3): older rows were outside the visible
+transcript. Root saw latest PDF marker/page and ACK onscreen. Separate guarded
+`slice3-file-picker-canonical-v5.json` **passed**: exact text/PDF UUID markers in
+one six-row conversation, exact ordered user/ACK pairs, unique durable IDs,
+92 original text bytes and one authenticated PNG page. This does not erase UIv5
+failure or prove its final returned-image preview step, which never ran.
+
+UI-only correction now awaits the visible ACK below the exact new prompt instead
+of counting offscreen old rows; returned attachment discovery uses unseen labels,
+not increasing total visible-cell count. The separate canonical check still owns
+exact durable counts. Full product suite above remains current; UI rerun pending.
+
+Signed picker buildv7 completed. `slice3-file-picker-production-ui-v6.xcresult`
+passed **1/0/0** through production login, actual Files text/PDF selection, local
+PDF preview, both sends, and authenticated returned text/page-image previews.
+Root inspected exported 3B8F526D-D569-4086-81F9-0C310F6ED892.png (text) and
+8D9437DE-0F07-401D-9D66-EF0053923A03.png (PDF page). Diagnostics exported without
+OS collection. `slice3-file-picker-canonical-v6.json` passed the separate exact
+ordered six-row/unique-ID/text-byte/page-image check. Physical acceptance remains.
+
+Important newly observed gap: running-v6 screenshot shows a stock context warning
+for the staged text reference outside its allowed workspace. Storage/readback/UI
+preview passes do NOT prove file contents reach inference. Investigation remains
+open; no broadened workspace permissions or backend patch is authorized/implied.
+
+Bounded independent SolLow review found no blocking issue in the production
+draft-save/PDF diffs. Existing detached PDFKit decode may continue after dismissal;
+cancellation prevents publication, not preempting synchronous parsing. Retain the
+existing 20MiB cap/off-main loader rather than adding a cancellation framework.
+Mid-decode cancellation and production definite-failure draft restoration remain
+coverage gaps; pre-cancel and store-only tests do not establish those claims.
+
+Root final Python rerun with approved disposable venv passed **32 tests** in
+slice3-picker-final-python-v1.log. Initial accidental system-Python invocation
+failed two imports because that interpreter lacks websockets; no code change.
+Strict codesign and ordinary owned-Simulator app launch passed (PID62042).
+
+Final picker/socket artifact auditv1 completed with zero flagged paths. Exact
+counts retained in slice3-picker-socket-final-audit-v1.jsonl. Scope is known
+fixture secrets/obvious bearer formats and exported consoles, not arbitrary
+opaque secrets, image OCR or quarantined OS diagnostics.

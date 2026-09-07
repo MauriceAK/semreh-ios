@@ -11,8 +11,8 @@ struct ComposerAttachmentDisplayItem: Identifiable, Equatable {
     let size: Int?
     let isImage: Bool
     let thumbnailData: Data?
-    /// Only direct images provide original bytes for a local preview. Generic
-    /// files and PDFs intentionally use the existing no-server-path fallback.
+    /// Direct images and PDFs provide original bytes for a local preview.
+    /// Generic files intentionally use the existing no-server-path fallback.
     let localPreviewData: Data?
 
     private let legacyPending: PendingAttachment?
@@ -37,7 +37,7 @@ struct ComposerAttachmentDisplayItem: Identifiable, Equatable {
         size = attachment.byteCount
         isImage = attachment.isImage
         thumbnailData = attachment.thumbnailData
-        localPreviewData = attachment.isImage ? attachment.originalBytes : nil
+        localPreviewData = (attachment.isImage || attachment.isPDF) ? attachment.originalBytes : nil
         legacyPending = nil
     }
 

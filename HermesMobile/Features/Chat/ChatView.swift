@@ -1925,6 +1925,12 @@ struct ChatView: View {
         prepareTranscriptForExplicitSend()
 
         draftMessage = ""
+        if viewModel.usesDirectGateway {
+            // Clear saved direct draft before awaiting submission to reduce
+            // stale composer restoration after termination. UserDefaults
+            // does not guarantee synchronous disk durability.
+            persistComposerDraft()
+        }
 
         let didStart = await viewModel.sendMessage(submittedDraft, modelContext: modelContext)
         if !didStart, draftMessage.isEmpty {

@@ -1585,6 +1585,238 @@ final class DirectHermesLiveSmokeTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testOptInHostedSlice3NativeActiveSocketLoss() async throws {
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("Slice 3 active socket-loss smoke is simulator-only.")
+        #endif
+
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SEMREH_SLICE1_LIVE"] == "1",
+              environment["SEMREH_SLICE1_HTTPS"] == "1",
+              environment["SEMREH_SLICE3_ACTIVE_SOCKET_LOSS_NATIVE"] == "1",
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == Self.defaultCredentialsPath,
+              environment["SEMREH_SLICE2_STOCK_BACKEND_SHA"] == Self.stockBackendSHA,
+              environment["SEMREH_SLICE2_TOOL_CWD"] == Self.stockToolCwd
+        else {
+            throw XCTSkip("Slice 3 active socket-loss smoke is opt-in for the pinned stock HTTPS fixture.")
+        }
+
+        let credentials = try await stage("slice3 active socket-loss credentials") {
+            try Self.readCredentials()
+        }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpAdditionalHeaders = [:]
+        configuration.httpShouldSetCookies = true
+        configuration.httpCookieAcceptPolicy = .always
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let api = APIClient(
+            baseURL: HostedTransport.https.baseURL,
+            session: session,
+            publicMediaSession: session,
+            customHeaderProvider: { [] }
+        )
+        let socketFactory = LiveActiveSocketLossFactory(session: session)
+        let events = LiveGatewayEventCapture()
+        let seedPrompt = "SEMREH_SLICE3_ACTIVE_SOCKET_SEED_\(UUID().uuidString)"
+        let delayedPrompt = "SEMREH_INTERRUPT_FIXTURE SEMREH_SLICE3_ACTIVE_SOCKET_LOSS_\(UUID().uuidString)"
+        let expectedAck = "SEMREH_SLICE1_ACK"
+        let stockFixtureCreate: [String: JSONValue] = [
+            "cwd": .string(Self.stockToolCwd),
+            "model": .string("semreh-fixture"),
+            "provider": .string("custom")
+        ]
+
+        var runtime: HermesServerRuntime?
+        var controller: GatewayConversationController?
+        var loggedIn = false
+        var ownedRuntimeID: String?
+        do {
+            let status = try await stage("slice3 active socket-loss status") { try await api.directStatus() }
+            guard status.authRequired == true else { throw LiveSmokeInvariant.failed }
+            let providers = try await stage("slice3 active socket-loss providers") { try await api.directProviders() }
+            guard providers.providers?.contains(where: { $0.name == "basic" && $0.supportsPassword == true }) == true else {
+                throw LiveSmokeInvariant.failed
+            }
+            let login = try await stage("slice3 active socket-loss login") {
+                try await api.directPasswordLogin(username: credentials.username, password: credentials.password)
+            }
+            guard login.ok == true else { throw LiveSmokeInvariant.failed }
+            loggedIn = true
+            try await stage("slice3 active socket-loss protected probe") { try await api.directProtectedProbe() }
+
+            let serverRuntime = try await stage("slice3 active socket-loss runtime init") {
+                try HermesServerRuntime(origin: HostedTransport.https.baseURL) { sink in
+                    HermesGatewayClient(
+                        gatewayURL: HostedTransport.https.gatewayURL,
+                        ticketProvider: {
+                            let response = try await api.directWSTicket()
+                            guard let ticket = response.ticket,
+                                  !ticket.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            else { throw LiveSmokeInvariant.failed }
+                            return ticket
+                        },
+                        requestTimeout: .seconds(30),
+                        eventHandler: sink,
+                        urlSessionConfiguration: configuration,
+                        socketFactory: { request in socketFactory.make(request: request) }
+                    )
+                }
+            }
+            runtime = serverRuntime
+            try await stage("slice3 active socket-loss runtime connect") { try await serverRuntime.connect() }
+
+            var bindingUpdateCount = 0
+            let initial = GatewayConversationController(
+                runtime: serverRuntime,
+                client: api,
+                storedID: nil,
+                profile: "default"
+            )
+            initial.onEvent = { event in Task { await events.append(event) } }
+            initial.onBinding = { binding in
+                bindingUpdateCount += 1
+                ownedRuntimeID = binding.runtimeID
+            }
+            controller = initial
+
+            try await stage("slice3 active socket-loss seed submit") {
+                try await initial.submit(seedPrompt, create: stockFixtureCreate)
+            }
+            let seedRuntimeID = try await stage("slice3 active socket-loss seed binding") {
+                try XCTUnwrap(initial.binding?.runtimeID)
+            }
+            ownedRuntimeID = seedRuntimeID
+            _ = try await stage("slice3 active socket-loss seed start") {
+                try await events.wait { event in
+                    event.sessionID == seedRuntimeID && event.type == "message.start"
+                }
+            }
+            _ = try await stage("slice3 active socket-loss seed terminal") {
+                try await events.wait { event in
+                    event.sessionID == seedRuntimeID
+                        && event.type == "message.complete"
+                        && Self.stringValue(Self.objectValue(event.payload)?["status"]) == "complete"
+                }
+            }
+            guard initial.runState == .idle else { throw LiveSmokeInvariant.failed }
+            let storedID = try await stage("slice3 active socket-loss durable identity") {
+                try XCTUnwrap(initial.storedID)
+            }
+            let baseline = try await stage("slice3 active socket-loss baseline transcript") {
+                try await api.directSessionMessages(sessionID: storedID, profile: "default")
+            }
+            try assertRecoveryTranscript(baseline, users: [seedPrompt], assistant: expectedAck)
+            var nativeTranscript: DirectHermesTranscriptPage?
+            initial.onTranscript = { page, _ in nativeTranscript = page }
+            let initialConnectionGeneration = serverRuntime.connectionGeneration
+
+            try await stage("slice3 active socket-loss accepted submit") {
+                try await initial.submit(delayedPrompt, create: stockFixtureCreate)
+            }
+            _ = try await stage("slice3 active socket-loss running before cancel") {
+                try await events.wait { event in
+                    event.sessionID == seedRuntimeID && event.type == "message.start"
+                }
+            }
+            guard initial.runState == .running else { throw LiveSmokeInvariant.failed }
+            var acceptedPage: DirectHermesTranscriptPage?
+            for _ in 0..<90 {
+                let page = try await api.directSessionMessages(sessionID: storedID, profile: "default")
+                let durable = page.messages.filter { $0.role == "user" || $0.role == "assistant" }
+                let users = durable.filter { $0.role == "user" }.compactMap(\.content)
+                let assistants = durable.filter { $0.role == "assistant" }.compactMap(\.content)
+                if users == [seedPrompt, delayedPrompt], assistants == [expectedAck] {
+                    acceptedPage = page
+                    break
+                }
+                try await Task.sleep(for: .milliseconds(200))
+            }
+            guard acceptedPage != nil,
+                  initial.runState == .running,
+                  serverRuntime.connectionGeneration == initialConnectionGeneration,
+                  socketFactory.socketCount == 1 else { throw LiveSmokeInvariant.failed }
+            guard socketFactory.cancelOnlySocket() else { throw LiveSmokeInvariant.failed }
+
+            for _ in 0..<90 {
+                if serverRuntime.connectionGeneration > initialConnectionGeneration,
+                   bindingUpdateCount >= 2 {
+                    break
+                }
+                try await Task.sleep(for: .milliseconds(200))
+            }
+            guard serverRuntime.connectionGeneration > initialConnectionGeneration,
+                  bindingUpdateCount >= 2,
+                  initial.storedID == storedID else {
+                throw LiveSmokeInvariant.failed
+            }
+            let reboundRuntimeID = try XCTUnwrap(initial.binding?.runtimeID)
+            _ = try await stage("slice3 active socket-loss recovered terminal") {
+                try await events.wait { event in
+                    event.sessionID == reboundRuntimeID
+                        && event.type == "message.complete"
+                        && Self.stringValue(Self.objectValue(event.payload)?["status"]) == "complete"
+                        && Self.stringValue(Self.objectValue(event.payload)?["text"]) == expectedAck
+                }
+            }
+            guard serverRuntime.state == .ready,
+                  initial.binding != nil,
+                  initial.runState == .idle else {
+                throw LiveSmokeInvariant.failed
+            }
+            guard socketFactory.socketCount >= 2,
+                  socketFactory.promptSubmitCount == 2 else {
+                throw LiveSmokeInvariant.failed
+            }
+
+            let finalTranscript = try await stage("slice3 active socket-loss canonical transcript") {
+                try await api.directSessionMessages(sessionID: storedID, profile: "default")
+            }
+            guard finalTranscript.messages.count >= baseline.messages.count,
+                  Array(finalTranscript.messages.prefix(baseline.messages.count)) == baseline.messages else {
+                throw LiveSmokeInvariant.failed
+            }
+            try assertRecoveryTranscript(
+                finalTranscript,
+                users: [seedPrompt, delayedPrompt],
+                assistant: expectedAck
+            )
+            try await initial.refresh()
+            guard nativeTranscript?.messages == finalTranscript.messages else {
+                throw LiveSmokeInvariant.failed
+            }
+
+            if let ownedRuntimeID {
+                let closed = try await stage("slice3 active socket-loss owned cleanup") {
+                    try await serverRuntime.request("session.close", params: [
+                        "session_id": .string(ownedRuntimeID),
+                        "profile": .string("default")
+                    ])
+                }
+                guard closed?.gatewayFields["closed"] == .bool(true) else { throw LiveSmokeInvariant.failed }
+            }
+            try await initial.dispose()
+            controller = nil
+            await serverRuntime.stop()
+            runtime = nil
+            try await stage("slice3 active socket-loss logout") { try await api.directLogout() }
+            loggedIn = false
+        } catch {
+            if let runtime, let ownedRuntimeID {
+                try? await runtime.connect()
+                _ = try? await runtime.request("session.close", params: [
+                    "session_id": .string(ownedRuntimeID),
+                    "profile": .string("default")
+                ])
+            }
+            if let controller { try? await controller.dispose() }
+            if let runtime { await runtime.stop() }
+            if loggedIn { try? await api.directLogout() }
+            throw error
+        }
+    }
+
     private func assertRecoveryTranscript(
         _ page: DirectHermesTranscriptPage,
         users: [String],
@@ -2086,6 +2318,89 @@ final class DirectHermesLiveSmokeTests: XCTestCase {
 
     private func stringValue(_ value: JSONValue?) -> String? {
         Self.stringValue(value)
+    }
+}
+
+private final class LiveActiveSocketLossFactory: @unchecked Sendable {
+    private let session: URLSession
+    private let lock = NSLock()
+    private var sockets: [LiveActiveSocketLossWebSocket] = []
+    private var promptSubmits = 0
+
+    init(session: URLSession) {
+        self.session = session
+    }
+
+    func make(request: URLRequest) -> HermesGatewayWebSocket {
+        let socket = LiveActiveSocketLossWebSocket(
+            task: session.webSocketTask(with: request),
+            onMessage: { [weak self] message in self?.record(message) }
+        )
+        lock.lock()
+        sockets.append(socket)
+        lock.unlock()
+        return socket
+    }
+
+    func cancelOnlySocket() -> Bool {
+        lock.lock()
+        let socket = sockets.count == 1 ? sockets.last : nil
+        lock.unlock()
+        socket?.cancel(with: .abnormalClosure, reason: nil)
+        return socket != nil
+    }
+
+    var socketCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return sockets.count
+    }
+
+    var promptSubmitCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return promptSubmits
+    }
+
+    private func record(_ message: URLSessionWebSocketTask.Message) {
+        guard case let .string(raw) = message,
+              let data = raw.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              object["method"] as? String == "prompt.submit"
+        else { return }
+        lock.lock()
+        promptSubmits += 1
+        lock.unlock()
+    }
+}
+
+private final class LiveActiveSocketLossWebSocket: HermesGatewayWebSocket, @unchecked Sendable {
+    private let task: URLSessionWebSocketTask
+    private let onMessage: (URLSessionWebSocketTask.Message) -> Void
+
+    init(
+        task: URLSessionWebSocketTask,
+        onMessage: @escaping (URLSessionWebSocketTask.Message) -> Void
+    ) {
+        self.task = task
+        self.onMessage = onMessage
+    }
+
+    func resume() {
+        task.resume()
+    }
+
+    func send(_ message: URLSessionWebSocketTask.Message) async throws {
+        onMessage(message)
+        try await task.send(message)
+    }
+
+    func receive() async throws -> URLSessionWebSocketTask.Message {
+        try await task.receive()
+    }
+
+    func cancel(with closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
+        task.cancel(with: closeCode, reason: reason)
     }
 }
 

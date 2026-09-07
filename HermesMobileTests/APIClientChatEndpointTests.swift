@@ -378,7 +378,7 @@ final class APIClientChatEndpointTests: APIClientTestCase {
         XCTAssertNil(item.path)
         XCTAssertEqual(item.mime, source.mimeType)
         XCTAssertEqual(item.size, source.originalBytes.count)
-        XCTAssertEqual(item.localImageData, source.originalBytes)
+        XCTAssertEqual(item.localPreviewData, source.originalBytes)
     }
 
     @MainActor
@@ -452,6 +452,134 @@ final class APIClientChatEndpointTests: APIClientTestCase {
         XCTAssertNotEqual(preview.data, originalImageData)
         XCTAssertEqual(preview.originalByteCount, originalImageData.count)
         XCTAssertEqual(pending.originalBytes, originalImageData)
+    }
+
+    @MainActor
+    func testChatAttachmentPreviewLoadsDirectPDFFromMemoryWithoutSessionOrAPI() async throws {
+        let pdfData = UIGraphicsPDFRenderer(bounds: CGRect(x: 0, y: 0, width: 320, height: 480)).pdfData { context in
+            context.beginPage()
+            "Local PDF".draw(at: CGPoint(x: 24, y: 24), withAttributes: nil)
+        }
+        let source = try DirectGatewayAttachment.pdf(data: pdfData, filename: "local.pdf")
+        let item = ChatAttachmentPreviewItem(
+            display: ComposerAttachmentDisplayItem(direct: DirectPendingAttachment(source: source))
+        )
+        let client = makeClient { request in
+            XCTFail("Direct local PDF preview must not request a host/server path: \(request.url?.path ?? "nil")")
+            throw URLError(.badURL)
+        }
+        let viewModel = try ChatAttachmentPreviewViewModel(
+            session: SessionSummary(),
+            server: XCTUnwrap(URL(string: "https://example.test")),
+            item: item,
+            apiClient: client,
+            usesDirectGateway: true
+        )
+
+        await viewModel.load()
+
+        guard case let .pdf(document) = viewModel.preview else {
+            return XCTFail("Direct local PDF should produce a native PDF preview.")
+        }
+        XCTAssertEqual(document.document.pageCount, 1)
+        XCTAssertNil(viewModel.errorMessage)
+    }
+
+    @MainActor
+    func testChatAttachmentPreviewRejectsMalformedDirectLocalPDFWithoutNetwork() async throws {
+        let source = try DirectGatewayAttachment.pdf(
+            data: Data("%PDF-1.4\nnot-a-real-document".utf8),
+            filename: "broken.pdf"
+        )
+        let item = ChatAttachmentPreviewItem(
+            display: ComposerAttachmentDisplayItem(direct: DirectPendingAttachment(source: source))
+        )
+        let client = makeClient { request in
+            XCTFail("Malformed direct local PDF must not request a host/server path: \(request.url?.path ?? "nil")")
+            throw URLError(.badURL)
+        }
+        let viewModel = try ChatAttachmentPreviewViewModel(
+            session: SessionSummary(),
+            server: XCTUnwrap(URL(string: "https://example.test")),
+            item: item,
+            apiClient: client,
+            usesDirectGateway: true
+        )
+
+        await viewModel.load()
+
+        guard case let .unavailable(message) = viewModel.preview else {
+            return XCTFail("Malformed direct local PDF should remain unavailable.")
+        }
+        XCTAssertTrue(message.localizedCaseInsensitiveContains("decode"))
+        XCTAssertNil(viewModel.errorMessage)
+    }
+
+    @MainActor
+    func testChatAttachmentPreviewRejectsDeclaredOversizeDirectLocalPDFWithoutAllocatingCapSizedData() async throws {
+        let pdfData = UIGraphicsPDFRenderer(bounds: CGRect(x: 0, y: 0, width: 320, height: 480)).pdfData { context in
+            context.beginPage()
+        }
+        let item = ChatAttachmentPreviewItem(
+            message: MessageAttachment(
+                name: "oversize.pdf",
+                path: nil,
+                mime: "application/pdf",
+                size: DocumentPreviewLimits.maximumBytes + 1,
+                isImage: false
+            ),
+            localData: pdfData
+        )
+        let client = makeClient { request in
+            XCTFail("Oversized direct local PDF must not request a host/server path: \(request.url?.path ?? "nil")")
+            throw URLError(.badURL)
+        }
+        let viewModel = try ChatAttachmentPreviewViewModel(
+            session: SessionSummary(),
+            server: XCTUnwrap(URL(string: "https://example.test")),
+            item: item,
+            apiClient: client,
+            usesDirectGateway: true
+        )
+
+        await viewModel.load()
+
+        guard case let .unavailable(message) = viewModel.preview else {
+            return XCTFail("Oversized direct local PDF should remain unavailable.")
+        }
+        XCTAssertTrue(message.localizedCaseInsensitiveContains("too large"))
+        XCTAssertNil(viewModel.errorMessage)
+    }
+
+    @MainActor
+    func testCancelledDirectLocalPDFPreviewDoesNotRequestNetworkOrPublishPreview() async throws {
+        let pdfData = UIGraphicsPDFRenderer(bounds: CGRect(x: 0, y: 0, width: 320, height: 480)).pdfData { context in
+            context.beginPage()
+        }
+        let source = try DirectGatewayAttachment.pdf(data: pdfData, filename: "cancelled.pdf")
+        let item = ChatAttachmentPreviewItem(
+            display: ComposerAttachmentDisplayItem(direct: DirectPendingAttachment(source: source))
+        )
+        let client = makeClient { request in
+            XCTFail("Cancelled direct local PDF preview must not request a host/server path: \(request.url?.path ?? "nil")")
+            throw URLError(.badURL)
+        }
+        let viewModel = try ChatAttachmentPreviewViewModel(
+            session: SessionSummary(),
+            server: XCTUnwrap(URL(string: "https://example.test")),
+            item: item,
+            apiClient: client,
+            usesDirectGateway: true
+        )
+
+        let task = Task { @MainActor in
+            await viewModel.load()
+        }
+        task.cancel()
+        await task.value
+
+        XCTAssertNil(viewModel.preview)
+        XCTAssertNil(viewModel.errorMessage)
     }
 
     @MainActor

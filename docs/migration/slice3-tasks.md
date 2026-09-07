@@ -1,6 +1,9 @@
 # Slice 3 task sheet
 
-Status: FIRST BOUNDED IMPLEMENTATIONS IN PROGRESS. Authorized September 6, 2026.
+Status: IN PROGRESS. Blocking/attachment implementations are integrated; the
+remaining lifecycle matrix, text-file inference verification and physical
+acceptance are open. Simulator Files picker/preview checkpoint passed.
+Authorized September 6, 2026.
 Integrator owns this sheet. [Execution plan](semreh_tui_gateway_v3_execution_plan.md)
 and [reference appendix](semreh_tui_gateway_v3_reference_appendix.md) own scope;
 this sheet does not invent contracts or mark unexecuted checks passed.
@@ -50,6 +53,18 @@ this sheet does not invent contracts or mark unexecuted checks passed.
   history to prove a run completed while its client owner was absent. This is
   useful native recovery evidence, but does not replace literal app-kill or phone
   background gates. No production test hook or new backend tool is needed.
+- September7 successor: exercise built-in Simulator Files provider with only
+  synthetic text/PDF files, no new app entitlements or personal/iCloud files.
+  PDF local preview and returned page-image preview are distinct stock contracts.
+- Persist the cleared direct composer draft before awaiting send, retaining
+  definite-failure restoration. This narrows the stale-draft relaunch window;
+  UserDefaults is not a transactional crash-durability guarantee. No automatic
+  resend, text-matching acceptance heuristic or new generic persistence system.
+- PDF picker verification exposed a real pre-send preview gap: the earlier
+  projection deliberately retained preview bytes only for images. Extend only
+  PDFs to reuse retained immutable bytes and the existing bounded/off-main PDF
+  loader; no new dependency, network upload, host path or disk persistence.
+  Generic unsupported-file fallback and metadata-only composer equality remain.
 
 ## Work packages
 
@@ -74,6 +89,11 @@ this sheet does not invent contracts or mark unexecuted checks passed.
     stopped original socket, waited for durable completion, connected fresh runtime
     and reopened same stored session. Exact baseline prefix, exact-once turn and
     idle recovered transcript verified. Not literal app kill, host restart or phone.
+  - [x] **R1c — Active native socket cancellation checkpoint.** Livev1 passed1/0/0:
+    canonical accepted-but-incomplete delayed turn, cancel sole real socket,
+    same-controller rebind/new transport generation and exact native/canonical
+    history, unchanged baseline and no extra submit. Controlled socket cancellation
+    only; actual proxy/WiFi/pre-ACK/preterminal boundaries remain separate.
 - [ ] **S3-R2 — Mobile/host lifecycle and orphan policy.** App background, kill,
   host restart and connectivity loss. Select finite grace from evidence; no silent
   personal-host configuration change. If zero is proposed, demonstrate cleanup
@@ -178,7 +198,11 @@ this sheet does not invent contracts or mark unexecuted checks passed.
     surfaces now use the explicit authenticated stock file-read route for supported
     absolute resources, without legacy fallback. Text/Markdown display capped256KiB;
     uploads unchanged. Focused/full tests pass; actual native image preview passed.
-    Native generic-file/PDF picker/preview and physical checks remain open.
+    Native generic-file/PDF picker and local/returned previews passed UIv6 plus
+    independent canonicalv6 readback. Physical checks remain open. Text-file
+    inference remains open: stock warned staged path was outside allowed workspace;
+    storage/preview does not prove model ingestion. Investigate without weakening
+    workspace guards or patching Hermes.
 - [ ] **S3-V — Canonical recovery matrix and independent integration.** Real stock
   backend/proxy cases, exact durable row counts, session targeting, prompt expiry,
   artifacts audit and full XCTest. If canonical recovery cannot meet requirements,

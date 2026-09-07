@@ -456,6 +456,15 @@ final class LongChatScrollUITests: XCTestCase {
             exerciseOptInDirectAttachmentFlow(app: app)
         }
 
+        if environment["SEMREH_SLICE3_FILE_PICKER_UI"] == "1" {
+            guard stockBackend else {
+                XCTFail("Slice 3 Files picker UI requires the pinned stock backend.")
+                return
+            }
+            exerciseOptInFilePickerFlow(app: app)
+            return
+        }
+
         if environment["SEMREH_SLICE3_CLARIFICATION_UI"] == "1" {
             guard stockBackend else {
                 XCTFail("Slice 3 clarification UI requires the pinned stock backend.")
@@ -567,6 +576,38 @@ final class LongChatScrollUITests: XCTestCase {
             RunLoop.main.run(until: Date().addingTimeInterval(0.1))
         }
         XCTAssertEqual(acknowledgements.count, expected, message)
+    }
+
+    @MainActor
+    private func waitForVisibleAcknowledgement(
+        below prompt: XCUIElement,
+        app: XCUIApplication,
+        timeout: TimeInterval = 90
+    ) -> XCUIElement? {
+        let acknowledgements = app.staticTexts.matching(
+            NSPredicate(format: "label == %@", slice1Acknowledgement)
+        )
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if prompt.exists && prompt.isHittable {
+                if let acknowledgement = acknowledgements.allElementsBoundByIndex.first(where: {
+                    $0.exists && $0.isHittable && $0.frame.minY >= prompt.frame.maxY
+                }) {
+                    let belowPrompt = acknowledgements.allElementsBoundByIndex.filter {
+                        $0.exists && $0.isHittable && $0.frame.minY >= prompt.frame.maxY
+                    }
+                    XCTAssertEqual(
+                        belowPrompt.count,
+                        1,
+                        "The new prompt must have exactly one visible fixture ACK below it."
+                    )
+                    return acknowledgement
+                }
+            }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        }
+        XCTFail("The Files picker turn must expose a visible terminal ACK below its exact new prompt.")
+        return nil
     }
 
     @MainActor
@@ -689,6 +730,235 @@ final class LongChatScrollUITests: XCTestCase {
             named: "slice3-attachment-chat-title-and-marker"
         )
         attachScreenshot(named: "slice3-attachment-send-success")
+    }
+
+    @MainActor
+    private func exerciseOptInFilePickerFlow(app: XCUIApplication) {
+        let composers = app.textViews.matching(
+            NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
+        )
+        let composer = composers.firstMatch
+        XCTAssertTrue(composer.waitForExistence(timeout: 10), "The production chat must expose its composer for Files picker attachment staging.")
+        let textPrompt = "SEMREH_SLICE3_FILE_PICKER_TEXT_\(UUID().uuidString)"
+        let pdfPrompt = "SEMREH_SLICE3_FILE_PICKER_PDF_\(UUID().uuidString)"
+        attachPlainText("\(textPrompt)\n\(pdfPrompt)", named: "slice3-file-picker-prompts")
+
+        exerciseFilePickerTurn(
+            filename: "semreh-picker.txt",
+            prompt: textPrompt,
+            expectedText: "SEMREH_FILE_PICKER_TEXT_V1",
+            expectedPDF: false,
+            app: app,
+            composer: composer
+        )
+        exerciseFilePickerTurn(
+            filename: "semreh-picker.pdf",
+            prompt: pdfPrompt,
+            expectedText: nil,
+            expectedPDF: true,
+            app: app,
+            composer: composer
+        )
+        XCTAssertFalse(
+            app.buttons["discard-pending-upload"].exists,
+            "Completed Files picker turns must not leave an unresolved-upload recovery banner."
+        )
+        attachScreenshot(named: "slice3-file-picker-roundtrip-complete")
+    }
+
+    @MainActor
+    private func exerciseFilePickerTurn(
+        filename: String,
+        prompt: String,
+        expectedText: String?,
+        expectedPDF: Bool,
+        app: XCUIApplication,
+        composer: XCUIElement
+    ) {
+        let canonicalQuery = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH[c] 'Open attachment '")
+        )
+        let baselineCanonicalLabels = Set(canonicalQuery.allElementsBoundByIndex.map(\.label))
+        guard openSyntheticFileFromDocumentPicker(filename: filename, app: app) else { return }
+
+        let chip = app.buttons["Open attachment \(filename)"]
+        assertHittable(
+            chip,
+            timeout: 20,
+            message: "Selecting \(filename) through the production Files picker must expose its composer chip."
+        )
+        XCTAssertTrue(app.buttons["Remove attachment \(filename)"].exists)
+        if expectedPDF {
+            chip.tap()
+            let localPDF = app.descendants(matching: .any).matching(
+                NSPredicate(format: "label == %@", "PDF document \(filename)")
+            ).firstMatch
+            guard localPDF.waitForExistence(timeout: 20), localPDF.isHittable else {
+                attachAccessibilitySnapshot(named: "slice3-file-picker-local-pdf-not-found", app: app)
+                attachScreenshot(named: "slice3-file-picker-local-pdf-not-found")
+                XCTFail("The selected PDF must expose the local native PDF preview before sending.")
+                return
+            }
+            let localDone = app.buttons["Done"]
+            assertHittable(localDone, timeout: 10, message: "The local PDF preview must expose Done.")
+            localDone.tap()
+            assertHittable(chip, timeout: 10, message: "Closing the local PDF preview must retain the staged chip.")
+        }
+        composer.tap()
+        composer.typeText(prompt)
+        let send = app.buttons["Send"]
+        assertHittable(send, timeout: 10, message: "The Files picker attachment turn must expose Send.")
+        send.tap()
+
+        let promptElement = app.staticTexts.matching(
+            NSPredicate(format: "label == %@ OR label BEGINSWITH %@", prompt, prompt + "\n")
+        ).firstMatch
+        assertHittable(promptElement, timeout: 25, message: "The Files picker prompt must appear in the transcript.")
+        let removeChip = app.buttons["Remove attachment \(filename)"]
+        let cleared = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"),
+            object: removeChip
+        )
+        wait(for: [cleared], timeout: 20)
+        XCTAssertFalse(removeChip.exists, "Sending \(filename) must clear its staged composer chip.")
+
+        guard waitForVisibleAcknowledgement(below: promptElement, app: app) != nil else { return }
+        waitForIdle(app: app)
+
+        guard let canonical = waitForExactlyOneNewCanonicalAttachment(
+            app: app,
+            baselineLabels: baselineCanonicalLabels
+        ) else { return }
+        assertHittable(
+            canonical,
+            timeout: 25,
+            message: "The server-returned \(filename) attachment must be reachable in the transcript."
+        )
+        let canonicalName = canonical.label.replacingOccurrences(of: "Open attachment ", with: "")
+        canonical.tap()
+
+        let previewElement: XCUIElement
+        if let expectedText {
+            let text = app.staticTexts.matching(
+                NSPredicate(format: "label CONTAINS[c] %@", expectedText)
+            ).firstMatch
+            assertHittable(text, timeout: 20, message: "The returned text attachment must render its exact fixture content.")
+            XCTAssertTrue(text.label.contains("Synthetic file used only for the isolated Semreh migration test."))
+            previewElement = text
+        } else if expectedPDF {
+            let pageImage = app.images[canonicalName]
+            assertHittable(pageImage, timeout: 20, message: "The sent PDF must return a native page-image preview.")
+            previewElement = pageImage
+        } else {
+            XCTFail("The Files picker roundtrip must specify a preview assertion.")
+            return
+        }
+
+        attachScreenshot(named: "slice3-file-picker-returned-\(filename)")
+        attachPlainText(prompt, named: "slice3-file-picker-marker-\(filename)")
+        let done = app.buttons["Done"]
+        assertHittable(done, timeout: 10, message: "The Files picker attachment preview must expose Done.")
+        done.tap()
+        let dismissed = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"),
+            object: previewElement
+        )
+        wait(for: [dismissed], timeout: 10)
+        XCTAssertFalse(previewElement.exists, "Dismissing the Files picker preview must return to the composer/transcript.")
+    }
+
+    @MainActor
+    private func waitForExactlyOneNewCanonicalAttachment(
+        app: XCUIApplication,
+        baselineLabels: Set<String>,
+        timeout: TimeInterval = 25
+    ) -> XCUIElement? {
+        let canonicalQuery = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH[c] 'Open attachment '")
+        )
+        let newCanonicalQuery = canonicalQuery.matching(
+            NSPredicate(format: "NOT (label IN %@)", Array(baselineLabels))
+        )
+        let returnedAttachmentAppeared = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "count > 0"),
+            object: newCanonicalQuery
+        )
+        wait(for: [returnedAttachmentAppeared], timeout: timeout)
+        let newCanonical = newCanonicalQuery.allElementsBoundByIndex
+        XCTAssertEqual(
+            newCanonical.count,
+            1,
+            "The one-page/file turn must add exactly one server-returned attachment cell beyond the prior transcript."
+        )
+        return newCanonical.first
+    }
+
+    @MainActor
+    private func openSyntheticFileFromDocumentPicker(filename: String, app: XCUIApplication) -> Bool {
+        let options = app.buttons["Composer options"]
+        assertHittable(options, timeout: 10, message: "The production composer must expose Composer options.")
+        options.tap()
+
+        let attachFile = app.buttons["Attach File"]
+        guard attachFile.waitForExistence(timeout: 10), attachFile.isHittable else {
+            attachAccessibilitySnapshot(named: "slice3-file-picker-menu-not-found", app: app)
+            XCTFail("Composer options must expose Attach File.")
+            return false
+        }
+        attachFile.tap()
+
+        // The first presentation normally opens Recents. Navigate through the
+        // stock Browse/On My iPhone hierarchy; subsequent presentations may
+        // remember the owned fixture folder, so both steps are conditional.
+        let browse = app.buttons["Browse"]
+        if browse.waitForExistence(timeout: 5) && browse.isHittable {
+            browse.tap()
+        }
+        let onMyIPhone = app.buttons["On My iPhone"]
+        if onMyIPhone.waitForExistence(timeout: 10) && onMyIPhone.isHittable {
+            onMyIPhone.tap()
+        }
+
+        // Files hides extensions visually, but exposes basename/type in its
+        // cell identifier (captured from the real system picker).
+        let fileURL = URL(fileURLWithPath: filename)
+        let file = app.cells["\(fileURL.deletingPathExtension().lastPathComponent), \(fileURL.pathExtension)"]
+        // Files remembers the last directory after the first selection. If
+        // the exact owned fixture is already visible, select it directly;
+        // otherwise navigate through the seeded folder.
+        if !file.waitForExistence(timeout: 5) {
+            let folder = app.descendants(matching: .any).matching(
+                NSPredicate(format: "label == %@", "SemrehSyntheticFixtures")
+            ).firstMatch
+            guard folder.waitForExistence(timeout: 20), folder.isHittable else {
+                attachAccessibilitySnapshot(named: "slice3-file-picker-folder-not-found", app: app)
+                attachScreenshot(named: "slice3-file-picker-folder-not-found")
+                XCTFail("The system Files picker must expose the owned synthetic fixture folder.")
+                return false
+            }
+            folder.tap()
+        }
+        guard file.waitForExistence(timeout: 15), file.isHittable else {
+            attachAccessibilitySnapshot(named: "slice3-file-picker-file-not-found", app: app)
+            attachScreenshot(named: "slice3-file-picker-file-not-found")
+            XCTFail("The system Files picker must expose \(filename).")
+            return false
+        }
+        file.tap()
+
+        let open = app.buttons["Open"]
+        guard open.waitForExistence(timeout: 10), open.isHittable else {
+            attachAccessibilitySnapshot(named: "slice3-file-picker-open-not-found", app: app)
+            attachScreenshot(named: "slice3-file-picker-open-not-found")
+            XCTFail("The system Files picker must expose Open after selecting \(filename).")
+            return false
+        }
+        open.tap()
+        let pickerDismissed = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"), object: file
+        )
+        wait(for: [pickerDismissed], timeout: 15)
+        return true
     }
 
     @MainActor

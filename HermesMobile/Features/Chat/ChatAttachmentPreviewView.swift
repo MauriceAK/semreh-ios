@@ -8,7 +8,7 @@ struct ChatAttachmentPreviewItem: Identifiable, Equatable {
     let mime: String?
     let size: Int?
     let isImage: Bool?
-    let localImageData: Data?
+    let localPreviewData: Data?
 
     init(message attachment: MessageAttachment, localData: Data?) {
         name = attachment.name
@@ -16,7 +16,7 @@ struct ChatAttachmentPreviewItem: Identifiable, Equatable {
         mime = attachment.mime
         size = attachment.size
         isImage = attachment.isImage
-        localImageData = localData
+        localPreviewData = localData
     }
 
     init(pending attachment: PendingAttachment) {
@@ -25,7 +25,7 @@ struct ChatAttachmentPreviewItem: Identifiable, Equatable {
         mime = attachment.mime
         size = attachment.size
         isImage = attachment.isImage
-        localImageData = attachment.thumbnailData
+        localPreviewData = attachment.thumbnailData
     }
 
     init(display item: ComposerAttachmentDisplayItem) {
@@ -34,7 +34,7 @@ struct ChatAttachmentPreviewItem: Identifiable, Equatable {
         mime = item.mime
         size = item.size
         isImage = item.isImage
-        localImageData = item.localPreviewData
+        localPreviewData = item.localPreviewData
     }
 
     var displayName: String {
@@ -358,17 +358,35 @@ final class ChatAttachmentPreviewViewModel {
 
         let trimmedPath = item.path?.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let path = trimmedPath, !path.isEmpty else {
-            if usesDirectGateway, item.inferredIsImage, let localImageData = item.localImageData {
+            if usesDirectGateway, let localPreviewData = item.localPreviewData {
                 guard !Task.isCancelled else { return }
-                let originalByteCount = localImageData.count
-                guard let previewData = await ImagePreviewDownsampler.previewDataAsync(
-                    from: localImageData,
-                    maxPixelSize: ImagePreviewDownsampler.filePreviewMaxPixelSize
-                ), !Task.isCancelled else {
+                if item.inferredIsImage {
+                    let originalByteCount = localPreviewData.count
+                    guard let previewData = await ImagePreviewDownsampler.previewDataAsync(
+                        from: localPreviewData,
+                        maxPixelSize: ImagePreviewDownsampler.filePreviewMaxPixelSize
+                    ), !Task.isCancelled else {
+                        return
+                    }
+                    preview = .image(.init(data: previewData, originalByteCount: originalByteCount))
                     return
                 }
-                preview = .image(.init(data: previewData, originalByteCount: originalByteCount))
-                return
+                if item.documentKind == .pdf {
+                    let declaredByteCount = item.size ?? 0
+                    guard max(localPreviewData.count, declaredByteCount) <= DocumentPreviewLimits.maximumBytes else {
+                        preview = .unavailable(String(localized: "This PDF preview is too large to display."))
+                        return
+                    }
+                    guard let document = await PDFPreviewDocument.load(data: localPreviewData),
+                          !Task.isCancelled else {
+                        if !Task.isCancelled {
+                            preview = .unavailable(String(localized: "Could not decode this PDF."))
+                        }
+                        return
+                    }
+                    preview = .pdf(document)
+                    return
+                }
             }
             preview = localFallbackPreview
             return
@@ -560,7 +578,7 @@ final class ChatAttachmentPreviewViewModel {
     }
 
     private var localFallbackPreview: FilePreviewContent {
-        if item.inferredIsImage, let data = item.localImageData {
+        if item.inferredIsImage, let data = item.localPreviewData {
             return .image(.init(data: data, originalByteCount: data.count))
         }
 

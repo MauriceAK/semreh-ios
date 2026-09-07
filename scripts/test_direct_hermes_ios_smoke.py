@@ -35,6 +35,52 @@ def load_seed_module():
 
 
 class IOSSmokeGuardTests(unittest.TestCase):
+    def test_active_socket_loss_is_stock_https_and_standalone(self):
+        base = ['--slice3-active-socket-loss', '--https', '--stock-backend']
+        for arguments in (
+            ['--slice3-active-socket-loss'],
+            ['--slice3-active-socket-loss', '--https'],
+            ['--slice3-active-socket-loss', '--stock-backend'],
+            *[base + [flag] for flag in (
+                '--slice2-ui', '--slice2-native', '--slice2-foundation',
+                '--slice2-reasoning', '--slice3-attachment', '--slice3-clarification',
+                '--slice3-blocking', '--slice3-file-picker', '--slice3-recovery',
+                '--slice3-completed-away', '--slice3-relaunch', '--slice3-gateway-restart',
+            )],
+            base + ['--cookie-phase', 'login'],
+            base + ['--tui-created-session-id', 'seed'],
+            base + ['--development-backend-sha', 'a' * 40],
+            base + ['--gateway-restart-nonce', 'A' * 16],
+        ):
+            with self.subTest(arguments=arguments):
+                self.assertRejected(arguments, '--slice3-active-socket-loss requires')
+
+    def test_active_socket_loss_exports_exact_native_target(self):
+        smoke = load_smoke_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            products = Path(temporary).resolve()
+            source = products / 'HermesMobile_HermesMobile_iphonesimulator.xctestrun'
+            source.write_bytes(plistlib.dumps({'TestConfigurations': [{
+                'TestTargets': [{'BlueprintName': 'HermesMobileTests'}],
+            }]}))
+            output = products / 'SemrehSlice1Live.xctestrun'
+            with patch.object(smoke, 'PRODUCTS', products), \
+                    patch.object(smoke, 'OUTPUT', output), \
+                    patch.object(smoke, 'validate') as validate, \
+                    patch.object(sys, 'argv', [str(SCRIPT), '--https', '--stock-backend', '--slice3-active-socket-loss']):
+                with redirect_stdout(StringIO()):
+                    smoke.main()
+            validate.assert_called_once_with()
+            target = plistlib.loads(output.read_bytes())['TestConfigurations'][0]['TestTargets'][0]
+            self.assertEqual(target['OnlyTestIdentifiers'], [
+                'DirectHermesLiveSmokeTests/testOptInHostedSlice3NativeActiveSocketLoss',
+            ])
+            environment = target['EnvironmentVariables']
+            self.assertEqual(environment['SEMREH_SLICE3_ACTIVE_SOCKET_LOSS_NATIVE'], '1')
+            self.assertEqual(environment['SEMREH_SLICE2_STOCK_BACKEND_SHA'], smoke.PIN)
+            self.assertEqual(environment['SEMREH_SLICE2_TOOL_CWD'], str(smoke.RUNTIME / 'tools'))
+            self.assertEqual(environment['SEMREH_SLICE1_HTTPS'], '1')
+
     def test_relaunch_seed_accepts_only_bounded_synthetic_marker(self):
         seed = load_seed_module()
         self.assertEqual(
@@ -62,7 +108,7 @@ class IOSSmokeGuardTests(unittest.TestCase):
     def test_stock_requires_backend_phase(self):
         self.assertRejected(
             ["--stock-backend"],
-            "--stock-backend requires --slice2-reasoning, --slice2-ui, --slice3-completed-away, --slice3-relaunch, or --slice3-gateway-restart",
+            "--stock-backend requires --slice2-reasoning, --slice2-ui, --slice3-file-picker, --slice3-completed-away, --slice3-relaunch, or --slice3-gateway-restart",
         )
 
     def test_reasoning_requires_exactly_one_backend_mode(self):
@@ -146,6 +192,56 @@ class IOSSmokeGuardTests(unittest.TestCase):
                 ["--https", "--slice2-ui", "--stock-backend", "--slice3-blocking", other],
                 "--slice3-clarification, --slice3-attachment, and --slice3-blocking are mutually exclusive",
             )
+
+    def test_slice3_file_picker_requires_stock_https_ui_and_is_standalone(self):
+        message = "--slice3-file-picker requires --slice2-ui --https --stock-backend and no other test phase"
+        self.assertRejected(["--slice3-file-picker"], message)
+        self.assertRejected(["--https", "--slice3-file-picker", "--stock-backend"], message)
+        self.assertRejected(["--https", "--slice2-ui", "--slice3-file-picker"], message)
+        self.assertRejected(
+            [
+                "--https", "--slice2-ui", "--stock-backend", "--slice3-file-picker",
+                "--slice3-attachment",
+            ],
+            message,
+        )
+
+    def test_stock_ui_generation_exports_file_picker_selector(self):
+        smoke = load_smoke_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            products = (Path(temporary) / "products").resolve()
+            products.mkdir()
+            source = products / "HermesMobileUIVerification_HermesMobileUIVerification_iphonesimulator.xctestrun"
+            source.write_bytes(plistlib.dumps({
+                "TestConfigurations": [{
+                    "TestTargets": [{"BlueprintName": "HermesMobileUITests"}],
+                }],
+            }))
+            runtime = Path(temporary) / "stock-runtime"
+            with patch.object(smoke, "PRODUCTS", products), \
+                    patch.object(smoke, "RUNTIME", runtime), \
+                    patch.object(smoke, "validate") as validate, \
+                    patch.object(smoke, "PIN", "29112bef099274229cadff79cdff7bf7b99c4b77"), \
+                    patch.object(sys, "argv", [
+                        str(SCRIPT), "--https", "--slice2-ui", "--stock-backend",
+                        "--slice3-file-picker",
+                    ]):
+                output = StringIO()
+                with redirect_stdout(output):
+                    smoke.main()
+
+            validate.assert_called_once_with()
+            plan = plistlib.loads((products / "SemrehSlice2LiveUI.xctestrun").read_bytes())
+            target = plan["TestConfigurations"][0]["TestTargets"][0]
+            environment = target["EnvironmentVariables"]
+            self.assertEqual(environment["SEMREH_SLICE3_FILE_PICKER_UI"], "1")
+            self.assertEqual(
+                target["OnlyTestIdentifiers"],
+                ["LongChatScrollUITests/testOptInLiveProductionLoginNewChatSend"],
+            )
+            self.assertNotIn("SEMREH_SLICE3_ATTACHMENT_UI", environment)
+            self.assertNotIn("SEMREH_SLICE3_BLOCKING_UI", environment)
+            self.assertNotIn("password", output.getvalue().lower())
 
     def test_slice3_recovery_requires_stock_https_and_is_standalone(self):
         message = "--slice3-recovery requires --https --stock-backend and no other test phase"

@@ -55,6 +55,31 @@ final class ComposerDraftStoreTests: XCTestCase {
         XCTAssertEqual(store.load(server: server, sessionID: "session-a"), "")
     }
 
+    func testPreAwaitClearRemovesSubmittedDraftWithoutTouchingAnotherSession() {
+        // Store-level coverage for the write sequence used before a gated
+        // send. This does not prove production call order or process-death
+        // durability.
+        store.save("A", server: server, sessionID: "session-a")
+        store.save("B", server: server, sessionID: "session-b")
+
+        store.save("", server: server, sessionID: "session-a")
+
+        let freshStore = ComposerDraftStore(defaults: defaults)
+        XCTAssertEqual(freshStore.load(server: server, sessionID: "session-a"), "")
+        XCTAssertEqual(freshStore.load(server: server, sessionID: "session-b"), "B")
+    }
+
+    func testDefiniteFailureCanRestoreDraftAfterPreAwaitClear() {
+        store.save("A", server: server, sessionID: "session-a")
+
+        // Model the direct-send sequence: clear before the await, then
+        // restore the submitted draft when the operation definitely fails.
+        store.save("", server: server, sessionID: "session-a")
+        store.save("A", server: server, sessionID: "session-a")
+
+        XCTAssertEqual(store.load(server: server, sessionID: "session-a"), "A")
+    }
+
     func testEmptyOrWhitespaceOnlyDraftIsNotRestored() {
         store.save("   \n\t  ", server: server, sessionID: "session-a")
 
