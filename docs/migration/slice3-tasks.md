@@ -51,6 +51,11 @@ this sheet does not invent contracts or mark unexecuted checks passed.
   - [ ] **B2 — Typed direct request lifecycle and responses.** One owner for
     controller/events/VM. Cover answer, cancel, expiry and stale generation/session
     rejection; do not reuse legacy HTTP pending-action endpoints.
+    - [x] **B2a — Single-clarification controller foundation.** Exact captured
+      identity, answer/empty cancel, stale response and replacement guards,
+      single-flight responses, expiry and resume reconstruction. Root focused
+      64pass and full2047pass/7intentional skips. Not yet connected to native UI;
+      approval/sudo/secret and unsupported clarification cancellation remain open.
   - [ ] **B3 — Native transient prompt UI.** Secure input stays memory-only;
     reconstruct outstanding requests after resume, clear only matching expiry,
     and prove no secret persistence or diagnostic exposure.
@@ -62,6 +67,11 @@ this sheet does not invent contracts or mark unexecuted checks passed.
   - [ ] **A2 — Retain local bytes and stage before prompt.** Attachment owner
     prepares bytes/metadata; shared controller writer integrates ordered staging,
     returned file references and failure-without-submit/draft preservation.
+    - [x] **A2a — Local byte preparation foundation.** Retained in-memory bytes,
+      bounded off-main base64 and exact image/file/PDF RPC parameter shapes;
+      local validation and cancellation tests pass in focused/full runs above.
+      Not yet wired into picker/send staging. Live image/file contract passed;
+      PDF success remains unverified because fixture renderer is unavailable.
 - [ ] **S3-M — Authenticated media.** Same-origin cookie auth, external credential
   isolation, Range, resource-scoped caching. No tickets in media URLs. Coordinate
   attachment metadata boundary with A; avoid generic speculative DTOs.

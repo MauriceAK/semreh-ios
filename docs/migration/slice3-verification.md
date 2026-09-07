@@ -83,3 +83,89 @@ Ambiguous-send recovery, blocked prompts, attachment staging, resource cache/Ran
 behavior, orphan policy and physical background/kill/relaunch remain open.
 Existing Slice2 residual phone checks and accepted performance deferral remain
 explicit in their task sheets; this checkpoint does not close them.
+
+## Blocking and attachment contract captures — continuation after 5deb68d
+
+Root reviewed Luna-authored probes and deterministic model fixture changes.
+`PYTHONPATH=scripts <disposable-venv-python> -m unittest
+scripts/test_direct_hermes_model_fixture.py`: **6 passed**. Exact-marker clarify
+tool calls added only to the local synthetic provider; ordinary ACK/reasoning/
+compression behavior retained. Root verified PID27017 executable, arguments and
+cwd, stopped only that owned provider, and relaunched PID18170 on18792 with an
+allowlisted environment. Gateway PID42082/config/pin remained unchanged.
+
+- `direct_hermes_blocking_probe.py --output <evidence>/slice3-blocking-contract-v1.json`:
+  **passed** via actual dedicated HTTPS/WS. Single-question answer, empty cancel,
+  reconnect pending identity, wrong-ID expired responses and cleanup checked.
+  Stock accepted a valid pending request ID with a wrong session ID: app-side
+  identity validation is required; no backend owner-validation guarantee claimed.
+  Live expiry, approval and sudo/secret remain unverified. Current timeout is
+  3600seconds; the probe did not change configuration or wait an hour.
+- `direct_hermes_attachment_probe.py --output <evidence>/slice3-attachment-contract-v1.json`:
+  **failed probe assertion**, after image/detach checks. Probe wrongly required
+  a workspace-relative file reference; pinned source explicitly permits an
+  absolute reference for profile-home attachments. Failed evidence retained.
+  Before live execution, root also caught an invalid synthetic PNG checksum;
+  replaced by generated/decoded valid PNG, not a backend change.
+- Same probe, corrected, output `slice3-attachment-contract-v2.json`: **passed
+  available cases**: image attach/detach, generic file upload/name/ref metadata,
+  image/file canonical REST roundtrip, unsupported-image no-submit, cleanup.
+  PDF returned5028; successful PDF render/roundtrip and live page-cap check were
+  **not run**, not passed. Source-declared image25MiB/PDF50MiB/25page limits read;
+  cap-sized payload allocation intentionally avoided. No dependency installed.
+
+These are protocol/fixture checks, not native UI acceptance. Controller and local
+attachment implementation are under review; no new Swift verification claimed yet.
+
+### Native controller/attachment focused attempts
+
+Root used signed Debug `xcodebuild test`, owned Simulator/DerivedData,
+`-parallel-testing-enabled NO -jobs 2 -collect-test-diagnostics never`, selecting
+GatewayConversationBlockingTests, DirectGatewayAttachmentTests,
+GatewayConversationControllerTests and HermesServerRuntimeTests.
+
+- `slice3-blocking-attachment-focused-v1.xcresult`/`.log`: **compile failed**;
+  new expiry-event test helper omitted the JSONValue.object wrapper. Root fixed
+  that helper; no executed-test claim for this attempt.
+- `slice3-blocking-attachment-focused-v2.xcresult`/`.log`: **62 passed, 2 failed,
+  0 skipped**. Malformed/batch callback test observed only the first asynchronously
+  delivered error. Image preparation accepted malformed short image data because
+  creating an ImageIO source alone did not establish a valid image. Corrections
+  under review; failures retained, no new implementation acceptance or commit yet.
+- `slice3-blocking-attachment-focused-v3.xcresult`/`.log`: **62 passed, 2 failed,
+  0 skipped**. The prior two failing cases passed after corrections, but matching
+  expiry and existing early-resume event tests observed incomplete asynchronous
+  delivery. Workers replaced scheduling assumptions with explicit callback
+  expectations across the new blocking tests and that existing resume test.
+  Root reviewed those test-only corrections; v4 is the subsequent run.
+- `slice3-blocking-attachment-focused-v4.xcresult`/`.log`: **64 passed, 0 failed,
+  0 skipped**. Signed focused test gate passes; full suite and native feature UI
+  integration remain open. No new commit or phone deployment from this patch.
+
+Main artifact audit `slice3-blocking-attachment-audit-v1.json` passed126830files,
+zero flags and66 exported consoles, before v4. Scope remains current known main
+test secrets and obvious bearer formats, not arbitrary opaque secrets or OCR.
+Root exported v4 console diagnostics; these have not yet been re-audited.
+Storage fell to1.6GiB; broader builds paused for precise old-cache cleanup approval.
+No files deleted. Active source/backend pin remains unchanged and stock clean.
+
+### Full checkpoint after approved storage cleanup
+
+Maurice approved deleting only the six previously identified old temporary Build/
+ModuleCache directories plus obsolete iPhone18,2 iOS26.6(23G71) debugging support.
+Root rechecked exact ordinary directories and no active matching xcodebuild;
+cleanup completed, free space approximately10GiB. Current26.6.1 support, active
+Simulator/DerivedData, source, logs, test results and personal Hermes preserved.
+
+Same signed command as focusedv4, omitting all `-only-testing` selections:
+`slice3-blocking-attachment-full-v1.xcresult`/`.log`: **2047 passed, 0 failed,
+7 intentional opt-in skips**. No Swift changes since focusedv4. Root reran six
+Python model-fixture tests: **6 passed**. `git diff --check` clean.
+Fullv1 diagnostics exported for console audit; artifact auditv2 completed with
+zero flagged paths under the existing known-secret/bearer scope, including the
+new focusedv4/fullv1 exported consoles. No arbitrary opaque-secret/OCR claim.
+
+This is the B2a/A2a foundation checkpoint, not Slice3 completion. Native picker/
+send staging and blocking UI are not wired yet. Successful PDF fixture rendering
+requires unavailable `pdftoppm`; no install authorized/performed. Physical gates,
+orphan policy and remaining blocking interactions stay open.

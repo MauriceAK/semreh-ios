@@ -33,6 +33,9 @@ final class GatewayConversationController {
     private(set) var storedID: String?
     private(set) var runState: RunState = .idle
     private(set) var pendingReasoningEffort: String?
+    /// One renderer-facing blocking prompt. It is transient and always scoped
+    /// to the exact server/runtime/connection/request identity below.
+    private(set) var pendingBlockingPrompt: GatewayBlockingPrompt?
     let profile: String
     var onBinding: ((GatewaySessionBinding) -> Void)?
     var onCanonicalID: ((String) -> Void)?
@@ -67,6 +70,9 @@ final class GatewayConversationController {
     @ObservationIgnored private var reasoningMutationTail: Task<Void, Never>?
     @ObservationIgnored private var reasoningRevision = 0
     @ObservationIgnored private var ambiguousReasoningEffort: String?
+    private enum BlockingClearReason: Equatable { case terminal, expiry }
+    private var blockingClear: (identity: GatewayBlockingPromptIdentity, reason: BlockingClearReason)?
+    private var blockingResponseInFlight = false
 
     init(runtime: HermesServerRuntime, storedID: String?, profile: String = "default", loadTranscript: @escaping TranscriptLoader) {
         self.runtime = runtime
@@ -351,6 +357,8 @@ final class GatewayConversationController {
         lifecycle &+= 1
         reasoningRevision &+= 1
         pendingReasoningEffort = nil
+        pendingBlockingPrompt = nil
+        blockingClear = nil
         ambiguousReasoningEffort = nil
         reasoningMutationTail?.cancel()
         attachmentTask?.cancel()
@@ -425,6 +433,7 @@ final class GatewayConversationController {
             // is not trusted. A later explicit attachment must resume the tip.
             throw DirectSessionError.conflictingDurableIDs
         }
+        restoreBlockingPrompt(from: result)
         try await refresh()
         guard binding != nil else { throw DirectSessionError.staleOperation }
         if result?.gatewayFields["running"] == .bool(true) { runState = .running }
@@ -433,6 +442,93 @@ final class GatewayConversationController {
             schedulePendingReasoningDrain()
         }
         onResume?(result)
+    }
+
+    /// Answers a stock clarify request only when the caller supplies the exact
+    /// identity it captured from the displayed prompt. That identity is
+    /// revalidated after any connect/rebind and again in the RPC parameter
+    /// closure; an ambiguous or replaced response is never retried.
+    func respondToBlockingPrompt(
+        _ answer: String,
+        expectedIdentity: GatewayBlockingPromptIdentity
+    ) async throws -> GatewayBlockingResponse {
+        guard !disposed else { throw DirectSessionError.stopped }
+        guard !blockingResponseInFlight else { throw GatewayBlockingError.responseInFlight }
+        blockingResponseInFlight = true
+        defer { blockingResponseInFlight = false }
+        guard let captured = pendingBlockingPrompt else {
+            throw GatewayBlockingError.noPendingClarification
+        }
+        guard captured.identity == expectedIdentity,
+              let capturedBinding = binding else {
+            throw GatewayBlockingError.staleClarification
+        }
+        let capturedLifecycle = lifecycle
+        try await ensureBinding(create: [:])
+        guard pendingBlockingPrompt?.identity == expectedIdentity,
+              let currentBinding = binding,
+              currentBinding == capturedBinding,
+              runtime.connectionGeneration == expectedIdentity.connectionGeneration,
+              lifecycle == capturedLifecycle else {
+            throw GatewayBlockingError.staleClarification
+        }
+
+        let result = try await runtime.request("clarify.respond", parameters: {
+            guard let pending = self.pendingBlockingPrompt,
+                  pending.identity == expectedIdentity,
+                  let binding = self.binding,
+                  binding == capturedBinding,
+                  self.runtime.connectionGeneration == expectedIdentity.connectionGeneration,
+                  self.lifecycle == capturedLifecycle else {
+                throw GatewayBlockingError.staleClarification
+            }
+            return [
+                "session_id": .string(expectedIdentity.runtimeID),
+                "profile": .string(expectedIdentity.profile),
+                "request_id": .string(expectedIdentity.requestID),
+                "answer": .string(answer)
+            ]
+        })
+        guard !disposed,
+              let currentBinding = binding,
+              currentBinding == capturedBinding,
+              runtime.connectionGeneration == expectedIdentity.connectionGeneration,
+              lifecycle == capturedLifecycle else {
+            throw GatewayBlockingError.staleClarification
+        }
+        guard let status = result?.gatewayFields["status"]?.gatewayString else {
+            throw GatewayBlockingError.invalidClarificationResponse
+        }
+        switch status {
+        case "ok":
+            if let stillPending = pendingBlockingPrompt {
+                guard stillPending.identity == expectedIdentity else {
+                    throw GatewayBlockingError.staleClarification
+                }
+                pendingBlockingPrompt = nil
+            } else {
+                guard blockingClear?.identity == expectedIdentity,
+                      blockingClear?.reason == BlockingClearReason.terminal else {
+                    throw GatewayBlockingError.staleClarification
+                }
+            }
+            return .accepted
+        case "expired":
+            if let stillPending = pendingBlockingPrompt {
+                guard stillPending.identity == expectedIdentity else {
+                    throw GatewayBlockingError.staleClarification
+                }
+                pendingBlockingPrompt = nil
+            } else {
+                guard blockingClear?.identity == expectedIdentity,
+                      blockingClear?.reason == BlockingClearReason.expiry else {
+                    throw GatewayBlockingError.staleClarification
+                }
+            }
+            return .expired
+        default:
+            throw GatewayBlockingError.invalidClarificationResponse
+        }
     }
 
     private func adopt(_ binding: GatewaySessionBinding) throws {
@@ -580,6 +676,94 @@ final class GatewayConversationController {
         onReasoningConfiguration?(configuration)
     }
 
+    private func blockingIdentity(requestID: String) throws -> GatewayBlockingPromptIdentity {
+        guard let binding,
+              !binding.storedID.isEmpty,
+              !binding.runtimeID.isEmpty,
+              !binding.profile.isEmpty,
+              !requestID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw GatewayBlockingError.malformedClarification
+        }
+        return GatewayBlockingPromptIdentity(
+            origin: runtime.origin.absoluteString,
+            profile: binding.profile,
+            storedID: binding.storedID,
+            runtimeID: binding.runtimeID,
+            connectionGeneration: runtime.connectionGeneration,
+            requestID: requestID.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+    }
+
+    private func restoreBlockingPrompt(from result: JSONValue?) {
+        blockingClear = nil
+        guard let fields = result?.gatewayFields else {
+            pendingBlockingPrompt = nil
+            return
+        }
+        guard let pending = fields["pending_clarify"] else {
+            pendingBlockingPrompt = nil
+            return
+        }
+        if pending == .null {
+            pendingBlockingPrompt = nil
+            return
+        }
+        do {
+            guard case .object(let pendingFields) = pending,
+                  let requestID = pendingFields["request_id"]?.gatewayString else {
+                throw GatewayBlockingError.malformedClarification
+            }
+            let identity = try blockingIdentity(requestID: requestID)
+            pendingBlockingPrompt = try GatewayBlockingPrompt.decode(
+                payload: pending,
+                identity: identity
+            )
+        } catch {
+            pendingBlockingPrompt = nil
+            onError?(error)
+        }
+    }
+
+    private func handleBlockingRequest(_ event: HermesGatewayEvent) {
+        guard let requestID = event.payload?.gatewayFields["request_id"]?.gatewayString else {
+            onError?(GatewayBlockingError.malformedClarification)
+            return
+        }
+        do {
+            let identity = try blockingIdentity(requestID: requestID)
+            let prompt = try GatewayBlockingPrompt.decode(payload: event.payload, identity: identity)
+            if pendingBlockingPrompt != prompt {
+                blockingClear = nil
+                pendingBlockingPrompt = prompt
+            }
+        } catch {
+            onError?(error)
+        }
+    }
+
+    private func handleBlockingExpiry(_ event: HermesGatewayEvent) {
+        guard let requestID = event.payload?.gatewayFields["request_id"]?.gatewayString else {
+            onError?(GatewayBlockingError.malformedClarification)
+            return
+        }
+        guard let pending = pendingBlockingPrompt,
+              pending.identity.requestID == requestID,
+              pending.identity.runtimeID == (event.sessionID ?? "") else {
+            return
+        }
+        blockingClear = (pending.identity, .expiry)
+        pendingBlockingPrompt = nil
+    }
+
+    private func clearBlockingPromptForTerminal(_ event: HermesGatewayEvent) {
+        guard let pending = pendingBlockingPrompt,
+              pending.identity.runtimeID == (event.sessionID ?? "") else {
+            return
+        }
+        blockingClear = (pending.identity, .terminal)
+        pendingBlockingPrompt = nil
+    }
+
     private func schedulePendingReasoningDrain() {
         guard !disposed, pendingReasoningEffort != nil, ambiguousReasoningEffort == nil else { return }
         reasoningMutationCount += 1
@@ -655,6 +839,10 @@ final class GatewayConversationController {
         }
         guard let binding, event.sessionID == binding.runtimeID else { return }
         switch event.type {
+        case "clarify.request":
+            handleBlockingRequest(event)
+        case "clarify.expire":
+            handleBlockingExpiry(event)
         case "message.start":
             turnEpoch &+= 1
             terminalReceipt = nil
@@ -673,6 +861,7 @@ final class GatewayConversationController {
                 }
             }
         case "message.complete":
+            clearBlockingPromptForTerminal(event)
             let receipt = "\(event.connectionGeneration ?? -1):\(event.sequence ?? -1)"
             guard terminalReceipt != receipt else { return }
             terminalReceipt = receipt

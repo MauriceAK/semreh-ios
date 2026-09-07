@@ -8,6 +8,32 @@ import direct_hermes_model_fixture as fixture
 
 
 class ModelFixtureTests(unittest.TestCase):
+    def test_exact_clarify_marker_emits_call_only_when_tool_is_advertised(self) -> None:
+        body = {
+            'stream': True,
+            'tools': [{'type': 'function', 'function': {'name': 'clarify'}}],
+        }
+        call = fixture.clarify_tool_call(body, fixture.CLARIFY_MARKER)
+        self.assertEqual(call['function']['name'], 'clarify')
+        self.assertEqual(
+            call['function']['arguments'],
+            '{"question":"Choose a bounded fixture answer","choices":["answer","cancel"]}',
+        )
+        self.assertIsNone(fixture.clarify_tool_call(body, 'prefix ' + fixture.CLARIFY_MARKER))
+        self.assertIsNone(fixture.clarify_tool_call({'stream': True}, fixture.CLARIFY_MARKER))
+        self.assertIsNone(fixture.clarify_tool_call({
+            **body,
+            'messages': [{'role': 'tool', 'content': 'answer'}],
+        }, fixture.CLARIFY_MARKER))
+        self.assertIsNotNone(fixture.clarify_tool_call({
+            **body,
+            'messages': [
+                {'role': 'user', 'content': fixture.CLARIFY_MARKER},
+                {'role': 'tool', 'content': 'old answer'},
+                {'role': 'user', 'content': fixture.CLARIFY_MARKER},
+            ],
+        }, fixture.CLARIFY_MARKER))
+
     def test_streaming_exact_bulky_marker_is_varied_and_exactly_4096_bytes(self) -> None:
         first = fixture.response_text(
             {"stream": True}, "SEMREH_COMPRESSION_BULKY_MAIN_00"

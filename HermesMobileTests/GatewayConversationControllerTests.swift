@@ -65,15 +65,19 @@ final class GatewayConversationControllerTests: XCTestCase {
         )
         var observations: [(String, String?, String?)] = []
         var canonicalIDs: [String] = []
+        let eventDelivery = expectation(description: "recovered events are delivered")
+        eventDelivery.expectedFulfillmentCount = 2
         let controller = makeController(runtime: runtime, storedID: "ancestor") { _, _, _, _ in
             self.page("tip")
         }
         controller.onCanonicalID = { canonicalIDs.append($0) }
         controller.onEvent = { event in
             observations.append((event.type, controller.storedID, controller.binding?.runtimeID))
+            eventDelivery.fulfill()
         }
 
         try await controller.open()
+        await fulfillment(of: [eventDelivery], timeout: 2)
 
         XCTAssertEqual(observations.map(\.0), ["message.start", "message.delta"])
         XCTAssertTrue(observations.allSatisfy { $0.1 == "tip" && $0.2 == "runtime-event" })

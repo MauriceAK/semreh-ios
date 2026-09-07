@@ -9,6 +9,7 @@ import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import re
 import time
+from typing import Optional
 
 REASONING_PROBE = False
 COMPRESSION_BULKY_MARKER_PREFIX = 'SEMREH_COMPRESSION_BULKY_MAIN_'
@@ -16,6 +17,12 @@ COMPRESSION_BULKY_MAIN_RE = re.compile(
     rf'^{re.escape(COMPRESSION_BULKY_MARKER_PREFIX)}(\d{{2}})$'
 )
 COMPRESSION_BULKY_MAIN_BYTES = 4_096
+CLARIFY_MARKER = 'SEMREH_BLOCKING_CLARIFY'
+CLARIFY_TOOL_CALL_ID = 'call_semreh_clarify'
+CLARIFY_ARGUMENTS = {
+    'question': 'Choose a bounded fixture answer',
+    'choices': ['answer', 'cancel'],
+}
 
 
 def compression_bulky_assistant(index: int) -> str:
@@ -39,6 +46,44 @@ def bulky_main_content(marker: str) -> str:
     if match is None:
         raise ValueError('marker is not an exact bulky-main fixture marker')
     return compression_bulky_assistant(int(match.group(1)))
+
+
+def clarify_marker_active(body: dict, last_user: object) -> bool:
+    """Only expose the clarify call for the exact marker and advertised tool."""
+    if last_user != CLARIFY_MARKER or not isinstance(body.get('tools'), list):
+        return False
+    # After the gateway answers the call, the tool result is in the next model
+    # request.  End the deterministic turn with an ACK instead of reopening the
+    # same prompt indefinitely.
+    messages = body.get('messages', [])
+    latest_user = max(
+        (index for index, message in enumerate(messages)
+         if isinstance(message, dict) and message.get('role') == 'user'),
+        default=-1,
+    )
+    if any(isinstance(message, dict) and message.get('role') == 'tool'
+           for message in messages[latest_user + 1:]):
+        return False
+    return any(
+        isinstance(tool, dict)
+        and isinstance(tool.get('function'), dict)
+        and tool['function'].get('name') == 'clarify'
+        for tool in body['tools']
+    )
+
+
+def clarify_tool_call(body: dict, last_user: object) -> Optional[dict]:
+    """Return one deterministic OpenAI tool call for the clarify-only probe."""
+    if not clarify_marker_active(body, last_user):
+        return None
+    return {
+        'id': CLARIFY_TOOL_CALL_ID,
+        'type': 'function',
+        'function': {
+            'name': 'clarify',
+            'arguments': json.dumps(CLARIFY_ARGUMENTS, separators=(',', ':')),
+        },
+    }
 
 
 def response_text(body: dict, last_user: object) -> str:
@@ -95,19 +140,35 @@ class Handler(BaseHTTPRequestHandler):
         # exact-marker-only. Auxiliary non-streaming summaries containing these
         # markers continue to receive the ordinary deterministic ACK.
         text = response_text(body, last_user)
+        tool_call = clarify_tool_call(body, last_user)
         base = {'id': 'chatcmpl-semreh-fixture', 'created': int(time.time()), 'model': 'semreh-fixture'}
         try:
             if body.get('stream'):
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/event-stream')
                 self.end_headers()
-                for delta, reason in [({'role': 'assistant', 'content': text}, None), ({}, 'stop')]:
+                if tool_call is not None:
+                    chunks = [
+                        ({'role': 'assistant', 'content': ''}, None),
+                        ({'tool_calls': [{'index': 0, **tool_call}]}, None),
+                        ({}, 'tool_calls'),
+                    ]
+                else:
+                    chunks = [({'role': 'assistant', 'content': text}, None), ({}, 'stop')]
+                for delta, reason in chunks:
                     chunk = {**base, 'object': 'chat.completion.chunk', 'choices': [{'index': 0, 'delta': delta, 'finish_reason': reason}]}
                     self.wfile.write(('data: ' + json.dumps(chunk) + '\n\n').encode())
                     self.wfile.flush()
                 self.wfile.write(b'data: [DONE]\n\n')
             else:
-                self.reply({**base, 'object': 'chat.completion', 'choices': [{'index': 0, 'message': {'role': 'assistant', 'content': text}, 'finish_reason': 'stop'}], 'usage': {'prompt_tokens': 1, 'completion_tokens': 1, 'total_tokens': 2}})
+                message = {'role': 'assistant', 'content': ''}
+                finish_reason = 'stop'
+                if tool_call is not None:
+                    message['tool_calls'] = [tool_call]
+                    finish_reason = 'tool_calls'
+                else:
+                    message['content'] = text
+                self.reply({**base, 'object': 'chat.completion', 'choices': [{'index': 0, 'message': message, 'finish_reason': finish_reason}], 'usage': {'prompt_tokens': 1, 'completion_tokens': 1, 'total_tokens': 2}})
         except (BrokenPipeError, ConnectionResetError):
             pass  # Expected when the client interrupts a pending fixture turn.
 
