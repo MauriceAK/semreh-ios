@@ -89,10 +89,11 @@ async def _close_owned_runtime(client, runtime_id: str | None, evidence: dict) -
         })
 
 
-async def _exercise(credentials: dict, evidence: dict) -> dict:
+async def _exercise(credentials: dict, evidence: dict, verify_reset: bool = False) -> dict:
     _validate_png_bytes(PNG_BYTES)
     image_b64 = base64.b64encode(PNG_BYTES).decode("ascii")
     runtime_id: str | None = None
+    created_runtime_id: str | None = None
     stored_id: str | None = None
     warmup_marker = "SEMREH_ORPHAN_ATTACHMENT_WARMUP"
     orphan_marker = "SEMREH_ORPHAN_ATTACHMENT_PLAIN_TEXT"
@@ -117,6 +118,7 @@ async def _exercise(credentials: dict, evidence: dict) -> dict:
                 if not isinstance(created, dict):
                     raise RuntimeError("session.create returned no object")
                 runtime_id = created.get("session_id")
+                created_runtime_id = runtime_id
                 stored_id = created.get("stored_session_id")
                 if not all(isinstance(value, str) and value for value in (runtime_id, stored_id)):
                     raise RuntimeError("session.create identity missing")
@@ -173,6 +175,33 @@ async def _exercise(credentials: dict, evidence: dict) -> dict:
                 if not resume_omits_queue:
                     raise RuntimeError("session.resume unexpectedly exposed attachment queue")
 
+                reset_preserved_history = False
+                if verify_reset:
+                    # Models the explicitly confirmed per-chat action. Only
+                    # this probe-created, idle runtime may be closed.
+                    await rpc.wait_idle(resumed_runtime_id)
+                    before_reset = await _rest_rows(client, stored_id)
+                    closed = await rpc.call("session.close", {"session_id": resumed_runtime_id})
+                    if not isinstance(closed, dict) or closed.get("closed") is not True:
+                        raise RuntimeError("explicit reset close was not confirmed")
+                    runtime_id = None
+                    reopened = await rpc.call("session.resume", {
+                        "session_id": stored_id, "profile": PROFILE,
+                    })
+                    if not isinstance(reopened, dict):
+                        raise RuntimeError("reset resume malformed")
+                    new_runtime_id = reopened.get("session_id")
+                    if not isinstance(new_runtime_id, str) or not new_runtime_id:
+                        raise RuntimeError("reset runtime identity missing")
+                    runtime_id = new_runtime_id
+                    if runtime_id == resumed_runtime_id:
+                        raise RuntimeError("reset unexpectedly reused closed runtime")
+                    resumed_runtime_id = runtime_id
+                    after_reset = await _rest_rows(client, stored_id)
+                    if before_reset != after_reset:
+                        raise RuntimeError("runtime reset changed saved history")
+                    reset_preserved_history = True
+
                 await rpc.call("prompt.submit", {
                     "session_id": resumed_runtime_id,
                     "text": orphan_marker,
@@ -189,8 +218,9 @@ async def _exercise(credentials: dict, evidence: dict) -> dict:
                     raise RuntimeError("plain-text turn was not uniquely durable")
                 user_text = _text(matching_users[0])
                 image_reference_count = user_text.count("@image:")
-                if image_reference_count != 1:
-                    raise RuntimeError("orphan image was not consumed by plain-text submit")
+                expected_images = 0 if verify_reset else 1
+                if image_reference_count != expected_images:
+                    raise RuntimeError("unexpected queued-image result after plain-text submit")
 
                 return {
                     "outcome": "passed",
@@ -199,10 +229,12 @@ async def _exercise(credentials: dict, evidence: dict) -> dict:
                     "fresh_ticket_used": True,
                     "resume_reused_runtime": True,
                     "resume_omits_queue_state": resume_omits_queue,
-                    "plain_text_consumed_orphan_image": True,
+                    "plain_text_consumed_orphan_image": image_reference_count == 1,
+                    "explicit_reset_verified": verify_reset,
+                    "reset_preserved_history": reset_preserved_history,
                     "canonical_row_count": len(rows),
                     "canonical_image_reference_count": image_reference_count,
-                    "created_runtime_id": runtime_id,
+                    "created_runtime_id": created_runtime_id,
                     "resumed_runtime_id": resumed_runtime_id,
                     "stored_session_id": stored_id,
                 }
@@ -213,6 +245,7 @@ async def _exercise(credentials: dict, evidence: dict) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--verify-reset", action="store_true")
     args = parser.parse_args()
     output = _output_path(args.output)
     evidence = {
@@ -224,7 +257,7 @@ def main() -> None:
     try:
         stock_probe.validate()
         credentials = json.loads((stock_probe.RUNTIME / "credentials.json").read_text())
-        evidence.update(asyncio.run(_exercise(credentials, evidence)))
+        evidence.update(asyncio.run(_exercise(credentials, evidence, args.verify_reset)))
         if evidence["cleanup_errors"]:
             raise RuntimeError("probe cleanup failed")
         evidence["outcome"] = "passed"

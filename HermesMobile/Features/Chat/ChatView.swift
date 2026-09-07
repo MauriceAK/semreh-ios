@@ -50,6 +50,85 @@ private enum TurnDiffPresentation: Identifiable {
     }
 }
 
+private struct DirectAttachmentRecoveryBanner: View {
+    let isBusy: Bool
+    let isActionAvailable: Bool
+    let onDiscard: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Attachment delivery needs attention")
+                    .font(AppFont.caption(weight: .semibold))
+                Text("Saved chat history is kept. Reset the pending upload before sending or adding attachments.")
+                    .font(AppFont.caption())
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 4)
+
+            if isBusy {
+                ProgressView()
+                    .controlSize(.small)
+                    .accessibilityLabel("Resetting pending upload")
+            } else if isActionAvailable {
+                Button("Discard pending upload", action: onDiscard)
+                    .font(AppFont.caption(weight: .semibold))
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .accessibilityIdentifier("discard-pending-upload")
+            } else {
+                Text("Reconnect this chat to check upload status.")
+                    .font(AppFont.caption())
+                    .multilineTextAlignment(.trailing)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.orange.opacity(0.35), lineWidth: 0.5)
+        }
+        .accessibilityElement(children: .contain)
+    }
+}
+
+private struct DirectAttachmentRecoveryAlertModifier: ViewModifier {
+    @Binding var target: DirectAttachmentRecoveryTarget?
+    let viewModel: ChatViewModel
+
+    func body(content: Content) -> some View {
+        content.alert(
+            "Discard Pending Upload?",
+            isPresented: Binding(
+                get: { target != nil },
+                set: { isPresented in
+                    if !isPresented { target = nil }
+                }
+            )
+        ) {
+            Button("Cancel", role: .cancel) {
+                target = nil
+            }
+            Button("Discard pending upload", role: .destructive) {
+                guard let capturedTarget = target else { return }
+                target = nil
+                Task {
+                    _ = await viewModel.resetDirectAttachmentRecovery(capturedTarget)
+                }
+            }
+        } message: {
+            Text("This resets only the affected live chat and may interrupt an active response. Saved chat history and your draft will be kept. The old staged upload will not be sent again.")
+        }
+    }
+}
+
 /// Reports the first completed UIKit appearance transition for a SwiftUI destination.
 /// `NavigationStack` does not expose push completion directly, while `viewDidAppear`
 /// and the transition coordinator remain synchronized with system animation speed.
@@ -334,6 +413,7 @@ struct ChatView: View {
     @State private var transcriptMediaPreviewItem: TranscriptMediaPreviewItem?
     @State private var pendingProfileSelection: ProfileSummary?
     @State private var showProfileNewSessionConfirmation = false
+    @State private var attachmentRecoveryConfirmationTarget: DirectAttachmentRecoveryTarget?
     @State private var goalDraft = ""
     @State private var showsGoalSheet = false
     @State private var activeGitSheet: ActiveGitSheet?
@@ -613,7 +693,7 @@ struct ChatView: View {
         )
     }
 
-    var body: some View {
+    private var chatBaseView: some View {
         ZStack(alignment: .bottom) {
             VStack(spacing: 0) {
                 if viewModel.isViewingCachedData {
@@ -632,6 +712,19 @@ struct ChatView: View {
             BottomComposerMaterialFade(composerHeight: composerHeight)
 
             composerAccessoryStack
+
+            if viewModel.attachmentRecoveryNeedsReset {
+                DirectAttachmentRecoveryBanner(
+                    isBusy: viewModel.attachmentRecoveryIsBusy,
+                    isActionAvailable: viewModel.directAttachmentRecoveryTarget != nil,
+                    onDiscard: {
+                        attachmentRecoveryConfirmationTarget = viewModel.directAttachmentRecoveryTarget
+                    }
+                )
+                .padding(.horizontal)
+                .padding(.bottom, composerHeight + 8)
+                .zIndex(12)
+            }
 
             messageComposer
 
@@ -867,6 +960,10 @@ struct ChatView: View {
                     }
                 )
             }
+        }
+
+    var body: some View {
+        chatBaseView
             .alert(
                 "Discard Later Messages?",
                 isPresented: $showEditDiscardConfirmation
@@ -930,6 +1027,10 @@ struct ChatView: View {
             } message: {
                 Text(viewModel.messageActionErrorMessage ?? "")
             }
+            .modifier(DirectAttachmentRecoveryAlertModifier(
+                target: $attachmentRecoveryConfirmationTarget,
+                viewModel: viewModel
+            ))
     }
 
     @ViewBuilder

@@ -4,6 +4,139 @@ import XCTest
 
 @MainActor
 final class GatewayConversationAttachmentTests: XCTestCase {
+    func testStageWritesMarkerBeforeDispatchAndSameRuntimeReopenBlocks() async throws {
+        let fake = AttachmentFakeTransport()
+        let gate = AttachmentGate()
+        fake.setAttachmentGate("image.attach_bytes", gate)
+        fake.setResponse("image.attach_bytes", .object([
+            "attached": .bool(true),
+            "path": .string("/profile/images/photo.png"),
+            "name": .string("photo.png")
+        ]))
+        fake.setResponse("session.resume", .object([
+            "session_id": .string("runtime-1"),
+            "session_key": .string("durable-1")
+        ]))
+        let runtime = try makeRuntime(fake)
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("GatewayConversationAttachmentMarkerLifecycle-\(UUID().uuidString)", isDirectory: true)
+        let store = DirectGatewayAttachmentRecoveryMarkerStore(rootURL: root)
+        let controller = makeController(runtime: runtime, markerStore: store)
+        let image = DirectPendingAttachment(source: try .image(data: pngData, filename: "photo.png"))
+        let stage = Task { try await controller.stageAttachment(image) }
+        await waitUntil { fake.calls().contains { $0.method == "image.attach_bytes" } }
+        let identity = try DirectGatewayAttachmentRecoveryIdentity(
+            origin: runtime.origin,
+            profile: "default",
+            storedID: "durable-1",
+            runtimeID: "runtime-1"
+        )
+        XCTAssertNotNil(try store.load(for: identity), "The marker must exist before RPC release")
+        await gate.release()
+        _ = try await stage.value
+
+        let reopened = makeController(runtime: runtime, storedID: "durable-1", markerStore: store)
+        try await reopened.open()
+        XCTAssertTrue(reopened.attachmentRecoveryNeedsReset)
+        do {
+            _ = try await reopened.stageAttachment(DirectPendingAttachment(source: try .image(data: pngData, filename: "again.png")))
+            XCTFail("A reopened same-runtime controller must block unresolved staging")
+        } catch DirectGatewayAttachmentStageError.definiteBeforeStage(.image, .unresolvedAttachment) { }
+        await runtime.stop()
+    }
+
+    func testTerminalKnownImageDetachesThenClearsMarker() async throws {
+        let fake = AttachmentFakeTransport()
+        fake.setResponse("image.attach_bytes", .object([
+            "attached": .bool(true),
+            "path": .string("/profile/images/photo.png"),
+            "name": .string("photo.png")
+        ]))
+        let runtime = try makeRuntime(fake)
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("GatewayConversationAttachmentMarkerTerminal-\(UUID().uuidString)", isDirectory: true)
+        let store = DirectGatewayAttachmentRecoveryMarkerStore(rootURL: root)
+        let controller = makeController(runtime: runtime, markerStore: store)
+        var image = DirectPendingAttachment(source: try .image(data: pngData, filename: "photo.png"))
+        let staged = try await controller.stageAttachment(image)
+        XCTAssertTrue(image.confirm(scope: staged.scope, serverDetachPaths: staged.receipt.detachPaths))
+        try await controller.submit("consume", stagedAttachments: [image])
+        fake.emit(HermesGatewayEvent(
+            method: "event",
+            type: "message.complete",
+            sessionID: "runtime-1",
+            sequence: 1,
+            payload: .object(["status": .string("complete")]),
+            params: nil,
+            connectionGeneration: 1
+        ))
+        let identity = try DirectGatewayAttachmentRecoveryIdentity(
+            origin: runtime.origin,
+            profile: "default",
+            storedID: "durable-1",
+            runtimeID: "runtime-1"
+        )
+        XCTAssertNotNil(try store.load(for: identity), "ACK alone must retain the marker")
+        XCTAssertFalse(fake.calls().contains { $0.method == "image.detach" })
+        await waitUntil { (try? store.load(for: identity)) == nil }
+        XCTAssertEqual(fake.calls().filter { $0.method == "image.detach" }.count, 1)
+        XCTAssertEqual(fake.calls().last?.method, "image.detach")
+        await runtime.stop()
+    }
+
+    func testTerminalWithRunningStatusRetainsMarkerWithoutDetach() async throws {
+        let fake = AttachmentFakeTransport()
+        fake.setResponse("image.attach_bytes", .object([
+            "attached": .bool(true),
+            "path": .string("/profile/images/photo.png"),
+            "name": .string("photo.png")
+        ]))
+        fake.setResponse("session.status", .object(["output": .string("Agent Running: Yes")]))
+        let runtime = try makeRuntime(fake)
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("GatewayConversationAttachmentMarkerRunning-\(UUID().uuidString)", isDirectory: true)
+        let store = DirectGatewayAttachmentRecoveryMarkerStore(rootURL: root)
+        let controller = makeController(runtime: runtime, markerStore: store)
+        var image = DirectPendingAttachment(source: try .image(data: pngData, filename: "photo.png"))
+        let staged = try await controller.stageAttachment(image)
+        XCTAssertTrue(image.confirm(scope: staged.scope, serverDetachPaths: staged.receipt.detachPaths))
+        try await controller.submit("running", stagedAttachments: [image])
+        fake.emit(HermesGatewayEvent(
+            method: "event",
+            type: "message.complete",
+            sessionID: "runtime-1",
+            sequence: 1,
+            payload: .object(["status": .string("complete")]),
+            params: nil,
+            connectionGeneration: 1
+        ))
+        await waitUntil { fake.calls().contains { $0.method == "session.status" } }
+        XCTAssertTrue(controller.attachmentRecoveryNeedsReset)
+        XCTAssertFalse(fake.calls().contains { $0.method == "image.detach" })
+        await runtime.stop()
+    }
+
+    func testExplicitResetClosesOnlyTargetAndRemovesMarker() async throws {
+        let fake = AttachmentFakeTransport()
+        fake.setResponse("image.attach_bytes", .object([
+            "attached": .bool(true),
+            "path": .string("/profile/images/photo.png"),
+            "name": .string("photo.png")
+        ]))
+        let runtime = try makeRuntime(fake)
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("GatewayConversationAttachmentMarkerReset-\(UUID().uuidString)", isDirectory: true)
+        let store = DirectGatewayAttachmentRecoveryMarkerStore(rootURL: root)
+        let controller = makeController(runtime: runtime, markerStore: store)
+        _ = try await controller.stageAttachment(DirectPendingAttachment(source: try .image(data: pngData, filename: "photo.png")))
+        let token = try XCTUnwrap(controller.unresolvedAttachmentMarkerToken)
+        try await controller.resetPendingAttachments(expectedToken: token)
+        XCTAssertFalse(controller.attachmentRecoveryNeedsReset)
+        XCTAssertNil(controller.binding)
+        XCTAssertEqual(fake.calls().filter { $0.method == "session.close" }.count, 1)
+        await runtime.stop()
+    }
+
     func testStageImageFileAndPDFUseExactRPCShapesAndScope() async throws {
         let fake = AttachmentFakeTransport()
         fake.setResponse("image.attach_bytes", .object([
@@ -404,18 +537,25 @@ final class GatewayConversationAttachmentTests: XCTestCase {
         }
         XCTAssertFalse(fake.calls().contains { $0.method == "prompt.submit" })
 
-        fake.setServerError("image.attach_bytes", .server(
+        await runtime.stop()
+
+        let mismatchFake = AttachmentFakeTransport()
+        mismatchFake.setServerError("image.attach_bytes", .server(
             code: 4016,
             message: "unsupported image extension",
             data: nil,
-            // A rejection for a different RPC method must not be applied to
-            // this attachment's definite-before-queue allowlist.
             method: "file.attach",
             requestID: "2-mismatch",
             server: "fixture"
         ))
+        let mismatchRuntime = try makeRuntime(mismatchFake)
+        let mismatchController = makeController(runtime: mismatchRuntime)
+        let mismatchImage = DirectPendingAttachment(source: try DirectGatewayAttachment.image(
+            data: pngData,
+            filename: "photo.png"
+        ))
         do {
-            _ = try await controller.stageAttachment(image)
+            _ = try await mismatchController.stageAttachment(mismatchImage)
             XCTFail("A mismatched server method must not be treated as definite")
         } catch DirectGatewayAttachmentStageError.unknown(
             .image,
@@ -424,32 +564,56 @@ final class GatewayConversationAttachmentTests: XCTestCase {
         ) {
             XCTAssertEqual(code, 4016)
         }
+        await mismatchRuntime.stop()
 
-        fake.setServerError("image.attach_bytes", nil)
-        fake.setResponse("image.attach_bytes", .object(["attached": .bool(true)]))
+        let malformedFake = AttachmentFakeTransport()
+        malformedFake.setResponse("image.attach_bytes", .object(["attached": .bool(true)]))
+        let malformedRuntime = try makeRuntime(malformedFake)
+        let malformedController = makeController(runtime: malformedRuntime)
+        let malformedImage = DirectPendingAttachment(source: try DirectGatewayAttachment.image(
+            data: pngData,
+            filename: "photo.png"
+        ))
         do {
-            _ = try await controller.stageAttachment(image)
+            _ = try await malformedController.stageAttachment(malformedImage)
             XCTFail("Expected malformed receipt")
         } catch DirectGatewayAttachmentStageError.unknown(_, let scope, .malformedResponse) {
             XCTAssertEqual(scope.runtimeID, "runtime-1")
         }
+        await malformedRuntime.stop()
 
-        fake.setResponse("image.attach_bytes", .object([
+        let transportFake = AttachmentFakeTransport()
+        transportFake.setResponse("image.attach_bytes", .object([
             "attached": .bool(true),
             "path": .string("/profile/images/photo.png"),
             "name": .string("photo.png")
         ]))
-        fake.setServerError("image.attach_bytes", .timeout(
+        transportFake.setServerError("image.attach_bytes", .timeout(
             method: "image.attach_bytes",
             requestID: "3"
         ))
+        let transportRuntime = try makeRuntime(transportFake)
+        let transportController = makeController(runtime: transportRuntime)
+        let transportImage = DirectPendingAttachment(source: try DirectGatewayAttachment.image(
+            data: pngData,
+            filename: "photo.png"
+        ))
         do {
-            _ = try await controller.stageAttachment(image)
+            _ = try await transportController.stageAttachment(transportImage)
             XCTFail("Expected a transport failure with unknown stage outcome")
         } catch DirectGatewayAttachmentStageError.unknown(_, _, .transport) { }
+        do {
+            try await transportController.submit("must stay blocked")
+            XCTFail("Unknown image staging must block plain sends")
+        } catch DirectSessionError.unresolvedAttachment { }
+        do {
+            _ = try await transportController.stageAttachment(DirectPendingAttachment(source: try .image(data: pngData, filename: "again.png")))
+            XCTFail("Unknown image staging must block another stage")
+        } catch DirectGatewayAttachmentStageError.definiteBeforeStage(.image, .unresolvedAttachment) { }
+        await transportRuntime.stop()
 
-        fake.setServerError("image.attach_bytes", nil)
-        fake.setServerError("pdf.attach", .server(
+        let pdfFake = AttachmentFakeTransport()
+        pdfFake.setServerError("pdf.attach", .server(
             code: 5028,
             message: "pdftoppm unavailable",
             data: nil,
@@ -457,11 +621,13 @@ final class GatewayConversationAttachmentTests: XCTestCase {
             requestID: "4",
             server: "fixture"
         ))
+        let pdfRuntime = try makeRuntime(pdfFake)
+        let pdfController = makeController(runtime: pdfRuntime)
         let pdf = DirectPendingAttachment(source: try DirectGatewayAttachment.pdf(
             data: Data("%PDF-1.4\n".utf8), filename: "report.pdf"
         ))
         do {
-            _ = try await controller.stageAttachment(pdf)
+            _ = try await pdfController.stageAttachment(pdf)
             XCTFail("Expected pinned PDF 5028 pre-queue rejection")
         } catch DirectGatewayAttachmentStageError.definiteBeforeStage(
             .pdf,
@@ -469,8 +635,8 @@ final class GatewayConversationAttachmentTests: XCTestCase {
         ) {
             XCTAssertEqual(code, 5028)
         }
-        XCTAssertFalse(fake.calls().contains { $0.method == "prompt.submit" })
-        await runtime.stop()
+        XCTAssertFalse(pdfFake.calls().contains { $0.method == "prompt.submit" })
+        await pdfRuntime.stop()
     }
 
     func testConcurrentStageAndSubmitAreRejectedWithoutDuplicateStage() async throws {
@@ -606,8 +772,16 @@ final class GatewayConversationAttachmentTests: XCTestCase {
         }
     }
 
-    private func makeController(runtime: HermesServerRuntime) -> GatewayConversationController {
-        GatewayConversationController(runtime: runtime, storedID: nil) { id, _, _, _ in
+    private func makeController(
+        runtime: HermesServerRuntime,
+        storedID: String? = nil,
+        markerStore: DirectGatewayAttachmentRecoveryMarkerStore? = nil
+    ) -> GatewayConversationController {
+        let store = markerStore ?? DirectGatewayAttachmentRecoveryMarkerStore(
+            rootURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("GatewayConversationAttachmentTests-\(UUID().uuidString)", isDirectory: true)
+        )
+        return GatewayConversationController(runtime: runtime, storedID: storedID, recoveryMarkerStore: store) { id, _, _, _ in
             DirectHermesTranscriptPage(sessionID: id, messages: [], pagination: nil)
         }
     }
@@ -729,7 +903,11 @@ private final class AttachmentFakeTransport: HermesGatewayTransport, @unchecked 
                 "session_key": .string("durable-1")
             ])
         case "session.close":
-            return .object(["closed": .bool(true)])
+            return response ?? .object(["closed": .bool(true)])
+        case "image.detach":
+            return .object(["detached": .bool(false), "count": .number(0)])
+        case "session.status":
+            return response ?? .object(["output": .string("Agent Running: No")])
         default:
             return response ?? .object(["status": .string("streaming")])
         }

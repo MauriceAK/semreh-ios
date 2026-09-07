@@ -69,13 +69,21 @@ this sheet does not invent contracts or mark unexecuted checks passed.
 - [ ] **S3-A — Attachment staging.** Capture image/text-code/PDF stock contracts,
   limits, references and failure behavior before implementation. Stage bytes before
   prompt; failure preserves draft and prevents submit. No host use of phone paths.
-  - [ ] **A3 — Restart-safe unresolved staging (decision required).** Stock live
+  - [ ] **A3 — Restart-safe unresolved staging (approved, implementing).** Stock live
     resume retains queued images but does not report them. Memory-only pending
     state can disappear on app kill/eviction, allowing the next ordinary prompt
     to consume an unknown staged image. Known receipts need exact-path detach;
     unknown receipts require durable per-session quarantine and an explicit
-    resolution policy, or another owner-approved lifecycle change. No personal
+    resolution policy. Maurice approved metadata-only persistence and explicit
+    confirmed per-chat runtime reset preserving saved history. The live stock
+    `--verify-reset` probe passes (reset-contract-v2); native persistence/reset
+    integration and restart acceptance remain unverified. No personal
     gateway resets, fabricated paths, automatic retries, or safety waiver.
+    - [x] **A3a — Persistent marker/reset implementation checkpoint.** Runtime-keyed
+      metadata, hot-reopen quarantine, terminal+idle exact-path cleanup, explicit
+      reset with lost-ACK/corrupt-marker handling. Focused100/full2144 passed;
+      native normal image flow passed with no stuck banner. Live native-controller
+      reset and literal app-kill/physical acceptance are still separate open checks.
   - [ ] **A1 — Capture stock staging/limits and PDF availability.** Record
     returned references, image/PDF/file failure responses and canonical history.
   - [ ] **A2 — Retain local bytes and stage before prompt.** Attachment owner
@@ -107,6 +115,11 @@ this sheet does not invent contracts or mark unexecuted checks passed.
     images. Existing auth mapping unchanged. Root review, focused/full tests and
     live stock HTTPS contract probe passed; native rendered UX, streaming, cache
     isolation and real device media acceptance remain separate gates.
+  - [x] **M2 — Direct managed-file preview checkpoint.** Existing native preview
+    surfaces now use the explicit authenticated stock file-read route for supported
+    absolute resources, without legacy fallback. Text/Markdown display capped256KiB;
+    uploads unchanged. Focused/full tests pass; actual native image preview passed.
+    Native generic-file/PDF picker/preview and physical checks remain open.
 - [ ] **S3-V — Canonical recovery matrix and independent integration.** Real stock
   backend/proxy cases, exact durable row counts, session targeting, prompt expiry,
   artifacts audit and full XCTest. If canonical recovery cannot meet requirements,

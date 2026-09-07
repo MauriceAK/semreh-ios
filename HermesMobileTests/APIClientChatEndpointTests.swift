@@ -455,16 +455,19 @@ final class APIClientChatEndpointTests: APIClientTestCase {
     }
 
     @MainActor
-    func testChatAttachmentPreviewLoadsDirectImageFromAuthenticatedMediaEnvelope() async throws {
+    func testChatAttachmentPreviewLoadsDirectImageFromAuthenticatedManagedFileEnvelope() async throws {
         let imageData = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")!
         let dataURL = "data:image/png;base64,\(imageData.base64EncodedString())"
         MockURLProtocol.requestHandler = { request in
-            XCTAssertEqual(request.url?.path, "/api/media")
+            XCTAssertEqual(request.url?.path, "/api/files/read")
             XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer fixture")
             let query = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.queryItems ?? []
-            XCTAssertEqual(query.first(where: { $0.name == "session_id" })?.value, "session-abc")
-            XCTAssertEqual(query.first(where: { $0.name == "path" })?.value, "images/result.png")
-            return apiTestJSONResponse(#"{"data_url":"\#(dataURL)"}"#, for: request)
+            XCTAssertEqual(query.first(where: { $0.name == "path" })?.value, "/home/fixture/images/result.png")
+            XCTAssertNil(query.first(where: { $0.name == "session_id" }))
+            return apiTestJSONResponse(
+                #"{"data_url":"\#(dataURL)","mime_type":"image/png","name":"result.png","path":"/home/fixture/images/result.png","size":\#(imageData.count)}"#,
+                for: request
+            )
         }
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [MockURLProtocol.self]
@@ -476,7 +479,7 @@ final class APIClientChatEndpointTests: APIClientTestCase {
         let item = ChatAttachmentPreviewItem(
             message: MessageAttachment(
                 name: "result.png",
-                path: "images/result.png",
+                path: "/home/fixture/images/result.png",
                 mime: "image/png",
                 size: imageData.count,
                 isImage: true
@@ -494,7 +497,7 @@ final class APIClientChatEndpointTests: APIClientTestCase {
         await viewModel.load()
 
         guard case let .image(preview) = viewModel.preview else {
-            return XCTFail("Direct image preview should decode the authenticated media envelope.")
+            return XCTFail("Direct image preview should decode the authenticated managed-file envelope.")
         }
         XCTAssertEqual(preview.data, imageData)
         XCTAssertEqual(preview.originalByteCount, imageData.count)
@@ -502,9 +505,127 @@ final class APIClientChatEndpointTests: APIClientTestCase {
     }
 
     @MainActor
-    func testChatAttachmentPreviewDirectGenericRemoteAttachmentIsUnavailableWithoutLegacyHTTP() async throws {
+    func testChatAttachmentPreviewLoadsDirectTextFromManagedFileWithoutLegacyHTTP() async throws {
+        let text = "plain text from the managed file"
+        let dataURL = "data:text/plain;base64,\(Data(text.utf8).base64EncodedString())"
         let client = makeClient { request in
-            XCTFail("Direct generic preview must not fall back to legacy HTTP: \(request.url?.path ?? "nil")")
+            XCTAssertEqual(request.url?.path, "/api/files/read")
+            let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
+            let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value) })
+            XCTAssertEqual(query["path"], "/home/fixture/attachments/notes.txt")
+            return apiTestJSONResponse(
+                #"{"data_url":"\#(dataURL)","mime_type":"text/plain","name":"notes.txt","path":"/home/fixture/attachments/notes.txt","size":\#(text.utf8.count)}"#,
+                for: request
+            )
+        }
+        let item = ChatAttachmentPreviewItem(
+            message: MessageAttachment(
+                name: "notes.txt",
+                path: "/home/fixture/attachments/notes.txt",
+                mime: "text/plain",
+                size: text.utf8.count,
+                isImage: false
+            ),
+            localData: nil
+        )
+        let viewModel = try ChatAttachmentPreviewViewModel(
+            session: try makeFilePreviewSession(),
+            server: XCTUnwrap(URL(string: "https://example.test")),
+            item: item,
+            apiClient: client,
+            usesDirectGateway: true
+        )
+
+        await viewModel.load()
+
+        guard case let .text(file) = viewModel.preview else {
+            return XCTFail("Direct text attachments should use the managed-file response bytes.")
+        }
+        XCTAssertEqual(file.content, text)
+        XCTAssertEqual(file.path, "/home/fixture/attachments/notes.txt")
+        XCTAssertNil(viewModel.errorMessage)
+    }
+
+    @MainActor
+    func testChatAttachmentPreviewLoadsDirectMarkdownFromManagedFile() async throws {
+        let markdown = "# Notes\n\nRendered markdown."
+        let dataURL = "data:text/markdown;base64,\(Data(markdown.utf8).base64EncodedString())"
+        let client = makeClient { request in
+            XCTAssertEqual(request.url?.path, "/api/files/read")
+            return apiTestJSONResponse(
+                #"{"data_url":"\#(dataURL)","mime_type":"text/markdown","name":"notes.md","path":"/home/fixture/attachments/notes.md","size":\#(markdown.utf8.count)}"#,
+                for: request
+            )
+        }
+        let item = ChatAttachmentPreviewItem(
+            message: MessageAttachment(
+                name: "notes.md",
+                path: "/home/fixture/attachments/notes.md",
+                mime: "text/markdown",
+                size: markdown.utf8.count,
+                isImage: false
+            ),
+            localData: nil
+        )
+        let viewModel = try ChatAttachmentPreviewViewModel(
+            session: try makeFilePreviewSession(),
+            server: XCTUnwrap(URL(string: "https://example.test")),
+            item: item,
+            apiClient: client,
+            usesDirectGateway: true
+        )
+
+        await viewModel.load()
+
+        guard case let .markdown(file) = viewModel.preview else {
+            return XCTFail("Direct Markdown attachments should use the managed-file response bytes.")
+        }
+        XCTAssertEqual(file.content, markdown)
+        XCTAssertEqual(file.path, "/home/fixture/attachments/notes.md")
+    }
+
+    @MainActor
+    func testChatAttachmentPreviewRejectsDirectTextAboveDisplayLimitWithoutDecoding() async throws {
+        let oversizedText = Data(repeating: 0x78, count: 256 * 1_024 + 1)
+        let dataURL = "data:text/plain;base64,\(oversizedText.base64EncodedString())"
+        let client = makeClient { request in
+            XCTAssertEqual(request.url?.path, "/api/files/read")
+            return apiTestJSONResponse(
+                #"{"data_url":"\#(dataURL)","mime_type":"text/plain","name":"large.txt","path":"/home/fixture/attachments/large.txt","size":\#(oversizedText.count)}"#,
+                for: request
+            )
+        }
+        let item = ChatAttachmentPreviewItem(
+            message: MessageAttachment(
+                name: "large.txt",
+                path: "/home/fixture/attachments/large.txt",
+                mime: "text/plain",
+                size: oversizedText.count,
+                isImage: false
+            ),
+            localData: nil
+        )
+        let viewModel = try ChatAttachmentPreviewViewModel(
+            session: try makeFilePreviewSession(),
+            server: XCTUnwrap(URL(string: "https://example.test")),
+            item: item,
+            apiClient: client,
+            usesDirectGateway: true
+        )
+
+        await viewModel.load()
+
+        guard case let .unavailable(message) = viewModel.preview else {
+            return XCTFail("Oversized direct text should be rejected before preview rendering.")
+        }
+        XCTAssertTrue(message.localizedCaseInsensitiveContains("too large"))
+        XCTAssertNil(viewModel.errorMessage)
+    }
+
+    @MainActor
+    func testChatAttachmentPreviewRejectsRelativeDirectPathWithoutRequest() async throws {
+        let client = makeClient { request in
+            XCTFail("Relative direct references must not request a guessed host path: \(request.url?.path ?? "nil")")
             throw URLError(.badURL)
         }
         let item = ChatAttachmentPreviewItem(
@@ -528,9 +649,122 @@ final class APIClientChatEndpointTests: APIClientTestCase {
         await viewModel.load()
 
         guard case let .unavailable(message) = viewModel.preview else {
-            return XCTFail("Direct generic remote attachments must be honestly unavailable.")
+            return XCTFail("Relative direct references should remain unavailable without a request.")
         }
-        XCTAssertTrue(message.localizedCaseInsensitiveContains("direct attachment"))
+        XCTAssertTrue(message.localizedCaseInsensitiveContains("not available"))
+    }
+
+    @MainActor
+    func testChatAttachmentPreviewDoesNotFetchKnownUnsupportedDirectBinary() async throws {
+        let client = makeClient { request in
+            XCTFail("Known unsupported direct binaries must not be fetched: \(request.url?.path ?? "nil")")
+            throw URLError(.badURL)
+        }
+        let item = ChatAttachmentPreviewItem(
+            message: MessageAttachment(
+                name: "archive.zip",
+                path: "/home/fixture/attachments/archive.zip",
+                mime: "application/zip",
+                size: 12,
+                isImage: false
+            ),
+            localData: nil
+        )
+        let viewModel = try ChatAttachmentPreviewViewModel(
+            session: try makeFilePreviewSession(),
+            server: XCTUnwrap(URL(string: "https://example.test")),
+            item: item,
+            apiClient: client,
+            usesDirectGateway: true
+        )
+
+        await viewModel.load()
+
+        guard case let .unavailable(message) = viewModel.preview else {
+            return XCTFail("Known unsupported direct binaries should remain unavailable.")
+        }
+        XCTAssertTrue(message.localizedCaseInsensitiveContains("file type"))
+    }
+
+    @MainActor
+    func testChatAttachmentPreviewMapsManagedFileUnauthorizedWithoutLegacyFallback() async throws {
+        let client = makeClient { request in
+            XCTAssertEqual(request.url?.path, "/api/files/read")
+            let response = HTTPURLResponse(
+                url: try XCTUnwrap(request.url),
+                statusCode: 401,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            return (response, Data(#"{"detail":"unauthorized"}"#.utf8))
+        }
+        let item = ChatAttachmentPreviewItem(
+            message: MessageAttachment(
+                name: "notes.txt",
+                path: "/home/fixture/attachments/notes.txt",
+                mime: "text/plain",
+                size: 12,
+                isImage: false
+            ),
+            localData: nil
+        )
+        let viewModel = try ChatAttachmentPreviewViewModel(
+            session: try makeFilePreviewSession(),
+            server: XCTUnwrap(URL(string: "https://example.test")),
+            item: item,
+            apiClient: client,
+            usesDirectGateway: true
+        )
+
+        await viewModel.load()
+
+        XCTAssertNil(viewModel.preview)
+        XCTAssertEqual(viewModel.errorMessage, APIError.unauthorized.localizedDescription)
+        guard let error = viewModel.lastError as? APIError,
+              case .unauthorized = error else {
+            return XCTFail("Managed-file 401 should remain an authentication error.")
+        }
+    }
+
+    @MainActor
+    func testChatAttachmentPreviewLoadsDirectPDFFromManagedFileWithPreviewLimit() async throws {
+        let pdfData = UIGraphicsPDFRenderer(bounds: CGRect(x: 0, y: 0, width: 320, height: 480)).pdfData { context in
+            context.beginPage()
+            "Attachment PDF".draw(at: CGPoint(x: 24, y: 24), withAttributes: nil)
+        }
+        let dataURL = "data:application/pdf;base64,\(pdfData.base64EncodedString())"
+        let client = makeClient { request in
+            XCTAssertEqual(request.url?.path, "/api/files/read")
+            return apiTestJSONResponse(
+                #"{"data_url":"\#(dataURL)","mime_type":"application/pdf","name":"report.pdf","path":"/home/fixture/attachments/report.pdf","size":\#(pdfData.count)}"#,
+                for: request
+            )
+        }
+        let item = ChatAttachmentPreviewItem(
+            message: MessageAttachment(
+                name: "report.pdf",
+                path: "/home/fixture/attachments/report.pdf",
+                mime: "application/pdf",
+                size: pdfData.count,
+                isImage: false
+            ),
+            localData: nil
+        )
+        let viewModel = try ChatAttachmentPreviewViewModel(
+            session: try makeFilePreviewSession(),
+            server: XCTUnwrap(URL(string: "https://example.test")),
+            item: item,
+            apiClient: client,
+            usesDirectGateway: true
+        )
+
+        await viewModel.load()
+
+        guard case let .pdf(document) = viewModel.preview else {
+            return XCTFail("Direct PDF attachments should use the managed-file bytes.")
+        }
+        XCTAssertEqual(document.document.pageCount, 1)
+        XCTAssertNil(viewModel.errorMessage)
     }
 
     func testDocumentPreviewKindRejectsStrongMIMEConflict() {

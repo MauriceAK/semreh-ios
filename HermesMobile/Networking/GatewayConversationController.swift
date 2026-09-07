@@ -38,6 +38,13 @@ final class GatewayConversationController {
     /// eventual resolution; this controller never clears it from a generic
     /// refresh or status response.
     private(set) var hasAmbiguousPromptDelivery = false
+    /// A persisted marker means Hermes may still own an attachment queued for
+    /// this durable chat. It is intentionally a cached value, never a file
+    /// read from a SwiftUI body.
+    private(set) var attachmentRecoveryNeedsReset = false
+    private(set) var attachmentRecoveryIsBusy = false
+    private(set) var unresolvedAttachmentMarkerToken: UUID?
+    var hasUnresolvedAttachmentMarker: Bool { attachmentRecoveryNeedsReset }
     private(set) var pendingReasoningEffort: String?
     /// One renderer-facing blocking prompt. It is transient and always scoped
     /// to the exact server/runtime/connection/request identity below.
@@ -57,6 +64,7 @@ final class GatewayConversationController {
 
     @ObservationIgnored private let runtime: HermesServerRuntime
     @ObservationIgnored private let loadTranscript: TranscriptLoader
+    @ObservationIgnored private let recoveryMarkerStore: any DirectGatewayAttachmentRecoveryMarkerStoreProtocol
     @ObservationIgnored private var observerID: UUID?
     @ObservationIgnored private var attachmentTask: Task<Void, Error>?
     @ObservationIgnored private var attachmentStageInFlight = false
@@ -80,15 +88,41 @@ final class GatewayConversationController {
     private enum BlockingClearReason: Equatable { case terminal, expiry }
     private var blockingClear: (identity: GatewayBlockingPromptIdentity, reason: BlockingClearReason)?
     private var blockingResponseInFlight = false
+    private var recoveryMarker: DirectGatewayAttachmentRecoveryMarker?
+    private var recoveryMarkerLoadFailed = false
+    private var recoveryStageUnknown = false
+    private var locallyConfirmedRecoveryStageCount = 0
+    private var recoveryDetachPaths: [String] = []
+    @ObservationIgnored private var recoveryCleanupTask: Task<Void, Never>?
+    private var latestEventSequence = -1
+    private struct RecoveryPromptObservation: Sendable {
+        let token: UUID
+        let binding: GatewaySessionBinding
+        let origin: URL
+        let connectionGeneration: Int
+        let lifecycle: Int
+        let minimumEventSequence: Int
+        var accepted = false
+        var terminalSequence: Int?
+    }
+    private var recoveryPromptObservation: RecoveryPromptObservation?
 
-    init(runtime: HermesServerRuntime, storedID: String?, profile: String = "default", loadTranscript: @escaping TranscriptLoader) {
+    init(
+        runtime: HermesServerRuntime,
+        storedID: String?,
+        profile: String = "default",
+        recoveryMarkerStore: any DirectGatewayAttachmentRecoveryMarkerStoreProtocol = DirectGatewayAttachmentRecoveryMarkerStore(),
+        loadTranscript: @escaping TranscriptLoader
+    ) {
         self.runtime = runtime
         self.storedID = storedID
         let normalizedProfile = profile.trimmingCharacters(in: .whitespacesAndNewlines)
         self.profile = normalizedProfile.isEmpty ? "default" : normalizedProfile
+        self.recoveryMarkerStore = recoveryMarkerStore
         self.loadTranscript = loadTranscript
         hasSubmittedPrompt = storedID != nil
         durableRowConfirmed = storedID != nil
+        refreshRecoveryMarker()
         observerID = runtime.observe(event: { [weak self] event in
             self?.receive(event)
         }, recover: { [weak self] transport in
@@ -101,19 +135,338 @@ final class GatewayConversationController {
         })
     }
 
-    convenience init(runtime: HermesServerRuntime, client: APIClient, storedID: String?, profile: String = "default") {
-        self.init(runtime: runtime, storedID: storedID, profile: profile) { id, profile, limit, offset in
+    convenience init(
+        runtime: HermesServerRuntime,
+        client: APIClient,
+        storedID: String?,
+        profile: String = "default",
+        recoveryMarkerStore: any DirectGatewayAttachmentRecoveryMarkerStoreProtocol = DirectGatewayAttachmentRecoveryMarkerStore()
+    ) {
+        self.init(runtime: runtime, storedID: storedID, profile: profile, recoveryMarkerStore: recoveryMarkerStore) { id, profile, limit, offset in
             try await client.directSessionMessages(sessionID: id, profile: profile, limit: limit, offset: offset)
         }
     }
 
-    deinit { attachmentTask?.cancel(); reconciliationTask?.cancel(); idleRefreshTask?.cancel() }
+    deinit { attachmentTask?.cancel(); reconciliationTask?.cancel(); idleRefreshTask?.cancel(); recoveryCleanupTask?.cancel() }
+
+    private func currentRecoveryIdentity() throws -> DirectGatewayAttachmentRecoveryIdentity {
+        guard let storedID, let binding else { throw DirectSessionError.invalidBinding }
+        return try DirectGatewayAttachmentRecoveryIdentity(
+            origin: runtime.origin,
+            profile: profile,
+            storedID: storedID,
+            runtimeID: binding.runtimeID
+        )
+    }
+
+    private func refreshRecoveryMarker() {
+        guard let storedID, let binding,
+              let identity = try? DirectGatewayAttachmentRecoveryIdentity(
+                origin: runtime.origin,
+                profile: profile,
+                storedID: storedID,
+                runtimeID: binding.runtimeID
+              ) else {
+            return
+        }
+        do {
+            let loaded = try recoveryMarkerStore.load(for: identity)
+            if let existing = recoveryMarker,
+               existing.identity != identity {
+                // A canonical-ID change can be a stock compression
+                // continuation. Keep the marker keyed by its original
+                // durable identity; the current runtime binding is still
+                // required for any reset and the marker remains blocking.
+                _ = existing
+            } else {
+                recoveryMarker = loaded
+                recoveryMarkerLoadFailed = false
+                recoveryStageUnknown = loaded != nil
+            }
+        } catch {
+            recoveryMarkerLoadFailed = true
+        }
+        attachmentRecoveryNeedsReset = recoveryMarker != nil || recoveryMarkerLoadFailed
+        unresolvedAttachmentMarkerToken = recoveryMarker?.token
+    }
+
+    private func markRecoveryMarker(_ marker: DirectGatewayAttachmentRecoveryMarker) {
+        recoveryMarker = marker
+        recoveryMarkerLoadFailed = false
+        recoveryStageUnknown = false
+        attachmentRecoveryNeedsReset = false
+        unresolvedAttachmentMarkerToken = marker.token
+    }
+
+    private func markRecoveryStageUnknownIfNeeded(_ kind: DirectGatewayAttachmentKind) {
+        guard kind != .file else { return }
+        recoveryStageUnknown = true
+        attachmentRecoveryNeedsReset = true
+    }
+
+    private func clearRecoveryMarker(_ marker: DirectGatewayAttachmentRecoveryMarker) throws {
+        try recoveryMarkerStore.remove(marker)
+        guard recoveryMarker?.token == marker.token else {
+            throw DirectGatewayAttachmentRecoveryMarkerStoreError.tokenMismatch
+        }
+        recoveryMarker = nil
+        recoveryMarkerLoadFailed = false
+        attachmentRecoveryNeedsReset = false
+        unresolvedAttachmentMarkerToken = nil
+        locallyConfirmedRecoveryStageCount = 0
+        recoveryDetachPaths.removeAll()
+        recoveryStageUnknown = false
+    }
+
+    private func persistRecoveryMarkerIfNeeded() throws -> (marker: DirectGatewayAttachmentRecoveryMarker, created: Bool) {
+        if let recoveryMarker { return (recoveryMarker, false) }
+        guard !recoveryMarkerLoadFailed else {
+            throw DirectSessionError.attachmentRecoveryUnavailable
+        }
+        let marker = DirectGatewayAttachmentRecoveryMarker(identity: try currentRecoveryIdentity())
+        do { try recoveryMarkerStore.write(marker) }
+        catch {
+            recoveryMarkerLoadFailed = true
+            attachmentRecoveryNeedsReset = true
+            throw DirectSessionError.attachmentRecoveryUnavailable
+        }
+        markRecoveryMarker(marker)
+        return (marker, true)
+    }
+
+    private func discardRecoveryStateAfterReset(_ marker: DirectGatewayAttachmentRecoveryMarker?) {
+        if let marker { try? recoveryMarkerStore.remove(marker) }
+        recoveryMarker = nil
+        recoveryMarkerLoadFailed = false
+        recoveryStageUnknown = false
+        attachmentRecoveryNeedsReset = false
+        unresolvedAttachmentMarkerToken = nil
+        locallyConfirmedRecoveryStageCount = 0
+        recoveryDetachPaths.removeAll()
+        recoveryPromptObservation = nil
+    }
+
+    private func draftRuntimeWasProvenClosed(
+        binding: GatewaySessionBinding,
+        lifecycle expectedLifecycle: Int,
+        origin expectedOrigin: URL,
+        generation expectedGeneration: Int
+    ) async throws -> Bool {
+        do {
+            let result = try await runtime.request("session.status", parameters: {
+                guard !self.disposed,
+                      self.lifecycle == expectedLifecycle,
+                      self.binding == binding,
+                      self.runtime.origin == expectedOrigin,
+                      self.runtime.connectionGeneration == expectedGeneration,
+                      self.runtime.state == .ready,
+                      self.runState == .idle else {
+                    throw DirectSessionError.staleOperation
+                }
+                return self.rpcParams(binding)
+            })
+            _ = result
+            return false
+        } catch let error as HermesGatewayError {
+            guard !disposed,
+                  lifecycle == expectedLifecycle,
+                  self.binding == binding,
+                  runtime.origin == expectedOrigin,
+                  runtime.connectionGeneration == expectedGeneration,
+                  runtime.state == .ready,
+                  runState == .idle else {
+                throw DirectSessionError.staleOperation
+            }
+            guard case .server(let code, _, _, let method, _, _) = error,
+                  method == "session.status" else { return false }
+            return code == 4001
+        }
+    }
+
+    private func rebindAfterAttachmentReset(
+        oldBinding: GatewaySessionBinding,
+        lifecycle expectedLifecycle: Int,
+        origin expectedOrigin: URL,
+        marker: DirectGatewayAttachmentRecoveryMarker?
+    ) async throws {
+        guard !disposed, lifecycle == expectedLifecycle,
+              runtime.origin == expectedOrigin else {
+            throw DirectSessionError.staleOperation
+        }
+        invalidateBinding()
+        do { try await ensureBinding(create: [:]) }
+        catch { throw DirectSessionError.attachmentRecoveryUnavailable }
+        guard !disposed,
+              lifecycle == expectedLifecycle,
+              runtime.origin == expectedOrigin,
+              runtime.state == .ready,
+              let rebound = binding,
+              rebound.profile == profile,
+              rebound.runtimeID != oldBinding.runtimeID else {
+            throw DirectSessionError.attachmentRecoveryUnavailable
+        }
+        // A different runtime can already carry its own unresolved marker.
+        // Runtime-ID change alone is not authority to clear that quarantine.
+        // Inspect only the rebound runtime key before discarding old-runtime
+        // state; a marker or read failure keeps recovery blocked on B.
+        let reboundIdentity = try currentRecoveryIdentity()
+        do {
+            guard try recoveryMarkerStore.load(for: reboundIdentity) == nil else {
+                throw DirectSessionError.unresolvedAttachment
+            }
+        } catch let error as DirectSessionError {
+            throw error
+        } catch {
+            throw DirectSessionError.attachmentRecoveryUnavailable
+        }
+        // A distinct stock runtime has a fresh in-memory attachment queue.
+        // Only now may the VM discard its old staged receipts. A corrupt or
+        // otherwise undeletable old marker is harmless because it is keyed to
+        // the closed runtime ID and is deliberately left on disk.
+        discardRecoveryStateAfterReset(marker)
+        turnEpoch &+= 1
+    }
 
     /// Opening a local draft does not create a backend session.
     func open() async throws {
         guard !disposed else { throw DirectSessionError.stopped }
         guard storedID != nil, hasSubmittedPrompt else { return }
         try await ensureBinding(create: [:])
+    }
+
+    /// Explicitly abandons only the live runtime carrying an unresolved
+    /// attachment marker. The caller owns user confirmation and warning text.
+    /// Durable transcript rows are retained by stock `session.close`; the
+    /// next `open()` resumes that stored conversation with a fresh runtime.
+    func resetPendingAttachments(expectedToken: UUID? = nil) async throws {
+        guard !disposed else { throw DirectSessionError.stopped }
+        guard recoveryMarker != nil || recoveryMarkerLoadFailed else {
+            throw DirectSessionError.unresolvedAttachment
+        }
+        if let expectedToken {
+            guard recoveryMarker?.token == expectedToken else {
+                throw DirectSessionError.staleOperation
+            }
+        }
+        let marker = recoveryMarker
+        guard !attachmentRecoveryIsBusy,
+              !attachmentStageInFlight,
+              !promptInFlight,
+              !hasAmbiguousPromptDelivery,
+              runState == .idle,
+              let capturedBinding = binding else {
+            throw DirectSessionError.ambiguousPrompt
+        }
+        let identity = try currentRecoveryIdentity()
+        if let marker {
+            guard marker.identity.origin == identity.origin,
+                  marker.identity.profile == identity.profile,
+                  marker.identity.runtimeID == identity.runtimeID else {
+                throw DirectSessionError.staleOperation
+            }
+        }
+        guard runtime.state == .ready else {
+            throw DirectSessionError.staleOperation
+        }
+        let wasDurable = hasSubmittedPrompt && storedID != nil
+        let capturedLifecycle = lifecycle
+        let capturedGeneration = runtime.connectionGeneration
+        let capturedOrigin = runtime.origin
+        attachmentRecoveryIsBusy = true
+        defer { attachmentRecoveryIsBusy = false }
+
+        var closeWasDispatched = false
+        let closeResult: JSONValue?
+        do {
+            closeResult = try await runtime.request("session.close", parameters: {
+                guard !self.disposed,
+                      self.lifecycle == capturedLifecycle,
+                      self.binding == capturedBinding,
+                      self.runtime.origin == capturedOrigin,
+                      self.runtime.connectionGeneration == capturedGeneration,
+                      self.runtime.state == .ready,
+                      self.runState == .idle,
+                      marker == nil
+                        ? self.recoveryMarkerLoadFailed
+                        : self.recoveryMarker?.token == marker?.token else {
+                    throw DirectSessionError.staleOperation
+                }
+                closeWasDispatched = true
+                // Once the close is actually dispatched, the previous
+                // in-memory stage is no longer safe to treat as reusable.
+                // Keep the quarantine visible until a fresh-runtime proof
+                // completes, including a failed/same-runtime rebind.
+                self.attachmentRecoveryNeedsReset = true
+                return self.rpcParams(capturedBinding)
+            })
+        } catch {
+            guard closeWasDispatched else { throw error }
+            if wasDurable {
+                try await rebindAfterAttachmentReset(
+                    oldBinding: capturedBinding,
+                    lifecycle: capturedLifecycle,
+                    origin: capturedOrigin,
+                    marker: marker
+                )
+                return
+            }
+            if try await draftRuntimeWasProvenClosed(
+                binding: capturedBinding,
+                lifecycle: capturedLifecycle,
+                origin: capturedOrigin,
+                generation: capturedGeneration
+            ) {
+                discardRecoveryStateAfterReset(marker)
+                invalidateBinding()
+                turnEpoch &+= 1
+                return
+            }
+            throw DirectSessionError.attachmentRecoveryUnavailable
+        }
+
+        guard !disposed,
+              lifecycle == capturedLifecycle,
+              binding == capturedBinding,
+              runtime.origin == capturedOrigin,
+              runtime.connectionGeneration == capturedGeneration else {
+            throw DirectSessionError.staleOperation
+        }
+        guard closeResult?.gatewayFields["closed"] == .bool(true) else {
+            if wasDurable {
+                try await rebindAfterAttachmentReset(
+                    oldBinding: capturedBinding,
+                    lifecycle: capturedLifecycle,
+                    origin: capturedOrigin,
+                    marker: marker
+                )
+                return
+            }
+            if try await draftRuntimeWasProvenClosed(
+                binding: capturedBinding,
+                lifecycle: capturedLifecycle,
+                origin: capturedOrigin,
+                generation: capturedGeneration
+            ) {
+                discardRecoveryStateAfterReset(marker)
+                invalidateBinding()
+                turnEpoch &+= 1
+                return
+            }
+            throw DirectSessionError.attachmentRecoveryUnavailable
+        }
+        if wasDurable {
+            try await rebindAfterAttachmentReset(
+                oldBinding: capturedBinding,
+                lifecycle: capturedLifecycle,
+                origin: capturedOrigin,
+                marker: marker
+            )
+        } else {
+            discardRecoveryStateAfterReset(marker)
+            invalidateBinding()
+            recoveryPromptObservation = nil
+            turnEpoch &+= 1
+        }
     }
 
     /// Stages one direct attachment on this conversation's already-owned
@@ -158,6 +511,16 @@ final class GatewayConversationController {
                 reason: .ambiguousPromptDelivery
             )
         }
+        guard !recoveryMarkerLoadFailed else {
+            throw DirectGatewayAttachmentStageError.definiteBeforeStage(
+                kind: kind,
+                reason: .recoveryMarkerUnavailable
+            )
+        }
+        // Report the actual in-flight operation before the marker barrier.
+        // The first stage may have persisted its marker while its RPC is
+        // suspended; a concurrent tap is a local busy rejection, not a
+        // recovery-quarantine result.
         guard !attachmentStageInFlight,
               !promptInFlight,
               runState == .idle else {
@@ -166,7 +529,15 @@ final class GatewayConversationController {
                 reason: .controllerBusy
             )
         }
-
+        guard !recoveryMarkerLoadFailed,
+              !recoveryStageUnknown,
+              !attachmentRecoveryIsBusy,
+              recoveryMarker == nil || locallyConfirmedRecoveryStageCount > 0 else {
+            throw DirectGatewayAttachmentStageError.definiteBeforeStage(
+                kind: kind,
+                reason: .unresolvedAttachment
+            )
+        }
         attachmentStageInFlight = true
         defer { attachmentStageInFlight = false }
 
@@ -199,6 +570,14 @@ final class GatewayConversationController {
             throw DirectGatewayAttachmentStageError.definiteBeforeStage(
                 kind: kind,
                 reason: .staleBeforeDispatch
+            )
+        }
+        guard !recoveryStageUnknown,
+              !attachmentRecoveryIsBusy,
+              recoveryMarker == nil || locallyConfirmedRecoveryStageCount > 0 else {
+            throw DirectGatewayAttachmentStageError.definiteBeforeStage(
+                kind: kind,
+                reason: .unresolvedAttachment
             )
         }
 
@@ -273,6 +652,20 @@ final class GatewayConversationController {
         // 120-second server-side window plus a small transport margin.
         let requestTimeout: Duration? = kind == .pdf ? .seconds(135) : nil
         var requestWasDispatched = false
+        var markerCreatedForThisStage = false
+        if kind != .file {
+            do {
+                let markerResult = try persistRecoveryMarkerIfNeeded()
+                markerCreatedForThisStage = markerResult.created
+            } catch let error as DirectSessionError {
+                throw DirectGatewayAttachmentStageError.definiteBeforeStage(
+                    kind: kind,
+                    reason: error == .attachmentRecoveryUnavailable
+                        ? .recoveryMarkerUnavailable
+                        : .staleBeforeDispatch
+                )
+            }
+        }
 
         do {
             let result = try await runtime.request(method, parameters: {
@@ -323,14 +716,33 @@ final class GatewayConversationController {
                 )
             }
 
+            if kind != .file {
+                locallyConfirmedRecoveryStageCount += 1
+                recoveryDetachPaths.append(contentsOf: receipt.detachPaths)
+            }
             return DirectGatewayAttachmentStageResult(scope: scope, receipt: receipt)
         } catch let error as DirectGatewayAttachmentStageError {
+            if case .unknown = error {
+                markRecoveryStageUnknownIfNeeded(kind)
+            }
+            if markerCreatedForThisStage,
+               locallyConfirmedRecoveryStageCount == 0,
+               case .definiteBeforeStage = error {
+                if let marker = recoveryMarker {
+                    try? clearRecoveryMarker(marker)
+                }
+            }
             throw error
         } catch let error as HermesGatewayError {
             if case .server(let code, let message, _, let serverMethod, _, _) = error,
                requestWasDispatched,
                serverMethod == method,
                Self.isDefiniteAttachmentRejection(kind: kind, method: method, code: code) {
+                if markerCreatedForThisStage,
+                   locallyConfirmedRecoveryStageCount == 0,
+                   let marker = recoveryMarker {
+                    try? clearRecoveryMarker(marker)
+                }
                 throw DirectGatewayAttachmentStageError.definiteBeforeStage(
                     kind: kind,
                     reason: .serverRejected(code: code, message: message)
@@ -338,6 +750,11 @@ final class GatewayConversationController {
             }
 
             guard requestWasDispatched else {
+                if markerCreatedForThisStage,
+                   locallyConfirmedRecoveryStageCount == 0,
+                   let marker = recoveryMarker {
+                    try? clearRecoveryMarker(marker)
+                }
                 let reason: DirectGatewayAttachmentStageDefiniteReason = {
                     if case .cancelled = error { return .cancelledBeforeDispatch }
                     return .staleBeforeDispatch
@@ -349,6 +766,7 @@ final class GatewayConversationController {
             }
 
             if case .cancelled = error {
+                markRecoveryStageUnknownIfNeeded(kind)
                 throw DirectGatewayAttachmentStageError.unknown(
                     kind: kind,
                     scope: scope,
@@ -356,6 +774,7 @@ final class GatewayConversationController {
                 )
             }
 
+            markRecoveryStageUnknownIfNeeded(kind)
             throw DirectGatewayAttachmentStageError.unknown(
                 kind: kind,
                 scope: scope,
@@ -363,11 +782,17 @@ final class GatewayConversationController {
             )
         } catch is CancellationError {
             if requestWasDispatched {
+                markRecoveryStageUnknownIfNeeded(kind)
                 throw DirectGatewayAttachmentStageError.unknown(
                     kind: kind,
                     scope: scope,
                     reason: .cancelledAfterDispatch
                 )
+            }
+            if markerCreatedForThisStage,
+               locallyConfirmedRecoveryStageCount == 0,
+               let marker = recoveryMarker {
+                try? clearRecoveryMarker(marker)
             }
             throw DirectGatewayAttachmentStageError.definiteBeforeStage(
                 kind: kind,
@@ -375,11 +800,17 @@ final class GatewayConversationController {
             )
         } catch is DirectSessionError {
             if requestWasDispatched {
+                markRecoveryStageUnknownIfNeeded(kind)
                 throw DirectGatewayAttachmentStageError.unknown(
                     kind: kind,
                     scope: scope,
                     reason: .staleAfterDispatch
                 )
+            }
+            if markerCreatedForThisStage,
+               locallyConfirmedRecoveryStageCount == 0,
+               let marker = recoveryMarker {
+                try? clearRecoveryMarker(marker)
             }
             throw DirectGatewayAttachmentStageError.definiteBeforeStage(
                 kind: kind,
@@ -387,11 +818,17 @@ final class GatewayConversationController {
             )
         } catch {
             if requestWasDispatched {
+                markRecoveryStageUnknownIfNeeded(kind)
                 throw DirectGatewayAttachmentStageError.unknown(
                     kind: kind,
                     scope: scope,
                     reason: .transport
                 )
+            }
+            if markerCreatedForThisStage,
+               locallyConfirmedRecoveryStageCount == 0,
+               let marker = recoveryMarker {
+                try? clearRecoveryMarker(marker)
             }
             throw DirectGatewayAttachmentStageError.definiteBeforeStage(
                 kind: kind,
@@ -409,6 +846,15 @@ final class GatewayConversationController {
     ) async throws {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw DirectSessionError.invalidResponse }
         guard !hasAmbiguousPromptDelivery else { throw DirectSessionError.ambiguousPrompt }
+        guard !recoveryMarkerLoadFailed else { throw DirectSessionError.attachmentRecoveryUnavailable }
+        guard !attachmentRecoveryIsBusy, !attachmentStageInFlight else { throw DirectSessionError.ambiguousPrompt }
+        guard !recoveryStageUnknown else { throw DirectSessionError.unresolvedAttachment }
+        if recoveryMarker != nil {
+            guard !stagedAttachments.isEmpty,
+                  locallyConfirmedRecoveryStageCount > 0 else {
+                throw DirectSessionError.unresolvedAttachment
+            }
+        }
         if pendingReasoningEffort != nil, let mutationTail = reasoningMutationTail {
             await mutationTail.value
         }
@@ -437,6 +883,8 @@ final class GatewayConversationController {
         let preSubmitTurn = turnEpoch
         var stagedScope: DirectPendingAttachmentStageScope?
         var stagedReferenceTexts: [String] = []
+        var recoveryTokenForSubmit: UUID?
+        var recoveryMinimumEventSequence = -1
         let validationLifecycle = lifecycle
         if !stagedAttachments.isEmpty {
             try await ensureBinding(create: create)
@@ -447,6 +895,11 @@ final class GatewayConversationController {
                   runtime.state == .ready,
                   let currentBinding = binding else {
                 throw DirectSessionError.staleOperation
+            }
+            guard !recoveryMarkerLoadFailed,
+                  !recoveryStageUnknown,
+                  recoveryMarker == nil || locallyConfirmedRecoveryStageCount > 0 else {
+                throw DirectSessionError.unresolvedAttachment
             }
             let scope = DirectPendingAttachmentStageScope(
                 binding: currentBinding,
@@ -459,6 +912,11 @@ final class GatewayConversationController {
             }
             stagedScope = scope
             stagedReferenceTexts = stagedAttachments.compactMap { $0.referenceText(for: scope) }
+            if let recoveryMarker,
+               locallyConfirmedRecoveryStageCount > 0 {
+                recoveryTokenForSubmit = recoveryMarker.token
+                recoveryMinimumEventSequence = latestEventSequence
+            }
         }
 
         turnEpoch &+= 1
@@ -470,6 +928,10 @@ final class GatewayConversationController {
             do { try await ensureBinding(create: create) }
             catch { runState = .idle; throw error }
         }
+        if stagedAttachments.isEmpty, (recoveryMarker != nil || recoveryMarkerLoadFailed) {
+            runState = .idle
+            throw DirectSessionError.unresolvedAttachment
+        }
         guard let capturedBinding = binding else { runState = .idle; throw DirectSessionError.invalidBinding }
         let generation = lifecycle
         let capturedOrigin = runtime.origin
@@ -480,6 +942,16 @@ final class GatewayConversationController {
         terminalReceipt = nil
         hasSubmittedPrompt = true
         var submitRequestWasDispatched = false
+        if let recoveryTokenForSubmit {
+            recoveryPromptObservation = RecoveryPromptObservation(
+                token: recoveryTokenForSubmit,
+                binding: capturedBinding,
+                origin: capturedOrigin,
+                connectionGeneration: capturedConnectionGeneration,
+                lifecycle: generation,
+                minimumEventSequence: recoveryMinimumEventSequence
+            )
+        }
         do {
             let result = try await runtime.request("prompt.submit", parameters: {
                 guard !self.disposed, let binding = self.binding else { throw DirectSessionError.invalidBinding }
@@ -510,8 +982,16 @@ final class GatewayConversationController {
             guard result?.gatewayFields["status"]?.gatewayString == "streaming" else { throw DirectSessionError.invalidResponse }
             // A very short turn can complete before the RPC continuation runs.
             if runState == .submitting { runState = .running }
+            if recoveryTokenForSubmit != nil,
+               recoveryPromptObservation?.token == recoveryTokenForSubmit {
+                recoveryPromptObservation?.accepted = true
+                scheduleRecoveryCleanupIfReady()
+            }
         } catch {
             guard !disposed, generation == lifecycle else { throw error }
+            if !submitRequestWasDispatched {
+                recoveryPromptObservation = nil
+            }
             if !submitRequestWasDispatched {
                 if !stagedAttachments.isEmpty {
                     let canReuseConfirmedStage = turnEpoch == submissionTurn &&
@@ -931,9 +1411,28 @@ final class GatewayConversationController {
         guard !disposed else { throw DirectSessionError.stopped }
         self.binding = binding
         bindingEpoch &+= 1
+        let previousRecoveryIdentity = recoveryMarker?.identity
         storedID = binding.storedID
         onCanonicalID?(binding.storedID)
         onBinding?(binding)
+        if previousRecoveryIdentity == nil {
+            refreshRecoveryMarker()
+        } else if previousRecoveryIdentity?.runtimeID != binding.runtimeID {
+            // A fresh stock runtime has an empty in-memory attachment queue;
+            // a marker keyed to the old runtime is not authority for it.
+            if !attachmentRecoveryIsBusy {
+                recoveryMarker = nil
+                recoveryMarkerLoadFailed = false
+                recoveryStageUnknown = false
+                attachmentRecoveryNeedsReset = false
+                unresolvedAttachmentMarkerToken = nil
+                locallyConfirmedRecoveryStageCount = 0
+                recoveryDetachPaths.removeAll()
+            }
+            refreshRecoveryMarker()
+        } else if previousRecoveryIdentity?.storedID != binding.storedID {
+            attachmentRecoveryNeedsReset = true
+        }
     }
 
     private func invalidateBinding() {
@@ -1285,6 +1784,107 @@ final class GatewayConversationController {
         try Task.checkCancellation()
     }
 
+    private func noteRecoveryTerminal(_ event: HermesGatewayEvent) {
+        guard let sequence = event.sequence,
+              let observation = recoveryPromptObservation,
+              observation.lifecycle == lifecycle,
+              observation.accepted || observation.terminalSequence == nil,
+              sequence > observation.minimumEventSequence,
+              runtime.state == .ready else { return }
+        var updated = observation
+        updated.terminalSequence = max(observation.terminalSequence ?? sequence, sequence)
+        recoveryPromptObservation = updated
+        scheduleRecoveryCleanupIfReady()
+    }
+
+    private func scheduleRecoveryCleanupIfReady() {
+        guard recoveryCleanupTask == nil,
+              let observation = recoveryPromptObservation,
+              observation.accepted,
+              observation.terminalSequence != nil,
+              recoveryMarker?.token == observation.token,
+              !disposed,
+              runState == .idle else { return }
+        recoveryCleanupTask = Task { [weak self] in
+            guard let self else { return }
+            await self.performRecoveryCleanup(observation: observation)
+        }
+    }
+
+    private func performRecoveryCleanup(observation: RecoveryPromptObservation) async {
+        defer { recoveryCleanupTask = nil }
+        guard !disposed,
+              !attachmentRecoveryIsBusy,
+              let marker = recoveryMarker,
+              marker.token == observation.token,
+              lifecycle == observation.lifecycle,
+              binding == observation.binding,
+              runtime.origin == observation.origin,
+              runtime.state == .ready,
+              runState == .idle else { return }
+        attachmentRecoveryIsBusy = true
+        defer { attachmentRecoveryIsBusy = false }
+        do {
+            let status = try await runtime.request("session.status", parameters: {
+                guard !self.disposed,
+                      self.lifecycle == observation.lifecycle,
+                      self.binding == observation.binding,
+                      self.runtime.origin == observation.origin,
+                      self.runtime.connectionGeneration == observation.connectionGeneration,
+                      self.runtime.state == .ready,
+                      self.runState == .idle,
+                      self.recoveryMarker?.token == marker.token else {
+                    throw DirectSessionError.staleOperation
+                }
+                return self.rpcParams(observation.binding)
+            })
+            guard let output = status?.gatewayFields["output"]?.gatewayString,
+                  output.components(separatedBy: .newlines).contains("Agent Running: No") else {
+                throw DirectSessionError.invalidResponse
+            }
+            var seen = Set<String>()
+            for path in recoveryDetachPaths where seen.insert(path).inserted {
+                let result = try await runtime.request("image.detach", parameters: {
+                    guard !self.disposed,
+                          self.lifecycle == observation.lifecycle,
+                          self.binding == observation.binding,
+                          self.runtime.origin == observation.origin,
+                          self.runtime.connectionGeneration == observation.connectionGeneration,
+                          self.runtime.state == .ready,
+                          self.runState == .idle,
+                          self.recoveryMarker?.token == marker.token else {
+                        throw DirectSessionError.staleOperation
+                    }
+                    return [
+                        "session_id": .string(observation.binding.runtimeID),
+                        "profile": .string(observation.binding.profile),
+                        "path": .string(path)
+                    ]
+                })
+                guard case .bool = result?.gatewayFields["detached"] else {
+                    throw DirectSessionError.invalidResponse
+                }
+            }
+            guard !disposed,
+                  lifecycle == observation.lifecycle,
+                  binding == observation.binding,
+                  runtime.origin == observation.origin,
+                  runtime.connectionGeneration == observation.connectionGeneration,
+                  runtime.state == .ready,
+                  runState == .idle,
+                  recoveryMarker?.token == marker.token else {
+                throw DirectSessionError.staleOperation
+            }
+            try clearRecoveryMarker(marker)
+            recoveryPromptObservation = nil
+        } catch {
+            recoveryStageUnknown = true
+            attachmentRecoveryNeedsReset = true
+            if !Task.isCancelled { onError?(error) }
+            // Every failure intentionally leaves the marker in place.
+        }
+    }
+
     private func receive(_ event: HermesGatewayEvent) {
         guard !disposed else { return }
         if event.method == "local", event.type == "transport.closed" {
@@ -1297,6 +1897,9 @@ final class GatewayConversationController {
             return
         }
         guard let binding, event.sessionID == binding.runtimeID else { return }
+        if let sequence = event.sequence {
+            latestEventSequence = max(latestEventSequence, sequence)
+        }
         switch event.type {
         case "clarify.request":
             handleBlockingRequest(event)
@@ -1313,14 +1916,17 @@ final class GatewayConversationController {
             // other `error` notifications are not assumed to end the turn.
             let message = event.payload?.gatewayFields["message"]?.gatewayString
             if message == "Turn cancelled before the agent was ready" || message == "Session no longer running before the agent was ready" {
+                noteRecoveryTerminal(event)
                 terminalReceipt = "\(event.connectionGeneration ?? -1):\(event.sequence ?? -1)"
                 if runState != .stopping {
                     runState = .idle
                     schedulePendingReasoningDrain()
                 }
+                scheduleRecoveryCleanupIfReady()
             }
         case "message.complete":
             clearBlockingPromptForTerminal(event)
+            noteRecoveryTerminal(event)
             let receipt = "\(event.connectionGeneration ?? -1):\(event.sequence ?? -1)"
             guard terminalReceipt != receipt else { return }
             terminalReceipt = receipt
@@ -1328,6 +1934,7 @@ final class GatewayConversationController {
                 runState = .idle
                 schedulePendingReasoningDrain()
             }
+            scheduleRecoveryCleanupIfReady()
             onEvent?(event)
             reconciliationTask?.cancel()
             reconciliationTask = Task { [weak self] in

@@ -495,6 +495,22 @@ After the direct chat skeleton works, update remaining scope and timeline again.
 
 ## Slice 3 — Mobile reliability, blocking interaction, and attachments
 
+### Approved unresolved-upload recovery — September 6, 2026
+
+After the stock orphan-image reproduction, Maurice approved a persistent,
+per-server/profile/session unresolved-upload marker and an explicit per-chat
+discard/reset action. Persist identity/status metadata only, not attachment bytes
+or secrets. Unknown staging must remain blocked across app restart. The explicit
+action may close/reopen only the targeted live runtime, preserving saved history
+and warning that a response in that chat can be interrupted. It must not reset a
+gateway service or affect unrelated sessions. This supersedes memory-only staging
+tracking and the prior prohibition on closing a persisted runtime only for this
+user-confirmed recovery action; ordinary disposal remains nondestructive.
+
+Small implementation decisions may be made and documented without repeated
+check-ins. Expanded test tools/providers, personal state, publication and physical
+acceptance boundaries are unchanged.
+
 ### Outcome
 
 The direct daily driver survives real mobile lifecycle and cannot leave Hermes silently blocked.

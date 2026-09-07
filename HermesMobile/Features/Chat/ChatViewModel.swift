@@ -252,6 +252,14 @@ struct ProfileSwitchOutcome: Equatable {
     let session: SessionSummary?
 }
 
+struct DirectAttachmentRecoveryTarget: Equatable {
+    let server: URL
+    let sessionID: String
+    let profile: String
+    let runtimeID: String
+    let markerToken: UUID?
+}
+
 struct ChatPollingIntervals: Equatable {
     let approvalNanoseconds: UInt64
     let clarificationNanoseconds: UInt64
@@ -662,7 +670,36 @@ final class ChatViewModel {
         usesDirectGateway ? directAttachmentPreparationStartGeneration : attachmentCoordinator.uploadStartGeneration
     }
     var uploadAttachmentErrorMessage: String? {
-        usesDirectGateway ? directAttachmentPreparationErrorMessage : attachmentCoordinator.uploadAttachmentErrorMessage
+        guard usesDirectGateway else { return attachmentCoordinator.uploadAttachmentErrorMessage }
+        if let attachmentRecoveryErrorMessage { return attachmentRecoveryErrorMessage }
+        if attachmentRecoveryNeedsReset {
+            return attachmentRecoveryIsBusy
+                ? String(localized: "Resetting unresolved attachment delivery…")
+                : String(localized: "An attachment delivery is unresolved. Saved chat history is kept; reset the pending upload before continuing.")
+        }
+        return directAttachmentPreparationErrorMessage
+    }
+    var attachmentRecoveryNeedsReset: Bool {
+        usesDirectGateway && directConversation?.attachmentRecoveryNeedsReset == true
+    }
+    var attachmentRecoveryIsBusy: Bool {
+        usesDirectGateway && directConversation?.attachmentRecoveryIsBusy == true
+    }
+    var directAttachmentRecoveryTarget: DirectAttachmentRecoveryTarget? {
+        guard usesDirectGateway,
+              let controller = directConversation,
+              controller.attachmentRecoveryNeedsReset,
+              let sessionID = controller.storedID,
+              !sessionID.isEmpty,
+              let runtimeID = controller.binding?.runtimeID,
+              !runtimeID.isEmpty else { return nil }
+        return DirectAttachmentRecoveryTarget(
+            server: server,
+            sessionID: sessionID,
+            profile: controller.profile,
+            runtimeID: runtimeID,
+            markerToken: controller.unresolvedAttachmentMarkerToken
+        )
     }
     var localAttachmentPreviews: [String: [String: Data]] { attachmentCoordinator.localAttachmentPreviews }
     private(set) var pinnedLocalNotices: [String] = []
@@ -714,6 +751,7 @@ final class ChatViewModel {
     var usesDirectGateway: Bool { gatewayRuntimeProvider != nil }
     @ObservationIgnored private let gatewayRuntimeProvider: (@MainActor (APIClient) async throws -> HermesServerRuntime)?
     @ObservationIgnored private let directAttachmentPreparer: (@Sendable (Data, String, Data?) async throws -> DirectPendingAttachment)?
+    @ObservationIgnored private let directAttachmentRecoveryMarkerStore: any DirectGatewayAttachmentRecoveryMarkerStoreProtocol
     private var directConversation: GatewayConversationController?
     private var directRuntime: HermesServerRuntime?
     @ObservationIgnored private var directAttachmentTask: Task<GatewayConversationController, Error>?
@@ -726,6 +764,7 @@ final class ChatViewModel {
     private var directAttachmentSelectionGeneration = 0
     private var directAttachmentPreparationStartGeneration = 0
     private var directAttachmentPreparationCount = 0
+    private var attachmentRecoveryErrorMessage: String?
     private var directComposerIsEditing = false
     private var directOlderOffset = 0
     private var directHistoryID: String?
@@ -849,7 +888,8 @@ final class ChatViewModel {
         serverTTSAudioPlayerFactory: (@MainActor (Data) throws -> any ListenAudioPlaying)? = nil,
         userDefaults: UserDefaults = .standard,
         gatewayRuntimeProvider: (@MainActor (APIClient) async throws -> HermesServerRuntime)? = nil,
-        directAttachmentPreparer: (@Sendable (Data, String, Data?) async throws -> DirectPendingAttachment)? = nil
+        directAttachmentPreparer: (@Sendable (Data, String, Data?) async throws -> DirectPendingAttachment)? = nil,
+        directAttachmentRecoveryMarkerStore: any DirectGatewayAttachmentRecoveryMarkerStoreProtocol = DirectGatewayAttachmentRecoveryMarkerStore()
     ) {
         sessionID = session.sessionId
         currentWorkspace = session.workspace
@@ -861,6 +901,7 @@ final class ChatViewModel {
         self.server = server
         self.gatewayRuntimeProvider = gatewayRuntimeProvider
         self.directAttachmentPreparer = directAttachmentPreparer
+        self.directAttachmentRecoveryMarkerStore = directAttachmentRecoveryMarkerStore
         #if DEBUG
         self.nativeAuthE2EAutoSubmitController = NativeAuthE2EAutoSubmitController.processController(
             serverURL: server
@@ -1107,8 +1148,13 @@ final class ChatViewModel {
             guard let self else { throw DirectSessionError.stopped }
             let runtime = try await gatewayRuntimeProvider(self.client)
             guard !self.directInvalidated else { throw DirectSessionError.stopped }
-            let controller = GatewayConversationController(runtime: runtime, client: self.client,
-                storedID: self.canonicalSessionID, profile: Self.nonEmpty(self.currentProfile) ?? "default")
+            let controller = GatewayConversationController(
+                runtime: runtime,
+                client: self.client,
+                storedID: self.canonicalSessionID,
+                profile: Self.nonEmpty(self.currentProfile) ?? "default",
+                recoveryMarkerStore: self.directAttachmentRecoveryMarkerStore
+            )
             controller.isVisible = self.directVisible
             controller.isEditing = self.directComposerIsEditing
             controller.onBinding = { [weak self] binding in self?.adoptDirectID(binding.storedID) }
@@ -1306,11 +1352,19 @@ final class ChatViewModel {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !directInvalidated, !isStartingChat,
               !isUpdatingComposerConfiguration else { return false }
+        guard !attachmentRecoveryIsBusy else {
+            sendErrorMessage = "Resetting unresolved attachment delivery. Your draft was kept."
+            return false
+        }
         guard directConversation?.hasAmbiguousPromptDelivery != true else {
             sendErrorMessage = "Delivery is uncertain. This message was not resent; reconnect to check the transcript."
             return false
         }
         guard directConversation?.runState == nil || directConversation?.runState == .idle else { return false }
+        if attachmentRecoveryNeedsReset, directPendingAttachments.isEmpty {
+            sendErrorMessage = "An attachment delivery is unresolved. Reset the pending upload before continuing."
+            return false
+        }
         guard pendingAttachments.isEmpty, !isPreparingDirectAttachment else {
             sendErrorMessage = "Direct Hermes attachments are not available yet. Your draft was kept."
             return false
@@ -2627,6 +2681,7 @@ final class ChatViewModel {
             directAttachmentPreparationErrorMessage = "Wait for the current direct message to finish before adding an attachment."
             return
         }
+        guard !attachmentRecoveryNeedsReset, !attachmentRecoveryIsBusy else { return }
 
         let generation = directAttachmentSelectionGeneration
         directAttachmentPreparationStartGeneration &+= 1
@@ -2684,7 +2739,7 @@ final class ChatViewModel {
 
     func clearPendingAttachments() {
         if usesDirectGateway {
-            guard !isStartingChat else {
+            guard !isStartingChat, !attachmentRecoveryNeedsReset, !attachmentRecoveryIsBusy else {
                 directAttachmentPreparationErrorMessage = "Wait for the current direct message to finish before changing attachments."
                 return
             }
@@ -2696,7 +2751,7 @@ final class ChatViewModel {
 
     func removePendingAttachment(id: UUID) {
         if usesDirectGateway {
-            guard !isStartingChat else {
+            guard !isStartingChat, !attachmentRecoveryNeedsReset, !attachmentRecoveryIsBusy else {
                 directAttachmentPreparationErrorMessage = "Wait for the current direct message to finish before changing attachments."
                 return
             }
@@ -2706,6 +2761,47 @@ final class ChatViewModel {
             directAttachmentPreparationErrorMessage = nil
         } else {
             attachmentCoordinator.removePendingAttachment(id: id)
+        }
+    }
+
+    /// Clears only the unresolved direct-attachment marker after the user has
+    /// explicitly confirmed the affected live chat reset. The draft and saved
+    /// transcript are intentionally untouched; local staged bytes are dropped
+    /// only after the controller confirms the marker reset.
+    func resetDirectAttachmentRecovery(_ target: DirectAttachmentRecoveryTarget) async -> Bool {
+        guard usesDirectGateway,
+              !directInvalidated,
+              target.server == server,
+              target.sessionID == canonicalSessionID,
+              let controller = directConversation,
+              controller.attachmentRecoveryNeedsReset,
+              controller.storedID == target.sessionID,
+              controller.profile == target.profile,
+              controller.binding?.runtimeID == target.runtimeID,
+              controller.unresolvedAttachmentMarkerToken == target.markerToken else {
+            return false
+        }
+
+        attachmentRecoveryErrorMessage = nil
+
+        do {
+            try await controller.resetPendingAttachments(expectedToken: target.markerToken)
+            guard !directInvalidated,
+                  directConversation === controller,
+                  target.server == server,
+                  target.sessionID == canonicalSessionID,
+                  controller.storedID == target.sessionID,
+                  controller.profile == target.profile,
+                  controller.attachmentRecoveryNeedsReset == false else {
+                return false
+            }
+            discardDirectPendingAttachmentsAfterRecoveryReset()
+            attachmentRecoveryErrorMessage = nil
+            return true
+        } catch {
+            lastError = error
+            attachmentRecoveryErrorMessage = String(localized: "The pending upload could not be reset. Saved chat history was kept; try again.")
+            return false
         }
     }
 
@@ -2724,6 +2820,14 @@ final class ChatViewModel {
             if case .pending = attachment.stageState { return true }
             return false
         }
+    }
+
+    private func discardDirectPendingAttachmentsAfterRecoveryReset() {
+        directAttachmentSelectionGeneration &+= 1
+        directAttachmentPreparationCount = 0
+        isPreparingDirectAttachment = false
+        directAttachmentPreparationErrorMessage = nil
+        directPendingAttachments.removeAll()
     }
 
     private func directAttachmentPreparationMessage(for error: Error) -> String {
@@ -2754,7 +2858,7 @@ final class ChatViewModel {
         if usesDirectGateway {
             guard !directInvalidated, let expectedSessionID = canonicalSessionID else { return nil }
             do {
-                let data = try await client.mediaData(sessionID: expectedSessionID, path: path)
+                let data = try await client.directReadManagedFile(path: path).data
                 guard !directInvalidated, expectedSessionID == canonicalSessionID else { return nil }
                 let preview = await ImagePreviewDownsampler.previewDataAsync(
                     from: data,

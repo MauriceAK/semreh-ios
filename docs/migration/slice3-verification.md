@@ -469,3 +469,86 @@ client state loss; it is not a literal dropped-frame or native app-kill test.
 It confirms the queue behavior underlying the client recovery-policy decision.
 Post-probe artifact audit`slice3-orphan-attachment-audit-v1.json` passed:
 151041files,0flags,85exportedconsoles, same known-secret/pattern-only exclusions.
+
+### Approved recovery and stock reset proof
+
+Maurice approved restart-persistent unresolved-upload metadata and explicit
+per-chat runtime reset preserving saved history. Binding plan records authority.
+Root extended the same guarded probe with `--verify-reset`: after hot resume,
+close only the probe-owned runtime, reopen the saved chat, compare canonical
+history before/after reset, then send ordinary text and require zero orphan images.
+`slice3-attachment-reset-contract-v2.json` passed with a new runtime, unchanged
+saved history and no cleanup errors. Earlier v1 passed assertions but mislabeled
+the created-runtime evidence field; retained, corrected in v2. Neither is native
+UI, literal app-kill or deliberately lost-frame evidence.
+
+Root and independent Luna source review confirm the queue is runtime-local:
+hot resume reuses the queue; a newly allocated cold runtime starts empty. Marker
+lookup therefore uses normalized origin/profile/live runtime ID; durable session
+ID is metadata so compression rotation cannot bypass recovery. Persisted runtime
+ID alone is not authority to close anything: reset requires a current proven
+binding and captured confirmation identity. No backend changes were made.
+
+`slice3-attachment-reset-audit-v1.jsonl`: **151044 files, 0 flags, 85 exported
+consoles**. Same known-secret/pattern exclusions as above. Native implementation,
+managed-file previews and corresponding new tests are under integration review;
+no new native pass or slice acceptance claimed in this entry.
+
+Native integration attempts for the recovery batch (same signed Simulator and
+test flags as earlier; filters: DirectGatewayAttachmentRecoveryMarkerTests,
+GatewayConversationAttachmentTests, ChatViewModelDirectGatewayTests,
+APIClientChatEndpointTests):
+
+- `slice3-attachment-recovery-focused-v1`: build failed before tests. Root reused
+  a PBX identifier already assigned to managed-file tests; new marker file was
+  resolved in the test directory. Corrected unique IDs; duplicate-object check0.
+- `slice3-attachment-recovery-focused-v2`: build failed before tests. SwiftUI
+  could not type-check the extended ChatView alert chain within compiler limits.
+  Luna extracted the confirmation into a dedicated modifier; rerun pending.
+- `slice3-attachment-recovery-python-v1.log`: **29 tests passed** for existing
+  smoke/recovery/native-canonical helper suites.
+
+One bounded Sol Low read-only review supplements Luna implementation and root
+review for this high-risk recovery logic. It found stuck recovery after a lost
+close acknowledgment, unreadable-marker recovery, and missing second-upload
+unknown-state coverage. These must be resolved before checkpoint acceptance;
+worker syntax checks are not executed XCTest evidence.
+
+- Focusedv3 failed compilation: observed cleanup-task property referenced from
+  deinit; root marked it ObservationIgnored like the existing task handles.
+- Focusedv4 still failed SwiftUI expression type-checking; Luna split the base
+  presentation/sheet chain from alerts without changing behavior.
+- Focusedv5 failed compilation: test helper gained a local variable but omitted
+  its now-required return; root corrected it.
+- Focusedv6 **96 passed, 4 failed, 0 skipped**. Failures exposed reset quarantine
+  not set on close dispatch, stale-status-proof error expectations, a fake
+  returning the closed runtime after reset, and busy/error guard precedence.
+  Production safety correction retains quarantine after uncertain reset; the
+  fake now models stock fresh-runtime behavior. Failed artifacts retained.
+- Focusedv7 **99 passed, 1 failed, 0 skipped**. Concurrent submit was blocked
+  correctly but reported unresolved upload instead of the prior busy outcome.
+  Root prioritized the in-flight stage guard without weakening the no-submit
+  assertion. Focusedv8 **100 passed, 0 failed, 0 skipped**. V6/v7/v8 console
+  exports retained; subsequent full-suite run below.
+
+Recovery fullv1 passed **2144 tests, 0 failed, 7 intentional opt-in skips**.
+Signed recovery UIbuildv1 and live production UIv1 passed **1/0/0** through real
+HTTPS login, new chat, native image Paste/local preview, staged send, canonical
+image cell and authenticated managed-file preview. The normal completed upload
+does not leave the reset banner visible. Root viewed the colored image in
+`slice3-attachment-recovery-ui-v1-attachments/F1DA6A43-744A-4C99-B709-A0C0E2A452CA.png`
+(transcript) and `69ADE1D9-B1A9-410D-9CED-046611F0EEC1.png` (preview).
+This is production UI evidence, not a literal app-kill or reset-dialog exercise.
+Full-suite/UI diagnostics and UI attachments were exported with OS diagnostic
+collection disabled. Post-export audit `slice3-attachment-recovery-audit-v1.jsonl`
+passed **156288 files, 0 flags, 90 exported consoles**, with the same known-current
+fixture-secret/pattern-only exclusions (not arbitrary secrets/OCR/quarantine).
+`slice3-attachment-recovery-canonical-v1.json` independently matched the exact UI
+UUID prompt to durable rows240/241:4unique rows,1image reference, authenticated
+media and managed-file reads both529bytes. No physical-device claim.
+
+Additional bounded native-controller/live-gateway recovery test is in preparation
+to join actual staging, persisted marker recreation, explicit reset, preserved
+history, and a subsequent plain-text turn. Reset abandons the queue; stock does
+not promise deletion of the physical uploaded file, and no file-deletion claim
+or new backend dependency is introduced.

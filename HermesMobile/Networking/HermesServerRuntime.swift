@@ -29,6 +29,8 @@ enum DirectSessionError: Error, Equatable {
     case invalidOrigin
     case eventBufferOverflow
     case ambiguousPrompt
+    case unresolvedAttachment
+    case attachmentRecoveryUnavailable
     case invalidResponse
     case stopUnconfirmed
     case draftCleanupUnconfirmed

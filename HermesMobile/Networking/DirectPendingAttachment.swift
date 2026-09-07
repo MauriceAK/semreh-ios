@@ -126,6 +126,8 @@ struct DirectGatewayAttachmentStageResult: Equatable, Sendable {
 enum DirectGatewayAttachmentStageDefiniteReason: Equatable, Sendable {
     case alreadyStaged
     case ambiguousPromptDelivery
+    case unresolvedAttachment
+    case recoveryMarkerUnavailable
     case cancelledBeforeDispatch
     case controllerBusy
     case sourcePreparation(DirectGatewayAttachmentError)

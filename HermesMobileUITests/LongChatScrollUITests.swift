@@ -568,6 +568,8 @@ final class LongChatScrollUITests: XCTestCase {
             predicate: NSPredicate(format: "exists == false"), object: canonicalImage
         )
         wait(for: [canonicalDismissed], timeout: 10)
+        XCTAssertFalse(app.buttons["discard-pending-upload"].exists,
+                       "A normally completed known upload must not leave an unresolved-upload recovery banner.")
         attachPlainText(
             "\(chatDetailIdentifier)\n\(prompt)",
             named: "slice3-attachment-chat-title-and-marker"

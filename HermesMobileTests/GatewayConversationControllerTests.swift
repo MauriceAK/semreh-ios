@@ -854,7 +854,16 @@ final class GatewayConversationControllerTests: XCTestCase {
             DirectHermesTranscriptPage(sessionID: id, messages: [], pagination: nil)
         }
     ) -> GatewayConversationController {
-        GatewayConversationController(runtime: runtime, storedID: storedID, profile: profile, loadTranscript: loader)
+        let markerRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("GatewayConversationControllerTests-\(UUID().uuidString)", isDirectory: true)
+        let markerStore = DirectGatewayAttachmentRecoveryMarkerStore(rootURL: markerRoot)
+        return GatewayConversationController(
+            runtime: runtime,
+            storedID: storedID,
+            profile: profile,
+            recoveryMarkerStore: markerStore,
+            loadTranscript: loader
+        )
     }
 
     private func page(_ sessionID: String) -> DirectHermesTranscriptPage {

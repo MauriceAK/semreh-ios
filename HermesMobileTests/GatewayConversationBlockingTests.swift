@@ -270,7 +270,10 @@ final class GatewayConversationBlockingTests: XCTestCase {
         runtime: HermesServerRuntime,
         storedID: String? = nil
     ) -> GatewayConversationController {
-        GatewayConversationController(runtime: runtime, storedID: storedID) { id, _, _, _ in
+        let markerRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("GatewayConversationBlockingTests-\(UUID().uuidString)", isDirectory: true)
+        let markerStore = DirectGatewayAttachmentRecoveryMarkerStore(rootURL: markerRoot)
+        return GatewayConversationController(runtime: runtime, storedID: storedID, recoveryMarkerStore: markerStore) { id, _, _, _ in
             DirectHermesTranscriptPage(sessionID: id, messages: [], pagination: nil)
         }
     }

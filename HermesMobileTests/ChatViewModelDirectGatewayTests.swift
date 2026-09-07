@@ -4,6 +4,53 @@ import XCTest
 
 @MainActor
 final class ChatViewModelDirectGatewayTests: APIClientTestCase {
+    func testReopenedDirectAttachmentRecoveryBlocksNewUploadUntilExplicitReset() async throws {
+        let fake = ChatDirectFakeTransport()
+        fake.setSessionCloseResponse(.object(["closed": .bool(true)]))
+        fake.setResumeResponseAfterSessionClose(.object([
+            "session_id": .string("runtime-2"),
+            "session_key": .string("durable-1")
+        ]))
+        let runtime = try makeRuntime(fake)
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ChatViewModelDirectAttachmentRecovery-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let markerStore = DirectGatewayAttachmentRecoveryMarkerStore(rootURL: root)
+        let identity = try DirectGatewayAttachmentRecoveryIdentity(
+            origin: testServer,
+            profile: "work",
+            storedID: "durable-1",
+            runtimeID: "runtime-1"
+        )
+        try markerStore.write(DirectGatewayAttachmentRecoveryMarker(identity: identity))
+
+        let vm = makeViewModel(
+            client: makeExistingComposerClient(requests: ChatDirectRequestRecorder()),
+            runtime: runtime,
+            sessionID: "durable-1",
+            recoveryMarkerStore: markerStore
+        )
+        await vm.loadMessages()
+
+        XCTAssertTrue(vm.attachmentRecoveryNeedsReset)
+        XCTAssertTrue(vm.directPendingAttachments.isEmpty)
+        await vm.uploadAttachment(data: directPNGData, filename: "blocked.png")
+        XCTAssertTrue(vm.directPendingAttachments.isEmpty)
+        XCTAssertTrue(vm.uploadAttachmentErrorMessage?.contains("unresolved") == true)
+
+        let target = try XCTUnwrap(vm.directAttachmentRecoveryTarget)
+        XCTAssertEqual(target.server, testServer)
+        XCTAssertEqual(target.sessionID, "durable-1")
+        XCTAssertEqual(target.runtimeID, "runtime-1")
+        let didReset = await vm.resetDirectAttachmentRecovery(target)
+        XCTAssertTrue(didReset)
+        XCTAssertFalse(vm.attachmentRecoveryNeedsReset)
+        XCTAssertEqual(fake.calls().filter { $0.method == "session.close" }.count, 1)
+
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
     func testDirectComposerLoadsProfileInventoryAndStagesDraftChoicesUntilFirstSend() async throws {
         let fake = ChatDirectFakeTransport()
         let runtime = try makeRuntime(fake)
@@ -1136,7 +1183,7 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         await runtime.stop()
     }
 
-    func testDirectAttachmentImageUsesAuthenticatedMediaEnvelopeAndCanonicalSessionPath() async throws {
+    func testDirectAttachmentImageUsesAuthenticatedManagedFileRouteAndCanonicalSessionIdentity() async throws {
         let fake = ChatDirectFakeTransport()
         let runtime = try makeRuntime(fake)
         let requests = ChatDirectRequestRecorder()
@@ -1144,20 +1191,20 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         let viewModel = makeViewModel(
             client: makeClient { request in
                 requests.append(request.url?.path ?? "nil")
-                XCTAssertEqual(request.url?.path, "/api/media")
+                XCTAssertEqual(request.url?.path, "/api/files/read")
                 let query = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.queryItems ?? []
-                XCTAssertEqual(query.first(where: { $0.name == "session_id" })?.value, "durable-1")
-                XCTAssertEqual(query.first(where: { $0.name == "path" })?.value, "images/result.png")
+                XCTAssertNil(query.first(where: { $0.name == "session_id" }))
+                XCTAssertEqual(query.first(where: { $0.name == "path" })?.value, "/managed/images/result.png")
                 return apiTestJSONResponse(#"{"data_url":"\#(imageURL)"}"#, for: request)
             },
             runtime: runtime,
             sessionID: "durable-1"
         )
 
-        let data = await viewModel.attachmentImageData(path: "images/result.png")
+        let data = await viewModel.attachmentImageData(path: "/managed/images/result.png")
 
         XCTAssertEqual(data, directPNGData)
-        XCTAssertEqual(requests.values(), ["/api/media"])
+        XCTAssertEqual(requests.values(), ["/api/files/read"])
         await runtime.stop()
     }
 
@@ -1177,8 +1224,8 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
             sessionID: "durable-1"
         )
 
-        let load = Task { await viewModel.attachmentImageData(path: "images/result.png") }
-        await waitUntil { requests.values().contains("/api/media") }
+        let load = Task { await viewModel.attachmentImageData(path: "/managed/images/result.png") }
+        await waitUntil { requests.values().contains("/api/files/read") }
         viewModel.invalidateDirectConversation()
         responseGate.signal()
 
@@ -1484,16 +1531,22 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         runtime: HermesServerRuntime,
         sessionID: String?,
         defaults: UserDefaults = .standard,
-        directAttachmentPreparer: (@Sendable (Data, String, Data?) async throws -> DirectPendingAttachment)? = nil
+        directAttachmentPreparer: (@Sendable (Data, String, Data?) async throws -> DirectPendingAttachment)? = nil,
+        recoveryMarkerStore: (any DirectGatewayAttachmentRecoveryMarkerStoreProtocol)? = nil
     ) -> ChatViewModel {
-        ChatViewModel(
+        let isolatedMarkerStore = recoveryMarkerStore ?? DirectGatewayAttachmentRecoveryMarkerStore(
+            rootURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("ChatViewModelDirectGatewayTests-\(UUID().uuidString)", isDirectory: true)
+        )
+        return ChatViewModel(
             session: SessionSummary(sessionId: sessionID, title: "New Chat", profile: "work"),
             server: testServer,
             client: client,
             liveActivityManager: ChatDirectNoopLiveActivityManager(),
             userDefaults: defaults,
             gatewayRuntimeProvider: { _ in runtime },
-            directAttachmentPreparer: directAttachmentPreparer
+            directAttachmentPreparer: directAttachmentPreparer,
+            directAttachmentRecoveryMarkerStore: isolatedMarkerStore
         )
     }
 
@@ -1659,6 +1712,8 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
         "output": .string("Agent Running: No")
     ])
     private var clarifyResponse: JSONValue = .object(["status": .string("ok")])
+    private var sessionCloseResponse: JSONValue = .object([:])
+    private var resumeResponseAfterSessionClose: JSONValue?
     private var clarifyGate: ChatDirectAsyncGate?
     private var attachmentResponses: [String: JSONValue] = [:]
     private var attachmentErrors: [String: HermesGatewayError] = [:]
@@ -1708,6 +1763,14 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
 
     func setClarifyResponse(_ response: JSONValue) {
         withLock { clarifyResponse = response }
+    }
+
+    func setSessionCloseResponse(_ response: JSONValue) {
+        withLock { sessionCloseResponse = response }
+    }
+
+    func setResumeResponseAfterSessionClose(_ response: JSONValue) {
+        withLock { resumeResponseAfterSessionClose = response }
     }
 
     func setAttachmentResponse(_ method: String, _ response: JSONValue) {
@@ -1785,6 +1848,12 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
                 return (.object(["status": .string("interrupted")]), nil, nil, false, nil, nil)
             case "session.status":
                 return (sessionStatusResponse, nil, nil, false, nil, nil)
+            case "session.close":
+                if let resumeResponseAfterSessionClose {
+                    self.resumeResponse = resumeResponseAfterSessionClose
+                    self.resumeResponseAfterSessionClose = nil
+                }
+                return (sessionCloseResponse, nil, nil, false, nil, nil)
             case "clarify.respond":
                 return (clarifyResponse, nil, clarifyGate, false, nil, nil)
             case "image.attach_bytes", "file.attach", "pdf.attach":
