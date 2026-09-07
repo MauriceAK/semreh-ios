@@ -459,10 +459,15 @@ struct SessionListView: View {
             case .insights:
                 InsightsView(server: server, onAPIError: authManager.handleAPIError)
             case .archived:
+                let archiveProfile = viewModel.activeProfileName ?? "default"
                 ArchivedSessionsView(
                     server: server,
-                    profile: viewModel.activeProfileName ?? "default",
-                    onAPIError: authManager.handleAPIError
+                    profile: archiveProfile,
+                    onAPIError: authManager.handleAPIError,
+                    onSessionsChanged: {
+                        await viewModel.refreshArchivedCountForProfile(archiveProfile)
+                        handleLastError()
+                    }
                 )
             case .scheduled:
                 ScheduledSessionsView(

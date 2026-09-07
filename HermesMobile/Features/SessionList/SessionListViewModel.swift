@@ -89,6 +89,12 @@ private struct SessionMutationRejectedError: LocalizedError {
     var errorDescription: String? { message }
 }
 
+private struct ArchivedCountResponseError: LocalizedError {
+    var errorDescription: String? {
+        String(localized: "Hermes did not return a valid archived session count.")
+    }
+}
+
 @MainActor
 @Observable
 final class SessionListViewModel {
@@ -163,6 +169,7 @@ final class SessionListViewModel {
     private var pendingMetadataMutations: [PendingMetadataKey: PendingMetadataMutation] = [:]
     private var activeProfileEpoch = 0
     private var metadataConfirmationRevision = 0
+    private var archivedCountRequestGeneration = 0
     /// Confirmed deletes remain hidden until a later process/session lifecycle;
     /// this prevents an eventually-consistent list response from resurrecting a
     /// row that the delete endpoint already acknowledged.
@@ -367,6 +374,9 @@ final class SessionListViewModel {
         loadGeneration &+= 1
         let generation = loadGeneration
         let requestedProfile = Self.nonEmpty(activeProfileName) ?? "default"
+        let requestedProfileEpoch = activeProfileEpoch
+        archivedCountRequestGeneration &+= 1
+        let countRequestGeneration = archivedCountRequestGeneration
         let requestRevision = metadataConfirmationRevision
         isLoading = true
         errorMessage = nil
@@ -389,7 +399,9 @@ final class SessionListViewModel {
                 offset: 0,
                 order: .recent
             )
-            guard loadGeneration == generation,
+            guard !Task.isCancelled,
+                  loadGeneration == generation,
+                  activeProfileEpoch == requestedProfileEpoch,
                   (Self.nonEmpty(activeProfileName) ?? "default") == requestedProfile
             else { return false }
             let rawSessions = response.sessions
@@ -409,11 +421,11 @@ final class SessionListViewModel {
                 .filter { $0.archived != true && $0.shouldAppearInSessionList }
             for sessionID in pendingSessionDeletions.keys {
                 pendingSessionDeletions[sessionID]?.latestCanonicalSessions = canonicalVisibleSessions
-                pendingSessionDeletions[sessionID]?.latestCanonicalArchivedCount = nil
+                pendingSessionDeletions[sessionID]?.latestCanonicalArchivedCount = archivedCount
             }
             let visibleSessions = sessionsAfterOptimisticDeletions(canonicalVisibleSessions)
             successfulLoadGeneration = generation
-            applySessions(visibleSessions, archivedCount: nil, animation: animation)
+            applySessions(visibleSessions, archivedCount: archivedCount, animation: animation)
             for (key, var pending) in Array(pendingMetadataMutations)
                 where key.profile == requestedProfile {
                 if pending.title?.revision ?? .min <= requestRevision { pending.title = nil }
@@ -436,9 +448,23 @@ final class SessionListViewModel {
                 }
             }
 
+            // The profile-aggregate list is the canonical visible-row load, but
+            // its total is not an archive count. Fetch the archive-only total
+            // independently so a count failure cannot discard rows that have
+            // already been applied above.
+            await refreshArchivedCount(
+                profile: requestedProfile,
+                generation: generation,
+                profileEpoch: requestedProfileEpoch,
+                requestGeneration: countRequestGeneration
+            )
+
             return true
         } catch {
-            guard loadGeneration == generation else { return false }
+            guard loadGeneration == generation,
+                  activeProfileEpoch == requestedProfileEpoch,
+                  (Self.nonEmpty(activeProfileName) ?? "default") == requestedProfile
+            else { return false }
             guard !isCancellationError(error) else { return false }
 
             lastError = error
@@ -473,6 +499,84 @@ final class SessionListViewModel {
 
             return false
         }
+    }
+
+    private func refreshArchivedCount(
+        profile requestedProfile: String,
+        generation: Int,
+        profileEpoch: Int,
+        requestGeneration: Int
+    ) async {
+        guard !Task.isCancelled,
+              loadGeneration == generation,
+              activeProfileEpoch == profileEpoch,
+              archivedCountRequestGeneration == requestGeneration,
+              (Self.nonEmpty(activeProfileName) ?? "default") == requestedProfile
+        else { return }
+
+        do {
+            let response = try await client.directSingleProfileSessions(
+                profile: requestedProfile,
+                limit: 0,
+                offset: 0,
+                order: .recent,
+                archived: .only
+            )
+
+            guard !Task.isCancelled,
+                  loadGeneration == generation,
+                  activeProfileEpoch == profileEpoch,
+                  archivedCountRequestGeneration == requestGeneration,
+                  (Self.nonEmpty(activeProfileName) ?? "default") == requestedProfile
+            else { return }
+
+            guard let total = response.total, total >= 0 else {
+                throw ArchivedCountResponseError()
+            }
+
+            archivedCount = total
+            lastError = nil
+            errorMessage = nil
+            for sessionID in pendingSessionDeletions.keys {
+                pendingSessionDeletions[sessionID]?.latestCanonicalArchivedCount = total
+            }
+        } catch {
+            guard !Task.isCancelled,
+                  loadGeneration == generation,
+                  activeProfileEpoch == profileEpoch,
+                  archivedCountRequestGeneration == requestGeneration,
+                  (Self.nonEmpty(activeProfileName) ?? "default") == requestedProfile,
+                  !isCancellationError(error)
+            else { return }
+
+            // Keep the successful visible-row load successful. This message is
+            // deliberately nonblocking: it is only shown by the existing list
+            // error surface when no rows are available, and never triggers the
+            // cache fallback/retry path for a count-only failure.
+            lastError = error
+            errorMessage = CacheFallbackPolicy.sendBannerMessage(for: error)
+        }
+    }
+
+    /// Refreshes only the archive total after an archive mutation. The
+    /// operation is scoped to the currently selected profile and cannot
+    /// publish after a newer load, profile switch, or cancellation.
+    func refreshArchivedCountForProfile(_ profile: String) async {
+        let requestedProfile = Self.nonEmpty(profile) ?? "default"
+        guard !isViewingCachedData,
+              requestedProfile == (Self.nonEmpty(activeProfileName) ?? "default")
+        else { return }
+
+        archivedCountRequestGeneration &+= 1
+        let requestGeneration = archivedCountRequestGeneration
+        let generation = loadGeneration
+        let profileEpoch = activeProfileEpoch
+        await refreshArchivedCount(
+            profile: requestedProfile,
+            generation: generation,
+            profileEpoch: profileEpoch,
+            requestGeneration: requestGeneration
+        )
     }
 
     /// Paints the last known sidebar immediately on a cold launch while the live
@@ -871,7 +975,9 @@ final class SessionListViewModel {
         modelContext: ModelContext? = nil,
         animation: Animation? = nil
     ) async -> Bool {
-        await mutateDirectMetadata(
+        let profile = Self.nonEmpty(activeProfileName) ?? "default"
+        let profileEpoch = activeProfileEpoch
+        let succeeded = await mutateDirectMetadata(
             session,
             modelContext: modelContext,
             animation: animation,
@@ -879,6 +985,11 @@ final class SessionListViewModel {
         ) { [sessionMutator] sessionID, profile in
             try await sessionMutator.archive(sessionID: sessionID, profile: profile)
         }
+        guard succeeded, activeProfileEpoch == profileEpoch else { return false }
+        await refreshArchivedCountForProfile(profile)
+        // A count failure does not undo a confirmed archive. A replaced UI
+        // scope must not consume this completion as its own navigation action.
+        return !Task.isCancelled && activeProfileEpoch == profileEpoch
     }
 
     func delete(
@@ -1531,6 +1642,8 @@ final class SessionListViewModel {
 
         if activeProfileName != profileName {
             activeProfileEpoch &+= 1
+            archivedCountRequestGeneration &+= 1
+            archivedCount = nil
             // A response for the previous profile must never repopulate a
             // same-query search after a profile switch.
             remoteSearchGeneration &+= 1

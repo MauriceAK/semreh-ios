@@ -299,6 +299,33 @@ async def exercise(client, evidence: dict) -> None:
                 ),
             })
 
+        count_params = {
+            "profile": PROFILE,
+            "limit": 0,
+            "offset": 0,
+            "archived": archived,
+            "order": "recent",
+        }
+        count_response = await client.get(
+            SINGLE_PROFILE_SESSION_ROUTE, params=count_params
+        )
+        if count_response.status_code != 200:
+            raise RuntimeError("single-profile session count request failed")
+        single_profile_checks.append({
+            "request": {
+                "method": "GET",
+                "path": SINGLE_PROFILE_SESSION_ROUTE,
+                "params": dict(count_params),
+            },
+            "response_status": count_response.status_code,
+            "response": _single_profile_session_summary(
+                count_response.json(),
+                archived=archived,
+                requested_limit=0,
+                requested_offset=0,
+            ),
+        })
+
     search_params = {"q": SEARCH_MARKER, "profile": PROFILE, "limit": SEARCH_LIMIT}
     search_response = await client.get(SEARCH_ROUTE, params=search_params)
     if search_response.status_code != 200:

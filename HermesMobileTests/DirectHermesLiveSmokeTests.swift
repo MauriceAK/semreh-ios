@@ -857,7 +857,9 @@ final class DirectHermesLiveSmokeTests: XCTestCase {
 
             let list = SessionListViewModel(server: HostedTransport.https.baseURL, client: api)
             guard try await stage("slice4 metadata list load", operation: { await list.load() }),
-                  let target = list.sessions.first(where: { $0.sessionId == targetID })
+                  let target = list.sessions.first(where: { $0.sessionId == targetID }),
+                  let baselineArchivedCount = list.archivedCount,
+                  baselineArchivedCount < Int.max
             else { throw LiveSmokeInvariant.failed }
             let changedTitle = "SEMREH_SLICE4_METADATA_\(UUID().uuidString)"
             guard try await stage("slice4 metadata rename consumer", operation: {
@@ -881,6 +883,9 @@ final class DirectHermesLiveSmokeTests: XCTestCase {
             guard archived.title == changedTitle, archived.pinned == true, archived.archived == true else {
                 throw LiveSmokeInvariant.failed
             }
+            guard list.archivedCount == baselineArchivedCount + 1 else {
+                throw LiveSmokeInvariant.failed
+            }
 
             let archivedList = ArchivedSessionsViewModel(
                 server: HostedTransport.https.baseURL,
@@ -897,6 +902,10 @@ final class DirectHermesLiveSmokeTests: XCTestCase {
             guard unarchived.title == changedTitle, unarchived.pinned == true, unarchived.archived == false else {
                 throw LiveSmokeInvariant.failed
             }
+            try await stage("slice4 metadata parent count refresh") {
+                await list.refreshArchivedCountForProfile("default")
+            }
+            guard list.archivedCount == baselineArchivedCount else { throw LiveSmokeInvariant.failed }
 
             let siblingAfter = try await stage("slice4 metadata sibling unchanged") {
                 try await api.directSessionDetail(sessionID: siblingID, profile: "default")

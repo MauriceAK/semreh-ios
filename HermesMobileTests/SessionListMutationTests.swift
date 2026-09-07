@@ -10,6 +10,7 @@ final class SessionListMutationTests: XCTestCase {
     override func tearDown() {
         MockURLProtocol.requestHandler = nil
         OverlappingDeleteURLProtocol.reset()
+        ArchivedCountGateURLProtocol.reset()
         MetadataOverlayURLProtocol.reset()
         super.tearDown()
     }
@@ -171,7 +172,7 @@ final class SessionListMutationTests: XCTestCase {
         configuration.protocolClasses = [OutOfOrderSessionURLProtocol.self]
         let server = try XCTUnwrap(URL(string: "https://example.test"))
         let client = APIClient(baseURL: server, session: URLSession(configuration: configuration))
-        let viewModel = SessionListViewModel(server: server, client: client)
+            let viewModel = SessionListViewModel(server: server, client: client)
 
         let firstLoad = Task { await viewModel.load() }
         try await Task.sleep(nanoseconds: 20_000_000)
@@ -1099,6 +1100,13 @@ final class SessionListMutationTests: XCTestCase {
                     #"{"sessions":[{"id":"session-abc","title":"Planning","profile":"default","pinned":false,"archived":false}]}"#,
                     for: request
                 )
+            case "/api/sessions":
+                let query = Dictionary(uniqueKeysWithValues: (URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+                XCTAssertEqual(query["profile"], "default")
+                XCTAssertEqual(query["limit"], "0")
+                XCTAssertEqual(query["offset"], "0")
+                XCTAssertEqual(query["archived"], "only")
+                return apiTestJSONResponse(#"{"sessions":[],"total":0,"limit":0,"offset":0}"#, for: request)
             case "/api/sessions/session-abc":
                 if request.httpMethod == "PATCH" {
                     patchStarted.fulfill()
@@ -1156,6 +1164,13 @@ final class SessionListMutationTests: XCTestCase {
                     #"{"sessions":[{"id":"session-abc","title":"Planning","profile":"default","pinned":false,"archived":false}]}"#,
                     for: request
                 )
+            case "/api/sessions":
+                let query = Dictionary(uniqueKeysWithValues: (URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+                XCTAssertEqual(query["profile"], "default")
+                XCTAssertEqual(query["limit"], "0")
+                XCTAssertEqual(query["offset"], "0")
+                XCTAssertEqual(query["archived"], "only")
+                return apiTestJSONResponse(#"{"sessions":[],"total":0,"limit":0,"offset":0}"#, for: request)
             case "/api/sessions/session-abc":
                 patchStarted.fulfill()
                 _ = releasePatch.wait(timeout: .now() + 2)
@@ -2285,32 +2300,291 @@ final class SessionListMutationTests: XCTestCase {
     }
 
     @MainActor
-    func testDirectLoadDoesNotInventArchivedCountForArchivedEntry() async throws {
-        let viewModel = try makeViewModel { request in
-            XCTAssertEqual(request.url?.path, "/api/profiles/sessions")
-            let query = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.queryItems
-            XCTAssertEqual(query?.first(where: { $0.name == "profile" })?.value, "default")
-            XCTAssertEqual(query?.first(where: { $0.name == "limit" })?.value, "500")
-            return apiTestJSONResponse("""
-            {
-              "sessions": [
-                {
-                  "id": "session-abc",
-                  "title": "Planning",
-                  "archived": false
-                }
-              ],
-              "total": 1
+    func testDirectLoadRestoresArchivedCountFromArchiveOnlyTotal() async throws {
+        var countRequests = 0
+        let viewModel = try makeViewModel(handlesArchivedCount: false) { request in
+            switch request.url?.path {
+            case "/api/profiles/sessions":
+                let query = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.queryItems
+                XCTAssertEqual(query?.first(where: { $0.name == "profile" })?.value, "default")
+                XCTAssertEqual(query?.first(where: { $0.name == "limit" })?.value, "500")
+                return apiTestJSONResponse(
+                    #"{"sessions":[{"id":"session-abc","title":"Planning","profile":"default","archived":false}],"total":1}"#,
+                    for: request
+                )
+            case "/api/sessions":
+                countRequests += 1
+                let query = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.queryItems
+                let values = Dictionary(uniqueKeysWithValues: (query ?? []).map { ($0.name, $0.value ?? "") })
+                XCTAssertEqual(values["profile"], "default")
+                XCTAssertEqual(values["limit"], "0")
+                XCTAssertEqual(values["offset"], "0")
+                XCTAssertEqual(values["order"], "recent")
+                XCTAssertEqual(values["archived"], "only")
+                return apiTestJSONResponse(#"{"sessions":[],"total":3,"limit":0,"offset":0}"#, for: request)
+            default:
+                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
             }
-            """, for: request)
         }
 
-        XCTAssertNil(viewModel.archivedCount)
+        let loaded = await viewModel.load()
 
-        await viewModel.load()
-
-        XCTAssertNil(viewModel.archivedCount)
+        XCTAssertTrue(loaded)
+        XCTAssertEqual(viewModel.archivedCount, 3)
+        XCTAssertEqual(countRequests, 1)
         XCTAssertEqual(viewModel.sessions.compactMap(\.sessionId), ["session-abc"])
+    }
+
+    @MainActor
+    func testArchivedCountFailureKeepsVisibleRowsAndUsesSanitizedNonBlockingError() async throws {
+        let viewModel = try makeViewModel(handlesArchivedCount: false) { request in
+            switch request.url?.path {
+            case "/api/profiles/sessions":
+                return apiTestJSONResponse(
+                    #"{"sessions":[{"id":"session-abc","title":"Planning","profile":"default","archived":false}],"total":1}"#,
+                    for: request
+                )
+            case "/api/sessions":
+                let response = HTTPURLResponse(
+                    url: try XCTUnwrap(request.url),
+                    statusCode: 500,
+                    httpVersion: nil,
+                    headerFields: ["Content-Type": "application/json"]
+                )
+                return (try XCTUnwrap(response), Data(#"{"error":"private count detail"}"#.utf8))
+            default:
+                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+        }
+
+        let loaded = await viewModel.load()
+
+        XCTAssertTrue(loaded)
+        XCTAssertEqual(viewModel.sessions.compactMap(\.sessionId), ["session-abc"])
+        XCTAssertNil(viewModel.archivedCount)
+        XCTAssertEqual(viewModel.errorMessage, "Hermes returned HTTP 500.")
+        XCTAssertFalse(viewModel.errorMessage?.contains("private count detail") == true)
+        XCTAssertNotNil(viewModel.lastError)
+    }
+
+    @MainActor
+    func testArchivedCountDoesNotCrossAnActiveProfileEpoch() async throws {
+        let countStarted = expectation(description: "default archived count started")
+        ArchivedCountGateURLProtocol.configure {
+            countStarted.fulfill()
+        }
+        let viewModel = try makeArchivedCountGateViewModel()
+        let workProfile = try JSONDecoder().decode(
+            ProfileSummary.self,
+            from: Data(#"{"name":"work"}"#.utf8)
+        )
+
+        let defaultLoad = Task { @MainActor in await viewModel.load() }
+        await fulfillment(of: [countStarted], timeout: 1)
+
+        let switched = await viewModel.switchActiveProfile(workProfile)
+        XCTAssertTrue(switched)
+        let workLoaded = await viewModel.load()
+        XCTAssertTrue(workLoaded)
+        XCTAssertEqual(viewModel.activeProfileName, "work")
+        XCTAssertEqual(viewModel.archivedCount, 7)
+
+        // The old default-profile count completes after the active profile has
+        // changed; it must not overwrite work's count.
+        ArchivedCountGateURLProtocol.releaseCount()
+        let defaultLoaded = await defaultLoad.value
+        XCTAssertTrue(defaultLoaded)
+        XCTAssertEqual(viewModel.archivedCount, 7)
+        XCTAssertEqual(ArchivedCountGateURLProtocol.countProfiles, ["default", "work"])
+    }
+
+    @MainActor
+    func testCancelledArchivedCountDoesNotPublishErrorOrCount() async throws {
+        let countStarted = expectation(description: "archived count started")
+        ArchivedCountGateURLProtocol.configure {
+            countStarted.fulfill()
+        }
+        let viewModel = try makeArchivedCountGateViewModel()
+
+        let loadTask = Task { @MainActor in await viewModel.load() }
+        await fulfillment(of: [countStarted], timeout: 1)
+        loadTask.cancel()
+        ArchivedCountGateURLProtocol.releaseCount()
+
+        let loaded = await loadTask.value
+        XCTAssertTrue(loaded)
+        XCTAssertEqual(viewModel.sessions.compactMap(\.sessionId), ["default-session"])
+        XCTAssertNil(viewModel.archivedCount)
+        XCTAssertNil(viewModel.errorMessage)
+        XCTAssertNil(viewModel.lastError)
+    }
+
+    @MainActor
+    func testArchivedCountZeroCanBecomePositiveOnExplicitRefresh() async throws {
+        var countRequests = 0
+        let viewModel = try makeViewModel(handlesArchivedCount: false) { request in
+            switch request.url?.path {
+            case "/api/profiles/sessions":
+                return apiTestJSONResponse(
+                    #"{"sessions":[{"id":"session-abc","title":"Planning","profile":"default","archived":false}],"total":1}"#,
+                    for: request
+                )
+            case "/api/sessions":
+                countRequests += 1
+                let total = countRequests == 1 ? 0 : 5
+                return apiTestJSONResponse(#"{"sessions":[],"total":\#(total),"limit":0,"offset":0}"#, for: request)
+            default:
+                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+        }
+
+        let firstLoaded = await viewModel.load()
+        XCTAssertTrue(firstLoaded)
+        XCTAssertEqual(viewModel.archivedCount, 0)
+        await viewModel.refreshArchivedCountForProfile("default")
+
+        XCTAssertEqual(viewModel.archivedCount, 5)
+        XCTAssertNil(viewModel.lastError)
+        XCTAssertEqual(countRequests, 2)
+    }
+
+    @MainActor
+    func testArchivedCountFailurePreservesPriorSameProfileCount() async throws {
+        var listRequests = 0
+        var countRequests = 0
+        let viewModel = try makeViewModel(handlesArchivedCount: false) { request in
+            switch request.url?.path {
+            case "/api/profiles/sessions":
+                listRequests += 1
+                return apiTestJSONResponse(
+                    #"{"sessions":[{"id":"session-abc","title":"Planning","profile":"default","archived":false}],"total":1}"#,
+                    for: request
+                )
+            case "/api/sessions":
+                countRequests += 1
+                if countRequests == 1 {
+                    return apiTestJSONResponse(#"{"sessions":[],"total":3,"limit":0,"offset":0}"#, for: request)
+                }
+                let response = HTTPURLResponse(
+                    url: try XCTUnwrap(request.url),
+                    statusCode: 503,
+                    httpVersion: nil,
+                    headerFields: ["Content-Type": "application/json"]
+                )
+                return (try XCTUnwrap(response), Data(#"{"error":"private count detail"}"#.utf8))
+            default:
+                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+        }
+
+        let firstLoaded = await viewModel.load()
+        XCTAssertTrue(firstLoaded)
+        XCTAssertEqual(viewModel.archivedCount, 3)
+        let secondLoaded = await viewModel.load()
+        XCTAssertTrue(secondLoaded)
+
+        XCTAssertEqual(viewModel.archivedCount, 3)
+        XCTAssertNotNil(viewModel.lastError)
+        XCTAssertEqual(listRequests, 2)
+        XCTAssertEqual(countRequests, 2)
+    }
+
+    @MainActor
+    func testInvalidArchivedCountIsSanitizedAndDoesNotPublishNegativeValue() async throws {
+        let viewModel = try makeViewModel(handlesArchivedCount: false) { request in
+            switch request.url?.path {
+            case "/api/profiles/sessions":
+                return apiTestJSONResponse(
+                    #"{"sessions":[{"id":"session-abc","title":"Planning","profile":"default","archived":false}],"total":1}"#,
+                    for: request
+                )
+            case "/api/sessions":
+                return apiTestJSONResponse(#"{"sessions":[],"total":-1,"limit":0,"offset":0}"#, for: request)
+            default:
+                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+        }
+
+        let loaded = await viewModel.load()
+        XCTAssertTrue(loaded)
+
+        XCTAssertNil(viewModel.archivedCount)
+        XCTAssertEqual(viewModel.errorMessage, "Hermes did not return a valid archived session count.")
+        XCTAssertNotNil(viewModel.lastError)
+    }
+
+    @MainActor
+    func testMissingArchivedCountIsSanitizedWithoutDiscardingRows() async throws {
+        let viewModel = try makeViewModel(handlesArchivedCount: false) { request in
+            switch request.url?.path {
+            case "/api/profiles/sessions":
+                return apiTestJSONResponse(
+                    #"{"sessions":[{"id":"session-abc","title":"Planning","profile":"default","archived":false}],"total":1}"#,
+                    for: request
+                )
+            case "/api/sessions":
+                return apiTestJSONResponse(#"{"sessions":[],"limit":0,"offset":0}"#, for: request)
+            default:
+                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+        }
+
+        let loaded = await viewModel.load()
+        XCTAssertTrue(loaded)
+        XCTAssertEqual(viewModel.sessions.compactMap(\.sessionId), ["session-abc"])
+        XCTAssertNil(viewModel.archivedCount)
+        XCTAssertEqual(viewModel.errorMessage, "Hermes did not return a valid archived session count.")
+    }
+
+    @MainActor
+    func testNewerSameProfileArchivedCountWinsOverOlderPendingRequest() async throws {
+        let countStarted = expectation(description: "first archived count started")
+        ArchivedCountGateURLProtocol.configure {
+            countStarted.fulfill()
+        }
+        let viewModel = try makeArchivedCountGateViewModel()
+
+        let olderLoad = Task { @MainActor in await viewModel.load() }
+        await fulfillment(of: [countStarted], timeout: 1)
+        let newerLoaded = await viewModel.load()
+        XCTAssertTrue(newerLoaded)
+        XCTAssertEqual(viewModel.archivedCount, 4)
+
+        ArchivedCountGateURLProtocol.releaseCount()
+        let olderLoaded = await olderLoad.value
+        XCTAssertTrue(olderLoaded)
+        XCTAssertEqual(viewModel.archivedCount, 4)
+        XCTAssertEqual(ArchivedCountGateURLProtocol.countProfiles, ["default", "default"])
+    }
+
+    @MainActor
+    func testProfileSwitchClearsArchivedCountBeforeNewProfileFetch() async throws {
+        let countStarted = expectation(description: "default archived count started")
+        ArchivedCountGateURLProtocol.configure {
+            countStarted.fulfill()
+        }
+        let viewModel = try makeArchivedCountGateViewModel()
+        let workProfile = try JSONDecoder().decode(
+            ProfileSummary.self,
+            from: Data(#"{"name":"work"}"#.utf8)
+        )
+
+        let initialLoad = Task { @MainActor in await viewModel.load() }
+        await fulfillment(of: [countStarted], timeout: 1)
+        ArchivedCountGateURLProtocol.releaseCount()
+        let initialLoaded = await initialLoad.value
+        XCTAssertTrue(initialLoaded)
+        XCTAssertEqual(viewModel.archivedCount, 4)
+
+        let switched = await viewModel.switchActiveProfile(workProfile)
+        XCTAssertTrue(switched)
+        XCTAssertNil(viewModel.archivedCount)
     }
 
     @MainActor
@@ -3089,12 +3363,33 @@ final class SessionListMutationTests: XCTestCase {
 
     @MainActor
     private func makeViewModel(
+        handlesArchivedCount: Bool = true,
         handler: @escaping (URLRequest) throws -> (HTTPURLResponse, Data)
     ) throws -> SessionListViewModel {
         let server = try XCTUnwrap(URL(string: "https://example.test"))
-        let client = try makeClient(server: server, handler: handler)
+        let client = try makeClient(server: server) { request in
+            if handlesArchivedCount, Self.isArchivedCountRequest(request) {
+                let components = try XCTUnwrap(URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false))
+                let query = Dictionary(uniqueKeysWithValues: (components.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+                XCTAssertEqual(request.httpMethod, "GET")
+                XCTAssertFalse(query["profile", default: ""].isEmpty)
+                XCTAssertEqual(query["limit"], "0")
+                XCTAssertEqual(query["offset"], "0")
+                XCTAssertEqual(query["order"], "recent")
+                XCTAssertEqual(query["archived"], "only")
+                return apiTestJSONResponse(#"{"sessions":[],"total":0,"limit":0,"offset":0}"#, for: request)
+            }
+            return try handler(request)
+        }
 
         return SessionListViewModel(server: server, client: client)
+    }
+
+    private static func isArchivedCountRequest(_ request: URLRequest) -> Bool {
+        guard request.url?.path == "/api/sessions" else { return false }
+        let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems
+        let values = Dictionary(uniqueKeysWithValues: (query ?? []).map { ($0.name, $0.value ?? "") })
+        return values["limit"] == "0" && values["archived"] == "only"
     }
 
     @MainActor
@@ -3102,6 +3397,18 @@ final class SessionListMutationTests: XCTestCase {
         let server = try XCTUnwrap(URL(string: "https://example.test"))
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [MetadataOverlayURLProtocol.self]
+        let client = APIClient(
+            baseURL: server,
+            session: URLSession(configuration: configuration)
+        )
+        return SessionListViewModel(server: server, client: client)
+    }
+
+    @MainActor
+    private func makeArchivedCountGateViewModel() throws -> SessionListViewModel {
+        let server = try XCTUnwrap(URL(string: "https://example.test"))
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ArchivedCountGateURLProtocol.self]
         let client = APIClient(
             baseURL: server,
             session: URLSession(configuration: configuration)
@@ -3299,6 +3606,123 @@ private final class LockedSessionMutationRequestCounts {
     }
 }
 
+private final class ArchivedCountGateURLProtocol: URLProtocol {
+    private static let lock = NSLock()
+    private static var onFirstCountStarted: (() -> Void)?
+    private static var countContinuation: CheckedContinuation<Void, Never>?
+    private static var releaseRequested = false
+    private static var profiles: [String] = []
+    private var loadingTask: Task<Void, Never>?
+
+    static var countProfiles: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return profiles
+    }
+
+    static func configure(onFirstCountStarted: @escaping () -> Void) {
+        lock.lock()
+        Self.onFirstCountStarted = onFirstCountStarted
+        countContinuation = nil
+        releaseRequested = false
+        profiles = []
+        lock.unlock()
+    }
+
+    static func reset() {
+        lock.lock()
+        let continuation = countContinuation
+        countContinuation = nil
+        releaseRequested = false
+        onFirstCountStarted = nil
+        profiles = []
+        lock.unlock()
+        continuation?.resume()
+    }
+
+    static func releaseCount() {
+        lock.lock()
+        let continuation = countContinuation
+        countContinuation = nil
+        if continuation == nil {
+            releaseRequested = true
+        }
+        lock.unlock()
+        continuation?.resume()
+    }
+
+    private static func waitForRelease() async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if releaseRequested {
+                releaseRequested = false
+                lock.unlock()
+                continuation.resume()
+            } else {
+                countContinuation = continuation
+                lock.unlock()
+            }
+        }
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let url = request.url else { return }
+        let path = url.path
+        let profile = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+            .queryItems?
+            .first(where: { $0.name == "profile" })?.value ?? "default"
+        let responseBody: String
+        let shouldHold: Bool
+        let startedCallback: (() -> Void)?
+
+        Self.lock.lock()
+        switch path {
+        case "/api/profiles/sessions":
+            shouldHold = false
+            startedCallback = nil
+            responseBody = #"{"sessions":[{"id":"\#(profile)-session","title":"Planning","profile":"\#(profile)","archived":false}],"total":1}"#
+        case "/api/sessions":
+            Self.profiles.append(profile)
+            shouldHold = Self.profiles.count == 1
+            startedCallback = shouldHold ? Self.onFirstCountStarted : nil
+            responseBody = profile == "work"
+                ? #"{"sessions":[],"total":7,"limit":0,"offset":0}"#
+                : #"{"sessions":[],"total":4,"limit":0,"offset":0}"#
+        default:
+            shouldHold = false
+            startedCallback = nil
+            responseBody = #"{}"#
+        }
+        Self.lock.unlock()
+
+        startedCallback?()
+        loadingTask = Task { [weak self] in
+            guard let self else { return }
+            if shouldHold {
+                await Self.waitForRelease()
+            }
+            guard !Task.isCancelled else { return }
+            let response = HTTPURLResponse(
+                url: url,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: Data(responseBody.utf8))
+            client?.urlProtocolDidFinishLoading(self)
+        }
+    }
+
+    override func stopLoading() {
+        loadingTask?.cancel()
+    }
+}
+
 private final class MetadataOverlayURLProtocol: URLProtocol {
     enum Scenario {
         case pin
@@ -3459,21 +3883,35 @@ private final class OutOfOrderSessionURLProtocol: URLProtocol {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
+        guard let url = request.url else { return }
+        let isVisibleList = url.path == "/api/profiles/sessions"
+        let ordinal: Int?
         Self.lock.lock()
-        Self.nextOrdinal += 1
-        let ordinal = Self.nextOrdinal
+        if isVisibleList {
+            Self.nextOrdinal += 1
+            ordinal = Self.nextOrdinal
+        } else {
+            ordinal = nil
+        }
         Self.lock.unlock()
 
         loadingTask = Task { [weak self] in
-            guard let self, let url = request.url else { return }
-            try? await Task.sleep(nanoseconds: ordinal == 1 ? 200_000_000 : 10_000_000)
+            guard let self else { return }
+            if let ordinal {
+                try? await Task.sleep(nanoseconds: ordinal == 1 ? 200_000_000 : 10_000_000)
+            }
             guard !Task.isCancelled else { return }
 
-            let title = ordinal == 1 ? "Stale result" : "Fresh result"
-            let sessionID = ordinal == 1 ? "old" : "new"
-            let data = Data("""
-            {"sessions":[{"id":"\(sessionID)","title":"\(title)"}]}
-            """.utf8)
+            let data: Data
+            if let ordinal {
+                let title = ordinal == 1 ? "Stale result" : "Fresh result"
+                let sessionID = ordinal == 1 ? "old" : "new"
+                data = Data("""
+                {"sessions":[{"id":"\(sessionID)","title":"\(title)"}]}
+                """.utf8)
+            } else {
+                data = Data(#"{"sessions":[],"total":0,"limit":0,"offset":0}"#.utf8)
+            }
             let response = HTTPURLResponse(
                 url: url,
                 statusCode: 200,

@@ -18,14 +18,16 @@ final class SessionListGatewayInvalidationTests: APIClientTestCase {
         try await startObservation(for: viewModel)
         let loaded = await viewModel.load()
         XCTAssertTrue(loaded)
-        let initialRequestCount = requests.value
+        let initialVisibleListCount = requests.visibleListValue
+        let initialArchiveCountRequestCount = requests.archiveCountValue
 
         for sequence in 1...4 {
             transport.emit(event: sessionsChanged(sequence: sequence))
         }
         try await Task.sleep(for: .milliseconds(550))
 
-        XCTAssertEqual(requests.value, initialRequestCount + 1)
+        XCTAssertEqual(requests.visibleListValue, initialVisibleListCount + 1)
+        XCTAssertEqual(requests.archiveCountValue, initialArchiveCountRequestCount + 1)
         XCTAssertFalse(viewModel.isSidebarDirty)
         await runtime.stop()
     }
@@ -44,28 +46,33 @@ final class SessionListGatewayInvalidationTests: APIClientTestCase {
         try await startObservation(for: viewModel)
         let loaded = await viewModel.load()
         XCTAssertTrue(loaded)
-        let initialRequestCount = requests.value
+        let initialVisibleListCount = requests.visibleListValue
+        let initialArchiveCountRequestCount = requests.archiveCountValue
 
         viewModel.setSidebarEditing(true)
         transport.emit(event: sessionsChanged(sequence: 1))
         try await Task.sleep(for: .milliseconds(400))
-        XCTAssertEqual(requests.value, initialRequestCount)
+        XCTAssertEqual(requests.visibleListValue, initialVisibleListCount)
+        XCTAssertEqual(requests.archiveCountValue, initialArchiveCountRequestCount)
         XCTAssertTrue(viewModel.isSidebarDirty)
 
         viewModel.setSidebarEditing(false)
         try await Task.sleep(for: .milliseconds(550))
-        XCTAssertEqual(requests.value, initialRequestCount + 1)
+        XCTAssertEqual(requests.visibleListValue, initialVisibleListCount + 1)
+        XCTAssertEqual(requests.archiveCountValue, initialArchiveCountRequestCount + 1)
         XCTAssertFalse(viewModel.isSidebarDirty)
 
         viewModel.setSidebarDestructiveActionPending(true)
         transport.emit(event: sessionsChanged(sequence: 2))
         try await Task.sleep(for: .milliseconds(400))
-        XCTAssertEqual(requests.value, initialRequestCount + 1)
+        XCTAssertEqual(requests.visibleListValue, initialVisibleListCount + 1)
+        XCTAssertEqual(requests.archiveCountValue, initialArchiveCountRequestCount + 1)
         XCTAssertTrue(viewModel.isSidebarDirty)
 
         viewModel.setSidebarDestructiveActionPending(false)
         try await Task.sleep(for: .milliseconds(550))
-        XCTAssertEqual(requests.value, initialRequestCount + 2)
+        XCTAssertEqual(requests.visibleListValue, initialVisibleListCount + 2)
+        XCTAssertEqual(requests.archiveCountValue, initialArchiveCountRequestCount + 2)
         XCTAssertFalse(viewModel.isSidebarDirty)
         await runtime.stop()
     }
@@ -79,16 +86,32 @@ final class SessionListGatewayInvalidationTests: APIClientTestCase {
         var selectedRuntime = firstRuntime
         let requests = SessionListRequestCounter()
         let client = makeClient { request in
-            let path = request.url?.path
-            guard path == "/api/profiles/sessions" else {
-                XCTFail("Unexpected request path: \(path ?? "nil")")
+            switch request.url?.path {
+            case "/api/profiles/sessions":
+                requests.incrementVisibleList()
+                return apiTestJSONResponse(
+                    #"{"sessions":[{"id":"one","title":"One"}]}"#,
+                    for: request
+                )
+            case "/api/sessions":
+                let query = Dictionary(
+                    uniqueKeysWithValues: (URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.queryItems ?? [])
+                        .map { ($0.name, $0.value ?? "") }
+                )
+                XCTAssertEqual(query["profile"], "default")
+                XCTAssertEqual(query["archived"], "only")
+                XCTAssertEqual(query["limit"], "0")
+                XCTAssertEqual(query["offset"], "0")
+                XCTAssertEqual(query["order"], "recent")
+                requests.incrementArchiveCount()
+                return apiTestJSONResponse(
+                    #"{"sessions":[],"total":0,"limit":0,"offset":0}"#,
+                    for: request
+                )
+            default:
+                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
                 throw URLError(.badURL)
             }
-            requests.increment()
-            return apiTestJSONResponse(
-                #"{"sessions":[{"id":"one","title":"One"}]}"#,
-                for: request
-            )
         }
         let viewModel = SessionListViewModel(
             server: server,
@@ -99,21 +122,25 @@ final class SessionListGatewayInvalidationTests: APIClientTestCase {
         try await startObservation(for: viewModel)
         let firstLoad = await viewModel.load()
         XCTAssertTrue(firstLoad)
-        let afterFirstLoad = requests.value
+        let afterFirstVisibleListLoad = requests.visibleListValue
+        let afterFirstArchiveCountLoad = requests.archiveCountValue
 
         selectedRuntime = secondRuntime
         viewModel.invalidateGatewayObservation()
         try await startObservation(for: viewModel)
         let secondLoad = await viewModel.load()
         XCTAssertTrue(secondLoad)
-        let afterRebindLoad = requests.value
+        let afterRebindVisibleListLoad = requests.visibleListValue
+        let afterRebindArchiveCountLoad = requests.archiveCountValue
 
         firstTransport.emit(event: sessionsChanged(sequence: 1))
         secondTransport.emit(event: sessionsChanged(sequence: 1))
         try await Task.sleep(for: .milliseconds(550))
 
-        XCTAssertEqual(afterRebindLoad, afterFirstLoad + 1)
-        XCTAssertEqual(requests.value, afterRebindLoad + 1)
+        XCTAssertEqual(afterRebindVisibleListLoad, afterFirstVisibleListLoad + 1)
+        XCTAssertEqual(afterRebindArchiveCountLoad, afterFirstArchiveCountLoad + 1)
+        XCTAssertEqual(requests.visibleListValue, afterRebindVisibleListLoad + 1)
+        XCTAssertEqual(requests.archiveCountValue, afterRebindArchiveCountLoad + 1)
         await firstRuntime.stop()
         await secondRuntime.stop()
     }
@@ -136,6 +163,20 @@ final class SessionListGatewayInvalidationTests: APIClientTestCase {
                 sessionProfiles.record(profile)
                 return apiTestJSONResponse(
                     #"{"sessions":[{"id":"work-session","title":"Work"}]}"#,
+                    for: request
+                )
+            case "/api/sessions":
+                let query = Dictionary(
+                    uniqueKeysWithValues: (URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.queryItems ?? [])
+                        .map { ($0.name, $0.value ?? "") }
+                )
+                XCTAssertEqual(query["profile"], "work")
+                XCTAssertEqual(query["archived"], "only")
+                XCTAssertEqual(query["limit"], "0")
+                XCTAssertEqual(query["offset"], "0")
+                XCTAssertEqual(query["order"], "recent")
+                return apiTestJSONResponse(
+                    #"{"sessions":[],"total":0,"limit":0,"offset":0}"#,
                     for: request
                 )
             default:
@@ -166,15 +207,32 @@ final class SessionListGatewayInvalidationTests: APIClientTestCase {
         runtime: HermesServerRuntime
     ) -> SessionListViewModel {
         let client = makeClient { request in
-            guard request.url?.path == "/api/profiles/sessions" else {
+            switch request.url?.path {
+            case "/api/profiles/sessions":
+                requests.incrementVisibleList()
+                return apiTestJSONResponse(
+                    #"{"sessions":[{"id":"one","title":"One"}]}"#,
+                    for: request
+                )
+            case "/api/sessions":
+                let query = Dictionary(
+                    uniqueKeysWithValues: (URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.queryItems ?? [])
+                        .map { ($0.name, $0.value ?? "") }
+                )
+                XCTAssertEqual(query["profile"], "default")
+                XCTAssertEqual(query["archived"], "only")
+                XCTAssertEqual(query["limit"], "0")
+                XCTAssertEqual(query["offset"], "0")
+                XCTAssertEqual(query["order"], "recent")
+                requests.incrementArchiveCount()
+                return apiTestJSONResponse(
+                    #"{"sessions":[],"total":0,"limit":0,"offset":0}"#,
+                    for: request
+                )
+            default:
                 XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
                 throw URLError(.badURL)
             }
-            requests.increment()
-            return apiTestJSONResponse(
-                #"{"sessions":[{"id":"one","title":"One"}]}"#,
-                for: request
-            )
         }
         return SessionListViewModel(
             server: server,
@@ -214,18 +272,31 @@ final class SessionListGatewayInvalidationTests: APIClientTestCase {
 
 private final class SessionListRequestCounter: @unchecked Sendable {
     private let lock = NSLock()
-    private var count = 0
+    private var visibleListCount = 0
+    private var archiveCount = 0
 
-    func increment() {
+    func incrementVisibleList() {
         lock.lock()
-        count += 1
+        visibleListCount += 1
         lock.unlock()
     }
 
-    var value: Int {
+    func incrementArchiveCount() {
+        lock.lock()
+        archiveCount += 1
+        lock.unlock()
+    }
+
+    var visibleListValue: Int {
         lock.lock()
         defer { lock.unlock() }
-        return count
+        return visibleListCount
+    }
+
+    var archiveCountValue: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return archiveCount
     }
 }
 

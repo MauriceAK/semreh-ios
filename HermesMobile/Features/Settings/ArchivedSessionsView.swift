@@ -6,6 +6,7 @@ struct ArchivedSessionsView: View {
     /// Forwarded to `ChatView` and used for load/unarchive failures so a 401
     /// here triggers the same re-login flow as everywhere else.
     let onAPIError: (Error) -> Void
+    let onSessionsChanged: () async -> Void
 
     @State private var viewModel: ArchivedSessionsViewModel
     @State private var openedSession: SessionSummary?
@@ -16,11 +17,13 @@ struct ArchivedSessionsView: View {
     init(
         server: URL,
         profile: String = "default",
-        onAPIError: @escaping (Error) -> Void
+        onAPIError: @escaping (Error) -> Void,
+        onSessionsChanged: @escaping () async -> Void = {}
     ) {
         self.server = server
         self.profile = profile
         self.onAPIError = onAPIError
+        self.onSessionsChanged = onSessionsChanged
         _viewModel = State(initialValue: ArchivedSessionsViewModel(server: server, profile: profile))
     }
 
@@ -176,6 +179,7 @@ struct ArchivedSessionsView: View {
             handleLastError()
             if didUnarchive {
                 SessionHaptics.archiveStateChanged(isEnabled: isHapticsEnabled)
+                await onSessionsChanged()
             }
         }
     }

@@ -34,7 +34,36 @@ This outline supports later parallelism; it is not permission to publish a relea
   route caps source rows at500 and cannot support complete large archives.
 - [x] Run focused native mutation/archive tests and actual-VM stock live smoke.
 - [x] Run integration suite and signed app launch before committing the cohort.
-- [ ] Finish archive count, full-scale search, and separately scoped safe deletion.
+- [ ] Finish full-scale search and separately scoped safe deletion.
+
+Archive-count follow-up:
+
+- [x] Use the explicit single-profile archive-only `limit=0` response's `total`,
+  never its row count (pinned rows may still be returned).
+- [x] Publish visible sessions before count completion; preserve a prior valid
+  same-profile count on transient failure. Missing/negative totals fail safely.
+- [x] Clear counts on profile changes and independently invalidate older count
+  requests. Confirmed archive and successful unarchive explicitly refresh the count.
+- [x] Verify actual native view-model count transitions against stock Hermes.
+
+Evidence: `slice4-archive-count-live-v1.json` passed all nine single-profile
+filter/offset/count captures; `slice4-count-native-live-v1` passed 1/0/0 and proves
+baseline → baseline+1 after archive → baseline after unarchive, plus unchanged
+sibling/transcript and owned-fixture restoration/cleanup. Full native
+`slice4-count-full-v1` passed 2,246/0/13 intentional opt-in skips. Strict signing
+verification and ordinary Simulator launch 43963 passed. Python count probe
+checks passed 9/9. No physical acceptance is implied.
+
+Failures retained: count-focused-v1 failed compilation on a shadowed test callback
+assignment, corrected by root; v2 ran 104 passing and three failing older fixtures
+that had omitted the count route or counted it as a visible-list refresh. Fixtures
+were corrected explicitly, preserving coalescing and overlap assertions, before
+the full-suite pass. Root also wired the post-archive refresh omitted from the
+worker handoff; independent review and the live transition test cover it.
+Count artifact audit passed with zero flagged paths; see
+`slice4-count-audit-v1.jsonl` for the exact file and exported-console counts. Its
+scope remains known fixture secrets and obvious bearer formats, not opaque-secret
+proof, screenshot OCR, or quarantined OS diagnostics.
 
 First cohort native attempt `slice4-metadata-focused-v1` failed compilation on six
 missing `try` expressions in the new opt-in live test; no tests ran. The owner

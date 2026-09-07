@@ -148,6 +148,20 @@ final class SessionListDirectTests: APIClientTestCase {
                     #"{"sessions":[{"id":"work-2","title":"Recent","cwd":"/tmp/work","started_at":20,"last_active":30,"profile":"work"},{"id":"work-1","title":"Older","started_at":10,"last_active":15,"profile":"work"}],"total":2,"limit":500,"offset":0,"profile_totals":{"work":2}}"#,
                     for: request
                 )
+            case "/api/sessions":
+                let query = Dictionary(
+                    uniqueKeysWithValues: (URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.queryItems ?? [])
+                        .map { ($0.name, $0.value ?? "") }
+                )
+                XCTAssertEqual(query["profile"], "work")
+                XCTAssertEqual(query["archived"], "only")
+                XCTAssertEqual(query["limit"], "0")
+                XCTAssertEqual(query["offset"], "0")
+                XCTAssertEqual(query["order"], "recent")
+                return apiTestJSONResponse(
+                    #"{"sessions":[],"total":0,"limit":0,"offset":0}"#,
+                    for: request
+                )
             default:
                 XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
                 throw URLError(.badURL)
@@ -184,6 +198,20 @@ final class SessionListDirectTests: APIClientTestCase {
                       "total":3,"limit":500,"offset":0,"profile_totals":{"default":3},"errors":[]
                     }
                     """#,
+                    for: request
+                )
+            case "/api/sessions":
+                let query = Dictionary(
+                    uniqueKeysWithValues: (URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.queryItems ?? [])
+                        .map { ($0.name, $0.value ?? "") }
+                )
+                XCTAssertEqual(query["profile"], "default")
+                XCTAssertEqual(query["archived"], "only")
+                XCTAssertEqual(query["limit"], "0")
+                XCTAssertEqual(query["offset"], "0")
+                XCTAssertEqual(query["order"], "recent")
+                return apiTestJSONResponse(
+                    #"{"sessions":[],"total":1,"limit":0,"offset":0}"#,
                     for: request
                 )
             case "/api/sessions/search":
@@ -247,6 +275,20 @@ final class SessionListDirectTests: APIClientTestCase {
                     #"""
                     {"sessions":[{"id":"\#(id)","title":"\#(id)","profile":"\#(profile ?? "default")","message_count":2,"archived":false}],"total":1,"limit":500,"offset":0,"profile_totals":{"\#(profile ?? "default")":1},"errors":[]}
                     """#,
+                    for: request
+                )
+            case "/api/sessions":
+                let query = Dictionary(
+                    uniqueKeysWithValues: (URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.queryItems ?? [])
+                        .map { ($0.name, $0.value ?? "") }
+                )
+                XCTAssertTrue(query["profile"] == "default" || query["profile"] == "work")
+                XCTAssertEqual(query["archived"], "only")
+                XCTAssertEqual(query["limit"], "0")
+                XCTAssertEqual(query["offset"], "0")
+                XCTAssertEqual(query["order"], "recent")
+                return apiTestJSONResponse(
+                    #"{"sessions":[],"total":0,"limit":0,"offset":0}"#,
                     for: request
                 )
             case "/api/sessions/search":

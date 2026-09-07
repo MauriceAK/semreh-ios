@@ -57,7 +57,7 @@ def single_profile_session_payload(
         "pinned": False,
     }
     return {
-        "sessions": [] if offset else [row],
+        "sessions": [] if offset or limit == 0 else [row],
         "total": 1,
         "limit": limit,
         "offset": offset,
@@ -150,6 +150,30 @@ class SessionConvenienceProbeTests(unittest.TestCase):
                 requested_offset=0,
             )
 
+    def test_single_profile_limit_zero_is_count_readback_for_each_filter(self):
+        for archived in probe.ARCHIVED_FILTERS:
+            payload = single_profile_session_payload(
+                archived == "only", offset=0, limit=0
+            )
+            payload["sessions"] = [{
+                "id": "fixture-pinned-id",
+                "profile": probe.PROFILE,
+                "is_default_profile": True,
+                "archived": archived == "only",
+                "pinned": True,
+            }]
+            summary = probe._single_profile_session_summary(
+                payload,
+                archived=archived,
+                requested_limit=0,
+                requested_offset=0,
+            )
+            self.assertEqual(summary["limit"], 0)
+            self.assertEqual(summary["offset"], 0)
+            self.assertEqual(summary["total"], 1)
+            self.assertEqual(summary["row_count"], 1)
+            self.assertEqual(summary["pinned_overfetch_count"], 1)
+
     def test_search_requires_seed_match_and_sanitizes_result_values(self):
         payload = {
             "results": [{
@@ -178,26 +202,29 @@ class SessionConvenienceProbeTests(unittest.TestCase):
         import asyncio
 
         asyncio.run(probe.exercise(client, evidence))
-        self.assertEqual(len(client.calls), 13)
+        self.assertEqual(len(client.calls), 16)
         for path, params in client.calls[:6]:
             self.assertEqual(path, probe.SESSION_ROUTE)
             self.assertEqual(set(params), {"profile", "limit", "offset", "archived", "order"})
             self.assertEqual(params["profile"], probe.PROFILE)
             self.assertEqual(params["offset"], 0)
             self.assertIn(params["archived"], probe.ARCHIVED_FILTERS)
-        for path, params in client.calls[6:12]:
+        for path, params in client.calls[6:15]:
             self.assertEqual(path, probe.SINGLE_PROFILE_SESSION_ROUTE)
             self.assertEqual(set(params), {"profile", "limit", "offset", "archived", "order"})
             self.assertEqual(params["profile"], probe.PROFILE)
-            self.assertEqual(params["limit"], probe.SINGLE_PROFILE_SESSION_LIMIT)
-            self.assertIn(params["offset"], probe.SINGLE_PROFILE_OFFSETS)
+            if params["limit"] == 0:
+                self.assertEqual(params["offset"], 0)
+            else:
+                self.assertEqual(params["limit"], probe.SINGLE_PROFILE_SESSION_LIMIT)
+                self.assertIn(params["offset"], probe.SINGLE_PROFILE_OFFSETS)
             self.assertIn(params["archived"], probe.ARCHIVED_FILTERS)
         self.assertEqual(client.calls[-1], (
             probe.SEARCH_ROUTE,
             {"q": probe.SEARCH_MARKER, "profile": probe.PROFILE, "limit": probe.SEARCH_LIMIT},
         ))
         self.assertEqual(len(evidence["session_lists"]), 6)
-        self.assertEqual(len(evidence["single_profile_session_lists"]), 6)
+        self.assertEqual(len(evidence["single_profile_session_lists"]), 9)
 
     def test_authenticated_run_is_used_by_exercise(self):
         client = FakeClient()
@@ -211,7 +238,7 @@ class SessionConvenienceProbeTests(unittest.TestCase):
         evidence = {}
         with mock.patch.object(probe, "authenticated", fake_authenticated):
             asyncio.run(probe._run_authenticated({"username": "fixture", "password": "secret"}, evidence))
-        self.assertEqual(len(client.calls), 13)
+        self.assertEqual(len(client.calls), 16)
 
     def test_output_scope_and_cli_arguments_fail_closed(self):
         parser = probe.build_parser()
