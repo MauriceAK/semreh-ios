@@ -653,3 +653,108 @@ blocking-probe-python-v3 logs. `slice3-blocking-removal-audit-v1.jsonl` passed:
 **165626 files, 0 flags, 94 exported consoles**. Same exclusions apply: current
 known fixture secrets and obvious bearer patterns only, not arbitrary secrets,
 OCR or quarantined OS diagnostics. No publication of private runtime state.
+
+## Native blocking integration — September 7, in progress
+
+Dirty successor to774ca10, same clean stock pin. Controller/VM now connect typed
+approval and cancel-only sensitive cards without legacy response endpoints.
+Exact identity guards, terminal queue clearing and renderer-scoped errors received
+root review plus a bounded Sol Low read-only review. Full integration gate pending.
+
+- `slice3-blocking-integration-focused-v1`: compile failed, two missing returns in
+  legacy VM guards; corrected.
+- Focused-v2: **103 passed, 3 failed**. Two fakes rejected permitted canonical
+  transcript GET; old clarification test relied on removed unsupported-approval
+  placeholder. Corrected fixtures without permitting legacy writes.
+- Focused-v3: **105 passed, 1 failed**, another instance of the strict GET fake.
+- Focused-v4: **106 passed, 0 failed, 0 skipped**. Subsequent expiry correction
+  below still requires a new native run.
+- `slice3-blocking-ui-build-v1.log`: signed build-for-testing passed.
+- `slice3-blocking-production-ui-v1`: **0 passed, 1 failed** waiting for the
+  approval container accessibility identifier. Exported screenshot proves the
+  card rendered; hierarchy contains exact action identifiers but not its parent
+  identifier. Correct test to require the visible heading/action, disappearance,
+  and terminal ACK. Root also observed keyboard left open under approval; reuse
+  existing clarification keyboard dismissal for the other direct prompt types.
+- `slice3-approval-secret-contract-v7.json`: failed newly added stale approval
+  assumption4009. Actual pinned methods_prompt/approval implementation and v8
+  prove repeated approval response returns **resolved0**, repeated secret cancel
+  returns **status expired**. V8 passed, zero cleanup errors/config unchanged.
+  Remove invented approval4009 expiry shortcut; unknown errors retain the card.
+  Zero resolution remains non-success. Regression added; all failures retained.
+- Selector Pythonv2 **14 passed**; approval-secret Pythonv4 **11 passed**.
+
+Reproduce focused gates with signed `xcodebuild test`, scheme HermesMobile,
+owned Simulator/DerivedData, jobs2, parallel-testing NO, diagnostics never;
+select GatewayBlockingPromptModelTests, GatewayConversationBlockingTests,
+ChatViewModelDirectGatewayTests and GatewayConversationControllerTests.
+Production UI uses signed HermesMobileUIVerification build-for-testing, then
+`direct_hermes_ios_smoke.py --https --stock-backend --slice2-ui --slice3-blocking`
+and generated SemrehSlice2LiveUI.xctestrun with test-without-building. Use fresh
+evidence paths. No native sudo, physical-device or slice-completion claim.
+
+Focused-v5 compiled, then failed before the test runner established connection
+(369seconds, zero tests executed). Retained result/diagnostics. Unchanged-build
+test-without-building focused-v6 passed **107 tests, 0 failures, 0 skips**,
+including unknown approval4009 rejection. Retry does not establish the first
+runner failure's cause. UI buildv2/rerun pending. Interim audit of UIv1 output:
+166612files, zero flagged paths,95exported consoles, same exclusions as above.
+
+Signed UI buildv2 passed; production UIv2 passed its approval denial/ACK steps,
+then failed waiting for the sensitive parent AX identifier (0whole-tests passed,
+1failed). Root screenshot shows the secret cancellation card with no keyboard;
+test now anchors visible heading, explanatory text and exact cancel button,
+requires zero app-wide regular/secure text fields, disappearance and terminalACK.
+No product response pass inferred for secret cancellation yet. V3 rerun pending.
+
+Signed UI buildv3 passed; production UIv3 passed **1 test, 0 failures, 0 skips**.
+Actual login/new-chat/approval-deny/secret-empty-cancel all reach unique terminal
+ACKs; no bulk action or secret input fields. Root inspected approval card
+205F0ECB-0D02-496A-9CAA-D5384C0335F3.png and final secret ACK
+187F1590-F929-430D-A51B-D86E831C849F.png in its exported attachments. Keyboard is
+dismissed; final cards clear. This is stock HTTPS Simulator evidence, not phone
+acceptance, credential entry, live sudo or multi-client blocking handoff.
+
+Recovery cleanup review found stale A failure could quarantine rebound B. Scoped
+task-owner UUID/finalizer and adoption retirement now reload B's own marker;
+explicit reset retains independent ownership. No automatic cleanup retry added.
+Bounded SolLow review found no remaining concrete production blocker. Native
+blocking-recovery-focused-v1 passed136/failed2 new regression fixtures: initial
+resume erroneously started on B, so A cleanup never began. Corrected initial A
+binding, before/after B marker checks and gated request completion; v2 pending.
+
+Blocking-recovery-focused-v2 compiled but runner hung before establishing its
+connection: zero tests executed. Unchanged-build v3 passed **138 tests, 0 failures,
+0 skips**. Failed attempt retained with exported diagnostics. Final full suite
+still pending; completed-away runtime/controller recreation smoke now executing.
+
+### Blocking/recovery checkpoint gates
+
+- `slice3-completed-away-live-v1.xcresult`: **1 passed, 0 failed, 0 skipped**.
+  Native controller accepted a delayed stock-fixture turn, was disposed without
+  session.close, and its runtime/socket stopped. Canonical polling observed durable
+  completion before the replacement runtime connected. Reopened same storedID is
+  idle, exact baseline prefix retained, user/assistant suffix appears exactly once,
+  and loaded/canonical transcripts match. Only owned live runtime closed; logout
+  cleanup passed. Not literal app kill, host restart, or physical background.
+- `slice3-blocking-recovery-full-v1.xcresult`: **2172 passed, 0 failed, 9 intentional
+  opt-in skips**. Generated original HermesMobile xctestrun has no test filter;
+  full test-without-building run uses the focused-v2/v3 signed build. New live
+  completed-away opt-in test ran separately above, not silently claimed by its skip.
+- `slice3-blocking-recovery-app-launch-v1.txt`: ordinary development app launched
+  on owned Simulator; codesign strict verification passed. No phone install.
+- Selector tests including completed-away phase: **16 passed**, evidence
+  `slice3-completed-away-selector-python-v1.log`.
+
+Completed-away selector: `direct_hermes_ios_smoke.py --https --stock-backend
+--slice3-completed-away`; generated SemrehSlice1Live.xctestrun, same owned
+Simulator/diagnostics-never, test-without-building. No backend source changes.
+All test diagnostics exported before final artifact audit. Failed runner attempts
+remain: app launched but XCTest test bundle did not establish its connection;
+root cause unknown. If repeated, explicitly terminate only the owned dev app
+before an unchanged-build retry; a cold owned-Simulator restart is a bounded
+fallback. This is a suggested launch preflight, not a demonstrated fix.
+
+Final `slice3-blocking-recovery-audit-v1.jsonl` completed: **172401 files scanned,
+0 flagged paths,103 exported consoles**. Known current fixture secrets/obvious
+bearer formats only; no arbitrary-secret, OCR or quarantined diagnostic guarantee.

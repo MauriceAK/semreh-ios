@@ -33,6 +33,39 @@ struct ApprovalRequestOverlay: View {
         self.allowsSkipAll = allowsSkipAll
     }
 
+    /// Direct Hermes uses the typed gateway prompt and has no legacy
+    /// "skip-all" endpoint. Reuse this renderer while preserving the exact
+    /// server-advertised choices and the prompt identity captured by ChatView.
+    init(
+        prompt: GatewayApprovalPrompt,
+        isResponding: Bool,
+        errorMessage: String?,
+        onChoice: @escaping (GatewayApprovalChoice) -> Void
+    ) {
+        self.init(
+            prompt: ApprovalPromptState(
+                sessionID: prompt.identity.storedID,
+                pending: PendingApproval(
+                    approvalId: prompt.identity.requestID,
+                    command: prompt.command,
+                    description: prompt.description,
+                    patternKey: prompt.patternKey,
+                    patternKeys: prompt.patternKeys
+                ),
+                pendingCount: 1
+            ),
+            isResponding: isResponding,
+            errorMessage: errorMessage,
+            onChoice: { choice in
+                guard let directChoice = GatewayApprovalChoice(rawValue: choice.rawValue) else { return }
+                onChoice(directChoice)
+            },
+            onSkipAll: {},
+            allowedChoices: Set(prompt.choices.compactMap { ApprovalChoice(rawValue: $0.rawValue) }),
+            allowsSkipAll: false
+        )
+    }
+
     var body: some View {
         ZStack {
             Color.black.opacity(colorScheme == .dark ? 0.38 : 0.22)

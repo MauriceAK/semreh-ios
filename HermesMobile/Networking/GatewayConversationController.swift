@@ -49,6 +49,13 @@ final class GatewayConversationController {
     /// One renderer-facing blocking prompt. It is transient and always scoped
     /// to the exact server/runtime/connection/request identity below.
     private(set) var pendingBlockingPrompt: GatewayBlockingPrompt?
+    /// Native direct-gateway prompts. Approval requests are retained in arrival
+    /// order because Hermes may have more than one live request; sensitive
+    /// requests use the same identity-keyed queue and expose only the first.
+    private(set) var pendingApprovalPrompt: GatewayApprovalPrompt?
+    private(set) var pendingSecretPrompt: GatewaySecretPrompt?
+    private(set) var pendingSudoPrompt: GatewaySudoPrompt?
+    private(set) var blockingInteractionResponseInFlight = false
     let profile: String
     var onBinding: ((GatewaySessionBinding) -> Void)?
     var onCanonicalID: ((String) -> Void)?
@@ -89,12 +96,23 @@ final class GatewayConversationController {
     private enum BlockingClearReason: Equatable { case terminal, expiry }
     private var blockingClear: (identity: GatewayBlockingPromptIdentity, reason: BlockingClearReason)?
     private var blockingResponseInFlight = false
+    private enum InteractionClearReason: Equatable { case terminal, expiry }
+    private enum SensitiveInteractionKind: String { case secret, sudo }
+    private var approvalPromptQueue: [GatewayApprovalPrompt] = []
+    private var secretPromptQueue: [GatewaySecretPrompt] = []
+    private var sudoPromptQueue: [GatewaySudoPrompt] = []
+    private var approvalClear: [(GatewayBlockingPromptIdentity, InteractionClearReason)] = []
+    private var secretClear: [(GatewayBlockingPromptIdentity, InteractionClearReason)] = []
+    private var sudoClear: [(GatewayBlockingPromptIdentity, InteractionClearReason)] = []
+    private var blockingInteractionInFlightIdentity: GatewayBlockingPromptIdentity?
     private var recoveryMarker: DirectGatewayAttachmentRecoveryMarker?
     private var recoveryMarkerLoadFailed = false
     private var recoveryStageUnknown = false
     private var locallyConfirmedRecoveryStageCount = 0
     private var recoveryDetachPaths: [String] = []
     @ObservationIgnored private var recoveryCleanupTask: Task<Void, Never>?
+    @ObservationIgnored private var recoveryCleanupOwnerToken: UUID?
+    @ObservationIgnored private var recoveryCleanupOwnerID: UUID?
     private var latestEventSequence = -1
     private struct RecoveryPromptObservation: Sendable {
         let token: UUID
@@ -1376,6 +1394,15 @@ final class GatewayConversationController {
         pendingReasoningEffort = nil
         pendingBlockingPrompt = nil
         blockingClear = nil
+        approvalPromptQueue.removeAll()
+        pendingApprovalPrompt = nil
+        secretPromptQueue.removeAll()
+        pendingSecretPrompt = nil
+        sudoPromptQueue.removeAll()
+        pendingSudoPrompt = nil
+        approvalClear.removeAll()
+        secretClear.removeAll()
+        sudoClear.removeAll()
         ambiguousReasoningEffort = nil
         reasoningMutationTail?.cancel()
         attachmentTask?.cancel()
@@ -1557,6 +1584,234 @@ final class GatewayConversationController {
         }
     }
 
+    // MARK: - Direct blocking interactions
+
+    /// Responds to the exact approval card that the caller rendered. Approval
+    /// cards are queued by full identity, so a response can finish after a
+    /// later card arrives without accidentally acknowledging that later card.
+    func respondToApproval(
+        _ choice: GatewayApprovalChoice,
+        expectedIdentity: GatewayBlockingPromptIdentity
+    ) async throws -> GatewayBlockingResponse {
+        guard !disposed else { throw DirectSessionError.stopped }
+        guard !blockingInteractionResponseInFlight else { throw GatewayBlockingError.responseInFlight }
+        blockingInteractionResponseInFlight = true
+        blockingInteractionInFlightIdentity = expectedIdentity
+        defer {
+            blockingInteractionResponseInFlight = false
+            blockingInteractionInFlightIdentity = nil
+        }
+        guard let captured = approvalPromptQueue.first(where: { $0.identity == expectedIdentity }),
+              captured.choices.contains(choice),
+              let capturedBinding = binding else {
+            throw GatewayBlockingContractError.staleInteraction
+        }
+        let capturedLifecycle = lifecycle
+        try await ensureBinding(create: [:])
+        guard isCurrentInteraction(expectedIdentity, binding: capturedBinding, lifecycle: capturedLifecycle),
+              approvalPromptQueue.contains(where: { $0.identity == expectedIdentity }) else {
+            throw GatewayBlockingContractError.staleInteraction
+        }
+        let result = try await runtime.request("approval.respond", parameters: {
+            guard self.isCurrentInteraction(expectedIdentity, binding: capturedBinding, lifecycle: capturedLifecycle),
+                  self.approvalPromptQueue.contains(where: { $0.identity == expectedIdentity }) else {
+                throw GatewayBlockingContractError.staleInteraction
+            }
+            return [
+                "session_id": .string(expectedIdentity.runtimeID),
+                "profile": .string(expectedIdentity.profile),
+                "request_id": .string(expectedIdentity.requestID),
+                "choice": .string(choice.rawValue)
+            ]
+        })
+        guard isCurrentInteraction(expectedIdentity, binding: capturedBinding, lifecycle: capturedLifecycle),
+              approvalPromptQueue.contains(where: { $0.identity == expectedIdentity }) ||
+              approvalClear.contains(where: { $0.0 == expectedIdentity }) else {
+            throw GatewayBlockingContractError.staleInteraction
+        }
+        if approvalClear.contains(where: { $0.0 == expectedIdentity && $0.1 == .expiry }) {
+            return .expired
+        }
+        guard let resolved = positiveIntegral(result?.gatewayFields["resolved"]) else {
+            throw GatewayBlockingContractError.approvalNotResolved
+        }
+        _ = resolved
+        clearApproval(expectedIdentity, reason: .terminal)
+        // The first approval response does not prove the queue is empty. Stock
+        // approval.pending is authoritative for the next card and may omit
+        // choices, which the shared model decoder derives safely.
+        await refreshApprovalQueue(expectedIdentity: expectedIdentity, binding: capturedBinding, lifecycle: capturedLifecycle)
+        return .accepted
+    }
+
+    func cancelSecret(expectedIdentity: GatewayBlockingPromptIdentity) async throws -> GatewayBlockingResponse {
+        try await cancelSensitive(.secret, expectedIdentity: expectedIdentity)
+    }
+
+    func cancelSudo(expectedIdentity: GatewayBlockingPromptIdentity) async throws -> GatewayBlockingResponse {
+        try await cancelSensitive(.sudo, expectedIdentity: expectedIdentity)
+    }
+
+    private func cancelSensitive(
+        _ kind: SensitiveInteractionKind,
+        expectedIdentity: GatewayBlockingPromptIdentity
+    ) async throws -> GatewayBlockingResponse {
+        guard !disposed else { throw DirectSessionError.stopped }
+        guard !blockingInteractionResponseInFlight else { throw GatewayBlockingError.responseInFlight }
+        blockingInteractionResponseInFlight = true
+        blockingInteractionInFlightIdentity = expectedIdentity
+        defer {
+            blockingInteractionResponseInFlight = false
+            blockingInteractionInFlightIdentity = nil
+        }
+        guard containsSensitive(kind, identity: expectedIdentity), let capturedBinding = binding else {
+            throw GatewayBlockingContractError.staleInteraction
+        }
+        let capturedLifecycle = lifecycle
+        try await ensureBinding(create: [:])
+        guard isCurrentInteraction(expectedIdentity, binding: capturedBinding, lifecycle: capturedLifecycle),
+              containsSensitive(kind, identity: expectedIdentity) else {
+            throw GatewayBlockingContractError.staleInteraction
+        }
+        let method = "\(kind.rawValue).respond"
+        let result: JSONValue?
+        do {
+            result = try await runtime.request(method, parameters: {
+                guard self.isCurrentInteraction(expectedIdentity, binding: capturedBinding, lifecycle: capturedLifecycle),
+                      self.containsSensitive(kind, identity: expectedIdentity) else {
+                    throw GatewayBlockingContractError.staleInteraction
+                }
+                return [
+                    "session_id": .string(expectedIdentity.runtimeID),
+                    "profile": .string(expectedIdentity.profile),
+                    "request_id": .string(expectedIdentity.requestID),
+                    kind == .secret ? "value" : "password": .string("")
+                ]
+            })
+        } catch {
+            throw error
+        }
+        guard isCurrentInteraction(expectedIdentity, binding: capturedBinding, lifecycle: capturedLifecycle),
+              containsSensitive(kind, identity: expectedIdentity) || sensitiveClearContains(kind, identity: expectedIdentity) else {
+            throw GatewayBlockingContractError.staleInteraction
+        }
+        if sensitiveClearContains(kind, identity: expectedIdentity, reason: .expiry) {
+            return .expired
+        }
+        guard result?.gatewayFields["status"]?.gatewayString == "ok" else {
+            if result?.gatewayFields["status"]?.gatewayString == "expired" {
+                clearSensitive(kind, expectedIdentity: expectedIdentity, reason: .expiry)
+                return .expired
+            }
+            throw GatewayBlockingContractError.invalidResponse
+        }
+        clearSensitive(kind, expectedIdentity: expectedIdentity, reason: .terminal)
+        return .accepted
+    }
+
+    private func isCurrentInteraction(
+        _ identity: GatewayBlockingPromptIdentity,
+        binding: GatewaySessionBinding,
+        lifecycle: Int
+    ) -> Bool {
+        !disposed && self.binding == binding && self.lifecycle == lifecycle &&
+        runtime.state == .ready &&
+        runtime.connectionGeneration == identity.connectionGeneration &&
+        runtime.origin.absoluteString == identity.origin &&
+        binding.runtimeID == identity.runtimeID && binding.storedID == identity.storedID &&
+        binding.profile == identity.profile
+    }
+
+    private func positiveIntegral(_ value: JSONValue?) -> Int? {
+        guard case .number(let number) = value, number.isFinite, number >= 1,
+              number.rounded(.towardZero) == number,
+              let value = Int(exactly: number), value > 0 else { return nil }
+        return value
+    }
+
+    private func containsSensitive(_ kind: SensitiveInteractionKind, identity: GatewayBlockingPromptIdentity) -> Bool {
+        switch kind {
+        case .secret: return secretPromptQueue.contains { $0.identity == identity }
+        case .sudo: return sudoPromptQueue.contains { $0.identity == identity }
+        }
+    }
+
+    private func sensitiveClearContains(_ kind: SensitiveInteractionKind, identity: GatewayBlockingPromptIdentity) -> Bool {
+        sensitiveClearContains(kind, identity: identity, reason: nil)
+    }
+
+    private func sensitiveClearContains(
+        _ kind: SensitiveInteractionKind,
+        identity: GatewayBlockingPromptIdentity,
+        reason: InteractionClearReason?
+    ) -> Bool {
+        switch kind {
+        case .secret:
+            return secretClear.contains { $0.0 == identity && (reason == nil || $0.1 == reason) }
+        case .sudo:
+            return sudoClear.contains { $0.0 == identity && (reason == nil || $0.1 == reason) }
+        }
+    }
+
+    private func clearApproval(_ identity: GatewayBlockingPromptIdentity, reason: InteractionClearReason) {
+        approvalPromptQueue.removeAll { $0.identity == identity }
+        pendingApprovalPrompt = approvalPromptQueue.first
+        approvalClear.removeAll()
+        approvalClear.append((identity, reason))
+    }
+
+    private func clearSensitive(_ kind: SensitiveInteractionKind, expectedIdentity: GatewayBlockingPromptIdentity, reason: InteractionClearReason) {
+        switch kind {
+        case .secret:
+            secretPromptQueue.removeAll { $0.identity == expectedIdentity }
+            pendingSecretPrompt = secretPromptQueue.first
+            secretClear.removeAll()
+            secretClear.append((expectedIdentity, reason))
+        case .sudo:
+            sudoPromptQueue.removeAll { $0.identity == expectedIdentity }
+            pendingSudoPrompt = sudoPromptQueue.first
+            sudoClear.removeAll()
+            sudoClear.append((expectedIdentity, reason))
+        }
+    }
+
+    private func refreshApprovalQueue(expectedIdentity: GatewayBlockingPromptIdentity, binding: GatewaySessionBinding, lifecycle: Int) async {
+        guard isCurrentInteraction(expectedIdentity, binding: binding, lifecycle: lifecycle) else { return }
+        do {
+            let result = try await runtime.request("approval.pending", parameters: {
+                guard self.isCurrentInteraction(expectedIdentity, binding: binding, lifecycle: lifecycle) else {
+                    throw GatewayBlockingContractError.staleInteraction
+                }
+                return ["session_id": .string(binding.runtimeID), "profile": .string(binding.profile)]
+            })
+            guard isCurrentInteraction(expectedIdentity, binding: binding, lifecycle: lifecycle) else { return }
+            guard let rawApprovals = result?.gatewayFields["approvals"],
+                  case .array(let values) = rawApprovals else {
+                throw GatewayBlockingContractError.malformedApproval
+            }
+            var prompts: [GatewayApprovalPrompt] = []
+            for value in values {
+                guard let requestID = value.gatewayFields["request_id"]?.gatewayString else {
+                    throw GatewayBlockingContractError.malformedApproval
+                }
+                let identity = try blockingIdentity(requestID: requestID)
+                let prompt = try GatewayApprovalPrompt.decode(payload: value, identity: identity)
+                if !prompts.contains(where: { $0.identity == prompt.identity }) { prompts.append(prompt) }
+            }
+            let newlyArrived = approvalPromptQueue.filter { existing in
+                !prompts.contains(where: { $0.identity == existing.identity })
+            }
+            approvalPromptQueue = prompts + newlyArrived
+            pendingApprovalPrompt = approvalPromptQueue.first
+            approvalClear.removeAll { $0.0 == expectedIdentity }
+        } catch GatewayBlockingContractError.staleInteraction {
+            // A newer binding owns the interaction; never mutate its queue.
+        } catch {
+            guard isCurrentInteraction(expectedIdentity, binding: binding, lifecycle: lifecycle) else { return }
+            onError?(error)
+        }
+    }
+
     private func adopt(_ binding: GatewaySessionBinding) throws {
         guard !disposed else { throw DirectSessionError.stopped }
         self.binding = binding
@@ -1568,6 +1823,18 @@ final class GatewayConversationController {
         if previousRecoveryIdentity == nil {
             refreshRecoveryMarker()
         } else if previousRecoveryIdentity?.runtimeID != binding.runtimeID {
+            // A cleanup awaiting the old runtime must not quarantine the newly
+            // adopted runtime. Explicit reset owns its marker independently and
+            // is allowed to retain it until fresh-runtime proof completes.
+            if recoveryCleanupTask != nil {
+                recoveryCleanupTask?.cancel()
+                recoveryCleanupTask = nil
+                recoveryCleanupOwnerToken = nil
+                recoveryCleanupOwnerID = nil
+                if !attachmentStageInFlight && !attachmentRemovalInFlight {
+                    attachmentRecoveryIsBusy = false
+                }
+            }
             // A fresh stock runtime has an empty in-memory attachment queue;
             // a marker keyed to the old runtime is not authority for it.
             if !attachmentRecoveryIsBusy {
@@ -1578,6 +1845,7 @@ final class GatewayConversationController {
                 unresolvedAttachmentMarkerToken = nil
                 locallyConfirmedRecoveryStageCount = 0
                 recoveryDetachPaths.removeAll()
+                recoveryPromptObservation = nil
             }
             refreshRecoveryMarker()
         } else if previousRecoveryIdentity?.storedID != binding.storedID {
@@ -1740,6 +2008,7 @@ final class GatewayConversationController {
     }
 
     private func restoreBlockingPrompt(from result: JSONValue?) {
+        restoreDirectBlockingPrompts(from: result)
         blockingClear = nil
         guard let fields = result?.gatewayFields else {
             pendingBlockingPrompt = nil
@@ -1767,6 +2036,34 @@ final class GatewayConversationController {
             pendingBlockingPrompt = nil
             onError?(error)
         }
+    }
+
+    private func restoreDirectBlockingPrompts(from result: JSONValue?) {
+        approvalPromptQueue.removeAll()
+        pendingApprovalPrompt = nil
+        pendingSecretPrompt = nil
+        pendingSudoPrompt = nil
+        secretPromptQueue.removeAll()
+        sudoPromptQueue.removeAll()
+        approvalClear.removeAll()
+        secretClear.removeAll()
+        sudoClear.removeAll()
+        guard let fields = result?.gatewayFields else { return }
+        if let pending = fields["pending_approval"], pending != .null {
+            do {
+                guard let requestID = pending.gatewayFields["request_id"]?.gatewayString else {
+                    throw GatewayBlockingContractError.malformedApproval
+                }
+                let identity = try blockingIdentity(requestID: requestID)
+                let prompt = try GatewayApprovalPrompt.decode(payload: pending, identity: identity)
+                approvalPromptQueue = [prompt]
+                pendingApprovalPrompt = prompt
+            } catch {
+                onError?(error)
+            }
+        }
+        // Stock resume intentionally does not restore secret/sudo requests;
+        // never fabricate a sensitive prompt from stale client state.
     }
 
     private func handleBlockingRequest(_ event: HermesGatewayEvent) {
@@ -1807,6 +2104,115 @@ final class GatewayConversationController {
         }
         blockingClear = (pending.identity, .terminal)
         pendingBlockingPrompt = nil
+    }
+
+    private func handleApprovalRequest(_ event: HermesGatewayEvent) {
+        guard let requestID = event.payload?.gatewayFields["request_id"]?.gatewayString else {
+            onError?(GatewayBlockingContractError.malformedApproval)
+            return
+        }
+        do {
+            let identity = try blockingIdentity(requestID: requestID)
+            let prompt = try GatewayApprovalPrompt.decode(payload: event.payload, identity: identity)
+            if let index = approvalPromptQueue.firstIndex(where: { $0.identity == identity }) {
+                approvalPromptQueue[index] = prompt
+            } else {
+                approvalPromptQueue.append(prompt)
+            }
+            pendingApprovalPrompt = approvalPromptQueue.first
+            approvalClear.removeAll { $0.0 == identity }
+        } catch { onError?(error) }
+    }
+
+    private func handleSecretRequest(_ event: HermesGatewayEvent) {
+        guard let requestID = event.payload?.gatewayFields["request_id"]?.gatewayString else {
+            onError?(GatewayBlockingContractError.malformedSecret)
+            return
+        }
+        do {
+            let identity = try blockingIdentity(requestID: requestID)
+            let prompt = try GatewaySecretPrompt.decode(payload: event.payload, identity: identity)
+            if let index = secretPromptQueue.firstIndex(where: { $0.identity == identity }) {
+                secretPromptQueue[index] = prompt
+            } else {
+                secretPromptQueue.append(prompt)
+            }
+            pendingSecretPrompt = secretPromptQueue.first
+            secretClear.removeAll { $0.0 == identity }
+        } catch { onError?(error) }
+    }
+
+    private func handleSudoRequest(_ event: HermesGatewayEvent) {
+        guard let requestID = event.payload?.gatewayFields["request_id"]?.gatewayString else {
+            onError?(GatewayBlockingContractError.malformedSudo)
+            return
+        }
+        do {
+            let identity = try blockingIdentity(requestID: requestID)
+            let prompt = try GatewaySudoPrompt.decode(payload: event.payload, identity: identity)
+            if let index = sudoPromptQueue.firstIndex(where: { $0.identity == identity }) {
+                sudoPromptQueue[index] = prompt
+            } else {
+                sudoPromptQueue.append(prompt)
+            }
+            pendingSudoPrompt = sudoPromptQueue.first
+            sudoClear.removeAll { $0.0 == identity }
+        } catch { onError?(error) }
+    }
+
+    private func handleSensitiveExpiry(_ kind: SensitiveInteractionKind, event: HermesGatewayEvent) {
+        guard let requestID = event.payload?.gatewayFields["request_id"]?.gatewayString else {
+            onError?(kind == .secret ? GatewayBlockingContractError.malformedSecret : GatewayBlockingContractError.malformedSudo)
+            return
+        }
+        let identity: GatewayBlockingPromptIdentity?
+        switch kind {
+        case .secret: identity = secretPromptQueue.first(where: { $0.identity.requestID == requestID })?.identity
+        case .sudo: identity = sudoPromptQueue.first(where: { $0.identity.requestID == requestID })?.identity
+        }
+        guard let identity, identity.runtimeID == (event.sessionID ?? "") else { return }
+        clearSensitive(kind, expectedIdentity: identity, reason: .expiry)
+    }
+
+    private func clearDirectBlockingForTerminal(_ event: HermesGatewayEvent) {
+        guard let runtimeID = event.sessionID else { return }
+        let inFlight = blockingInteractionInFlightIdentity
+        let inFlightCategory = inFlight.flatMap { self.inFlightKind($0) }
+        approvalPromptQueue.removeAll { $0.identity.runtimeID == runtimeID }
+        pendingApprovalPrompt = approvalPromptQueue.first
+        secretPromptQueue.removeAll { $0.identity.runtimeID == runtimeID }
+        pendingSecretPrompt = secretPromptQueue.first
+        sudoPromptQueue.removeAll { $0.identity.runtimeID == runtimeID }
+        pendingSudoPrompt = sudoPromptQueue.first
+        // Only the request whose RPC has already crossed the transport boundary
+        // gets a tombstone. Other queued prompts are terminally gone and must
+        // not reappear after the turn completes.
+        if let inFlight, inFlight.runtimeID == runtimeID {
+            switch inFlightCategory {
+            case .approval:
+                approvalClear = [(inFlight, .terminal)]
+            case .secret:
+                secretClear = [(inFlight, .terminal)]
+            case .sudo:
+                sudoClear = [(inFlight, .terminal)]
+            case nil:
+                break
+            }
+        }
+    }
+
+    private enum InFlightInteractionKind { case approval, secret, sudo }
+
+    private func inFlightKind(_ identity: GatewayBlockingPromptIdentity) -> InFlightInteractionKind? {
+        if approvalClear.contains(where: { $0.0 == identity }) ||
+            approvalPromptQueue.contains(where: { $0.identity == identity }) { return .approval }
+        if secretClear.contains(where: { $0.0 == identity }) ||
+            secretPromptQueue.contains(where: { $0.identity == identity }) { return .secret }
+        if sudoClear.contains(where: { $0.0 == identity }) ||
+            sudoPromptQueue.contains(where: { $0.identity == identity }) { return .sudo }
+        // During terminal handling the queue has just been removed, so infer
+        // the method from the request's currently tracked prompt kind only.
+        return nil
     }
 
     private func schedulePendingReasoningDrain() {
@@ -1955,15 +2361,31 @@ final class GatewayConversationController {
               recoveryMarker?.token == observation.token,
               !disposed,
               runState == .idle else { return }
+        let ownerID = UUID()
+        recoveryCleanupOwnerToken = observation.token
+        recoveryCleanupOwnerID = ownerID
         recoveryCleanupTask = Task { [weak self] in
             guard let self else { return }
-            await self.performRecoveryCleanup(observation: observation)
+            await self.performRecoveryCleanup(observation: observation, ownerID: ownerID)
         }
     }
 
-    private func performRecoveryCleanup(observation: RecoveryPromptObservation) async {
-        defer { recoveryCleanupTask = nil }
+    private func performRecoveryCleanup(observation: RecoveryPromptObservation, ownerID: UUID) async {
+        let ownerToken = observation.token
+        var ownsBusy = false
+        defer {
+            if recoveryCleanupOwnerID == ownerID {
+                recoveryCleanupTask = nil
+                recoveryCleanupOwnerToken = nil
+                recoveryCleanupOwnerID = nil
+                if ownsBusy {
+                    attachmentRecoveryIsBusy = false
+                }
+            }
+        }
         guard !disposed,
+              recoveryCleanupOwnerID == ownerID,
+              recoveryCleanupOwnerToken == ownerToken,
               !attachmentRecoveryIsBusy,
               let marker = recoveryMarker,
               marker.token == observation.token,
@@ -1973,7 +2395,7 @@ final class GatewayConversationController {
               runtime.state == .ready,
               runState == .idle else { return }
         attachmentRecoveryIsBusy = true
-        defer { attachmentRecoveryIsBusy = false }
+        ownsBusy = true
         do {
             let status = try await runtime.request("session.status", parameters: {
                 guard !self.disposed,
@@ -2028,6 +2450,14 @@ final class GatewayConversationController {
             try clearRecoveryMarker(marker)
             recoveryPromptObservation = nil
         } catch {
+            guard !disposed,
+                  recoveryCleanupOwnerID == ownerID,
+                  recoveryCleanupOwnerToken == ownerToken,
+                  lifecycle == observation.lifecycle,
+                  binding == observation.binding,
+                  runtime.origin == observation.origin,
+                  runtime.connectionGeneration == observation.connectionGeneration,
+                  recoveryMarker?.token == marker.token else { return }
             recoveryStageUnknown = true
             attachmentRecoveryNeedsReset = true
             if !Task.isCancelled { onError?(error) }
@@ -2039,6 +2469,12 @@ final class GatewayConversationController {
         guard !disposed else { return }
         if event.method == "local", event.type == "transport.closed" {
             if runState != .idle { runState = .deliveryUnknown }
+            approvalPromptQueue.removeAll()
+            pendingApprovalPrompt = nil
+            secretPromptQueue.removeAll()
+            pendingSecretPrompt = nil
+            sudoPromptQueue.removeAll()
+            pendingSudoPrompt = nil
             return
         }
         if event.type == "sessions.changed" {
@@ -2055,6 +2491,16 @@ final class GatewayConversationController {
             handleBlockingRequest(event)
         case "clarify.expire":
             handleBlockingExpiry(event)
+        case "approval.request":
+            handleApprovalRequest(event)
+        case "secret.request":
+            handleSecretRequest(event)
+        case "sudo.request":
+            handleSudoRequest(event)
+        case "secret.expire":
+            handleSensitiveExpiry(.secret, event: event)
+        case "sudo.expire":
+            handleSensitiveExpiry(.sudo, event: event)
         case "message.start":
             turnEpoch &+= 1
             terminalReceipt = nil
@@ -2066,6 +2512,7 @@ final class GatewayConversationController {
             // other `error` notifications are not assumed to end the turn.
             let message = event.payload?.gatewayFields["message"]?.gatewayString
             if message == "Turn cancelled before the agent was ready" || message == "Session no longer running before the agent was ready" {
+                clearDirectBlockingForTerminal(event)
                 noteRecoveryTerminal(event)
                 terminalReceipt = "\(event.connectionGeneration ?? -1):\(event.sequence ?? -1)"
                 if runState != .stopping {
@@ -2076,6 +2523,7 @@ final class GatewayConversationController {
             }
         case "message.complete":
             clearBlockingPromptForTerminal(event)
+            clearDirectBlockingForTerminal(event)
             noteRecoveryTerminal(event)
             let receipt = "\(event.connectionGeneration ?? -1):\(event.sequence ?? -1)"
             guard terminalReceipt != receipt else { return }

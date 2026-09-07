@@ -177,6 +177,20 @@ def _event_diagnostics(probe: Probe) -> dict:
     return {"event_counts": counts, "tool_events": tool_events}
 
 
+async def _expect_stale_approval(
+    probe: Probe, session_id: str, request_id: str
+) -> dict:
+    """Assert the pinned stock terminal approval response is a no-op."""
+    result = await probe.rpc("approval.respond", {
+        "session_id": session_id,
+        "request_id": request_id,
+        "choice": "deny",
+    })
+    if not isinstance(result, dict) or result.get("resolved") != 0:
+        raise AssertionError("repeated approval response did not return resolved=0")
+    return {"resolved_count": 0}
+
+
 async def _exercise(credentials: dict, evidence: dict, *, runtime: Path,
                     base: str, ws_base: str, origin: str,
                     tools_cwd: Path) -> None:
@@ -245,6 +259,10 @@ async def _exercise(credentials: dict, evidence: dict, *, runtime: Path,
                 raise AssertionError("approval denial did not resolve exactly one request")
             evidence["phase"] = "approval.terminal"
             await _wait_terminal(probe, approval_runtime, approval_start)
+            evidence["phase"] = "approval.stale-response"
+            stale_approval = await _expect_stale_approval(
+                probe, approval_runtime, approval_payload["request_id"]
+            )
             evidence["checks"].append({
                 "name": "approval.request -> pending -> deny",
                 "result": _request_shape(
@@ -258,6 +276,7 @@ async def _exercise(credentials: dict, evidence: dict, *, runtime: Path,
                     if isinstance(resumed_pending.get("choices"), list) else 0,
                     "resolved_count": 1,
                     "terminal": True,
+                    "duplicate_response_resolved_count": stale_approval["resolved_count"],
                 },
             })
 
@@ -287,12 +306,21 @@ async def _exercise(credentials: dict, evidence: dict, *, runtime: Path,
                 raise AssertionError("empty secret response did not return status=ok")
             evidence["phase"] = "secret.terminal"
             await _wait_terminal(probe, secret_runtime, secret_start)
+            evidence["phase"] = "secret.stale-response"
+            stale_secret = await probe.rpc("secret.respond", {
+                "session_id": secret_runtime,
+                "request_id": secret_payload["request_id"],
+                "value": "",
+            })
+            if not isinstance(stale_secret, dict) or stale_secret.get("status") != "expired":
+                raise AssertionError("repeated secret response did not return status=expired")
             evidence["checks"].append({
                 "name": "secret.request -> empty cancellation",
                 "result": secret_shape | {
                     "empty_value_submitted": True,
                     "response_status_ok": True,
                     "terminal": True,
+                    "duplicate_response_status": "expired",
                 },
             })
         finally:

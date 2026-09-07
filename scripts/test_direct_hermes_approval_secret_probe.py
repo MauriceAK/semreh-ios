@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 import json
 import importlib.util
@@ -197,6 +198,28 @@ class ApprovalSecretFixtureTests(unittest.TestCase):
             ("semreh-fixture-empty-secret",), {"preprocess": False},
         ))
         self.assertEqual(secret, "fixture-skill-result")
+
+    def test_stale_approval_response_requires_zero_resolution(self) -> None:
+        class FakeProbe:
+            def __init__(self, resolved: int) -> None:
+                self.resolved = resolved
+
+            async def rpc(self, method: str, params: dict) -> dict:
+                self.method = method
+                self.params = params
+                return {"resolved": self.resolved}
+
+        good = FakeProbe(0)
+        result = asyncio.run(probe._expect_stale_approval(
+            good, "runtime", "opaque"
+        ))
+        self.assertEqual(result, {"resolved_count": 0})
+        self.assertEqual(good.method, "approval.respond")
+
+        with self.assertRaisesRegex(AssertionError, "resolved=0"):
+            asyncio.run(probe._expect_stale_approval(
+                FakeProbe(1), "runtime", "opaque"
+            ))
 
 
 if __name__ == "__main__":

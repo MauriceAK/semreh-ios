@@ -43,6 +43,13 @@ this sheet does not invent contracts or mark unexecuted checks passed.
   capture. Disable tool-search deferral only in this deterministic fixture so
   its two already-authorized synthetic tool schemas are directly advertised;
   do not broaden toolsets or alter app/backend production behavior.
+- September7: pinned approval response with no matching pending request returns
+  `resolved: 0`, not an expiry RPC code. Keep the card/error rather than inventing
+  success or expiry. Sensitive explicit `status: expired` remains supported.
+- Next recovery check uses controller/runtime recreation and exact canonical
+  history to prove a run completed while its client owner was absent. This is
+  useful native recovery evidence, but does not replace literal app-kill or phone
+  background gates. No production test hook or new backend tool is needed.
 
 ## Work packages
 
@@ -62,6 +69,11 @@ this sheet does not invent contracts or mark unexecuted checks passed.
     connectivity errors. No prompt resend, replay, orphan config or notification
     expansion. Root review, independent Luna review and signed tests passed;
     actual scene-phase delivery/mobile continuity remain S3-R2/V/P gates.
+  - [x] **R1b — Completed-away native connection recovery.** Stock HTTPS smoke
+    completed-away-live-v1 passed1/0/0: accepted delayed turn, disposed controller,
+    stopped original socket, waited for durable completion, connected fresh runtime
+    and reopened same stored session. Exact baseline prefix, exact-once turn and
+    idle recovered transcript verified. Not literal app kill, host restart or phone.
 - [ ] **S3-R2 — Mobile/host lifecycle and orphan policy.** App background, kill,
   host restart and connectivity loss. Select finite grace from evidence; no silent
   personal-host configuration change. If zero is proposed, demonstrate cleanup
@@ -91,6 +103,12 @@ this sheet does not invent contracts or mark unexecuted checks passed.
       full nativev2 passed2067/0fail/7intentional skips. Root inspected screenshots
       and corrected small-phone keyboard clipping. Approval/sudo/secret, mobile
       recovery and physical blocking acceptance remain open; this does not close B.
+    - [x] **B2c — Native approval/sensitive cancellation checkpoint.** Identity-scoped
+      queues, exact advertised approval choice, positive resolution only, secret/
+      sudo explicit-empty responses, scoped expiry/errors and no legacy writes.
+      Production UIv3 passed approval denial and secret cancellation/terminalACK;
+      full blocking-recovery-v1 passed2172/0fail/9opt-in skips. Sudo remains
+      source/unit-only; mobile, multi-client and physical gates remain open.
   - [ ] **B3 — Native transient prompt UI.** Secure input stays memory-only;
     reconstruct outstanding requests after resume, clear only matching expiry,
     and prove no secret persistence or diagnostic exposure.

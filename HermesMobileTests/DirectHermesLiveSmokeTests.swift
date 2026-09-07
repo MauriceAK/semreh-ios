@@ -1171,6 +1171,227 @@ final class DirectHermesLiveSmokeTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testOptInHostedSlice3CompletedWhileAway() async throws {
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("Slice 3 completed-away smoke is simulator-only.")
+        #endif
+
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SEMREH_SLICE1_LIVE"] == "1",
+              environment["SEMREH_SLICE1_HTTPS"] == "1",
+              environment["SEMREH_SLICE3_COMPLETED_AWAY_NATIVE"] == "1",
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == Self.defaultCredentialsPath,
+              environment["SEMREH_SLICE2_STOCK_BACKEND_SHA"] == Self.stockBackendSHA,
+              environment["SEMREH_SLICE2_TOOL_CWD"] == Self.stockToolCwd
+        else {
+            throw XCTSkip("Slice 3 completed-away smoke is opt-in for the pinned stock HTTPS fixture.")
+        }
+
+        let credentials = try await stage("slice3 completed-away credentials") {
+            try Self.readCredentials()
+        }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpAdditionalHeaders = [:]
+        configuration.httpShouldSetCookies = true
+        configuration.httpCookieAcceptPolicy = .always
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let api = APIClient(
+            baseURL: HostedTransport.https.baseURL,
+            session: session,
+            publicMediaSession: session,
+            customHeaderProvider: { [] }
+        )
+
+        var runtime: HermesServerRuntime?
+        var initial: GatewayConversationController?
+        var reopened: GatewayConversationController?
+        var loggedIn = false
+        var cleanupRuntimeID: String?
+        let events = LiveGatewayEventCapture()
+        let seedPrompt = "SEMREH_SLICE1_PROMPT"
+        let delayedPrompt = "SEMREH_INTERRUPT_FIXTURE SEMREH_RECOVERY_AFTER_ACCEPT"
+        let expectedAck = "SEMREH_SLICE1_ACK"
+        let stockFixtureCreate: [String: JSONValue] = [
+            "cwd": .string(Self.stockToolCwd),
+            "model": .string("semreh-fixture"),
+            "provider": .string("custom")
+        ]
+
+        do {
+            let status = try await stage("slice3 completed-away status") { try await api.directStatus() }
+            guard status.authRequired == true else { throw LiveSmokeInvariant.failed }
+            let providers = try await stage("slice3 completed-away providers") { try await api.directProviders() }
+            guard providers.providers?.contains(where: { $0.name == "basic" && $0.supportsPassword == true }) == true else {
+                throw LiveSmokeInvariant.failed
+            }
+            let login = try await stage("slice3 completed-away login") {
+                try await api.directPasswordLogin(username: credentials.username, password: credentials.password)
+            }
+            guard login.ok == true else { throw LiveSmokeInvariant.failed }
+            loggedIn = true
+            try await stage("slice3 completed-away protected probe") { try await api.directProtectedProbe() }
+
+            let serverRuntime = try await stage("slice3 completed-away runtime init") {
+                try HermesServerRuntime(origin: HostedTransport.https.baseURL, client: api)
+            }
+            runtime = serverRuntime
+            try await stage("slice3 completed-away runtime connect") { try await serverRuntime.connect() }
+
+            let first = GatewayConversationController(
+                runtime: serverRuntime,
+                client: api,
+                storedID: nil,
+                profile: "default"
+            )
+            first.onEvent = { event in Task { await events.append(event) } }
+            first.onBinding = { binding in cleanupRuntimeID = binding.runtimeID }
+            initial = first
+            try await stage("slice3 completed-away seed submit") {
+                try await first.submit(seedPrompt, create: stockFixtureCreate)
+            }
+            let seedRuntimeID = try await stage("slice3 completed-away seed binding") {
+                try XCTUnwrap(first.binding?.runtimeID)
+            }
+            cleanupRuntimeID = seedRuntimeID
+            let seedTerminal = try await stage("slice3 completed-away seed terminal") {
+                try await events.wait { event in
+                    event.sessionID == seedRuntimeID
+                        && event.type == "message.complete"
+                        && Self.stringValue(Self.objectValue(event.payload)?["status"]) == "complete"
+                }
+            }
+            let storedID = try await stage("slice3 completed-away durable identity") {
+                try XCTUnwrap(first.storedID)
+            }
+            let baseline = try await stage("slice3 completed-away baseline transcript") {
+                try await api.directSessionMessages(sessionID: storedID, profile: "default")
+            }
+            try assertRecoveryTranscript(baseline, users: [seedPrompt], assistant: expectedAck)
+
+            try await stage("slice3 completed-away delayed submit") {
+                try await first.submit(delayedPrompt, create: stockFixtureCreate)
+            }
+            _ = try await stage("slice3 completed-away accepted running") {
+                try await events.wait { event in
+                    event.sessionID == seedRuntimeID
+                        && event.type == "message.start"
+                        && (event.sequence ?? -1) > (seedTerminal.sequence ?? -1)
+                }
+            }
+
+            // The controller is the app-owned observer. Dispose it without a
+            // session.close. The stock session must finish while this owner
+            // is absent; no prompt is resent by the test.
+            try await stage("slice3 completed-away controller disposal") { try await first.dispose() }
+            initial = nil
+
+            let replacementRuntime = try await stage("slice3 completed-away replacement runtime init") {
+                try HermesServerRuntime(origin: HostedTransport.https.baseURL, client: api)
+            }
+            await serverRuntime.stop()
+            runtime = replacementRuntime
+
+            let completedAway = try await stage("slice3 completed-away canonical completion") {
+                for _ in 0..<90 {
+                    let page = try await api.directSessionMessages(sessionID: storedID, profile: "default")
+                    let durable = page.messages.filter { $0.role == "user" || $0.role == "assistant" }
+                    let users = durable.filter { $0.role == "user" }.compactMap(\.content)
+                    let assistants = durable.filter { $0.role == "assistant" }.compactMap(\.content)
+                    if users == [seedPrompt, delayedPrompt],
+                       assistants == [expectedAck, expectedAck] {
+                        return page
+                    }
+                    try await Task.sleep(for: .milliseconds(500))
+                }
+                throw LiveSmokeInvariant.failed
+            }
+            guard completedAway.messages.count >= baseline.messages.count,
+                  Array(completedAway.messages.prefix(baseline.messages.count)) == baseline.messages else {
+                throw LiveSmokeInvariant.failed
+            }
+            try assertRecoveryTranscript(
+                completedAway,
+                users: [seedPrompt, delayedPrompt],
+                assistant: expectedAck
+            )
+
+            try await stage("slice3 completed-away replacement runtime connect") {
+                try await replacementRuntime.connect()
+            }
+            let resumed = GatewayConversationController(
+                runtime: replacementRuntime,
+                client: api,
+                storedID: storedID,
+                profile: "default"
+            )
+            resumed.onBinding = { binding in cleanupRuntimeID = binding.runtimeID }
+            var reopenedTranscript: DirectHermesTranscriptPage?
+            resumed.onTranscript = { page, _ in reopenedTranscript = page }
+            reopened = resumed
+            try await stage("slice3 completed-away controller reopen") { try await resumed.open() }
+            guard resumed.storedID == storedID,
+                  resumed.runState == .idle,
+                  resumed.binding?.runtimeID.isEmpty == false,
+                  reopenedTranscript?.messages == completedAway.messages else {
+                throw LiveSmokeInvariant.failed
+            }
+            let reopenedPage = try await stage("slice3 completed-away reopened transcript") {
+                try await api.directSessionMessages(sessionID: storedID, profile: "default")
+            }
+            guard reopenedPage.messages == completedAway.messages else {
+                throw LiveSmokeInvariant.failed
+            }
+            try assertRecoveryTranscript(
+                reopenedPage,
+                users: [seedPrompt, delayedPrompt],
+                assistant: expectedAck
+            )
+
+            let reopenedRuntimeID = try XCTUnwrap(resumed.binding?.runtimeID)
+            cleanupRuntimeID = reopenedRuntimeID
+            try await stage("slice3 completed-away owned runtime cleanup") {
+                let closed = try await replacementRuntime.request("session.close", params: [
+                    "session_id": .string(reopenedRuntimeID),
+                    "profile": .string("default")
+                ])
+                guard closed?.gatewayFields["closed"] == .bool(true) else {
+                    throw LiveSmokeInvariant.failed
+                }
+            }
+            cleanupRuntimeID = nil
+            try await resumed.dispose()
+            reopened = nil
+            await replacementRuntime.stop()
+            runtime = nil
+            try await stage("slice3 completed-away logout") { try await api.directLogout() }
+            loggedIn = false
+        } catch {
+            if let cleanupRuntimeID, let runtime {
+                try? await runtime.connect()
+                let closeResult = try? await runtime.request(
+                    "session.close",
+                    params: [
+                        "session_id": .string(cleanupRuntimeID),
+                        "profile": .string("default")
+                    ],
+                    timeout: .seconds(30)
+                )
+                if case .bool = closeResult?.gatewayFields["closed"] {
+                    // True closed the owned runtime; false means it was absent.
+                } else {
+                    XCTFail("Owned completed-away runtime cleanup was not confirmed.")
+                }
+            }
+            if let reopened { try? await reopened.dispose() }
+            if let initial { try? await initial.dispose() }
+            if let runtime { await runtime.stop() }
+            if loggedIn { try? await api.directLogout() }
+            throw error
+        }
+    }
+
     private func assertRecoveryTranscript(
         _ page: DirectHermesTranscriptPage,
         users: [String],

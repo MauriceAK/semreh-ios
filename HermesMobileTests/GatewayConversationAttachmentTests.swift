@@ -116,6 +116,93 @@ final class GatewayConversationAttachmentTests: XCTestCase {
         await runtime.stop()
     }
 
+    func testStaleCleanupDoesNotQuarantineCleanReboundRuntime() async throws {
+        try await exerciseStaleCleanupRebind(preserveReboundMarker: false)
+    }
+
+    func testStaleCleanupDoesNotClearReboundRuntimeMarker() async throws {
+        try await exerciseStaleCleanupRebind(preserveReboundMarker: true)
+    }
+
+    private func exerciseStaleCleanupRebind(preserveReboundMarker: Bool) async throws {
+        let fake = AttachmentFakeTransport()
+        let cleanupGate = AttachmentGate()
+        fake.setRequestGate("session.status", cleanupGate)
+        fake.setResponse("image.attach_bytes", .object([
+            "attached": .bool(true),
+            "path": .string("/profile/images/photo.png"),
+            "name": .string("photo.png")
+        ]))
+        fake.setResponse("session.resume", .object([
+            "session_id": .string("runtime-1"),
+            "session_key": .string("durable-1")
+        ]))
+        let runtime = try makeRuntime(fake)
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("GatewayConversationAttachmentStaleCleanup-\(UUID().uuidString)", isDirectory: true)
+        let store = DirectGatewayAttachmentRecoveryMarkerStore(rootURL: root)
+        let controller = makeController(runtime: runtime, storedID: "durable-1", markerStore: store)
+        var errors = 0
+        controller.onError = { _ in errors += 1 }
+        try await controller.open()
+        XCTAssertEqual(controller.binding?.runtimeID, "runtime-1")
+        var image = DirectPendingAttachment(source: try .image(data: pngData, filename: "photo.png"))
+        let staged = try await controller.stageAttachment(image)
+        XCTAssertTrue(image.confirm(scope: staged.scope, serverDetachPaths: staged.receipt.detachPaths))
+        try await controller.submit("consume", stagedAttachments: [image])
+        fake.emit(HermesGatewayEvent(
+            method: "event",
+            type: "message.complete",
+            sessionID: "runtime-1",
+            sequence: 1,
+            payload: .object([:]),
+            params: nil,
+            connectionGeneration: 1
+        ))
+        await waitUntil { fake.calls().contains { $0.method == "session.status" } }
+        fake.setResponse("session.resume", .object([
+            "session_id": .string("runtime-2"),
+            "session_key": .string("durable-1")
+        ]))
+        if preserveReboundMarker {
+            let identity = try DirectGatewayAttachmentRecoveryIdentity(
+                origin: runtime.origin,
+                profile: "default",
+                storedID: "durable-1",
+                runtimeID: "runtime-2"
+            )
+            try store.write(DirectGatewayAttachmentRecoveryMarker(identity: identity))
+        }
+        try await runtime.reconnect()
+        XCTAssertEqual(controller.binding?.runtimeID, "runtime-2")
+        let reboundIdentity = try DirectGatewayAttachmentRecoveryIdentity(
+            origin: runtime.origin,
+            profile: "default",
+            storedID: "durable-1",
+            runtimeID: "runtime-2"
+        )
+        let reboundToken = try store.load(for: reboundIdentity)?.token
+        if preserveReboundMarker {
+            XCTAssertTrue(controller.attachmentRecoveryNeedsReset)
+            XCTAssertNotNil(reboundToken)
+        } else {
+            XCTAssertFalse(controller.attachmentRecoveryNeedsReset)
+            XCTAssertNil(reboundToken)
+        }
+        await cleanupGate.release()
+        await waitUntil { fake.completedCalls(for: "session.status") >= 1 }
+        if preserveReboundMarker {
+            XCTAssertTrue(controller.attachmentRecoveryNeedsReset)
+            XCTAssertEqual(try store.load(for: reboundIdentity)?.token, reboundToken)
+        } else {
+            XCTAssertFalse(controller.attachmentRecoveryNeedsReset)
+            XCTAssertNil(try store.load(for: reboundIdentity))
+        }
+        XCTAssertFalse(fake.calls().contains { $0.method == "image.detach" })
+        XCTAssertEqual(errors, 0, "stale cleanup A must not report into rebound runtime B")
+        await runtime.stop()
+    }
+
     func testExplicitResetClosesOnlyTargetAndRemovesMarker() async throws {
         let fake = AttachmentFakeTransport()
         fake.setResponse("image.attach_bytes", .object([
@@ -1026,6 +1113,7 @@ private final class AttachmentFakeTransport: HermesGatewayTransport, @unchecked 
     private var serverErrors: [String: HermesGatewayError] = [:]
     private var attachmentGates: [String: AttachmentGate] = [:]
     private var requestGates: [String: AttachmentGate] = [:]
+    private var completedRequestCounts: [String: Int] = [:]
 
     func installSink(_ sink: @escaping @Sendable (HermesGatewayEvent) -> Void) {
         withLock { self.sink = sink }
@@ -1060,6 +1148,10 @@ private final class AttachmentFakeTransport: HermesGatewayTransport, @unchecked 
         withLock { callsValue }
     }
 
+    func completedCalls(for method: String) -> Int {
+        withLock { completedRequestCounts[method, default: 0] }
+    }
+
     func connect() async throws {
         withLock {
             generationValue += 1
@@ -1088,6 +1180,7 @@ private final class AttachmentFakeTransport: HermesGatewayTransport, @unchecked 
         }
         if let gate { await gate.wait() }
         if let error { throw error }
+        withLock { completedRequestCounts[method, default: 0] += 1 }
         switch method {
         case "session.create":
             return .object([

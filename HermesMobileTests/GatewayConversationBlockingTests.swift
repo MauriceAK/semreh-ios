@@ -236,6 +236,139 @@ final class GatewayConversationBlockingTests: XCTestCase {
         await runtime.stop()
     }
 
+    func testApprovalQueuePreservesDistinctRequestsAndUsesExactChoice() async throws {
+        let fake = BlockingFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime)
+        try await controller.submit("ask")
+        await awaitEvents(controller, fake, [approvalEvent(requestID: "approval-1"), approvalEvent(requestID: "approval-2")], expectedCount: 2)
+        XCTAssertEqual(controller.pendingApprovalPrompt?.identity.requestID, "approval-1")
+        let first = try XCTUnwrap(controller.pendingApprovalPrompt?.identity)
+        let firstResponse = try await controller.respondToApproval(.once, expectedIdentity: first)
+        XCTAssertEqual(firstResponse, .accepted)
+        XCTAssertEqual(controller.pendingApprovalPrompt?.identity.requestID, "approval-2")
+        let choices = fake.calls().filter { $0.method == "approval.respond" }.compactMap { $0.params?.gatewayFields["choice"]?.gatewayString }
+        XCTAssertEqual(choices, ["once"])
+        await runtime.stop()
+    }
+
+    func testApprovalRejectsWrongIdentityAndZeroResolution() async throws {
+        let fake = BlockingFakeTransport()
+        fake.setApprovalResponse(.object(["resolved": .number(0)]))
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime)
+        try await controller.submit("ask")
+        await awaitEvent(controller, fake, approvalEvent(requestID: "approval-1"))
+        let identity = try XCTUnwrap(controller.pendingApprovalPrompt?.identity)
+        let wrong = GatewayBlockingPromptIdentity(origin: identity.origin, profile: identity.profile, storedID: identity.storedID, runtimeID: identity.runtimeID, connectionGeneration: identity.connectionGeneration, requestID: "other")
+        do {
+            _ = try await controller.respondToApproval(.once, expectedIdentity: wrong)
+            XCTFail("wrong approval identity must be rejected")
+        } catch GatewayBlockingContractError.staleInteraction { }
+        do {
+            _ = try await controller.respondToApproval(.once, expectedIdentity: identity)
+            XCTFail("zero approval resolution is not success")
+        } catch GatewayBlockingContractError.approvalNotResolved { }
+        XCTAssertEqual(controller.pendingApprovalPrompt?.identity, identity)
+        await runtime.stop()
+    }
+
+    func testApproval4009DoesNotExpireOrClearPrompt() async throws {
+        let fake = BlockingFakeTransport()
+        fake.setApprovalError(.server(
+            code: 4009,
+            message: "expired",
+            data: nil,
+            method: "approval.respond",
+            requestID: "rpc-1",
+            server: "fixture"
+        ))
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime)
+        try await controller.submit("ask")
+        await awaitEvent(controller, fake, approvalEvent(requestID: "approval-1"))
+        let identity = try XCTUnwrap(controller.pendingApprovalPrompt?.identity)
+        do {
+            _ = try await controller.respondToApproval(.once, expectedIdentity: identity)
+            XCTFail("4009 must not be treated as an approval expiry")
+        } catch let error as HermesGatewayError {
+            guard case .server(let code, _, _, let method, _, _) = error else {
+                XCTFail("unexpected gateway error: \(error)")
+                return
+            }
+            XCTAssertEqual(code, 4009)
+            XCTAssertEqual(method, "approval.respond")
+        }
+        XCTAssertEqual(controller.pendingApprovalPrompt?.identity, identity)
+        await runtime.stop()
+    }
+
+    func testApprovalTerminalBeforeAckDoesNotClearNewTurnPrompt() async throws {
+        let fake = BlockingFakeTransport()
+        let gate = AsyncGate()
+        fake.setApprovalGate(gate)
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime)
+        try await controller.submit("ask")
+        await awaitEvent(controller, fake, approvalEvent(requestID: "approval-1"))
+        let identity = try XCTUnwrap(controller.pendingApprovalPrompt?.identity)
+        let response = Task { try await controller.respondToApproval(.once, expectedIdentity: identity) }
+        await fake.waitForApprovalCall()
+        await awaitEvent(controller, fake, event(sessionID: "runtime-1", type: "message.complete", payload: .object([:])))
+        XCTAssertNil(controller.pendingApprovalPrompt)
+        await awaitEvent(controller, fake, approvalEvent(requestID: "approval-2"))
+        await gate.release()
+        let result = try await response.value
+        XCTAssertEqual(result, .accepted)
+        XCTAssertEqual(controller.pendingApprovalPrompt?.identity.requestID, "approval-2")
+        await runtime.stop()
+    }
+
+    func testSecretQueueCancelUsesEmptyValueAndKeepsNextPrompt() async throws {
+        let fake = BlockingFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime)
+        try await controller.submit("ask")
+        await awaitEvents(controller, fake, [secretEvent(requestID: "secret-1"), secretEvent(requestID: "secret-2")], expectedCount: 2)
+        let first = try XCTUnwrap(controller.pendingSecretPrompt?.identity)
+        let firstResponse = try await controller.cancelSecret(expectedIdentity: first)
+        XCTAssertEqual(firstResponse, .accepted)
+        XCTAssertEqual(controller.pendingSecretPrompt?.identity.requestID, "secret-2")
+        let values = fake.calls().filter { $0.method == "secret.respond" }.compactMap { $0.params?.gatewayFields["value"] }
+        XCTAssertEqual(values, [.string("")])
+        await runtime.stop()
+    }
+
+    func testSensitiveExpiredResponseClearsOnlyMatchingPrompt() async throws {
+        let fake = BlockingFakeTransport()
+        fake.setSensitiveResponse(.object(["status": .string("expired")]))
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime)
+        try await controller.submit("ask")
+        await awaitEvent(controller, fake, secretEvent(requestID: "secret-expired"))
+        let identity = try XCTUnwrap(controller.pendingSecretPrompt?.identity)
+        let response = try await controller.cancelSecret(expectedIdentity: identity)
+        XCTAssertEqual(response, .expired)
+        XCTAssertNil(controller.pendingSecretPrompt)
+        await runtime.stop()
+    }
+
+    func testResumeRestoresApprovalButNotSensitivePrompt() async throws {
+        let fake = BlockingFakeTransport()
+        fake.setResumeResponse(.object([
+            "session_id": .string("runtime-resumed"),
+            "session_key": .string("stored-chat"),
+            "pending_approval": approvalPayload(requestID: "approval-resumed")
+        ]))
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime, storedID: "stored-chat")
+        try await controller.open()
+        XCTAssertEqual(controller.pendingApprovalPrompt?.identity.requestID, "approval-resumed")
+        XCTAssertNil(controller.pendingSecretPrompt)
+        XCTAssertNil(controller.pendingSudoPrompt)
+        await runtime.stop()
+    }
+
     private func awaitEvent(
         _ controller: GatewayConversationController,
         _ fake: BlockingFakeTransport,
@@ -318,6 +451,27 @@ final class GatewayConversationBlockingTests: XCTestCase {
         ]))
     }
 
+    private func approvalEvent(requestID: String) -> HermesGatewayEvent {
+        event(sessionID: "runtime-1", type: "approval.request", payload: approvalPayload(requestID: requestID))
+    }
+
+    private func approvalPayload(requestID: String) -> JSONValue {
+        .object([
+            "request_id": .string(requestID),
+            "command": .string("echo bounded"),
+            "description": .string("Run a bounded command"),
+            "pattern_key": .string("echo"),
+            "pattern_keys": .array([.string("echo")]),
+            "choices": .array([.string("once"), .string("session"), .string("always"), .string("deny")])
+        ])
+    }
+
+    private func secretEvent(requestID: String) -> HermesGatewayEvent {
+        event(sessionID: "runtime-1", type: "secret.request", payload: .object([
+            "request_id": .string(requestID), "prompt": .string("A secret is required"), "env_var": .string("TOKEN")
+        ]))
+    }
+
     private func event(
         sessionID: String,
         type: String,
@@ -358,6 +512,12 @@ private final class BlockingFakeTransport: HermesGatewayTransport, @unchecked Se
     private var generation = 100
     private var resumeResponse: JSONValue?
     private var clarifyResponse: JSONValue = .object(["status": .string("ok")])
+    private var approvalResponse: JSONValue = .object(["resolved": .number(1)])
+    private var approvalError: HermesGatewayError?
+    private var sensitiveResponse: JSONValue = .object(["status": .string("ok")])
+    private var approvalGate: AsyncGate?
+    private var approvalCalled: CheckedContinuation<Void, Never>?
+    private var approvalWasCalled = false
     private var clarifyGate: AsyncGate?
     private var clarifyCalled: CheckedContinuation<Void, Never>?
     private var clarifyWasCalled = false
@@ -386,9 +546,28 @@ private final class BlockingFakeTransport: HermesGatewayTransport, @unchecked Se
                 return .object(["status": .string("streaming")])
             case "clarify.respond":
                 return clarifyResponse
+            case "approval.respond":
+                return approvalResponse
+            case "approval.pending":
+                return .object(["approvals": .array([])])
+            case "secret.respond", "sudo.respond":
+                return sensitiveResponse
             default:
                 return .object([:])
             }
+        }
+        if method == "approval.respond", let approvalError = withLock({ self.approvalError }) {
+            throw approvalError
+        }
+        if method == "approval.respond" {
+            let (gate, waiter) = withLock { () -> (AsyncGate?, CheckedContinuation<Void, Never>?) in
+                approvalWasCalled = true
+                let waiter = approvalCalled
+                approvalCalled = nil
+                return (approvalGate, waiter)
+            }
+            if let waiter { waiter.resume() }
+            if let gate { await gate.wait() }
         }
         if method == "clarify.respond" {
             let (gate, waiter) = withLock { () -> (AsyncGate?, CheckedContinuation<Void, Never>?) in
@@ -410,6 +589,10 @@ private final class BlockingFakeTransport: HermesGatewayTransport, @unchecked Se
 
     func setResumeResponse(_ response: JSONValue) { withLock { resumeResponse = response } }
     func setClarifyResponse(_ response: JSONValue) { withLock { clarifyResponse = response } }
+    func setApprovalResponse(_ response: JSONValue) { withLock { approvalResponse = response } }
+    func setApprovalError(_ error: HermesGatewayError) { withLock { approvalError = error } }
+    func setSensitiveResponse(_ response: JSONValue) { withLock { sensitiveResponse = response } }
+    func setApprovalGate(_ gate: AsyncGate) { withLock { approvalGate = gate } }
     func setClarifyGate(_ gate: AsyncGate) { withLock { clarifyGate = gate } }
 
     func waitForClarifyCall() async {
@@ -417,6 +600,15 @@ private final class BlockingFakeTransport: HermesGatewayTransport, @unchecked Se
             withLock {
                 if clarifyWasCalled { continuation.resume() }
                 else { clarifyCalled = continuation }
+            }
+        }
+    }
+
+    func waitForApprovalCall() async {
+        await withCheckedContinuation { continuation in
+            withLock {
+                if approvalWasCalled { continuation.resume() }
+                else { approvalCalled = continuation }
             }
         }
     }

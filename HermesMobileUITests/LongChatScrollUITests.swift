@@ -24,6 +24,12 @@ final class LongChatScrollUITests: XCTestCase {
     private let singleCancelAcknowledgement = "SEMREH_SLICE3_CLARIFY_ACK_SINGLE_CANCEL"
     private let batchCancelAcknowledgement = "SEMREH_SLICE3_CLARIFY_ACK_BATCH_CANCEL"
     private let multiSelectCancelAcknowledgement = "SEMREH_SLICE3_CLARIFY_ACK_MULTI_SELECT_CANCEL"
+    private let blockingApprovalMarker = "SEMREH_BLOCKING_APPROVAL"
+    private let blockingSecretMarker = "SEMREH_BLOCKING_SECRET"
+    private let blockingApprovalDenyIdentifier = "approval-request-choice-deny"
+    private let blockingSecretCancelIdentifier = "direct-sensitive-prompt-cancel"
+    private let blockingApprovalAcknowledgement = "SEMREH_SLICE3_BLOCKING_ACK_APPROVAL_DENY"
+    private let blockingSecretAcknowledgement = "SEMREH_SLICE3_BLOCKING_ACK_SECRET_CANCEL"
 
     func testTenThousandRowChatScrollsAndScrollToLatestReachesEndMarker() {
         continueAfterFailure = false
@@ -437,6 +443,14 @@ final class LongChatScrollUITests: XCTestCase {
             exerciseOptInClarificationFlow(app: app)
         }
 
+        if environment["SEMREH_SLICE3_BLOCKING_UI"] == "1" {
+            guard stockBackend else {
+                XCTFail("Slice 3 blocking UI requires the pinned stock backend.")
+                return
+            }
+            exerciseOptInBlockingFlow(app: app)
+        }
+
         if let storedID = environment["SEMREH_SLICE2_TUI_CREATED_SESSION_ID"] {
             XCTAssertNotNil(storedID.range(of: "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$", options: .regularExpression))
             var link = URLComponents()
@@ -598,6 +612,127 @@ final class LongChatScrollUITests: XCTestCase {
             screenshotPrefix: "slice3-clarification-multi-select",
             app: app
         )
+    }
+
+    @MainActor
+    private func exerciseOptInBlockingFlow(app: XCUIApplication) {
+        runBlockingApprovalDenial(app: app)
+        runBlockingSecretCancellation(app: app)
+    }
+
+    @MainActor
+    private func runBlockingApprovalDenial(app: XCUIApplication) {
+        sendLivePrompt(
+            blockingApprovalMarker,
+            app: app,
+            screenshotPrefix: "slice3-blocking-approval-request"
+        )
+        let heading = app.staticTexts["Approval required"]
+        XCTAssertTrue(
+            heading.waitForExistence(timeout: 30),
+            "The synthetic approval marker must expose the stock approval heading."
+        )
+        let deny = app.buttons[blockingApprovalDenyIdentifier]
+        XCTAssertFalse(app.buttons["approval-request-skip-all"].exists,
+                       "Direct approval must not offer the legacy bulk bypass.")
+        assertHittable(
+            deny,
+            timeout: 15,
+            message: "The synthetic approval overlay must expose its deny action."
+        )
+        attachScreenshot(named: "slice3-blocking-approval-request-card")
+        deny.tap()
+        waitForBlockingElementToClear(
+            heading,
+            button: deny,
+            screenshotName: "slice3-blocking-approval-cleared"
+        )
+        waitForBlockingAcknowledgement(
+            blockingApprovalAcknowledgement,
+            app: app,
+            screenshotName: "slice3-blocking-approval-follow-up-ack"
+        )
+    }
+
+    @MainActor
+    private func runBlockingSecretCancellation(app: XCUIApplication) {
+        sendLivePrompt(
+            blockingSecretMarker,
+            app: app,
+            screenshotPrefix: "slice3-blocking-secret-request"
+        )
+        let heading = app.staticTexts["Secret required"]
+        XCTAssertTrue(
+            heading.waitForExistence(timeout: 30),
+            "The synthetic secret marker must expose the cancel-only heading."
+        )
+        let explanation = app.staticTexts[
+            "This app cannot securely enter this value yet. Cancel to unblock the request without sending a secret."
+        ]
+        XCTAssertTrue(
+            explanation.waitForExistence(timeout: 10),
+            "The secret prompt must explain that no secret entry is available."
+        )
+        XCTAssertEqual(
+            app.textFields.count,
+            0,
+            "The secret cancellation prompt must not expose a regular text input field."
+        )
+        XCTAssertEqual(
+            app.secureTextFields.count,
+            0,
+            "The secret cancellation prompt must not expose a secure input field."
+        )
+        let cancel = app.buttons[blockingSecretCancelIdentifier]
+        assertHittable(
+            cancel,
+            timeout: 15,
+            message: "The synthetic secret overlay must expose its explicit cancel action."
+        )
+        attachScreenshot(named: "slice3-blocking-secret-request-card")
+        cancel.tap()
+        waitForBlockingElementToClear(
+            heading,
+            button: cancel,
+            screenshotName: "slice3-blocking-secret-cleared"
+        )
+        waitForBlockingAcknowledgement(
+            blockingSecretAcknowledgement,
+            app: app,
+            screenshotName: "slice3-blocking-secret-follow-up-ack"
+        )
+    }
+
+    @MainActor
+    private func waitForBlockingElementToClear(
+        _ element: XCUIElement,
+        button: XCUIElement,
+        screenshotName: String
+    ) {
+        let cleared = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"),
+            object: element
+        )
+        wait(for: [cleared], timeout: 30)
+        XCTAssertFalse(element.exists, "The blocking prompt must clear after its response.")
+        XCTAssertFalse(button.exists, "The blocking action must disappear after its response.")
+        attachScreenshot(named: screenshotName)
+    }
+
+    @MainActor
+    private func waitForBlockingAcknowledgement(
+        _ acknowledgement: String,
+        app: XCUIApplication,
+        screenshotName: String
+    ) {
+        let terminal = app.staticTexts[acknowledgement]
+        assertHittable(
+            terminal,
+            timeout: 90,
+            message: "The blocking response must produce its unique terminal ACK."
+        )
+        waitForIdle(app: app)
+        attachScreenshot(named: screenshotName)
     }
 
     @MainActor

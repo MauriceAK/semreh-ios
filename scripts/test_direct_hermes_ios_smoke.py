@@ -41,7 +41,7 @@ class IOSSmokeGuardTests(unittest.TestCase):
     def test_stock_requires_backend_phase(self):
         self.assertRejected(
             ["--stock-backend"],
-            "--stock-backend requires --slice2-reasoning or --slice2-ui",
+            "--stock-backend requires --slice2-reasoning, --slice2-ui, or --slice3-completed-away",
         )
 
     def test_reasoning_requires_exactly_one_backend_mode(self):
@@ -104,13 +104,59 @@ class IOSSmokeGuardTests(unittest.TestCase):
             message,
         )
 
+    def test_slice3_blocking_requires_stock_https_ui(self):
+        message = "--slice3-blocking requires --slice2-ui --https --stock-backend"
+        self.assertRejected(["--slice3-blocking"], message)
+        self.assertRejected(["--https", "--slice3-blocking", "--stock-backend"], message)
+        self.assertRejected(["--https", "--slice2-ui", "--slice3-blocking"], message)
+        self.assertRejected(
+            ["--slice2-ui", "--stock-backend", "--slice3-blocking"],
+            "Slice 2 UI requires --https and no other test phase",
+        )
+        self.assertRejected(
+            [
+                "--https", "--slice2-ui", "--slice3-blocking",
+                "--development-backend-sha", "8c50f84522a755d40346e73701a6847fbdde20ec",
+            ],
+            message,
+        )
+        for other in ("--slice3-clarification", "--slice3-attachment"):
+            self.assertRejected(
+                ["--https", "--slice2-ui", "--stock-backend", "--slice3-blocking", other],
+                "--slice3-clarification, --slice3-attachment, and --slice3-blocking are mutually exclusive",
+            )
+
     def test_slice3_recovery_requires_stock_https_and_is_standalone(self):
         message = "--slice3-recovery requires --https --stock-backend and no other test phase"
         self.assertRejected(["--slice3-recovery"], message)
         self.assertRejected(["--https", "--slice3-recovery"], message)
         self.assertRejected(["--https", "--slice3-recovery", "--stock-backend", "--slice2-native"], message)
         self.assertRejected(
+            ["--https", "--slice2-ui", "--slice3-recovery", "--stock-backend", "--slice3-blocking"],
+            message,
+        )
+        self.assertRejected(
             ["--https", "--slice3-recovery", "--stock-backend", "--development-backend-sha", "abc"],
+            message,
+        )
+
+    def test_slice3_completed_away_requires_stock_https_and_is_standalone(self):
+        message = "--slice3-completed-away requires --https --stock-backend and no other test phase"
+        self.assertRejected(["--slice3-completed-away"], message)
+        self.assertRejected(["--https", "--slice3-completed-away"], message)
+        self.assertRejected(
+            ["--https", "--slice3-completed-away", "--stock-backend", "--slice2-ui"],
+            message,
+        )
+        self.assertRejected(
+            ["--https", "--slice3-completed-away", "--stock-backend", "--slice3-recovery"],
+            "--slice3-recovery requires --https --stock-backend and no other test phase",
+        )
+        self.assertRejected(
+            [
+                "--https", "--slice3-completed-away",
+                "--development-backend-sha", "8c50f84522a755d40346e73701a6847fbdde20ec",
+            ],
             message,
         )
 
@@ -152,6 +198,48 @@ class IOSSmokeGuardTests(unittest.TestCase):
             self.assertEqual(
                 target["OnlyTestIdentifiers"],
                 ["DirectHermesLiveSmokeTests/testOptInHostedSlice3NativeAttachmentRecovery"],
+            )
+            self.assertNotIn("SEMREH_SLICE3_COMPLETED_AWAY_NATIVE", environment)
+            self.assertNotIn("password", output.getvalue().lower())
+
+    def test_stock_native_completed_away_generation_exports_exact_target_and_guards(self):
+        smoke = load_smoke_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            products = (Path(temporary) / "products").resolve()
+            products.mkdir()
+            source = products / "HermesMobile_HermesMobile_iphonesimulator.xctestrun"
+            source.write_bytes(plistlib.dumps({
+                "TestConfigurations": [{
+                    "TestTargets": [{"BlueprintName": "HermesMobileTests"}],
+                }],
+            }))
+            runtime = Path(temporary) / "stock-runtime"
+            credentials = runtime / "credentials.json"
+            tool_cwd = runtime / "tools"
+            with patch.object(smoke, "PRODUCTS", products), \
+                    patch.object(smoke, "OUTPUT", products / "SemrehSlice1Live.xctestrun"), \
+                    patch.object(smoke, "RUNTIME", runtime), \
+                    patch.object(smoke, "validate") as validate, \
+                    patch.object(smoke, "PIN", "29112bef099274229cadff79cdff7bf7b99c4b77"), \
+                    patch.object(sys, "argv", [
+                        str(SCRIPT), "--https", "--slice3-completed-away", "--stock-backend",
+                    ]):
+                output = StringIO()
+                with redirect_stdout(output):
+                    smoke.main()
+
+            validate.assert_called_once_with()
+            plan = plistlib.loads((products / "SemrehSlice1Live.xctestrun").read_bytes())
+            target = plan["TestConfigurations"][0]["TestTargets"][0]
+            environment = target["EnvironmentVariables"]
+            self.assertEqual(environment["SEMREH_SLICE1_CREDENTIALS_FILE"], str(credentials))
+            self.assertEqual(environment["SEMREH_SLICE2_STOCK_BACKEND_SHA"], "29112bef099274229cadff79cdff7bf7b99c4b77")
+            self.assertEqual(environment["SEMREH_SLICE2_TOOL_CWD"], str(tool_cwd))
+            self.assertEqual(environment["SEMREH_SLICE3_COMPLETED_AWAY_NATIVE"], "1")
+            self.assertEqual(environment["SEMREH_SLICE1_HTTPS"], "1")
+            self.assertEqual(
+                target["OnlyTestIdentifiers"],
+                ["DirectHermesLiveSmokeTests/testOptInHostedSlice3CompletedWhileAway"],
             )
             self.assertNotIn("password", output.getvalue().lower())
 
@@ -195,6 +283,8 @@ class IOSSmokeGuardTests(unittest.TestCase):
                 ["LongChatScrollUITests/testOptInLiveProductionLoginNewChatSend"],
             )
             self.assertNotIn("SEMREH_SLICE3_CLARIFICATION_UI", environment)
+            self.assertNotIn("SEMREH_SLICE3_BLOCKING_UI", environment)
+            self.assertNotIn("SEMREH_SLICE3_COMPLETED_AWAY_NATIVE", environment)
             self.assertNotIn("password", output.getvalue().lower())
 
     def test_stock_ui_generation_exports_slice3_clarification_opt_in(self):
@@ -252,6 +342,39 @@ class IOSSmokeGuardTests(unittest.TestCase):
             plan = plistlib.loads((products / "SemrehSlice2LiveUI.xctestrun").read_bytes())
             environment = plan["TestConfigurations"][0]["TestTargets"][0]["EnvironmentVariables"]
             self.assertEqual(environment["SEMREH_SLICE3_ATTACHMENT_UI"], "1")
+
+    def test_stock_ui_generation_exports_slice3_blocking_opt_in(self):
+        smoke = load_smoke_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            products = (Path(temporary) / "products").resolve()
+            products.mkdir()
+            source = products / "HermesMobileUIVerification_HermesMobileUIVerification_iphonesimulator.xctestrun"
+            source.write_bytes(plistlib.dumps({
+                "TestConfigurations": [{
+                    "TestTargets": [{"BlueprintName": "HermesMobileUITests"}],
+                }],
+            }))
+            runtime = Path(temporary) / "stock-runtime"
+            with patch.object(smoke, "PRODUCTS", products), \
+                    patch.object(smoke, "RUNTIME", runtime), \
+                    patch.object(smoke, "validate") as validate, \
+                    patch.object(smoke, "PIN", "29112bef099274229cadff79cdff7bf7b99c4b77"), \
+                    patch.object(sys, "argv", [
+                        str(SCRIPT), "--https", "--slice2-ui", "--stock-backend",
+                        "--slice3-blocking",
+                    ]):
+                with redirect_stdout(StringIO()):
+                    smoke.main()
+
+            validate.assert_called_once_with()
+            plan = plistlib.loads((products / "SemrehSlice2LiveUI.xctestrun").read_bytes())
+            target = plan["TestConfigurations"][0]["TestTargets"][0]
+            environment = target["EnvironmentVariables"]
+            self.assertEqual(environment["SEMREH_SLICE3_BLOCKING_UI"], "1")
+            self.assertEqual(
+                target["OnlyTestIdentifiers"],
+                ["LongChatScrollUITests/testOptInLiveProductionLoginNewChatSend"],
+            )
 
     def test_development_ui_generation_validates_exact_backend_and_paths(self):
         smoke = load_smoke_module()

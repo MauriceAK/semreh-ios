@@ -703,10 +703,48 @@ final class ChatViewModel {
     }
     var localAttachmentPreviews: [String: [String: Data]] { attachmentCoordinator.localAttachmentPreviews }
     private(set) var pinnedLocalNotices: [String] = []
-    var approvalPrompt: ApprovalPromptState? { pendingActionCoordinator.approvalPrompt }
-    var isRespondingToApproval: Bool { pendingActionCoordinator.isRespondingToApproval }
-    var approvalErrorMessage: String? { pendingActionCoordinator.approvalErrorMessage }
-    var isSessionApprovalBypassEnabled: Bool { pendingActionCoordinator.isSessionApprovalBypassEnabled }
+    var approvalPrompt: ApprovalPromptState? {
+        usesDirectGateway ? nil : pendingActionCoordinator.approvalPrompt
+    }
+    var isRespondingToApproval: Bool {
+        usesDirectGateway ? false : pendingActionCoordinator.isRespondingToApproval
+    }
+    var approvalErrorMessage: String? {
+        usesDirectGateway ? nil : pendingActionCoordinator.approvalErrorMessage
+    }
+    var isSessionApprovalBypassEnabled: Bool {
+        usesDirectGateway ? false : pendingActionCoordinator.isSessionApprovalBypassEnabled
+    }
+    /// Direct Hermes blocking prompts are projections of the live controller;
+    /// do not copy them into a second VM-owned queue that can outlive a rebind.
+    var pendingApprovalPrompt: GatewayApprovalPrompt? {
+        usesDirectGateway ? directConversation?.pendingApprovalPrompt : nil
+    }
+    var pendingSecretPrompt: GatewaySecretPrompt? {
+        usesDirectGateway ? directConversation?.pendingSecretPrompt : nil
+    }
+    var pendingSudoPrompt: GatewaySudoPrompt? {
+        usesDirectGateway ? directConversation?.pendingSudoPrompt : nil
+    }
+    var blockingInteractionResponseInFlight: Bool {
+        usesDirectGateway && directConversation?.blockingInteractionResponseInFlight == true
+    }
+    var blockingInteractionErrorMessage: String? {
+        guard usesDirectGateway,
+              let identity = directBlockingInteractionErrorIdentity,
+              let message = directBlockingInteractionErrorMessage else { return nil }
+        let displayedIdentities = [
+            pendingApprovalPrompt?.identity,
+            pendingSecretPrompt?.identity,
+            pendingSudoPrompt?.identity
+        ].compactMap { $0 }
+        return displayedIdentities.contains(identity) ? message : nil
+    }
+    func blockingInteractionErrorMessage(for identity: GatewayBlockingPromptIdentity) -> String? {
+        guard usesDirectGateway,
+              directBlockingInteractionErrorIdentity == identity else { return nil }
+        return directBlockingInteractionErrorMessage
+    }
     var clarificationPrompt: ClarificationPromptState? {
         usesDirectGateway ? directClarificationPrompt : pendingActionCoordinator.clarificationPrompt
     }
@@ -760,6 +798,8 @@ final class ChatViewModel {
     private(set) var directClarificationPrompt: ClarificationPromptState? = nil
     private(set) var isRespondingToDirectClarification = false
     private(set) var directClarificationErrorMessage: String? = nil
+    private(set) var directBlockingInteractionErrorMessage: String? = nil
+    private var directBlockingInteractionErrorIdentity: GatewayBlockingPromptIdentity?
     private var directClarificationOwnedSendError: String?
     private var directAttachmentSelectionGeneration = 0
     private var directAttachmentPreparationStartGeneration = 0
@@ -1163,6 +1203,8 @@ final class ChatViewModel {
                 guard let self else { return }
                 self.applyDirectSessionInfo(result?.gatewayFields["info"])
                 self.syncDirectClarificationPrompt()
+                self.directBlockingInteractionErrorMessage = nil
+                self.directBlockingInteractionErrorIdentity = nil
             }
             controller.onReasoningConfiguration = { [weak self, weak controller] configuration in
                 guard let self, let controller,
@@ -1232,6 +1274,8 @@ final class ChatViewModel {
         directClarificationErrorMessage = nil
         directClarificationOwnedSendError = nil
         isRespondingToDirectClarification = false
+        directBlockingInteractionErrorMessage = nil
+        directBlockingInteractionErrorIdentity = nil
         clearDirectPendingAttachments()
         directConversation?.invalidate()
         directAttachmentTask?.cancel()
@@ -1608,10 +1652,9 @@ final class ChatViewModel {
             } else if raw.type == "error" {
                 sendErrorMessage = raw.payload?.gatewayFields["message"]?.gatewayString ?? "Hermes reported an error."
             } else if ["approval.request", "sudo.request", "secret.request"].contains(raw.type) {
-                // Native blocking-interaction controls are Slice 3. Until then,
-                // surface the wait explicitly instead of silently dropping it
-                // or trying the WebUI approval/clarification endpoints.
-                sendErrorMessage = "Hermes is waiting for input. This migration build cannot answer that request yet; use the TUI or stop this response."
+                // The live controller owns the typed prompt projection. The
+                // overlay observes that projection directly; do not route a
+                // native request through the legacy HTTP error surface.
             }
         case .unknown: break
         }
@@ -5863,12 +5906,153 @@ final class ChatViewModel {
 
     @discardableResult
     func respondToApproval(_ choice: ApprovalChoice) async -> Bool {
-        await pendingActionCoordinator.respondToApproval(choice)
+        guard !usesDirectGateway else { return false }
+        return await pendingActionCoordinator.respondToApproval(choice)
+    }
+
+    /// Sends a direct approval only for the identity captured from the
+    /// rendered prompt. The legacy approval overload above remains unchanged.
+    func respondToApproval(
+        _ choice: GatewayApprovalChoice,
+        expectedIdentity: GatewayBlockingPromptIdentity
+    ) async throws -> GatewayBlockingResponse {
+        let controller = try directBlockingController(
+            expectedIdentity: expectedIdentity,
+            currentIdentity: pendingApprovalPrompt?.identity
+        )
+        directBlockingInteractionErrorMessage = nil
+        directBlockingInteractionErrorIdentity = nil
+        do {
+            let response = try await controller.respondToApproval(
+                choice,
+                expectedIdentity: expectedIdentity
+            )
+            try validateDirectBlockingController(controller, expectedIdentity: expectedIdentity)
+            directBlockingInteractionErrorMessage = nil
+            directBlockingInteractionErrorIdentity = nil
+            return response
+        } catch {
+            recordDirectBlockingError(error, controller: controller, expectedIdentity: expectedIdentity, currentIdentity: pendingApprovalPrompt?.identity)
+            throw error
+        }
+    }
+
+    func cancelSecret(
+        expectedIdentity: GatewayBlockingPromptIdentity
+    ) async throws -> GatewayBlockingResponse {
+        let controller = try directBlockingController(
+            expectedIdentity: expectedIdentity,
+            currentIdentity: pendingSecretPrompt?.identity
+        )
+        directBlockingInteractionErrorMessage = nil
+        directBlockingInteractionErrorIdentity = nil
+        do {
+            let response = try await controller.cancelSecret(expectedIdentity: expectedIdentity)
+            try validateDirectBlockingController(controller, expectedIdentity: expectedIdentity)
+            directBlockingInteractionErrorMessage = nil
+            directBlockingInteractionErrorIdentity = nil
+            return response
+        } catch {
+            recordDirectBlockingError(error, controller: controller, expectedIdentity: expectedIdentity, currentIdentity: pendingSecretPrompt?.identity)
+            throw error
+        }
+    }
+
+    func cancelSudo(
+        expectedIdentity: GatewayBlockingPromptIdentity
+    ) async throws -> GatewayBlockingResponse {
+        let controller = try directBlockingController(
+            expectedIdentity: expectedIdentity,
+            currentIdentity: pendingSudoPrompt?.identity
+        )
+        directBlockingInteractionErrorMessage = nil
+        directBlockingInteractionErrorIdentity = nil
+        do {
+            let response = try await controller.cancelSudo(expectedIdentity: expectedIdentity)
+            try validateDirectBlockingController(controller, expectedIdentity: expectedIdentity)
+            directBlockingInteractionErrorMessage = nil
+            directBlockingInteractionErrorIdentity = nil
+            return response
+        } catch {
+            recordDirectBlockingError(error, controller: controller, expectedIdentity: expectedIdentity, currentIdentity: pendingSudoPrompt?.identity)
+            throw error
+        }
+    }
+
+    private func directBlockingController(
+        expectedIdentity: GatewayBlockingPromptIdentity,
+        currentIdentity: GatewayBlockingPromptIdentity?
+    ) throws -> GatewayConversationController {
+        guard usesDirectGateway,
+              !directInvalidated,
+              directBlockingOriginMatches(expectedIdentity.origin),
+              let controller = directConversation,
+              controller.storedID == expectedIdentity.storedID,
+              controller.profile == expectedIdentity.profile,
+              controller.binding?.runtimeID == expectedIdentity.runtimeID,
+              currentIdentity == expectedIdentity else {
+            throw GatewayBlockingContractError.staleInteraction
+        }
+        return controller
+    }
+
+    private func validateDirectBlockingController(
+        _ controller: GatewayConversationController,
+        expectedIdentity: GatewayBlockingPromptIdentity
+    ) throws {
+        guard !directInvalidated,
+              directConversation === controller,
+              directBlockingOriginMatches(expectedIdentity.origin),
+              controller.storedID == expectedIdentity.storedID,
+              controller.profile == expectedIdentity.profile,
+              controller.binding?.runtimeID == expectedIdentity.runtimeID else {
+            throw GatewayBlockingContractError.staleInteraction
+        }
+    }
+
+    private func directBlockingOriginMatches(_ rawOrigin: String) -> Bool {
+        guard let expected = try? AuthManager.normalizedServerURL(from: rawOrigin),
+              let current = try? AuthManager.normalizedServerURL(from: server.absoluteString) else {
+            return false
+        }
+        return expected == current
+    }
+
+    private func recordDirectBlockingError(
+        _ error: Error,
+        controller: GatewayConversationController,
+        expectedIdentity: GatewayBlockingPromptIdentity,
+        currentIdentity: GatewayBlockingPromptIdentity?
+    ) {
+        guard !directInvalidated,
+              directConversation === controller,
+              currentIdentity == expectedIdentity else { return }
+        directBlockingInteractionErrorMessage = directBlockingErrorMessage(for: error)
+        directBlockingInteractionErrorIdentity = expectedIdentity
+    }
+
+    private func directBlockingErrorMessage(for error: Error) -> String {
+        if let contractError = error as? GatewayBlockingContractError {
+            switch contractError {
+            case .approvalNotResolved:
+                return "Hermes did not confirm that approval. Keep the request open and try again."
+            case .staleInteraction:
+                return "That Hermes request is no longer active."
+            case .malformedApproval, .malformedSecret, .malformedSudo, .unsupportedApprovalChoice, .invalidResponse:
+                return "Hermes sent a blocking request this app cannot safely answer."
+            }
+        }
+        if let blockingError = error as? GatewayBlockingError,
+           blockingError == .responseInFlight {
+            return "A response is already being delivered."
+        }
+        return "The Hermes response could not be delivered. Try again if the request is still shown."
     }
 
     @discardableResult
     func skipApprovalsForCurrentSession() async -> Bool {
-        await pendingActionCoordinator.skipApprovalsForCurrentSession()
+        guard !usesDirectGateway else { return false }
+        return await pendingActionCoordinator.skipApprovalsForCurrentSession()
     }
 
     func applyApprovalUpdate(_ update: ApprovalPendingResponse, sessionID: String) {

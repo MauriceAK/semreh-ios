@@ -728,7 +728,32 @@ struct ChatView: View {
 
             messageComposer
 
-            if let approvalPrompt = viewModel.approvalPrompt {
+            if let directApprovalPrompt = viewModel.pendingApprovalPrompt {
+                ApprovalRequestOverlay(
+                    prompt: directApprovalPrompt,
+                    isResponding: viewModel.blockingInteractionResponseInFlight,
+                    errorMessage: viewModel.blockingInteractionErrorMessage(for: directApprovalPrompt.identity),
+                    onChoice: { choice in
+                        let renderedIdentity = directApprovalPrompt.identity
+                        Task {
+                            do {
+                                let response = try await viewModel.respondToApproval(
+                                    choice,
+                                    expectedIdentity: renderedIdentity
+                                )
+                                if response == .accepted,
+                                   let legacyChoice = ApprovalChoice(rawValue: choice.rawValue) {
+                                    ChatHaptics.approvalSubmitted(legacyChoice, isEnabled: isHapticsEnabled)
+                                }
+                            } catch {
+                                // The VM keeps an identity-scoped error visible
+                                // when the request is still the rendered one.
+                            }
+                        }
+                    }
+                )
+                .zIndex(10)
+            } else if let approvalPrompt = viewModel.approvalPrompt {
                 ApprovalRequestOverlay(
                     prompt: approvalPrompt,
                     isResponding: viewModel.isRespondingToApproval,
@@ -751,6 +776,34 @@ struct ChatView: View {
                     }
                 )
                 .zIndex(10)
+            }
+
+            if let secretPrompt = viewModel.pendingSecretPrompt {
+                DirectGatewaySensitivePromptOverlay(
+                    prompt: secretPrompt,
+                    isResponding: viewModel.blockingInteractionResponseInFlight,
+                    errorMessage: viewModel.blockingInteractionErrorMessage(for: secretPrompt.identity),
+                    onCancel: {
+                        let renderedIdentity = secretPrompt.identity
+                        Task {
+                            _ = try? await viewModel.cancelSecret(expectedIdentity: renderedIdentity)
+                        }
+                    }
+                )
+                .zIndex(31)
+            } else if let sudoPrompt = viewModel.pendingSudoPrompt {
+                DirectGatewaySensitivePromptOverlay(
+                    prompt: sudoPrompt,
+                    isResponding: viewModel.blockingInteractionResponseInFlight,
+                    errorMessage: viewModel.blockingInteractionErrorMessage(for: sudoPrompt.identity),
+                    onCancel: {
+                        let renderedIdentity = sudoPrompt.identity
+                        Task {
+                            _ = try? await viewModel.cancelSudo(expectedIdentity: renderedIdentity)
+                        }
+                    }
+                )
+                .zIndex(31)
             }
 
             if let nativeAuthPrompt = viewModel.nativeAuthPrompt {
@@ -799,6 +852,27 @@ struct ChatView: View {
                     // The ordinary composer owns this binding. Do not send a global
                     // resignFirstResponder action: the clarification card's answer
                     // field may already be focused and must not be hijacked.
+                    composerIsFocused = false
+                }
+                .onChange(of: viewModel.pendingApprovalPrompt?.identity) { oldIdentity, newIdentity in
+                    guard viewModel.usesDirectGateway,
+                          let newIdentity,
+                          oldIdentity != newIdentity,
+                          composerIsFocused else { return }
+                    composerIsFocused = false
+                }
+                .onChange(of: viewModel.pendingSecretPrompt?.identity) { oldIdentity, newIdentity in
+                    guard viewModel.usesDirectGateway,
+                          let newIdentity,
+                          oldIdentity != newIdentity,
+                          composerIsFocused else { return }
+                    composerIsFocused = false
+                }
+                .onChange(of: viewModel.pendingSudoPrompt?.identity) { oldIdentity, newIdentity in
+                    guard viewModel.usesDirectGateway,
+                          let newIdentity,
+                          oldIdentity != newIdentity,
+                          composerIsFocused else { return }
                     composerIsFocused = false
                 }
         }

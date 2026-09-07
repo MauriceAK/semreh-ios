@@ -662,6 +662,148 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         await runtime.stop()
     }
 
+    func testDirectBlockingApprovalAndSensitiveCancellationUseTypedGatewayWithoutLegacyHTTP() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let viewModel = makeViewModel(
+            client: makeDirectBlockingTestClient(),
+            runtime: runtime,
+            sessionID: nil
+        )
+
+        let didSend = await viewModel.sendMessage("hello")
+        XCTAssertTrue(didSend)
+        await waitUntil { fake.calls().contains { $0.method == "prompt.submit" } }
+
+        fake.emit(approvalEvent(requestID: "approval-deny", sequence: 20))
+        await waitUntil { viewModel.pendingApprovalPrompt?.identity.requestID == "approval-deny" }
+        let approvalIdentity = try XCTUnwrap(viewModel.pendingApprovalPrompt?.identity)
+        XCTAssertNil(viewModel.approvalPrompt, "Direct mode must not surface the legacy approval card")
+        let approvalResponse = try await viewModel.respondToApproval(.deny, expectedIdentity: approvalIdentity)
+        XCTAssertEqual(approvalResponse, .accepted)
+        XCTAssertNil(viewModel.pendingApprovalPrompt)
+
+        fake.emit(secretEvent(requestID: "secret-cancel", sequence: 21))
+        await waitUntil { viewModel.pendingSecretPrompt?.identity.requestID == "secret-cancel" }
+        let secretIdentity = try XCTUnwrap(viewModel.pendingSecretPrompt?.identity)
+        let secretResponse = try await viewModel.cancelSecret(expectedIdentity: secretIdentity)
+        XCTAssertEqual(secretResponse, .accepted)
+        XCTAssertNil(viewModel.pendingSecretPrompt)
+
+        fake.emit(sudoEvent(requestID: "sudo-cancel", sequence: 22))
+        await waitUntil { viewModel.pendingSudoPrompt?.identity.requestID == "sudo-cancel" }
+        let sudoIdentity = try XCTUnwrap(viewModel.pendingSudoPrompt?.identity)
+        let sudoResponse = try await viewModel.cancelSudo(expectedIdentity: sudoIdentity)
+        XCTAssertEqual(sudoResponse, .accepted)
+        XCTAssertNil(viewModel.pendingSudoPrompt)
+
+        let calls = fake.calls()
+        XCTAssertEqual(calls.filter { $0.method == "approval.respond" }.count, 1)
+        XCTAssertEqual(fields(calls.first { $0.method == "approval.respond" }?.params)?["choice"], .string("deny"))
+        XCTAssertEqual(fields(calls.first { $0.method == "secret.respond" }?.params)?["value"], .string(""))
+        XCTAssertEqual(fields(calls.first { $0.method == "sudo.respond" }?.params)?["password"], .string(""))
+        XCTAssertFalse(calls.contains { $0.method.hasPrefix("/api/") })
+
+        viewModel.invalidateDirectConversation()
+        await runtime.stop()
+    }
+
+    func testDirectBlockingReplacedIdentityCannotAnswerOldPromptOrLeakLegacyState() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let viewModel = makeViewModel(
+            client: makeDirectBlockingTestClient(),
+            runtime: runtime,
+            sessionID: nil
+        )
+        let didSend = await viewModel.sendMessage("hello")
+        XCTAssertTrue(didSend)
+        await waitUntil { fake.calls().contains { $0.method == "prompt.submit" } }
+
+        fake.emit(approvalEvent(requestID: "approval-old", sequence: 20))
+        await waitUntil { viewModel.pendingApprovalPrompt?.identity.requestID == "approval-old" }
+        let oldIdentity = try XCTUnwrap(viewModel.pendingApprovalPrompt?.identity)
+        fake.emit(ChatDirectEventFactory.event(sessionID: "runtime-1", type: "message.complete", sequence: 21, payload: ["status": .string("complete")]))
+        await waitUntil { viewModel.pendingApprovalPrompt == nil }
+        fake.emit(approvalEvent(requestID: "approval-new", sequence: 22))
+        await waitUntil { viewModel.pendingApprovalPrompt?.identity.requestID == "approval-new" }
+
+        do {
+            _ = try await viewModel.respondToApproval(.deny, expectedIdentity: oldIdentity)
+            XCTFail("A replaced approval identity must be rejected")
+        } catch GatewayBlockingContractError.staleInteraction { }
+        XCTAssertEqual(fake.calls().filter { $0.method == "approval.respond" }.count, 0)
+        XCTAssertNil(viewModel.approvalPrompt)
+        XCTAssertNil(viewModel.blockingInteractionErrorMessage)
+        let legacyResponse = await viewModel.respondToApproval(.deny)
+        XCTAssertFalse(legacyResponse)
+
+        viewModel.invalidateDirectConversation()
+        await runtime.stop()
+    }
+
+    func testDirectBlockingApprovalUnknownServerErrorAndRejectedResponsesRemainVisibleOnlyForCurrentPrompt() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let viewModel = makeViewModel(
+            client: makeDirectBlockingTestClient(),
+            runtime: runtime,
+            sessionID: nil
+        )
+        let didSend = await viewModel.sendMessage("hello")
+        XCTAssertTrue(didSend)
+        await waitUntil { fake.calls().contains { $0.method == "prompt.submit" } }
+
+        fake.setBlockingResponse("approval.respond", .object([:]))
+        fake.emit(approvalEvent(requestID: "approval-rejected", sequence: 20))
+        await waitUntil { viewModel.pendingApprovalPrompt?.identity.requestID == "approval-rejected" }
+        let rejectedIdentity = try XCTUnwrap(viewModel.pendingApprovalPrompt?.identity)
+        do {
+            _ = try await viewModel.respondToApproval(.deny, expectedIdentity: rejectedIdentity)
+            XCTFail("Malformed approval acknowledgement must not report success")
+        } catch GatewayBlockingContractError.approvalNotResolved { }
+        XCTAssertTrue(viewModel.blockingInteractionErrorMessage?.contains("did not confirm") == true)
+        fake.emit(secretEvent(requestID: "secret-new", sequence: 21))
+        await waitUntil { viewModel.pendingSecretPrompt?.identity.requestID == "secret-new" }
+        let secretIdentity = try XCTUnwrap(viewModel.pendingSecretPrompt?.identity)
+        XCTAssertNil(viewModel.blockingInteractionErrorMessage(for: secretIdentity))
+        XCTAssertTrue(viewModel.blockingInteractionErrorMessage(for: rejectedIdentity)?.contains("did not confirm") == true)
+
+        fake.emit(ChatDirectEventFactory.event(sessionID: "runtime-1", type: "message.complete", sequence: 22, payload: ["status": .string("complete")]))
+        await waitUntil { viewModel.pendingApprovalPrompt == nil }
+        fake.setBlockingError("approval.respond", .server(
+            code: 4009,
+            message: "server rejected approval response",
+            data: nil,
+            method: "approval.respond",
+            requestID: "approval-unknown-error",
+            server: "fixture"
+        ))
+        fake.emit(approvalEvent(requestID: "approval-unknown-error", sequence: 23))
+        await waitUntil { viewModel.pendingApprovalPrompt?.identity.requestID == "approval-unknown-error" }
+        let unknownErrorIdentity = try XCTUnwrap(viewModel.pendingApprovalPrompt?.identity)
+        do {
+            _ = try await viewModel.respondToApproval(.deny, expectedIdentity: unknownErrorIdentity)
+            XCTFail("An unknown approval server error must not be reported as expiry")
+        } catch let error as HermesGatewayError {
+            if case .server(let code, _, _, let method, _, _) = error {
+                XCTAssertEqual(code, 4009)
+                XCTAssertEqual(method, "approval.respond")
+            } else {
+                XCTFail("Expected the original approval server error, got \(error)")
+            }
+        } catch {
+            XCTFail("Expected HermesGatewayError, got \(error)")
+        }
+        XCTAssertEqual(viewModel.pendingApprovalPrompt?.identity, unknownErrorIdentity)
+        XCTAssertTrue(
+            viewModel.blockingInteractionErrorMessage(for: unknownErrorIdentity)?.contains("could not be delivered") == true
+        )
+
+        viewModel.invalidateDirectConversation()
+        await runtime.stop()
+    }
+
     func testDirectClarificationExpiredResponseIsNotReportedAsSuccess() async throws {
         let fake = ChatDirectFakeTransport()
         fake.setClarifyResponse(.object(["status": .string("expired")]))
@@ -723,16 +865,16 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         await waitUntil { viewModel.sendErrorMessage == "That clarification expired before it was answered." }
         fake.emit(ChatDirectEventFactory.event(
             sessionID: "runtime-1",
-            type: "approval.request",
+            type: "error",
             sequence: 24,
-            payload: ["request_id": .string("unrelated")]
+            payload: ["message": .string("Unrelated transport error")]
         ))
-        await waitUntil { viewModel.sendErrorMessage?.contains("cannot answer") == true }
+        await waitUntil { viewModel.sendErrorMessage == "Unrelated transport error" }
         fake.emit(clarificationEvent(requestID: "request-after-unrelated", sequence: 25))
         await waitUntil { viewModel.clarificationPrompt?.pending.clarifyId == "request-after-unrelated" }
         XCTAssertEqual(
             viewModel.sendErrorMessage,
-            "Hermes is waiting for input. This migration build cannot answer that request yet; use the TUI or stop this response."
+            "Unrelated transport error"
         )
 
         await viewModel.disposeDirectConversation()
@@ -1641,6 +1783,46 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         )
     }
 
+    private func approvalEvent(requestID: String, sequence: Int) -> HermesGatewayEvent {
+        ChatDirectEventFactory.event(
+            sessionID: "runtime-1",
+            type: "approval.request",
+            sequence: sequence,
+            payload: [
+                "request_id": .string(requestID),
+                "command": .string("echo fixture"),
+                "description": .string("Allow the bounded fixture command"),
+                "pattern_key": .string("fixture.command"),
+                "pattern_keys": .array([.string("fixture.command")]),
+                "allow_session": .bool(true),
+                "allow_permanent": .bool(false),
+                "choices": .array([.string("once"), .string("session"), .string("deny")])
+            ]
+        )
+    }
+
+    private func secretEvent(requestID: String, sequence: Int) -> HermesGatewayEvent {
+        ChatDirectEventFactory.event(
+            sessionID: "runtime-1",
+            type: "secret.request",
+            sequence: sequence,
+            payload: [
+                "request_id": .string(requestID),
+                "prompt": .string("Enter the fixture secret"),
+                "env_var": .string("FIXTURE_SECRET")
+            ]
+        )
+    }
+
+    private func sudoEvent(requestID: String, sequence: Int) -> HermesGatewayEvent {
+        ChatDirectEventFactory.event(
+            sessionID: "runtime-1",
+            type: "sudo.request",
+            sequence: sequence,
+            payload: ["request_id": .string(requestID)]
+        )
+    }
+
     private func makeViewModel(
         client: APIClient,
         runtime: HermesServerRuntime,
@@ -1708,6 +1890,20 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
                 }
                 return apiTestJSONResponse(#"{"session_id":"durable-1","messages":[],"pagination":{"limit":120,"offset":0,"order":"desc","returned":0}}"#, for: request)
             }
+        }
+    }
+
+    private func makeDirectBlockingTestClient() -> APIClient {
+        makeClient { request in
+            guard request.httpMethod == "GET",
+                  request.url?.path == "/api/sessions/durable-1/messages" else {
+                XCTFail("Unexpected direct blocking REST request: \(request.httpMethod ?? "nil") \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+            return apiTestJSONResponse(
+                #"{"session_id":"durable-1","messages":[],"pagination":{"limit":120,"offset":0,"order":"latest","returned":0}}"#,
+                for: request
+            )
         }
     }
 
@@ -1833,6 +2029,13 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
     private var attachmentResponses: [String: JSONValue] = [:]
     private var imageDetachResponse: JSONValue = .object(["detached": .bool(false), "count": .number(0)])
     private var attachmentErrors: [String: HermesGatewayError] = [:]
+    private var blockingResponses: [String: JSONValue] = [
+        "approval.respond": .object(["resolved": .number(1)]),
+        "secret.respond": .object(["status": .string("ok")]),
+        "sudo.respond": .object(["status": .string("ok")]),
+        "approval.pending": .object(["approvals": .array([])])
+    ]
+    private var blockingErrors: [String: HermesGatewayError] = [:]
     private var attachmentGates: [String: ChatDirectAsyncGate] = [:]
     private var promptSubmitGate: ChatDirectAsyncGate?
     private var promptSubmitShouldCancel = false
@@ -1897,6 +2100,17 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
         withLock { imageDetachResponse = response }
     }
 
+    func setBlockingResponse(_ method: String, _ response: JSONValue) {
+        withLock { blockingResponses[method] = response }
+    }
+
+    func setBlockingError(_ method: String, _ error: HermesGatewayError?) {
+        withLock {
+            if let error { blockingErrors[method] = error }
+            else { blockingErrors.removeValue(forKey: method) }
+        }
+    }
+
     func setAttachmentError(_ method: String, _ error: HermesGatewayError?) {
         withLock {
             if let error { attachmentErrors[method] = error }
@@ -1939,7 +2153,7 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
     }
 
     func request(method: String, params: JSONValue?, timeout: Duration?) async throws -> JSONValue? {
-        let attachmentError = withLock { attachmentErrors[method] }
+        let requestError = withLock { attachmentErrors[method] ?? blockingErrors[method] }
         let behavior = withLock { () -> (JSONValue?, JSONValue?, ChatDirectAsyncGate?, Bool, JSONValue?, JSONValue?) in
             callsValue.append(Call(method: method, params: params))
             switch method {
@@ -1981,6 +2195,8 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
                 return (response, nil, attachmentGates[method], false, nil, nil)
             case "image.detach":
                 return (imageDetachResponse, nil, nil, false, nil, nil)
+            case "approval.respond", "secret.respond", "sudo.respond", "approval.pending":
+                return (blockingResponses[method] ?? .object([:]), nil, nil, false, nil, nil)
             default:
                 return (.object([:]), nil, nil, false, nil, nil)
             }
@@ -2014,7 +2230,7 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
             await gate.wait()
             if withLock({ promptSubmitShouldCancel }) { throw CancellationError() }
         }
-        if let attachmentError { throw attachmentError }
+        if let requestError { throw requestError }
         return behavior.0
     }
 

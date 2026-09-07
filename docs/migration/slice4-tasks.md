@@ -23,3 +23,26 @@ This outline supports later parallelism; it is not permission to publish a relea
 
 Potential parallel lanes: feature inventory, independent screen implementations,
 contract tests and deletion audit. Shared chat/history/runtime files stay single-owner.
+
+## Preparatory source inventory — September7
+
+Read-only Luna inventory, root checked transport boundary at stock pin29112bef.
+`hermes serve` mounts official REST and `/api/ws` (delegating to tui_gateway.ws);
+headless mode disables the SPA, not those APIs (web_server.py17618,17834,19553).
+Using verified official REST is already part of the binding architecture and is
+not a legacy WebUI fallback. Bare stdio gateway lacks REST, but is not our mobile
+deployment target. Do not conflate filenames under web_server/web_routers with a
+browser-UI dependency, or assume a route shape without a live capture.
+
+- RPC candidates: profiles, projects, cron.manage, skills.manage/reload,
+  model.options/config, insights.get, session.cwd.set/workspace.move.
+- Official headless REST candidates: session content search, Git, memory, plus
+  profile/cron/skill/admin endpoints. Exact app-to-stock shape mapping and safe
+  live contract checks remain unexecuted; preserve features where supported.
+- Workspace collection list/suggestion/add/remove/rename/reorder has no exact
+  scoped stock match yet. Inventory alternatives before proposing disposition.
+- Legacy retirement consumers: APIClient+Chat, SSEClient, OfficialHermesContinuity,
+  ChatStreamCoordinator, ChatPendingActionCoordinator and legacy ChatViewModel
+  branches; first prove all production constructors use the direct runtime.
+- History edit/regenerate/fork remain disabled in direct mode pending exact
+  row-ID/lineage contracts. No silent feature removal authorized by this inventory.

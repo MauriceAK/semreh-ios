@@ -27,7 +27,9 @@ def main():
     parser.add_argument('--slice2-ui', action='store_true')
     parser.add_argument('--slice3-clarification', action='store_true')
     parser.add_argument('--slice3-attachment', action='store_true')
+    parser.add_argument('--slice3-blocking', action='store_true')
     parser.add_argument('--slice3-recovery', action='store_true')
+    parser.add_argument('--slice3-completed-away', action='store_true')
     parser.add_argument('--tui-created-session-id')
     parser.add_argument('--development-backend-sha')
     parser.add_argument('--stock-backend', action='store_true')
@@ -61,17 +63,35 @@ def main():
         or not args.stock_backend or args.development_backend_sha
     ):
         parser.error('--slice3-attachment requires --slice2-ui --https --stock-backend')
+    if args.slice3_blocking and (
+        not args.slice2_ui or not args.https or args.cookie_phase
+        or not args.stock_backend or args.development_backend_sha
+    ):
+        parser.error('--slice3-blocking requires --slice2-ui --https --stock-backend')
+    if sum(bool(flag) for flag in (
+        args.slice3_clarification, args.slice3_attachment, args.slice3_blocking
+    )) > 1:
+        parser.error('--slice3-clarification, --slice3-attachment, and --slice3-blocking are mutually exclusive')
     if args.slice3_recovery and (
         not args.https or args.cookie_phase or not args.stock_backend
         or args.development_backend_sha or args.slice2_foundation
         or args.slice2_native or args.slice2_reasoning or args.slice2_ui
-        or args.slice3_clarification or args.slice3_attachment
+        or args.slice3_clarification or args.slice3_attachment or args.slice3_blocking
+        or args.slice3_completed_away
         or args.tui_created_session_id
     ):
         parser.error('--slice3-recovery requires --https --stock-backend and no other test phase')
-    backend_phase = args.slice2_reasoning or args.slice2_ui or args.slice3_recovery
+    if args.slice3_completed_away and (
+        not args.https or args.cookie_phase or not args.stock_backend
+        or args.development_backend_sha or args.slice2_foundation
+        or args.slice2_native or args.slice2_reasoning or args.slice2_ui
+        or args.slice3_clarification or args.slice3_attachment or args.slice3_blocking
+        or args.slice3_recovery or args.tui_created_session_id
+    ):
+        parser.error('--slice3-completed-away requires --https --stock-backend and no other test phase')
+    backend_phase = args.slice2_reasoning or args.slice2_ui or args.slice3_recovery or args.slice3_completed_away
     if args.stock_backend and not backend_phase:
-        parser.error('--stock-backend requires --slice2-reasoning or --slice2-ui')
+        parser.error('--stock-backend requires --slice2-reasoning, --slice2-ui, or --slice3-completed-away')
     if backend_phase and args.stock_backend == bool(args.development_backend_sha):
         parser.error('Slice 2 backend phase requires exactly one backend mode')
     development = backend_phase and not args.stock_backend
@@ -134,6 +154,14 @@ def main():
             'SEMREH_SLICE3_RECOVERY_NATIVE': '1',
         })
         method = 'testOptInHostedSlice3NativeAttachmentRecovery'
+    if args.slice3_completed_away:
+        environment = target['EnvironmentVariables']
+        environment.update({
+            'SEMREH_SLICE2_STOCK_BACKEND_SHA': PIN,
+            'SEMREH_SLICE2_TOOL_CWD': str(runtime / 'tools'),
+            'SEMREH_SLICE3_COMPLETED_AWAY_NATIVE': '1',
+        })
+        method = 'testOptInHostedSlice3CompletedWhileAway'
     if args.cookie_phase:
         target['EnvironmentVariables']['SEMREH_SLICE1_COOKIE_PHASE'] = args.cookie_phase
         method = 'testOptInHostedCookie' + args.cookie_phase.title() + 'Phase'
@@ -152,6 +180,8 @@ def main():
             target['EnvironmentVariables']['SEMREH_SLICE3_CLARIFICATION_UI'] = '1'
         if args.slice3_attachment:
             target['EnvironmentVariables']['SEMREH_SLICE3_ATTACHMENT_UI'] = '1'
+        if args.slice3_blocking:
+            target['EnvironmentVariables']['SEMREH_SLICE3_BLOCKING_UI'] = '1'
         if args.tui_created_session_id:
             target['EnvironmentVariables']['SEMREH_SLICE2_TUI_CREATED_SESSION_ID'] = args.tui_created_session_id
         method = 'testOptInLiveProductionLoginNewChatSend'

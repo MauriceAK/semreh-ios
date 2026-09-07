@@ -65,8 +65,11 @@ enum GatewayBlockingError: Error, Equatable, Sendable {
 enum GatewayBlockingContractError: Error, Equatable, Sendable {
     case malformedApproval
     case unsupportedApprovalChoice
+    case approvalNotResolved
     case malformedSecret
     case malformedSudo
+    case invalidResponse
+    case staleInteraction
 }
 
 enum GatewayApprovalChoice: String, CaseIterable, Equatable, Sendable {
