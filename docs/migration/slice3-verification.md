@@ -971,3 +971,80 @@ Final selectorPythonv3 passed29 after assertion-grouping tidy. App-kill artifact
 auditv1 completed with zero flagged paths; exact counts retained in JSONL. Known
 fixture secrets/obvious bearer formats/exported consoles only; same exclusions as
 previous audits. The successful checkpoint does not close R2c auth follow-up.
+
+September7 read-only upstream check: official releases/latest still resolves to
+v2026.8.31/v0.21.0 at29112be, so no newer stable release was identified as a simple
+upgrade resolution: https://github.com/NousResearch/hermes-agent/releases/tag/v2026.8.31.
+Related issue79065 discusses read-only-workspace upload fallback and explicitly
+notes that absolute fallback refs need a scoped allowlist for prompt expansion:
+https://github.com/NousResearch/hermes-agent/issues/79065. It is related context,
+not proof our exact current profile-home mismatch is fixed or covered by a PR.
+No upstream write or backend pin change performed.
+Related PR79095 describes scoped fallback-root expansion, but targets the older
+workspace-staging behavior, not our pinned profile-home implementation:
+https://github.com/NousResearch/hermes-agent/pull/79095. Do not adopt its patch or
+infer released compatibility from the issue being closed; inspected release and
+running stock source remain the contract evidence.
+
+September7 successor review (not yet a native pass): pre-ACK selector Pythonv1
+failed because the root omitted the new flag from `backend_phase`; corrected v2
+passed31 tests. Retain both logs. Root review corrected the accepted-state native
+assertion to exactly user/assistant/user, not two completed pairs; the final
+canonical check still requires two complete pairs and unique durable IDs.
+Auth worker parse-only handoff was insufficient: root caught an unconstructible
+empty timeout enum, and independent SolLow review caught expiry validation begun
+during a suspended fresh login sharing its commit epoch. Worker is correcting
+both and adding the exact interleaving regression before native verification.
+The protected-probe task-group deadline depends on URLSession cancellation;
+it is not a general timeout guarantee for cancellation-ignoring custom clients.
+
+Auth correction re-reviewed by SolLow: no production blocker found after
+commit-time epoch retirement. Its gated regression still uses yield/1ms for the
+final observation, not a deterministic finalizer-completion barrier; do not
+overstate that test as exhaustive scheduler proof. Pre-ACK source review also
+found no blocker after the accepted-state fix. It proves client-side ACK
+suppression, not proxy/packet loss or exact server-running state at cancellation.
+Full auth-preack-full-v1 compiled and launched its host, but no completed XCTest
+result is available yet. Retain this attempt if runner startup times out.
+Fresh auth-relaunch-seed-v1 passed exact two-row baseline on the stock fixture;
+this is JSON-RPC seeding only, not app login/relaunch acceptance.
+
+auth-preack-full-v1 ended after365.55s with test-host connection timeout: zero
+tests executed, one runner failure. Diagnostics exported and retained. Unchanged
+build retry full-v2 uses the original arm64 xctestrun, per-test60/120s deadlines,
+parallelNO/jobs2/collect-test-diagnostics never. No code change between attempts.
+
+Full-v2 executed2182pass/1fail/12intentional opt-in skips. The new switch/logout
+test wrongly expected unconfigured after removing B while A remained configured;
+actual loggedIn(A) matches the retained auto-switch contract. Worker corrects
+that assertion, not production behavior. Diagnostics retained. Root starts the
+already-built preACK opt-in while the test-only correction is prepared.
+
+preack-live-v1 **passed1/0/0** against the stock HTTPS fixture: exact target success
+response suppressed, accepted three-row canonical state, sole socket cancelled,
+same controller rebound, two complete canonical pairs/unique IDs/preserved prefix,
+native refresh matched REST, and exactly one target submission. Owned cleanup
+and logout passed. Diagnostics exported. No real proxy-loss or physical claim.
+Luna corrected full-v2's multi-account expectation; no production change.
+Full-v3 rebuild/rerun begins with the same bounded native flags.
+
+Full-v3 **passed2183/0/12intentional opt-in skips**. Diagnostics exported;
+preACK realbackend gate remains separate1/0/0. Signed production UIbuildv1 passed
+with no logged warnings; root starts retained idle-relaunch UI gate on the fresh
+auth seed (normal login/navigation/termination/relaunch/follow-up send).
+
+Auth productionUIv1 **passed1/0/0**: ordinary login, seeded conversation open,
+process termination/relaunch without password re-entry, and one follow-up send.
+Separate auth-relaunch-canonical-v1 passed four exact rows/preserved baseline
+hash. Root viewed relaunch51E30886-FCF9-4002-98DE-A0D574063CE9.png and completed
+181FE31A-4F17-4815-905C-9D816D8C86A8.png; empty composer, exact two ACKs.
+Strict codesign and ordinary signed launch passed(PID96411). Diagnostic exports
+retained. This does not establish the root cause of earlier app-kill UIv1's auth
+failure, physical acceptance, or concurrent configure/login correctness beyond
+the bounded stale-expiry change. Final artifact audit/selector check follows.
+
+Final selectorPythonv1 passed31. Auth-preack-final-audit-v1 completed:
+197187files scanned, zero flagged paths,123exported console logs. Scope is known
+fixture secrets/obvious bearer formats, not arbitrary opaque secrets, OCR or
+quarantined OS diagnostics. No backend source/config/route change, phone install,
+push or publication. Checkpoint remains part of unfinished Slice3 (~70% overall).

@@ -28,12 +28,18 @@ final class AuthManagerStateTests: XCTestCase {
 
     func testUnauthorizedWhileLoggedInKeepsServerAndMovesToLoggedOut() async throws {
         let keychain = InMemoryKeychainStore()
-        let manager = try await makeLoggedInManager(keychain: keychain, serverURLString: "https://example.test")
         let server = try XCTUnwrap(URL(string: "https://example.test"))
+        let client = ProbeAuthClient(server: server, probes: [.succeed, .expired])
+        let manager = try await makeLoggedInManager(
+            keychain: keychain,
+            serverURLString: server.absoluteString,
+            client: client
+        )
         let cookieStorage = HTTPCookieStorage.shared
-        cookieStorage.setCookie(try makeSessionCookie(for: server))
+        cookieStorage.setCookie(try makeSessionCookie(for: server, value: "expired-cookie"))
 
         manager.handleAPIError(DirectHermesAuthError.sessionExpired)
+        await waitForProbe(client, count: 2)
 
         XCTAssertEqual(manager.state, .loggedOut(server: server))
         XCTAssertEqual(keychain.savedValues[.serverURL], server.absoluteString)
@@ -43,14 +49,146 @@ final class AuthManagerStateTests: XCTestCase {
 
     func testUnauthorizedWhileAlreadyLoggedOutStaysLoggedOutWithServer() async throws {
         let keychain = InMemoryKeychainStore()
-        let manager = try await makeLoggedInManager(keychain: keychain, serverURLString: "https://example.test")
         let server = try XCTUnwrap(URL(string: "https://example.test"))
+        let client = ProbeAuthClient(server: server, probes: [.succeed, .expired])
+        let manager = try await makeLoggedInManager(
+            keychain: keychain,
+            serverURLString: server.absoluteString,
+            client: client
+        )
 
         manager.handleAPIError(DirectHermesAuthError.sessionExpired)
+        await waitForProbe(client, count: 2)
         manager.handleAPIError(DirectHermesAuthError.sessionExpired)
 
         XCTAssertEqual(manager.state, .loggedOut(server: server))
         XCTAssertEqual(keychain.savedValues[.serverURL], server.absoluteString)
+    }
+
+    func testLateExpiryFromOlderRequestCannotDemoteFreshLogin() async throws {
+        let server = try XCTUnwrap(URL(string: "https://example.test"))
+        let keychain = InMemoryKeychainStore()
+        let client = ProbeAuthClient(server: server, probes: [.succeed, .wait, .succeed])
+        let manager = try await makeLoggedInManager(
+            keychain: keychain,
+            serverURLString: server.absoluteString,
+            client: client
+        )
+
+        manager.handleAPIError(DirectHermesAuthError.sessionExpired)
+        await waitForProbe(client, count: 2)
+
+        await manager.configure(
+            serverURLString: server.absoluteString,
+            username: "test-user",
+            password: "new-secret"
+        )
+        await Task.yield()
+
+        XCTAssertEqual(manager.state, .loggedIn(server: server))
+        XCTAssertEqual(HTTPCookieStorage.shared.cookies(for: server)?.first?.value, "login-2")
+        XCTAssertNil(manager.lastErrorMessage)
+
+        await manager.signOut()
+    }
+
+    func testExpiryArrivingDuringConfigureCannotDemoteFreshCommit() async throws {
+        let server = try XCTUnwrap(URL(string: "https://example.test"))
+        let client = ProbeAuthClient(server: server, probes: [.succeed, .manual, .manual])
+        let manager = try await makeLoggedInManager(
+            keychain: InMemoryKeychainStore(),
+            serverURLString: server.absoluteString,
+            client: client
+        )
+
+        let configureTask = Task { @MainActor in
+            await manager.configure(
+                serverURLString: server.absoluteString,
+                username: "test-user",
+                password: "new-secret"
+            )
+        }
+        await waitForProbe(client, count: 2)
+
+        // The configure protected probe is suspended while an unrelated stale
+        // request reports expiry. The second epoch advance occurs only at the
+        // successful configure commit below.
+        manager.handleAPIError(DirectHermesAuthError.sessionExpired)
+        await waitForProbe(client, count: 3)
+
+        client.releaseProbe(2, with: .success(()))
+        await configureTask.value
+        XCTAssertEqual(manager.state, .loggedIn(server: server))
+
+        client.releaseProbe(3, with: .failure(DirectHermesAuthError.sessionExpired))
+        await Task.yield()
+        try? await Task.sleep(for: .milliseconds(1))
+
+        XCTAssertEqual(manager.state, .loggedIn(server: server))
+        XCTAssertEqual(HTTPCookieStorage.shared.cookies(for: server)?.first?.value, "login-2")
+        XCTAssertNil(manager.lastErrorMessage)
+    }
+
+    func testExpiryValidationCoalescesAndNetworkFailurePreservesCurrentCookie() async throws {
+        let server = try XCTUnwrap(URL(string: "https://example.test"))
+        let keychain = InMemoryKeychainStore()
+        let client = ProbeAuthClient(server: server, probes: [.succeed, .wait, .network])
+        let manager = try await makeLoggedInManager(
+            keychain: keychain,
+            serverURLString: server.absoluteString,
+            client: client
+        )
+
+        manager.handleAPIError(DirectHermesAuthError.sessionExpired)
+        manager.handleAPIError(DirectHermesAuthError.sessionExpired)
+        await waitForProbe(client, count: 2)
+        XCTAssertEqual(client.probeCallCount, 2, "Concurrent expiry reports must share one validation probe.")
+
+        await manager.signOut()
+
+        let secondClient = ProbeAuthClient(server: server, probes: [.succeed, .network])
+        let secondManager = try await makeLoggedInManager(
+            keychain: InMemoryKeychainStore(),
+            serverURLString: server.absoluteString,
+            client: secondClient
+        )
+        secondManager.handleAPIError(DirectHermesAuthError.sessionExpired)
+        await waitForProbe(secondClient, count: 2)
+
+        XCTAssertEqual(secondManager.state, .loggedIn(server: server))
+        XCTAssertEqual(HTTPCookieStorage.shared.cookies(for: server)?.first?.value, "login-1")
+        XCTAssertNil(secondManager.lastErrorMessage)
+    }
+
+    func testSwitchAndLogoutRetirePendingExpiryValidation() async throws {
+        let serverA = try XCTUnwrap(URL(string: "https://a.example.test"))
+        let serverB = try XCTUnwrap(URL(string: "https://b.example.test"))
+        let keychain = InMemoryKeychainStore()
+        let registry = ServerRegistry.inMemory(keychain: keychain)
+        registry.activate(url: serverB)
+        let client = ProbeAuthClient(server: serverA, probes: [.succeed, .wait])
+        let manager = try await makeLoggedInManager(
+            keychain: keychain,
+            serverURLString: serverA.absoluteString,
+            client: client,
+            serverRegistry: registry
+        )
+        let accountB = try XCTUnwrap(registry.servers.first { $0.id == serverB.absoluteString })
+
+        manager.handleAPIError(DirectHermesAuthError.sessionExpired)
+        await waitForProbe(client, count: 2)
+        manager.switchActiveServer(to: accountB)
+        await Task.yield()
+
+        XCTAssertEqual(manager.state, .loggedIn(server: serverB))
+        XCTAssertNil(manager.lastErrorMessage)
+
+        manager.handleAPIError(DirectHermesAuthError.sessionExpired)
+        await manager.signOut()
+        // Signing out B preserves the other configured account and activates A.
+        // The validation retired during the switch/sign-out must not demote A.
+        XCTAssertEqual(manager.state, .loggedIn(server: serverA))
+        XCTAssertNil(manager.lastErrorMessage)
     }
 
     func testUnauthorizedWhileUnconfiguredKeepsFullClearBehavior() {
@@ -188,11 +326,17 @@ final class AuthManagerStateTests: XCTestCase {
         let keychain = InMemoryKeychainStore()
         let serverA = try XCTUnwrap(URL(string: "https://a.test"))
         let serverB = try XCTUnwrap(URL(string: "https://b.test"))
-        let manager = try await makeLoggedInManager(keychain: keychain, serverURLString: "https://a.test")
+        let client = ProbeAuthClient(server: serverA, probes: [.succeed, .expired])
+        let manager = try await makeLoggedInManager(
+            keychain: keychain,
+            serverURLString: serverA.absoluteString,
+            client: client
+        )
         HTTPCookieStorage.shared.setCookie(try makeSessionCookie(for: serverA, value: "a-cookie"))
         HTTPCookieStorage.shared.setCookie(try makeSessionCookie(for: serverB, value: "b-cookie"))
 
         manager.handleAPIError(DirectHermesAuthError.sessionExpired)
+        await waitForProbe(client, count: 2)
 
         // Only the active server's auth is affected by its 401.
         XCTAssertEqual(manager.state, .loggedOut(server: serverA))
@@ -605,8 +749,9 @@ final class AuthManagerStateTests: XCTestCase {
     private func makeLoggedInManager(
         keychain: InMemoryKeychainStore,
         serverURLString: String,
-        client providedClient: MockAuthAPIClient? = nil,
-        logoutTimeout: Duration = .seconds(5)
+        client providedClient: (any AuthAPIClient)? = nil,
+        logoutTimeout: Duration = .seconds(5),
+        serverRegistry: ServerRegistry? = nil
     ) async throws -> AuthManager {
         let client = providedClient
             ?? MockAuthAPIClient(authStatus: AuthStatusResponse(authEnabled: true, loggedIn: false))
@@ -614,7 +759,7 @@ final class AuthManagerStateTests: XCTestCase {
             keychain: keychain,
             clientFactory: { _ in client },
             logoutTimeout: logoutTimeout,
-            serverRegistry: ServerRegistry.inMemory()
+            serverRegistry: serverRegistry ?? ServerRegistry.inMemory()
         )
 
         await manager.configure(serverURLString: serverURLString, username: "test-user", password: "secret")
@@ -627,6 +772,19 @@ final class AuthManagerStateTests: XCTestCase {
         return manager
     }
 
+    private func waitForProbe(_ client: ProbeAuthClient, count: Int) async {
+        for _ in 0..<100 {
+            if client.probeCallCount >= count {
+                await Task.yield()
+                try? await Task.sleep(for: .milliseconds(1))
+                return
+            }
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        XCTFail("Timed out waiting for protected probe (count).")
+    }
+
     private func makeSessionCookie(for server: URL, value: String = "stale-session-token") throws -> HTTPCookie {
         try XCTUnwrap(
             HTTPCookie(properties: [
@@ -636,5 +794,106 @@ final class AuthManagerStateTests: XCTestCase {
                 .value: value,
             ])
         )
+    }
+
+    private final class ProbeAuthClient: AuthAPIClient, @unchecked Sendable {
+        enum ProbeBehavior {
+            case succeed
+            case expired
+            case network
+            case wait
+            case manual
+        }
+
+        let server: URL
+        private let lock = NSLock()
+        private var probes: [ProbeBehavior]
+        private var nextProbe = 0
+        private var loginCount = 0
+        private var waitingProbes: [Int: CheckedContinuation<Void, Error>] = [:]
+
+        init(server: URL, probes: [ProbeBehavior]) {
+            self.server = server
+            self.probes = probes
+        }
+
+        var probeCallCount: Int {
+            withLock { nextProbe }
+        }
+
+        private func withLock<T>(_ body: () -> T) -> T {
+            lock.lock()
+            defer { lock.unlock() }
+            return body()
+        }
+
+        func releaseProbe(_ number: Int, with result: Result<Void, Error>) {
+            let continuation = withLock { waitingProbes.removeValue(forKey: number) }
+            continuation?.resume(with: result)
+        }
+
+        func directStatus() async throws -> DirectHermesStatusResponse {
+            DirectHermesStatusResponse(
+                version: nil,
+                releaseDate: nil,
+                authRequired: true,
+                authProviders: ["basic"],
+                authFlows: nil,
+                overall: nil
+            )
+        }
+
+        func directProviders() async throws -> DirectHermesAuthProvidersResponse {
+            DirectHermesAuthProvidersResponse(
+                providers: [DirectHermesAuthProvider(name: "basic", displayName: nil, supportsPassword: true)]
+            )
+        }
+
+        func directPasswordLogin(
+            username: String,
+            password: String,
+            provider: String
+        ) async throws -> DirectHermesPasswordLoginResponse {
+            let value = withLock {
+                loginCount += 1
+                return "login-\(loginCount)"
+            }
+            guard let host = server.host else { throw APIError.invalidServerURL }
+            if let cookie = HTTPCookie(properties: [
+                .domain: host,
+                .path: "/",
+                .name: "hermes_session",
+                .value: value
+            ]) {
+                HTTPCookieStorage.shared.setCookie(cookie)
+            }
+            return DirectHermesPasswordLoginResponse(ok: true, next: nil)
+        }
+
+        func directProtectedProbe() async throws {
+            let (index, behavior) = withLock {
+                let index = nextProbe
+                nextProbe += 1
+                let behavior = index < probes.count ? probes[index] : .succeed
+                return (index + 1, behavior)
+            }
+
+            switch behavior {
+            case .succeed:
+                return
+            case .expired:
+                throw DirectHermesAuthError.sessionExpired
+            case .network:
+                throw APIError.network(underlying: URLError(.notConnectedToInternet))
+            case .wait:
+                try await Task.sleep(for: .seconds(3600))
+            case .manual:
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                    withLock { waitingProbes[index] = continuation }
+                }
+            }
+        }
+
+        func directLogout() async throws {}
     }
 }

@@ -35,6 +35,7 @@ def main():
     parser.add_argument('--slice3-app-kill', action='store_true')
     parser.add_argument('--slice3-gateway-restart', action='store_true')
     parser.add_argument('--slice3-active-socket-loss', action='store_true')
+    parser.add_argument('--slice3-pre-ack-loss', action='store_true')
     parser.add_argument('--gateway-restart-nonce')
     parser.add_argument('--tui-created-session-id')
     parser.add_argument('--slice3-relaunch-seed-text')
@@ -42,6 +43,16 @@ def main():
     parser.add_argument('--stock-backend', action='store_true')
     parser.add_argument('--cookie-phase', choices=['login', 'restore', 'logout'])
     args = parser.parse_args()
+    if args.slice3_pre_ack_loss and (
+        not args.https or not args.stock_backend or args.development_backend_sha
+        or args.cookie_phase or args.slice2_foundation or args.slice2_native
+        or args.slice2_reasoning or args.slice2_ui or args.slice3_clarification
+        or args.slice3_attachment or args.slice3_blocking or args.slice3_file_picker
+        or args.slice3_recovery or args.slice3_completed_away or args.slice3_relaunch
+        or args.slice3_app_kill or args.slice3_gateway_restart or args.slice3_active_socket_loss
+        or args.gateway_restart_nonce or args.tui_created_session_id or args.slice3_relaunch_seed_text
+    ):
+        parser.error('--slice3-pre-ack-loss requires --https --stock-backend and no other test phase')
     if args.slice3_active_socket_loss and (
         not args.https or not args.stock_backend or args.development_backend_sha
         or args.cookie_phase or args.slice2_foundation or args.slice2_native
@@ -158,7 +169,7 @@ def main():
     ):
         parser.error('--slice3-gateway-restart requires --https --stock-backend --gateway-restart-nonce and no other test phase')
     backend_phase = (
-        args.slice3_active_socket_loss or args.slice2_reasoning or args.slice2_ui or args.slice3_file_picker or args.slice3_recovery
+        args.slice3_pre_ack_loss or args.slice3_active_socket_loss or args.slice2_reasoning or args.slice2_ui or args.slice3_file_picker or args.slice3_recovery
         or args.slice3_completed_away or args.slice3_relaunch or args.slice3_gateway_restart
     )
     if args.stock_backend and not backend_phase:
@@ -258,6 +269,13 @@ def main():
             'SEMREH_SLICE3_ACTIVE_SOCKET_LOSS_NATIVE': '1',
         })
         method = 'testOptInHostedSlice3NativeActiveSocketLoss'
+    if args.slice3_pre_ack_loss:
+        target['EnvironmentVariables'].update({
+            'SEMREH_SLICE2_STOCK_BACKEND_SHA': PIN,
+            'SEMREH_SLICE2_TOOL_CWD': str(runtime / 'tools'),
+            'SEMREH_SLICE3_PRE_ACK_LOSS_NATIVE': '1',
+        })
+        method = 'testOptInHostedSlice3NativePreACKLoss'
     if args.cookie_phase:
         target['EnvironmentVariables']['SEMREH_SLICE1_COOKIE_PHASE'] = args.cookie_phase
         method = 'testOptInHostedCookie' + args.cookie_phase.title() + 'Phase'

@@ -78,6 +78,13 @@ this sheet does not invent contracts or mark unexecuted checks passed.
   runs; choose a finite value against the eventual physical long-background
   interval plus reconnect margin. Do not use zero without cleanup/cap evidence
   or broaden synthetic tools just to exercise delegation-specific reaping.
+- Auth follow-up found a source-supported stale-error race: global expiry handling
+  can clear a newly logged-in account in response to an old REST 401. Implement
+  a narrow AuthManager-owned current-session revalidation, coalesced and guarded
+  by auth generation/server across login/logout/switch. Only a current structured
+  expiry may clear cookies; generic probe failures must not log out. This adds one
+  bounded protected read only on expiry, not a new auth store/framework or a broad
+  callback rewrite. It addresses the race, not a proven cause of UIv1's failure.
 
 ## Work packages
 
@@ -107,6 +114,11 @@ this sheet does not invent contracts or mark unexecuted checks passed.
     same-controller rebind/new transport generation and exact native/canonical
     history, unchanged baseline and no extra submit. Controlled socket cancellation
     only; actual proxy/WiFi/pre-ACK/preterminal boundaries remain separate.
+  - [x] **R1d — Accepted send without consumed ACK checkpoint.** Preack-live-v1
+    passed1/0/0 with only the target success ACK suppressed before controller
+    consumption, real socket cancellation/rebind, exact canonical identity/order/
+    unique IDs/prefix, native refresh and no resend. Root and SolLow reviewed.
+    Application-level ACK suppression is not actual proxy loss or before-write loss.
 - [ ] **S3-R2 — Mobile/host lifecycle and orphan policy.** App background, kill,
   host restart and connectivity loss. Select finite grace from evidence; no silent
   personal-host configuration change. If zero is proposed, demonstrate cleanup
@@ -126,6 +138,10 @@ this sheet does not invent contracts or mark unexecuted checks passed.
     reached Sessions, then initial deep-link launch returned session-expired before
     any test turn. Unchanged UIv2 passed; cause unresolved. Preserve failed
     artifacts and investigate without hiding the boundary behind an arbitrary wait.
+    Source-supported stale-expiry race is separately fixed with coalesced current
+    protected read and server/auth-epoch guards. Full2183/0/12opt-in skips and
+    production auth-relaunch UI1/0/0 plus independent canonical4rows passed.
+    No claim that this proves the earlier failure's cause; keep that gap visible.
 - [ ] **S3-B — Blocking interaction.** Approval, clarification, sudo/secret and
   expiry. Key requests by server/session/generation/request; explicit deterministic
   cancellation if full UI unsupported. No sensitive response in persistence/logs.

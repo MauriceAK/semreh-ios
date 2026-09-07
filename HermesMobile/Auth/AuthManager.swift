@@ -52,6 +52,13 @@ final class AuthManager {
     private let serverRegistry: ServerRegistry
     private let officialStore: OfficialContinuityConfigurationStore
     private let officialClientFactory: @Sendable (URL, String) -> OfficialHermesContinuityClient
+    /// Structured expiry can arrive from a request started before a fresh login.
+    /// Validate the current cookie first, and bind the result to this auth epoch.
+    private var authEpoch = 0
+    private var expiryValidationTask: Task<Void, Never>?
+    private var expiryValidationOwner: UUID?
+    private var expiryValidationServer: URL?
+    private var expiryValidationEpoch: Int?
 
     init(
         keychain: any KeychainStoring = KeychainStore(),
@@ -140,6 +147,7 @@ final class AuthManager {
         password: String,
         customHeaders: [CustomHeader]? = nil
     ) async {
+        advanceAuthEpoch()
         lastErrorMessage = nil
 
         if let customHeaders {
@@ -195,6 +203,11 @@ final class AuthManager {
             // endpoints responded. This confirms the current cookie/auth state
             // for both authenticated and auth-disabled deployments.
             try await client.directProtectedProbe()
+
+            // A protected expiry can arrive while this configure is suspended.
+            // Retire that validation again immediately before committing the new
+            // login so it cannot demote the freshly authenticated state.
+            advanceAuthEpoch()
 
             // Persist only on success: the server URL and the headers that reached it.
             try keychain.save(serverURL.absoluteString, forKey: .serverURL)
@@ -305,6 +318,7 @@ final class AuthManager {
             //
             // Do the throwing Keychain write first so a write failure leaves the
             // live header store (and the active server) completely untouched.
+            advanceAuthEpoch()
             try keychain.save(serverURL.absoluteString, forKey: .serverURL)
             headerStore.replace(with: newHeaders)
             serverRegistry.activate(url: serverURL)
@@ -339,6 +353,7 @@ final class AuthManager {
     /// to onboarding only when none remain (#17). A single-server install behaves
     /// exactly as before (sign out → onboarding).
     func signOut() async {
+        advanceAuthEpoch()
         guard let active = state.server else {
             // Defensive: nothing is active. Safe full reset to onboarding.
             clearLocalAuth(for: nil)
@@ -363,6 +378,7 @@ final class AuthManager {
         let isActive = state.server?.absoluteString == account.id
 
         if isActive {
+            advanceAuthEpoch()
             if case .loggedIn = state {
                 OpenChatSessionStore.shared.activateGateway(server: nil)
                 await attemptBestEffortServerLogout(server: serverURL)
@@ -384,6 +400,7 @@ final class AuthManager {
         guard account.id != state.server?.absoluteString,
               let serverURL = URL(string: account.urlString) else { return }
 
+        advanceAuthEpoch()
         serverRegistry.setActive(id: account.id)
         refreshServers()
         try? keychain.save(serverURL.absoluteString, forKey: .serverURL)
@@ -481,17 +498,122 @@ final class AuthManager {
             return
         }
 
-        lastErrorMessage = String(localized: "Your session expired. Sign in again.")
-
         switch state {
-        case .loggedIn(let server), .loggedOut(let server):
+        case .loggedIn(let server):
+            beginExpiryValidation(for: server)
+        case .loggedOut(let server):
+            commitSessionExpiry(for: server)
+        case .unconfigured:
+            lastErrorMessage = String(localized: "Your session expired. Sign in again.")
+            clearLocalAuth(for: nil)
+        }
+    }
+
+    /// A protected 401 is not authoritative when it may belong to an older
+    /// request. Re-check the current cookie through the active client first.
+    /// The task is coalesced and its completion is scoped by owner, server, and
+    /// auth epoch so cancellation cannot mutate a later login or server switch.
+    private func beginExpiryValidation(for server: URL) {
+        guard expiryValidationTask == nil else { return }
+
+        let owner = UUID()
+        let epoch = authEpoch
+        let client = clientFactory(server)
+        let timeout = logoutTimeout
+        expiryValidationOwner = owner
+        expiryValidationServer = server
+        expiryValidationEpoch = epoch
+        expiryValidationTask = Task { @MainActor [weak self, client] in
+            let outcome: Result<Void, Error>
+            do {
+                try await Self.runBoundedProtectedProbe(client: client, timeout: timeout)
+                outcome = .success(())
+            } catch {
+                outcome = .failure(error)
+            }
+            guard let self else { return }
+            self.finishExpiryValidation(
+                owner: owner,
+                server: server,
+                epoch: epoch,
+                outcome: outcome
+            )
+        }
+    }
+
+    private func finishExpiryValidation(
+        owner: UUID,
+        server: URL,
+        epoch: Int,
+        outcome: Result<Void, Error>
+    ) {
+        guard expiryValidationOwner == owner,
+              expiryValidationServer == server,
+              expiryValidationEpoch == epoch else {
+            return
+        }
+
+        expiryValidationTask = nil
+        expiryValidationOwner = nil
+        expiryValidationServer = nil
+        expiryValidationEpoch = nil
+
+        guard authEpoch == epoch,
+              case .loggedIn(let currentServer) = state,
+              currentServer == server else {
+            return
+        }
+
+        guard case .failure(let error) = outcome,
+              let authError = error as? DirectHermesAuthError,
+              authError == .sessionExpired else {
+            // A successful or inconclusive validation must not sign the user out.
+            return
+        }
+
+        commitSessionExpiry(for: server)
+    }
+
+    private func commitSessionExpiry(for server: URL) {
+        lastErrorMessage = String(localized: "Your session expired. Sign in again.")
+        switch state {
+        case .loggedIn(let currentServer), .loggedOut(let currentServer):
+            guard currentServer == server else { return }
             // The server is still valid; only the session cookie is stale. Keep the
             // Keychain entry so re-login is a one-field affair, and clear only this
             // server's cookies so other configured servers stay signed in (#16).
             clearSessionCookies(for: server)
             state = .loggedOut(server: server)
         case .unconfigured:
-            clearLocalAuth(for: nil)
+            return
+        }
+    }
+
+    private func advanceAuthEpoch() {
+        authEpoch &+= 1
+        expiryValidationTask?.cancel()
+        expiryValidationTask = nil
+        expiryValidationOwner = nil
+        expiryValidationServer = nil
+        expiryValidationEpoch = nil
+    }
+
+    private struct ProtectedProbeTimeout: Error {}
+
+    private static func runBoundedProtectedProbe(
+        client: any AuthAPIClient,
+        timeout: Duration
+    ) async throws {
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                try await client.directProtectedProbe()
+            }
+            group.addTask {
+                try await Task.sleep(for: timeout)
+                throw ProtectedProbeTimeout()
+            }
+            defer { group.cancelAll() }
+            try await group.next()
         }
     }
 
