@@ -1,5 +1,15 @@
 # Slice 4 task outline
 
+September 8 update: guarded edit/regenerate/delete and stock updater have passed
+signed build-v7/full-v2 (2262/0/14), focused checks and owned stock destructive
+HTTPS live-v2. Existing confirmations remain. Exact row/profile/binding checks and
+no-repeat handling do not close the cross-client race Maurice accepted in the
+binding plan. Attached-session deletion is refused, without implicit close.
+Production navigation/device acceptance and actual updater execution are unverified;
+S4-D and whole-release acceptance are not marked complete. Current dispatch and
+retained failure history are in remaining-work.md and secondary-feature-status.md;
+older notes below describe prior checkpoints, not current disablement decisions.
+
 Status: bounded S4-S search/detail integration verified; metadata and archive
 consumer integration underway. Other packages remain
 open. Refine remaining owners/file boundaries as Slice3 interfaces stabilize.

@@ -83,12 +83,6 @@ private struct PendingMetadataKey: Hashable {
     let sessionID: String
 }
 
-private struct SessionMutationRejectedError: LocalizedError {
-    let message: String
-
-    var errorDescription: String? { message }
-}
-
 private struct ArchivedCountResponseError: LocalizedError {
     var errorDescription: String? {
         String(localized: "Hermes did not return a valid archived session count.")
@@ -174,6 +168,9 @@ final class SessionListViewModel {
     /// or after a known child cannot be read back. Never branch that source
     /// again blindly during this view-model lifetime.
     private var duplicateOutcomeUnknownKeys: Set<PendingMetadataKey> = []
+    /// A lost direct-delete acknowledgement must never trigger or permit a blind
+    /// repeat for the same durable session/profile in this view-model lifetime.
+    private var deleteOutcomeUnknownKeys: Set<PendingMetadataKey> = []
     private var activeProfileEpoch = 0
     private var metadataConfirmationRevision = 0
     private var archivedCountRequestGeneration = 0
@@ -1140,6 +1137,19 @@ final class SessionListViewModel {
             return false
         }
 
+        let profile = Self.nonEmpty(session.profile) ?? Self.nonEmpty(activeProfileName) ?? "default"
+        let activeProfile = Self.nonEmpty(activeProfileName) ?? "default"
+        guard profile == activeProfile else {
+            actionErrorMessage = String(localized: "Switch to this session's profile before deleting it.")
+            return false
+        }
+        let scope = PendingMetadataKey(profile: profile, sessionID: sessionId)
+        guard !deleteOutcomeUnknownKeys.contains(scope) else {
+            actionErrorMessage = DirectSessionDeleteError.outcomeUnknown.localizedDescription
+            return false
+        }
+        let profileEpoch = activeProfileEpoch
+
         guard beginSessionMutation(sessionId) else { return false }
         defer { endSessionMutation(sessionId) }
 
@@ -1170,12 +1180,29 @@ final class SessionListViewModel {
         }
 
         do {
-            let response = try await sessionMutator.delete(sessionID: sessionId)
-            if response.ok == false {
-                throw SessionMutationRejectedError(
-                    message: Self.nonEmpty(response.error)
-                        ?? String(localized: "The server did not delete the session.")
-                )
+            let runtime = try await gatewayRuntimeProvider(client)
+            guard !Task.isCancelled, activeProfileEpoch == profileEpoch,
+                  (Self.nonEmpty(activeProfileName) ?? "default") == profile else {
+                rollbackPendingSessionDeletion(sessionId, modelContext: modelContext, animation: animation)
+                return false
+            }
+            try await sessionMutator.delete(
+                sessionID: sessionId,
+                profile: profile,
+                runtime: runtime,
+                validateBeforeDispatch: { [weak self] in
+                    guard let self else { return false }
+                    return !Task.isCancelled && self.activeProfileEpoch == profileEpoch
+                        && (Self.nonEmpty(self.activeProfileName) ?? "default") == profile
+                }
+            )
+
+            // The exact delete is confirmed, but a replacement profile must not
+            // inherit this profile's pending state or global row tombstone.
+            guard !Task.isCancelled, activeProfileEpoch == profileEpoch,
+                  (Self.nonEmpty(activeProfileName) ?? "default") == profile else {
+                pendingSessionDeletions.removeValue(forKey: sessionId)
+                return false
             }
 
             // Keep the tombstone active while the follow-up list load runs so an
@@ -1183,13 +1210,23 @@ final class SessionListViewModel {
             confirmedSessionDeletionIDs.insert(sessionId)
             _ = await load(modelContext: modelContext, animation: animation)
             pendingSessionDeletions.removeValue(forKey: sessionId)
+            guard !Task.isCancelled, activeProfileEpoch == profileEpoch,
+                  (Self.nonEmpty(activeProfileName) ?? "default") == profile else { return false }
             actionErrorMessage = nil
             lastError = nil
             return true
+        } catch DirectSessionDeleteError.outcomeUnknown {
+            deleteOutcomeUnknownKeys.insert(scope)
+            rollbackPendingSessionDeletion(sessionId, modelContext: modelContext, animation: animation)
+            guard !Task.isCancelled, activeProfileEpoch == profileEpoch,
+                  (Self.nonEmpty(activeProfileName) ?? "default") == profile else { return false }
+            actionErrorMessage = DirectSessionDeleteError.outcomeUnknown.localizedDescription
+            return false
         } catch {
             let wasCancelled = isCancellationError(error)
             rollbackPendingSessionDeletion(sessionId, modelContext: modelContext, animation: animation)
-            guard !wasCancelled else { return false }
+            guard !wasCancelled, activeProfileEpoch == profileEpoch,
+                  (Self.nonEmpty(activeProfileName) ?? "default") == profile else { return false }
 
             lastError = error
             actionErrorMessage = error.localizedDescription

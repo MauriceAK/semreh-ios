@@ -87,32 +87,30 @@ extension APIClient {
         )
     }
 
-    func updatesCheck() async throws -> UpdatesCheckResponse {
-        try await send(endpoint: .updatesCheck, method: "GET")
+    func updatesCheck(force: Bool = false) async throws -> UpdatesCheckResponse {
+        let path = "/api/hermes/update/check?force=\(force ? "true" : "false")"
+        return try decode(UpdatesCheckResponse.self, from: await sendDirectData(
+            path: path, method: "GET", classifyStructuredAuthExpiry: true
+        ))
     }
 
-    /// Forces a *live* update check: `POST /api/updates/check` with `{ "force": true }`.
-    /// Upstream runs a real `git fetch` for this path (`check_for_updates(force=True)`),
-    /// whereas the plain GET only returns the cached status. Same response shape, so
-    /// `UpdatesCheckResponse` is reused. Used by the manual "Check for updates" button (#308).
     func updatesCheckForced() async throws -> UpdatesCheckResponse {
-        try await send(
-            endpoint: .updatesCheck,
-            method: "POST",
-            body: UpdatesCheckForceRequest(force: true)
-        )
+        try await updatesCheck(force: true)
     }
 
-    /// Applies a pending repo update. The server pulls `--ff-only` and then
-    /// restarts itself, so the caller must tolerate a brief connection outage
-    /// and re-poll afterwards. Defaults to the `webui` target (issue #180 scope;
-    /// no `agent` target, `/force`, or `/summary`).
-    func applyUpdate(target: String = "webui") async throws -> UpdatesApplyResponse {
-        try await send(
-            endpoint: .updatesApply,
-            method: "POST",
-            body: UpdatesApplyRequest(target: target)
-        )
+    /// Starts the stock Hermes updater. The acknowledgement is not completion;
+    /// callers must correlate its action ID with the durable action status.
+    func applyUpdate() async throws -> UpdatesApplyResponse {
+        try decode(UpdatesApplyResponse.self, from: await sendDirectData(
+            path: "/api/hermes/update", method: "POST", classifyStructuredAuthExpiry: true
+        ))
+    }
+
+    func hermesUpdateStatus() async throws -> HermesUpdateStatusResponse {
+        try decode(HermesUpdateStatusResponse.self, from: await sendDirectData(
+            path: "/api/actions/hermes-update/status?lines=1", method: "GET",
+            classifyStructuredAuthExpiry: true
+        ))
     }
 
     func insights(days: Int) async throws -> InsightsResponse {
@@ -123,12 +121,4 @@ extension APIClient {
 private struct PersonalitySetRequest: Encodable {
     let sessionId: String
     let name: String
-}
-
-private struct UpdatesApplyRequest: Encodable {
-    let target: String
-}
-
-private struct UpdatesCheckForceRequest: Encodable {
-    let force: Bool
 }

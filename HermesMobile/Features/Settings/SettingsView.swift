@@ -41,13 +41,14 @@ struct SettingsView: View {
     @State private var isLoadingServerSettings = false
     @State private var serverVersion: String?
     @State private var serverSettingsError: String?
-    @State private var serverUpdateState: UpdatesCheckResponse.WebUIUpdateState?
+    @State private var serverUpdateState: UpdatesCheckResponse.UpdateState?
     @State private var updateApplyPhase: ServerUpdateApplyPhase = .idle
     @State private var isConfirmingUpdate = false
     @State private var updateApplyMessage: String?
     @State private var isCheckingForUpdates = false
     @State private var forcedCheckOutcome: UpdatesCheckResponse.ForcedCheckOutcome?
     @State private var isPresentingForcedCheckResult = false
+    @State private var updateOperation: Task<Void, Never>?
     @State private var defaultModel: String?
     @State private var defaultProfileName: String?
     @State private var defaultProfileDisplayName: String?
@@ -577,6 +578,14 @@ struct SettingsView: View {
             await loadServerSettings()
             await refreshNotificationPermissionStatus()
         }
+        .onDisappear {
+            updateOperation?.cancel()
+            updateOperation = nil
+            if isUpdateApplyInFlight {
+                updateApplyMessage = String(localized: "Update monitoring stopped. Check the server status before trying again.")
+                updateApplyPhase = .unknown
+            }
+        }
         .alert("Clear this server's cache?", isPresented: $isConfirmingClearCache) {
             Button("Cancel", role: .cancel) {}
             Button("Clear Cache", role: .destructive) {
@@ -590,7 +599,7 @@ struct SettingsView: View {
         .alert("Update server?", isPresented: $isConfirmingUpdate) {
             Button("Cancel", role: .cancel) {}
             Button("Update") {
-                Task {
+                updateOperation = Task {
                     await applyServerUpdate()
                 }
             }
@@ -608,7 +617,7 @@ struct SettingsView: View {
                 // The popup already carries the restart warning, so Update applies
                 // directly — no second confirmation dialog (issue #308).
                 Button("Update") {
-                    Task {
+                    updateOperation = Task {
                         await applyServerUpdate()
                     }
                 }
@@ -847,7 +856,7 @@ struct SettingsView: View {
         switch updateApplyPhase {
         case .applying, .recovering:
             return true
-        case .idle, .blocked, .failed:
+        case .idle, .blocked, .failed, .unknown:
             return false
         }
     }
@@ -862,7 +871,7 @@ struct SettingsView: View {
             updateProgressRow(String(localized: "Checking for updates…"))
         } else {
             SettingsButton(String(localized: "Check for updates")) {
-                Task {
+                updateOperation = Task {
                     await checkForUpdatesManually()
                 }
             }
@@ -874,11 +883,12 @@ struct SettingsView: View {
     private var forcedCheckAlertTitle: String {
         switch forcedCheckOutcome {
         case let .updateAvailable(behind):
-            return String(localized: "Update available · \(behind) behind")
+            return behind.map { String(localized: "Update available · \($0) behind") }
+                ?? String(localized: "Update available")
         case .upToDate:
             return String(localized: "You're up to date")
-        case .disabled:
-            return String(localized: "Update checks are off")
+        case .managed:
+            return String(localized: "Update managed externally")
         case .error, .none:
             return String(localized: "Couldn't check for updates")
         }
@@ -890,8 +900,8 @@ struct SettingsView: View {
             return String(localized: "This pulls the latest Hermes server version and restarts it. Active chats may be interrupted briefly; the app reconnects when the server is back.")
         case .upToDate:
             return String(localized: "The Hermes server is running the latest version.")
-        case .disabled:
-            return String(localized: "Update checks are turned off on this server.")
+        case let .managed(message):
+            return message ?? String(localized: "This Hermes installation must be updated outside the app.")
         case .error, .none:
             return String(localized: "Something went wrong reaching the server. Try again in a moment.")
         }
@@ -908,7 +918,12 @@ struct SettingsView: View {
             case .upToDate:
                 updateNoteRow(systemImage: "checkmark.circle", tint: .secondary, text: String(localized: "Up to date"))
             case let .updateAvailable(behind):
-                updateNoteRow(systemImage: "arrow.up.circle", tint: .blue, text: String(localized: "Update available · \(behind) behind"))
+                updateNoteRow(systemImage: "arrow.up.circle", tint: .blue,
+                    text: behind.map { String(localized: "Update available · \($0) behind") }
+                        ?? String(localized: "Update available"))
+            case let .managed(message):
+                updateNoteRow(systemImage: "info.circle", tint: .secondary,
+                    text: message ?? String(localized: "Updates are managed outside this app."))
             case .unavailable:
                 EmptyView()
             }
@@ -955,6 +970,8 @@ struct SettingsView: View {
                 updateMessageRow(systemImage: "exclamationmark.triangle", tint: .orange)
                 updateActionButton(title: String(localized: "Retry update"))
             }
+        case .unknown:
+            updateMessageRow(systemImage: "questionmark.circle", tint: .orange)
         }
     }
 
@@ -963,8 +980,7 @@ struct SettingsView: View {
             isConfirmingUpdate = true
         }
         // Mirror of the check button's `isUpdateApplyInFlight` guard: while a
-        // forced check is running, block Update/Retry so apply can't race the
-        // in-flight POST /api/updates/check (#308 review).
+        // forced check is running, block Update/Retry so apply can't race it.
         .disabled(isCheckingForUpdates)
         .padding(.top, 4)
     }
@@ -1020,7 +1036,7 @@ struct SettingsView: View {
 
         do {
             let updates = try await client.updatesCheck()
-            serverUpdateState = updates.webuiUpdateState
+            serverUpdateState = updates.updateState
         } catch {
             // Non-fatal: update availability is optional info. On any failure we
             // degrade to showing the version only, with no indicator.
@@ -1069,7 +1085,7 @@ struct SettingsView: View {
             let response = try await client.updatesCheckForced()
             // Refresh the passive inline indicator from the fresh result too, so a
             // forced check keeps the on-open note in sync (issue #308).
-            serverUpdateState = response.webuiUpdateState
+            serverUpdateState = response.updateState
             forcedCheckOutcome = response.forcedCheckOutcome
         } catch {
             authManager.handleAPIError(error)
@@ -1095,7 +1111,7 @@ struct SettingsView: View {
         switch updateApplyPhase {
         case .idle, .blocked, .failed:
             break
-        case .applying, .recovering:
+        case .applying, .recovering, .unknown:
             return
         }
 
@@ -1105,45 +1121,45 @@ struct SettingsView: View {
 
         let response: UpdatesApplyResponse
         do {
-            response = try await client.applyUpdate(target: "webui")
+            response = try await client.applyUpdate()
         } catch {
-            // The apply call returns before the server restarts, so a failure
-            // here is a real pre-restart error (auth, unreachable, decode).
+            // The server may have accepted the bodyless POST before its ACK was
+            // lost. Do not retry or claim failure when action ownership is unknown.
             authManager.handleAPIError(error)
-            updateApplyMessage = String(localized: "Could not reach the server to start the update.")
-            updateApplyPhase = .failed
+            updateApplyMessage = String(localized: "Hermes may have started updating, but the response was lost. Check the server status before trying again.")
+            updateApplyPhase = .unknown
             return
         }
 
-        switch response.outcome {
-        case .applying:
-            updateApplyPhase = .recovering
-            await waitForServerToReturn(using: client, previousVersion: serverVersion)
-        case .restartBlocked:
-            updateApplyMessage = response.displayMessage(
-                default: String(localized: "The server is busy with active work. Wait for it to finish, then retry.")
-            )
-            updateApplyPhase = .blocked
-        case .failed:
+        // Navigation may cancel monitoring while the POST acknowledgement is
+        // returning. Do not overwrite onDisappear's unknown state with a
+        // recovering spinner that a cancelled task can never finish.
+        guard !Task.isCancelled else {
+            updateApplyPhase = .unknown
+            return
+        }
+        switch HermesUpdateStart.evaluate(response) {
+        case .refused:
             updateApplyMessage = response.displayMessage(
                 default: String(localized: "The update could not be applied.")
             )
-            updateApplyPhase = .failed
+            updateApplyPhase = .blocked
+            return
+        case .unknown:
+            updateApplyMessage = String(localized: "Hermes may already be updating, but this app could not identify that update. Check the server status before trying again.")
+            updateApplyPhase = .unknown
+            return
+        case let .monitor(actionID):
+            updateApplyPhase = .recovering
+            await waitForUpdateCompletion(using: client, actionID: actionID)
         }
     }
 
-    /// Polls the self-restarting server until the restart is confirmed, then
-    /// refreshes the version and indicator. Bounded so a slow/stuck restart
-    /// never leaves a spinner up.
-    ///
-    /// Completion requires *proof the restart happened* — the reported version
-    /// changed, or the check explicitly reports `.upToDate` — not merely a
-    /// reachable server. That avoids finalising against the outgoing process or
-    /// on a transient `stale_check` that still claims a non-zero `behind`, while
-    /// still letting update-check-disabled servers converge via the new version.
-    /// State is refreshed inline (not via the non-reentrant `loadServerSettings`)
-    /// so a concurrent load can't make us flip to `.idle` without refreshing.
-    private func waitForServerToReturn(using client: APIClient, previousVersion: String?) async {
+    /// Polls the stock action status for a bounded interval. Completion is owned
+    /// only when its durable marker matches the POST-returned action ID and the
+    /// corroborating exit code is zero; version/liveness/latest receipt are not
+    /// substitutes. A confirmed completion then refreshes Settings from stock.
+    private func waitForUpdateCompletion(using client: APIClient, actionID: String) async {
         let maxAttempts = 30 // ~60s at a 2s cadence — generous for a self-restart.
 
         for _ in 0..<maxAttempts {
@@ -1153,43 +1169,29 @@ struct SettingsView: View {
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             guard !Task.isCancelled else { return }
 
-            // One reachable status call gives us both liveness and the fresh
-            // version; a nil result means the restart outage hasn't cleared yet.
-            guard let status = try? await client.directStatus() else {
+            guard let status = try? await client.hermesUpdateStatus() else {
                 continue
             }
-
-            let newVersion = status.version
-            let updateState = (try? await client.updatesCheck())?.webuiUpdateState ?? .unavailable
-            let restartConfirmed = (newVersion != nil && newVersion != previousVersion)
-                || updateState == .upToDate
-
-            if restartConfirmed {
-                serverVersion = newVersion
-                serverSettingsError = newVersion == nil ? String(localized: "Unknown") : nil
-                serverUpdateState = updateState
+            guard !Task.isCancelled else { return }
+            switch HermesUpdateCompletion.evaluate(expectedActionID: actionID, status: status) {
+            case .waiting:
+                continue
+            case .succeeded:
+                await loadServerSettings()
+                guard !Task.isCancelled else { return }
                 updateApplyPhase = .idle
                 updateApplyMessage = nil
+                return
+            case .unknown:
+                updateApplyMessage = String(localized: "The update outcome could not be confirmed. Inspect the server before trying again.")
+                updateApplyPhase = .unknown
                 return
             }
         }
 
-        // Didn't confirm the restart in the window. Refresh once so the indicator
-        // reflects reality, then surface a distinct, retryable failure — never a
-        // silent reset (the `.failed` UI stays visible regardless of the now
-        // possibly-nil `serverUpdateState`).
-        await loadServerSettings()
-        if serverSettingsError != nil {
-            updateApplyMessage = String(localized: "The server didn't come back after the update. Check the server, then retry.")
-            updateApplyPhase = .failed
-        } else if case .updateAvailable = serverUpdateState {
-            updateApplyMessage = String(localized: "The update is taking longer than expected to finish. Try again in a moment.")
-            updateApplyPhase = .failed
-        } else {
-            // Server is back and not reporting a pending update — treat as done.
-            updateApplyPhase = .idle
-            updateApplyMessage = nil
-        }
+        // A timeout is ambiguous. Do not silently retry the POST or infer success.
+        updateApplyMessage = String(localized: "The update outcome could not be confirmed in time. Inspect the server before trying again.")
+        updateApplyPhase = .unknown
     }
 
     private func clearOfflineCache() async {
@@ -1264,7 +1266,7 @@ struct SettingsView: View {
     }
 }
 
-/// Phases of the in-app "apply webui update" flow (issue #180).
+/// Phases of the in-app stock Hermes update flow.
 private enum ServerUpdateApplyPhase: Equatable {
     /// No update in flight; show the "Update" button.
     case idle
@@ -1274,6 +1276,8 @@ private enum ServerUpdateApplyPhase: Equatable {
     case recovering
     /// Restart was blocked by active chat/agent work; offer a retry.
     case blocked
+    /// The request may have started an update, but ownership/completion is not provable.
+    case unknown
     /// The update failed (conflict, diverged, unreachable, or timed-out restart).
     case failed
 }

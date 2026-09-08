@@ -70,14 +70,6 @@ extension APIClient {
         )
     }
 
-    func deleteSession(id: String) async throws -> SessionMutationResponse {
-        try await send(
-            endpoint: .deleteSession,
-            method: "POST",
-            body: SessionIDRequest(sessionId: id)
-        )
-    }
-
     func pinSession(id: String, pinned: Bool) async throws -> SessionMutationResponse {
         try await send(
             endpoint: .pinSession,

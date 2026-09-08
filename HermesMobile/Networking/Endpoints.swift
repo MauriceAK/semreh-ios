@@ -17,7 +17,6 @@ enum Endpoint {
     case sessionStatus(id: String)
     case newSession
     case renameSession
-    case deleteSession
     case pinSession
     case archiveSession
     case branchSession
@@ -62,8 +61,6 @@ enum Endpoint {
     case gitCommitMessageSelected
     case personalities
     case setPersonality
-    case updatesCheck
-    case updatesApply
     case insights(days: Int)
     case crons
     case cronCreate
@@ -144,8 +141,6 @@ enum Endpoint {
             return "/api/session/new"
         case .renameSession:
             return "/api/session/rename"
-        case .deleteSession:
-            return "/api/session/delete"
         case .pinSession:
             return "/api/session/pin"
         case .archiveSession:
@@ -234,10 +229,6 @@ enum Endpoint {
             return "/api/personalities"
         case .setPersonality:
             return "/api/personality/set"
-        case .updatesCheck:
-            return "/api/updates/check"
-        case .updatesApply:
-            return "/api/updates/apply"
         case .insights:
             return "/api/insights"
         case .crons:

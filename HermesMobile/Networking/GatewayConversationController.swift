@@ -22,6 +22,11 @@ enum DirectSessionCompressionError: Error, Equatable, Sendable {
 @MainActor
 @Observable
 final class GatewayConversationController {
+    struct DestructivePromptTarget: Equatable {
+        let userRowID: Int
+        let userOrdinal: Int?
+        let permitsEmptyTranscript: Bool
+    }
     enum RunState: Equatable { case idle, submitting, running, stopping, deliveryUnknown }
     enum SteerOutcome: String { case accepted, queued, rejected }
     enum CompressionOutcome: Equatable { case compressed, unchanged, aborted, lockSkipped }
@@ -1814,16 +1819,41 @@ final class GatewayConversationController {
     func submit(
         _ text: String,
         stagedAttachments: [DirectPendingAttachment] = [],
-        create: [String: JSONValue] = [:]
+        create: [String: JSONValue] = [:],
+        destructiveTarget: DestructivePromptTarget? = nil
     ) async throws {
         guard !compressionOutcomeUnknown else { throw DirectSessionCompressionError.outcomeUnknown }
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw DirectSessionError.invalidResponse }
+        if let destructiveTarget {
+            guard destructiveTarget.userRowID > 0,
+                  Double(exactly: destructiveTarget.userRowID) != nil,
+                  destructiveTarget.userOrdinal.map({ $0 >= 0 }) ?? true else {
+                throw DirectSessionError.staleOperation
+            }
+        }
+        let destructiveEntryBinding = destructiveTarget == nil ? nil : binding
+        let destructiveEntryLifecycle = lifecycle
+        let destructiveEntryOrigin = runtime.origin
+        let destructiveEntryConnectionGeneration = runtime.connectionGeneration
+        if destructiveTarget != nil {
+            guard let destructiveEntryBinding,
+                  destructiveEntryBinding.profile == profile,
+                  runtime.state == .ready else {
+                throw DirectSessionError.invalidBinding
+            }
+        }
         guard !branchInFlight else { throw DirectSessionError.ambiguousPrompt }
         guard !promptUncertaintyLoadFailed else { throw DirectSessionError.staleOperation }
         guard !hasAmbiguousPromptDelivery else { throw DirectSessionError.ambiguousPrompt }
         guard !recoveryMarkerLoadFailed else { throw DirectSessionError.attachmentRecoveryUnavailable }
         guard !attachmentRecoveryIsBusy, !attachmentStageInFlight, !attachmentRemovalInFlight else { throw DirectSessionError.ambiguousPrompt }
         guard !recoveryStageUnknown else { throw DirectSessionError.unresolvedAttachment }
+        if destructiveTarget != nil {
+            // Edit/regenerate never consume the ordinary composer's staged files.
+            guard stagedAttachments.isEmpty, recoveryMarker == nil else {
+                throw DirectSessionError.unresolvedAttachment
+            }
+        }
         if recoveryMarker != nil {
             guard !stagedAttachments.isEmpty,
                   locallyConfirmedRecoveryStageCount > 0 else {
@@ -1850,6 +1880,46 @@ final class GatewayConversationController {
         if let pendingReasoningEffort {
             let applied = try await applyStockReasoning(pendingReasoningEffort)
             guard !applied.deferred else { throw DirectSessionError.invalidResponse }
+        }
+
+        if destructiveTarget != nil {
+            // Stock checks the active-turn lease again while replacing rows, but
+            // this status proof keeps an already-running turn out of the normal
+            // path. A cross-client race after this read remains a stock limitation.
+            guard lifecycle == destructiveEntryLifecycle,
+                  binding == destructiveEntryBinding,
+                  runtime.origin == destructiveEntryOrigin,
+                  runtime.connectionGeneration == destructiveEntryConnectionGeneration else {
+                throw DirectSessionError.staleOperation
+            }
+            try await ensureBinding(create: create)
+            guard lifecycle == destructiveEntryLifecycle,
+                  let statusBinding = binding,
+                  statusBinding == destructiveEntryBinding,
+                  statusBinding.profile == profile,
+                  runtime.origin == destructiveEntryOrigin,
+                  runtime.connectionGeneration == destructiveEntryConnectionGeneration else {
+                throw DirectSessionError.staleOperation
+            }
+            let status = try await runtime.request("session.status", parameters: {
+                guard !self.disposed,
+                      self.lifecycle == destructiveEntryLifecycle,
+                      self.binding == statusBinding,
+                      self.runtime.origin == destructiveEntryOrigin,
+                      self.runtime.connectionGeneration == destructiveEntryConnectionGeneration,
+                      self.runtime.state == .ready, self.runState == .idle,
+                      self.promptInFlight else { throw DirectSessionError.staleOperation }
+                return self.rpcParams(statusBinding)
+            })
+            guard status?.gatewayFields["output"]?.gatewayString?
+                .components(separatedBy: .newlines)
+                .contains("Agent Running: No") == true,
+                  lifecycle == destructiveEntryLifecycle,
+                  binding == destructiveEntryBinding,
+                  runtime.origin == destructiveEntryOrigin,
+                  runtime.connectionGeneration == destructiveEntryConnectionGeneration else {
+                throw DirectSessionError.ambiguousPrompt
+            }
         }
 
         // Confirmed attachment receipts belong to the idle turn in which they
@@ -1948,8 +2018,38 @@ final class GatewayConversationController {
                         throw DirectSessionError.staleOperation
                     }
                 }
+                if destructiveTarget != nil {
+                    guard self.lifecycle == generation,
+                          self.lifecycle == destructiveEntryLifecycle,
+                          self.turnEpoch == submissionTurn,
+                          self.runState == .submitting,
+                          binding == capturedBinding,
+                          binding == destructiveEntryBinding,
+                          self.runtime.origin == capturedOrigin,
+                          self.runtime.origin == destructiveEntryOrigin,
+                          self.runtime.connectionGeneration == capturedConnectionGeneration,
+                          self.runtime.connectionGeneration == destructiveEntryConnectionGeneration,
+                          self.runtime.state == .ready else {
+                        throw DirectSessionError.staleOperation
+                    }
+                }
                 submitRequestWasDispatched = true
-                return ["session_id": .string(binding.runtimeID), "profile": .string(self.profile), "text": .string(submittedText)]
+                var parameters: [String: JSONValue] = [
+                    "session_id": .string(binding.runtimeID),
+                    "profile": .string(self.profile),
+                    "text": .string(submittedText)
+                ]
+                if let destructiveTarget {
+                    parameters["confirm_truncate"] = .bool(true)
+                    parameters["truncate_before_row_id"] = .number(Double(destructiveTarget.userRowID))
+                    if let ordinal = destructiveTarget.userOrdinal {
+                        parameters["truncate_before_user_ordinal"] = .number(Double(ordinal))
+                    }
+                    if destructiveTarget.permitsEmptyTranscript {
+                        parameters["confirm_empty_truncate"] = .bool(true)
+                    }
+                }
+                return parameters
             })
             try checkLifecycle(generation)
             if !stagedAttachments.isEmpty {

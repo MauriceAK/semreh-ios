@@ -12,6 +12,26 @@ private struct SessionDuplicateWhileRunningError: LocalizedError {
     }
 }
 
+enum DirectSessionDeleteError: LocalizedError, Equatable {
+    case identityMismatch
+    case activeSession
+    case rejected(String)
+    case outcomeUnknown
+
+    var errorDescription: String? {
+        switch self {
+        case .identityMismatch:
+            return String(localized: "Hermes did not confirm the exact session and profile to delete.")
+        case .activeSession:
+            return String(localized: "This session is open in Hermes, so it can't be deleted. Close it there, then try again.")
+        case let .rejected(message):
+            return message
+        case .outcomeUnknown:
+            return String(localized: "Hermes may have deleted this session, but the result could not be confirmed. Refresh to check the result; this app will not repeat the delete automatically.")
+        }
+    }
+}
+
 struct SessionMutator {
     let client: APIClient
 
@@ -39,8 +59,41 @@ struct SessionMutator {
         return detail
     }
 
-    func delete(sessionID: String) async throws -> SessionMutationResponse {
-        try await client.deleteSession(id: sessionID)
+    @MainActor
+    func delete(
+        sessionID: String,
+        profile: String,
+        runtime: HermesServerRuntime,
+        validateBeforeDispatch: @MainActor () -> Bool
+    ) async throws {
+        let detail = try await client.directSessionDetail(sessionID: sessionID, profile: profile)
+        guard detail.sessionId == sessionID, detail.profile == profile else {
+            throw DirectSessionDeleteError.identityMismatch
+        }
+        guard validateBeforeDispatch() else { throw DirectSessionError.staleOperation }
+
+        do {
+            let result = try await runtime.request("session.delete", params: [
+                "session_id": .string(sessionID),
+                "profile": .string(profile)
+            ])
+            guard case .object(let fields) = result,
+                  fields["deleted"]?.gatewayString == sessionID else {
+                throw DirectSessionDeleteError.outcomeUnknown
+            }
+        } catch let error as HermesGatewayError {
+            if case let .server(code, message, _, _, _, _) = error {
+                if code == 4023 { throw DirectSessionDeleteError.activeSession }
+                throw DirectSessionDeleteError.rejected(message)
+            }
+            throw DirectSessionDeleteError.outcomeUnknown
+        } catch let error as DirectSessionDeleteError {
+            throw error
+        } catch {
+            // Once request() starts, cancellation, reconnect-generation changes,
+            // and decoding failures cannot prove whether Hermes deleted the row.
+            throw DirectSessionDeleteError.outcomeUnknown
+        }
     }
 
     func rename(

@@ -280,132 +280,78 @@ struct ProviderModel: Decodable, Equatable, Sendable {
     }
 }
 
-/// `GET /api/updates/check`. Every field is optional: older servers, the
-/// `{ "disabled": true }` opt-out payload, and failed/`stale_check` responses
-/// all omit different keys, and we never crash on a shape we don't expect.
+/// Stock `GET /api/hermes/update/check`. Fields remain optional so an additive
+/// server response never makes Settings unusable.
 struct UpdatesCheckResponse: Decodable, Equatable {
-    let webui: UpdateTargetInfo?
-    let agent: UpdateTargetInfo?
-    let checkedAt: Double?
-    let disabled: Bool?
+    let installMethod: String?
+    let currentVersion: String?
+    let behind: Int?
+    let updateAvailable: Bool?
+    let canApply: Bool?
+    let updateCommand: String?
+    let message: String?
+    let commits: [HermesUpdateCommit]?
 }
 
-struct UpdateTargetInfo: Decodable, Equatable {
-    let name: String?
-    let behind: Int?
-    let currentSha: String?
-    let latestSha: String?
-    let branch: String?
-    let repoUrl: String?
-    let compareUrl: String?
-    let error: String?
-    let staleCheck: Bool?
+struct HermesUpdateCommit: Decodable, Equatable {
+    let sha: String?
+    let summary: String?
+    let author: String?
+    let at: Int?
 }
 
 extension UpdatesCheckResponse {
-    /// What the Settings screen should show for the webui repo. `.unavailable`
-    /// means "show the version only, no indicator" — the server turned the check
-    /// off, errored, returned a stale result, or omitted the webui block.
-    enum WebUIUpdateState: Equatable {
+    enum UpdateState: Equatable {
         case upToDate
-        case updateAvailable(behind: Int)
+        case updateAvailable(behind: Int?)
+        case managed(message: String?)
         case unavailable
     }
 
-    /// The fully-distinguished result of a *manual* (forced) update check (#308).
-    /// Unlike `webuiUpdateState`, this keeps `disabled` and `error` apart so the
-    /// "Check for updates" popup can word each case for the user — the passive
-    /// inline note treats both as "no indicator" and collapses them together.
     enum ForcedCheckOutcome: Equatable {
-        case updateAvailable(behind: Int)
+        case updateAvailable(behind: Int?)
         case upToDate
-        /// Update checks are turned off on this server (`{ "disabled": true }`).
-        case disabled
-        /// The check failed, returned a stale result, or omitted the webui block.
+        case managed(message: String?)
         case error
     }
 
     var forcedCheckOutcome: ForcedCheckOutcome {
-        if disabled == true {
-            return .disabled
+        if canApply == false {
+            return .managed(message: message)
         }
-
-        guard let webui else {
-            return .error
+        guard canApply == true else { return .error }
+        if updateAvailable == true || behind.map({ $0 != 0 }) == true {
+            return .updateAvailable(behind: behind.flatMap { $0 > 0 ? $0 : nil })
         }
-
-        if webui.error != nil || webui.staleCheck == true {
-            return .error
-        }
-
-        if let behind = webui.behind, behind > 0 {
-            return .updateAvailable(behind: behind)
-        }
-
-        return .upToDate
+        if behind == 0 { return .upToDate }
+        return .error
     }
 
-    /// The passive inline indicator's coarser view of the same check. Derived from
-    /// `forcedCheckOutcome` so the two never drift: both "off" and "errored"
-    /// collapse to `.unavailable` (show the version only, with no indicator).
-    var webuiUpdateState: WebUIUpdateState {
+    var updateState: UpdateState {
         switch forcedCheckOutcome {
         case let .updateAvailable(behind):
             return .updateAvailable(behind: behind)
         case .upToDate:
             return .upToDate
-        case .disabled, .error:
+        case let .managed(message):
+            return .managed(message: message)
+        case .error:
             return .unavailable
         }
     }
 }
 
-/// `POST /api/updates/apply`. Tolerant: every field is optional because the
-/// server returns a different mix of keys per outcome — success (`ok`,
-/// `restart_scheduled`), restart-blocked (`restart_blocked` + active counts),
-/// merge conflict (`conflict`), diverged history (`diverged`), or a generic
-/// failure — and may add more over time. We never crash on an unexpected shape.
+/// Stock `POST /api/hermes/update` acknowledgement. `ok` does not mean the
+/// background action completed; only a returned action ID can be monitored.
 struct UpdatesApplyResponse: Decodable, Equatable {
     let ok: Bool?
     let message: String?
-    let target: String?
-    let conflict: Bool?
-    let diverged: Bool?
-    let restartBlocked: Bool?
-    let restartScheduled: Bool?
-    let stashConflict: Bool?
-    let activeStreams: Int?
-    let activeRuns: Int?
+    let error: String?
+    let actionId: String?
+    let alreadyRunning: Bool?
 }
 
 extension UpdatesApplyResponse {
-    /// How the Settings screen should react to an apply attempt.
-    enum Outcome: Equatable {
-        /// Server accepted the update and is restarting; poll until it returns.
-        case applying
-        /// Active chat/agent work blocked the restart. Not a failure — surface
-        /// the server's message and let the user retry once work finishes.
-        case restartBlocked
-        /// The update could not be applied (merge conflict, diverged history,
-        /// unreachable remote, or a generic `ok: false`).
-        case failed
-    }
-
-    var outcome: Outcome {
-        // A restart-blocked response always carries `ok: false`, so check the
-        // blocked flag first to avoid mislabelling it as a hard failure.
-        if restartBlocked == true {
-            return .restartBlocked
-        }
-
-        if ok == true {
-            return .applying
-        }
-
-        return .failed
-    }
-
-    /// The server's human-readable message, or `fallback` when it omitted one.
     func displayMessage(default fallback: String) -> String {
         guard let trimmed = message?.trimmingCharacters(in: .whitespacesAndNewlines),
               !trimmed.isEmpty
@@ -414,6 +360,50 @@ extension UpdatesApplyResponse {
         }
 
         return trimmed
+    }
+}
+
+enum HermesUpdateStart: Equatable {
+    case monitor(actionID: String)
+    case refused
+    case unknown
+
+    static func evaluate(_ response: UpdatesApplyResponse) -> Self {
+        if response.ok == false { return .refused }
+        guard response.ok == true,
+              let actionID = response.actionId,
+              !actionID.isEmpty else { return .unknown }
+        return .monitor(actionID: actionID)
+    }
+}
+
+struct HermesUpdateStatusResponse: Decodable, Equatable {
+    let running: Bool?
+    let exitCode: Int?
+    let actionId: String?
+    let receipt: HermesUpdateReceiptSummary?
+    // Deliberately do not decode `lines`: update output can contain sensitive data.
+}
+
+struct HermesUpdateReceiptSummary: Decodable, Equatable {
+    let outcome: String?
+    let postVersion: String?
+}
+
+enum HermesUpdateCompletion: Equatable {
+    case waiting
+    case succeeded
+    case unknown
+
+    static func evaluate(
+        expectedActionID: String,
+        status: HermesUpdateStatusResponse,
+        isCancelled: Bool = false
+    ) -> Self {
+        guard !isCancelled else { return .unknown }
+        guard status.running == false else { return .waiting }
+        guard status.actionId == expectedActionID else { return .unknown }
+        return status.exitCode == 0 ? .succeeded : .unknown
     }
 }
 

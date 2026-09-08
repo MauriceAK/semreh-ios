@@ -4477,18 +4477,137 @@ final class ChatViewModel {
         }
     }
 
-    /// Direct edit/regenerate remain unavailable until safe destructive targeting is resolved.
     func editMessage(_ context: MessageActionContext, newText: String, modelContext: ModelContext? = nil) async -> Bool {
-        messageActionErrorMessage = String(localized: "Editing is not available in direct Hermes mode yet.")
-        return false
+        let text = newText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return false }
+        return await submitDestructiveMessage(
+            context: context,
+            replacementText: text,
+            expectedRole: .user,
+            modelContext: modelContext
+        )
     }
 
     func regenerateAssistantResponse(
         _ context: MessageActionContext,
         modelContext: ModelContext? = nil
     ) async -> Bool {
-        messageActionErrorMessage = String(localized: "Regeneration is not available in direct Hermes mode yet.")
-        return false
+        await submitDestructiveMessage(
+            context: context,
+            replacementText: nil,
+            expectedRole: .assistant,
+            modelContext: modelContext
+        )
+    }
+
+    private func submitDestructiveMessage(
+        context: MessageActionContext,
+        replacementText: String?,
+        expectedRole: MessageActionContext.Role,
+        modelContext: ModelContext?
+    ) async -> Bool {
+        guard usesDirectGateway, !directInvalidated, !isViewingCachedData,
+              activeStreamID == nil, !isStartingChat, !isEditingMessage,
+              !isRegeneratingMessage, !isUpdatingComposerConfiguration,
+              directPendingAttachments.isEmpty, pendingAttachments.isEmpty,
+              !isPreparingDirectAttachment, !attachmentRecoveryIsBusy else {
+            messageActionErrorMessage = String(localized: "Reconnect, finish the active response, and clear pending attachments before changing history.")
+            return false
+        }
+        guard context.role == expectedRole else {
+            messageActionErrorMessage = String(localized: "That message is no longer a valid history target.")
+            return false
+        }
+
+        directModelContext = modelContext ?? directModelContext
+        if expectedRole == .user { isEditingMessage = true }
+        else { isRegeneratingMessage = true }
+        messageActionErrorMessage = nil
+        lastError = nil
+        defer {
+            isEditingMessage = false
+            isRegeneratingMessage = false
+            OpenChatSessionStore.shared.noteStreamingStateChanged()
+        }
+
+        do {
+            let controller = try await ensureDirectConversation()
+            guard controller.runState == .idle,
+                  controller.profile == (requestProfileName ?? "default"),
+                  controller.storedID == canonicalSessionID,
+                  controller.storedID == directHistoryID else {
+                throw DirectSessionError.staleOperation
+            }
+
+            // Re-read the canonical tail immediately before selecting the row.
+            // This detects ordinary stale/mismatched targets, while the approved
+            // stock cross-client check/write race remains explicitly non-atomic.
+            try await controller.refresh()
+            guard controller.runState == .idle,
+                  controller.profile == (requestProfileName ?? "default"),
+                  controller.storedID == canonicalSessionID,
+                  controller.storedID == directHistoryID,
+                  let selectedIndex = messages.firstIndex(where: { $0.messageId == context.messageID }),
+                  messages[selectedIndex].role == (expectedRole == .user ? "user" : "assistant"),
+                  messages[selectedIndex].content == context.copyText else {
+                throw DirectSessionError.staleOperation
+            }
+
+            let targetIndex: Int
+            let prompt: String
+            if expectedRole == .user {
+                targetIndex = selectedIndex
+                prompt = replacementText ?? ""
+            } else {
+                guard selectedIndex > messages.startIndex,
+                      let origin = messages[..<selectedIndex].lastIndex(where: {
+                          TranscriptTurnClassifier.isUserTurnBoundary($0)
+                      }),
+                      let content = messages[origin].content?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !content.isEmpty else {
+                    throw DirectSessionError.staleOperation
+                }
+                targetIndex = origin
+                prompt = content
+            }
+            guard messages[targetIndex].role == "user",
+                  let rowString = messages[targetIndex].messageId,
+                  rowString == rowString.trimmingCharacters(in: .whitespacesAndNewlines),
+                  let rowID = Int(rowString), rowID > 0,
+                  Double(exactly: rowID) != nil else {
+                throw DirectSessionError.staleOperation
+            }
+
+            let priorUserCount = messages[..<targetIndex].filter {
+                TranscriptTurnClassifier.isUserTurnBoundary($0)
+            }.count
+            let ordinal = hasOlderMessages ? nil : priorUserCount
+            try await controller.submit(
+                prompt,
+                destructiveTarget: .init(
+                    userRowID: rowID,
+                    userOrdinal: ordinal,
+                    permitsEmptyTranscript: priorUserCount == 0 && !hasOlderMessages
+                )
+            )
+            return true
+        } catch {
+            lastError = error
+            if directConversation?.hasAmbiguousPromptDelivery == true {
+                messageActionErrorMessage = String(localized: "Hermes may have queued or started the replacement. It was not resent; refresh after the run settles before trying again.")
+            } else if case let HermesGatewayError.server(code, _, data, method, _, _) = error,
+                      method == "prompt.submit", code == 4018,
+                      case .number(let segment)? = data?.gatewayFields["segment_ordinal"],
+                      segment < 0 {
+                messageActionErrorMessage = String(localized: "That turn is in the immutable compacted history and cannot be changed from this continuation.")
+            } else if let directError = error as? DirectSessionError,
+                      directError == .staleOperation {
+                messageActionErrorMessage = String(localized: "The conversation changed, so no history was replaced. Review the latest messages and try again.")
+            } else {
+                messageActionErrorMessage = String(localized: "Hermes refused to change this history. No automatic retry was attempted.")
+            }
+            return false
+        }
     }
 
     @discardableResult

@@ -90,6 +90,18 @@ import or deletion. Moving a chat between local groups does not move files or
 change its Hermes working directory. Actual remote folder creation is a separate
 filesystem capability, not something a local bookmark may pretend to perform.
 
+## Approved stock destructive-action limitation — September 8, 2026
+
+Maurice approved retaining edit/regenerate/delete using guarded stock Hermes
+operations after discussion of the non-atomic check/mutation window when another
+client changes the same conversation concurrently. Preserve confirmations, exact
+durable target/profile checks, active-run checks and no automatic retry after an
+ambiguous mutation. Reject stale or mismatched targets detectable before dispatch.
+Document the residual concurrent-writer limitation; do not claim that client
+preflight makes the operation atomic. This narrows the external-mutation guarantee
+in the Slice 4 gate, not normal targeting, error handling or verification duties.
+No private backend dependency, personal-data mutation or deployment is authorized.
+
 ## Historical Slice 2 reasoning experiment — September 5, 2026
 
 Maurice requires per-session reasoning changes, including selecting the next

@@ -6,6 +6,39 @@ import UIKit
 import UniformTypeIdentifiers
 @testable import HermesMobile
 
+private final class DirectDestructiveTransport: HermesGatewayTransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private var sink: (@Sendable (HermesGatewayEvent) -> Void)?
+    private var prompts: [JSONValue] = []
+    private let promptStatus: String
+
+    init(promptStatus: String = "streaming") {
+        self.promptStatus = promptStatus
+    }
+
+    func installSink(_ sink: @escaping @Sendable (HermesGatewayEvent) -> Void) {
+        lock.withLock { self.sink = sink }
+    }
+    func promptParams() -> [JSONValue] { lock.withLock { prompts } }
+    func resetPrompts() { lock.withLock { prompts.removeAll() } }
+    func connect() async throws {}
+    func close() async {}
+    func connectionIdentifier() async -> Int? { 1 }
+    func request(method: String, params: JSONValue?, timeout: Duration?) async throws -> JSONValue? {
+        switch method {
+        case "session.resume":
+            return .object(["session_id": .string("runtime-existing"), "session_key": .string("durable-1"), "running": .bool(false)])
+        case "session.status":
+            return .object(["output": .string("Agent Running: No")])
+        case "prompt.submit":
+            if let params { lock.withLock { prompts.append(params) } }
+            return .object(["status": .string(promptStatus)])
+        default:
+            throw DirectSessionError.invalidResponse
+        }
+    }
+}
+
 final class ChatViewModelSendTests: XCTestCase {
     override func tearDown() {
         ChatViewModel.resetActiveStreamSnapshotsForTesting()
@@ -3396,85 +3429,145 @@ final class ChatViewModelSendTests: XCTestCase {
     }
 
     @MainActor
-    private func assertDirectDestructiveActionRefused(action: String, staleOrRepeated: Bool) async throws {
-        let transport = SendRetirementDirectTransport()
+    private func makeDirectDestructiveViewModel(
+        transport: DirectDestructiveTransport,
+        returned: Int = 2,
+        rows: @escaping () -> String
+    ) throws -> ChatViewModel {
         let server = URL(string: "https://example.test")!
         let runtime = try HermesServerRuntime(origin: server) { sink in
             transport.installSink(sink)
             return transport
         }
-        var requests = 0
         MockURLProtocol.requestHandler = { request in
-            requests += 1
             XCTAssertEqual(request.httpMethod, "GET")
             XCTAssertEqual(request.url?.path, "/api/sessions/durable-1/messages")
             XCTAssertEqual(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "profile" }?.value, "work")
-            return apiTestJSONResponse(#"{"session_id":"durable-1","messages":[{"id":11,"role":"user","content":"Original question"},{"id":12,"role":"assistant","content":"Completed answer"}],"pagination":{"limit":120,"offset":0,"order":"latest","returned":2}}"#, for: request)
+            return apiTestJSONResponse(
+                #"{"session_id":"durable-1","messages":\#(rows()),"pagination":{"limit":120,"offset":0,"order":"latest","returned":\#(returned)}}"#,
+                for: request
+            )
         }
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [MockURLProtocol.self]
         let client = APIClient(baseURL: server, session: URLSession(configuration: configuration))
-        let viewModel = ChatViewModel(session: SessionSummary(sessionId: "durable-1", profile: "work"),
-            server: server, client: client, gatewayRuntimeProvider: { _ in runtime })
-        await viewModel.loadMessages()
-        XCTAssertEqual(viewModel.messages.compactMap(\.content), ["Original question", "Completed answer"])
-        let originalIDs = viewModel.messages.map(\.id)
-        let originalRequests = requests
-        let originalMethods = transport.methods()
-        let originalStream = viewModel.activeStreamID
-        let role = action == "edit" ? "user" : "assistant"
-        let index = action == "edit" ? 0 : 1
-        let selected = staleOrRepeated
-            ? ChatMessage(role: role, content: "Stale selection", timestamp: 1, messageId: "stale-row")
-            : viewModel.messages[index]
-        let context = try XCTUnwrap(MessageActionContext(message: selected, visibleIndex: index,
-            messagesOffset: staleOrRepeated ? 900 : 0))
+        return ChatViewModel(
+            session: SessionSummary(sessionId: "durable-1", profile: "work"),
+            server: server,
+            client: client,
+            gatewayRuntimeProvider: { _ in runtime },
+            directAttachmentRecoveryMarkerStore: DirectGatewayAttachmentRecoveryMarkerStore(
+                rootURL: FileManager.default.temporaryDirectory
+                    .appendingPathComponent("ChatViewModelSendTests-\(UUID().uuidString)", isDirectory: true)
+            ),
+            promptUncertaintyStore: InMemoryDirectPromptDeliveryUncertaintyStore()
+        )
+    }
 
+    @MainActor
+    func testDirectEditUsesExactDurableUserRowAndSingleSubmit() async throws {
+        let transport = DirectDestructiveTransport()
+        let viewModel = try makeDirectDestructiveViewModel(transport: transport) {
+            #"[{"id":11,"role":"user","content":"Original question"},{"id":12,"role":"assistant","content":"Completed answer"}]"#
+        }
+        await viewModel.loadMessages()
+        let context = try XCTUnwrap(MessageActionContext(message: viewModel.messages[0], visibleIndex: 0, messagesOffset: 0))
+        let edited = await viewModel.editMessage(context, newText: "Edited question")
+        let recordedPrompts = transport.promptParams()
+        await viewModel.disposeDirectConversation()
+        XCTAssertTrue(edited)
+        let params = try XCTUnwrap(recordedPrompts.first?.gatewayFields)
+        XCTAssertEqual(params["text"], .string("Edited question"))
+        XCTAssertEqual(params["truncate_before_row_id"], .number(11))
+        XCTAssertEqual(params["truncate_before_user_ordinal"], .number(0))
+        XCTAssertEqual(params["confirm_truncate"], .bool(true))
+        XCTAssertEqual(params["confirm_empty_truncate"], .bool(true))
+        XCTAssertEqual(recordedPrompts.count, 1)
+    }
+
+    @MainActor
+    func testDirectRegenerateTargetsOriginatingUserAndStaleRefreshRefuses() async throws {
+        let transport = DirectDestructiveTransport()
+        var rows = #"[{"id":11,"role":"user","content":"Question one"},{"id":12,"role":"assistant","content":"Answer one"},{"id":21,"role":"user","content":"Question two"},{"id":22,"role":"assistant","content":"Answer two"}]"#
+        let viewModel = try makeDirectDestructiveViewModel(transport: transport, returned: 4) { rows }
+        await viewModel.loadMessages()
+        let context = try XCTUnwrap(MessageActionContext(message: viewModel.messages[3], visibleIndex: 3, messagesOffset: 0))
+        let regenerated = await viewModel.regenerateAssistantResponse(context)
+        let recordedPrompts = transport.promptParams()
+        await viewModel.disposeDirectConversation()
+
+        rows = #"[{"id":11,"role":"user","content":"Question one"},{"id":12,"role":"assistant","content":"Changed externally"}]"#
+        let staleTransport = DirectDestructiveTransport()
+        let staleViewModel = try makeDirectDestructiveViewModel(transport: staleTransport) { rows }
+        await staleViewModel.loadMessages()
+        let staleRegenerate = await staleViewModel.regenerateAssistantResponse(context)
+        let stalePrompts = staleTransport.promptParams()
+        let staleMessage = staleViewModel.messageActionErrorMessage
+        await staleViewModel.disposeDirectConversation()
+
+        XCTAssertTrue(regenerated)
+        let params = try XCTUnwrap(recordedPrompts.first?.gatewayFields)
+        XCTAssertEqual(params["text"], .string("Question two"))
+        XCTAssertEqual(params["truncate_before_row_id"], .number(21))
+        XCTAssertEqual(params["truncate_before_user_ordinal"], .number(1))
+        XCTAssertFalse(staleRegenerate)
+        XCTAssertTrue(stalePrompts.isEmpty)
+        XCTAssertEqual(staleMessage, "The conversation changed, so no history was replaced. Review the latest messages and try again.")
+    }
+
+    @MainActor
+    func testDirectEditQueuedAcknowledgementIsAmbiguousAndNeverResent() async throws {
+        let transport = DirectDestructiveTransport(promptStatus: "queued")
+        let viewModel = try makeDirectDestructiveViewModel(transport: transport) {
+            #"[{"id":11,"role":"user","content":"Original question"},{"id":12,"role":"assistant","content":"Completed answer"}]"#
+        }
+        await viewModel.loadMessages()
+        let context = try XCTUnwrap(MessageActionContext(message: viewModel.messages[0], visibleIndex: 0, messagesOffset: 0))
+
+        let first = await viewModel.editMessage(context, newText: "Edited question")
+        XCTAssertFalse(first)
+        XCTAssertEqual(transport.promptParams().count, 1)
+        XCTAssertTrue(viewModel.messageActionErrorMessage?.contains("not resent") == true)
+
+        let second = await viewModel.editMessage(context, newText: "Edited question")
+        XCTAssertFalse(second)
+        XCTAssertEqual(transport.promptParams().count, 1)
+        await viewModel.disposeDirectConversation()
+    }
+
+    @MainActor
+    func testDirectEditRejectsRowIDThatCannotBeRepresentedExactlyOnWire() async throws {
+        let transport = DirectDestructiveTransport()
+        let viewModel = try makeDirectDestructiveViewModel(transport: transport) {
+            #"[{"id":"9007199254740993","role":"user","content":"Original question"},{"id":12,"role":"assistant","content":"Completed answer"}]"#
+        }
+        await viewModel.loadMessages()
+        let context = try XCTUnwrap(MessageActionContext(message: viewModel.messages[0], visibleIndex: 0, messagesOffset: 0))
+        let accepted = await viewModel.editMessage(context, newText: "Edited question")
+        XCTAssertFalse(accepted)
+        XCTAssertTrue(transport.promptParams().isEmpty)
+        await viewModel.disposeDirectConversation()
+    }
+
+    @MainActor
+    private func assertDirectDestructiveActionRefused(action: String, staleOrRepeated: Bool) async throws {
+        XCTAssertEqual(action, "retry")
+        let transport = DirectDestructiveTransport()
+        let viewModel = try makeDirectDestructiveViewModel(transport: transport) {
+            #"[{"id":11,"role":"user","content":"Original question"},{"id":12,"role":"assistant","content":"Completed answer"}]"#
+        }
+        await viewModel.loadMessages()
+        let originalIDs = viewModel.messages.map(\.id)
         for _ in 0..<(staleOrRepeated ? 2 : 1) {
-            switch action {
-            case "edit":
-                let accepted = await viewModel.editMessage(context, newText: "Edited question")
-                XCTAssertFalse(accepted)
-                XCTAssertEqual(viewModel.messageActionErrorMessage, "Editing is not available in direct Hermes mode yet.")
-            case "regenerate":
-                let accepted = await viewModel.regenerateAssistantResponse(context)
-                XCTAssertFalse(accepted)
-                XCTAssertEqual(viewModel.messageActionErrorMessage, "Regeneration is not available in direct Hermes mode yet.")
-            default:
-                let result = await viewModel.executeSlashCommand(try XCTUnwrap(SlashCommandCatalog.command(named: "retry")))
-                XCTAssertEqual(result, .unsupported(friendlyMessage: "Retry is not available in direct Hermes mode yet."))
-            }
+            let result = await viewModel.executeSlashCommand(
+                try XCTUnwrap(SlashCommandCatalog.command(named: "retry"))
+            )
+            XCTAssertEqual(result, .unsupported(friendlyMessage: "Retry is not available in direct Hermes mode yet."))
         }
         XCTAssertEqual(viewModel.messages.map(\.id), originalIDs)
-        XCTAssertEqual(viewModel.messages.compactMap(\.content), ["Original question", "Completed answer"])
-        XCTAssertEqual(viewModel.activeStreamID, originalStream)
-        XCTAssertFalse(viewModel.isStartingChat)
-        XCTAssertFalse(viewModel.isEditingMessage)
-        XCTAssertFalse(viewModel.isRegeneratingMessage)
-        XCTAssertEqual(requests, originalRequests)
-        XCTAssertEqual(transport.methods(), originalMethods)
+        XCTAssertTrue(transport.promptParams().isEmpty)
+        XCTAssertNil(viewModel.activeStreamID)
         await viewModel.disposeDirectConversation()
-        await runtime.stop()
-    }
-
-    @MainActor
-    func testDirectEditRefusalPreservesDurableHistoryAndMakesNoRequest() async throws {
-        try await assertDirectDestructiveActionRefused(action: "edit", staleOrRepeated: false)
-    }
-
-    @MainActor
-    func testDirectRegenerateRefusalPreservesDurableHistoryAndMakesNoRequest() async throws {
-        try await assertDirectDestructiveActionRefused(action: "regenerate", staleOrRepeated: false)
-    }
-
-    @MainActor
-    func testDirectEditRefusalWithStaleContextCannotTruncateCurrentHistory() async throws {
-        try await assertDirectDestructiveActionRefused(action: "edit", staleOrRepeated: true)
-    }
-
-    @MainActor
-    func testDirectRegenerateRefusalWithStaleContextCannotTruncateCurrentHistory() async throws {
-        try await assertDirectDestructiveActionRefused(action: "regenerate", staleOrRepeated: true)
     }
 
     @MainActor

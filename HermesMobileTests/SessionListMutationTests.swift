@@ -129,7 +129,6 @@ final class SessionListMutationTests: XCTestCase {
 
     override func tearDown() {
         MockURLProtocol.requestHandler = nil
-        OverlappingDeleteURLProtocol.reset()
         ArchivedCountGateURLProtocol.reset()
         MetadataOverlayURLProtocol.reset()
         super.tearDown()
@@ -872,22 +871,23 @@ final class SessionListMutationTests: XCTestCase {
     }
 
     @MainActor
-    func testDeleteRemovesRowBeforeServerAcknowledgementAndKeepsItGoneAfterSuccess() async throws {
+    func testDeleteUsesExactStoredIDAndProfileOnSharedRuntimeAndKeepsOptimisticRowGone() async throws {
         let mutationStarted = expectation(description: "delete request started")
-        let releaseMutation = DispatchSemaphore(value: 0)
+        let transport = SessionDeleteTransport(result: .success, onRequest: { mutationStarted.fulfill() })
+        let runtime = try HermesServerRuntime(origin: URL(string: "https://example.test")!) { _ in transport }
         var sessionLoadCount = 0
-        let viewModel = try makeViewModel { request in
+        let viewModel = try makeViewModel(gatewayRuntimeProvider: { _ in runtime }) { request in
             switch request.url?.path {
             case "/api/profiles/sessions":
                 sessionLoadCount += 1
                 let body = sessionLoadCount == 1
-                    ? #"{"sessions":[{"id":"delete-me","title":"Delete me","archived":false},{"id":"keep-me","title":"Keep me","archived":false}]}"#
+                    ? #"{"sessions":[{"id":"delete-me","title":"Delete me","profile":"default","archived":false},{"id":"keep-me","title":"Keep me","profile":"default","archived":false}]}"#
                     : #"{"sessions":[{"id":"keep-me","title":"Keep me","archived":false}]}"#
                 return apiTestJSONResponse(body, for: request)
-            case "/api/session/delete":
-                mutationStarted.fulfill()
-                releaseMutation.wait()
-                return apiTestJSONResponse(#"{"ok":true}"#, for: request)
+            case "/api/sessions/delete-me":
+                XCTAssertEqual(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems,
+                               [URLQueryItem(name: "profile", value: "default")])
+                return apiTestJSONResponse(#"{"id":"delete-me","profile":"default"}"#, for: request)
             default:
                 XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
                 throw URLError(.badURL)
@@ -902,26 +902,30 @@ final class SessionListMutationTests: XCTestCase {
         await fulfillment(of: [mutationStarted], timeout: 2)
 
         XCTAssertEqual(viewModel.sessions.compactMap(\.sessionId), ["keep-me"])
-        XCTAssertTrue(viewModel.isMutating(session))
-
-        releaseMutation.signal()
         let didDelete = await deleteTask.value
         XCTAssertTrue(didDelete)
         XCTAssertFalse(viewModel.isMutating(session))
         XCTAssertEqual(viewModel.sessions.compactMap(\.sessionId), ["keep-me"])
+        XCTAssertEqual(transport.deleteFields(), [
+            "profile": .string("default"),
+            "session_id": .string("delete-me")
+        ])
+        XCTAssertEqual(transport.methods(), ["session.delete"])
     }
 
     @MainActor
-    func testDeleteFailureRestoresTheExactRowAndOrder() async throws {
+    func testDeleteActiveAttachmentRefusalRestoresExactRowAndIsActionable() async throws {
+        let transport = SessionDeleteTransport(result: .activeRefusal)
+        let runtime = try HermesServerRuntime(origin: URL(string: "https://example.test")!) { _ in transport }
         var sessionLoadCount = 0
-        let viewModel = try makeViewModel { request in
+        let viewModel = try makeViewModel(gatewayRuntimeProvider: { _ in runtime }) { request in
             switch request.url?.path {
             case "/api/profiles/sessions":
                 sessionLoadCount += 1
                 XCTAssertEqual(sessionLoadCount, 1)
-                return apiTestJSONResponse(#"{"sessions":[{"id":"first","title":"First","archived":false},{"id":"delete-me","title":"Delete me","archived":false},{"id":"last","title":"Last","archived":false}]}"#, for: request)
-            case "/api/session/delete":
-                return apiTestJSONResponse(#"{"ok":false,"error":"delete refused"}"#, for: request)
+                return apiTestJSONResponse(#"{"sessions":[{"id":"first","title":"First","profile":"default","archived":false},{"id":"delete-me","title":"Delete me","profile":"default","archived":false},{"id":"last","title":"Last","profile":"default","archived":false}]}"#, for: request)
+            case "/api/sessions/delete-me":
+                return apiTestJSONResponse(#"{"id":"delete-me","profile":"default"}"#, for: request)
             default:
                 XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
                 throw URLError(.badURL)
@@ -935,41 +939,133 @@ final class SessionListMutationTests: XCTestCase {
 
         XCTAssertFalse(didDelete)
         XCTAssertEqual(viewModel.sessions, before)
-        XCTAssertEqual(viewModel.actionErrorMessage, "delete refused")
+        XCTAssertEqual(viewModel.actionErrorMessage, "This session is open in Hermes, so it can't be deleted. Close it there, then try again.")
         XCTAssertFalse(viewModel.isMutating(session))
     }
 
     @MainActor
-    func testDeleteFailureAfterOverlappingCanonicalRefreshRestoresLatestCanonicalRow() async throws {
-        let mutationStarted = expectation(description: "delete request started")
-        let overlappingLoadStarted = expectation(description: "overlapping canonical load started")
-        OverlappingDeleteURLProtocol.configure(
-            onMutationStarted: { mutationStarted.fulfill() },
-            onOverlappingLoadStarted: { overlappingLoadStarted.fulfill() }
-        )
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [OverlappingDeleteURLProtocol.self]
-        let server = try XCTUnwrap(URL(string: "https://example.test"))
-        let client = APIClient(baseURL: server, session: URLSession(configuration: configuration))
-        let viewModel = SessionListViewModel(server: server, client: client)
-
+    func testDeletePreflightIdentityMismatchNeverDispatches() async throws {
+        let transport = SessionDeleteTransport(result: .success)
+        let runtime = try HermesServerRuntime(origin: URL(string: "https://example.test")!) { _ in transport }
+        let viewModel = try makeViewModel(gatewayRuntimeProvider: { _ in runtime }) { request in
+            if request.url?.path == "/api/profiles/sessions" {
+                return apiTestJSONResponse(#"{"sessions":[{"id":"delete-me","title":"Delete me","profile":"default","archived":false}]}"#, for: request)
+            }
+            return apiTestJSONResponse(#"{"id":"different-session","profile":"default"}"#, for: request)
+        }
         await viewModel.load()
-        let session = try XCTUnwrap(viewModel.sessions.first(where: { $0.sessionId == "delete-me" }))
-        let deleteTask = Task { @MainActor in await viewModel.delete(session) }
-        await fulfillment(of: [mutationStarted], timeout: 2)
+        let session = try XCTUnwrap(viewModel.sessions.first)
+        let deleted = await viewModel.delete(session)
+        XCTAssertFalse(deleted)
+        XCTAssertEqual(viewModel.sessions, [session])
+        XCTAssertTrue(transport.methods().isEmpty)
+        XCTAssertEqual(viewModel.actionErrorMessage, "Hermes returned a different session than the requested link.")
+    }
 
-        let overlappingLoadTask = Task { @MainActor in await viewModel.load() }
-        await fulfillment(of: [overlappingLoadStarted], timeout: 2)
-        XCTAssertNil(viewModel.sessions.first(where: { $0.sessionId == "delete-me" }))
-        let overlappingLoadSucceeded = await overlappingLoadTask.value
-        XCTAssertTrue(overlappingLoadSucceeded)
+    @MainActor
+    func testDeleteMismatchedAcknowledgementIsUnknownAndNeverRepeated() async throws {
+        let transport = SessionDeleteTransport(result: .mismatchedAcknowledgement)
+        let runtime = try HermesServerRuntime(origin: URL(string: "https://example.test")!) { _ in transport }
+        let viewModel = try makeViewModel(gatewayRuntimeProvider: { _ in runtime }) { request in
+            if request.url?.path == "/api/profiles/sessions" {
+                return apiTestJSONResponse(#"{"sessions":[{"id":"delete-me","title":"Delete me","profile":"default","archived":false}]}"#, for: request)
+            }
+            return apiTestJSONResponse(#"{"id":"delete-me","profile":"default"}"#, for: request)
+        }
+        await viewModel.load()
+        let session = try XCTUnwrap(viewModel.sessions.first)
+        let firstDelete = await viewModel.delete(session)
+        XCTAssertFalse(firstDelete)
+        XCTAssertEqual(viewModel.sessions, [session])
+        let repeatedDelete = await viewModel.delete(session)
+        XCTAssertFalse(repeatedDelete)
+        XCTAssertEqual(transport.methods(), ["session.delete"])
+        XCTAssertTrue(viewModel.actionErrorMessage?.contains("may have deleted") == true)
+    }
 
-        let deleteSucceeded = await deleteTask.value
-        XCTAssertFalse(deleteSucceeded)
-        XCTAssertEqual(
-            viewModel.sessions.first(where: { $0.sessionId == "delete-me" })?.title,
-            "Canonical latest"
+    @MainActor
+    func testDeleteTransportFailureIsAmbiguousAndNeverAutomaticallyRetried() async throws {
+        let transport = SessionDeleteTransport(result: .transportFailure)
+        let runtime = try HermesServerRuntime(origin: URL(string: "https://example.test")!) { _ in transport }
+        let viewModel = try makeViewModel(gatewayRuntimeProvider: { _ in runtime }) { request in
+            if request.url?.path == "/api/profiles/sessions" {
+                return apiTestJSONResponse(#"{"sessions":[{"id":"delete-me","title":"Delete me","profile":"default","archived":false}]}"#, for: request)
+            }
+            return apiTestJSONResponse(#"{"id":"delete-me","profile":"default"}"#, for: request)
+        }
+        await viewModel.load()
+        let session = try XCTUnwrap(viewModel.sessions.first)
+        let firstDelete = await viewModel.delete(session)
+        let repeatedDelete = await viewModel.delete(session)
+        XCTAssertFalse(firstDelete)
+        XCTAssertFalse(repeatedDelete)
+        XCTAssertEqual(transport.methods(), ["session.delete"])
+    }
+
+    @MainActor
+    func testDeleteProfileSwitchDuringPreflightRestoresRowWithoutDispatch() async throws {
+        let preflightStarted = expectation(description: "delete preflight started")
+        let releasePreflight = DispatchSemaphore(value: 0)
+        let transport = SessionDeleteTransport(result: .success)
+        let runtime = try HermesServerRuntime(origin: URL(string: "https://example.test")!) { _ in transport }
+        let viewModel = try makeViewModel(gatewayRuntimeProvider: { _ in runtime }) { request in
+            switch request.url?.path {
+            case "/api/profiles/sessions":
+                return apiTestJSONResponse(#"{"sessions":[{"id":"delete-me","title":"Delete me","profile":"default","archived":false}]}"#, for: request)
+            case "/api/sessions/delete-me":
+                preflightStarted.fulfill()
+                releasePreflight.wait()
+                return apiTestJSONResponse(#"{"id":"delete-me","profile":"default"}"#, for: request)
+            default:
+                throw URLError(.badURL)
+            }
+        }
+        await viewModel.load()
+        let session = try XCTUnwrap(viewModel.sessions.first)
+        let task = Task { @MainActor in await viewModel.delete(session) }
+        await fulfillment(of: [preflightStarted], timeout: 2)
+        let work = try JSONDecoder().decode(ProfileSummary.self, from: Data(#"{"name":"work"}"#.utf8))
+        let switched = await viewModel.switchActiveProfile(work)
+        XCTAssertTrue(switched)
+        releasePreflight.signal()
+        let deleted = await task.value
+        XCTAssertFalse(deleted)
+        XCTAssertEqual(viewModel.sessions, [session])
+        XCTAssertTrue(transport.methods().isEmpty)
+        XCTAssertNil(viewModel.actionErrorMessage)
+    }
+
+    @MainActor
+    func testConfirmedDeleteAfterProfileSwitchDoesNotTombstoneReplacementProfile() async throws {
+        let requestStarted = expectation(description: "delete dispatched")
+        let releaseResponse = DispatchSemaphore(value: 0)
+        let transport = SessionDeleteTransport(
+            result: .success,
+            onRequest: { requestStarted.fulfill() },
+            responseGate: releaseResponse
         )
+        let runtime = try HermesServerRuntime(origin: URL(string: "https://example.test")!) { _ in transport }
+        let viewModel = try makeViewModel(gatewayRuntimeProvider: { _ in runtime }) { request in
+            if request.url?.path == "/api/profiles/sessions" {
+                let profile = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?
+                    .queryItems?.first(where: { $0.name == "profile" })?.value ?? "default"
+                return apiTestJSONResponse("{\"sessions\":[{\"id\":\"delete-me\",\"title\":\"Delete me\",\"profile\":\"\(profile)\",\"archived\":false}]}", for: request)
+            }
+            return apiTestJSONResponse(#"{"id":"delete-me","profile":"default"}"#, for: request)
+        }
+        await viewModel.load()
+        let session = try XCTUnwrap(viewModel.sessions.first)
+        let task = Task { @MainActor in await viewModel.delete(session) }
+        await fulfillment(of: [requestStarted], timeout: 2)
+        let work = try JSONDecoder().decode(ProfileSummary.self, from: Data(#"{"name":"work"}"#.utf8))
+        _ = await viewModel.switchActiveProfile(work)
+        releaseResponse.signal()
+        let deleted = await task.value
+        XCTAssertFalse(deleted)
+        let loaded = await viewModel.load()
+        XCTAssertTrue(loaded)
+        XCTAssertEqual(viewModel.sessions.first?.profile, "work")
+        XCTAssertEqual(viewModel.sessions.first?.sessionId, "delete-me")
     }
 
     @MainActor
@@ -977,9 +1073,11 @@ final class SessionListMutationTests: XCTestCase {
         var loadCount = 0
         var mutationPaths: [String] = []
         var detailCount = 0
+        let deleteTransport = SessionDeleteTransport(result: .success, expectedID: "session-abc")
+        let runtime = try HermesServerRuntime(origin: URL(string: "https://example.test")!) { _ in deleteTransport }
         let organizer = LocalOrganizerStore(defaults: UserDefaults(suiteName: "SessionListMutationTests.pinArchive.\(UUID().uuidString)")!)
         let project = try organizer.createGroup(name: "Local", color: nil, server: URL(string: "https://example.test")!, profile: "default")
-        let viewModel = try makeViewModel(organizerStore: organizer) { request in
+        let viewModel = try makeViewModel(gatewayRuntimeProvider: { _ in runtime }, organizerStore: organizer) { request in
             switch request.url?.path {
             case "/api/profiles/sessions":
                 loadCount += 1
@@ -1009,11 +1107,6 @@ final class SessionListMutationTests: XCTestCase {
                         : #"{"id":"session-abc","title":"Planning","profile":"default","pinned":1,"archived":1}"#,
                     for: request
                 )
-            case "/api/session/delete":
-                mutationPaths.append("/api/session/delete")
-                let body = try XCTUnwrap(apiTestJSONBody(from: request))
-                XCTAssertEqual(body["session_id"] as? String, "session-abc")
-                return apiTestJSONResponse(#"{"ok": true}"#, for: request)
             default:
                 XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
                 throw URLError(.badURL)
@@ -1046,9 +1139,10 @@ final class SessionListMutationTests: XCTestCase {
                 "GET /api/sessions/session-abc",
                 "PATCH /api/sessions/session-abc",
                 "GET /api/sessions/session-abc",
-                "/api/session/delete"
+                "GET /api/sessions/session-abc"
             ]
         )
+        XCTAssertEqual(deleteTransport.methods(), ["session.delete"])
         XCTAssertNil(viewModel.actionErrorMessage)
         XCTAssertNil(viewModel.lastError)
     }
@@ -3722,83 +3816,59 @@ private final class OutOfOrderSessionURLProtocol: URLProtocol {
     }
 }
 
-private final class OverlappingDeleteURLProtocol: URLProtocol {
-    private static let lock = NSLock()
-    private static var sessionLoadCount = 0
-    private static var onMutationStarted: (() -> Void)?
-    private static var onOverlappingLoadStarted: (() -> Void)?
-    private var loadingTask: Task<Void, Never>?
+private final class SessionDeleteTransport: HermesGatewayTransport, @unchecked Sendable {
+    enum Result { case success, activeRefusal, mismatchedAcknowledgement, transportFailure }
 
-    static func configure(
-        onMutationStarted: @escaping () -> Void,
-        onOverlappingLoadStarted: @escaping () -> Void
+    private let lock = NSLock()
+    private let result: Result
+    private let expectedID: String
+    private let onRequest: (() -> Void)?
+    private let responseGate: DispatchSemaphore?
+    private var generation = 0
+    private var recorded: [(String, JSONValue?)] = []
+
+    init(
+        result: Result,
+        expectedID: String = "delete-me",
+        onRequest: (() -> Void)? = nil,
+        responseGate: DispatchSemaphore? = nil
     ) {
-        lock.lock()
-        sessionLoadCount = 0
-        self.onMutationStarted = onMutationStarted
-        self.onOverlappingLoadStarted = onOverlappingLoadStarted
-        lock.unlock()
+        self.result = result
+        self.expectedID = expectedID
+        self.onRequest = onRequest
+        self.responseGate = responseGate
     }
 
-    static func reset() {
-        lock.lock()
-        sessionLoadCount = 0
-        onMutationStarted = nil
-        onOverlappingLoadStarted = nil
-        lock.unlock()
-    }
+    func connect() async throws { lock.withLock { generation += 1 } }
+    func close() async { }
+    func connectionIdentifier() async -> Int? { lock.withLock { generation } }
 
-    override class func canInit(with request: URLRequest) -> Bool { true }
-
-    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
-
-    override func startLoading() {
-        guard let url = request.url else { return }
-        let path = url.path
-        let responseBody: String
-        let delayNanoseconds: UInt64
-
-        Self.lock.lock()
-        switch path {
-        case "/api/profiles/sessions":
-            Self.sessionLoadCount += 1
-            if Self.sessionLoadCount == 1 {
-                responseBody = #"{"sessions":[{"id":"delete-me","title":"Before delete","archived":false},{"id":"keep-me","title":"Keep me","archived":false}]}"#
-            } else {
-                Self.onOverlappingLoadStarted?()
-                responseBody = #"{"sessions":[{"id":"delete-me","title":"Canonical latest","archived":false},{"id":"keep-me","title":"Keep me","archived":false}]}"#
-            }
-            delayNanoseconds = 0
-        case "/api/session/delete":
-            Self.onMutationStarted?()
-            responseBody = #"{"ok":false,"error":"delete refused"}"#
-            delayNanoseconds = 100_000_000
-        default:
-            responseBody = #"{}"#
-            delayNanoseconds = 0
-        }
-        Self.lock.unlock()
-
-        loadingTask = Task { [weak self] in
-            guard let self else { return }
-            if delayNanoseconds > 0 {
-                try? await Task.sleep(nanoseconds: delayNanoseconds)
-            }
-            guard !Task.isCancelled else { return }
-            let response = HTTPURLResponse(
-                url: url,
-                statusCode: 200,
-                httpVersion: "HTTP/1.1",
-                headerFields: ["Content-Type": "application/json"]
-            )!
-            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-            client?.urlProtocol(self, didLoad: Data(responseBody.utf8))
-            client?.urlProtocolDidFinishLoading(self)
+    func request(method: String, params: JSONValue?, timeout: Duration?) async throws -> JSONValue? {
+        lock.withLock { recorded.append((method, params)) }
+        onRequest?()
+        responseGate?.wait()
+        switch result {
+        case .success:
+            return .object(["deleted": .string(expectedID)])
+        case .activeRefusal:
+            throw HermesGatewayError.server(
+                code: 4023, message: "cannot delete an active session", data: nil,
+                method: method, requestID: "delete-1", server: nil
+            )
+        case .mismatchedAcknowledgement:
+            return .object(["deleted": .string("different-session")])
+        case .transportFailure:
+            throw HermesGatewayError.closed
         }
     }
 
-    override func stopLoading() {
-        loadingTask?.cancel()
+    func methods() -> [String] { lock.withLock { recorded.map(\.0) } }
+
+    func deleteFields() -> [String: JSONValue] {
+        lock.withLock {
+            guard let params = recorded.first?.1, case .object(let fields) = params else { return [:] }
+            return fields
+        }
     }
 }
 
