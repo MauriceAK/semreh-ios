@@ -956,7 +956,14 @@ final class ChatViewModelSendTests: XCTestCase {
             let path = request.url?.path
             requestedPaths.append(path ?? "nil")
             switch path {
-            case "/api/transcribe":
+            case "/api/audio/transcribe":
+                XCTAssertEqual(request.httpMethod, "POST")
+                XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
+                XCTAssertNotNil(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?
+                    .queryItems?.first(where: { $0.name == "profile" })?.value)
+                let transcriptionBody = try JSONSerialization.jsonObject(with: XCTUnwrap(apiTestBodyData(from: request))) as! [String: String]
+                XCTAssertEqual(transcriptionBody["mime_type"], "audio/mp4")
+                XCTAssertTrue(transcriptionBody["data_url"]?.hasPrefix("data:audio/mp4;base64,") == true)
                 return apiTestJSONResponse("""
                 {
                   "ok": true,
@@ -995,7 +1002,7 @@ final class ChatViewModelSendTests: XCTestCase {
         )
 
         XCTAssertTrue(didStart)
-        XCTAssertEqual(requestedPaths, ["/api/transcribe", "/api/upload", "/api/chat/start"])
+        XCTAssertEqual(requestedPaths, ["/api/audio/transcribe", "/api/upload", "/api/chat/start"])
 
         // The message the model sees is exactly the transcript — no
         // "[Attached files: …]" suffix that would make the agent try to "inspect"

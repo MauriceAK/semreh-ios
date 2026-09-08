@@ -2,93 +2,84 @@ import XCTest
 @testable import HermesMobile
 
 final class APIClientTranscribeTests: APIClientTestCase {
-    func testTranscribeAudioSendsMultipartFileFieldAndDecodes() async throws {
+    func testExactStockRequestAndResponse() async throws {
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/transcribe")
+            XCTAssertEqual(request.url?.path, "/api/audio/transcribe")
             XCTAssertEqual(request.httpMethod, "POST")
-
-            let contentType = request.value(forHTTPHeaderField: "Content-Type")
-            XCTAssertNotNil(contentType)
-            XCTAssertTrue(contentType?.hasPrefix("multipart/form-data") == true)
-
-            guard let body = apiTestBodyData(from: request) else {
-                XCTFail("Missing request body")
-                throw URLError(.badServerResponse)
-            }
-
-            let bodyString = String(data: body, encoding: .utf8) ?? ""
-            XCTAssertTrue(bodyString.contains("Content-Disposition: form-data; name=\"file\"; filename=\"voice-note.m4a\""))
-            XCTAssertTrue(bodyString.contains("clip-bytes"))
-            // Transcribe sends only the file field — no session_id (unlike upload).
-            XCTAssertFalse(bodyString.contains("name=\"session_id\""))
-
-            return apiTestJSONResponse("""
-            {
-              "ok": true,
-              "transcript": "hello world"
-            }
-            """, for: request)
+            XCTAssertEqual(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems,
+                           [URLQueryItem(name: "profile", value: "work & notes")])
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
+            let body = try JSONSerialization.jsonObject(with: XCTUnwrap(apiTestBodyData(from: request))) as! [String: String]
+            XCTAssertEqual(body, ["data_url": "data:audio/wav;base64,Y2xpcA==", "mime_type": "audio/wav"])
+            return apiTestJSONResponse(#"{"ok":true,"transcript":"hello","provider":"fixture","future":1}"#, for: request)
         }
-
-        let response = try await client.transcribeAudio(data: Data("clip-bytes".utf8), filename: "voice-note.m4a")
-
-        XCTAssertEqual(response.ok, true)
-        XCTAssertEqual(response.transcript, "hello world")
-        XCTAssertNil(response.error)
+        let response = try await client.transcribeAudio(data: Data("clip".utf8), mimeType: "audio/wav", profile: "work & notes")
+        XCTAssertEqual(response.transcript, "hello")
     }
 
-    func testTranscribeAudioDecodesServerErrorBodyOnServiceUnavailable() async throws {
-        let client = makeClient { request in
-            let response = HTTPURLResponse(
-                url: request.url!,
-                statusCode: 503,
-                httpVersion: nil,
-                headerFields: ["Content-Type": "application/json"]
-            )!
-            let data = Data(#"{"error": "Speech-to-text is unavailable on this server"}"#.utf8)
-            return (response, data)
-        }
-
-        // A 503 with a JSON error body decodes into `.error` rather than throwing,
-        // so the caller can show the server's message and abort cleanly.
-        let response = try await client.transcribeAudio(data: Data("x".utf8), filename: "v.m4a")
-        XCTAssertEqual(response.error, "Speech-to-text is unavailable on this server")
-        XCTAssertNil(response.transcript)
+    func testEmptyTranscriptIsValidSilence() async throws {
+        let client = makeClient { apiTestJSONResponse(#"{"ok":true,"transcript":""}"#, for: $0) }
+        let response = try await client.transcribeAudio(data: Data([1]), mimeType: "audio/wav", profile: "default")
+        XCTAssertEqual(response.transcript, "")
     }
 
-    func testTranscribeAudioMapsUnauthorized() async {
-        let client = makeClient { request in
-            let response = HTTPURLResponse(
-                url: request.url!,
-                statusCode: 401,
-                httpVersion: nil,
-                headerFields: nil
-            )!
-            return (response, Data())
-        }
-
+    func testMalformedSuccessCannotBecomeTranscript() async throws {
+        let client = makeClient { apiTestJSONResponse(#"{"transcript":"unacknowledged"}"#, for: $0) }
         do {
-            _ = try await client.transcribeAudio(data: Data("x".utf8), filename: "v.m4a")
-            XCTFail("Expected APIError.unauthorized")
-        } catch APIError.unauthorized {
-            // expected
-        } catch {
-            XCTFail("Unexpected error: \(error)")
+            _ = try await client.transcribeAudio(data: Data([1]), mimeType: "audio/wav", profile: "default")
+            XCTFail("Expected rejected acknowledgement")
+        } catch DirectTranscriptionError.invalidAcknowledgement {}
+    }
+
+    func testStockErrorDoesNotRetryLegacyEndpoint() async throws {
+        var requests = 0
+        let client = makeClient { request in
+            requests += 1
+            XCTAssertEqual(request.url?.path, "/api/audio/transcribe")
+            return (HTTPURLResponse(url: request.url!, statusCode: 400, httpVersion: nil,
+                                    headerFields: ["Content-Type": "application/json"])!,
+                    Data(#"{"detail":"Transcription unavailable"}"#.utf8))
+        }
+        do {
+            _ = try await client.transcribeAudio(data: Data([1]), mimeType: "audio/wav", profile: "default")
+            XCTFail("Expected stock error")
+        } catch {}
+        XCTAssertEqual(requests, 1)
+    }
+
+    func testInvalidAndOversizedRecordingsNeverUpload() async throws {
+        let client = makeClient { _ in XCTFail("Must not upload"); throw URLError(.badURL) }
+        for data in [Data(), Data(repeating: 0, count: APIClient.maximumTranscriptionBytes + 1)] {
+            do {
+                _ = try await client.transcribeAudio(data: data, mimeType: "audio/wav", profile: "default")
+                XCTFail("Expected local validation")
+            } catch is DirectTranscriptionError {}
         }
     }
 
-    func testTranscribeAudioTolerantToUnknownFields() async throws {
-        let client = makeClient { request in
-            apiTestJSONResponse("""
-            {
-              "ok": true,
-              "transcript": "hi",
-              "future_field": 42
-            }
-            """, for: request)
+    @MainActor
+    func testHeldTranscriptCannotCommitAfterLiveProfileChanges() async {
+        var liveProfile = "original"
+        var draft = ComposerVoiceDraftUpdateSession()
+        draft.begin(baseDraft: "Keep this", profile: liveProfile,
+                    currentProfile: { liveProfile })
+        var completion: CheckedContinuation<String, Never>?
+        let heldTranscriber = Task { @MainActor in
+            await withCheckedContinuation { completion = $0 }
         }
+        while completion == nil { await Task.yield() }
+        liveProfile = "different"
+        completion?.resume(returning: "late words")
+        let transcript = await heldTranscriber.value
+        XCTAssertNil(draft.composedDraft(for: transcript))
+        liveProfile = "original"
+        XCTAssertEqual(draft.composedDraft(for: transcript), "Keep this late words")
+    }
 
-        let response = try await client.transcribeAudio(data: Data("x".utf8), filename: "v.m4a")
-        XCTAssertEqual(response.transcript, "hi")
+    @MainActor
+    func testProfileScopePreservesSelectionSessionAndDefault() {
+        XCTAssertEqual(ComposerVoiceInputController.profileScope(selected: " chosen ", session: "existing"), "chosen")
+        XCTAssertEqual(ComposerVoiceInputController.profileScope(selected: nil, session: "existing"), "existing")
+        XCTAssertEqual(ComposerVoiceInputController.profileScope(selected: " ", session: nil), "default")
     }
 }

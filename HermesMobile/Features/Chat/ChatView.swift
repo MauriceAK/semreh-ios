@@ -608,6 +608,8 @@ struct ChatView: View {
             isSendingVoiceNote: viewModel.isSendingVoiceNote,
             autoStartsVoiceInput: autoStartsVoiceInput,
             apiClient: viewModel.client,
+            voiceInputProfileName: viewModel.voiceInputProfileName,
+            currentVoiceInputProfile: { viewModel.voiceInputProfileName },
             uploadAttachmentErrorMessage: viewModel.uploadAttachmentErrorMessage,
             onSend: {
                 Task { await sendDraftMessage() }

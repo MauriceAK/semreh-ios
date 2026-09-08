@@ -50,7 +50,10 @@ Preserve completed Luna work. Root owns integration, notes and native execution.
 
 ## Decisions / limitations that implementation workers must not silently resolve
 
-- [ ] MEMORY/USER/project-context editor disposition (SOUL has a stock contract).
+- [ ] Memory parity: source audit found builtin MEMORY/USER supported through
+  selected profile's returned home plus stock-defined memories paths and managed
+  file APIs; SOUL has its dedicated contract. Implementing, not removal candidates.
+  Effective project-context discovery remains open (current UI is read-only).
 - [ ] Edit/regenerate release treatment: stock external-rewrite safety gap.
 - [ ] Deletion treatment: stock active-writer concurrency limitation.
 - [ ] Corrupt/unresolvable delivery-marker recovery UX; no silent/global reset.
@@ -109,6 +112,22 @@ Independent reviewer found/fixed moving-tail ordering, missing historical tool
 groups and idle canonical rollover before native verification. Strict signing and
 ordinary Simulator launch91834 passed. Audit-v1:291375files/0flags/171consoles,
 same limited scope above. Subsequent transcription edits are not covered here.
+
+Transcription successor: `slice4-transcription-build-v1` and `full-v1` passed
+2314/0/14intentional skips. Explicit actual chat profile, JSON data URL/WAV or
+MP4 MIME,25MiB pre-upload cap, stock ACK, native fallback and synchronous live-
+profile check at draft insertion. Independent reviewer caught the deferred
+SwiftUI-cancellation race; commit-time scope check and held-result regression
+address it. Signed launch99715 passed. No microphone/device/provider execution
+claim. Existing dormant voice-note upload/send paths remain separate legacy work.
+Targeted transcription artifact audit passed:4766files/0flags/1exported console,
+covering that build, suite and exported diagnostics plus migration docs/runtime
+logs. Older evidence was not rescanned; opaque/OCR/unexported contents excluded.
+
+Edit/regenerate contract re-audit confirms missing public atomic precondition:
+internal DB rewind has expected-row/content guards, public undo wrappers do not
+expose them; no registered session.rewind RPC. TUI retry is undo then resubmit,
+not guarded row-addressed edit. Async user disposition requested; no waiver yet.
 Skills read-only stock probe verified58rows and one SKILL.md; no skill mutations.
 Combined build-and-test attempts twice produced no result and were interrupted;
 separate build-for-testing then test-without-building produced the passing runs.

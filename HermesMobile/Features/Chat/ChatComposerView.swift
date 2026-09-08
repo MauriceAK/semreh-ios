@@ -118,6 +118,8 @@ struct MessageComposerView: View {
     /// the "New Chat with Voice" App Intent (#338). Defaults to false for normal composers.
     let autoStartsVoiceInput: Bool
     let apiClient: APIClient?
+    var voiceInputProfileName: String = "default"
+    var currentVoiceInputProfile: (() -> String)? = nil
     let uploadAttachmentErrorMessage: String?
     let onSend: () -> Void
     let onSendVoiceNote: (Data, String) -> Void
@@ -440,6 +442,9 @@ struct MessageComposerView: View {
                 // a beat after it appeared; auto-start once we're active (#338).
                 autoStartVoiceInputIfNeeded()
             }
+        }
+        .onChange(of: voiceInputProfileName) { _, _ in
+            voiceInput.stopBeforeSubmittingDraft()
         }
         .onChange(of: voiceNoteRecorder.elapsed) { _, elapsed in
             // Enforce the max-duration cap: auto-stop and send (not cancel) once
@@ -1100,6 +1105,8 @@ struct MessageComposerView: View {
     @MainActor
     private func toggleVoiceInput() {
         voiceInput.apiClient = apiClient
+        voiceInput.profileName = voiceInputProfileName
+        voiceInput.currentProfile = currentVoiceInputProfile
         voiceInput.providerPreference = ComposerSTTProviderPreference.storedValue(sttProviderPreferenceRawValue)
         voiceInput.locale = .current
         Task {

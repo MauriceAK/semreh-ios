@@ -2351,6 +2351,8 @@ final class ChatViewModel {
         Self.nonEmpty(selectedProfileName) ?? Self.nonEmpty(currentProfile)
     }
 
+    var voiceInputProfileName: String { requestProfileName ?? "default" }
+
     /// The canonical Hermes session ID is the server-provided `session_id`.
     /// `SessionSummary.id` may be a local synthetic fallback and must never be
     /// sent as a session-scoped reasoning identity.
@@ -4056,7 +4058,8 @@ final class ChatViewModel {
         //    whole send — no fallback, no partial message (per the issue).
         let transcript: String
         do {
-            let response = try await client.transcribeAudio(data: audioData, filename: filename)
+            let response = try await client.transcribeAudio(
+                data: audioData, mimeType: "audio/mp4", profile: voiceInputProfileName)
             if let serverError = response.error?.trimmingCharacters(in: .whitespacesAndNewlines),
                !serverError.isEmpty {
                 setUploadAttachmentError(serverError)

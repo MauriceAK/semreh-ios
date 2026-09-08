@@ -221,7 +221,7 @@ final class CustomHeaderAPIClientInjectionTests: APIClientTestCase {
             return try self.ok(request)
         }
 
-        _ = try? await client.transcribeAudio(data: Data("clip".utf8), filename: "v.m4a")
+        _ = try? await client.transcribeAudio(data: Data("clip".utf8), mimeType: "audio/wav", profile: "default")
     }
 
     func testDownloadRequestCarriesCustomHeaders() async throws {
