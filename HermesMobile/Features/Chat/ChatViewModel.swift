@@ -646,19 +646,12 @@ final class ChatViewModel {
     private(set) var selectedReasoningEffort: String?
     /// Raw per-session override; nil means this session inherits the profile value.
     private(set) var sessionReasoningEffort: String?
-    /// Model-aware effort vocabulary (`supported_efforts` from `GET /api/reasoning`).
-    /// `nil` on older servers → the composer falls back to the static list (issue #18).
+    /// Model-aware effort vocabulary reported by the direct Hermes configuration.
     private(set) var supportedReasoningEfforts: [String]?
     /// `supports_reasoning_effort`; `false` hides the composer effort control.
     private(set) var supportsReasoningEffort: Bool?
-    /// `session_scoped_reasoning`; only an explicit `true` authorizes a
-    /// session-bearing effort POST. `nil` preserves legacy global behavior.
+    /// Only an explicit `true` authorizes a session-scoped effort change.
     private(set) var sessionScopedReasoning: Bool?
-    /// Drops out-of-order `GET /api/reasoning` responses after rapid model switches
-    /// so the gating never reflects a stale model (upstream #3750 class of bug).
-    private var reasoningGatingFetchToken = 0
-    /// Drops an effort-write response after a newer effort selection starts.
-    private var reasoningSelectionToken = 0
     /// Shared configuration mutation generation. Model and reasoning writes are
     /// optimistic, so a late response must never roll back a newer visible choice.
     private var composerConfigurationMutationToken = 0
@@ -975,7 +968,6 @@ final class ChatViewModel {
     private var activeStreamReplayToolMatchIndex = 0
     private var activeStreamReplayPendingToolMatchIndex: Int?
     private var latestServerLoadHadAssistantResponseAfterLatestUser = false
-    private var needsComposerConfigurationReload = false
     private var pendingExplicitModelPick = false
 
     init(
@@ -2418,241 +2410,32 @@ final class ChatViewModel {
     }
 
     func loadComposerConfiguration() async {
-        if usesDirectGateway { await loadDirectComposerConfiguration(); return }
-        if isLoadingComposerConfiguration {
-            needsComposerConfigurationReload = true
-            return
-        }
-
-        isLoadingComposerConfiguration = true
-        composerConfigurationErrorMessage = nil
-        lastError = nil
-        defer { isLoadingComposerConfiguration = false }
-
-        repeat {
-            needsComposerConfigurationReload = false
-
-            let initialState = composerConfigurationState
-            let result = await ChatComposerConfigLoader(client: client)
-                .loadConfiguration(from: initialState, sessionID: canonicalSessionID)
-
-            guard composerConfigurationState == initialState else {
-                needsComposerConfigurationReload = true
-                continue
-            }
-
-            applyComposerConfigurationState(result.state)
-
-            if let error = result.configurationError {
-                lastError = error
-                composerConfigurationErrorMessage = CacheFallbackPolicy.composerBannerMessage(for: error)
-            }
-        } while needsComposerConfigurationReload
+        await loadDirectComposerConfiguration()
     }
 
-    /// Refreshes the model catalog when a picker opens: refetch `/api/models`
-    /// (so the sheet stops pinning the chat-load-time snapshot), then overlay
-    /// the active provider's live list from `/api/models/live`. Failures are
-    /// silent by design — the picker keeps whatever it already shows.
+    /// Refreshes the direct Hermes inventory when a picker opens.
     func refreshModelCatalogForPickerOpen() async {
-        if usesDirectGateway { await loadDirectComposerConfiguration(); return }
-        if let response = try? await client.models() {
-            let groups = response.catalogGroups
-            if !groups.isEmpty {
-                modelCatalogGroups = groups
-            }
-        }
-
-        if let live = try? await client.modelsLive() {
-            modelCatalogGroups = modelCatalogGroups.mergingLiveModels(from: live)
-        }
+        await loadDirectComposerConfiguration()
     }
-
-    private var composerConfigurationState: ChatComposerConfigState {
-        ChatComposerConfigState(
-            currentWorkspace: currentWorkspace,
-            currentModel: currentModel,
-            currentModelProvider: currentModelProvider,
-            currentProfile: currentProfile,
-            selectedProfileName: selectedProfileName,
-            selectedReasoningEffort: selectedReasoningEffort,
-            sessionReasoningEffort: sessionReasoningEffort,
-            supportedReasoningEfforts: supportedReasoningEfforts,
-            supportsReasoningEffort: supportsReasoningEffort,
-            sessionScopedReasoning: sessionScopedReasoning,
-            modelCatalogGroups: modelCatalogGroups,
-            agentCommands: agentCommands,
-            workspaceRoots: workspaceRoots,
-            workspaceSuggestions: workspaceSuggestions,
-            profileOptions: profileOptions,
-            isSingleProfileMode: isSingleProfileMode
-        )
-    }
-
-    private func applyComposerConfigurationState(_ state: ChatComposerConfigState) {
-        currentWorkspace = state.currentWorkspace
-        currentModel = state.currentModel
-        currentModelProvider = state.currentModelProvider
-        currentProfile = state.currentProfile
-        selectedProfileName = state.selectedProfileName
-        selectedReasoningEffort = state.selectedReasoningEffort
-        sessionReasoningEffort = state.sessionReasoningEffort
-        supportedReasoningEfforts = state.supportedReasoningEfforts
-        supportsReasoningEffort = state.supportsReasoningEffort
-        sessionScopedReasoning = state.sessionScopedReasoning
-        modelCatalogGroups = state.modelCatalogGroups
-        agentCommands = state.agentCommands
-        workspaceRoots = state.workspaceRoots
-        workspaceSuggestions = state.workspaceSuggestions
-        profileOptions = state.profileOptions
-        isSingleProfileMode = state.isSingleProfileMode
-    }
-
     @discardableResult
     func selectComposerModel(_ option: ModelCatalogOption) async -> Bool {
-        if usesDirectGateway {
-            guard canConfigureDirectDraft(),
-                  modelCatalogGroups.flatMap(\.models).contains(option),
-                  !option.matchesSelection(modelID: currentModel, providerID: currentModelProvider) else { return false }
-            composerConfigurationMutationToken &+= 1
-            currentModel = option.id
-            currentModelProvider = option.providerID
-            sessionReasoningEffort = nil
-            selectedReasoningEffort = nil
-            applyDirectReasoningGating()
-            return true
-        }
-        guard !option.matchesSelection(modelID: currentModel, providerID: currentModelProvider) else {
+        guard canConfigureDirectDraft(),
+              modelCatalogGroups.flatMap(\.models).contains(option),
+              !option.matchesSelection(modelID: currentModel, providerID: currentModelProvider) else {
             return false
         }
-
-        guard !isViewingCachedData else {
-            composerConfigurationErrorMessage = String(localized: "Reconnect to the server to change models.")
-            return false
-        }
-
-        guard activeStreamID == nil else {
-            composerConfigurationErrorMessage = String(localized: "Wait for the current response to finish before changing models.")
-            return false
-        }
-
-        guard let sessionID else {
-            composerConfigurationErrorMessage = String(localized: "The server did not provide a session ID.")
-            return false
-        }
-
-        let previousModel = currentModel
-        let previousProvider = currentModelProvider
-        let previousWorkspace = currentWorkspace
-        let previousPendingExplicitModelPick = pendingExplicitModelPick
         composerConfigurationMutationToken &+= 1
-        let mutationToken = composerConfigurationMutationToken
-
-        // Update the chip immediately. Sending remains disabled for the short
-        // persistence window, while rollback below restores the exact prior
-        // selection if the server rejects the change.
         currentModel = option.id
         currentModelProvider = option.providerID
-        isUpdatingComposerConfiguration = true
-        composerConfigurationErrorMessage = nil
-        lastError = nil
-        defer {
-            if composerConfigurationMutationToken == mutationToken {
-                isUpdatingComposerConfiguration = false
-            }
-        }
-
-        do {
-            let response = try await client.updateSession(
-                id: sessionID,
-                workspace: currentWorkspace,
-                model: option.id,
-                modelProvider: option.providerID
-            )
-
-            guard composerConfigurationMutationToken == mutationToken,
-                  currentModel == option.id,
-                  currentModelProvider == option.providerID
-            else { return false }
-
-            currentModel = response.session?.model ?? option.id
-            currentModelProvider = response.session?.modelProvider ?? option.providerID
-            currentWorkspace = response.session?.workspace ?? currentWorkspace
-            pendingExplicitModelPick = true
-            // Still inside the isUpdatingComposerConfiguration window, so the
-            // effort menu stays disabled until the new model's gating lands —
-            // no interactable flash of the previous model's options (issue #18).
-            await refreshReasoningEffortGating()
-            guard composerConfigurationMutationToken == mutationToken else { return false }
-            return true
-        } catch {
-            guard composerConfigurationMutationToken == mutationToken else { return false }
-            currentModel = previousModel
-            currentModelProvider = previousProvider
-            currentWorkspace = previousWorkspace
-            pendingExplicitModelPick = previousPendingExplicitModelPick
-            lastError = error
-            composerConfigurationErrorMessage = error.localizedDescription
-            return false
-        }
+        sessionReasoningEffort = nil
+        selectedReasoningEffort = nil
+        applyDirectReasoningGating()
+        return true
     }
 
-    /// Re-queries `GET /api/reasoning` for the current model/provider and updates
-    /// the effort gating (issue #18). Failures are silent to the user, but reset
-    /// the gating to the "unknown" fallback (static effort list, control shown) —
-    /// keeping the previous model's gating after a successful model switch could
-    /// hide the control for a model that supports it, or offer efforts the new
-    /// model rejects. If the selected effort is no longer supported, snaps to the
-    /// server's coerced `reasoning_effort`.
+    /// Reapplies the capability gating from the current direct inventory.
     func refreshReasoningEffortGating() async {
-        if usesDirectGateway { applyDirectReasoningGating(); return }
-        guard !isViewingCachedData else { return }
-
-        reasoningGatingFetchToken += 1
-        let token = reasoningGatingFetchToken
-        let expectedSessionID = canonicalSessionID
-        let expectedModel = currentModel
-        let expectedProvider = currentModelProvider
-
-        guard let response = try? await client.reasoning(
-            model: Self.nonEmpty(currentModel),
-            provider: Self.nonEmpty(currentModelProvider),
-            sessionID: Self.nonEmpty(expectedSessionID)
-        ) else {
-            if token == reasoningGatingFetchToken,
-               expectedSessionID == canonicalSessionID,
-               expectedModel == currentModel,
-               expectedProvider == currentModelProvider {
-                supportedReasoningEfforts = nil
-                supportsReasoningEffort = nil
-                sessionScopedReasoning = nil
-            }
-            return
-        }
-
-        guard token == reasoningGatingFetchToken,
-              expectedSessionID == canonicalSessionID,
-              expectedModel == currentModel,
-              expectedProvider == currentModelProvider
-        else { return }
-
-        supportedReasoningEfforts = response.normalizedSupportedEfforts
-        supportsReasoningEffort = response.supportsReasoningEffort
-        sessionScopedReasoning = response.sessionScopedReasoning
-        if response.sessionScopedReasoning == true {
-            // The session-aware endpoint is authoritative, including a nil
-            // override after selecting Default/inherit.
-            sessionReasoningEffort = response.normalizedSessionReasoningEffort
-        } else if let rawEffort = response.normalizedSessionReasoningEffort {
-            sessionReasoningEffort = rawEffort
-        }
-
-        if let selected = Self.nonEmpty(selectedReasoningEffort)?.lowercased(),
-           let supported = supportedReasoningEfforts,
-           !supported.contains(selected),
-           let serverEffort = Self.nonEmpty(response.effectiveEffort) {
-            selectedReasoningEffort = serverEffort
-        }
+        applyDirectReasoningGating()
     }
 
     /// Reloads device-local workspace bookmarks after manager changes.
@@ -2718,247 +2501,48 @@ final class ChatViewModel {
     func selectWorkspacePath(_ path: String) async -> Bool {
         let workspace = path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !workspace.isEmpty else { return false }
-        if usesDirectGateway {
-            guard canConfigureDirectDraft(), workspace != currentWorkspace else { return false }
-            composerConfigurationMutationToken &+= 1
-            currentWorkspace = workspace
-            return true
-        }
-
-        guard workspace != currentWorkspace else {
-            return false
-        }
-
-        guard !isViewingCachedData else {
-            composerConfigurationErrorMessage = String(localized: "Reconnect to the server to change workspace.")
-            return false
-        }
-
-        guard activeStreamID == nil else {
-            composerConfigurationErrorMessage = String(localized: "Wait for the current response to finish before changing workspace.")
-            return false
-        }
-
-        guard let sessionID else {
-            composerConfigurationErrorMessage = String(localized: "The server did not provide a session ID.")
-            return false
-        }
-
-        let previousWorkspace = currentWorkspace
+        guard canConfigureDirectDraft(), workspace != currentWorkspace else { return false }
+        composerConfigurationMutationToken &+= 1
         currentWorkspace = workspace
-        isUpdatingComposerConfiguration = true
-        composerConfigurationErrorMessage = nil
-        lastError = nil
-        defer { isUpdatingComposerConfiguration = false }
-
-        do {
-            let response = try await client.updateSession(
-                id: sessionID,
-                workspace: workspace,
-                model: currentModel,
-                modelProvider: currentModelProvider
-            )
-
-            currentWorkspace = response.session?.workspace ?? workspace
-            currentModel = response.session?.model ?? currentModel
-            currentModelProvider = response.session?.modelProvider ?? currentModelProvider
-            return true
-        } catch {
-            currentWorkspace = previousWorkspace
-            lastError = error
-            composerConfigurationErrorMessage = error.localizedDescription
-            return false
-        }
+        return true
     }
 
     func switchProfile(_ profile: ProfileSummary, startNewSession: Bool) async -> ProfileSwitchOutcome? {
-        if usesDirectGateway {
-            guard !directInvalidated, !isViewingCachedData, !isUpdatingComposerConfiguration,
-                  activeStreamID == nil, let name = profile.normalizedName else { return nil }
-            // A profile owns a different durable namespace. Return a new local
-            // draft; never retarget this controller or change the host profile.
-            guard startNewSession else {
-                composerConfigurationErrorMessage = "Choose New Chat to use a different Hermes profile."
-                return nil
-            }
-            return ProfileSwitchOutcome(session: SessionSummary(title: "New Chat", createdAt: Date().timeIntervalSince1970, profile: name))
-        }
-        guard !isViewingCachedData else {
-            composerConfigurationErrorMessage = String(localized: "Reconnect to the server to change profiles.")
+        guard !directInvalidated, !isViewingCachedData, !isUpdatingComposerConfiguration,
+              activeStreamID == nil, let name = profile.normalizedName else { return nil }
+        // A profile owns a different durable namespace. Return a new local
+        // draft; never retarget this controller or change the host profile.
+        guard startNewSession else {
+            composerConfigurationErrorMessage = "Choose New Chat to use a different Hermes profile."
             return nil
         }
-
-        guard activeStreamID == nil else {
-            composerConfigurationErrorMessage = String(localized: "Wait for the current response to finish before changing profiles.")
-            return nil
-        }
-
-        guard let profileName = profile.normalizedName else {
-            composerConfigurationErrorMessage = String(localized: "The server did not provide a profile name.")
-            return nil
-        }
-
-        if !startNewSession, isSelectedProfile(profile) {
-            return nil
-        }
-
-        isUpdatingComposerConfiguration = true
-        composerConfigurationErrorMessage = nil
-        lastError = nil
-        defer { isUpdatingComposerConfiguration = false }
-
-        do {
-            let response = try await client.switchProfile(name: profileName)
-            profileOptions = response.profiles ?? profileOptions
-            selectedProfileName = response.active ?? profileName
-            currentProfile = selectedProfileName
-            await refreshWorkspaceRoots()
-
-            if let defaultWorkspace = response.defaultWorkspace, !defaultWorkspace.isEmpty {
-                currentWorkspace = defaultWorkspace
-            }
-
-            if let defaultModel = response.defaultModel, !defaultModel.isEmpty {
-                currentModel = defaultModel
-                currentModelProvider = Self.nonEmpty(profile.provider)
-            }
-            pendingExplicitModelPick = false
-
-            await loadComposerConfiguration()
-
-            guard startNewSession else {
-                return ProfileSwitchOutcome(session: nil)
-            }
-
-            let newSessionResponse = try await client.createSession(
-                workspace: currentWorkspace,
-                model: currentModel,
-                modelProvider: requestModelProvider,
-                profile: requestProfileName
+        return ProfileSwitchOutcome(
+            session: SessionSummary(
+                title: "New Chat",
+                createdAt: Date().timeIntervalSince1970,
+                profile: name
             )
-
-            guard let session = newSessionResponse.session else {
-                composerConfigurationErrorMessage = String(localized: "The server did not return the new profile session.")
-                return nil
-            }
-
-            return ProfileSwitchOutcome(session: SessionSummary(from: session))
-        } catch {
-            lastError = error
-            composerConfigurationErrorMessage = error.localizedDescription
-            return nil
-        }
+        )
     }
 
     @discardableResult
     func selectReasoningEffort(_ effort: String) async -> Bool {
         let selectedEffort = effort.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !selectedEffort.isEmpty else { return false }
-        if usesDirectGateway {
-            if canonicalSessionID != nil {
-                return await selectDirectSessionReasoning(selectedEffort.lowercased())
-            }
-            guard canConfigureDirectDraft() else { return false }
-            let normalized = selectedEffort.lowercased()
-            guard normalized == ReasoningEffortOption.inheritID ||
-                    (supportsReasoningEffort == true && supportedReasoningEfforts?.contains(normalized) == true) else { return false }
-            composerConfigurationMutationToken &+= 1
-            sessionScopedReasoning = true
-            sessionReasoningEffort = normalized == ReasoningEffortOption.inheritID ? nil : normalized
-            selectedReasoningEffort = sessionReasoningEffort
-            return true
+        if canonicalSessionID != nil {
+            return await selectDirectSessionReasoning(selectedEffort.lowercased())
         }
-
-        let normalizedEffort = selectedEffort.lowercased()
-        let clearsSessionOverride = normalizedEffort == ReasoningEffortOption.inheritID
-        if clearsSessionOverride && sessionScopedReasoning != true {
-            composerConfigurationErrorMessage = String(localized: "Session reasoning inheritance is unavailable on this server.")
+        guard canConfigureDirectDraft() else { return false }
+        let normalized = selectedEffort.lowercased()
+        guard normalized == ReasoningEffortOption.inheritID ||
+                (supportsReasoningEffort == true && supportedReasoningEfforts?.contains(normalized) == true) else {
             return false
         }
-
-        guard selectedEffort != selectedReasoningSelection else {
-            return false
-        }
-
-        guard !isViewingCachedData else {
-            composerConfigurationErrorMessage = String(localized: "Reconnect to the server to change reasoning.")
-            return false
-        }
-
-        guard activeStreamID == nil else {
-            composerConfigurationErrorMessage = String(localized: "Wait for the current response to finish before changing reasoning.")
-            return false
-        }
-
-        let previousSelectedReasoningEffort = selectedReasoningEffort
-        let previousSessionReasoningEffort = sessionReasoningEffort
-        let previousSessionScopedReasoning = sessionScopedReasoning
-        let expectedSessionID = canonicalSessionID
-        let expectedModel = currentModel
-        let expectedProvider = currentModelProvider
         composerConfigurationMutationToken &+= 1
-        let mutationToken = composerConfigurationMutationToken
-
-        // Reflect the selection immediately. The composer is disabled only while
-        // persistence is in flight; a failed request restores the prior effective
-        // value and raw session override below.
-        if clearsSessionOverride {
-            sessionReasoningEffort = nil
-        } else if sessionScopedReasoning == true {
-            sessionReasoningEffort = selectedEffort
-        } else {
-            selectedReasoningEffort = selectedEffort
-        }
-
-        isUpdatingComposerConfiguration = true
-        composerConfigurationErrorMessage = nil
-        lastError = nil
-        defer {
-            if composerConfigurationMutationToken == mutationToken {
-                isUpdatingComposerConfiguration = false
-            }
-        }
-
-        reasoningSelectionToken &+= 1
-        let selectionToken = reasoningSelectionToken
-        if sessionScopedReasoning == true && expectedSessionID == nil {
-            if composerConfigurationMutationToken == mutationToken {
-                selectedReasoningEffort = previousSelectedReasoningEffort
-                sessionReasoningEffort = previousSessionReasoningEffort
-                sessionScopedReasoning = previousSessionScopedReasoning
-                composerConfigurationErrorMessage = String(localized: "The server did not provide a session ID.")
-            }
-            return false
-        }
-
-        do {
-            let wireEffort = clearsSessionOverride ? "" : selectedEffort
-            let response = try await client.saveReasoningEffort(
-                wireEffort,
-                sessionID: sessionScopedReasoning == true ? expectedSessionID : nil
-            )
-            guard selectionToken == reasoningSelectionToken,
-                  composerConfigurationMutationToken == mutationToken,
-                  expectedSessionID == canonicalSessionID,
-                  expectedModel == currentModel,
-                  expectedProvider == currentModelProvider
-            else { return false }
-
-            sessionScopedReasoning = response.sessionScopedReasoning ?? sessionScopedReasoning
-            sessionReasoningEffort = response.normalizedSessionReasoningEffort
-                ?? (sessionScopedReasoning == true && !clearsSessionOverride ? wireEffort : nil)
-            selectedReasoningEffort = response.effectiveEffort
-                ?? (clearsSessionOverride ? selectedReasoningEffort : selectedEffort)
-            return true
-        } catch {
-            guard composerConfigurationMutationToken == mutationToken else { return false }
-            selectedReasoningEffort = previousSelectedReasoningEffort
-            sessionReasoningEffort = previousSessionReasoningEffort
-            sessionScopedReasoning = previousSessionScopedReasoning
-            lastError = error
-            composerConfigurationErrorMessage = error.localizedDescription
-            return false
-        }
+        sessionScopedReasoning = true
+        sessionReasoningEffort = normalized == ReasoningEffortOption.inheritID ? nil : normalized
+        selectedReasoningEffort = sessionReasoningEffort
+        return true
     }
 
     func uploadAttachment(data: Data, filename: String, previewData: Data? = nil) async {
@@ -4317,188 +3901,25 @@ final class ChatViewModel {
     }
 
     private func switchModelFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
-        guard !usesDirectGateway else {
-            return .unsupported(friendlyMessage: "Use the model picker in New Chat before sending its first message.")
-        }
-        let requestedModel = args.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !requestedModel.isEmpty else {
-            return .unsupported(friendlyMessage: String(localized: "Usage: /model <id>"))
-        }
-
-        guard let sessionID else {
-            return .unsupported(friendlyMessage: String(localized: "The server did not provide a session ID."))
-        }
-
-        guard canRunConfigurationSlashCommand(String(localized: "change models")) else {
-            return .unsupported(friendlyMessage: composerConfigurationErrorMessage ?? String(localized: "Model switching is unavailable."))
-        }
-
-        let match = modelOption(matching: requestedModel)
-
-        isUpdatingComposerConfiguration = true
-        composerConfigurationErrorMessage = nil
-        sendErrorMessage = nil
-        lastError = nil
-        defer { isUpdatingComposerConfiguration = false }
-
-        do {
-            let response = try await client.updateSession(
-                id: sessionID,
-                workspace: currentWorkspace,
-                model: match?.id ?? requestedModel,
-                modelProvider: match?.providerID
-            )
-
-            currentModel = response.session?.model ?? match?.id ?? requestedModel
-            currentModelProvider = response.session?.modelProvider ?? match?.providerID ?? currentModelProvider
-            currentWorkspace = response.session?.workspace ?? currentWorkspace
-            pendingExplicitModelPick = true
-            await refreshReasoningEffortGating()
-            return .executed(message: nil)
-        } catch {
-            lastError = error
-            composerConfigurationErrorMessage = error.localizedDescription
-            return .unsupported(friendlyMessage: error.localizedDescription)
-        }
+        _ = args
+        return .unsupported(friendlyMessage: "Use the model picker in New Chat before sending its first message.")
     }
 
     private func switchWorkspaceFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
-        if usesDirectGateway {
-            let changed = await selectWorkspacePath(args)
-            return changed ? .executed(message: nil) : .unsupported(friendlyMessage: composerConfigurationErrorMessage ?? "Workspace was not changed.")
-        }
-        let requestedWorkspace = args.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !requestedWorkspace.isEmpty else {
-            return .unsupported(friendlyMessage: String(localized: "Usage: /workspace <path>"))
-        }
-
-        guard let sessionID else {
-            return .unsupported(friendlyMessage: String(localized: "The server did not provide a session ID."))
-        }
-
-        guard canRunConfigurationSlashCommand(String(localized: "change workspace")) else {
-            return .unsupported(friendlyMessage: composerConfigurationErrorMessage ?? String(localized: "Workspace switching is unavailable."))
-        }
-
-        let workspace = workspacePath(matching: requestedWorkspace) ?? requestedWorkspace
-
-        isUpdatingComposerConfiguration = true
-        composerConfigurationErrorMessage = nil
-        sendErrorMessage = nil
-        lastError = nil
-        defer { isUpdatingComposerConfiguration = false }
-
-        do {
-            let response = try await client.updateSession(
-                id: sessionID,
-                workspace: workspace,
-                model: currentModel,
-                modelProvider: currentModelProvider
-            )
-
-            currentWorkspace = response.session?.workspace ?? workspace
-            currentModel = response.session?.model ?? currentModel
-            currentModelProvider = response.session?.modelProvider ?? currentModelProvider
-            workspaceSuggestions = workspaceRoots.compactMap(\.path)
-            return .executed(message: nil)
-        } catch {
-            lastError = error
-            composerConfigurationErrorMessage = error.localizedDescription
-            return .unsupported(friendlyMessage: error.localizedDescription)
-        }
+        let changed = await selectWorkspacePath(args)
+        return changed
+            ? .executed(message: nil)
+            : .unsupported(friendlyMessage: composerConfigurationErrorMessage ?? "Workspace was not changed.")
     }
 
     private func switchReasoningFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
-        if usesDirectGateway {
-            let changed = await selectReasoningEffort(args)
-            return changed ? .executed(message: nil) : .unsupported(friendlyMessage: composerConfigurationErrorMessage ?? "Use a supported reasoning level in New Chat. Server-wide display changes are not available here.")
-        }
-        let reasoning = args.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !reasoning.isEmpty else {
-            let levels = SlashCommandCatalog.availableReasoningLevels(
-                forSupportedEfforts: supportedReasoningEfforts
+        let changed = await selectReasoningEffort(args)
+        return changed
+            ? .executed(message: nil)
+            : .unsupported(
+                friendlyMessage: composerConfigurationErrorMessage
+                    ?? "Use a supported reasoning level in New Chat. Server-wide display changes are not available here."
             )
-            let usage = (["show", "hide"] + levels).joined(separator: "|")
-            return .unsupported(friendlyMessage: String(localized: "Usage: /reasoning \(usage)|inherit"))
-        }
-
-        guard canRunConfigurationSlashCommand(String(localized: "change reasoning")) else {
-            return .unsupported(friendlyMessage: composerConfigurationErrorMessage ?? String(localized: "Reasoning changes are unavailable."))
-        }
-
-        isUpdatingComposerConfiguration = true
-        composerConfigurationErrorMessage = nil
-        sendErrorMessage = nil
-        lastError = nil
-        defer { isUpdatingComposerConfiguration = false }
-
-        reasoningSelectionToken &+= 1
-        let selectionToken = reasoningSelectionToken
-        let expectedSessionID = canonicalSessionID
-        let expectedModel = currentModel
-        let expectedProvider = currentModelProvider
-
-        do {
-            if Self.reasoningDisplayArgs.contains(reasoning) {
-                _ = try await client.saveReasoningDisplay(reasoning)
-            } else if Self.reasoningClearArgs.contains(reasoning) {
-                guard sessionScopedReasoning == true else {
-                    return .unsupported(friendlyMessage: String(localized: "Session reasoning inheritance is unavailable on this server."))
-                }
-                guard let expectedSessionID else {
-                    return .unsupported(friendlyMessage: String(localized: "The server did not provide a session ID."))
-                }
-                let response = try await client.saveReasoningEffort(
-                    "",
-                    sessionID: expectedSessionID
-                )
-                guard selectionToken == reasoningSelectionToken,
-                      expectedSessionID == canonicalSessionID,
-                      expectedModel == currentModel,
-                      expectedProvider == currentModelProvider
-                else {
-                    return .unsupported(
-                        friendlyMessage: composerConfigurationErrorMessage
-                            ?? String(localized: "Reasoning changes are unavailable.")
-                    )
-                }
-
-                sessionScopedReasoning = response.sessionScopedReasoning ?? sessionScopedReasoning
-                sessionReasoningEffort = nil
-                selectedReasoningEffort = response.effectiveEffort ?? selectedReasoningEffort
-            } else if Self.reasoningEffortArgs.contains(reasoning)
-                || supportedReasoningEfforts?.contains(reasoning) == true {
-                if sessionScopedReasoning == true && expectedSessionID == nil {
-                    return .unsupported(friendlyMessage: String(localized: "The server did not provide a session ID."))
-                }
-                let response = try await client.saveReasoningEffort(
-                    reasoning,
-                    sessionID: sessionScopedReasoning == true ? expectedSessionID : nil
-                )
-                guard selectionToken == reasoningSelectionToken,
-                      expectedSessionID == canonicalSessionID,
-                      expectedModel == currentModel,
-                      expectedProvider == currentModelProvider
-                else {
-                    return .unsupported(
-                        friendlyMessage: composerConfigurationErrorMessage
-                            ?? String(localized: "Reasoning changes are unavailable.")
-                    )
-                }
-
-                sessionScopedReasoning = response.sessionScopedReasoning ?? sessionScopedReasoning
-                sessionReasoningEffort = response.normalizedSessionReasoningEffort
-                    ?? (sessionScopedReasoning == true ? reasoning : nil)
-                selectedReasoningEffort = response.effectiveEffort ?? reasoning
-            } else {
-                return .unsupported(friendlyMessage: String(localized: "Unknown reasoning level: \(reasoning)."))
-            }
-            return .executed(message: nil)
-        } catch {
-            lastError = error
-            composerConfigurationErrorMessage = error.localizedDescription
-            return .unsupported(friendlyMessage: error.localizedDescription)
-        }
     }
 
     private func renameSessionFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
@@ -4932,50 +4353,8 @@ final class ChatViewModel {
         return .unsupported(friendlyMessage: String(localized: "Retry is not available in direct Hermes mode yet."))
     }
 
-    private func canRunConfigurationSlashCommand(_ actionDescription: String) -> Bool {
-        if isViewingCachedData {
-            composerConfigurationErrorMessage = String(localized: "Reconnect to the server to \(actionDescription).")
-            return false
-        }
 
-        if activeStreamID != nil {
-            composerConfigurationErrorMessage = String(localized: "Wait for the current response to finish before you \(actionDescription).")
-            return false
-        }
 
-        return true
-    }
-
-    private func modelOption(matching query: String) -> ModelCatalogOption? {
-        let normalizedQuery = query.lowercased()
-        let options = modelCatalogGroups.flatMap(\.slashAutocompleteModels)
-
-        if let exact = options.first(where: { $0.id.lowercased() == normalizedQuery }) {
-            return exact
-        }
-
-        return options.first {
-            $0.id.lowercased().contains(normalizedQuery) ||
-            $0.displayName.lowercased().contains(normalizedQuery)
-        }
-    }
-
-    private func workspacePath(matching query: String) -> String? {
-        let normalizedQuery = query.lowercased()
-        let roots = workspaceRoots.compactMap { root -> (path: String, name: String?)? in
-            guard let path = root.path, !path.isEmpty else { return nil }
-            return (path, root.name)
-        }
-
-        if let exact = roots.first(where: { $0.path.lowercased() == normalizedQuery }) {
-            return exact.path
-        }
-
-        return roots.first {
-            $0.path.lowercased().contains(normalizedQuery) ||
-            ($0.name?.lowercased().contains(normalizedQuery) == true)
-        }?.path
-    }
 
     @discardableResult
     func appendLocalAssistantMessage(_ text: String) -> String? {
@@ -6701,9 +6080,6 @@ final class ChatViewModel {
         return suffix.replacingOccurrences(of: "gpt-", with: "GPT-", options: [.caseInsensitive])
     }
 
-    private static let reasoningDisplayArgs: Set<String> = ["show", "hide", "on", "off"]
-    private static let reasoningEffortArgs: Set<String> = ["none", "minimal", "low", "medium", "high", "xhigh"]
-    private static let reasoningClearArgs: Set<String> = [ReasoningEffortOption.inheritID, "clear", "default"]
     private static let personalityClearArgs: Set<String> = ["none", "default", "clear"]
 
     private static func btwMessageText(question: String, answer: String?, isLoading: Bool) -> String {

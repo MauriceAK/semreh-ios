@@ -1,7 +1,7 @@
 # Secondary feature migration status
 
-Reconciled September 8, 2026 against committed app `c386902` plus pending/project
-retirement verified by signed build-v1/full-v2 (2332/0/14). Backend contract pin:
+Reconciled September 8, 2026 against committed app `c5b9df3` plus composer/registry
+retirement verified by signed build-v3/full-v1 (2291/0/14). Backend contract pin:
 `29112bef099274229cadff79cdff7bf7b99c4b77`.
 This is the existing dispatch inventory, not release acceptance or a percentage.
 The binding v3 execution plan owns scope and gates; root owns disposition.
@@ -22,6 +22,7 @@ No unsupported feature below has been silently approved for permanent removal.
 | Skills list/toggle/SKILL.md | Direct scoped `/api/skills`, `/api/skills/toggle`, `/api/skills/content`; selected profile reaches consumers. | Native tests; read-only live58rows plus one SKILL.md. Actual toggle/UI, related metadata and installed linked files remain open. Temporary unavailable notice is not feature-removal approval. |
 | Chat skill activation/search | Still explicitly unavailable in direct chat. List-screen migration is not activation. | Stock command.dispatch lacks profile binding and resolves executable quickcommands/plugins before skills. Raw content omits runtime preprocessing/setup/config/supporting files. Need faithful supported handling or explicit disposition. |
 | Inference provider inventory | Stock `/api/model/options` adapter including unconfigured rows, explicit default profile, selected provider, availability hints, warnings and model counts. | Focused and full native checks passed. UI distinguishes inventory from connection health and states credential sources are not reported; no login-provider substitution or activation. No new live provider/physical check. |
+| Settings version / session-visibility preferences / server updates | SettingsView still calls legacy `/api/settings` and `/api/updates/*`, including an explicit `webui` update target. Not migrated. | Stock `hermes_cli/web_server.py` exposes version at `/api/status`, read-only `/api/hermes/update/check`, and a materially different `/api/hermes/update` action. Map these workflows separately; do not merely rename the update target or execute an update against the pinned fixture. Session visibility currently has local storage but legacy server synchronization; its disposition must be explicit. |
 | Git reads / diff UI | Direct scoped session cwd → returned worktree root → status/review/branches/diff. Full review inventory beyond200; unknown flags retained. Unproven unstaged diff fails explicitly, avoiding false all-add fallback. | `0d9c6df`: full2368/0/14 plus dedicated91/0/0. `e43a571` live stock reads verified staged/unstaged separation. Native session-root navigation and physical UI not proved. |
 | Git writes / remote operations | Existing checkout/stash, stage/unstage/discard, generated commit message, commit/selected commit, fetch/pull/push still legacy. | Audit each workflow, not just route names. Stock auto-stage/discard/selection semantics differ. No personal/remote mutation verification authorized. |
 | Memory / USER / SOUL | Direct profile scope, managed MEMORY/USER reads and atomic replacement, dedicated SOUL route. Baseline/readback and unknown-write barrier. | `cd41f5b` native2338/0/14. Managed transport live check passed, not actual memory-editor/model adoption. Concurrent-writer CAS and effective project-context discovery remain open. |

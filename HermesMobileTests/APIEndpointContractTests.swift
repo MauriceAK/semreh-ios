@@ -68,13 +68,6 @@ final class ContractReadinessTests: XCTestCase {
             .init(name: "truncate session", method: "POST", endpoint: .truncateSession, path: "/api/session/truncate"),
             .init(name: "update session", method: "POST", endpoint: .updateSession, path: "/api/session/update"),
             .init(
-                name: "session yolo",
-                method: "GET",
-                endpoint: .sessionYolo(sessionID: "session-123"),
-                path: "/api/session/yolo",
-                query: ["session_id": "session-123"]
-            ),
-            .init(
                 name: "chat stream",
                 method: "GET",
                 endpoint: .chatStream(streamID: "stream-123"),
@@ -97,36 +90,6 @@ final class ContractReadinessTests: XCTestCase {
             ),
             .init(name: "chat steer", method: "POST", endpoint: .chatSteer, path: "/api/chat/steer"),
             .init(name: "goal", method: "POST", endpoint: .submitGoal, path: "/api/goal"),
-            .init(
-                name: "approval pending",
-                method: "GET",
-                endpoint: .approvalPending(sessionID: "session-123"),
-                path: "/api/approval/pending",
-                query: ["session_id": "session-123"]
-            ),
-            .init(
-                name: "approval stream",
-                method: "GET",
-                endpoint: .approvalStream(sessionID: "session-123"),
-                path: "/api/approval/stream",
-                query: ["session_id": "session-123"]
-            ),
-            .init(name: "approval respond", method: "POST", endpoint: .approvalRespond, path: "/api/approval/respond"),
-            .init(
-                name: "clarification pending",
-                method: "GET",
-                endpoint: .clarifyPending(sessionID: "session-123"),
-                path: "/api/clarify/pending",
-                query: ["session_id": "session-123"]
-            ),
-            .init(
-                name: "clarification stream",
-                method: "GET",
-                endpoint: .clarifyStream(sessionID: "session-123"),
-                path: "/api/clarify/stream",
-                query: ["session_id": "session-123"]
-            ),
-            .init(name: "clarification respond", method: "POST", endpoint: .clarifyRespond, path: "/api/clarify/respond"),
             .init(name: "btw", method: "POST", endpoint: .btw, path: "/api/btw"),
             .init(name: "background", method: "POST", endpoint: .background, path: "/api/background"),
             .init(
@@ -136,18 +99,6 @@ final class ContractReadinessTests: XCTestCase {
                 path: "/api/background/status",
                 query: ["session_id": "session-123"]
             ),
-            .init(name: "workspaces", method: "GET", endpoint: .workspaces, path: "/api/workspaces"),
-            .init(
-                name: "workspace suggestions",
-                method: "GET",
-                endpoint: .workspaceSuggestions(prefix: "/Users/uzair"),
-                path: "/api/workspaces/suggest",
-                query: ["prefix": "/Users/uzair"]
-            ),
-            .init(name: "workspace add", method: "POST", endpoint: .workspaceAdd, path: "/api/workspaces/add"),
-            .init(name: "workspace remove", method: "POST", endpoint: .workspaceRemove, path: "/api/workspaces/remove"),
-            .init(name: "workspace rename", method: "POST", endpoint: .workspaceRename, path: "/api/workspaces/rename"),
-            .init(name: "workspace reorder", method: "POST", endpoint: .workspaceReorder, path: "/api/workspaces/reorder"),
             .init(
                 name: "directory list root",
                 method: "GET",

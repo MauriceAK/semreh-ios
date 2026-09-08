@@ -463,6 +463,60 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         await runtime.stop()
     }
 
+    func testDirectComposerReloadDoesNotOverwriteConcurrentDraftWorkspaceSelection() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let inventoryStarted = expectation(description: "inventory started")
+        let releaseInventory = DispatchSemaphore(value: 0)
+        let client = makeClient { request in
+            if request.url?.path == "/api/model/options" {
+                inventoryStarted.fulfill()
+                releaseInventory.wait()
+                return apiTestJSONResponse(#"{"model":"model-a","provider":"fixture","providers":[{"slug":"fixture","models":["model-a"]}]}"#, for: request)
+            }
+            XCTAssertEqual(request.url?.path, "/api/profiles")
+            return apiTestJSONResponse(#"{"profiles":[{"name":"work"}]}"#, for: request)
+        }
+        let vm = makeViewModel(client: client, runtime: runtime, sessionID: nil)
+        let load = Task { @MainActor in await vm.loadComposerConfiguration() }
+        await fulfillment(of: [inventoryStarted], timeout: 2)
+
+        let selected = await vm.selectWorkspacePath("/draft-choice")
+        XCTAssertTrue(selected)
+        releaseInventory.signal()
+        await load.value
+
+        XCTAssertEqual(vm.selectedWorkspacePath, "/draft-choice")
+        XCTAssertTrue(vm.modelCatalogGroups.isEmpty, "A stale configuration result must not partially apply")
+        XCTAssertTrue(fake.calls().isEmpty)
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testDirectComposerLoadFailurePreservesDraftSelection() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let draft = SessionSummary(
+            title: "New Chat",
+            workspace: "/draft",
+            model: "chosen-model",
+            modelProvider: "fixture",
+            profile: "work"
+        )
+        let client = makeClient { _ in throw URLError(.notConnectedToInternet) }
+        let vm = makeViewModel(client: client, runtime: runtime, sessionID: nil, session: draft)
+
+        await vm.loadComposerConfiguration()
+
+        XCTAssertEqual(vm.selectedWorkspacePath, "/draft")
+        XCTAssertEqual(vm.selectedModelID, "chosen-model")
+        XCTAssertEqual(vm.selectedModelProviderID, "fixture")
+        XCTAssertNotNil(vm.composerConfigurationErrorMessage)
+        XCTAssertTrue(fake.calls().isEmpty)
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
     func testExistingDirectChatLoadsScopedReasoningAndWritesOnlyThroughGateway() async throws {
         let fake = ChatDirectFakeTransport()
         let runtime = try makeRuntime(fake)
@@ -2711,6 +2765,7 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         client: APIClient,
         runtime: HermesServerRuntime,
         sessionID: String?,
+        session: SessionSummary? = nil,
         defaults: UserDefaults = .standard,
         directAttachmentPreparer: (@Sendable (Data, String, Data?) async throws -> DirectPendingAttachment)? = nil,
         recoveryMarkerStore: (any DirectGatewayAttachmentRecoveryMarkerStoreProtocol)? = nil,
@@ -2721,7 +2776,7 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
                 .appendingPathComponent("ChatViewModelDirectGatewayTests-\(UUID().uuidString)", isDirectory: true)
         )
         return ChatViewModel(
-            session: SessionSummary(sessionId: sessionID, title: "New Chat", profile: "work"),
+            session: session ?? SessionSummary(sessionId: sessionID, title: "New Chat", profile: "work"),
             server: testServer,
             client: client,
             liveActivityManager: ChatDirectNoopLiveActivityManager(),

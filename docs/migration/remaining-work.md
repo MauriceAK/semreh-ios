@@ -5,9 +5,9 @@ details/evidence: `slice3-tasks.md`, `slice3-verification.md`, `slice4-tasks.md`
 This is the current dispatch checklist, not a new architecture or acceptance waiver.
 Preserve completed Luna work. Root owns integration, notes and native execution.
 
-Current checkpoint: pending-interaction/project API retirement verified on
-`c386902` plus scoped diff; signed pending-project-retirement build-v1/full-v2:
-2332passed/0failed/14intentional skips. Sol Low workers, root integration/review. The
+Current checkpoint: composer/workspace-registry retirement verified on
+`c5b9df3` plus scoped diff; signed composer-registry-retirement build-v3/full-v1:
+2291passed/0failed/14intentional skips. Sol Low workers, root integration/review. The
 reconciled `secondary-feature-status.md` owns the per-feature current inventory.
 Do not use the historical checkpoints below as the next dispatch instruction.
 
@@ -51,6 +51,23 @@ plus one interrupted-run staging console. Unselected/opaque/OCR/unexported
 contents excluded; no unrelated historical evidence rescan claimed.
 
 ## Implementation batches
+
+- [x] **Legacy composer/workspace-registry retirement:** removed the old composer
+  loader, HTTP configuration selection branches and unused registry APIs/DTOs/
+  endpoints. Existing direct draft choices, per-session reasoning and its pending
+  intent/rollback guards remain; managed file access is unchanged. Removed obsolete
+  HTTP tests, retaining direct composer/controller coverage and adding two direct
+  regressions for draft preservation on inventory failure and stale inventory
+  versus a concurrent workspace choice. Provider-exact label selection is a pure
+  presentation test, not an invented named-model field in stock inventory.
+  Signed build-v3 passed; focused-v1 219/1/0, corrected fixture-only focused-v2
+  1/0/0, then full-v1 2291/0/14. Build-v1 failed an async XCTest autoclosure;
+  build-v2 passed after that syntax fix. Focused failure was an old catalog-route
+  fixture, not a direct product assertion failure. Strict signing and Simulator
+  launch15024 passed. Targeted audit-v1:5264files/0flags/3exported consoles;
+  unselected evidence, opaque/OCR and unexported compressed contents excluded.
+  No changed backend contract/new live probe or physical
+  acceptance claimed. Remaining chat/SSE/native-auth paths are separate work.
 
 - [x] **Legacy pending interaction and dead project API retirement:** removed
   ChatPendingActionCoordinator, its two SSE/polling owners and old approval/

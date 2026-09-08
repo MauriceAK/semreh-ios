@@ -26,19 +26,12 @@ enum Endpoint {
     case retrySession
     case truncateSession
     case updateSession
-    case sessionYolo(sessionID: String?)
     case exportSession(sessionID: String, format: SessionExportFormat)
     case chatStream(streamID: String)
     case chatCancel(streamID: String)
     case chatStreamStatus(streamID: String)
     case chatSteer
     case submitGoal
-    case approvalPending(sessionID: String)
-    case approvalStream(sessionID: String)
-    case approvalRespond
-    case clarifyPending(sessionID: String)
-    case clarifyStream(sessionID: String)
-    case clarifyRespond
     case nativeAuthSubmit
     case nativeAuthCancel
     case workLoginStatus(requestID: String, sessionID: String)
@@ -47,12 +40,6 @@ enum Endpoint {
     case btw
     case background
     case backgroundStatus(sessionID: String)
-    case workspaces
-    case workspaceSuggestions(prefix: String)
-    case workspaceAdd
-    case workspaceRemove
-    case workspaceRename
-    case workspaceReorder
     case directoryList(sessionID: String, path: String?)
     case file(sessionID: String, path: String)
     case rawFile(sessionID: String, path: String)
@@ -184,8 +171,6 @@ enum Endpoint {
             return "/api/session/truncate"
         case .updateSession:
             return "/api/session/update"
-        case .sessionYolo:
-            return "/api/session/yolo"
         case .exportSession:
             return "/api/session/export"
         case .chatStream:
@@ -198,18 +183,6 @@ enum Endpoint {
             return "/api/chat/steer"
         case .submitGoal:
             return "/api/goal"
-        case .approvalPending:
-            return "/api/approval/pending"
-        case .approvalStream:
-            return "/api/approval/stream"
-        case .approvalRespond:
-            return "/api/approval/respond"
-        case .clarifyPending:
-            return "/api/clarify/pending"
-        case .clarifyStream:
-            return "/api/clarify/stream"
-        case .clarifyRespond:
-            return "/api/clarify/respond"
         case .nativeAuthSubmit:
             return "/api/native-auth/submit"
         case .nativeAuthCancel:
@@ -226,18 +199,6 @@ enum Endpoint {
             return "/api/background"
         case .backgroundStatus:
             return "/api/background/status"
-        case .workspaces:
-            return "/api/workspaces"
-        case .workspaceSuggestions:
-            return "/api/workspaces/suggest"
-        case .workspaceAdd:
-            return "/api/workspaces/add"
-        case .workspaceRemove:
-            return "/api/workspaces/remove"
-        case .workspaceRename:
-            return "/api/workspaces/rename"
-        case .workspaceReorder:
-            return "/api/workspaces/reorder"
         case .directoryList:
             return "/api/list"
         case .file:
@@ -449,19 +410,11 @@ enum Endpoint {
             let .chatCancel(streamID),
             let .chatStreamStatus(streamID):
             return [URLQueryItem(name: "stream_id", value: streamID)]
-        case let .sessionYolo(sessionID):
-            guard let sessionID else { return [] }
-            return [URLQueryItem(name: "session_id", value: sessionID)]
         case let .exportSession(sessionID, format):
             return [
                 URLQueryItem(name: "session_id", value: sessionID),
                 URLQueryItem(name: "format", value: format.rawValue)
             ]
-        case let .approvalPending(sessionID),
-            let .approvalStream(sessionID),
-            let .clarifyPending(sessionID),
-            let .clarifyStream(sessionID):
-            return [URLQueryItem(name: "session_id", value: sessionID)]
         case let .workLoginStatus(requestID, sessionID):
             return [
                 URLQueryItem(name: "request_id", value: requestID),
@@ -475,8 +428,6 @@ enum Endpoint {
                 items.append(URLQueryItem(name: "path", value: path))
             }
             return items
-        case let .workspaceSuggestions(prefix):
-            return [URLQueryItem(name: "prefix", value: prefix)]
         case let .file(sessionID, path),
             let .rawFile(sessionID, path):
             return [
