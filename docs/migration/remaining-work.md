@@ -143,6 +143,25 @@ them to a proven product or infrastructure cause.
 
 ## Cadence
 
+Current next cohort: direct file browser/preview and built-in memory/SOUL saves
+are authored and independently reviewed, awaiting native integration alongside
+profile creation. Memory uses managed multipart atomic replacement, never an
+unrestricted filesystem fallback; concurrent writers still have no CAS guard.
+Profile creation preserves confirmed identity across optional configuration
+failure. Retry only repeats captured configuration, not creation. A stock
+best-effort model-assignment failure stays explicitly partial; the app does not
+invent a model-config repair that could retain wrong-provider credentials.
+Native checkpoint now passed: signed build-v3 and full-v2,2338pass/0fail/
+14intentional opt-in skips, strict code signing and ordinary Simulator launch19578.
+Retained failures: build-v1 test raw-string delimiter; full-v1 four multipart
+mock-parser failures (Swift CRLF is one Character, dropLast(2) truncated paths).
+Exact delimiter parser fixed, path/overwrite/filename assertions strengthened;
+product code and existing success/failure assertions not weakened. These checks
+do not prove actual memory/profile writes on stock runtime or physical UI.
+Targeted artifact audit-v1 passed9579files/0flags/2exported consoles across this
+cohort's successful and failed builds/tests plus migration docs/runtime logs.
+No claim for unselected older evidence, opaque/OCR/unexported contents.
+
 Three disjoint implementation workers while root integrates/verifies. Compile and
 targeted checks per batch; full/live gates at meaningful integration checkpoints.
 Do not rerun passed gates merely to reconstruct context. Only one native/build

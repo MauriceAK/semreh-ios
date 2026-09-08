@@ -847,9 +847,9 @@ final class APIClientChatEndpointTests: APIClientTestCase {
         await viewModel.load()
 
         XCTAssertNil(viewModel.preview)
-        XCTAssertEqual(viewModel.errorMessage, APIError.unauthorized.localizedDescription)
-        guard let error = viewModel.lastError as? APIError,
-              case .unauthorized = error else {
+        XCTAssertEqual(viewModel.errorMessage, DirectHermesRequestError.http(statusCode: 401, reason: .unauthorized).localizedDescription)
+        guard let error = viewModel.lastError as? DirectHermesRequestError,
+              case .http(statusCode: 401, reason: .unauthorized) = error else {
             return XCTFail("Managed-file 401 should remain an authentication error.")
         }
     }

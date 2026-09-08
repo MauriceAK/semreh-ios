@@ -86,6 +86,14 @@ struct DirectoryListResponse: Decodable, Equatable {
 }
 
 struct WorkspaceEntry: Decodable, Equatable, Identifiable {
+    init(name: String?, path: String?, type: String?, size: Int?, modified: Double?, isDirectory: Bool?) {
+        self.name = name
+        self.path = path
+        self.type = type
+        self.size = size
+        self.modified = modified
+        self.isDirectory = isDirectory
+    }
     var id: String { path ?? name ?? UUID().uuidString }
     var isBrowsableDirectory: Bool {
         isDirectory == true || type == "dir"

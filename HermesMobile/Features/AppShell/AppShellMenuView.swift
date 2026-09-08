@@ -237,7 +237,8 @@ struct ControlView: View {
             SkillsView(server: server, profile: viewModel.activeProfileName ?? "default", onAPIError: authManager.handleAPIError)
                 .id(viewModel.activeProfileName ?? "default")
         case .memory:
-            MemoryView(server: server, onAPIError: authManager.handleAPIError)
+            MemoryView(server: server, profile: viewModel.activeProfileName ?? "default", onAPIError: authManager.handleAPIError)
+                .id(viewModel.activeProfileName ?? "default")
         case .insights:
             InsightsView(server: server, onAPIError: authManager.handleAPIError)
         case .archived:

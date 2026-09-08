@@ -143,11 +143,23 @@ final class DirectHermesManagedFileTests: APIClientTestCase {
         do {
             _ = try await client.directReadManagedFile(path: "/profile/attachments/note.txt")
             XCTFail("Expected unauthorized response")
-        } catch APIError.unauthorized {
-            // Protected stock route keeps the existing auth distinction.
+        } catch DirectHermesRequestError.http(statusCode: 401, reason: .unauthorized) {
+            // Generic 401 is not proof that the stock session expired.
         } catch {
-            XCTFail("Expected APIError.unauthorized, got \(error)")
+            XCTFail("Expected generic direct unauthorized, got \(error)")
         }
+    }
+
+    func testManagedFileRecognizedExpiryRemainsDistinctFromGeneric401() async throws {
+        let client = makeAuthenticatedClient { request in
+            (HTTPURLResponse(url: request.url!, statusCode: 401, httpVersion: nil,
+                             headerFields: ["Content-Type": "application/json"])!,
+             Data(#"{"error":"session_expired"}"#.utf8))
+        }
+        do {
+            _ = try await client.directReadManagedFile(path: "/profile/attachments/note.txt")
+            XCTFail("Expected recognized expiry")
+        } catch DirectHermesAuthError.sessionExpired {}
     }
 
     private func makeAuthenticatedClient(

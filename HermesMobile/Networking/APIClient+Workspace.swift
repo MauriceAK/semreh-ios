@@ -1,6 +1,102 @@
 import Foundation
 
+enum DirectWorkspaceError: LocalizedError {
+    case missingWorkspace, invalidPath, outsideWorkspace, invalidText
+    var errorDescription: String? {
+        switch self {
+        case .missingWorkspace: return "The session has no authoritative workspace directory."
+        case .invalidPath: return "The workspace file path is invalid."
+        case .outsideWorkspace: return "The requested file is unavailable within this session's workspace."
+        case .invalidText: return "This file is not valid UTF-8 text. Export it to open it in another app."
+        }
+    }
+}
+
+private struct DirectManagedDirectory: Decodable {
+    let path: String
+    let entries: [Entry]
+    struct Entry: Decodable {
+        let name: String
+        let path: String
+        let isDirectory: Bool
+        let size: Int?
+        let mtime: Double?
+    }
+}
+
 extension APIClient {
+    /// Resolve only through authoritative session cwd and server-returned entries.
+    /// Files routes themselves are global: profile belongs to session discovery.
+    private func directWorkspaceTarget(sessionID: String, profile: String, relativePath: String) async throws -> (root: String, target: String) {
+        let parts = relativePath == "." ? [] : relativePath.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        guard !relativePath.isEmpty, !relativePath.hasPrefix("/"), parts.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." && !$0.contains("\0") }) else {
+            throw DirectWorkspaceError.invalidPath
+        }
+        let detail = try await directSessionDetail(sessionID: sessionID, profile: profile)
+        guard let cwd = detail.workspace, cwd.hasPrefix("/"), !cwd.contains("\0") else {
+            throw DirectWorkspaceError.missingWorkspace
+        }
+        var listing = try await directManagedDirectory(path: cwd)
+        let root = listing.path
+        guard root.hasPrefix("/"), !root.contains("\0") else { throw DirectWorkspaceError.invalidPath }
+        var target = root
+        for (index, name) in parts.enumerated() {
+            guard let entry = listing.entries.first(where: { $0.name == name }),
+                  Self.workspaceContains(root: root, path: entry.path) else {
+                throw DirectWorkspaceError.outsideWorkspace
+            }
+            target = entry.path
+            if index < parts.count - 1 {
+                guard entry.isDirectory else { throw DirectWorkspaceError.invalidPath }
+                listing = try await directManagedDirectory(path: target)
+                guard Self.workspaceContains(root: root, path: listing.path) else { throw DirectWorkspaceError.outsideWorkspace }
+            }
+        }
+        return (root, target)
+    }
+
+    private static func workspaceContains(root: String, path: String) -> Bool {
+        path == root || path.hasPrefix(root == "/" ? "/" : root + "/")
+    }
+
+    private func directManagedDirectory(path: String) async throws -> DirectManagedDirectory {
+        var components = URLComponents()
+        components.path = "/api/files"
+        components.queryItems = [URLQueryItem(name: "path", value: path)]
+        return try decode(DirectManagedDirectory.self, from: await sendDirectData(
+            path: components.string!, method: "GET", classifyStructuredAuthExpiry: true))
+    }
+
+    func directWorkspaceDirectory(sessionID: String, profile: String, path: String) async throws -> DirectoryListResponse {
+        let scope = try await directWorkspaceTarget(sessionID: sessionID, profile: profile, relativePath: path)
+        let listing = try await directManagedDirectory(path: scope.target)
+        guard Self.workspaceContains(root: scope.root, path: listing.path) else { throw DirectWorkspaceError.outsideWorkspace }
+        let rows = listing.entries.filter { Self.workspaceContains(root: scope.root, path: $0.path) }.map { entry in
+            WorkspaceEntry(name: entry.name, path: entry.path == scope.root ? "." : String(entry.path.dropFirst(scope.root == "/" ? 1 : scope.root.count + 1)),
+                type: entry.isDirectory ? "dir" : "file", size: entry.size, modified: entry.mtime, isDirectory: entry.isDirectory)
+        }
+        let relative = listing.path == scope.root ? "." : String(listing.path.dropFirst(scope.root == "/" ? 1 : scope.root.count + 1))
+        return DirectoryListResponse(entries: rows, path: relative, workspace: scope.root, error: nil)
+    }
+
+    func directWorkspaceFile(sessionID: String, profile: String, path: String, maximumBytes: Int) async throws -> DirectHermesManagedFile {
+        let scope = try await directWorkspaceTarget(sessionID: sessionID, profile: profile, relativePath: path)
+        let file = try await directReadManagedFile(path: scope.target, maximumBytes: maximumBytes)
+        guard let returnedPath = file.path, Self.workspaceContains(root: scope.root, path: returnedPath) else {
+            throw DirectWorkspaceError.outsideWorkspace
+        }
+        return file
+    }
+
+    func directWorkspaceDownload(sessionID: String, profile: String, path: String, maximumBytes: Int = 100 * 1_024 * 1_024) async throws -> Data {
+        // The read envelope supplies a canonical returned path for containment
+        // validation. Raw download does not. Base64 increases peak memory, so
+        // both the envelope and decoded bytes remain explicitly bounded.
+        // This is not an atomic filesystem snapshot: stock may race a file
+        // replacement after resolving its path and before reading its bytes.
+        try await directWorkspaceFile(sessionID: sessionID, profile: profile,
+            path: path, maximumBytes: maximumBytes).data
+    }
     func workspaces() async throws -> WorkspacesResponse {
         try await send(endpoint: .workspaces, method: "GET")
     }
@@ -90,9 +186,9 @@ extension APIClient {
     /// Reads one absolute path through the authenticated stock managed-files
     /// route. The server owns root/sensitive-file policy; the client only
     /// rejects empty/relative inputs so it never guesses a host path.
-    func directReadManagedFile(path: String) async throws -> DirectHermesManagedFile {
+    func directReadManagedFile(path: String, maximumBytes: Int = 25 * 1_024 * 1_024) async throws -> DirectHermesManagedFile {
         let trimmedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedPath.isEmpty,
+        guard maximumBytes > 0, !trimmedPath.isEmpty,
               trimmedPath.hasPrefix("/"),
               !trimmedPath.contains("\0")
         else {
@@ -114,16 +210,24 @@ extension APIClient {
         customHeaderProvider().apply(to: &request)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
 
-        let maximumDecodedBytes = DirectHermesManagedFileResponseAdapter.maximumDecodedBytes
+        let maximumDecodedBytes = min(maximumBytes, 100 * 1_024 * 1_024)
         let maximumEncodedBytes = GatewayMediaResponseAdapter.encodedEnvelopeMaximumBytes(
             for: maximumDecodedBytes
         )
-        let (data, _) = try await boundedData(
-            for: request,
-            using: session,
-            mapsUnauthorized: true,
-            maximumBytes: maximumEncodedBytes
-        )
+        let protectedSession = URLSession(configuration: session.configuration,
+            delegate: DirectHermesRedirectGuard(origin: baseURL), delegateQueue: nil)
+        defer { protectedSession.invalidateAndCancel() }
+        let data: Data
+        do {
+            (data, _) = try await boundedData(for: request, using: protectedSession,
+                mapsUnauthorized: false, maximumBytes: maximumEncodedBytes)
+        } catch let APIError.http(statusCode, body) {
+            let bytes = Data((body ?? "").utf8)
+            if DirectHermesAuthFailureClassifier.isSessionExpired(statusCode: statusCode, body: bytes) {
+                throw DirectHermesAuthError.sessionExpired
+            }
+            throw DirectHermesRequestError.from(statusCode: statusCode, body: bytes)
+        }
         let envelope = try decode(DirectHermesManagedFileEnvelope.self, from: data)
         guard let dataURL = envelope.dataURL?.trimmingCharacters(in: .whitespacesAndNewlines),
               !dataURL.isEmpty

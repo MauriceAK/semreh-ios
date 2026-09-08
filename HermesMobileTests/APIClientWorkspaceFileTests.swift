@@ -8,6 +8,129 @@ import UniformTypeIdentifiers
 @testable import HermesMobile
 
 final class APIClientWorkspaceFileTests: APIClientTestCase {
+    func testWorkspaceReadRejectsReturnedCanonicalPathOutsideRoot() async throws {
+        let client = makeClient { request in
+            if let fixture = try workspaceTraversalFixture(request) { return fixture }
+            XCTAssertEqual(request.url?.path, "/api/files/read")
+            return apiTestJSONResponse(#"{"path":"/outside/Notes.txt","data_url":"data:text/plain;base64,c2VjcmV0"}"#, for: request)
+        }
+        do {
+            _ = try await client.directWorkspaceDownload(sessionID: "session-abc", profile: "default", path: "Sources/Notes.txt")
+            XCTFail("Must not expose bytes from mismatched canonical path")
+        } catch DirectWorkspaceError.outsideWorkspace {}
+    }
+
+    @MainActor
+    func testCancelledBrowserDoesNotPublishLateDirectory() async throws {
+        let started = expectation(description: "Directory suspended")
+        WorkspacePreviewReadGate.configure(holdDirectory: true, started: { started.fulfill() })
+        defer { WorkspacePreviewReadGate.reset() }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [WorkspacePreviewReadGate.self]
+        let client = APIClient(baseURL: URL(string: "https://example.test")!,
+                               session: URLSession(configuration: configuration))
+        let model = FileBrowserViewModel(session: try makeFilePreviewSession(),
+            server: URL(string: "https://example.test")!, apiClient: client)
+        let load = Task { await model.loadRoot() }
+        await fulfillment(of: [started], timeout: 2)
+        load.cancel()
+        WorkspacePreviewReadGate.completeOlder()
+        await load.value
+        XCTAssertTrue(model.entries.isEmpty)
+        XCTAssertNil(model.errorMessage)
+        XCTAssertFalse(model.isLoading)
+    }
+
+    @MainActor
+    func testCancelledExportDoesNotPublishError() async throws {
+        let started = expectation(description: "Export suspended")
+        WorkspacePreviewReadGate.configure(started: { started.fulfill() })
+        defer { WorkspacePreviewReadGate.reset() }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [WorkspacePreviewReadGate.self]
+        let client = APIClient(baseURL: URL(string: "https://example.test")!,
+                               session: URLSession(configuration: configuration))
+        let model = FilePreviewViewModel(session: try makeFilePreviewSession(),
+            server: URL(string: "https://example.test")!, path: "Sources/Notes.txt", apiClient: client)
+        let export = Task { try? await model.exportPayload() }
+        await fulfillment(of: [started], timeout: 2)
+        export.cancel()
+        WorkspacePreviewReadGate.completeOlder()
+        _ = await export.value
+        XCTAssertNil(model.exportErrorMessage)
+        XCTAssertNil(model.lastError)
+        XCTAssertFalse(model.isExporting)
+    }
+
+    @MainActor
+    func testFilePreviewLatestReadWinsWhenOlderResponseArrivesLast() async throws {
+        let started = expectation(description: "First read suspended")
+        WorkspacePreviewReadGate.configure(started: { started.fulfill() })
+        defer { WorkspacePreviewReadGate.reset() }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [WorkspacePreviewReadGate.self]
+        let client = APIClient(baseURL: URL(string: "https://example.test")!,
+                               session: URLSession(configuration: configuration))
+        let model = FilePreviewViewModel(session: try makeFilePreviewSession(),
+            server: URL(string: "https://example.test")!, path: "Sources/Notes.txt", apiClient: client)
+        let old = Task { await model.load() }
+        await fulfillment(of: [started], timeout: 2)
+        await model.load()
+        WorkspacePreviewReadGate.completeOlder()
+        await old.value
+        guard case .text(let file) = model.preview else { return XCTFail("Expected text preview") }
+        XCTAssertEqual(file.content, "new")
+        let exported = try await model.exportPayload()
+        XCTAssertEqual(exported.data, Data("new".utf8))
+        XCTAssertFalse(model.isLoading)
+    }
+
+    func testDirectWorkspaceRequiresFreshCwdWithoutHostHomeFallback() async throws {
+        var requests = 0
+        let client = makeClient { request in
+            requests += 1
+            XCTAssertEqual(request.url?.path, "/api/sessions/session-abc")
+            return apiTestJSONResponse(#"{"id":"session-abc","profile":"work"}"#, for: request)
+        }
+        do {
+            _ = try await client.directWorkspaceDirectory(sessionID: "session-abc", profile: "work", path: ".")
+            XCTFail("Missing cwd must not browse a host default")
+        } catch DirectWorkspaceError.missingWorkspace {}
+        XCTAssertEqual(requests, 1)
+    }
+
+    func testDirectWorkspaceMapsMetadataAndExcludesResolvedOutsideEntries() async throws {
+        let client = makeClient { request in
+            if request.url?.path == "/api/sessions/session-abc" {
+                return apiTestJSONResponse(#"{"id":"session-abc","cwd":"/workspace","profile":"work"}"#, for: request)
+            }
+            XCTAssertEqual(request.url?.path, "/api/files")
+            XCTAssertEqual(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems,
+                           [URLQueryItem(name: "path", value: "/workspace")])
+            return apiTestJSONResponse(#"{"path":"/workspace","entries":[{"name":"notes","path":"/workspace/notes","is_directory":true,"mtime":12},{"name":"outside","path":"/private/other","is_directory":true}]}"#, for: request)
+        }
+        let listing = try await client.directWorkspaceDirectory(sessionID: "session-abc", profile: "work", path: ".")
+        XCTAssertEqual(listing.path, ".")
+        XCTAssertEqual(listing.entries?.count, 1)
+        XCTAssertEqual(listing.entries?.first?.path, "notes")
+        XCTAssertEqual(listing.entries?.first?.modified, 12)
+        XCTAssertEqual(listing.entries?.first?.isBrowsableDirectory, true)
+        do {
+            _ = try await client.directWorkspaceDownload(sessionID: "session-abc", profile: "work", path: "outside/file.txt")
+            XCTFail("Must not request a resolved outside directory")
+        } catch DirectWorkspaceError.outsideWorkspace {}
+    }
+
+    func testDirectWorkspaceRejectsTraversalBeforeRequests() async throws {
+        let client = makeClient { _ in XCTFail("Must not request"); throw URLError(.badURL) }
+        for path in ["", "../outside", "/host", "dir/../outside"] {
+            do {
+                _ = try await client.directWorkspaceDirectory(sessionID: "session-abc", profile: "default", path: path)
+                XCTFail("Expected invalid path")
+            } catch DirectWorkspaceError.invalidPath {}
+        }
+    }
+
     func testProjectsBuildsExpectedPathAndDecodesProjectList() async throws {
         let client = makeClient { request in
             XCTAssertEqual(request.url?.path, "/api/projects")
@@ -448,10 +571,11 @@ final class APIClientWorkspaceFileTests: APIClientTestCase {
     func testFileBrowserLatestDirectoryRequestWins() async throws {
         let firstRequestStarted = expectation(description: "First directory request started")
         let client = makeClient { request in
+            if let fixture = try workspaceTraversalFixture(request) { return fixture }
             let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
             let path = components?.queryItems?.first(where: { $0.name == "path" })?.value
 
-            if path == "cat" {
+            if path == "/tmp/workspace/cat" {
                 firstRequestStarted.fulfill()
                 Thread.sleep(forTimeInterval: 0.3)
             }
@@ -459,7 +583,7 @@ final class APIClientWorkspaceFileTests: APIClientTestCase {
             return apiTestJSONResponse("""
             {
               "entries": [],
-              "path": "\(path ?? ".")"
+              "path": "\(path ?? "/tmp/workspace")"
             }
             """, for: request)
         }
@@ -483,10 +607,11 @@ final class APIClientWorkspaceFileTests: APIClientTestCase {
     func testFileBrowserRetriesFailedDirectoryWithoutDiscardingCurrentEntries() async throws {
         var catAttempts = 0
         let client = makeClient { request in
+            if let fixture = try workspaceTraversalFixture(request) { return fixture }
             let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
             let path = components?.queryItems?.first(where: { $0.name == "path" })?.value
 
-            if path == "cat" {
+            if path == "/tmp/workspace/cat" {
                 catAttempts += 1
                 if catAttempts == 1 {
                     let response = HTTPURLResponse(
@@ -501,8 +626,8 @@ final class APIClientWorkspaceFileTests: APIClientTestCase {
 
             return apiTestJSONResponse("""
             {
-              "entries": [{"name": "cat", "path": "cat", "type": "dir"}],
-              "path": "\(path ?? ".")"
+              "entries": [{"name": "cat", "path": "/tmp/workspace/cat", "is_directory": true}],
+              "path": "\(path ?? "/tmp/workspace")"
             }
             """, for: request)
         }
@@ -882,12 +1007,13 @@ final class APIClientWorkspaceFileTests: APIClientTestCase {
     @MainActor
     func testFilePreviewExportPayloadUsesLoadedTextContent() async throws {
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/file")
+            if let fixture = try workspaceTraversalFixture(request) { return fixture }
+            XCTAssertEqual(request.url?.path, "/api/files/read")
 
             return apiTestJSONResponse("""
             {
-              "path": "Sources/Notes.txt",
-              "content": "hello\\n",
+              "path": "/tmp/workspace/Sources/Notes.txt",
+              "data_url": "data:text/plain;base64,aGVsbG8K",
               "size": 6,
               "lines": 1
             }
@@ -914,13 +1040,14 @@ final class APIClientWorkspaceFileTests: APIClientTestCase {
         let rawData = Data([0x50, 0x4B, 0x03, 0x04])
         var requestedPaths: [String] = []
         let client = makeClient { request in
+            if let fixture = try workspaceTraversalFixture(request) { return fixture }
             requestedPaths.append(request.url?.path ?? "nil")
-            XCTAssertEqual(request.url?.path, "/api/file/raw")
+            XCTAssertEqual(request.url?.path, "/api/files/read")
 
             let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
             let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value) })
-            XCTAssertEqual(query["session_id"], "session-abc")
-            XCTAssertEqual(query["path"], "Build/archive.zip")
+            XCTAssertNil(query["session_id"])
+            XCTAssertEqual(query["path"], "/tmp/workspace/Build/archive.zip")
 
             let response = HTTPURLResponse(
                 url: try XCTUnwrap(request.url),
@@ -928,7 +1055,9 @@ final class APIClientWorkspaceFileTests: APIClientTestCase {
                 httpVersion: nil,
                 headerFields: ["Content-Type": "application/zip"]
             )
-            return (try XCTUnwrap(response), rawData)
+            return apiTestJSONResponse("""
+            {"path":"/tmp/workspace/Build/archive.zip","data_url":"data:application/zip;base64,\(rawData.base64EncodedString())"}
+            """, for: request)
         }
         let viewModel = try FilePreviewViewModel(
             session: makeFilePreviewSession(),
@@ -949,7 +1078,7 @@ final class APIClientWorkspaceFileTests: APIClientTestCase {
         XCTAssertEqual(payload.filename, "archive.zip")
         XCTAssertEqual(payload.contentType, UTType.zip)
         XCTAssertFalse(payload.isImage)
-        XCTAssertEqual(requestedPaths, ["/api/file/raw"])
+        XCTAssertEqual(requestedPaths, ["/api/files/read"])
     }
 
     @MainActor
@@ -959,14 +1088,17 @@ final class APIClientWorkspaceFileTests: APIClientTestCase {
             "Semreh PDF preview".draw(at: CGPoint(x: 24, y: 24), withAttributes: nil)
         }
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/file/raw")
+            if let fixture = try workspaceTraversalFixture(request) { return fixture }
+            XCTAssertEqual(request.url?.path, "/api/files/read")
             let response = HTTPURLResponse(
                 url: try XCTUnwrap(request.url),
                 statusCode: 200,
                 httpVersion: nil,
                 headerFields: ["Content-Type": "application/pdf"]
             )
-            return (try XCTUnwrap(response), pdfData)
+            return apiTestJSONResponse("""
+            {"path":"/tmp/workspace/Docs/report.PDF","data_url":"data:application/pdf;base64,\(pdfData.base64EncodedString())"}
+            """, for: request)
         }
         let viewModel = try FilePreviewViewModel(
             session: makeFilePreviewSession(),
@@ -993,11 +1125,12 @@ final class APIClientWorkspaceFileTests: APIClientTestCase {
     @MainActor
     func testFilePreviewLoadsMarkdownFromTextEndpoint() async throws {
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/file")
+            if let fixture = try workspaceTraversalFixture(request) { return fixture }
+            XCTAssertEqual(request.url?.path, "/api/files/read")
             return apiTestJSONResponse("""
             {
-              "path": "Docs/readme.md",
-              "content": "# Heading\\n\\nReadable prose.",
+              "path": "/tmp/workspace/Docs/readme.md",
+              "data_url": "data:text/markdown;base64,IyBIZWFkaW5nCgpSZWFkYWJsZSBwcm9zZS4=",
               "size": 28,
               "lines": 3
             }
@@ -1071,5 +1204,111 @@ private final class CancellablePreviewURLProtocol: URLProtocol {
         let handler = Self.stoppedHandler
         Self.lock.unlock()
         handler?()
+    }
+}
+
+/// Exact stock session/list fixtures shared by consumer tests; file routes
+/// remain asserted by each test's own handler.
+private func workspaceTraversalFixture(_ request: URLRequest) throws -> (HTTPURLResponse, Data)? {
+    if request.url?.path == "/api/sessions/session-abc" {
+        XCTAssertEqual(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems,
+                       [URLQueryItem(name: "profile", value: "default")])
+        return apiTestJSONResponse(#"{"id":"session-abc","cwd":"/tmp/workspace","profile":"default"}"#, for: request)
+    }
+    guard request.url?.path == "/api/files" else { return nil }
+    let path = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.first?.value
+    let entries: [[String: Any]]
+    switch path {
+    case "/tmp/workspace":
+        entries = ["cat", "leetcode-editor", "Sources", "Build", "Docs"].map {
+            ["name": $0, "path": "/tmp/workspace/" + $0, "is_directory": true]
+        }
+    case "/tmp/workspace/Sources":
+        entries = [["name": "Notes.txt", "path": "/tmp/workspace/Sources/Notes.txt", "is_directory": false]]
+    case "/tmp/workspace/Build":
+        entries = [["name": "archive.zip", "path": "/tmp/workspace/Build/archive.zip", "is_directory": false]]
+    case "/tmp/workspace/Docs":
+        entries = ["report.PDF", "readme.md"].map {
+            ["name": $0, "path": "/tmp/workspace/Docs/" + $0, "is_directory": false]
+        }
+    default: return nil
+    }
+    let data = try JSONSerialization.data(withJSONObject: ["path": path!, "entries": entries])
+    return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil,
+                            headerFields: ["Content-Type": "application/json"])!, data)
+}
+
+private final class WorkspacePreviewReadGate: URLProtocol {
+    private static let lock = NSLock()
+    private static var pending: WorkspacePreviewReadGate?
+    private static var first = true
+    private static var holdDirectory = false
+    private static var started: (() -> Void)?
+    static func configure(holdDirectory: Bool = false, started: @escaping () -> Void) {
+        lock.lock(); defer { lock.unlock() }
+        first = true
+        self.holdDirectory = holdDirectory
+        pending = nil
+        self.started = started
+    }
+    static func reset() {
+        lock.lock(); defer { lock.unlock() }
+        pending = nil
+        started = nil
+    }
+    static func completeOlder() {
+        lock.lock()
+        let pending = self.pending
+        self.pending = nil
+        lock.unlock()
+        if let pending, pending.request.url?.path == "/api/files",
+           let fixture = try? workspaceTraversalFixture(pending.request) {
+            pending.deliver(fixture)
+        } else {
+            pending?.complete(text: "old")
+        }
+    }
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        do {
+            Self.lock.lock()
+            if Self.holdDirectory && Self.first && request.url?.path == "/api/files" {
+                Self.first = false
+                Self.pending = self
+                let started = Self.started
+                Self.lock.unlock()
+                started?()
+                return
+            }
+            Self.lock.unlock()
+            if let fixture = try workspaceTraversalFixture(request) {
+                deliver(fixture)
+                return
+            }
+            Self.lock.lock()
+            if Self.first {
+                Self.first = false
+                Self.pending = self
+                let started = Self.started
+                Self.lock.unlock()
+                started?()
+            } else {
+                Self.lock.unlock()
+                complete(text: "new")
+            }
+        } catch { client?.urlProtocol(self, didFailWithError: error) }
+    }
+    override func stopLoading() {}
+    private func complete(text: String) {
+        let encoded = Data(text.utf8).base64EncodedString()
+        deliver(apiTestJSONResponse("""
+        {"path":"/tmp/workspace/Sources/Notes.txt","data_url":"data:text/plain;base64,\(encoded)"}
+        """, for: request))
+    }
+    private func deliver(_ response: (HTTPURLResponse, Data)) {
+        client?.urlProtocol(self, didReceive: response.0, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: response.1)
+        client?.urlProtocolDidFinishLoading(self)
     }
 }

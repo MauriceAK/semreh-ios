@@ -22,23 +22,57 @@ final class MemoryViewModel {
     private(set) var errorMessage: String?
     private(set) var actionErrorMessage: String?
     private(set) var lastError: Error?
+    private(set) var scope: DirectMemoryScope?
+    private(set) var sectionErrors: [String: String] = [:]
+    private(set) var hasUnconfirmedSave = false
+    let profile: String
+    private var documents: [DirectMemoryDocument] = []
+    private var editingBaseline: DirectMemoryDocument?
+    private var loadGeneration = 0
 
     private let client: APIClient
 
-    init(server: URL, client: APIClient? = nil) {
+    init(server: URL, profile: String, client: APIClient? = nil) {
+        self.profile = profile
         self.client = client ?? APIClient(baseURL: server)
     }
 
     func load() async {
+        guard !isSaving else { return }
+        loadGeneration += 1
+        let generation = loadGeneration
         isLoading = true
         errorMessage = nil
         lastError = nil
-        defer { isLoading = false }
+        defer { if generation == loadGeneration { isLoading = false } }
 
         do {
-            let response = try await client.memory()
-            apply(response)
+            try Task.checkCancellation()
+            let resolved = try await client.directMemoryScope(profile: profile)
+            var loaded: [DirectMemoryDocument] = []
+            var failures: [String: String] = [:]
+            var firstError: Error?
+            for section in MemorySection.allCases {
+                try Task.checkCancellation()
+                do { loaded.append(try await client.directMemoryDocument(section: section, scope: resolved)) }
+                catch {
+                    if Task.isCancelled { throw CancellationError() }
+                    failures[section.rawValue] = error.localizedDescription
+                    firstError = firstError ?? error
+                }
+            }
+            guard generation == loadGeneration, !Task.isCancelled else { return }
+            scope = resolved
+            documents = loaded
+            sectionErrors = failures
+            memoryText = loaded.first { $0.section == .memory }?.content
+            userText = loaded.first { $0.section == .user }?.content
+            soulText = loaded.first { $0.section == .soul }?.content
+            hasLoaded = true
+            lastError = firstError
+            if failures.isEmpty { hasUnconfirmedSave = false }
         } catch {
+            guard generation == loadGeneration, !Task.isCancelled else { return }
             lastError = error
             errorMessage = error.localizedDescription
         }
@@ -46,6 +80,15 @@ final class MemoryViewModel {
 
     func clearActionError() {
         actionErrorMessage = nil
+    }
+
+    func canEdit(_ section: MemorySection) -> Bool {
+        !isSaving && !isLoading && !hasUnconfirmedSave && documents.contains { $0.section == section }
+    }
+
+    func beginEditing(_ section: MemorySection) {
+        editingBaseline = documents.first { $0.section == section }
+        clearActionError()
     }
 
     /// The read-only project-context section only appears when the server sent a
@@ -88,41 +131,42 @@ final class MemoryViewModel {
     }
 
     func save(section: MemorySection, content: String) async -> Bool {
+        guard canEdit(section), let scope,
+              let baseline = editingBaseline?.section == section ? editingBaseline : documents.first(where: { $0.section == section }) else { return false }
         isSaving = true
         actionErrorMessage = nil
         lastError = nil
         defer { isSaving = false }
 
         do {
-            let writeResponse = try await client.writeMemory(section: section, content: content)
-            guard writeResponse.ok != false else {
-                actionErrorMessage = writeResponse.error ?? String(localized: "Could not save memory.")
-                return false
+            let confirmed = try await client.directSaveMemory(content, baseline: baseline, scope: scope)
+            documents.removeAll { $0.section == section }
+            documents.append(confirmed)
+            editingBaseline = nil
+            switch section {
+            case .memory: memoryText = confirmed.content
+            case .user: userText = confirmed.content
+            case .soul: soulText = confirmed.content
             }
-
-            let refreshed = try await client.memory()
-            apply(refreshed)
             return true
         } catch {
-            lastError = error
+            if case DirectMemoryError.unconfirmed(let underlying) = error {
+                hasUnconfirmedSave = true
+                lastError = underlying
+            } else { lastError = error }
             actionErrorMessage = error.localizedDescription
             return false
         }
     }
 
-    private func apply(_ response: MemoryResponse) {
-        memoryText = response.memory
-        userText = response.user
-        soulText = response.soul
-        memoryMtime = response.memoryMtime.map { Date(timeIntervalSince1970: $0) }
-        userMtime = response.userMtime.map { Date(timeIntervalSince1970: $0) }
-        soulMtime = response.soulMtime.map { Date(timeIntervalSince1970: $0) }
+    /// Retained presentation seam for future authoritative context discovery.
+    /// The stock memory adapter does not fabricate this projection from filenames.
+    func applyProjectContext(_ response: MemoryResponse) {
         projectContextText = response.projectContext
         projectContextName = response.projectContextName
         projectContextWorkspace = response.projectContextWorkspace
         projectContextMtime = response.projectContextMtime.map { Date(timeIntervalSince1970: $0) }
         isProjectContextShadowed = response.projectContextShadowed ?? false
         isExternalNotesEnabled = response.externalNotesEnabled
-        hasLoaded = true
     }
 }
