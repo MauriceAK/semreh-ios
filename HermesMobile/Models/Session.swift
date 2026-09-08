@@ -27,38 +27,6 @@ struct SessionMutationResponse: Decodable {
     let error: String?
 }
 
-struct ProjectsResponse: Decodable, Equatable {
-    let projects: [ProjectSummary]?
-
-    enum CodingKeys: String, CodingKey {
-        case projects
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        projects = try? container.decodeIfPresent([ProjectSummary].self, forKey: .projects)
-    }
-}
-
-struct ProjectMutationResponse: Decodable, Equatable {
-    let ok: Bool?
-    let project: ProjectSummary?
-    let error: String?
-
-    enum CodingKeys: String, CodingKey {
-        case ok
-        case project
-        case error
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        ok = container.decodeLossyBoolIfPresent(forKey: .ok)
-        project = try? container.decodeIfPresent(ProjectSummary.self, forKey: .project)
-        error = container.decodeLossyStringIfPresent(forKey: .error)
-    }
-}
-
 struct ProjectSummary: Decodable, Equatable, Hashable, Identifiable {
     var id: String { projectId ?? name ?? UUID().uuidString }
 

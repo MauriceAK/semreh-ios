@@ -73,8 +73,6 @@ protocol ChatStreamCoordinatorDelegate: AnyObject {
     func streamCoordinatorUpdateTitle(_ payload: TitleStreamEvent) -> Bool
     @discardableResult
     func streamCoordinatorApplyDone(_ payload: DoneStreamEvent) -> Bool
-    func streamCoordinatorApplyApprovalUpdate(_ update: ApprovalPendingResponse)
-    func streamCoordinatorApplyClarificationUpdate(_ update: ClarificationPendingResponse)
     func streamCoordinatorApplyNativeAuthComponent(_ component: NativeAuthWireComponent)
     func streamCoordinatorApplyNativeAuthState(_ state: NativeAuthWireState)
     func streamCoordinatorApplyWebsiteLogin(_ request: WebsiteLoginRequest)
@@ -671,11 +669,11 @@ final class ChatStreamCoordinator {
             completeCurrentResponse(needsTranscriptRefresh: !hasCompletedTranscript)
         case .approvalPending(let update):
             liveActivityManager.update(.waitingForApproval)
-            delegate?.streamCoordinatorApplyApprovalUpdate(update)
+            _ = update
             markProgress()
         case .clarificationPending(let update):
             liveActivityManager.update(.waitingForClarification)
-            delegate?.streamCoordinatorApplyClarificationUpdate(update)
+            _ = update
             markProgress()
         case .websiteLoginPending(let request):
             delegate?.streamCoordinatorApplyWebsiteLogin(request)

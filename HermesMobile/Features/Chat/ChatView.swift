@@ -419,7 +419,6 @@ struct ChatView: View {
     private let transcriptBlockSpacing: CGFloat = 6
     private let composerAccessoryVerticalSpacing: CGFloat = 8
     private let activeRunStatusSpacerHeight: CGFloat = 36
-    private let approvalBypassStatusSpacerHeight: CGFloat = 38
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dismiss) private var dismiss
@@ -838,29 +837,6 @@ struct ChatView: View {
                             } catch {
                                 // The VM keeps an identity-scoped error visible
                                 // when the request is still the rendered one.
-                            }
-                        }
-                    }
-                )
-                .zIndex(10)
-            } else if let approvalPrompt = viewModel.approvalPrompt {
-                ApprovalRequestOverlay(
-                    prompt: approvalPrompt,
-                    isResponding: viewModel.isRespondingToApproval,
-                    errorMessage: viewModel.approvalErrorMessage,
-                    onChoice: { choice in
-                        Task {
-                            let didRespond = await viewModel.respondToApproval(choice)
-                            if didRespond {
-                                ChatHaptics.approvalSubmitted(choice, isEnabled: isHapticsEnabled)
-                            }
-                        }
-                    },
-                    onSkipAll: {
-                        Task {
-                            let didSkip = await viewModel.skipApprovalsForCurrentSession()
-                            if didSkip {
-                                ChatHaptics.approvalBypassEnabled(isEnabled: isHapticsEnabled)
                             }
                         }
                     }
@@ -1497,10 +1473,6 @@ struct ChatView: View {
                         .transition(ChatMotion.bottomOverlayTransition(reduceMotion: reduceMotion))
                 }
 
-                if showsApprovalBypassStatus {
-                    ApprovalBypassStatusPill()
-                        .transition(ChatMotion.bottomOverlayTransition(reduceMotion: reduceMotion))
-                }
             }
             .padding(.horizontal)
             .padding(.bottom, composerHeight + 8)
@@ -1509,7 +1481,6 @@ struct ChatView: View {
             .animation(ChatMotion.quickState(reduceMotion: reduceMotion), value: composerAccessoryVisibleItemCount)
             .animation(ChatMotion.quickState(reduceMotion: reduceMotion), value: activeRunStatusPresentation)
             .animation(ChatMotion.quickState(reduceMotion: reduceMotion), value: viewModel.pinnedLocalNotices)
-            .animation(ChatMotion.quickState(reduceMotion: reduceMotion), value: showsApprovalBypassStatus)
         }
     }
 
@@ -1626,16 +1597,12 @@ struct ChatView: View {
                 viewModel.toggleListening(to: context)
             },
             onSubmitClarification: { response, identity in
+                guard let identity else { return }
                 Task {
-                    let didRespond: Bool
-                    if let identity {
-                        didRespond = await viewModel.respondToDirectClarification(
-                            response,
-                            expectedIdentity: identity
-                        )
-                    } else {
-                        didRespond = await viewModel.respondToClarification(response)
-                    }
+                    let didRespond = await viewModel.respondToDirectClarification(
+                        response,
+                        expectedIdentity: identity
+                    )
                     if didRespond {
                         ChatHaptics.clarificationSubmitted(isEnabled: isHapticsEnabled)
                     }
@@ -1742,19 +1709,11 @@ struct ChatView: View {
         )
     }
 
-    private var showsApprovalBypassStatus: Bool {
-        viewModel.isSessionApprovalBypassEnabled && viewModel.approvalPrompt == nil
-    }
-
     private var composerAccessorySpacerHeight: CGFloat {
         var height = pinnedNoticeSpacerHeight
         if activeRunStatusPresentation != nil {
             height += activeRunStatusSpacerHeight
         }
-        if showsApprovalBypassStatus {
-            height += approvalBypassStatusSpacerHeight
-        }
-
         let visibleItemCount = composerAccessoryVisibleItemCount
         if visibleItemCount > 1 {
             height += CGFloat(visibleItemCount - 1) * composerAccessoryVerticalSpacing
@@ -1768,9 +1727,6 @@ struct ChatView: View {
             count += 1
         }
         if activeRunStatusPresentation != nil {
-            count += 1
-        }
-        if showsApprovalBypassStatus {
             count += 1
         }
         return count
@@ -1875,9 +1831,6 @@ struct ChatView: View {
             applyInitialComposerFocusPolicyIfNeeded()
         }
         await viewModel.loadComposerConfiguration()
-        guard !Task.isCancelled else { return }
-
-        await viewModel.refreshApprovalBypassState()
         guard !Task.isCancelled else { return }
 
         await uploadInitialAttachmentsIfNeeded()

@@ -787,18 +787,6 @@ final class ChatViewModel {
     }
     var localAttachmentPreviews: [String: [String: Data]] { attachmentCoordinator.localAttachmentPreviews }
     private(set) var pinnedLocalNotices: [String] = []
-    var approvalPrompt: ApprovalPromptState? {
-        usesDirectGateway ? nil : pendingActionCoordinator.approvalPrompt
-    }
-    var isRespondingToApproval: Bool {
-        usesDirectGateway ? false : pendingActionCoordinator.isRespondingToApproval
-    }
-    var approvalErrorMessage: String? {
-        usesDirectGateway ? nil : pendingActionCoordinator.approvalErrorMessage
-    }
-    var isSessionApprovalBypassEnabled: Bool {
-        usesDirectGateway ? false : pendingActionCoordinator.isSessionApprovalBypassEnabled
-    }
     /// Direct Hermes blocking prompts are projections of the live controller;
     /// do not copy them into a second VM-owned queue that can outlive a rebind.
     var pendingApprovalPrompt: GatewayApprovalPrompt? {
@@ -830,13 +818,13 @@ final class ChatViewModel {
         return directBlockingInteractionErrorMessage
     }
     var clarificationPrompt: ClarificationPromptState? {
-        usesDirectGateway ? directClarificationPrompt : pendingActionCoordinator.clarificationPrompt
+        directClarificationPrompt
     }
     var isRespondingToClarification: Bool {
-        usesDirectGateway ? isRespondingToDirectClarification : pendingActionCoordinator.isRespondingToClarification
+        isRespondingToDirectClarification
     }
     var clarificationErrorMessage: String? {
-        usesDirectGateway ? directClarificationErrorMessage : pendingActionCoordinator.clarificationErrorMessage
+        directClarificationErrorMessage
     }
     private(set) var nativeAuthPrompt: NativeAuthPromptState?
     private(set) var nativeAuthErrorMessage: String?
@@ -913,7 +901,6 @@ final class ChatViewModel {
     private let server: URL
     let client: APIClient
     private let streamCoordinator: ChatStreamCoordinator
-    private let pendingActionCoordinator: ChatPendingActionCoordinator
     private let attachmentCoordinator: ChatAttachmentCoordinator
     private let btwStreamClient: SSEStreamingClient
     private let liveActivityManager: any AgentLiveActivityManaging
@@ -996,8 +983,6 @@ final class ChatViewModel {
         server: URL,
         client: APIClient? = nil,
         streamClient: SSEStreamingClient? = nil,
-        approvalStreamClient: SSEStreamingClient? = nil,
-        clarifyStreamClient: SSEStreamingClient? = nil,
         btwStreamClient: SSEStreamingClient? = nil,
         liveActivityManager: (any AgentLiveActivityManaging)? = nil,
         showsLiveActivityResponseExcerpts: Bool = false,
@@ -1045,12 +1030,6 @@ final class ChatViewModel {
             liveActivityManager: resolvedLiveActivityManager,
             showsLiveActivityResponseExcerpts: showsLiveActivityResponseExcerpts
         )
-        self.pendingActionCoordinator = ChatPendingActionCoordinator(
-            client: resolvedClient,
-            approvalStreamClient: approvalStreamClient ?? SSEClient(allowedServerURL: server),
-            clarifyStreamClient: clarifyStreamClient ?? SSEClient(allowedServerURL: server),
-            pollingIntervals: pollingIntervals
-        )
         self.attachmentCoordinator = ChatAttachmentCoordinator(client: resolvedClient)
         self.btwStreamClient = btwStreamClient ?? SSEClient(allowedServerURL: server)
         self.liveActivityManager = resolvedLiveActivityManager
@@ -1081,7 +1060,6 @@ final class ChatViewModel {
             ?? { try ServerTTSAudioPlayer(data: $0) }
         displayTitle = Self.displayTitle(from: session.title)
         self.streamCoordinator.attach(delegate: self)
-        self.pendingActionCoordinator.delegate = self
         self.attachmentCoordinator.delegate = self
         if gatewayRuntimeProvider == nil { streamCoordinator.adoptKnownLiveStreamIfNeeded(session.activeStreamId) }
         if let initialDirectConversation {
@@ -2528,11 +2506,6 @@ final class ChatViewModel {
         workspaceSuggestions = state.workspaceSuggestions
         profileOptions = state.profileOptions
         isSingleProfileMode = state.isSingleProfileMode
-    }
-
-    func refreshApprovalBypassState() async {
-        guard !usesDirectGateway else { return }
-        await pendingActionCoordinator.refreshApprovalBypassState()
     }
 
     @discardableResult
@@ -5326,7 +5299,6 @@ final class ChatViewModel {
 
     func cleanupPollingTasks() {
         stopBackgroundPolling(clearTrackedPrompts: true)
-        pendingActionCoordinator.stopMonitoring(clearPrompt: true)
     }
 
     private func suspendActiveStreamConnection() {
@@ -5478,14 +5450,8 @@ final class ChatViewModel {
         liveRunBookmarkStore.remove(server: server, sessionID: sessionID)
     }
 
-    @discardableResult
-    func respondToApproval(_ choice: ApprovalChoice) async -> Bool {
-        guard !usesDirectGateway else { return false }
-        return await pendingActionCoordinator.respondToApproval(choice)
-    }
-
     /// Sends a direct approval only for the identity captured from the
-    /// rendered prompt. The legacy approval overload above remains unchanged.
+    /// rendered prompt.
     func respondToApproval(
         _ choice: GatewayApprovalChoice,
         expectedIdentity: GatewayBlockingPromptIdentity
@@ -5624,21 +5590,6 @@ final class ChatViewModel {
     }
 
     @discardableResult
-    func skipApprovalsForCurrentSession() async -> Bool {
-        guard !usesDirectGateway else { return false }
-        return await pendingActionCoordinator.skipApprovalsForCurrentSession()
-    }
-
-    func applyApprovalUpdate(_ update: ApprovalPendingResponse, sessionID: String) {
-        pendingActionCoordinator.applyApprovalUpdate(update, sessionID: sessionID)
-    }
-
-    @discardableResult
-    func respondToClarification(_ responseText: String) async -> Bool {
-        await pendingActionCoordinator.respondToClarification(responseText)
-    }
-
-    @discardableResult
     func respondToDirectClarification(
         _ responseText: String,
         expectedIdentity: GatewayBlockingPromptIdentity
@@ -5690,10 +5641,6 @@ final class ChatViewModel {
             directClarificationErrorMessage = "The clarification could not be delivered. No response was retried."
             return false
         }
-    }
-
-    func applyClarificationUpdate(_ update: ClarificationPendingResponse, sessionID: String) {
-        pendingActionCoordinator.applyClarificationUpdate(update, sessionID: sessionID)
     }
 
     @discardableResult
@@ -6816,22 +6763,6 @@ final class ChatViewModel {
     """)
 }
 
-extension ChatViewModel: ChatPendingActionCoordinatorDelegate {
-    var pendingActionSessionID: String? { sessionID }
-    var pendingActionHasActiveStream: Bool { activeStreamID != nil }
-    var pendingActionIsStreamConnectionSuspended: Bool { isStreamConnectionSuspended }
-
-    func pendingActionCoordinatorWillSubmitAction() {
-        sendErrorMessage = nil
-        lastError = nil
-    }
-
-    func pendingActionCoordinatorDidFailAction(_ error: Error) {
-        lastError = error
-        sendErrorMessage = CacheFallbackPolicy.sendBannerMessage(for: error)
-    }
-}
-
 extension ChatViewModel: ChatAttachmentCoordinatorDelegate {
     var attachmentSessionID: String? { sessionID }
     var attachmentIsViewingCachedData: Bool { isViewingCachedData }
@@ -6850,7 +6781,7 @@ extension ChatViewModel: ChatStreamCoordinatorDelegate {
     var streamCoordinatorDisplayTitle: String { displayTitle }
     var streamCoordinatorHasRunningLiveToolCall: Bool { hasRunningLiveToolCall }
     var streamCoordinatorHasPendingPrompt: Bool {
-        pendingActionCoordinator.hasPendingPrompt
+        pendingApprovalPrompt != nil || clarificationPrompt != nil
     }
     var streamCoordinatorHasNativeAuthLocalInputPrompt: Bool {
         nativeAuthPrompt?.inputComponents.isEmpty == false
@@ -6877,12 +6808,11 @@ extension ChatViewModel: ChatStreamCoordinatorDelegate {
     }
 
     func streamCoordinatorStartAuxiliaryMonitoring() {
-        pendingActionCoordinator.startMonitoring()
         OpenChatSessionStore.shared.noteStreamingStateChanged()
     }
 
     func streamCoordinatorStopAuxiliaryMonitoring(clearPrompt: Bool) {
-        pendingActionCoordinator.stopMonitoring(clearPrompt: clearPrompt)
+        _ = clearPrompt
         if activeStreamID == nil {
             cancelOwnedStreamStatusWatch()
         }
@@ -7035,16 +6965,6 @@ extension ChatViewModel: ChatStreamCoordinatorDelegate {
             )
         }
         return hasCompletedTranscript
-    }
-
-    func streamCoordinatorApplyApprovalUpdate(_ update: ApprovalPendingResponse) {
-        guard let sessionID else { return }
-        applyApprovalUpdate(update, sessionID: sessionID)
-    }
-
-    func streamCoordinatorApplyClarificationUpdate(_ update: ClarificationPendingResponse) {
-        guard let sessionID else { return }
-        applyClarificationUpdate(update, sessionID: sessionID)
     }
 
     func streamCoordinatorApplyNativeAuthComponent(_ component: NativeAuthWireComponent) {

@@ -5,9 +5,9 @@ details/evidence: `slice3-tasks.md`, `slice3-verification.md`, `slice4-tasks.md`
 This is the current dispatch checklist, not a new architecture or acceptance waiver.
 Preserve completed Luna work. Root owns integration, notes and native execution.
 
-Current checkpoint: local organizer and stock provider inventory verified on
-`bc0f02c` plus scoped diff; signed organizer-providers build-v7/full-v1:
-2356passed/0failed/14intentional skips. Sol Low workers, root integration/review. The
+Current checkpoint: pending-interaction/project API retirement verified on
+`c386902` plus scoped diff; signed pending-project-retirement build-v1/full-v2:
+2332passed/0failed/14intentional skips. Sol Low workers, root integration/review. The
 reconciled `secondary-feature-status.md` owns the per-feature current inventory.
 Do not use the historical checkpoints below as the next dispatch instruction.
 
@@ -51,6 +51,21 @@ plus one interrupted-run staging console. Unselected/opaque/OCR/unexported
 contents excluded; no unrelated historical evidence rescan claimed.
 
 ## Implementation batches
+
+- [x] **Legacy pending interaction and dead project API retirement:** removed
+  ChatPendingActionCoordinator, its two SSE/polling owners and old approval/
+  clarification/yolo HTTP methods and UI fallback. Direct identity-bound approval,
+  clarification, secret and sudo behavior unchanged. Removed unreachable Projects
+  CRUD/move API/DTO/endpoint/test surfaces after local organizer migration.
+  Retained background polling cleanup assertion from formerly combined test;
+  pure legacy wire decoder/Endpoint constants remain until their later cleanup.
+  Signed build-v1 passed first attempt; focused-v1 230/0/0. Full-v1 stalled before
+  recorded cases, interrupted exact owned process at139s, terminal73. One same-build
+  full-v2 retry passed2332/0/14 in~30s; no source change or proven cause inferred.
+  Strict signing and Simulator launch2572 passed. Audit-v1:5317files/0flags,
+  two exported consoles plus one interrupted staging console. Unselected/opaque/
+  unexported contents excluded. No new live probe needed for unchanged gateway
+  contracts; not physical acceptance or full legacy chat/SSE removal.
 
 - [x] **Local organizer and provider inventory:** device-local persistent
   server/profile-scoped groups, assignments and workspace bookmarks; no backend

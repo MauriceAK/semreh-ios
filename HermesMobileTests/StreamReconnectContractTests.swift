@@ -251,8 +251,6 @@ final class StreamReconnectContractTests: APIClientTestCase {
             server: server,
             client: client,
             streamClient: streamClient,
-            approvalStreamClient: ScriptedSSEStreamingClient(),
-            clarifyStreamClient: ScriptedSSEStreamingClient(),
             btwStreamClient: ScriptedSSEStreamingClient()
         )
         streamClient.flushPendingStreamingContent = { [weak viewModel] in

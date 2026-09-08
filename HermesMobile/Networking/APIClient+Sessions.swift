@@ -154,25 +154,6 @@ extension APIClient {
         )
     }
 
-    func moveSession(id: String, projectID: String?) async throws -> SessionMutationResponse {
-        try await send(
-            endpoint: .moveSession,
-            method: "POST",
-            body: MoveSessionRequest(sessionId: id, projectId: projectID)
-        )
-    }
-
-    func sessionYolo(sessionID: String) async throws -> SessionYoloResponse {
-        try await send(endpoint: .sessionYolo(sessionID: sessionID), method: "GET")
-    }
-
-    func setSessionYolo(sessionID: String, enabled: Bool) async throws -> SessionYoloResponse {
-        try await send(
-            endpoint: .sessionYolo(sessionID: nil),
-            method: "POST",
-            body: SessionYoloRequest(sessionId: sessionID, enabled: enabled)
-        )
-    }
 }
 
 private struct NewSessionRequest: Encodable {
@@ -223,14 +204,4 @@ private struct UpdateSessionRequest: Encodable {
     let model: String?
     let modelProvider: String?
     let reasoningEffort: String?
-}
-
-private struct MoveSessionRequest: Encodable {
-    let sessionId: String
-    let projectId: String?
-}
-
-private struct SessionYoloRequest: Encodable {
-    let sessionId: String
-    let enabled: Bool
 }

@@ -24,54 +24,6 @@ extension APIClient {
         return try await send(endpoint: .chatStreamStatus(streamID: streamID), method: "GET")
     }
 
-    func approvalPending(sessionID: String) async throws -> ApprovalPendingResponse {
-        try await send(endpoint: .approvalPending(sessionID: sessionID), method: "GET")
-    }
-
-    nonisolated func approvalStreamURL(sessionID: String) -> URL {
-        Endpoint.approvalStream(sessionID: sessionID).url(relativeTo: baseURL)
-    }
-
-    func respondApproval(
-        sessionID: String,
-        choice: ApprovalChoice,
-        approvalID: String?
-    ) async throws -> ApprovalRespondResponse {
-        try await send(
-            endpoint: .approvalRespond,
-            method: "POST",
-            body: ApprovalRespondRequest(
-                sessionId: sessionID,
-                choice: choice,
-                approvalId: approvalID
-            )
-        )
-    }
-
-    func clarifyPending(sessionID: String) async throws -> ClarificationPendingResponse {
-        try await send(endpoint: .clarifyPending(sessionID: sessionID), method: "GET")
-    }
-
-    nonisolated func clarifyStreamURL(sessionID: String) -> URL {
-        Endpoint.clarifyStream(sessionID: sessionID).url(relativeTo: baseURL)
-    }
-
-    func respondClarification(
-        sessionID: String,
-        response: String,
-        clarifyID: String?
-    ) async throws -> ClarificationRespondResponse {
-        try await send(
-            endpoint: .clarifyRespond,
-            method: "POST",
-            body: ClarificationRespondRequest(
-                sessionId: sessionID,
-                response: response,
-                clarifyId: clarifyID
-            )
-        )
-    }
-
     func submitNativeAuth(
         sessionID: String,
         streamID: String,

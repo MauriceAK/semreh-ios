@@ -1,7 +1,7 @@
 # Secondary feature migration status
 
-Reconciled September 7, 2026 against committed app `bc0f02c` plus local-organizer/
-provider diff verified by signed build-v7/full-v1 (2356/0/14). Backend contract pin:
+Reconciled September 8, 2026 against committed app `c386902` plus pending/project
+retirement verified by signed build-v1/full-v2 (2332/0/14). Backend contract pin:
 `29112bef099274229cadff79cdff7bf7b99c4b77`.
 This is the existing dispatch inventory, not release acceptance or a percentage.
 The binding v3 execution plan owns scope and gates; root owns disposition.

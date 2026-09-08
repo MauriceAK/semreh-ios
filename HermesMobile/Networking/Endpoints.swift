@@ -26,13 +26,8 @@ enum Endpoint {
     case retrySession
     case truncateSession
     case updateSession
-    case moveSession
     case sessionYolo(sessionID: String?)
     case exportSession(sessionID: String, format: SessionExportFormat)
-    case projects
-    case createProject
-    case renameProject
-    case deleteProject
     case chatStream(streamID: String)
     case chatCancel(streamID: String)
     case chatStreamStatus(streamID: String)
@@ -189,20 +184,10 @@ enum Endpoint {
             return "/api/session/truncate"
         case .updateSession:
             return "/api/session/update"
-        case .moveSession:
-            return "/api/session/move"
         case .sessionYolo:
             return "/api/session/yolo"
         case .exportSession:
             return "/api/session/export"
-        case .projects:
-            return "/api/projects"
-        case .createProject:
-            return "/api/projects/create"
-        case .renameProject:
-            return "/api/projects/rename"
-        case .deleteProject:
-            return "/api/projects/delete"
         case .chatStream:
             return "/api/chat/stream"
         case .chatCancel:

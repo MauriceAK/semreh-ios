@@ -224,61 +224,6 @@ final class APIClientSessionMutationTests: APIClientTestCase {
         XCTAssertEqual(response.session?.messageCount, 4)
     }
 
-    func testMoveSessionBuildsExpectedBodyAndDecodesMovedSession() async throws {
-        let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/session/move")
-
-            let body = try XCTUnwrap(apiTestBodyData(from: request))
-            let json = try JSONSerialization.jsonObject(with: body) as? [String: Any]
-            XCTAssertEqual(json?["session_id"] as? String, "abc123")
-            XCTAssertEqual(json?["project_id"] as? String, "proj123")
-            XCTAssertNil(json?["sessionId"])
-            XCTAssertNil(json?["projectId"])
-
-            return apiTestJSONResponse("""
-            {
-              "ok": true,
-              "session": {
-                "session_id": "abc123",
-                "project_id": "proj123"
-              }
-            }
-            """, for: request)
-        }
-
-        let response = try await client.moveSession(id: "abc123", projectID: "proj123")
-
-        XCTAssertEqual(response.ok, true)
-        XCTAssertEqual(response.session?.sessionId, "abc123")
-        XCTAssertEqual(response.session?.projectId, "proj123")
-    }
-
-    func testMoveSessionToNoProjectOmitsProjectID() async throws {
-        let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/session/move")
-
-            let body = try XCTUnwrap(apiTestBodyData(from: request))
-            let json = try JSONSerialization.jsonObject(with: body) as? [String: Any]
-            XCTAssertEqual(json?["session_id"] as? String, "abc123")
-            XCTAssertNil(json?["project_id"])
-
-            return apiTestJSONResponse("""
-            {
-              "ok": true,
-              "session": {
-                "session_id": "abc123",
-                "project_id": null
-              }
-            }
-            """, for: request)
-        }
-
-        let response = try await client.moveSession(id: "abc123", projectID: nil)
-
-        XCTAssertEqual(response.ok, true)
-        XCTAssertNil(response.session?.projectId)
-    }
-
     func testArchiveSessionBuildsExpectedBodyAndDecodesResponse() async throws {
         let client = makeClient { request in
             XCTAssertEqual(request.url?.path, "/api/session/archive")

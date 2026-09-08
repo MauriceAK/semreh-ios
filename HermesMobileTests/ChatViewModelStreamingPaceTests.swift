@@ -514,8 +514,6 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
             server: server,
             client: client,
             streamClient: streamClient,
-            approvalStreamClient: PacingSpySSEStreamingClient(),
-            clarifyStreamClient: PacingSpySSEStreamingClient()
         )
         viewModel.setNativeAuthE2EAutoSubmitControllerForTesting(controller)
         let submitted = expectation(description: "production native-auth submit route called")
@@ -628,8 +626,6 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
             server: server,
             client: client,
             streamClient: streamClient,
-            approvalStreamClient: PacingSpySSEStreamingClient(),
-            clarifyStreamClient: PacingSpySSEStreamingClient()
         )
         viewModel.setNativeAuthE2EAutoSubmitControllerForTesting(controller)
         let submitAttempted = expectation(description: "encrypted native-auth submit attempted")
@@ -781,8 +777,6 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
             server: server,
             client: client,
             streamClient: streamClient,
-            approvalStreamClient: PacingSpySSEStreamingClient(),
-            clarifyStreamClient: PacingSpySSEStreamingClient(),
             streamingScrollCoalescingDelayNanoseconds: 1_000_000,
             streamingWordRevealCadenceNanoseconds: wordCadenceNanoseconds,
             streamingMaxRevealLagNanoseconds: maxLagNanoseconds

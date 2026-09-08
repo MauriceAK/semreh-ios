@@ -221,8 +221,6 @@ final class LiveActivityTests: XCTestCase {
         configuration.protocolClasses = [LiveActivityURLProtocol.self]
         let client = APIClient(baseURL: baseURL, session: URLSession(configuration: configuration))
         let streamClient = LiveActivitySpySSEClient()
-        let approvalStreamClient = LiveActivitySpySSEClient()
-        let clarifyStreamClient = LiveActivitySpySSEClient()
         let manager = SpyAgentLiveActivityManager()
         let session = try Self.sessionSummary(id: "session-abc", title: "Live work")
 
@@ -236,8 +234,6 @@ final class LiveActivityTests: XCTestCase {
             server: baseURL,
             client: client,
             streamClient: streamClient,
-            approvalStreamClient: approvalStreamClient,
-            clarifyStreamClient: clarifyStreamClient,
             liveActivityManager: manager
         )
 
@@ -287,8 +283,6 @@ final class LiveActivityTests: XCTestCase {
         configuration.protocolClasses = [LiveActivityURLProtocol.self]
         let client = APIClient(baseURL: baseURL, session: URLSession(configuration: configuration))
         let streamClient = LiveActivitySpySSEClient()
-        let approvalStreamClient = LiveActivitySpySSEClient()
-        let clarifyStreamClient = LiveActivitySpySSEClient()
         let manager = SpyAgentLiveActivityManager()
         let session = try Self.sessionSummary(id: "session-abc", title: "Private live work")
 
@@ -302,8 +296,6 @@ final class LiveActivityTests: XCTestCase {
             server: baseURL,
             client: client,
             streamClient: streamClient,
-            approvalStreamClient: approvalStreamClient,
-            clarifyStreamClient: clarifyStreamClient,
             liveActivityManager: manager
         )
 
@@ -323,8 +315,6 @@ final class LiveActivityTests: XCTestCase {
         configuration.protocolClasses = [LiveActivityURLProtocol.self]
         let client = APIClient(baseURL: baseURL, session: URLSession(configuration: configuration))
         let streamClient = LiveActivitySpySSEClient()
-        let approvalStreamClient = LiveActivitySpySSEClient()
-        let clarifyStreamClient = LiveActivitySpySSEClient()
         let manager = SpyAgentLiveActivityManager()
         let session = try Self.sessionSummary(id: "session-abc", title: "Visible live work")
 
@@ -338,8 +328,6 @@ final class LiveActivityTests: XCTestCase {
             server: baseURL,
             client: client,
             streamClient: streamClient,
-            approvalStreamClient: approvalStreamClient,
-            clarifyStreamClient: clarifyStreamClient,
             liveActivityManager: manager,
             showsLiveActivityResponseExcerpts: true
         )
@@ -362,8 +350,6 @@ final class LiveActivityTests: XCTestCase {
         configuration.protocolClasses = [LiveActivityURLProtocol.self]
         let client = APIClient(baseURL: baseURL, session: URLSession(configuration: configuration))
         let streamClient = LiveActivitySpySSEClient()
-        let approvalStreamClient = LiveActivitySpySSEClient()
-        let clarifyStreamClient = LiveActivitySpySSEClient()
         let manager = SpyAgentLiveActivityManager()
         let session = try Self.sessionSummary(id: "session-abc", title: "Toggle live work")
 
@@ -377,8 +363,6 @@ final class LiveActivityTests: XCTestCase {
             server: baseURL,
             client: client,
             streamClient: streamClient,
-            approvalStreamClient: approvalStreamClient,
-            clarifyStreamClient: clarifyStreamClient,
             liveActivityManager: manager,
             showsLiveActivityResponseExcerpts: true
         )
@@ -401,8 +385,6 @@ final class LiveActivityTests: XCTestCase {
         configuration.protocolClasses = [LiveActivityURLProtocol.self]
         let client = APIClient(baseURL: baseURL, session: URLSession(configuration: configuration))
         let streamClient = LiveActivitySpySSEClient()
-        let approvalStreamClient = LiveActivitySpySSEClient()
-        let clarifyStreamClient = LiveActivitySpySSEClient()
         let manager = SpyAgentLiveActivityManager()
         let session = try Self.sessionSummary(id: "session-abc", title: "Live work")
         var nextStreamNumber = 1
@@ -419,8 +401,6 @@ final class LiveActivityTests: XCTestCase {
             server: baseURL,
             client: client,
             streamClient: streamClient,
-            approvalStreamClient: approvalStreamClient,
-            clarifyStreamClient: clarifyStreamClient,
             liveActivityManager: manager
         )
 
@@ -454,8 +434,6 @@ final class LiveActivityTests: XCTestCase {
         configuration.protocolClasses = [LiveActivityURLProtocol.self]
         let client = APIClient(baseURL: baseURL, session: URLSession(configuration: configuration))
         let streamClient = LiveActivitySpySSEClient()
-        let approvalStreamClient = LiveActivitySpySSEClient()
-        let clarifyStreamClient = LiveActivitySpySSEClient()
         let manager = SpyAgentLiveActivityManager()
         let session = try Self.sessionSummary(id: "session-abc", title: "Untitled Session")
 
@@ -469,8 +447,6 @@ final class LiveActivityTests: XCTestCase {
             server: baseURL,
             client: client,
             streamClient: streamClient,
-            approvalStreamClient: approvalStreamClient,
-            clarifyStreamClient: clarifyStreamClient,
             liveActivityManager: manager
         )
 
@@ -491,8 +467,6 @@ final class LiveActivityTests: XCTestCase {
         configuration.protocolClasses = [LiveActivityURLProtocol.self]
         let client = APIClient(baseURL: baseURL, session: URLSession(configuration: configuration))
         let streamClient = LiveActivitySpySSEClient()
-        let approvalStreamClient = LiveActivitySpySSEClient()
-        let clarifyStreamClient = LiveActivitySpySSEClient()
         let manager = SpyAgentLiveActivityManager()
         let session = try Self.sessionSummary(id: "session-abc", title: "Untitled Session")
 
@@ -506,8 +480,6 @@ final class LiveActivityTests: XCTestCase {
             server: baseURL,
             client: client,
             streamClient: streamClient,
-            approvalStreamClient: approvalStreamClient,
-            clarifyStreamClient: clarifyStreamClient,
             liveActivityManager: manager
         )
 
@@ -533,8 +505,6 @@ final class LiveActivityTests: XCTestCase {
         configuration.protocolClasses = [LiveActivityURLProtocol.self]
         let client = APIClient(baseURL: baseURL, session: URLSession(configuration: configuration))
         let streamClient = LiveActivitySpySSEClient()
-        let approvalStreamClient = LiveActivitySpySSEClient()
-        let clarifyStreamClient = LiveActivitySpySSEClient()
         let manager = SpyAgentLiveActivityManager()
         let session = try Self.sessionSummary(id: "session-abc", title: "Live work")
 
@@ -548,8 +518,6 @@ final class LiveActivityTests: XCTestCase {
             server: baseURL,
             client: client,
             streamClient: streamClient,
-            approvalStreamClient: approvalStreamClient,
-            clarifyStreamClient: clarifyStreamClient,
             liveActivityManager: manager
         )
 

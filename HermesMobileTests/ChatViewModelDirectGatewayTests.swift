@@ -1305,7 +1305,6 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         fake.emit(approvalEvent(requestID: "approval-deny", sequence: 20))
         await waitUntil { viewModel.pendingApprovalPrompt?.identity.requestID == "approval-deny" }
         let approvalIdentity = try XCTUnwrap(viewModel.pendingApprovalPrompt?.identity)
-        XCTAssertNil(viewModel.approvalPrompt, "Direct mode must not surface the legacy approval card")
         let approvalResponse = try await viewModel.respondToApproval(.deny, expectedIdentity: approvalIdentity)
         XCTAssertEqual(approvalResponse, .accepted)
         XCTAssertNil(viewModel.pendingApprovalPrompt)
@@ -1360,10 +1359,7 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
             XCTFail("A replaced approval identity must be rejected")
         } catch GatewayBlockingContractError.staleInteraction { }
         XCTAssertEqual(fake.calls().filter { $0.method == "approval.respond" }.count, 0)
-        XCTAssertNil(viewModel.approvalPrompt)
         XCTAssertNil(viewModel.blockingInteractionErrorMessage)
-        let legacyResponse = await viewModel.respondToApproval(.deny)
-        XCTAssertFalse(legacyResponse)
 
         viewModel.invalidateDirectConversation()
         await runtime.stop()

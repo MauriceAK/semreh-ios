@@ -67,7 +67,6 @@ final class ContractReadinessTests: XCTestCase {
             .init(name: "retry session", method: "POST", endpoint: .retrySession, path: "/api/session/retry"),
             .init(name: "truncate session", method: "POST", endpoint: .truncateSession, path: "/api/session/truncate"),
             .init(name: "update session", method: "POST", endpoint: .updateSession, path: "/api/session/update"),
-            .init(name: "move session", method: "POST", endpoint: .moveSession, path: "/api/session/move"),
             .init(
                 name: "session yolo",
                 method: "GET",
@@ -75,10 +74,6 @@ final class ContractReadinessTests: XCTestCase {
                 path: "/api/session/yolo",
                 query: ["session_id": "session-123"]
             ),
-            .init(name: "projects", method: "GET", endpoint: .projects, path: "/api/projects"),
-            .init(name: "create project", method: "POST", endpoint: .createProject, path: "/api/projects/create"),
-            .init(name: "rename project", method: "POST", endpoint: .renameProject, path: "/api/projects/rename"),
-            .init(name: "delete project", method: "POST", endpoint: .deleteProject, path: "/api/projects/delete"),
             .init(
                 name: "chat stream",
                 method: "GET",

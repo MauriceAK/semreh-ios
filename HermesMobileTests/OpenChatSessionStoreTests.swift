@@ -1122,8 +1122,6 @@ final class OpenChatSessionStoreTests: XCTestCase {
             server: server,
             client: client,
             streamClient: resolvedStreamClient,
-            approvalStreamClient: SpySSEStreamingClient(),
-            clarifyStreamClient: SpySSEStreamingClient(),
             listenAudioSession: SpyListenAudioSession(),
             listenRemoteControlCenter: SpyListenRemoteControlCenter()
         )
