@@ -876,7 +876,7 @@ final class OpenChatSessionStoreTests: XCTestCase {
             creating: viewModel
         )
 
-        let didStart = await viewModel.sendMessage("Keep working")
+        let didStart = viewModel.seedLegacyResponseForTesting("Keep working")
         XCTAssertTrue(didStart)
         streamClient.emit(.token("Partial live answer."), lastEventID: "session-abc:4")
         streamClient.emit(
@@ -937,7 +937,7 @@ final class OpenChatSessionStoreTests: XCTestCase {
             creating: viewModel
         )
 
-        let didStart = await viewModel.sendMessage("Keep working")
+        let didStart = viewModel.seedLegacyResponseForTesting("Keep working")
         XCTAssertTrue(didStart)
         let idleListRow = SessionSummary(sessionId: "session-abc", isStreaming: false)
         XCTAssertTrue(

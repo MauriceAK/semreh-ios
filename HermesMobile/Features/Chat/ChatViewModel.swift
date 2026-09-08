@@ -3991,147 +3991,27 @@ final class ChatViewModel {
     }
 
     func sendMessage(_ draft: String, modelContext: ModelContext? = nil) async -> Bool {
-        if usesDirectGateway { return await sendDirectMessage(draft, modelContext: modelContext) }
-        guard !isViewingCachedData else {
-            sendErrorMessage = String(localized: "Reconnect to the server to send a message.")
+        guard usesDirectGateway else {
+            sendErrorMessage = "Direct Hermes connection is unavailable."
             return false
         }
-
-        let message = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !message.isEmpty else { return false }
-
-        guard let sessionID else {
-            sendErrorMessage = String(localized: "The server did not provide a session ID.")
-            return false
-        }
-
-        let localMessageID = "local-\(UUID().uuidString)"
-        let attachmentPreparation = attachmentCoordinator.prepareForSend(localMessageID: localMessageID)
-
-        return await performChatSend(
-            sessionID: sessionID,
-            localMessageID: localMessageID,
-            displayContent: message,
-            messageForAPI: attachmentPreparation.chatMessageText(draft: message),
-            messageAttachments: attachmentPreparation.messageAttachments,
-            apiPayloads: attachmentPreparation.apiPayloads,
-            attachmentsToRestoreOnFailure: attachmentPreparation.attachments,
-            modelContext: modelContext
-        )
+        return await sendDirectMessage(draft, modelContext: modelContext)
     }
 
-    /// Records → transcribes → uploads → sends a server-transcribed voice note
-    /// (Telegram-style). The sent message's text is the transcript and its sole
-    /// attachment is the audio clip, rendered as a playable note by the inline
-    /// audio player. Aborts (toast, no partial send) if transcription fails or
-    /// returns nothing. Returns true only if the chat send started.
+    /// Voice dictation remains supported through the composer. Sending the audio
+    /// recording itself is not a supported direct attachment operation.
     @discardableResult
     func sendVoiceNote(audioData: Data, filename: String, modelContext: ModelContext? = nil) async -> Bool {
-        guard !usesDirectGateway else {
-            sendErrorMessage = "Direct Hermes voice attachments are not available yet."
-            return false
-        }
-        // Reentrancy guard: bail if a voice note OR a regular chat send is already
-        // in flight. `performChatSend` has no internal guard, so two overlapping
-        // sends would both flip `isStartingChat`/`isSendingVoiceNote` and race their
-        // `defer { … = false }` (clearing the flag while the other still runs, and
-        // firing two concurrent `startChat`s). The UI already blocks this; the guard
-        // keeps a future caller (accessibility shortcut, test harness) safe too.
-        guard !isSendingVoiceNote, !isStartingChat else { return false }
-        guard !isViewingCachedData else {
-            setUploadAttachmentError(String(localized: "Reconnect to the server to send a voice note."))
-            return false
-        }
-        guard !audioData.isEmpty else { return false }
-        guard let sessionID else {
-            setUploadAttachmentError(String(localized: "The server did not provide a session ID."))
-            return false
-        }
-
-        isSendingVoiceNote = true
-        setUploadAttachmentError(nil)
-        sendErrorMessage = nil
-        lastError = nil
-        defer { isSendingVoiceNote = false }
-
-        // 1. Transcribe via server STT. Any error or empty transcript aborts the
-        //    whole send — no fallback, no partial message (per the issue).
-        let transcript: String
-        do {
-            let response = try await client.transcribeAudio(
-                data: audioData, mimeType: "audio/mp4", profile: voiceInputProfileName)
-            if let serverError = response.error?.trimmingCharacters(in: .whitespacesAndNewlines),
-               !serverError.isEmpty {
-                setUploadAttachmentError(serverError)
-                return false
-            }
-            let text = (response.transcript ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !text.isEmpty else {
-                setUploadAttachmentError(String(localized: "Couldn't transcribe that voice note. Try recording again."))
-                return false
-            }
-            transcript = text
-        } catch {
-            lastError = error
-            setUploadAttachmentError(error.localizedDescription)
-            return false
-        }
-
-        // 2. Upload the clip as a standalone attachment (kept out of the composer's
-        //    pending list). On failure the coordinator already surfaced the error.
-        guard let pending = await attachmentCoordinator.uploadStandaloneAttachment(
-            data: audioData,
-            filename: filename
-        ) else {
-            return false
-        }
-
-        // 3. Send a chat message: text = transcript, attachments = [the clip].
-        let messageAttachment = MessageAttachment(
-            name: pending.name,
-            path: pending.path,
-            mime: pending.mime,
-            size: pending.size,
-            isImage: pending.isImage
-        )
-        let localMessageID = "local-\(UUID().uuidString)"
-        // The API message text is the bare transcript — NOT chatMessageText(…),
-        // which would append a "[Attached files: <clip>.m4a]" suffix. That suffix
-        // is the agent's only signal about a non-image attachment (the server
-        // strips attachment metadata before the model call and never embeds audio),
-        // so it makes the agent try to "inspect" / transcribe the clip itself
-        // instead of just answering the transcript. The clip still rides along in
-        // `messageAttachments` / `apiPayloads` purely so the inline player renders
-        // and persists; it's display-only and never reaches the model. (#330)
-        return await performChatSend(
-            sessionID: sessionID,
-            localMessageID: localMessageID,
-            displayContent: transcript,
-            messageForAPI: transcript,
-            messageAttachments: [messageAttachment],
-            apiPayloads: [pending.toJSONValue()],
-            attachmentsToRestoreOnFailure: [],
-            modelContext: modelContext
-        )
+        sendErrorMessage = "Direct Hermes voice attachments are not available yet."
+        return false
     }
 
-    /// Shared optimistic-append + `startChat` + rollback core used by both the
-    /// text composer (`sendMessage`) and the voice-note flow (`sendVoiceNote`).
-    /// `attachmentsToRestoreOnFailure` is re-staged into the composer if the send
-    /// fails — empty for voice notes, whose clip isn't a composer attachment.
-    private func performChatSend(
-        sessionID: String,
-        localMessageID: String,
-        displayContent: String,
-        messageForAPI: String,
-        messageAttachments: [MessageAttachment],
-        apiPayloads: [JSONValue]?,
-        attachmentsToRestoreOnFailure: [PendingAttachment],
-        modelContext: ModelContext?
-    ) async -> Bool {
-        isStartingChat = true
-        sendErrorMessage = nil
-        lastError = nil
+    #if DEBUG
+    /// State-only setup for retained legacy renderer/recovery tests. This does not
+    /// submit a prompt or exercise the retired WebUI send endpoint.
+    @discardableResult
+    func seedLegacyResponseForTesting(_ draft: String, streamID: String = "stream-123", modelContext: ModelContext? = nil) -> Bool {
+        guard !usesDirectGateway else { return false }
         archiveLiveReasoningIfNeeded()
         archiveLiveToolCallsIfNeeded()
         liveReasoningText = ""
@@ -4140,71 +4020,17 @@ final class ChatViewModel {
         toolCallAnchorMessageID = nil
         prepareForNewResponse()
         responseCompletionNeedsTranscriptRefresh = false
-        defer { isStartingChat = false }
-
-        let optimisticMessage = ChatMessage(
-            role: "user",
-            content: displayContent,
-            timestamp: Date().timeIntervalSince1970,
-            messageId: localMessageID,
-            attachments: messageAttachments.isEmpty ? nil : messageAttachments
-        )
-        messages.append(optimisticMessage)
-
-        cacheCurrentMessages(sessionID: sessionID, modelContext: modelContext)
-
-        do {
-            let explicitModelPick = explicitModelPickForChatStart()
-            let response = try await client.startChat(
-                sessionID: sessionID,
-                message: messageForAPI,
-                workspace: currentWorkspace,
-                model: currentModel,
-                modelProvider: requestModelProvider,
-                profile: requestProfileName,
-                explicitModelPick: explicitModelPick,
-                attachments: apiPayloads
-            )
-
-            guard let streamID = response.streamId else {
-                sendErrorMessage = response.error ?? String(localized: "The server did not return a stream ID.")
-                rollbackOptimisticMessage(id: localMessageID)
-                cacheCurrentMessages(sessionID: sessionID, modelContext: modelContext)
-                restorePendingAttachments(attachmentsToRestoreOnFailure)
-                return false
-            }
-
-            completeExplicitModelPickForChatStart(explicitModelPick)
-            messageLoadGeneration &+= 1
-            streamCoordinator.start(streamID: streamID)
-            return true
-        } catch {
-            if let streamID = (error as? APIError)?.activeStreamID {
-                rollbackOptimisticMessage(id: localMessageID)
-                cacheCurrentMessages(sessionID: sessionID, modelContext: modelContext)
-                restorePendingAttachments(attachmentsToRestoreOnFailure)
-                // The existing run may have started outside this view model. Reconcile
-                // the server transcript first so the SSE tokens attach to the persisted
-                // assistant turn instead of creating a second bubble with only the tail.
-                await loadMessages(modelContext: modelContext, allowApplyDuringLocalStart: true)
-                _ = restoreActiveStreamSnapshotIfAvailable(streamID: streamID)
-                streamingAssistantMessageID = TranscriptTurnClassifier
-                    .currentTurnAssistantAnchorIDs(in: messages, messageOffset: messagesOffset)
-                    .first
-                streamCoordinator.start(streamID: streamID)
-                // The server kept the earlier run, not this newly submitted text.
-                // Report an unaccepted send so ChatView restores the draft while
-                // the coordinator reconnects to the existing response.
-                return false
-            }
-            lastError = error
-            sendErrorMessage = CacheFallbackPolicy.sendBannerMessage(for: error)
-            rollbackOptimisticMessage(id: localMessageID)
-            cacheCurrentMessages(sessionID: sessionID, modelContext: modelContext)
-            restorePendingAttachments(attachmentsToRestoreOnFailure)
-            return false
-        }
+        let localID = "local-\(UUID().uuidString)"
+        let attachments = attachmentCoordinator.prepareForSend(localMessageID: localID).messageAttachments
+        messages.append(ChatMessage(role: "user", content: draft.trimmingCharacters(in: .whitespacesAndNewlines),
+            timestamp: Date().timeIntervalSince1970, messageId: localID,
+            attachments: attachments.isEmpty ? nil : attachments))
+        if let sessionID { cacheCurrentMessages(sessionID: sessionID, modelContext: modelContext) }
+        messageLoadGeneration &+= 1
+        streamCoordinator.start(streamID: streamID)
+        return true
     }
+    #endif
 
     func submitGoal(args rawArgs: String, modelContext: ModelContext? = nil) async -> Bool {
         guard !usesDirectGateway else {

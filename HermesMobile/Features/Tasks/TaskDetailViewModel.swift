@@ -18,6 +18,8 @@ final class TaskDetailViewModel {
     private(set) var actionErrorMessage: String?
     private(set) var lastError: Error?
     private(set) var lastMutation: CronJobListMutation?
+    private(set) var mutationNeedsInspection = false
+    var owningProfile: String { profile }
 
     private let client: APIClient
     private let profile: String
@@ -63,6 +65,7 @@ final class TaskDetailViewModel {
             runs = freshRuns
             runningElapsed = executionJob.latestExecution?.runningElapsed()
             deliveryOptions = options
+            mutationNeedsInspection = false
         } catch {
             let options = await deliveryOptionsResponse
             guard generation == loadGeneration else { return }
@@ -78,10 +81,25 @@ final class TaskDetailViewModel {
 
     func runNow() async -> Bool {
         let success = await mutateJob { jobID in
-            try await client.runCron(jobID: jobID)
+            let result = try await client.directTriggerCron(jobID: jobID, profile: profile)
+            return CronMutationResponse(ok: true, job: result, error: nil)
         }
         if success {
-            runningElapsed = 0
+            // The trigger can have completed already, including removing a
+            // one-shot. Only stock execution inventory can supply a badge.
+            isMutating = true
+            defer { isMutating = false }
+            do {
+                let inventory = try await client.directCronJobs(profile: profile)
+                if let fresh = inventory.first(where: { $0.jobId == job.jobId }) {
+                    job = fresh
+                    runningElapsed = fresh.latestExecution?.runningElapsed()
+                    lastMutation = .upsert(fresh)
+                } else if let id = job.jobId {
+                    runningElapsed = nil
+                    lastMutation = .delete(jobID: id)
+                }
+            } catch { lastError = error; actionErrorMessage = "The run returned, but its current execution state could not be refreshed." }
         }
         return success
     }
@@ -113,45 +131,40 @@ final class TaskDetailViewModel {
         }
 
         return await mutateJob { jobID in
-            try await client.updateCron(
-                jobID: jobID,
-                prompt: draft.trimmedPrompt,
-                schedule: draft.trimmedSchedule,
-                name: draft.name.trimmingCharacters(in: .whitespacesAndNewlines),
-                deliver: draft.deliver.trimmingCharacters(in: .whitespacesAndNewlines),
-                skills: draft.skills,
-                model: draft.model.trimmingCharacters(in: .whitespacesAndNewlines),
-                provider: draft.provider.trimmingCharacters(in: .whitespacesAndNewlines),
-                profile: draft.profile.trimmingCharacters(in: .whitespacesAndNewlines),
-                toastNotifications: draft.toastNotifications
-            )
+            let result = try await client.directUpdateCron(jobID: jobID, profile: profile, draft: draft)
+            return CronMutationResponse(ok: true, job: result, error: nil)
         }
     }
 
     func delete() async -> Bool {
-        guard !isMutating else { return false }
+        guard !isMutating, !mutationNeedsInspection else { return false }
+        guard job.profile == nil || job.profile == profile else {
+            actionErrorMessage = "This task belongs to a different profile."
+            return false
+        }
         guard let jobID = job.jobId else {
             actionErrorMessage = String(localized: "Missing job identifier.")
             return false
         }
 
         isMutating = true
+        loadGeneration += 1
+        isLoading = false
         actionErrorMessage = nil
         lastError = nil
         lastMutation = nil
         defer { isMutating = false }
 
         do {
-            let response = try await client.deleteCron(jobID: jobID)
-            guard response.ok != false else {
-                actionErrorMessage = response.error ?? String(localized: "Could not delete task.")
-                return false
-            }
+            try await client.directDeleteCron(jobID: jobID, profile: profile)
 
             lastMutation = .delete(jobID: jobID)
             return true
         } catch {
-            lastError = error
+            if case DirectCronMutationError.unconfirmed(let underlying) = error {
+                mutationNeedsInspection = true
+                lastError = underlying
+            } else { lastError = error }
             actionErrorMessage = error.localizedDescription
             return false
         }
@@ -160,7 +173,11 @@ final class TaskDetailViewModel {
     private func mutateJob(
         action: (String) async throws -> CronMutationResponse
     ) async -> Bool {
-        guard !isMutating else { return false }
+        guard !isMutating, !mutationNeedsInspection else { return false }
+        guard job.profile == nil || job.profile == profile else {
+            actionErrorMessage = "This task belongs to a different profile."
+            return false
+        }
         guard let jobID = job.jobId else {
             actionErrorMessage = String(localized: "Missing job identifier.")
             return false
@@ -188,7 +205,10 @@ final class TaskDetailViewModel {
             }
             return true
         } catch {
-            lastError = error
+            if case DirectCronMutationError.unconfirmed(let underlying) = error {
+                mutationNeedsInspection = true
+                lastError = underlying
+            } else { lastError = error }
             actionErrorMessage = error.localizedDescription
             return false
         }

@@ -21,7 +21,7 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
             maxLagNanoseconds: 60_000_000_000
         )
 
-        let didStart = await viewModel.sendMessage("Stream a reply")
+        let didStart = viewModel.seedLegacyResponseForTesting("Stream a reply")
         XCTAssertTrue(didStart)
 
         streamClient.emit(.token("alpha beta gamma delta"))
@@ -60,7 +60,7 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
             maxLagNanoseconds: 300_000_000
         )
 
-        let didStart = await viewModel.sendMessage("Stream a reply")
+        let didStart = viewModel.seedLegacyResponseForTesting("Stream a reply")
         XCTAssertTrue(didStart)
 
         let words = (0..<60).map { "w\($0) " }
@@ -83,7 +83,7 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
         let streamClient = PacingSpySSEStreamingClient()
         let viewModel = try makeStalledDrainViewModel(streamClient: streamClient)
 
-        let didStart = await viewModel.sendMessage("Stream a reply")
+        let didStart = viewModel.seedLegacyResponseForTesting("Stream a reply")
         XCTAssertTrue(didStart)
 
         streamClient.emit(.token("alpha beta gamma"))
@@ -103,7 +103,7 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
         let streamClient = PacingSpySSEStreamingClient()
         let viewModel = try makeStalledDrainViewModel(streamClient: streamClient)
 
-        let didStart = await viewModel.sendMessage("Stream a reply")
+        let didStart = viewModel.seedLegacyResponseForTesting("Stream a reply")
         XCTAssertTrue(didStart)
 
         streamClient.emit(.token("alpha beta gamma"))
@@ -126,7 +126,7 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
             maxLagNanoseconds: 50_000_000
         )
 
-        let didStart = await viewModel.sendMessage("Stream a reply")
+        let didStart = viewModel.seedLegacyResponseForTesting("Stream a reply")
         XCTAssertTrue(didStart)
 
         // Awkward chunk boundaries: ZWJ family, flag, CRLF, tabs, doubled spaces,
@@ -161,7 +161,7 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
             maxLagNanoseconds: 50_000_000
         )
 
-        let didStart = await viewModel.sendMessage("Keep working while I leave")
+        let didStart = viewModel.seedLegacyResponseForTesting("Keep working while I leave")
         XCTAssertTrue(didStart)
         viewModel.setTranscriptPresentationActive(false)
         streamClient.emit(.token("alpha beta gamma"))
@@ -226,7 +226,7 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
         await viewModel.loadMessages()
         XCTAssertEqual(viewModel.messagesOffset, 1)
 
-        let didStart = await viewModel.sendMessage("Keep the live tail")
+        let didStart = viewModel.seedLegacyResponseForTesting("Keep the live tail")
         XCTAssertTrue(didStart)
         streamClient.emit(.token("live"))
         viewModel.flushPendingStreamingContent()
@@ -289,7 +289,7 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
             wordCadenceNanoseconds: 1_000_000,
             maxLagNanoseconds: 50_000_000
         )
-        let didStart = await viewModel.sendMessage("Hold the native auth request open")
+        let didStart = viewModel.seedLegacyResponseForTesting("Hold the native auth request open")
         XCTAssertTrue(didStart)
         let component = try XCTUnwrap(
             try? JSONDecoder().decode(
@@ -340,7 +340,7 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
             wordCadenceNanoseconds: 1_000_000,
             maxLagNanoseconds: 50_000_000
         )
-        let didStart = await viewModel.sendMessage("Open a native auth prompt")
+        let didStart = viewModel.seedLegacyResponseForTesting("Open a native auth prompt")
         XCTAssertTrue(didStart)
 
         let original = try makeNativeAuthComponent()
@@ -363,7 +363,7 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
             wordCadenceNanoseconds: 1_000_000,
             maxLagNanoseconds: 50_000_000
         )
-        let didStartMixedMetadataStream = await viewModel.sendMessage("Open a native auth prompt")
+        let didStartMixedMetadataStream = viewModel.seedLegacyResponseForTesting("Open a native auth prompt")
         XCTAssertTrue(didStartMixedMetadataStream)
         let runtimeKey = nativeAuthRuntimePublicKey()
         let original = try makeNativeAuthComponent(runtimePublicKey: runtimeKey)
@@ -397,7 +397,7 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
             wordCadenceNanoseconds: 1_000_000,
             maxLagNanoseconds: 50_000_000
         )
-        let didStartOutOfOrderStream = await viewModel.sendMessage("Open a native auth prompt")
+        let didStartOutOfOrderStream = viewModel.seedLegacyResponseForTesting("Open a native auth prompt")
         XCTAssertTrue(didStartOutOfOrderStream)
         let component = try makeNativeAuthComponent()
         viewModel.streamCoordinatorApplyNativeAuthComponent(component)
@@ -422,7 +422,7 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
             wordCadenceNanoseconds: 1_000_000,
             maxLagNanoseconds: 50_000_000
         )
-        let didStartRetryStream = await viewModel.sendMessage("Open a native auth prompt")
+        let didStartRetryStream = viewModel.seedLegacyResponseForTesting("Open a native auth prompt")
         XCTAssertTrue(didStartRetryStream)
         let runtimeKey = nativeAuthRuntimePublicKey()
         let input = try makeNativeAuthComponent(runtimePublicKey: runtimeKey)
@@ -558,7 +558,7 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
             }
         }
 
-        let didStartFixtureStream = await viewModel.sendMessage("Open the fixture prompt")
+        let didStartFixtureStream = viewModel.seedLegacyResponseForTesting("Open the fixture prompt")
         XCTAssertTrue(didStartFixtureStream)
         let runtimeKey = nativeAuthRuntimePublicKey()
         let input = try makeNativeAuthComponent(
@@ -657,7 +657,7 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
             }
         }
 
-        let didStartFixtureStream = await viewModel.sendMessage("Open the fixture prompt")
+        let didStartFixtureStream = viewModel.seedLegacyResponseForTesting("Open the fixture prompt")
         XCTAssertTrue(didStartFixtureStream)
         let runtimeKey = nativeAuthRuntimePublicKey()
         let input = try makeNativeAuthComponent(
@@ -806,7 +806,7 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
             historyMessageCount: historyMessageCount
         )
         await viewModel.loadMessages()
-        let didStart = await viewModel.sendMessage("Benchmark live tail")
+        let didStart = viewModel.seedLegacyResponseForTesting("Benchmark live tail")
         XCTAssertTrue(didStart)
         let startedAt = CFAbsoluteTimeGetCurrent()
         streamClient.emit(.token("seed"))

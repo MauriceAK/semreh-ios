@@ -1047,8 +1047,10 @@ struct SettingsView: View {
         }
 
         do {
-            let catalog = try await client.models()
-            defaultModel = catalog.defaultModel
+            let context = try await client.directActiveProfile()
+            guard let running = context.current?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !running.isEmpty else { throw DirectMainModelError.invalidSelection }
+            defaultModel = try await client.directModelOptions(profile: running).model
         } catch {
             // Non-fatal: default model is optional info
             defaultModel = nil

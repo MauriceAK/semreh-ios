@@ -7,6 +7,68 @@ import UniformTypeIdentifiers
 @testable import HermesMobile
 
 final class APIClientCronEndpointTests: APIClientTestCase {
+    func testDirectCreateUsesOwningProfileQueryAndNoLegacyNotificationFields() async throws {
+        var methods: [String] = []
+        let client = makeClient { request in
+            methods.append(request.httpMethod ?? "")
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems
+            XCTAssertEqual(query?.first { $0.name == "profile" }?.value, "work")
+            if request.httpMethod == "POST" {
+                XCTAssertEqual(request.url?.path, "/api/cron/jobs")
+                let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(apiTestBodyData(from: request))) as? [String: Any])
+                XCTAssertEqual(body["prompt"] as? String, "run")
+                XCTAssertEqual(body["schedule"] as? String, "0 7 * * *")
+                XCTAssertEqual(body["skills"] as? [String], ["inspect"])
+                XCTAssertNil(body["profile"])
+                XCTAssertNil(body["toast_notifications"])
+            } else { XCTAssertEqual(request.url?.path, "/api/cron/jobs/new-job") }
+            return apiTestJSONResponse(#"{"id":"new-job","profile":"work","prompt":"run","skills":["inspect"]}"#, for: request)
+        }
+        let result = try await client.directCreateCron(draft: CronJobEditorDraft(prompt: "run", schedule: "0 7 * * *", skillsText: "inspect"), profile: "work")
+        XCTAssertEqual(result.jobId, "new-job")
+        XCTAssertEqual(methods, ["POST", "GET"])
+    }
+
+    func testDirectUpdateUsesSparseUpdatesAndConfirmsSameOwnedJob() async throws {
+        let client = makeClient { request in
+            XCTAssertEqual(request.url?.path, "/api/cron/jobs/job1")
+            if request.httpMethod == "PUT" {
+                let data = try XCTUnwrap(apiTestBodyData(from: request))
+                let body = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+                let updates = try XCTUnwrap(body["updates"] as? [String: Any])
+                XCTAssertEqual(Set(body.keys), ["updates"])
+                XCTAssertEqual(updates["prompt"] as? String, "updated")
+                XCTAssertTrue(updates["model"] is NSNull)
+                for retained in ["profile", "toast_notifications", "script", "context_from", "enabled_toolsets", "workdir", "no_agent"] {
+                    XCTAssertNil(updates[retained])
+                }
+            } else { XCTAssertEqual(request.httpMethod, "GET") }
+            return apiTestJSONResponse(#"{"id":"job1","profile":"work","prompt":"updated","script":"existing.py"}"#, for: request)
+        }
+        let result = try await client.directUpdateCron(jobID: "job1", profile: "work",
+            draft: CronJobEditorDraft(prompt: "updated", schedule: "0 8 * * *", profile: "work"))
+        XCTAssertEqual(result.prompt, "updated")
+    }
+
+    func testDirectUpdateRejectsProfileMoveBeforeAnyRequest() async throws {
+        let client = makeClient { _ in XCTFail("No implicit profile move"); throw URLError(.badURL) }
+        do {
+            _ = try await client.directUpdateCron(jobID: "job1", profile: "work", draft: CronJobEditorDraft(prompt: "run", schedule: "0 7 * * *", profile: "other"))
+            XCTFail("Expected unsupported move")
+        } catch DirectCronMutationError.unsupportedProfileMove { }
+    }
+
+    func testDirectDeleteRequiresConfirmedAbsenceAndNeverRetriesReceiptFailure() async throws {
+        var deletes = 0
+        let client = makeClient { request in
+            if request.httpMethod == "DELETE" { deletes += 1; return apiTestJSONResponse(#"{"ok":true}"#, for: request) }
+            return apiTestJSONResponse(#"[{"id":"job1","profile":"work"}]"#, for: request)
+        }
+        do { try await client.directDeleteCron(jobID: "job1", profile: "work"); XCTFail("Existing job is not confirmed deleted") }
+        catch DirectCronMutationError.unconfirmed { }
+        XCTAssertEqual(deletes, 1)
+    }
+
     func testDirectPauseResumeUseBodylessScopedPostAndRawJobReceipt() async throws {
         for paused in [true, false] {
             let client = makeClient { request in

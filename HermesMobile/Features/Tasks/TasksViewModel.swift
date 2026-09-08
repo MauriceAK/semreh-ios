@@ -19,6 +19,11 @@ final class TasksViewModel {
     private(set) var errorMessage: String?
     private(set) var actionErrorMessage: String?
     private(set) var lastError: Error?
+    private(set) var creationNeedsInspection = false
+    private(set) var creationInspectionProfile: String?
+    private(set) var creationInspectionJobs: [CronJob] = []
+    private(set) var creationInspectionReady = false
+    private(set) var isInspectingCreation = false
 
     private let client: APIClient
     private let profile: String
@@ -68,43 +73,69 @@ final class TasksViewModel {
         actionErrorMessage = nil
     }
 
+    /// Explicit read-only inspection; ordinary list refresh never unlocks creation.
+    func inspectCreationOutcome() async {
+        guard creationNeedsInspection, !isInspectingCreation,
+              let scope = creationInspectionProfile else { return }
+        isInspectingCreation = true
+        creationInspectionReady = false
+        lastError = nil
+        defer { isInspectingCreation = false }
+        do {
+            let result = try await client.directCronJobs(profile: scope)
+            guard !Task.isCancelled, creationNeedsInspection, creationInspectionProfile == scope else { return }
+            creationInspectionJobs = result
+            creationInspectionReady = true
+        } catch {
+            guard !Task.isCancelled else { return }
+            lastError = error
+            actionErrorMessage = "Could not inspect saved tasks. Creation remains paused; refresh the inspection before continuing."
+        }
+    }
+
+    func acknowledgeCreationInspection() {
+        guard creationNeedsInspection, creationInspectionReady, !isInspectingCreation else { return }
+        creationNeedsInspection = false
+        creationInspectionProfile = nil
+        creationInspectionJobs = []
+        creationInspectionReady = false
+        actionErrorMessage = nil
+    }
+
     func create(from draft: CronJobEditorDraft) async -> Bool {
+        guard !isMutating, !creationNeedsInspection else { return false }
         guard draft.validationMessage == nil else {
             actionErrorMessage = draft.validationMessage
             return false
         }
 
         isMutating = true
+        loadGeneration += 1
+        isLoading = false
         actionErrorMessage = nil
         lastError = nil
         defer { isMutating = false }
 
         do {
-            let response = try await client.createCron(
-                prompt: draft.trimmedPrompt,
-                schedule: draft.trimmedSchedule,
-                name: draft.trimmedName,
-                deliver: draft.trimmedDeliver,
-                skills: draft.skills,
-                model: draft.trimmedModel,
-                provider: draft.trimmedProvider,
-                profile: draft.trimmedProfile,
-                toastNotifications: draft.toastNotifications
-            )
-
-            guard response.ok != false else {
-                actionErrorMessage = response.error ?? String(localized: "Could not create task.")
-                return false
-            }
-
-            if let job = response.job {
-                apply(.upsert(job))
-            } else {
-                await load()
-            }
+            let owningProfile = draft.trimmedProfile ?? profile
+            let job = try await client.directCreateCron(draft: draft, profile: owningProfile)
+            if owningProfile == profile { apply(.upsert(job)) }
             return true
+        } catch DirectCronMutationError.savedUnregistered(let id) {
+            creationNeedsInspection = true
+            let owningProfile = draft.trimmedProfile ?? profile
+            creationInspectionProfile = owningProfile
+            if let saved = try? await client.directCronJob(jobID: id, profile: owningProfile), owningProfile == profile {
+                apply(.upsert(saved))
+            }
+            actionErrorMessage = DirectCronMutationError.savedUnregistered(jobID: id).localizedDescription
+            return false
         } catch {
-            lastError = error
+            if case DirectCronMutationError.unconfirmed(let underlying) = error {
+                creationNeedsInspection = true
+                creationInspectionProfile = draft.trimmedProfile ?? profile
+                lastError = underlying
+            } else { lastError = error }
             actionErrorMessage = error.localizedDescription
             return false
         }

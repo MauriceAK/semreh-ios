@@ -300,21 +300,108 @@ final class CronManagementViewModelTests: XCTestCase {
     }
 
     @MainActor
+    func testCreatePartialRegistrationKeepsSavedJobAndPreventsDuplicateCreate() async throws {
+        var writes = 0
+        let client = makeClient { request in
+            if request.httpMethod == "POST" {
+                writes += 1
+                let body = #"{"detail":{"job_id":"saved-job","job_saved":true,"scheduler_registered":false,"retry_create":false}}"#
+                return (HTTPURLResponse(url: request.url!, statusCode: 424, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!, Data(body.utf8))
+            }
+            if request.url?.path == "/api/cron/jobs" {
+                XCTAssertEqual(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "profile" })?.value, "default")
+                return apiTestJSONResponse(#"[{"id":"saved-job","profile":"default","prompt":"run"}]"#, for: request)
+            }
+            XCTAssertEqual(request.url?.path, "/api/cron/jobs/saved-job")
+            return apiTestJSONResponse(#"{"id":"saved-job","profile":"default","prompt":"run","state":"scheduled"}"#, for: request)
+        }
+        let model = TasksViewModel(server: URL(string: "https://example.test")!, client: client)
+        let draft = CronJobEditorDraft(prompt: "run", schedule: "0 7 * * *")
+        let created = await model.create(from: draft)
+        XCTAssertFalse(created)
+        XCTAssertEqual(model.jobs.map(\.jobId), ["saved-job"])
+        XCTAssertTrue(model.creationNeedsInspection)
+        let retried = await model.create(from: draft)
+        XCTAssertFalse(retried)
+        XCTAssertEqual(writes, 1)
+        XCTAssertTrue(model.actionErrorMessage?.contains("saved") == true)
+        model.acknowledgeCreationInspection()
+        XCTAssertTrue(model.creationNeedsInspection, "Acknowledgment before successful inspection must not unlock creation")
+        await model.inspectCreationOutcome()
+        XCTAssertEqual(model.creationInspectionJobs.map(\.jobId), ["saved-job"])
+        XCTAssertTrue(model.creationInspectionReady)
+        XCTAssertTrue(model.creationNeedsInspection, "Inspection alone must not unlock creation")
+        model.acknowledgeCreationInspection()
+        XCTAssertFalse(model.creationNeedsInspection)
+        XCTAssertEqual(writes, 1, "Inspection and acknowledgment must never retry creation")
+    }
+
+    @MainActor
+    func testAmbiguousCreateDoesNotRetryOrInventJob() async throws {
+        var writes = 0
+        let client = makeClient { _ in writes += 1; throw URLError(.networkConnectionLost) }
+        let model = TasksViewModel(server: URL(string: "https://example.test")!, client: client)
+        let draft = CronJobEditorDraft(prompt: "run", schedule: "0 7 * * *")
+        let created = await model.create(from: draft)
+        XCTAssertFalse(created)
+        XCTAssertTrue(model.jobs.isEmpty)
+        XCTAssertTrue(model.creationNeedsInspection)
+        let retried = await model.create(from: draft)
+        XCTAssertFalse(retried)
+        XCTAssertEqual(writes, 1)
+        await model.inspectCreationOutcome()
+        XCTAssertFalse(model.creationInspectionReady)
+        model.acknowledgeCreationInspection()
+        XCTAssertTrue(model.creationNeedsInspection, "Failed inspection must leave the safeguard intact")
+    }
+
+    @MainActor
+    func testTriggerCompletedOneShotDoesNotInventRunningBadge() async throws {
+        let client = makeClient { request in
+            if request.url?.path == "/api/cron/jobs/job123/trigger" {
+                return apiTestJSONResponse(#"{"id":"job123","profile":"default","state":"completed","enabled":false}"#, for: request)
+            }
+            XCTAssertEqual(request.url?.path, "/api/cron/jobs")
+            return apiTestJSONResponse("[]", for: request)
+        }
+        let model = TaskDetailViewModel(job: try decodeCronJob(#"{"id":"job123","profile":"default"}"#), runningElapsed: nil,
+            server: URL(string: "https://example.test")!, client: client)
+        let ran = await model.runNow()
+        XCTAssertTrue(ran)
+        XCTAssertNil(model.runningElapsed)
+        XCTAssertEqual(model.job.state, "completed")
+        XCTAssertEqual(model.lastMutation, .delete(jobID: "job123"))
+    }
+
+    @MainActor
+    func testAmbiguousDeletePreservesRowAndBlocksRepeatedMutation() async throws {
+        var writes = 0
+        let client = makeClient { _ in writes += 1; throw URLError(.networkConnectionLost) }
+        let model = TaskDetailViewModel(job: try decodeCronJob(#"{"id":"job123","profile":"default"}"#), runningElapsed: nil,
+            server: URL(string: "https://example.test")!, client: client)
+        let deleted = await model.delete()
+        XCTAssertFalse(deleted)
+        XCTAssertNil(model.lastMutation)
+        XCTAssertEqual(model.job.jobId, "job123")
+        let retried = await model.delete()
+        XCTAssertFalse(retried)
+        XCTAssertEqual(writes, 1)
+    }
+
+    @MainActor
     func testTasksViewModelCreateInsertsReturnedJob() async throws {
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/crons/create")
+            XCTAssertTrue(["/api/cron/jobs", "/api/cron/jobs/job-created"].contains(request.url?.path ?? ""))
 
             return apiTestJSONResponse("""
             {
-              "ok": true,
-              "job": {
                 "id": "job-created",
+                "profile": "default",
                 "name": "Created",
                 "prompt": "Run it",
                 "schedule": {"kind": "cron", "expr": "0 7 * * *"},
                 "enabled": true,
                 "state": "scheduled"
-              }
             }
             """, for: request)
         }
@@ -480,7 +567,12 @@ final class CronManagementViewModelTests: XCTestCase {
     @MainActor
     func testTaskDetailViewModelDeletePublishesDeleteMutation() async throws {
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/crons/delete")
+            if request.url?.path == "/api/cron/jobs" {
+                XCTAssertEqual(request.httpMethod, "GET")
+                return apiTestJSONResponse("[]", for: request)
+            }
+            XCTAssertEqual(request.url?.path, "/api/cron/jobs/job123")
+            XCTAssertEqual(request.httpMethod, "DELETE")
 
             return apiTestJSONResponse("""
             {

@@ -7,6 +7,87 @@ import UniformTypeIdentifiers
 @testable import HermesMobile
 
 final class APIClientConfigurationTests: APIClientTestCase {
+    func testDirectModelCatalogExplicitRefreshKeepsProfileAndCustomIdentity() async throws {
+        let client = makeClient { request in
+            XCTAssertEqual(request.url?.path, "/api/model/options")
+            XCTAssertEqual(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems,
+                [URLQueryItem(name: "profile", value: "work"), URLQueryItem(name: "explicit_only", value: "true"),
+                 URLQueryItem(name: "refresh", value: "true")])
+            return apiTestJSONResponse(#"{"model":"local-id","provider":"custom:studio","providers":[{"slug":"custom:studio","name":"Studio","authenticated":true,"models":["local-id"]}]}"#, for: request)
+        }
+        let result = try await client.directModelOptions(profile: "work", refresh: true)
+        XCTAssertEqual(result.catalogGroups.first?.models.first?.providerID, "custom:studio")
+        XCTAssertEqual(result.catalogGroups.first?.models.first?.id, "local-id")
+    }
+
+    func testDirectMainModelWritesExactProfileProviderAndVerifiesNormalizedReadback() async throws {
+        var requests: [String] = []
+        let client = makeClient { request in
+            requests.append(request.httpMethod ?? "")
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems
+            XCTAssertEqual(query?.first(where: { $0.name == "profile" })?.value, "work & notes")
+            if request.httpMethod == "POST" {
+                XCTAssertEqual(request.url?.path, "/api/model/set")
+                XCTAssertEqual(try apiTestJSONBody(from: request) as? [String: AnyHashable],
+                    ["scope": "main", "provider": "custom:studio", "model": "requested",
+                     "confirm_expensive_model": false])
+                return apiTestJSONResponse(#"{"ok":true,"scope":"main","provider":"custom:studio","model":"normalized"}"#, for: request)
+            }
+            XCTAssertEqual(request.url?.path, "/api/model/options")
+            return apiTestJSONResponse(#"{"provider":"custom:studio","model":"normalized","providers":[]}"#, for: request)
+        }
+        let result = try await client.directSetMainModel(profile: "work & notes", provider: "custom:studio", model: "requested")
+        guard case .confirmed(let model, let provider) = result else { return XCTFail("Expected verified selection") }
+        XCTAssertEqual(model, "normalized")
+        XCTAssertEqual(provider, "custom:studio")
+        XCTAssertEqual(requests, ["POST", "GET"])
+    }
+
+    func testDirectMainModelConfirmationNeverAutomaticallyWritesAgain() async throws {
+        var count = 0
+        let client = makeClient { request in
+            count += 1
+            XCTAssertEqual(request.httpMethod, "POST")
+            return apiTestJSONResponse(#"{"ok":false,"scope":"main","provider":"openai","model":"priced","confirm_required":true,"confirm_message":"Confirm cost"}"#, for: request)
+        }
+        let result = try await client.directSetMainModel(profile: "work", provider: "openai", model: "priced")
+        guard case .confirmationRequired(let message) = result else { return XCTFail("Expected confirmation") }
+        XCTAssertEqual(message, "Confirm cost")
+        XCTAssertEqual(count, 1)
+    }
+
+    func testDirectMainModelExplicitConfirmationBodyAndReadback() async throws {
+        let client = makeClient { request in
+            if request.httpMethod == "POST" {
+                let body = try apiTestJSONBody(from: request) as? [String: AnyHashable]
+                XCTAssertEqual(body?["confirm_expensive_model"], true)
+                return apiTestJSONResponse(#"{"ok":true,"scope":"main","provider":"openai","model":"priced"}"#, for: request)
+            }
+            return apiTestJSONResponse(#"{"provider":"openai","model":"priced"}"#, for: request)
+        }
+        let result = try await client.directSetMainModel(profile: "work", provider: "openai", model: "priced", confirmExpensive: true)
+        guard case .confirmed = result else { return XCTFail("Expected confirmed readback") }
+    }
+
+    func testDirectMainModelWrongScopeProviderOrReadbackNeverConfirms() async throws {
+        for acknowledgement in [
+            #"{"ok":true,"scope":"auxiliary","provider":"custom:studio","model":"chosen"}"#,
+            #"{"ok":true,"scope":"main","provider":"custom:other","model":"chosen"}"#,
+            #"{"ok":true,"scope":"main","provider":"custom:studio","model":"chosen"}"#
+        ] {
+            var posts = 0
+            let client = makeClient { request in
+                if request.httpMethod == "POST" { posts += 1; return apiTestJSONResponse(acknowledgement, for: request) }
+                return apiTestJSONResponse(#"{"provider":"custom:studio","model":"different"}"#, for: request)
+            }
+            do {
+                _ = try await client.directSetMainModel(profile: "work", provider: "custom:studio", model: "chosen")
+                XCTFail("Must not confirm mismatched state")
+            } catch DirectMainModelError.unconfirmed {}
+            XCTAssertEqual(posts, 1)
+        }
+    }
+
     func testProfileCreationCatalogReadsRunningProfileWithoutSwitchingStartupDefault() async throws {
         var paths: [String] = []
         let client = makeClient { request in

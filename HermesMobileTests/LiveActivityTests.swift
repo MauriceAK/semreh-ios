@@ -241,7 +241,7 @@ final class LiveActivityTests: XCTestCase {
             liveActivityManager: manager
         )
 
-        let didStart = await viewModel.sendMessage("Run the tests")
+        let didStart = viewModel.seedLegacyResponseForTesting("Run the tests")
         XCTAssertTrue(didStart)
         XCTAssertEqual(manager.starts, [
             SpyAgentLiveActivityManager.Start(sessionID: "session-abc", sessionTitle: "Live work", streamID: "stream-123")
@@ -307,7 +307,7 @@ final class LiveActivityTests: XCTestCase {
             liveActivityManager: manager
         )
 
-        let didStart = await viewModel.sendMessage("Keep response text private")
+        let didStart = viewModel.seedLegacyResponseForTesting("Keep response text private")
         XCTAssertTrue(didStart)
 
         streamClient.emit(.token("Private token."))
@@ -344,7 +344,7 @@ final class LiveActivityTests: XCTestCase {
             showsLiveActivityResponseExcerpts: true
         )
 
-        let didStart = await viewModel.sendMessage("Show response text")
+        let didStart = viewModel.seedLegacyResponseForTesting("Show response text")
         XCTAssertTrue(didStart)
 
         streamClient.emit(.token("Visible token."))
@@ -383,7 +383,7 @@ final class LiveActivityTests: XCTestCase {
             showsLiveActivityResponseExcerpts: true
         )
 
-        let didStart = await viewModel.sendMessage("Toggle response text")
+        let didStart = viewModel.seedLegacyResponseForTesting("Toggle response text")
         XCTAssertTrue(didStart)
 
         streamClient.emit(.token("Visible token."))
@@ -424,7 +424,7 @@ final class LiveActivityTests: XCTestCase {
             liveActivityManager: manager
         )
 
-        let didStartFirstResponse = await viewModel.sendMessage("Run the first answer")
+        let didStartFirstResponse = viewModel.seedLegacyResponseForTesting("Run the first answer", streamID: "stream-1")
         XCTAssertTrue(didStartFirstResponse)
         streamClient.emit(.token("First answer."))
         streamClient.emit(.done(DoneStreamEvent()))
@@ -438,7 +438,7 @@ final class LiveActivityTests: XCTestCase {
         ])
         XCTAssertNil(viewModel.activeStreamID)
 
-        let didStartFollowup = await viewModel.sendMessage("Follow up")
+        let didStartFollowup = viewModel.seedLegacyResponseForTesting("Follow up", streamID: "stream-2")
         XCTAssertTrue(didStartFollowup)
 
         XCTAssertEqual(manager.starts, [
@@ -474,7 +474,7 @@ final class LiveActivityTests: XCTestCase {
             liveActivityManager: manager
         )
 
-        let didStart = await viewModel.sendMessage("Name this run")
+        let didStart = viewModel.seedLegacyResponseForTesting("Name this run")
         XCTAssertTrue(didStart)
 
         streamClient.emit(.title(TitleStreamEvent(sessionId: "session-abc", title: "Generated Search Plan")))
@@ -511,7 +511,7 @@ final class LiveActivityTests: XCTestCase {
             liveActivityManager: manager
         )
 
-        let didStart = await viewModel.sendMessage("Finish with a generated title")
+        let didStart = viewModel.seedLegacyResponseForTesting("Finish with a generated title")
         XCTAssertTrue(didStart)
 
         streamClient.emit(.done(DoneStreamEvent(session: try Self.sessionDetail(id: "session-abc", title: "Generated Finish Plan"))))
@@ -553,7 +553,7 @@ final class LiveActivityTests: XCTestCase {
             liveActivityManager: manager
         )
 
-        let didStart = await viewModel.sendMessage("Run the tests")
+        let didStart = viewModel.seedLegacyResponseForTesting("Run the tests")
         XCTAssertTrue(didStart)
 
         streamClient.emit(.token("Done."))
@@ -628,7 +628,7 @@ final class LiveActivityTests: XCTestCase {
             liveActivityManager: manager
         )
 
-        let didStart = await viewModel.sendMessage("Keep working")
+        let didStart = viewModel.seedLegacyResponseForTesting("Keep working")
         XCTAssertTrue(didStart)
         streamClient.emit(.toolStarted(ToolStreamEvent(
             eventType: nil,
@@ -655,7 +655,7 @@ final class LiveActivityTests: XCTestCase {
             "Keep working",
             "Completed from transcript refresh."
         ])
-        XCTAssertEqual(requestPaths, ["/api/chat/start", "/api/chat/stream/status", "/api/session"])
+        XCTAssertEqual(requestPaths, ["/api/chat/stream/status", "/api/session"])
     }
 
     func testStatusRefreshWithoutFinalAssistantDoesNotCompleteLiveActivity() async throws {
@@ -708,7 +708,7 @@ final class LiveActivityTests: XCTestCase {
             liveActivityManager: manager
         )
 
-        let didStart = await viewModel.sendMessage("Keep working")
+        let didStart = viewModel.seedLegacyResponseForTesting("Keep working")
         XCTAssertTrue(didStart)
         streamClient.emit(.toolStarted(ToolStreamEvent(
             eventType: nil,

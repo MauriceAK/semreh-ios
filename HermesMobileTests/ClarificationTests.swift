@@ -158,7 +158,7 @@ final class ClarificationTests: XCTestCase {
             }
         }
 
-        let didStart = await viewModel.sendMessage("Continue")
+        let didStart = viewModel.seedLegacyResponseForTesting("Continue")
         XCTAssertTrue(didStart)
         clarifyStreamClient.emit(.clarificationPending(ClarificationPendingResponse(
             pending: PendingClarification(
@@ -258,7 +258,7 @@ final class ClarificationTests: XCTestCase {
             }
         }
 
-        let didStart = await viewModel.sendMessage("Continue")
+        let didStart = viewModel.seedLegacyResponseForTesting("Continue")
 
         XCTAssertTrue(didStart)
         XCTAssertEqual(streamClient.startedURLs.first?.path, "/api/chat/stream")
@@ -323,7 +323,7 @@ final class ClarificationTests: XCTestCase {
             }
         }
 
-        let didStart = await viewModel.sendMessage("Continue")
+        let didStart = viewModel.seedLegacyResponseForTesting("Continue")
         XCTAssertTrue(didStart)
         clarifyStreamClient.emit(.clarificationPending(ClarificationPendingResponse(
             pending: PendingClarification(
@@ -350,7 +350,7 @@ final class ClarificationTests: XCTestCase {
             return jsonResponse(#"{"session_id": "session-abc", "stream_id": "stream-123"}"#, for: request)
         }
 
-        let didStart = await viewModel.sendMessage("Continue")
+        let didStart = viewModel.seedLegacyResponseForTesting("Continue")
         XCTAssertTrue(didStart)
 
         viewModel.applyClarificationUpdate(

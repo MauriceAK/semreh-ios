@@ -18,12 +18,35 @@ struct DefaultModelPickerView: View {
     @State private var isSaving = false
     @State private var isSavingCustom = false
     @State private var saveError: String?
+    @State private var profile: String?
+    @State private var defaultProvider: String?
+    @State private var customProvider: String?
+    @State private var providerOptions: [String] = []
+    @State private var selectedProvider: String?
+    @State private var presentationGeneration = 0
+    @State private var pendingConfirmation: PendingModelConfirmation?
+
+    private struct PendingModelConfirmation {
+        let model: String
+        let provider: String
+        let isCustom: Bool
+        let expensive: Bool
+        let message: String
+    }
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 24) {
                     ModelPickerSearchField(text: $searchText)
+                    Text("Applies to new sessions in the running profile. Existing chats keep their model.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if let profile {
+                        Text("Profile: \(profile)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
 
                     if let saveError {
                         Text(saveError)
@@ -33,7 +56,14 @@ struct DefaultModelPickerView: View {
                     }
 
                     ModelPickerCard(title: String(localized: "Custom")) {
+                        Picker("Provider", selection: $customProvider) {
+                            ForEach(providerOptions, id: \.self) { provider in
+                                Text(provider).tag(Optional(provider))
+                            }
+                        }
+                        .disabled(isLoading || isSaving || pendingConfirmation != nil)
                         TextField("Custom model ID", text: $customModel)
+                            .disabled(isSaving || pendingConfirmation != nil)
                             .font(.subheadline)
                             .autocorrectionDisabled()
                             .textInputAutocapitalization(.never)
@@ -41,7 +71,7 @@ struct DefaultModelPickerView: View {
                             .padding(.vertical, 10)
                             .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
 
-                        Text("Type a model ID exactly as the server expects it.")
+                        Text("Choose a provider and enter its bare model ID. For legacy @provider:model text, select that provider above and enter only the model ID.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
 
@@ -49,9 +79,9 @@ struct DefaultModelPickerView: View {
                             String(localized: "Save Custom Model"),
                             isLoading: isSavingCustom
                         ) {
-                            Task { await save(customModel, isCustom: true) }
+                            Task { await save(customModel, provider: customProvider, isCustom: true) }
                         }
-                        .disabled(customModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSaving)
+                        .disabled(customModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSaving || isLoading || pendingConfirmation != nil || profile == nil || customProvider == nil)
                     }
 
                     modelListContent
@@ -61,14 +91,34 @@ struct DefaultModelPickerView: View {
             .navigationTitle("Default Model")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Refresh Models") { Task { await loadModels(refresh: true) } }
+                        .disabled(isLoading || isSaving || pendingConfirmation != nil)
+                }
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") {
                         dismiss()
                     }
+                    .disabled(isSaving)
                 }
             }
             .task {
-                await loadModels()
+                await loadModels(refreshAfterCached: true)
+            }
+            .interactiveDismissDisabled(isSaving)
+            .onDisappear { presentationGeneration += 1 }
+            .alert("Confirm Model Change", isPresented: Binding(
+                get: { pendingConfirmation != nil },
+                set: { if !$0 { pendingConfirmation = nil } }
+            ), presenting: pendingConfirmation) { pending in
+                Button("Confirm") {
+                    pendingConfirmation = nil
+                    Task { await save(pending.model, provider: pending.provider, isCustom: pending.isCustom,
+                                      confirmedNous: true, confirmExpensive: pending.expensive) }
+                }
+                Button("Cancel", role: .cancel) { pendingConfirmation = nil }
+            } message: { pending in
+                Text(pending.message)
             }
         }
         .adaptiveFormPresentation()
@@ -144,7 +194,7 @@ struct DefaultModelPickerView: View {
 
     private func modelRow(_ model: ModelCatalogOption) -> some View {
         Button {
-            Task { await save(model.id) }
+            Task { await save(model.id, provider: model.providerID) }
         } label: {
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {
@@ -163,9 +213,9 @@ struct DefaultModelPickerView: View {
 
                 Spacer(minLength: 12)
 
-                if isSaving && selectedModel == model.id {
+                if isSaving && selectedModel == model.id && selectedProvider == model.providerID {
                     ProgressView()
-                } else if model.id == defaultModel || model.id == selectedModel {
+                } else if model.id == defaultModel && model.providerID == defaultProvider {
                     Image(systemName: "checkmark")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(Color.accentColor)
@@ -177,9 +227,9 @@ struct DefaultModelPickerView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .disabled(isSaving)
+        .disabled(isSaving || isLoading || pendingConfirmation != nil || profile == nil)
         .accessibilityLabel(modelAccessibilityLabel(for: model))
-        .accessibilityValue(model.id == defaultModel || model.id == selectedModel ? "Selected" : "")
+        .accessibilityValue(model.id == defaultModel && model.providerID == defaultProvider ? "Selected" : "")
     }
 
     private func modelAccessibilityLabel(for model: ModelCatalogOption) -> String {
@@ -190,57 +240,101 @@ struct DefaultModelPickerView: View {
         return "\(model.displayName), \(model.id)"
     }
 
-    private func loadModels() async {
+    private func loadModels(refresh: Bool = false, refreshAfterCached: Bool = false) async {
         guard !isLoading else { return }
+        let generation = presentationGeneration
         isLoading = true
         errorMessage = nil
-
+        defer { if generation == presentationGeneration { isLoading = false } }
         do {
-            let response = try await APIClient(baseURL: server).models()
-            defaultModel = response.defaultModel ?? currentDefaultModel
-            groups = response.catalogGroups
+            let client = APIClient(baseURL: server)
+            let scope: String
+            if let profile {
+                scope = profile
+            } else {
+                let active = try await client.directActiveProfile()
+                guard let running = active.current?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !running.isEmpty else { throw DirectMainModelError.invalidSelection }
+                scope = running
+            }
+            let response = try await client.directModelOptions(profile: scope, refresh: refresh)
+            guard generation == presentationGeneration, !Task.isCancelled else { return }
+            profile = scope
+            applyCatalog(response)
+            // Preserve the previous cached-first, fresh-on-open behavior.
+            // Failure of the live catalog leaves the usable cached rows intact.
+            if refreshAfterCached,
+               let live = try? await client.directModelOptions(profile: scope, refresh: true) {
+                guard generation == presentationGeneration, !Task.isCancelled, profile == scope else { return }
+                applyCatalog(live)
+            }
         } catch {
+            guard generation == presentationGeneration, !Task.isCancelled else { return }
             errorMessage = error.localizedDescription
         }
-
-        isLoading = false
-
-        await overlayLiveModels()
     }
 
-    /// Overlays the active provider's live (uncached) list onto the cached
-    /// catalog so newly available models appear. Failures are silent by
-    /// design — the cached list stays as-is (issue #236).
-    private func overlayLiveModels() async {
-        guard let live = try? await APIClient(baseURL: server).modelsLive() else { return }
-        groups = groups.mergingLiveModels(from: live)
+    private func applyCatalog(_ response: DirectHermesModelOptions) {
+        defaultModel = response.model
+        defaultProvider = response.provider
+        if customProvider == nil { customProvider = response.provider }
+        var providers = (response.providers ?? []).filter { $0.authenticated != false }.compactMap(\.slug)
+        if let customProvider, !providers.contains(customProvider) { providers.append(customProvider) }
+        var seen = Set<String>()
+        providerOptions = providers.filter { !$0.isEmpty && seen.insert($0).inserted }
+        groups = response.catalogGroups
     }
 
-    private func save(_ model: String, isCustom: Bool = false) async {
+    private func save(_ model: String, provider: String?, isCustom: Bool = false,
+                      confirmedNous: Bool = false, confirmExpensive: Bool = false) async {
         let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-
+        guard !isSaving, !isLoading, pendingConfirmation == nil, !trimmed.isEmpty,
+              let provider, !provider.isEmpty, let profile else { return }
+        if isCustom && trimmed.hasPrefix("@") {
+            saveError = "Choose the provider above and enter only its model ID; legacy @provider:model syntax is not sent to Hermes."
+            return
+        }
+        if provider.lowercased() == "nous" && !confirmedNous {
+            pendingConfirmation = PendingModelConfirmation(model: trimmed, provider: provider,
+                isCustom: isCustom, expensive: false,
+                message: "Selecting Nous also lets Hermes configure currently unconfigured tools to use the Nous Tool Gateway. Existing explicit tool settings are preserved. Continue?")
+            return
+        }
+        let generation = presentationGeneration
         isSaving = true
         isSavingCustom = isCustom
         saveError = nil
         selectedModel = trimmed
-
+        selectedProvider = provider
+        defer {
+            if generation == presentationGeneration {
+                isSaving = false
+                isSavingCustom = false
+            }
+        }
         do {
-            let response = try await APIClient(baseURL: server).saveDefaultModel(model: trimmed)
-            if response.ok == true {
-                onSave(trimmed)
+            let result = try await APIClient(baseURL: server).directSetMainModel(
+                profile: profile, provider: provider, model: trimmed, confirmExpensive: confirmExpensive)
+            guard generation == presentationGeneration, !Task.isCancelled else { return }
+            switch result {
+            case .confirmationRequired(let message):
+                pendingConfirmation = PendingModelConfirmation(model: trimmed, provider: provider,
+                    isCustom: isCustom, expensive: true, message: message)
+            case .confirmed(let model, let provider):
+                defaultModel = model
+                defaultProvider = provider
+                onSave(model)
                 dismiss()
-            } else {
-                saveError = String(localized: "The server did not confirm the change.")
-                selectedModel = nil
             }
         } catch {
+            guard generation == presentationGeneration, !Task.isCancelled else { return }
             saveError = error.localizedDescription
             selectedModel = nil
+            selectedProvider = nil
+            // A lost ACK/readback can follow a committed write. Reconcile by
+            // reading the captured profile; never silently repeat the POST.
+            await loadModels()
         }
-
-        isSaving = false
-        isSavingCustom = false
     }
 
 }

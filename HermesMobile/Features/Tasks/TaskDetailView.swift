@@ -129,7 +129,8 @@ struct TaskDetailView: View {
                 saveTitle: String(localized: "Save"),
                 isSaving: viewModel.isMutating,
                 errorMessage: viewModel.actionErrorMessage,
-                deliveryOptions: viewModel.deliveryOptions
+                deliveryOptions: viewModel.deliveryOptions,
+                owningProfile: viewModel.owningProfile
             ) { draft in
                 let didUpdate = await viewModel.update(from: draft)
                 handleActionResult(didUpdate)
@@ -142,7 +143,7 @@ struct TaskDetailView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This removes the scheduled task from the Hermes server.")
+            Text("This removes the scheduled task, its saved output files, and its task notepad from Hermes. It does not promise to interrupt an already-running task.")
         }
         .task {
             await loadOutput()
@@ -296,7 +297,7 @@ struct TaskDetailView: View {
     }
 
     private var isActionDisabled: Bool {
-        viewModel.isMutating || viewModel.job.jobId == nil
+        viewModel.isMutating || viewModel.mutationNeedsInspection || viewModel.job.jobId == nil
     }
 
     private var pauseResumeTitle: String {

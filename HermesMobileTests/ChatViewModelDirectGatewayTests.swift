@@ -4,6 +4,191 @@ import XCTest
 
 @MainActor
 final class ChatViewModelDirectGatewayTests: APIClientTestCase {
+    func testFailedDirectQueueDrainAttemptsOnceRetainsTextAndWaitsForExplicitTrigger() async throws {
+        for failingMethod in ["session.create", "prompt.submit"] {
+            let fake = ChatDirectFakeTransport()
+            fake.setEmitsPromptEvents(false)
+            fake.setBlockingError(failingMethod, .server(code: 4009,
+                message: "fixture busy before dispatch", data: nil, method: failingMethod,
+                requestID: "fixture-rejection", server: nil))
+            let runtime = try makeRuntime(fake)
+            let vm = makeViewModel(client: makeClient { request in
+                // A runtime created before prompt rejection has a durable ID.
+                // Its explicit retry can resume and reconcile the stock tail.
+                guard request.httpMethod == "GET", request.url?.path == "/api/sessions/durable-1/messages" else {
+                    XCTFail("Unexpected queue REST request: \(request.httpMethod ?? "nil") \(request.url?.path ?? "nil")")
+                    throw URLError(.badURL)
+                }
+                XCTAssertEqual(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?
+                    .first { $0.name == "profile" }?.value, "work")
+                return apiTestJSONResponse(#"{"session_id":"durable-1","messages":[],"pagination":{"limit":120,"offset":0,"order":"latest","returned":0}}"#, for: request)
+            }, runtime: runtime, sessionID: nil)
+            // Exercise the retained queue entry/drain callbacks with a real
+            // direct-owned VM, not the legacy renderer setup seam.
+            XCTAssertTrue(vm.streamCoordinatorEnqueuePendingSteerLeftover("Keep the queued text"))
+            vm.streamCoordinatorDrainQueuedSlashMessageIfIdle()
+            await waitUntil { vm.sendErrorMessage != nil }
+            // A failure-driven recursive drain would issue more RPCs during
+            // this bounded quiescence window, even with synchronous mock errors.
+            for _ in 0..<10 { try await Task.sleep(for: .milliseconds(10)) }
+            XCTAssertEqual(fake.calls().filter { $0.method == failingMethod }.count, 1)
+            let statusCommand = try XCTUnwrap(SlashCommandCatalog.command(named: "status"))
+            let status = await vm.executeSlashCommand(statusCommand)
+            guard case .executed(let text) = status else { return XCTFail("Expected queue status") }
+            XCTAssertTrue(text?.contains("Queued messages: 1") == true)
+
+            fake.setBlockingError(failingMethod, nil)
+            vm.streamCoordinatorDrainQueuedSlashMessageIfIdle()
+            await waitUntil { vm.messages.contains { $0.role == "user" && $0.content == "Keep the queued text" } && !vm.isStartingChat }
+            let submits = fake.calls().filter { $0.method == "prompt.submit" }
+            XCTAssertEqual(submits.count, failingMethod == "prompt.submit" ? 2 : 1)
+            XCTAssertEqual(fields(submits.last?.params)?["text"], .string("Keep the queued text"))
+            let finalStatus = await vm.executeSlashCommand(statusCommand)
+            guard case .executed(let finalText) = finalStatus else { return XCTFail("Expected final queue status") }
+            XCTAssertTrue(finalText?.contains("Queued messages: 0") == true)
+            await vm.disposeDirectConversation()
+            await runtime.stop()
+        }
+    }
+
+    func testOrdinarySendTrimsTextAndAddsExactlyOneOptimisticUserWithoutWebUI() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let vm = makeViewModel(client: makeClient { _ in
+            XCTFail("A draft send must not use WebUI REST")
+            throw URLError(.badURL)
+        }, runtime: runtime, sessionID: nil)
+        let accepted = await vm.sendMessage("  Keep working  ")
+        XCTAssertTrue(accepted)
+        XCTAssertEqual(vm.messages.filter { $0.role == "user" }.map(\.content), ["Keep working"])
+        let submit = try XCTUnwrap(fake.calls().first { $0.method == "prompt.submit" })
+        XCTAssertEqual(fields(submit.params)?["text"], .string("Keep working"))
+        XCTAssertEqual(fields(submit.params)?["profile"], .string("work"))
+        XCTAssertEqual(fields(submit.params)?["session_id"], .string("runtime-1"))
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testDirectSelectedModelSurvivesDefiniteCreateFailureAndExplicitRetry() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let vm = makeViewModel(client: makeExistingComposerClient(requests: ChatDirectRequestRecorder()),
+                               runtime: runtime, sessionID: nil)
+        await vm.loadComposerConfiguration()
+        let option = try XCTUnwrap(vm.modelCatalogGroups.first?.models.last)
+        let selected = await vm.selectComposerModel(option)
+        XCTAssertTrue(selected)
+        fake.setBlockingError("session.create", .transport("fixture refused before creation"))
+        let first = await vm.sendMessage("First explicit attempt")
+        XCTAssertFalse(first)
+        XCTAssertEqual(vm.selectedModelID, option.id)
+        XCTAssertEqual(vm.selectedModelProviderID, option.providerID)
+        fake.setBlockingError("session.create", nil)
+        let retry = await vm.sendMessage("User explicitly retried")
+        XCTAssertTrue(retry)
+        let creates = fake.calls().filter { $0.method == "session.create" }
+        XCTAssertEqual(creates.count, 2)
+        for create in creates {
+            XCTAssertEqual(fields(create.params)?["model"], .string(option.id))
+            XCTAssertEqual(fields(create.params)?["provider"], .string(try XCTUnwrap(option.providerID)))
+            XCTAssertNil(fields(create.params)?["explicit_model_pick"], "WebUI flags are not direct contracts")
+        }
+        XCTAssertEqual(fake.calls().filter { $0.method == "prompt.submit" }.count, 1)
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testSceneActivationDuringDirectSubmitAcknowledgementPreservesNewResponse() async throws {
+        let fake = ChatDirectFakeTransport()
+        let gate = ChatDirectAsyncGate()
+        fake.setPromptSubmitGate(gate)
+        let runtime = try makeRuntime(fake)
+        let vm = makeViewModel(client: makeClient { _ in
+            XCTFail("An active submit must not reload a stale REST tail")
+            throw URLError(.badURL)
+        }, runtime: runtime, sessionID: nil)
+        let sending = Task { await vm.sendMessage("New local prompt") }
+        await waitUntil { vm.isStartingChat && vm.hasStreamingAssistantMessageContent }
+        let rows = vm.messages
+        let anchor = vm.streamingAssistantMessageID
+        await vm.refreshAfterSceneActivation()
+        XCTAssertEqual(vm.messages, rows)
+        XCTAssertEqual(vm.streamingAssistantMessageID, anchor)
+        await gate.release()
+        let accepted = await sending.value
+        XCTAssertTrue(accepted)
+        XCTAssertEqual(vm.messages.filter { $0.role == "user" }.map(\.content), ["New local prompt"])
+        XCTAssertEqual(fake.calls().filter { $0.method == "prompt.submit" }.count, 1)
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testOrdinarySendDefiniteCreateFailureRollsBackWithoutTunnelBlameOrLegacyFallback() async throws {
+        let fake = ChatDirectFakeTransport()
+        fake.setBlockingError("session.create", .transport("fixture connection unavailable"))
+        let runtime = try makeRuntime(fake)
+        let vm = makeViewModel(client: makeClient { _ in
+            XCTFail("A failed direct send must not use WebUI")
+            throw URLError(.badURL)
+        }, runtime: runtime, sessionID: nil)
+        let accepted = await vm.sendMessage("Keep working")
+        XCTAssertFalse(accepted)
+        XCTAssertTrue(vm.messages.isEmpty)
+        XCTAssertNotNil(vm.sendErrorMessage)
+        XCTAssertFalse(vm.sendErrorMessage?.contains("hermes-webui") == true)
+        XCTAssertFalse(fake.calls().contains { $0.method == "prompt.submit" })
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testOrdinarySendInvalidAcknowledgementRetainsUncertaintyInsteadOfUnsafeRollback() async throws {
+        let fake = ChatDirectFakeTransport()
+        fake.setPromptSubmitResponse(.object([:]))
+        let runtime = try makeRuntime(fake)
+        let vm = makeViewModel(client: makeClient { _ in throw URLError(.badURL) }, runtime: runtime, sessionID: nil)
+        _ = await vm.sendMessage("Keep uncertain text")
+        XCTAssertEqual(vm.messages.filter { $0.role == "user" }.map(\.content), ["Keep uncertain text"])
+        XCTAssertTrue(vm.directConversationHasPromptDeliveryUncertainty)
+        let again = await vm.sendMessage("Do not automatically retry")
+        XCTAssertFalse(again)
+        XCTAssertEqual(fake.calls().filter { $0.method == "prompt.submit" }.count, 1)
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testVoiceNoteRefusesWithoutTranscriptionUploadOrPromptWhileDictationRemainsSeparate() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let vm = makeViewModel(client: makeClient { _ in
+            XCTFail("Unsupported voice attachment must not transcribe or upload")
+            throw URLError(.badURL)
+        }, runtime: runtime, sessionID: nil)
+        let accepted = await vm.sendVoiceNote(audioData: Data("recording".utf8), filename: "voice.m4a")
+        XCTAssertFalse(accepted)
+        XCTAssertTrue(vm.messages.isEmpty)
+        XCTAssertTrue(fake.calls().isEmpty)
+        XCTAssertFalse(vm.isSendingVoiceNote)
+        XCTAssertEqual(vm.sendErrorMessage, "Direct Hermes voice attachments are not available yet.")
+        await runtime.stop()
+    }
+
+    func testDirectDuplicateAttachmentNamesKeepIndependentSelectionsAndStageEachOnce() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let vm = makeViewModel(client: makeClient { _ in throw URLError(.badURL) }, runtime: runtime, sessionID: nil)
+        await vm.uploadAttachment(data: Data("one".utf8), filename: "same.txt")
+        await vm.uploadAttachment(data: Data("two".utf8), filename: "same.txt")
+        XCTAssertEqual(vm.directPendingAttachments.count, 2)
+        XCTAssertEqual(Set(vm.directPendingAttachments.map(\.id)).count, 2)
+        let accepted = await vm.sendMessage("Compare these")
+        XCTAssertTrue(accepted)
+        XCTAssertEqual(fake.calls().filter { $0.method == "file.attach" }.count, 2)
+        XCTAssertEqual(fake.calls().filter { $0.method == "prompt.submit" }.count, 1)
+        XCTAssertTrue(vm.directPendingAttachments.isEmpty)
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
     func testPromptUncertaintyMarkerWriteFailureIsDefiniteNondispatch() async throws {
         let fake = ChatDirectFakeTransport()
         let runtime = try makeRuntime(fake)
@@ -2606,6 +2791,8 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
     private var generation = 0
     private var connected = false
     private var steerResponse: JSONValue = .object(["status": .string("accepted")])
+    private var promptSubmitResponse: JSONValue = .object(["status": .string("streaming")])
+    private var emitsPromptEvents = true
     private var resumeResponse: JSONValue = .object([
         "session_id": .string("runtime-1"),
         "session_key": .string("durable-1"),
@@ -2655,6 +2842,14 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
 
     func setSteerResponse(_ response: JSONValue) {
         withLock { steerResponse = response }
+    }
+
+    func setPromptSubmitResponse(_ response: JSONValue) {
+        withLock { promptSubmitResponse = response }
+    }
+
+    func setEmitsPromptEvents(_ enabled: Bool) {
+        withLock { emitsPromptEvents = enabled }
     }
 
     func setResumeResponse(_ response: JSONValue) {
@@ -2791,12 +2986,12 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
                 return (reasoningSetResponse, reasoningSetResponse, reasoningSetGate,
                         reasoningSetShouldFail, nil, params)
             case "prompt.submit":
-                let sink = self.sink
+                let sink = emitsPromptEvents ? self.sink : nil
                 Task {
                     sink?(ChatDirectEventFactory.event(sessionID: "runtime-1", type: "message.start", sequence: 1))
                     sink?(ChatDirectEventFactory.event(sessionID: "runtime-1", type: "message.delta", sequence: 2, payload: ["text": .string("streamed answer")]))
                 }
-                return (.object(["status": .string("streaming")]), nil, promptSubmitGate, false, nil, nil)
+                return (promptSubmitResponse, nil, promptSubmitGate, false, nil, nil)
             case "session.steer":
                 return (steerResponse, nil, nil, false, nil, nil)
             case "session.interrupt":

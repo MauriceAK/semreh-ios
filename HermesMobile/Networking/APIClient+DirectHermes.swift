@@ -74,11 +74,12 @@ private struct DirectHermesPasswordLoginRequest: Encodable {
 }
 
 extension APIClient {
-    func directModelOptions(profile: String) async throws -> DirectHermesModelOptions {
+    func directModelOptions(profile: String, refresh: Bool = false) async throws -> DirectHermesModelOptions {
         var path = URLComponents()
         path.path = "/api/model/options"
         path.queryItems = [URLQueryItem(name: "profile", value: profile),
                           URLQueryItem(name: "explicit_only", value: "true")]
+        if refresh { path.queryItems?.append(URLQueryItem(name: "refresh", value: "true")) }
         guard let encodedPath = path.string else { throw APIError.invalidServerURL }
         let data = try await sendDirectData(path: encodedPath, method: "GET", classifyStructuredAuthExpiry: true)
         return try decode(DirectHermesModelOptions.self, from: data)

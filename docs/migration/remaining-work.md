@@ -19,13 +19,13 @@ Preserve completed Luna work. Root owns integration, notes and native execution.
   recovery without losing delivery warnings. Astra Low worker scopes next cut.
   Check canonical IDs, scoped markers and conflict handling; real compression
   required before claiming continuation acceptance.
-- [ ] **Continuity-sidecar retirement:** remove callers, old auth/config hooks and
+- [x] **Continuity-sidecar retirement:** remove callers, old auth/config hooks and
   implementation while retaining direct credentials/accounts. Astra Low owner.
   Check direct login/restore/logout and absence of executable sidecar fallback.
-  Code ready: implementation/settings/auth hooks removed, compatibility regression
-  added; integrated build pending. Old account metadata/keys preserved.
-  Successor integrated build passed; focused integration152/0/0 includes auth,
-  branch/store and skills checks. Broad cutover/full/live acceptance still open.
+  Implementation/settings/auth hooks removed, compatibility regression added;
+  integrated focused152/0/0 and successor full suites passed. Source search again
+  finds no OfficialHermesContinuity/continuitySidecar implementation or callers.
+  Old account metadata/keys preserved. Broader WebUI cutover remains separate.
 - [ ] **Legacy chat/SSE retirement:** remove replaced chat/event/prompt branches,
   obsolete DTOs/tests/fixtures and unused package references after caller removal.
   Check direct send/recovery/blocking prompts, build, and repository caller search.
@@ -42,6 +42,11 @@ Preserve completed Luna work. Root owns integration, notes and native execution.
   Check exact stock request/response and visible behavior; do not invent routes.
   Skills list/toggle/SKILL.md and active-profile UI propagation authored. Linked
   files explicitly unavailable pending parity decision; no legacy detail request.
+  Skills screen migration does not include chat skill-shortcut execution:
+  executeSkillShortcutCommand/searchSkills still explicitly refuse direct mode.
+  That pre-existing gap is a separate retained requirement, not accepted removal.
+  Source-backed invocation contract is being mapped; literal slash text alone
+  must not be called verified skill activation.
 - [ ] **Session conveniences:** remaining duplicate/move/export and deletion
   disposition; search, rename, pin, archive and counts already have verified work.
   Check exact profile/identity, rollback and no ambiguous automatic retry.
@@ -142,6 +147,28 @@ them to a proven product or infrastructure cause.
 - [ ] Physical iPhone acceptance; performance issues in `performance-followups.md`.
 
 ## Cadence
+
+Latest native checkpoint: ordinary send fallback retirement, scoped cron mutations,
+and main-model picker passed signed `slice4-send-cron-model-build-v4` and
+`slice4-send-cron-model-full-v2`: 2352 passed, zero failed, 14 intentional skips.
+Strict code signing and Simulator launch46616 passed. Targeted audit-v1 scanned
+9649 files with zero flags and both exported test consoles; unselected evidence,
+opaque secrets and unexported compressed contents remain outside that claim.
+Retained build-v1/v2 compiler errors and full-v1 39 failures were corrected;
+renderer-only setups now explicitly seed state, not the removed WebUI send API.
+Direct send regressions exercise real direct orchestration with mock transport.
+This is not live model/cron execution or physical-device acceptance.
+
+Newly confirmed recovery gap: stock REST returns durable rows, not live partial
+assistant text. `session.resume.inflight` carries that text without an atomic
+event watermark; blindly appending later deltas can duplicate it. Completed
+durable interim assistant rows must not absorb subsequent stream segments.
+Investigate proven warm cursor replay separately; cold prefix/corrections recovery
+remains unaccepted. No duplicated snapshot UI or unsafe last-row merge approved.
+Skill activation also remains open: raw skill-content REST omits runtime setup,
+configuration, supporting files and optional shell preprocessing. command.dispatch
+is not profile-bound and resolves executable quick commands/plugins before skills.
+Do not label raw text submission equivalent to TUI skill activation.
 
 Current next cohort: direct file browser/preview and built-in memory/SOUL saves
 are authored and independently reviewed, awaiting native integration alongside

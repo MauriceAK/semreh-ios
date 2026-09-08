@@ -17,6 +17,35 @@ struct TasksView: View {
 
     var body: some View {
         content
+            .safeAreaInset(edge: .bottom) {
+                if viewModel.creationNeedsInspection {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(viewModel.actionErrorMessage ?? "Inspect saved tasks before creating another task.")
+                        Button("Inspect tasks in \(viewModel.creationInspectionProfile ?? profile)") {
+                            Task {
+                                await viewModel.inspectCreationOutcome()
+                                if let error = viewModel.lastError { onAPIError(error) }
+                            }
+                        }
+                        .disabled(viewModel.isInspectingCreation)
+                        if viewModel.creationInspectionReady {
+                            DisclosureGroup("Saved tasks (\(viewModel.creationInspectionJobs.count))") {
+                                ScrollView {
+                                    VStack(alignment: .leading) {
+                                        ForEach(viewModel.creationInspectionJobs) { job in
+                                            Text("\(job.displayName) — \(job.jobId ?? "Unknown ID")")
+                                        }
+                                    }
+                                }.frame(maxHeight: 140)
+                            }
+                            Text("This snapshot does not guarantee an earlier request cannot finish later. Continuing allows new tasks; it does not retry the previous request.")
+                            Button("I inspected these tasks — allow new tasks") {
+                                viewModel.acknowledgeCreationInspection()
+                            }
+                        }
+                    }.font(.footnote).padding().background(.regularMaterial)
+                }
+            }
             .scrollContentBackground(.hidden)
             .background { SemrehBackdrop().ignoresSafeArea() }
             .navigationTitle("Tasks")
@@ -28,7 +57,7 @@ struct TasksView: View {
                     } label: {
                         Label("New Task", systemImage: "plus")
                     }
-                    .disabled(viewModel.isMutating)
+                    .disabled(viewModel.isMutating || viewModel.creationNeedsInspection)
 
                     Button {
                         Task { await loadTasks() }
@@ -45,7 +74,7 @@ struct TasksView: View {
             .sheet(isPresented: $isPresentingCreateTask) {
                 CronJobEditorSheet(
                     title: String(localized: "New Task"),
-                    draft: CronJobEditorDraft(),
+                    draft: CronJobEditorDraft(profile: profile),
                     saveTitle: String(localized: "Create"),
                     isSaving: viewModel.isMutating,
                     errorMessage: viewModel.actionErrorMessage,
@@ -257,6 +286,7 @@ struct CronJobEditorSheet: View {
     /// The draft's deliver value when the editor opened; stable across
     /// re-inits because callers rebuild the same draft.
     private let initialDeliver: String
+    private let owningProfile: String?
 
     /// Picker rows recomputed from the live draft so a value typed while the
     /// options were still loading keeps a matching row, and the initial
@@ -277,6 +307,7 @@ struct CronJobEditorSheet: View {
         isSaving: Bool,
         errorMessage: String?,
         deliveryOptions: [CronDeliveryOption]? = nil,
+        owningProfile: String? = nil,
         onSave: @escaping (CronJobEditorDraft) async -> Bool
     ) {
         self.title = title
@@ -286,7 +317,10 @@ struct CronJobEditorSheet: View {
         self.onSave = onSave
         self.serverDeliveryOptions = deliveryOptions
         self.initialDeliver = draft.deliver
-        _draft = State(initialValue: draft)
+        self.owningProfile = owningProfile
+        var scopedDraft = draft
+        if let owningProfile { scopedDraft.profile = owningProfile }
+        _draft = State(initialValue: scopedDraft)
     }
 
     var body: some View {
@@ -324,6 +358,9 @@ struct CronJobEditorSheet: View {
                     }
 
                     Toggle("Toast Notifications", isOn: $draft.toastNotifications)
+                        .disabled(true)
+                    Text("Toast notifications are unavailable on this Hermes server. This setting is not sent or applied.")
+                        .font(.footnote).foregroundStyle(.secondary)
                 }
 
                 Section("Configuration") {
@@ -340,9 +377,15 @@ struct CronJobEditorSheet: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
 
-                    TextField("Profile", text: $draft.profile)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
+                    if let owningProfile {
+                        Text("Owning profile: \(owningProfile)")
+                        Text("Moving a task between profiles is not available here.").font(.footnote).foregroundStyle(.secondary)
+                    } else {
+                        TextField("Owning Profile", text: $draft.profile)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                        Text("The task is stored in this profile. Select that profile to view it after creation.").font(.footnote).foregroundStyle(.secondary)
+                    }
                 }
 
                 if let formMessage {
