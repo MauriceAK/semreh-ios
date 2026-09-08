@@ -188,10 +188,6 @@ final class ChatScrollPolicyTests: XCTestCase {
         )
     }
 
-    func testLeavingAChatKeepsTheLiveStreamAttached() {
-        XCTAssertTrue(ChatNavigationLifecyclePolicy.shouldKeepLiveStreamOnDisappear)
-    }
-
     func testBottomThresholdLoosensWhileStreaming() {
         XCTAssertEqual(
             ChatScrollPolicy.bottomThreshold(isStreaming: false),

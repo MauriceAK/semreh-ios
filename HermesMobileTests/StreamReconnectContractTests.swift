@@ -1,78 +1,9 @@
 import XCTest
 @testable import HermesMobile
 
-/// Contract tests for the riskiest streaming paths: disconnect → reconnect
-/// with replayed tokens, server restart mid-stream, and replay of content the
-/// client already rendered. Each test drives a real `ChatViewModel` (which
-/// owns the replay dedup from PR #211) and a real `ChatStreamCoordinator`
-/// through a full scripted wire sequence via `ScriptedSSEStreamingClient`.
+/// Contract tests for direct reconnect and canonical transcript recovery.
 final class StreamReconnectContractTests: APIClientTestCase {
-    // MARK: - Scenario 1: reconnect with overlapping replayed tokens (#201 regression guard)
-
-    @MainActor
-    func testReconnectWithOverlappingReplayRendersEachTokenExactlyOnce() async throws {
-        let streamClient = ScriptedSSEStreamingClient(connectionScripts: [
-            [
-                .init(.token("Alpha "), lastEventID: "stream-123:1"),
-                .init(.token("bravo "), lastEventID: "stream-123:2"),
-                .init(.transportError("The network connection was lost."))
-            ],
-            [
-                .init(.token("Alpha "), lastEventID: "stream-123:1"),
-                .init(.token("bravo "), lastEventID: "stream-123:2"),
-                .init(.token("charlie "), lastEventID: "stream-123:3"),
-                .init(.token("delta."), lastEventID: "stream-123:4"),
-                .init(.done(DoneStreamEvent())),
-                .init(.streamEnd)
-            ]
-        ])
-        let viewModel = try makeViewModel(streamClient: streamClient) { request in
-            switch request.url?.path {
-            case "/api/chat/stream/status":
-                return apiTestJSONResponse(
-                    #"{"active": false, "stream_id": "stream-123", "replay_available": true}"#,
-                    for: request
-                )
-            case "/api/session":
-                return apiTestJSONResponse(
-                    #"{"session": {"session_id": "session-abc", "title": "Planning"}}"#,
-                    for: request
-                )
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
-
-        let didStart = await viewModel.seedLegacyResponseForTesting("Keep working")
-        XCTAssertTrue(didStart)
-        streamClient.playArmedConnectionScript()
-
-        XCTAssertEqual(assistantContents(of: viewModel), ["Alpha bravo "])
-        XCTAssertTrue(viewModel.isActiveStreamConnectionSuspended)
-
-        // The transport error schedules an async reconnect; the status probe
-        // reports the stream inactive with a replay journal available.
-        try await waitUntil { streamClient.startedURLs.count == 2 }
-
-        let replayURL = try XCTUnwrap(streamClient.startedURLs.last)
-        let query = queryDictionary(of: replayURL)
-        XCTAssertEqual(replayURL.path, "/api/chat/stream")
-        XCTAssertEqual(query["stream_id"], "stream-123")
-        XCTAssertEqual(query["replay"], "1")
-        XCTAssertEqual(query["after_seq"], "2")
-
-        streamClient.playArmedConnectionScript()
-
-        XCTAssertEqual(assistantContents(of: viewModel), ["Alpha bravo charlie delta."])
-        XCTAssertNil(viewModel.activeStreamID)
-        XCTAssertEqual(viewModel.activeStreamRecoveryState, .idle)
-        XCTAssertFalse(viewModel.isActiveStreamConnectionSuspended)
-        XCTAssertNil(viewModel.sendErrorMessage)
-        XCTAssertEqual(streamClient.droppedEventCount, 0)
-    }
-
-    // MARK: - Scenario 2: missing terminal recovered from canonical direct state
+    // MARK: - Missing terminal recovered from canonical direct state
 
     @MainActor
     func testDirectDisconnectBeforeTerminalReplacesPartialWithCanonicalCompletedAnswer() async throws {
@@ -136,9 +67,6 @@ final class StreamReconnectContractTests: APIClientTestCase {
         await viewModel.disposeDirectConversation()
         await runtime.stop()
     }
-
-    // MARK: - Scenario 3: replay arriving after the response already rendered locally
-
 
     @MainActor
     func testDirectRunningResumePreservesCompletedAssistantSegmentWithoutSubmittingDuplicate() async throws {
@@ -220,53 +148,14 @@ final class StreamReconnectContractTests: APIClientTestCase {
         await runtime.stop()
     }
 
-    @MainActor
-    private func makeViewModel(
-        streamClient: ScriptedSSEStreamingClient,
-        handler: @escaping (URLRequest) throws -> (HTTPURLResponse, Data)
-    ) throws -> ChatViewModel {
-        MockURLProtocol.requestHandler = handler
-
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [MockURLProtocol.self]
-        let urlSession = URLSession(configuration: configuration)
-        let server = try XCTUnwrap(URL(string: "https://example.test"))
-        let client = APIClient(baseURL: server, session: urlSession)
-
-        let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
-        let session = try decoder.decode(
-            SessionSummary.self,
-            from: Data("""
-            {
-              "session_id": "session-abc",
-              "title": "Planning",
-              "workspace": "/tmp/workspace"
-            }
-            """.utf8)
-        )
-
-        let viewModel = ChatViewModel(
-            session: session,
-            server: server,
-            client: client,
-            streamClient: streamClient,
-            btwStreamClient: ScriptedSSEStreamingClient()
-        )
-        streamClient.flushPendingStreamingContent = { [weak viewModel] in
-            viewModel?.flushPendingStreamingContent()
-        }
-        return viewModel
+    private func queryDictionary(of url: URL) -> [String: String] {
+        let queryItems = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        return Dictionary(uniqueKeysWithValues: queryItems.map { ($0.name, $0.value ?? "") })
     }
 
     @MainActor
     private func assistantContents(of viewModel: ChatViewModel) -> [String] {
         viewModel.messages.filter { $0.role == "assistant" }.compactMap(\.content)
-    }
-
-    private func queryDictionary(of url: URL) -> [String: String] {
-        let queryItems = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
-        return Dictionary(uniqueKeysWithValues: queryItems.map { ($0.name, $0.value ?? "") })
     }
 
     @MainActor

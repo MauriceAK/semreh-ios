@@ -356,16 +356,8 @@ final class OpenChatSessionStore {
 
     func liveStreamIDs(for server: URL) -> [String] {
         _ = liveOwnershipGeneration
-        let serverKey = OpenChatSessionKey.normalizedServer(server)
-        return viewModels
-            .compactMap { key, viewModel in
-                // This list feeds the legacy sidebar status watcher. Direct UI
-                // liveness values are not WebUI RPC IDs and must never go there.
-                guard key.server == serverKey, !viewModel.usesDirectGateway else { return nil }
-                return viewModel.activeStreamID?.trimmingCharacters(in: .whitespacesAndNewlines)
-            }
-            .filter { !$0.isEmpty }
-            .sorted()
+        _ = server
+        return []
     }
 
     #if DEBUG
@@ -501,7 +493,6 @@ final class OpenChatSessionStore {
         // Stop owned work before dropping the store's strong reference. These APIs
         // are also used by navigation/reset paths and avoid relying on deinit timing.
         viewModel.stopSessionEventSync()
-        viewModel.cancelOwnedStreamStatusWatch()
         viewModel.cleanupPollingTasks()
         viewModel.invalidateDirectConversation()
         Task { await viewModel.disposeDirectConversation() }
@@ -555,23 +546,5 @@ private struct OpenChatSessionKey: Hashable {
 
     static func normalizedServer(_ server: URL) -> String {
         server.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-    }
-}
-
-enum ChatNavigationLifecyclePolicy {
-    static var shouldKeepLiveStreamOnDisappear: Bool { true }
-}
-
-@MainActor
-enum ChatNavigationLifecycle {
-    static func applyViewDisappear(to viewModel: ChatViewModel) {
-        viewModel.stopListening()
-        guard ChatNavigationLifecyclePolicy.shouldKeepLiveStreamOnDisappear else {
-            viewModel.cancelStreamReconnectRetry()
-            viewModel.suspendStreamForNavigation()
-            viewModel.cleanupPollingTasks()
-            return
-        }
-        viewModel.ensureOwnedStreamStatusWatch()
     }
 }

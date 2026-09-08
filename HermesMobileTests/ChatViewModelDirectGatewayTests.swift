@@ -4,6 +4,59 @@ import XCTest
 
 @MainActor
 final class ChatViewModelDirectGatewayTests: APIClientTestCase {
+    func testQueuedMessageDrainsOnceAfterAuthoritativeDirectCompletion() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let vm = makeViewModel(client: makeClient { request in
+            guard request.httpMethod == "GET",
+                  request.url?.path == "/api/sessions/durable-1/messages" else {
+                XCTFail("Unexpected queue reconciliation request: \(request.httpMethod ?? "nil") \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+            XCTAssertEqual(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?
+                .first { $0.name == "profile" }?.value, "work")
+            return apiTestJSONResponse(
+                #"{"session_id":"durable-1","messages":[{"id":1,"role":"user","content":"Original turn"},{"id":2,"role":"assistant","content":"First answer"}],"pagination":{"limit":120,"offset":0,"order":"latest","returned":2}}"#,
+                for: request
+            )
+        }, runtime: runtime, sessionID: nil)
+
+        let accepted = await vm.sendMessage("Original turn")
+        XCTAssertTrue(accepted)
+        await waitUntil { vm.activeStreamID != nil && vm.hasStreamingAssistantMessageContent }
+
+        let queued = await vm.submitStreamingMessage("Queued next turn", behavior: .queue)
+        guard case .executed(let message) = queued else {
+            XCTFail("Expected queue acknowledgement")
+            return
+        }
+        XCTAssertTrue(message?.contains("#1") == true)
+        XCTAssertEqual(fake.calls().filter { $0.method == "prompt.submit" }.count, 1)
+
+        fake.emit(ChatDirectEventFactory.event(
+            sessionID: "runtime-1",
+            type: "message.complete",
+            sequence: 3,
+            payload: ["text": .string("First answer"), "status": .string("complete")]
+        ))
+
+        await waitUntil {
+            fake.calls().filter { $0.method == "prompt.submit" }.count == 2
+                && vm.messages.filter { $0.role == "user" }.map(\.content)
+                    == ["Original turn", "Queued next turn"]
+        }
+        let submits = fake.calls().filter { $0.method == "prompt.submit" }
+        XCTAssertEqual(fields(submits[1].params)?["text"], .string("Queued next turn"))
+        XCTAssertEqual(vm.messages.filter { $0.role == "user" }.map(\.content),
+                       ["Original turn", "Queued next turn"])
+        XCTAssertTrue(vm.messages.contains { $0.role == "assistant" && $0.content == "First answer" })
+        for _ in 0..<10 { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(fake.calls().filter { $0.method == "prompt.submit" }.count, 2)
+
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
     func testFailedDirectQueueDrainAttemptsOnceRetainsTextAndWaitsForExplicitTrigger() async throws {
         for failingMethod in ["session.create", "prompt.submit"] {
             let fake = ChatDirectFakeTransport()
@@ -25,8 +78,8 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
             }, runtime: runtime, sessionID: nil)
             // Exercise the retained queue entry/drain callbacks with a real
             // direct-owned VM, not the legacy renderer setup seam.
-            XCTAssertTrue(vm.streamCoordinatorEnqueuePendingSteerLeftover("Keep the queued text"))
-            vm.streamCoordinatorDrainQueuedSlashMessageIfIdle()
+            XCTAssertEqual(vm.enqueueMessageForTesting("Keep the queued text"), 1)
+            vm.drainQueuedMessagesForTesting()
             await waitUntil { vm.sendErrorMessage != nil }
             // A failure-driven recursive drain would issue more RPCs during
             // this bounded quiescence window, even with synchronous mock errors.
@@ -38,7 +91,7 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
             XCTAssertTrue(text?.contains("Queued messages: 1") == true)
 
             fake.setBlockingError(failingMethod, nil)
-            vm.streamCoordinatorDrainQueuedSlashMessageIfIdle()
+            vm.drainQueuedMessagesForTesting()
             await waitUntil { vm.messages.contains { $0.role == "user" && $0.content == "Keep the queued text" } && !vm.isStartingChat }
             let submits = fake.calls().filter { $0.method == "prompt.submit" }
             XCTAssertEqual(submits.count, failingMethod == "prompt.submit" ? 2 : 1)

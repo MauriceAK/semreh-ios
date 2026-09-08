@@ -73,20 +73,6 @@ final class ContractReadinessTests: XCTestCase {
                 path: "/api/chat/stream",
                 query: ["stream_id": "stream-123"]
             ),
-            .init(
-                name: "chat cancel",
-                method: "GET",
-                endpoint: .chatCancel(streamID: "stream-123"),
-                path: "/api/chat/cancel",
-                query: ["stream_id": "stream-123"]
-            ),
-            .init(
-                name: "chat stream status",
-                method: "GET",
-                endpoint: .chatStreamStatus(streamID: "stream-123"),
-                path: "/api/chat/stream/status",
-                query: ["stream_id": "stream-123"]
-            ),
             .init(name: "chat steer", method: "POST", endpoint: .chatSteer, path: "/api/chat/steer"),
             .init(name: "goal", method: "POST", endpoint: .submitGoal, path: "/api/goal"),
             .init(name: "btw", method: "POST", endpoint: .btw, path: "/api/btw"),

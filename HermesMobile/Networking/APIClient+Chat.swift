@@ -16,14 +16,6 @@ extension APIClient {
         return components.url ?? url
     }
 
-    func cancelChat(streamID: String) async throws -> ChatCancelResponse {
-        return try await send(endpoint: .chatCancel(streamID: streamID), method: "GET")
-    }
-
-    func chatStreamStatus(streamID: String) async throws -> ChatStreamStatusResponse {
-        return try await send(endpoint: .chatStreamStatus(streamID: streamID), method: "GET")
-    }
-
     func steerChat(sessionID: String, text: String) async throws -> ChatSteerResponse {
         try await send(
             endpoint: .chatSteer,
@@ -76,17 +68,6 @@ extension APIClient {
 
 }
 
-private struct ChatStartRequest: Encodable {
-    let sessionId: String
-    let message: String
-    let workspace: String?
-    let model: String?
-    let modelProvider: String?
-    let profile: String?
-    let explicitModelPick: Bool?
-    let attachments: [JSONValue]?
-}
-
 private struct ChatSteerRequest: Encodable {
     let sessionId: String
     let text: String
@@ -99,18 +80,6 @@ private struct GoalSubmissionRequest: Encodable {
     let model: String?
     let modelProvider: String?
     let profile: String?
-}
-
-private struct ApprovalRespondRequest: Encodable {
-    let sessionId: String
-    let choice: ApprovalChoice
-    let approvalId: String?
-}
-
-private struct ClarificationRespondRequest: Encodable {
-    let sessionId: String
-    let response: String
-    let clarifyId: String?
 }
 
 private struct BtwRequest: Encodable {

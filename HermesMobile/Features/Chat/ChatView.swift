@@ -504,7 +504,6 @@ struct ChatView: View {
     @State private var shouldRestoreComposerFocusAfterPreview = false
     @State private var responseCompletionNotificationTracker = ResponseCompletionNotificationTracker()
     @State private var responseCompletionBackgroundTask: UIBackgroundTaskIdentifier = .invalid
-    @State private var activeStreamStatusRefreshTask: Task<Void, Never>?
     @State private var foregroundRefreshTask: Task<Void, Never>?
     @State private var initialAttachments: [SharedAttachmentImport]
     @State private var didUploadInitialAttachments = false
@@ -950,20 +949,17 @@ struct ChatView: View {
                 persistTranscriptRestore()
                 foregroundRefreshTask?.cancel()
                 foregroundRefreshTask = nil
-                activeStreamStatusRefreshTask?.cancel()
-                activeStreamStatusRefreshTask = nil
                 guard !disablesExternalLifecycle else { return }
                 // Stop the per-session event stream when the chat is not on
                 // screen. Background sync for every retained conversation caused
                 // main-thread disk I/O and transcript reloads (build 19 lag).
                 viewModel.stopSessionEventSync()
-                ChatNavigationLifecycle.applyViewDisappear(to: viewModel)
+                viewModel.stopListening()
             }
             .onAppear {
                 viewModel.setTranscriptPresentationActive(true)
                 guard !disablesExternalLifecycle else { return }
                 foregroundRefreshTask?.cancel()
-                viewModel.cancelOwnedStreamStatusWatch()
                 foregroundRefreshTask = Task { @MainActor in
                     guard !Task.isCancelled, scenePhase == .active else { return }
                     await viewModel.reconnectStreamIfNeeded(modelContext: modelContext)
@@ -2265,46 +2261,17 @@ struct ChatView: View {
     }
 
     private func handleActiveStreamChange() {
-        guard let activeStreamID = viewModel.activeStreamID else {
-            activeStreamStatusRefreshTask?.cancel()
-            activeStreamStatusRefreshTask = nil
+        guard viewModel.activeStreamID == nil else { return }
 
-            if responseCompletionNotificationTracker.shouldEndBackgroundTaskOnStreamInactive(
-                completionTrigger: viewModel.responseCompletionHapticTrigger
-            ) {
-                endResponseCompletionBackgroundTask()
-            }
-
-            // The agent may have edited files this turn, so refresh git state (status,
-            // ahead/behind, branch) once the response finishes — keeps the toolbar badge,
-            // Changes row, and commit surfaces in sync without re-entering the chat.
-            // Run unconditionally: refreshAfterExternalMutation re-checks /api/git-info first,
-            // so it also detects a repo the agent just created (git init/clone) mid-turn.
-            Task { await gitAvailabilityViewModel.refreshAfterExternalMutation() }
-            return
+        if responseCompletionNotificationTracker.shouldEndBackgroundTaskOnStreamInactive(
+            completionTrigger: viewModel.responseCompletionHapticTrigger
+        ) {
+            endResponseCompletionBackgroundTask()
         }
 
-        startActiveStreamStatusRefreshTask(streamID: activeStreamID)
-    }
-
-    private func startActiveStreamStatusRefreshTask(streamID: String) {
-        guard !viewModel.usesDirectGateway else { return }
-        activeStreamStatusRefreshTask?.cancel()
-        activeStreamStatusRefreshTask = Task { @MainActor in
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
-                guard !Task.isCancelled else { return }
-                guard viewModel.activeStreamID == streamID else { return }
-
-                if viewModel.isActiveStreamConnectionSuspended {
-                    continue
-                }
-
-                await viewModel.recoverStaleActiveStreamIfNeeded(modelContext: modelContext)
-
-                guard viewModel.activeStreamID == streamID else { return }
-            }
-        }
+        // The agent may have edited files this turn, so refresh git state once
+        // the response finishes.
+        Task { await gitAvailabilityViewModel.refreshAfterExternalMutation() }
     }
 
     private func handleResponseCompletionSideEffects() {
@@ -2343,14 +2310,10 @@ struct ChatView: View {
         let taskIdentifier = UIApplication.shared.beginBackgroundTask(withName: "Semreh response completion") {
             Task { @MainActor in
                 endResponseCompletionBackgroundTask()
-                viewModel.suspendStreamForBackground()
             }
         }
 
         responseCompletionBackgroundTask = taskIdentifier
-        if taskIdentifier == .invalid {
-            viewModel.suspendStreamForBackground()
-        }
     }
 
     private func endResponseCompletionBackgroundTask() {

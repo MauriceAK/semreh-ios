@@ -3,11 +3,6 @@ import XCTest
 
 @MainActor
 final class LiveActivityTests: XCTestCase {
-    override func tearDown() {
-        LiveActivityURLProtocol.handler = nil
-        super.tearDown()
-    }
-
     func testSanitizesLiveActivityText() {
         let title = AgentRunActivitySanitizer.sessionTitle("  A very long Hermes session title with\nmultiple lines and extra words  ")
         let activity = AgentRunActivitySanitizer.activityLine("Reading /Users/example/project/Secrets.swift\nwith details")
@@ -216,52 +211,17 @@ final class LiveActivityTests: XCTestCase {
     }
 
     func testChatViewModelLiveActivityLifecycleUsesInjectedManager() async throws {
-        let baseURL = URL(string: "https://example.test")!
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [LiveActivityURLProtocol.self]
-        let client = APIClient(baseURL: baseURL, session: URLSession(configuration: configuration))
-        let streamClient = LiveActivitySpySSEClient()
         let manager = SpyAgentLiveActivityManager()
-        let session = try Self.sessionSummary(id: "session-abc", title: "Live work")
-
-        LiveActivityURLProtocol.handler = { request in
-            XCTAssertEqual(request.url?.path, "/api/chat/start")
-            return Self.jsonResponse(#"{"stream_id":"stream-123","session_id":"session-abc"}"#, for: request)
-        }
-
-        let viewModel = ChatViewModel(
-            session: session,
-            server: baseURL,
-            client: client,
-            streamClient: streamClient,
-            liveActivityManager: manager
-        )
-
-        let didStart = viewModel.seedLegacyResponseForTesting("Run the tests")
-        XCTAssertTrue(didStart)
+        let fixture = try await makeDirectActivityFixture(manager: manager)
+        await fixture.emit("message.start")
         XCTAssertEqual(manager.starts, [
-            SpyAgentLiveActivityManager.Start(sessionID: "session-abc", sessionTitle: "Live work", streamID: "stream-123")
+            SpyAgentLiveActivityManager.Start(sessionID: "session-abc", sessionTitle: "Live work", streamID: nil)
         ])
-
-        streamClient.emit(.reasoning("I should inspect failures."))
-        streamClient.emit(.toolStarted(ToolStreamEvent(
-            eventType: nil,
-            name: "shell_command",
-            preview: nil,
-            args: nil,
-            duration: nil,
-            isError: nil
-        )))
-        streamClient.emit(.token("Done."))
-        streamClient.emit(.toolCompleted(ToolStreamEvent(
-            eventType: nil,
-            name: "shell_command",
-            preview: nil,
-            args: nil,
-            duration: 1.2,
-            isError: false
-        )))
-        streamClient.emit(.done(DoneStreamEvent()))
+        await fixture.emit("reasoning.delta", payload: ["text": .string("I should inspect failures.")])
+        await fixture.emit("tool.start", payload: ["name": .string("shell_command")])
+        await fixture.emit("message.delta", payload: ["text": .string("Done.")])
+        await fixture.emit("tool.complete", payload: ["name": .string("shell_command")])
+        await fixture.emit("message.complete", payload: ["status": .string("complete")])
 
         XCTAssertEqual(manager.updates, [
             .reasoning("I should inspect failures."),
@@ -273,141 +233,60 @@ final class LiveActivityTests: XCTestCase {
             activity: "Response complete",
             errorSummary: nil
         ))
-        XCTAssertNil(viewModel.activeStreamID)
-        XCTAssertEqual(viewModel.responseCompletionHapticTrigger, 1)
+        XCTAssertNil(fixture.viewModel.activeStreamID)
+        XCTAssertEqual(fixture.viewModel.responseCompletionHapticTrigger, 1)
+        await fixture.runtime.stop()
     }
 
     func testChatViewModelSuppressesLiveActivityResponseExcerptsByDefault() async throws {
-        let baseURL = URL(string: "https://example.test")!
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [LiveActivityURLProtocol.self]
-        let client = APIClient(baseURL: baseURL, session: URLSession(configuration: configuration))
-        let streamClient = LiveActivitySpySSEClient()
         let manager = SpyAgentLiveActivityManager()
-        let session = try Self.sessionSummary(id: "session-abc", title: "Private live work")
-
-        LiveActivityURLProtocol.handler = { request in
-            XCTAssertEqual(request.url?.path, "/api/chat/start")
-            return Self.jsonResponse(#"{"stream_id":"stream-123","session_id":"session-abc"}"#, for: request)
-        }
-
-        let viewModel = ChatViewModel(
-            session: session,
-            server: baseURL,
-            client: client,
-            streamClient: streamClient,
-            liveActivityManager: manager
-        )
-
-        let didStart = viewModel.seedLegacyResponseForTesting("Keep response text private")
-        XCTAssertTrue(didStart)
-
-        streamClient.emit(.token("Private token."))
-        streamClient.emit(.interimAssistant(InterimAssistantStreamEvent(text: "Private interim.", alreadyStreamed: false)))
+        let fixture = try await makeDirectActivityFixture(manager: manager)
+        await fixture.emit("message.start")
+        await fixture.emit("message.delta", payload: ["text": .string("Private token.")])
+        await fixture.emit("message.interim", payload: ["text": .string("Private interim."), "already_streamed": .bool(false)])
+        fixture.viewModel.flushPendingStreamingContent()
 
         XCTAssertTrue(manager.updates.isEmpty)
-        XCTAssertTrue(viewModel.messages.contains { $0.content?.contains("Private token.") == true })
+        XCTAssertTrue(fixture.viewModel.messages.contains { $0.content?.contains("Private token.") == true })
+        await fixture.runtime.stop()
     }
 
     func testChatViewModelCanOptIntoLiveActivityResponseExcerpts() async throws {
-        let baseURL = URL(string: "https://example.test")!
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [LiveActivityURLProtocol.self]
-        let client = APIClient(baseURL: baseURL, session: URLSession(configuration: configuration))
-        let streamClient = LiveActivitySpySSEClient()
         let manager = SpyAgentLiveActivityManager()
-        let session = try Self.sessionSummary(id: "session-abc", title: "Visible live work")
-
-        LiveActivityURLProtocol.handler = { request in
-            XCTAssertEqual(request.url?.path, "/api/chat/start")
-            return Self.jsonResponse(#"{"stream_id":"stream-123","session_id":"session-abc"}"#, for: request)
-        }
-
-        let viewModel = ChatViewModel(
-            session: session,
-            server: baseURL,
-            client: client,
-            streamClient: streamClient,
-            liveActivityManager: manager,
-            showsLiveActivityResponseExcerpts: true
-        )
-
-        let didStart = viewModel.seedLegacyResponseForTesting("Show response text")
-        XCTAssertTrue(didStart)
-
-        streamClient.emit(.token("Visible token."))
-        streamClient.emit(.interimAssistant(InterimAssistantStreamEvent(text: "Visible interim.", alreadyStreamed: false)))
+        let fixture = try await makeDirectActivityFixture(manager: manager)
+        fixture.viewModel.setShowsLiveActivityResponseExcerpts(true)
+        await fixture.emit("message.start")
+        await fixture.emit("message.delta", payload: ["text": .string("Visible token.")])
+        await fixture.emit("message.interim", payload: ["text": .string("Visible interim."), "already_streamed": .bool(false)])
 
         XCTAssertEqual(manager.updates, [
             .token("Visible token."),
             .interimAssistant("Visible interim.")
         ])
+        await fixture.runtime.stop()
     }
 
     func testDisablingLiveActivityResponseExcerptsClearsActiveExcerpt() async throws {
-        let baseURL = URL(string: "https://example.test")!
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [LiveActivityURLProtocol.self]
-        let client = APIClient(baseURL: baseURL, session: URLSession(configuration: configuration))
-        let streamClient = LiveActivitySpySSEClient()
         let manager = SpyAgentLiveActivityManager()
-        let session = try Self.sessionSummary(id: "session-abc", title: "Toggle live work")
-
-        LiveActivityURLProtocol.handler = { request in
-            XCTAssertEqual(request.url?.path, "/api/chat/start")
-            return Self.jsonResponse(#"{"stream_id":"stream-123","session_id":"session-abc"}"#, for: request)
-        }
-
-        let viewModel = ChatViewModel(
-            session: session,
-            server: baseURL,
-            client: client,
-            streamClient: streamClient,
-            liveActivityManager: manager,
-            showsLiveActivityResponseExcerpts: true
-        )
-
-        let didStart = viewModel.seedLegacyResponseForTesting("Toggle response text")
-        XCTAssertTrue(didStart)
-
-        streamClient.emit(.token("Visible token."))
-        viewModel.setShowsLiveActivityResponseExcerpts(false)
+        let fixture = try await makeDirectActivityFixture(manager: manager)
+        fixture.viewModel.setShowsLiveActivityResponseExcerpts(true)
+        await fixture.emit("message.start")
+        await fixture.emit("message.delta", payload: ["text": .string("Visible token.")])
+        fixture.viewModel.setShowsLiveActivityResponseExcerpts(false)
 
         XCTAssertEqual(manager.updates, [
             .token("Visible token."),
             .clearResponseExcerpt
         ])
+        await fixture.runtime.stop()
     }
 
     func testFollowupMessageStartsNewLiveActivityAfterCompletedResponse() async throws {
-        let baseURL = URL(string: "https://example.test")!
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [LiveActivityURLProtocol.self]
-        let client = APIClient(baseURL: baseURL, session: URLSession(configuration: configuration))
-        let streamClient = LiveActivitySpySSEClient()
         let manager = SpyAgentLiveActivityManager()
-        let session = try Self.sessionSummary(id: "session-abc", title: "Live work")
-        var nextStreamNumber = 1
-
-        LiveActivityURLProtocol.handler = { request in
-            XCTAssertEqual(request.url?.path, "/api/chat/start")
-            let streamID = "stream-\(nextStreamNumber)"
-            nextStreamNumber += 1
-            return Self.jsonResponse(#"{"stream_id":"\#(streamID)","session_id":"session-abc"}"#, for: request)
-        }
-
-        let viewModel = ChatViewModel(
-            session: session,
-            server: baseURL,
-            client: client,
-            streamClient: streamClient,
-            liveActivityManager: manager
-        )
-
-        let didStartFirstResponse = viewModel.seedLegacyResponseForTesting("Run the first answer", streamID: "stream-1")
-        XCTAssertTrue(didStartFirstResponse)
-        streamClient.emit(.token("First answer."))
-        streamClient.emit(.done(DoneStreamEvent()))
+        let fixture = try await makeDirectActivityFixture(manager: manager)
+        await fixture.emit("message.start")
+        await fixture.emit("message.delta", payload: ["text": .string("First answer.")])
+        await fixture.emit("message.complete", payload: ["status": .string("complete")])
 
         XCTAssertEqual(manager.ends, [
             SpyAgentLiveActivityManager.End(
@@ -416,125 +295,14 @@ final class LiveActivityTests: XCTestCase {
                 errorSummary: nil
             )
         ])
-        XCTAssertNil(viewModel.activeStreamID)
-
-        let didStartFollowup = viewModel.seedLegacyResponseForTesting("Follow up", streamID: "stream-2")
-        XCTAssertTrue(didStartFollowup)
+        XCTAssertNil(fixture.viewModel.activeStreamID)
+        await fixture.emit("message.start")
 
         XCTAssertEqual(manager.starts, [
-            SpyAgentLiveActivityManager.Start(sessionID: "session-abc", sessionTitle: "Live work", streamID: "stream-1"),
-            SpyAgentLiveActivityManager.Start(sessionID: "session-abc", sessionTitle: "Live work", streamID: "stream-2")
+            SpyAgentLiveActivityManager.Start(sessionID: "session-abc", sessionTitle: "Live work", streamID: nil),
+            SpyAgentLiveActivityManager.Start(sessionID: "session-abc", sessionTitle: "Live work", streamID: nil)
         ])
-        XCTAssertEqual(viewModel.activeStreamID, "stream-2")
-    }
-
-    func testTitleStreamEventUpdatesLiveActivityTitle() async throws {
-        let baseURL = URL(string: "https://example.test")!
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [LiveActivityURLProtocol.self]
-        let client = APIClient(baseURL: baseURL, session: URLSession(configuration: configuration))
-        let streamClient = LiveActivitySpySSEClient()
-        let manager = SpyAgentLiveActivityManager()
-        let session = try Self.sessionSummary(id: "session-abc", title: "Untitled Session")
-
-        LiveActivityURLProtocol.handler = { request in
-            XCTAssertEqual(request.url?.path, "/api/chat/start")
-            return Self.jsonResponse(#"{"stream_id":"stream-123","session_id":"session-abc"}"#, for: request)
-        }
-
-        let viewModel = ChatViewModel(
-            session: session,
-            server: baseURL,
-            client: client,
-            streamClient: streamClient,
-            liveActivityManager: manager
-        )
-
-        let didStart = viewModel.seedLegacyResponseForTesting("Name this run")
-        XCTAssertTrue(didStart)
-
-        streamClient.emit(.title(TitleStreamEvent(sessionId: "session-abc", title: "Generated Search Plan")))
-
-        XCTAssertEqual(viewModel.displayTitle, "Generated Search Plan")
-        XCTAssertEqual(manager.updates, [
-            .sessionTitle("Generated Search Plan")
-        ])
-    }
-
-    func testDoneSessionTitleUpdatesLiveActivityBeforeCompletion() async throws {
-        let baseURL = URL(string: "https://example.test")!
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [LiveActivityURLProtocol.self]
-        let client = APIClient(baseURL: baseURL, session: URLSession(configuration: configuration))
-        let streamClient = LiveActivitySpySSEClient()
-        let manager = SpyAgentLiveActivityManager()
-        let session = try Self.sessionSummary(id: "session-abc", title: "Untitled Session")
-
-        LiveActivityURLProtocol.handler = { request in
-            XCTAssertEqual(request.url?.path, "/api/chat/start")
-            return Self.jsonResponse(#"{"stream_id":"stream-123","session_id":"session-abc"}"#, for: request)
-        }
-
-        let viewModel = ChatViewModel(
-            session: session,
-            server: baseURL,
-            client: client,
-            streamClient: streamClient,
-            liveActivityManager: manager
-        )
-
-        let didStart = viewModel.seedLegacyResponseForTesting("Finish with a generated title")
-        XCTAssertTrue(didStart)
-
-        streamClient.emit(.done(DoneStreamEvent(session: try Self.sessionDetail(id: "session-abc", title: "Generated Finish Plan"))))
-
-        XCTAssertEqual(viewModel.displayTitle, "Generated Finish Plan")
-        XCTAssertEqual(manager.updates, [
-            .sessionTitle("Generated Finish Plan")
-        ])
-        XCTAssertEqual(manager.ends.last, SpyAgentLiveActivityManager.End(
-            status: .complete,
-            activity: "Response complete",
-            errorSummary: nil
-        ))
-    }
-
-    func testStreamEndWithoutDoneStillCompletesLiveActivity() async throws {
-        let baseURL = URL(string: "https://example.test")!
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [LiveActivityURLProtocol.self]
-        let client = APIClient(baseURL: baseURL, session: URLSession(configuration: configuration))
-        let streamClient = LiveActivitySpySSEClient()
-        let manager = SpyAgentLiveActivityManager()
-        let session = try Self.sessionSummary(id: "session-abc", title: "Live work")
-
-        LiveActivityURLProtocol.handler = { request in
-            XCTAssertEqual(request.url?.path, "/api/chat/start")
-            return Self.jsonResponse(#"{"stream_id":"stream-123","session_id":"session-abc"}"#, for: request)
-        }
-
-        let viewModel = ChatViewModel(
-            session: session,
-            server: baseURL,
-            client: client,
-            streamClient: streamClient,
-            liveActivityManager: manager
-        )
-
-        let didStart = viewModel.seedLegacyResponseForTesting("Run the tests")
-        XCTAssertTrue(didStart)
-
-        streamClient.emit(.token("Done."))
-        streamClient.emit(.streamEnd)
-
-        XCTAssertEqual(manager.ends, [
-            SpyAgentLiveActivityManager.End(
-                status: .complete,
-                activity: "Response complete",
-                errorSummary: nil
-            )
-        ])
-        XCTAssertNil(viewModel.activeStreamID)
+        await fixture.runtime.stop()
     }
 
     // Retired WebUI status-refresh coverage maps to the direct recovery tests below:
@@ -761,292 +529,6 @@ final class LiveActivityTests: XCTestCase {
         XCTAssertEqual(cleared.updatedAt, Date(timeIntervalSince1970: 130))
     }
 
-    private static func sessionSummary(id: String, title: String) throws -> SessionSummary {
-        let data = Data(#"{"session_id":"\#(id)","title":"\#(title)"}"#.utf8)
-        let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
-        return try decoder.decode(SessionSummary.self, from: data)
-    }
-
-    private static func sessionDetail(id: String, title: String) throws -> SessionDetail {
-        let data = Data(#"{"session_id":"\#(id)","title":"\#(title)"}"#.utf8)
-        let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
-        return try decoder.decode(SessionDetail.self, from: data)
-    }
-
-    private static func jsonResponse(_ json: String, for request: URLRequest) -> (HTTPURLResponse, Data) {
-        let response = HTTPURLResponse(
-            url: request.url!,
-            statusCode: 200,
-            httpVersion: "HTTP/1.1",
-            headerFields: ["Content-Type": "application/json"]
-        )!
-        return (response, Data(json.utf8))
-    }
-
-    // MARK: - Orphaned activity reconciliation (#246)
-
-    /// Builds a stream-status response for driving the reconciler core. `nil`
-    /// `terminalState` omits the `journal` block entirely (the server's shape
-    /// when it has no run summary), which the reconciler maps to `.complete`.
-    private func statusResponse(active: Bool, terminalState: String? = nil) -> ChatStreamStatusResponse {
-        ChatStreamStatusResponse(
-            active: active,
-            streamId: nil,
-            replayAvailable: nil,
-            journal: terminalState.map { RunJournalStatus(terminal: true, terminalState: $0) }
-        )
-    }
-
-    @MainActor
-    func testReconcilerEndsOnlyStreamsTheServerReportsInactive() async {
-        var ended: [String] = []
-        let now = Date(timeIntervalSince1970: 10_000)
-
-        await LiveActivityReconciler.reconcileOrphanedActivities(
-            orphans: [
-                OrphanedLiveActivity(streamID: "done", sessionID: "s-done", updatedAt: now),
-                OrphanedLiveActivity(streamID: "running", sessionID: "s-running", updatedAt: now),
-                OrphanedLiveActivity(streamID: "errored", sessionID: "s-errored", updatedAt: now)
-            ],
-            now: now,
-            notifiesOnCompletion: false,
-            streamStatus: { streamID in
-                switch streamID {
-                case "done": self.statusResponse(active: false)   // server says the run is over → end the orphan
-                case "running": self.statusResponse(active: true)  // still active → leave it for the reconnect path
-                default: nil                                       // status check failed → leave it (no false positives)
-                }
-            },
-            endOrphan: { orphan, _ in ended.append(orphan.streamID); return true },
-            notify: { _ in }
-        )
-
-        XCTAssertEqual(ended, ["done"])
-    }
-
-    @MainActor
-    func testReconcilerEndsNothingWhenNoOrphansExist() async {
-        var endCount = 0
-
-        await LiveActivityReconciler.reconcileOrphanedActivities(
-            orphans: [],
-            now: Date(timeIntervalSince1970: 10_000),
-            notifiesOnCompletion: true,
-            streamStatus: { _ in self.statusResponse(active: false) },
-            endOrphan: { _, _ in endCount += 1; return true },
-            notify: { _ in }
-        )
-
-        XCTAssertEqual(endCount, 0)
-    }
-
-    // #248: on the cold-launch pass, a recently finished orphan also fires a
-    // "response complete" notification once it's ended.
-    @MainActor
-    func testReconcilerNotifiesRecentlyCompletedOrphanOnColdLaunchPass() async {
-        let now = Date(timeIntervalSince1970: 10_000)
-        var notified: [String] = []
-
-        await LiveActivityReconciler.reconcileOrphanedActivities(
-            orphans: [
-                OrphanedLiveActivity(streamID: "recent", sessionID: "s-recent", updatedAt: now.addingTimeInterval(-60))
-            ],
-            now: now,
-            notifiesOnCompletion: true,
-            streamStatus: { _ in self.statusResponse(active: false) },
-            endOrphan: { _, _ in true },
-            notify: { notified.append($0.sessionID) }
-        )
-
-        XCTAssertEqual(notified, ["s-recent"])
-    }
-
-    // #248: a completion older than the recency window is finalized silently.
-    @MainActor
-    func testReconcilerEndsButDoesNotNotifyStaleCompletion() async {
-        let now = Date(timeIntervalSince1970: 10_000)
-        var ended: [String] = []
-        var notified: [String] = []
-
-        await LiveActivityReconciler.reconcileOrphanedActivities(
-            orphans: [
-                OrphanedLiveActivity(
-                    streamID: "stale",
-                    sessionID: "s-stale",
-                    updatedAt: now.addingTimeInterval(-(LiveActivityReconciler.recentCompletionWindow + 1))
-                )
-            ],
-            now: now,
-            notifiesOnCompletion: true,
-            streamStatus: { _ in self.statusResponse(active: false) },
-            endOrphan: { orphan, _ in ended.append(orphan.streamID); return true },
-            notify: { notified.append($0.sessionID) }
-        )
-
-        XCTAssertEqual(ended, ["stale"])
-        XCTAssertTrue(notified.isEmpty)
-    }
-
-    // #248 dedup: if another path already finalized the run, `endOrphan` reports it
-    // ended nothing here, so the reconciler must not fire a second notification.
-    @MainActor
-    func testReconcilerDoesNotNotifyWhenAnotherPathAlreadyFinalized() async {
-        let now = Date(timeIntervalSince1970: 10_000)
-        var notified: [String] = []
-
-        await LiveActivityReconciler.reconcileOrphanedActivities(
-            orphans: [
-                OrphanedLiveActivity(streamID: "dup", sessionID: "s-dup", updatedAt: now)
-            ],
-            now: now,
-            notifiesOnCompletion: true,
-            streamStatus: { _ in self.statusResponse(active: false) },
-            endOrphan: { _, _ in false },   // already final — nothing transitioned here
-            notify: { notified.append($0.sessionID) }
-        )
-
-        XCTAssertTrue(notified.isEmpty)
-    }
-
-    // #248: the foreground pass ends orphans but never notifies — the in-session
-    // completion paths own notifications while the app is alive.
-    @MainActor
-    func testReconcilerForegroundPassEndsOrphansButNeverNotifies() async {
-        let now = Date(timeIntervalSince1970: 10_000)
-        var ended: [String] = []
-        var notified: [String] = []
-
-        await LiveActivityReconciler.reconcileOrphanedActivities(
-            orphans: [
-                OrphanedLiveActivity(streamID: "recent", sessionID: "s-recent", updatedAt: now)
-            ],
-            now: now,
-            notifiesOnCompletion: false,
-            streamStatus: { _ in self.statusResponse(active: false) },
-            endOrphan: { orphan, _ in ended.append(orphan.streamID); return true },
-            notify: { notified.append($0.sessionID) }
-        )
-
-        XCTAssertEqual(ended, ["recent"])
-        XCTAssertTrue(notified.isEmpty)
-    }
-
-    // #248: a future-dated completion (clock skew) is treated as not-recent.
-    @MainActor
-    func testReconcilerDoesNotNotifyFutureDatedCompletion() async {
-        let now = Date(timeIntervalSince1970: 10_000)
-        var notified: [String] = []
-
-        await LiveActivityReconciler.reconcileOrphanedActivities(
-            orphans: [
-                OrphanedLiveActivity(streamID: "future", sessionID: "s-future", updatedAt: now.addingTimeInterval(120))
-            ],
-            now: now,
-            notifiesOnCompletion: true,
-            streamStatus: { _ in self.statusResponse(active: false) },
-            endOrphan: { _, _ in true },
-            notify: { notified.append($0.sessionID) }
-        )
-
-        XCTAssertTrue(notified.isEmpty)
-    }
-
-    // #267: the journal `terminal_state` → Live Activity outcome mapping. The
-    // load-bearing rows are `lost-worker-bookkeeping` → `.failed` (a silently
-    // dropped run — the bug this issue fixes) and the unknown/missing fallback →
-    // `.complete` (never mislabel a genuine completion as a failure).
-    @MainActor
-    func testReconciledOutcomeMapsTerminalStateToStatus() {
-        func status(_ terminalState: String?) -> AgentRunActivityStatus {
-            LiveActivityReconciler.reconciledOutcome(forTerminalState: terminalState).status
-        }
-        XCTAssertEqual(status("completed"), .complete)
-        XCTAssertEqual(status("errored"), .failed)
-        XCTAssertEqual(status("interrupted-by-crash"), .failed)
-        XCTAssertEqual(status("lost-worker-bookkeeping"), .failed)
-        XCTAssertEqual(status("interrupted-by-user"), .cancelled)
-        XCTAssertEqual(status("running"), .complete)
-        XCTAssertEqual(status("unknown"), .complete)
-        XCTAssertEqual(status(nil), .complete)
-        XCTAssertEqual(status("a-state-we-have-never-seen"), .complete)
-
-        // The widget line reuses the existing localized completion strings.
-        XCTAssertEqual(
-            LiveActivityReconciler.reconciledOutcome(forTerminalState: "completed").activity,
-            String(localized: "Response complete")
-        )
-        XCTAssertEqual(
-            LiveActivityReconciler.reconciledOutcome(forTerminalState: "errored").activity,
-            String(localized: "Response failed")
-        )
-        XCTAssertEqual(
-            LiveActivityReconciler.reconciledOutcome(forTerminalState: "interrupted-by-user").activity,
-            String(localized: "Response cancelled")
-        )
-    }
-
-    // #267: the core finalizes each orphan with the outcome mapped from the
-    // server journal's terminal_state — not an unconditional `.complete`.
-    @MainActor
-    func testReconcilerFinalizesOrphanWithMappedOutcome() async {
-        let now = Date(timeIntervalSince1970: 10_000)
-        var endedWith: [String: AgentRunActivityStatus] = [:]
-
-        await LiveActivityReconciler.reconcileOrphanedActivities(
-            orphans: [
-                OrphanedLiveActivity(streamID: "ok", sessionID: "s-ok", updatedAt: now),
-                OrphanedLiveActivity(streamID: "lost", sessionID: "s-lost", updatedAt: now),
-                OrphanedLiveActivity(streamID: "stopped", sessionID: "s-stopped", updatedAt: now)
-            ],
-            now: now,
-            notifiesOnCompletion: false,
-            streamStatus: { streamID in
-                switch streamID {
-                case "ok": self.statusResponse(active: false, terminalState: "completed")
-                case "lost": self.statusResponse(active: false, terminalState: "lost-worker-bookkeeping")
-                default: self.statusResponse(active: false, terminalState: "interrupted-by-user")
-                }
-            },
-            endOrphan: { orphan, outcome in endedWith[orphan.streamID] = outcome.status; return true },
-            notify: { _ in }
-        )
-
-        XCTAssertEqual(endedWith["ok"], .complete)
-        XCTAssertEqual(endedWith["lost"], .failed)
-        XCTAssertEqual(endedWith["stopped"], .cancelled)
-    }
-
-    // #267: a recently silently-failed run must still be finalized but must NOT
-    // fire a "response complete" notification on the cold-launch pass — only a
-    // run that mapped to `.complete` notifies.
-    @MainActor
-    func testReconcilerNotifiesOnlyCompletedTerminalStateOnColdLaunch() async {
-        let now = Date(timeIntervalSince1970: 10_000)
-        var ended: [String] = []
-        var notified: [String] = []
-
-        await LiveActivityReconciler.reconcileOrphanedActivities(
-            orphans: [
-                OrphanedLiveActivity(streamID: "failed", sessionID: "s-failed", updatedAt: now.addingTimeInterval(-60)),
-                OrphanedLiveActivity(streamID: "done", sessionID: "s-done", updatedAt: now.addingTimeInterval(-60))
-            ],
-            now: now,
-            notifiesOnCompletion: true,
-            streamStatus: { streamID in
-                streamID == "failed"
-                    ? self.statusResponse(active: false, terminalState: "errored")
-                    : self.statusResponse(active: false, terminalState: "completed")
-            },
-            endOrphan: { orphan, _ in ended.append(orphan.streamID); return true },
-            notify: { notified.append($0.sessionID) }
-        )
-
-        XCTAssertEqual(ended.sorted(), ["done", "failed"])  // both finalized
-        XCTAssertEqual(notified, ["s-done"])                // only the completed one notifies
-    }
-
     // #246 follow-up (PR #266 #3): the orphan reconciler must defer to a stream
     // whose SSE is live in this process. The manager tracks that ownership via the
     // lifecycle calls the coordinator already makes — set on `start`, cleared on
@@ -1196,56 +678,4 @@ private final class SpyAgentLiveActivityManager: AgentLiveActivityManaging {
         directOwner = nil
         ends.append(End(status: status, activity: activity, errorSummary: errorSummary))
     }
-}
-
-private final class LiveActivitySpySSEClient: SSEStreamingClient {
-    private var onEvent: (@MainActor (SSEEvent) -> Void)?
-    private(set) var startedURLs: [URL] = []
-    private(set) var stopCount = 0
-    private(set) var lastEventID: String?
-
-    func start(url: URL, onEvent: @escaping @MainActor (SSEEvent) -> Void) {
-        startedURLs.append(url)
-        lastEventID = nil
-        self.onEvent = onEvent
-    }
-
-    func stop() {
-        stopCount += 1
-    }
-
-    @MainActor
-    func emit(_ event: SSEEvent) {
-        onEvent?(event)
-    }
-}
-
-private final class LiveActivityURLProtocol: URLProtocol {
-    static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
-
-    override class func canInit(with request: URLRequest) -> Bool {
-        true
-    }
-
-    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
-        request
-    }
-
-    override func startLoading() {
-        guard let handler = Self.handler else {
-            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
-            return
-        }
-
-        do {
-            let (response, data) = try handler(request)
-            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-            client?.urlProtocol(self, didLoad: data)
-            client?.urlProtocolDidFinishLoading(self)
-        } catch {
-            client?.urlProtocol(self, didFailWithError: error)
-        }
-    }
-
-    override func stopLoading() {}
 }

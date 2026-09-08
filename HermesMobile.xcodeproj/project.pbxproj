@@ -167,13 +167,10 @@
 		C1A042000000000000000003 /* ClarificationRequestOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1A042000000000000000004 /* ClarificationRequestOverlay.swift */; };
 		C1A042000000000000000005 /* ClarificationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1A042000000000000000006 /* ClarificationTests.swift */; };
 		A02400000000000000000001 /* Goal.swift in Sources */ = {isa = PBXBuildFile; fileRef = A02400000000000000000002 /* Goal.swift */; };
-		C04600000000000000000001 /* ChatStreamCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = C04600000000000000000002 /* ChatStreamCoordinator.swift */; };
 		C0DE1E550000000000000001 /* OpenChatSessionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE1E550000000000000002 /* OpenChatSessionStore.swift */; };
 		C0DE1E550000000000000021 /* ComposerDraftStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE1E550000000000000022 /* ComposerDraftStore.swift */; };
-		C04600000000000000000003 /* ChatStreamCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C04600000000000000000004 /* ChatStreamCoordinatorTests.swift */; };
 		C0DE1E550000000000000011 /* OpenChatSessionStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE1E550000000000000012 /* OpenChatSessionStoreTests.swift */; };
 		C0DE1E550000000000000023 /* ComposerDraftStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE1E550000000000000024 /* ComposerDraftStoreTests.swift */; };
-		C22600000000000000000001 /* ScriptedSSEStreamFixture.swift in Sources */ = {isa = PBXBuildFile; fileRef = C22600000000000000000002 /* ScriptedSSEStreamFixture.swift */; };
 		C22600000000000000000003 /* StreamReconnectContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C22600000000000000000004 /* StreamReconnectContractTests.swift */; };
 		1A2B3C4D5E6F7000000000D4 /* ChatViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F7000000000D5 /* ChatViewModel.swift */; };
 		1A2B3C4D5E6F7000000000D6 /* SSEClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F7000000000D7 /* SSEClient.swift */; };
@@ -568,13 +565,10 @@
 		C1A042000000000000000004 /* ClarificationRequestOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClarificationRequestOverlay.swift; sourceTree = "<group>"; };
 		C1A042000000000000000006 /* ClarificationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClarificationTests.swift; sourceTree = "<group>"; };
 		A02400000000000000000002 /* Goal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Goal.swift; sourceTree = "<group>"; };
-		C04600000000000000000002 /* ChatStreamCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatStreamCoordinator.swift; sourceTree = "<group>"; };
 		C0DE1E550000000000000002 /* OpenChatSessionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenChatSessionStore.swift; sourceTree = "<group>"; };
 		C0DE1E550000000000000022 /* ComposerDraftStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerDraftStore.swift; sourceTree = "<group>"; };
-		C04600000000000000000004 /* ChatStreamCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatStreamCoordinatorTests.swift; sourceTree = "<group>"; };
 		C0DE1E550000000000000012 /* OpenChatSessionStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenChatSessionStoreTests.swift; sourceTree = "<group>"; };
 		C0DE1E550000000000000024 /* ComposerDraftStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerDraftStoreTests.swift; sourceTree = "<group>"; };
-		C22600000000000000000002 /* ScriptedSSEStreamFixture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScriptedSSEStreamFixture.swift; sourceTree = "<group>"; };
 		C22600000000000000000004 /* StreamReconnectContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamReconnectContractTests.swift; sourceTree = "<group>"; };
 		1A2B3C4D5E6F7000000000D5 /* ChatViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatViewModel.swift; sourceTree = "<group>"; };
 		1A2B3C4D5E6F7000000000D7 /* SSEClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSEClient.swift; sourceTree = "<group>"; };
@@ -930,7 +924,6 @@
 				C03260000000000000F102 /* APIClientTTSTests.swift */,
 				C03270000000000000F102 /* APIClientSessionExportTests.swift */,
 				C03250000000000000F106 /* ComposerVoiceNoteRecorderTests.swift */,
-					C04600000000000000000004 /* ChatStreamCoordinatorTests.swift */,
 					C0DE1E550000000000000012 /* OpenChatSessionStoreTests.swift */,
 					C0DE1E550000000000000024 /* ComposerDraftStoreTests.swift */,
 					C04800000000000000000004 /* ChatAttachmentCoordinatorTests.swift */,
@@ -955,7 +948,6 @@
 				C13000000000000000000002 /* ChatVerticalScrollAxisGuardTests.swift */,
 				C0DE25000000000000000004 /* ChatScrollPolicyTests.swift */,
 				1A2B3C4D5E6F7000000000DD /* SSEClientTests.swift */,
-				C22600000000000000000002 /* ScriptedSSEStreamFixture.swift */,
 				C22600000000000000000004 /* StreamReconnectContractTests.swift */,
 				C22300000000000000000004 /* CompressionAnchorResolverTests.swift */,
 				C21200000000000000000004 /* StreamingWordDrainTests.swift */,
@@ -1233,7 +1225,6 @@
 				031031031031031031031006 /* MarkdownMathFormatter.swift */,
 				03103103103103103103100C /* MarkdownMathFormatter+Environments.swift */,
 				031031031031031031031008 /* MarkdownMathFormatter+Support.swift */,
-					C04600000000000000000002 /* ChatStreamCoordinator.swift */,
 					C0DE1E550000000000000002 /* OpenChatSessionStore.swift */,
 					C0DE1E550000000000000022 /* ComposerDraftStore.swift */,
 					C04800000000000000000002 /* ChatAttachmentCoordinator.swift */,
@@ -1819,7 +1810,6 @@
 				031031031031031031031005 /* MarkdownMathFormatter.swift in Sources */,
 				03103103103103103103100B /* MarkdownMathFormatter+Environments.swift in Sources */,
 				031031031031031031031007 /* MarkdownMathFormatter+Support.swift in Sources */,
-					C04600000000000000000001 /* ChatStreamCoordinator.swift in Sources */,
 					C0DE1E550000000000000001 /* OpenChatSessionStore.swift in Sources */,
 					C0DE1E550000000000000021 /* ComposerDraftStore.swift in Sources */,
 					C04800000000000000000001 /* ChatAttachmentCoordinator.swift in Sources */,
@@ -1927,7 +1917,6 @@
 				C03260000000000000B102 /* APIClientTTSTests.swift in Sources */,
 				C03270000000000000B102 /* APIClientSessionExportTests.swift in Sources */,
 				C03250000000000000B106 /* ComposerVoiceNoteRecorderTests.swift in Sources */,
-					C04600000000000000000003 /* ChatStreamCoordinatorTests.swift in Sources */,
 					C0DE1E550000000000000011 /* OpenChatSessionStoreTests.swift in Sources */,
 					C0DE1E550000000000000023 /* ComposerDraftStoreTests.swift in Sources */,
 					C04800000000000000000003 /* ChatAttachmentCoordinatorTests.swift in Sources */,
@@ -1952,7 +1941,6 @@
 				C13000000000000000000001 /* ChatVerticalScrollAxisGuardTests.swift in Sources */,
 				C0DE25000000000000000003 /* ChatScrollPolicyTests.swift in Sources */,
 				1A2B3C4D5E6F7000000000DC /* SSEClientTests.swift in Sources */,
-				C22600000000000000000001 /* ScriptedSSEStreamFixture.swift in Sources */,
 				C22600000000000000000003 /* StreamReconnectContractTests.swift in Sources */,
 				C22300000000000000000003 /* CompressionAnchorResolverTests.swift in Sources */,
 				C21200000000000000000003 /* StreamingWordDrainTests.swift in Sources */,

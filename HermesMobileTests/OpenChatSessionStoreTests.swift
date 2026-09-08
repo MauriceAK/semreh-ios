@@ -72,12 +72,15 @@ final class OpenChatSessionStoreTests: XCTestCase {
     }
 
     @MainActor
-    func testActiveModelsArePreservedWhileIdleModelsAreEvicted() throws {
+    func testActiveModelsArePreservedWhileIdleModelsAreEvicted() async throws {
         let server = try XCTUnwrap(URL(string: "https://example.test"))
         let store = OpenChatSessionStore(
             retentionPolicy: OpenChatSessionStoreRetentionPolicy(maxIdleViewModelsPerServer: 2)
         )
-        let active = try makeViewModel(sessionID: "session-active", activeStreamID: "stream-active")
+        let fixture = try await makeDirectBranchViewModel(
+            session: SessionSummary(sessionId: "session-active"), server: server, running: true
+        )
+        let active = fixture.viewModel
         _ = store.adoptedViewModel(
             session: SessionSummary(sessionId: "session-active"),
             server: server,
@@ -94,7 +97,8 @@ final class OpenChatSessionStoreTests: XCTestCase {
             ["session-active", "session-idle-3", "session-idle-4"]
         )
         XCTAssertEqual(store.liveSessionIDs(for: server), ["session-active"])
-        XCTAssertEqual(store.liveStreamIDs(for: server), ["stream-active"])
+        XCTAssertEqual(store.liveStreamIDs(for: server), [])
+        await fixture.runtime.stop()
     }
 
     @MainActor
@@ -169,7 +173,7 @@ final class OpenChatSessionStoreTests: XCTestCase {
         let cancelled = await viewModel.cancelActiveStream()
 
         XCTAssertFalse(cancelled)
-        XCTAssertEqual(viewModel.activeStreamID, "legacy-stream")
+        XCTAssertNil(viewModel.activeStreamID)
         XCTAssertEqual(viewModel.sendErrorMessage, "Hermes has not confirmed that the response stopped.")
     }
 
@@ -873,129 +877,6 @@ final class OpenChatSessionStoreTests: XCTestCase {
         XCTAssertFalse(reopenedFirst === first, "The least-recent inactive model should be evicted")
     }
 
-    @MainActor
-    func testLeaveDoesNotSuspendALiveRunAndReopenDoesNotNeedSessionFetch() async throws {
-        let streamClient = SpySSEStreamingClient()
-        var sessionFetchCount = 0
-        let viewModel = try makeViewModel(sessionID: "session-abc", streamClient: streamClient) { request in
-            switch request.url?.path {
-            case "/api/chat/start":
-                return apiTestJSONResponse("""
-                {
-                  "session_id": "session-abc",
-                  "stream_id": "stream-123"
-                }
-                """, for: request)
-            case "/api/session":
-                sessionFetchCount += 1
-                XCTFail("Warm reopen must not wait on /api/session to know the run is live.")
-                return apiTestJSONResponse("{}", for: request)
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
-        let server = try XCTUnwrap(URL(string: "https://example.test"))
-        _ = OpenChatSessionStore.shared.adoptedViewModel(
-            session: SessionSummary(sessionId: "session-abc"),
-            server: server,
-            creating: viewModel
-        )
-
-        let didStart = viewModel.seedLegacyResponseForTesting("Keep working")
-        XCTAssertTrue(didStart)
-        streamClient.emit(.token("Partial live answer."), lastEventID: "session-abc:4")
-        streamClient.emit(
-            .toolStarted(ToolStreamEvent(
-                eventType: "tool.started",
-                name: "search_files",
-                preview: "searching",
-                args: nil,
-                duration: nil,
-                isError: nil,
-                stableID: "tool-1"
-            )),
-            lastEventID: "session-abc:5"
-        )
-        viewModel.flushPendingStreamingContent()
-
-        XCTAssertEqual(viewModel.activeStreamID, "stream-123")
-        XCTAssertFalse(viewModel.liveToolCalls.isEmpty)
-
-        ChatNavigationLifecycle.applyViewDisappear(to: viewModel)
-        XCTAssertEqual(streamClient.stopCount, 0)
-        XCTAssertEqual(viewModel.activeStreamID, "stream-123")
-        XCTAssertFalse(viewModel.isActiveStreamConnectionSuspended)
-
-        let reopened = OpenChatSessionStore.shared.viewModel(
-            session: SessionSummary(sessionId: "session-abc"),
-            server: server
-        )
-        XCTAssertTrue(reopened === viewModel)
-        XCTAssertTrue(reopened.hasPreservedLiveRun)
-        XCTAssertTrue(reopened.hasPreservedTranscript)
-        XCTAssertFalse(
-            ChatInitialAppearancePolicy.shouldReloadTranscriptOnAppear(
-                hasPreservedTranscript: reopened.hasPreservedTranscript
-            )
-        )
-        XCTAssertEqual(reopened.activeStreamID, "stream-123")
-        XCTAssertEqual(reopened.liveToolCalls.first?.id, "tool-1")
-        XCTAssertEqual(sessionFetchCount, 0)
-    }
-
-    @MainActor
-    func testSidebarPulseUsesLiveOwnerEvenWhenListPayloadIsIdle() async throws {
-        let streamClient = SpySSEStreamingClient()
-        let viewModel = try makeViewModel(sessionID: "session-abc", streamClient: streamClient) { request in
-            XCTAssertEqual(request.url?.path, "/api/chat/start")
-            return apiTestJSONResponse("""
-            {
-              "session_id": "session-abc",
-              "stream_id": "stream-123"
-            }
-            """, for: request)
-        }
-        let server = try XCTUnwrap(URL(string: "https://example.test"))
-        _ = OpenChatSessionStore.shared.adoptedViewModel(
-            session: SessionSummary(sessionId: "session-abc"),
-            server: server,
-            creating: viewModel
-        )
-
-        let didStart = viewModel.seedLegacyResponseForTesting("Keep working")
-        XCTAssertTrue(didStart)
-        let idleListRow = SessionSummary(sessionId: "session-abc", isStreaming: false)
-        XCTAssertTrue(
-            SessionRowView.isActiveStreaming(
-                idleListRow,
-                liveOwnerSessionIDs: OpenChatSessionStore.shared.liveSessionIDs(for: server)
-            )
-        )
-        XCTAssertEqual(
-            OpenChatSessionStore.shared.liveStreamIDs(for: server),
-            ["stream-123"]
-        )
-    }
-
-    func testColdOpenAdoptsListStreamIDBeforeSessionFetch() throws {
-        let viewModel = try makeViewModel(
-            sessionID: "session-abc",
-            activeStreamID: "stream-from-list"
-        )
-
-        XCTAssertEqual(viewModel.activeStreamID, "stream-from-list")
-        XCTAssertTrue(viewModel.isActiveStreamConnectionSuspended)
-        XCTAssertTrue(viewModel.hasPreservedLiveRun)
-        XCTAssertFalse(viewModel.hasPreservedTranscript)
-        XCTAssertTrue(
-            ChatInitialAppearancePolicy.shouldReloadTranscriptOnAppear(
-                hasPreservedTranscript: viewModel.hasPreservedTranscript
-            )
-        )
-        XCTAssertFalse(viewModel.isEstablishingConnection)
-    }
-
     func testColdOpenWithoutKnownStreamDoesNotFlashConnectingOnCachePaint() throws {
         let viewModel = try makeViewModel(sessionID: "session-abc")
         viewModel.markConversationConnectionInProgress()
@@ -1122,7 +1003,6 @@ final class OpenChatSessionStoreTests: XCTestCase {
     func makeViewModel(
         sessionID: String,
         activeStreamID: String? = nil,
-        streamClient: SSEStreamingClient? = nil,
         handler: ((URLRequest) throws -> (HTTPURLResponse, Data))? = nil
     ) throws -> ChatViewModel {
         if let handler {
@@ -1142,20 +1022,13 @@ final class OpenChatSessionStoreTests: XCTestCase {
             baseURL: server,
             session: urlSession
         )
-        let resolvedStreamClient = streamClient ?? SpySSEStreamingClient()
         let viewModel = ChatViewModel(
             session: SessionSummary(sessionId: sessionID, activeStreamId: activeStreamID),
             server: server,
             client: client,
-            streamClient: resolvedStreamClient,
             listenAudioSession: SpyListenAudioSession(),
             listenRemoteControlCenter: SpyListenRemoteControlCenter()
         )
-        if let spy = resolvedStreamClient as? SpySSEStreamingClient {
-            spy.flushPendingStreamingContent = { [weak viewModel] in
-                viewModel?.flushPendingStreamingContent()
-            }
-        }
         return viewModel
     }
 
@@ -1317,59 +1190,6 @@ private actor ForegroundRecoveryTransport: HermesGatewayTransport {
     func connectionCount() -> Int { connections }
 }
 
-private final class SpySSEStreamingClient: SSEStreamingClient {
-    private(set) var startedURLs: [URL] = []
-    private(set) var resumeEventIDs: [String?] = []
-    private(set) var stopCount = 0
-    private(set) var lastEventID: String?
-    private var eventHandlers: [@MainActor (SSEEvent, String?) -> Void] = []
-    var automaticallyFlushPendingStreamingContent = true
-    var flushPendingStreamingContent: (() -> Void)?
-
-    func start(url: URL, onEvent: @escaping @MainActor (SSEEvent) -> Void) {
-        start(url: url, resumeFrom: nil, onEvent: onEvent)
-    }
-
-    func start(
-        url: URL,
-        resumeFrom eventID: String?,
-        onEvent: @escaping @MainActor (SSEEvent) -> Void
-    ) {
-        start(url: url, resumeFrom: eventID) { event, _ in
-            onEvent(event)
-        }
-    }
-
-    func start(
-        url: URL,
-        resumeFrom eventID: String?,
-        onEventWithID onEvent: @escaping @MainActor (SSEEvent, String?) -> Void
-    ) {
-        startedURLs.append(url)
-        resumeEventIDs.append(eventID)
-        lastEventID = eventID
-        eventHandlers.append(onEvent)
-    }
-
-    func stop() {
-        stopCount += 1
-    }
-
-    @MainActor
-    func emit(
-        _ event: SSEEvent,
-        lastEventID: String? = nil,
-        onConnection index: Int? = nil
-    ) {
-        self.lastEventID = lastEventID
-        let handler = index.flatMap { eventHandlers.indices.contains($0) ? eventHandlers[$0] : nil }
-            ?? eventHandlers.last
-        handler?(event, lastEventID)
-        if automaticallyFlushPendingStreamingContent {
-            flushPendingStreamingContent?()
-        }
-    }
-}
 
 private final class SpyListenAudioSession: ListenAudioSessionControlling {
     func activate() {}

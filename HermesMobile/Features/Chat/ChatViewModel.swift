@@ -315,7 +315,7 @@ final class ChatViewModel {
     private(set) var isCancellingStream = false
     private(set) var isViewingCachedData = false
     var activeStreamID: String? {
-        guard usesDirectGateway else { return streamCoordinator.activeStreamID }
+        guard usesDirectGateway else { return nil }
         guard !directInvalidated, let controller = directConversation, controller.runState != .idle else { return nil }
         // UI liveness identity only; never a persisted gateway runtime ID.
         return controller.storedID.map { "direct-run:\($0)" } ?? "direct-draft-run"
@@ -356,8 +356,8 @@ final class ChatViewModel {
             isVisiblySlow: isConnectionVisiblySlow
         )
     }
-    var activeStreamRecoveryState: ActiveStreamRecoveryState { streamCoordinator.recoveryState }
-    var liveTokensPerSecond: Double? { streamCoordinator.liveTokensPerSecond }
+    var activeStreamRecoveryState: ActiveStreamRecoveryState { .idle }
+    var liveTokensPerSecond: Double? { nil }
     private(set) var errorMessage: String?
     private(set) var sendErrorMessage: String?
     private(set) var messageActionErrorMessage: String?
@@ -823,7 +823,6 @@ final class ChatViewModel {
     private let isCLISession: Bool
     private let server: URL
     let client: APIClient
-    private let streamCoordinator: ChatStreamCoordinator
     private let attachmentCoordinator: ChatAttachmentCoordinator
     private let btwStreamClient: SSEStreamingClient
     private let liveActivityManager: any AgentLiveActivityManaging
@@ -874,8 +873,8 @@ final class ChatViewModel {
     private(set) var listenPlaybackSpeed: ListenPlaybackSpeed
     @ObservationIgnored private var listenPlaybackTicker: Timer?
     private var showsLiveActivityResponseExcerpts: Bool
-    private var hasCompletedCurrentResponse: Bool { usesDirectGateway ? directResponseComplete : streamCoordinator.hasCompletedCurrentResponse }
-    private var isStreamConnectionSuspended: Bool { usesDirectGateway ? directRuntime?.state == .disconnected : streamCoordinator.isConnectionSuspended }
+    private var hasCompletedCurrentResponse: Bool { directResponseComplete }
+    private var isStreamConnectionSuspended: Bool { usesDirectGateway && directRuntime?.state == .disconnected }
     var isActiveStreamConnectionSuspended: Bool { isStreamConnectionSuspended }
     private var hasLoadedPersonalitySuggestions = false
     private var isLoadingPersonalitySuggestions = false
@@ -889,9 +888,8 @@ final class ChatViewModel {
     private var activeBtwAnswer = ""
     private var backgroundPromptsByTaskID: [String: String] = [:]
     @ObservationIgnored private var backgroundPollTask: Task<Void, Never>?
-    @ObservationIgnored private var streamStatusWatchTask: Task<Void, Never>?
     private var isRefreshingCompletedResponseTitle = false
-    private var isActiveStreamReplayConnection: Bool { streamCoordinator.isReplayConnection }
+    private var isActiveStreamReplayConnection: Bool { false }
     private var activeStreamReplayMatchedPrefixLength = 0
     private var activeStreamReplayMatchedInterimLength = 0
     private var activeStreamReplayMatchedReasoningLength = 0
@@ -904,7 +902,6 @@ final class ChatViewModel {
         session: SessionSummary,
         server: URL,
         client: APIClient? = nil,
-        streamClient: SSEStreamingClient? = nil,
         btwStreamClient: SSEStreamingClient? = nil,
         liveActivityManager: (any AgentLiveActivityManaging)? = nil,
         showsLiveActivityResponseExcerpts: Bool = false,
@@ -938,15 +935,8 @@ final class ChatViewModel {
         self.directConversation = initialDirectConversation
         self.directRuntime = initialDirectConversation?.sharedRuntime
         let resolvedClient = client ?? APIClient(baseURL: server)
-        let resolvedStreamClient = streamClient ?? SSEClient(allowedServerURL: server)
         let resolvedLiveActivityManager = liveActivityManager ?? AgentLiveActivityManager.shared
         self.client = resolvedClient
-        self.streamCoordinator = ChatStreamCoordinator(
-            client: resolvedClient,
-            streamClient: resolvedStreamClient,
-            liveActivityManager: resolvedLiveActivityManager,
-            showsLiveActivityResponseExcerpts: showsLiveActivityResponseExcerpts
-        )
         self.attachmentCoordinator = ChatAttachmentCoordinator(client: resolvedClient)
         self.btwStreamClient = btwStreamClient ?? SSEClient(allowedServerURL: server)
         self.liveActivityManager = resolvedLiveActivityManager
@@ -965,20 +955,11 @@ final class ChatViewModel {
         let restorePoint = restoreStore.load(server: server, sessionID: session.sessionId ?? session.id)
         savedFollowingLatest = restorePoint.followingLatest
         savedVisibleMessageID = restorePoint.visibleMessageID
-        if gatewayRuntimeProvider == nil, let bookmark = liveRunBookmarkStore.load(server: server, sessionID: session.sessionId ?? session.id),
-           bookmark.streamID == session.activeStreamId {
-            liveReasoningText = bookmark.liveReasoningText
-            streamingAssistantMessageID = bookmark.streamingAssistantMessageID
-            liveToolCalls = bookmark.liveToolCalls
-            streamCoordinator.restoreLastEventID(bookmark.lastEventID)
-        }
         self.listenPlaybackSpeed = ListenPlaybackSpeed.stored(in: userDefaults)
         self.serverTTSAudioPlayerFactory = serverTTSAudioPlayerFactory
             ?? { try ServerTTSAudioPlayer(data: $0) }
         displayTitle = Self.displayTitle(from: session.title)
-        self.streamCoordinator.attach(delegate: self)
         self.attachmentCoordinator.delegate = self
-        if gatewayRuntimeProvider == nil { streamCoordinator.adoptKnownLiveStreamIfNeeded(session.activeStreamId) }
         if let initialDirectConversation {
             configureDirectConversation(initialDirectConversation)
         }
@@ -987,7 +968,6 @@ final class ChatViewModel {
     deinit {
         directReasoningRefreshTask?.cancel()
         backgroundPollTask?.cancel()
-        streamStatusWatchTask?.cancel()
         pendingStreamingScrollTriggerTask?.cancel()
         pendingStreamingContentFlushTask?.cancel()
         connectionVisibilityTask?.cancel()
@@ -1246,6 +1226,11 @@ final class ChatViewModel {
                 self.setDirectClarificationSendError(message)
             }
             self.syncDirectClarificationPrompt()
+            if event.type == "message.complete",
+               controller.runState == .idle,
+               !controller.hasAmbiguousPromptDelivery {
+                self.drainQueuedSlashMessageIfIdle()
+            }
         }
         controller.onError = { [weak self, weak controller] error in
             guard let self, let controller,
@@ -1844,6 +1829,7 @@ final class ChatViewModel {
             if showsLiveActivityResponseExcerpts { liveActivityManager.update(.token(text)) }
         case .interim(let text, let alreadyStreamed):
             _ = appendInterimAssistant(InterimAssistantStreamEvent(text: text, alreadyStreamed: alreadyStreamed))
+            if showsLiveActivityResponseExcerpts { liveActivityManager.update(.interimAssistant(text)) }
         case .thinkingDelta(let text), .reasoningDelta(let text):
             _ = appendReasoning(text)
             liveActivityManager.update(.reasoning(text))
@@ -2043,7 +2029,7 @@ final class ChatViewModel {
         guard showsLiveActivityResponseExcerpts != shows else { return }
 
         showsLiveActivityResponseExcerpts = shows
-        streamCoordinator.setShowsLiveActivityResponseExcerpts(shows)
+        if !shows { liveActivityManager.update(.clearResponseExcerpt) }
     }
 
     var showsListenPlaybackBar: Bool {
@@ -3329,7 +3315,6 @@ final class ChatViewModel {
         messageLoadGeneration &+= 1
         endConnectionWait()
         clearCacheFirstMessagePlaceholder()
-        streamCoordinator.prepareForNewResponse()
     }
 
     func sendMessage(_ draft: String, modelContext: ModelContext? = nil) async -> Bool {
@@ -3362,136 +3347,29 @@ final class ChatViewModel {
         streamingAssistantMessageIndex = nil
     }
 
-    @discardableResult
-    func seedLegacyResponseForTesting(_ draft: String, streamID: String = "stream-123", modelContext: ModelContext? = nil) -> Bool {
-        guard !usesDirectGateway else { return false }
-        archiveLiveReasoningIfNeeded()
-        archiveLiveToolCallsIfNeeded()
-        liveReasoningText = ""
-        liveToolCalls = []
-        reasoningAnchorMessageID = nil
-        toolCallAnchorMessageID = nil
-        prepareForNewResponse()
-        responseCompletionNeedsTranscriptRefresh = false
-        let localID = "local-\(UUID().uuidString)"
-        let attachments = attachmentCoordinator.prepareForSend(localMessageID: localID).messageAttachments
-        messages.append(ChatMessage(role: "user", content: draft.trimmingCharacters(in: .whitespacesAndNewlines),
-            timestamp: Date().timeIntervalSince1970, messageId: localID,
-            attachments: attachments.isEmpty ? nil : attachments))
-        if let sessionID { cacheCurrentMessages(sessionID: sessionID, modelContext: modelContext) }
-        messageLoadGeneration &+= 1
-        streamCoordinator.start(streamID: streamID)
-        return true
+    /// Transport-neutral renderer seam for pacing tests. This follows the same
+    /// presentation path as shared-runtime events without opening a connection.
+    func handleDirectEventForTesting(_ event: HermesGatewayEvent) {
+        applyDirectEvent(event)
     }
+
+    @discardableResult
+    func enqueueMessageForTesting(_ text: String) -> Int {
+        enqueueQueuedSlashMessage(text, attachments: [])
+    }
+
+    func drainQueuedMessagesForTesting() {
+        drainQueuedSlashMessageIfIdle()
+    }
+
     #endif
 
     func submitGoal(args rawArgs: String, modelContext: ModelContext? = nil) async -> Bool {
-        guard !usesDirectGateway else {
-            goalErrorMessage = String(localized: "Goals are not available in direct Hermes mode yet.")
-            sendErrorMessage = goalErrorMessage
-            return false
-        }
-
-        guard !isViewingCachedData else {
-            goalErrorMessage = String(localized: "Reconnect to the server to manage goals.")
-            sendErrorMessage = goalErrorMessage
-            return false
-        }
-
-        let args = rawArgs.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !args.isEmpty else { return false }
-
-        guard let sessionID else {
-            goalErrorMessage = String(localized: "The server did not provide a session ID.")
-            sendErrorMessage = goalErrorMessage
-            return false
-        }
-
-        guard activeStreamID == nil else {
-            goalErrorMessage = String(localized: "Wait for the current response to finish before changing goals.")
-            sendErrorMessage = goalErrorMessage
-            return false
-        }
-
-        isSubmittingGoal = true
-        goalErrorMessage = nil
-        sendErrorMessage = nil
-        lastError = nil
-        defer { isSubmittingGoal = false }
-
-        do {
-            let response = try await client.submitGoal(
-                sessionID: sessionID,
-                args: args,
-                workspace: currentWorkspace,
-                model: currentModel,
-                modelProvider: requestModelProvider,
-                profile: requestProfileName
-            )
-
-            currentGoal = response.goal
-
-            if response.ok == false || response.action?.lowercased() == "error" {
-                goalErrorMessage = response.displayMessage ?? String(localized: "Goal request failed.")
-                sendErrorMessage = goalErrorMessage
-                return false
-            }
-
-            hasActivatedGoalCommand = true
-
-            guard response.kickoffPromptText != nil else {
-                if let message = response.displayMessage {
-                    appendLocalNoticeMessage(message)
-                }
-                return true
-            }
-
-            return await attachGoalKickoffStream(
-                noticeMessage: response.displayMessage,
-                modelContext: modelContext
-            )
-        } catch {
-            lastError = error
-            goalErrorMessage = error.localizedDescription
-            sendErrorMessage = goalErrorMessage
-            return false
-        }
-    }
-
-    private func attachGoalKickoffStream(noticeMessage: String?, modelContext: ModelContext?) async -> Bool {
-        guard !usesDirectGateway else {
-            goalErrorMessage = String(localized: "Goals are not available in direct Hermes mode yet.")
-            sendErrorMessage = goalErrorMessage
-            return false
-        }
-
-        await loadMessages(modelContext: modelContext)
-
-        if let errorMessage {
-            goalErrorMessage = errorMessage
-            sendErrorMessage = errorMessage
-            return false
-        }
-
-        guard let streamID = activeStreamID else {
-            if let noticeMessage {
-                appendLocalNoticeMessage(noticeMessage)
-            }
-            return true
-        }
-
-        if streamingAssistantMessageID == nil {
-            restoreActiveStreamSnapshotIfAvailable(streamID: streamID)
-        }
-        if streamingAssistantMessageID == nil {
-            streamingAssistantMessageID = Self.latestAssistantMessageID(in: messages)
-        }
-        if let noticeMessage {
-            pinLocalNoticeMessage(noticeMessage)
-        }
-
-        streamCoordinator.start(streamID: streamID)
-        return true
+        _ = rawArgs
+        _ = modelContext
+        goalErrorMessage = String(localized: "Goals are not available in direct Hermes mode yet.")
+        sendErrorMessage = goalErrorMessage
+        return false
     }
 
     private func rollbackOptimisticMessage(id: String) {
@@ -4689,44 +4567,8 @@ final class ChatViewModel {
         }
     }
 
-    func suspendStreamForBackground() {
-        suspendActiveStreamConnection()
-    }
-
-    func suspendStreamForNavigation() {
-        suspendActiveStreamConnection()
-    }
-
-    func cancelStreamReconnectRetry() {
-        guard !usesDirectGateway else { return }
-        streamCoordinator.cancelReconnectRetry()
-    }
-
-    func ensureOwnedStreamStatusWatch() {
-        guard !usesDirectGateway else { return }
-        guard streamStatusWatchTask == nil, activeStreamID != nil else { return }
-        streamStatusWatchTask = Task { @MainActor [weak self] in
-            while let self, !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
-                guard !Task.isCancelled else { return }
-                guard self.activeStreamID != nil else { return }
-                await self.recoverStaleActiveStreamIfNeeded()
-            }
-        }
-    }
-
-    func cancelOwnedStreamStatusWatch() {
-        streamStatusWatchTask?.cancel()
-        streamStatusWatchTask = nil
-    }
-
     func cleanupPollingTasks() {
         stopBackgroundPolling(clearTrackedPrompts: true)
-    }
-
-    private func suspendActiveStreamConnection() {
-        guard !usesDirectGateway else { return }
-        streamCoordinator.suspendActiveStreamConnection()
     }
 
     /// Reconciles an open chat when the scene becomes active. A known suspended
@@ -4753,25 +4595,6 @@ final class ChatViewModel {
         } catch { lastError = error; return false }
     }
 
-    func refreshTranscriptIfActiveStreamCompleted(
-        streamID expectedStreamID: String,
-        modelContext: ModelContext? = nil
-    ) async {
-        guard !usesDirectGateway else { return }
-        await streamCoordinator.refreshTranscriptIfCompleted(
-            streamID: expectedStreamID,
-            modelContext: modelContext
-        )
-    }
-
-    func recoverStaleActiveStreamIfNeeded(
-        now: Date = Date(),
-        modelContext: ModelContext? = nil
-    ) async {
-        guard !usesDirectGateway else { return }
-        await streamCoordinator.recoverStaleStreamIfNeeded(now: now, modelContext: modelContext)
-    }
-
     private var hasRunningLiveToolCall: Bool {
         liveToolCalls.contains { !$0.isCompleted }
     }
@@ -4792,7 +4615,7 @@ final class ChatViewModel {
                 completedReasoningGroups: completedReasoningGroups,
                 liveToolCalls: liveToolCalls,
                 liveReasoningText: liveReasoningText,
-                activeStreamLastEventID: streamCoordinator.lastEventID,
+                activeStreamLastEventID: nil,
                 streamingAssistantMessageID: streamingAssistantMessageID,
                 toolCallAnchorMessageID: toolCallAnchorMessageID,
                 reasoningAnchorMessageID: reasoningAnchorMessageID,
@@ -4807,7 +4630,7 @@ final class ChatViewModel {
         liveRunBookmarkStore.save(
             LiveRunBookmark(
                 streamID: activeStreamID,
-                lastEventID: streamCoordinator.lastEventID,
+                lastEventID: nil,
                 liveReasoningText: liveReasoningText,
                 streamingAssistantMessageID: streamingAssistantMessageID,
                 liveToolCalls: liveToolCalls
@@ -5743,7 +5566,6 @@ final class ChatViewModel {
     }
 
     private func resetActiveStreamReplayTokenState() {
-        streamCoordinator.clearReplayConnection()
         activeStreamReplayMatchedPrefixLength = 0
     }
 
@@ -6152,205 +5974,6 @@ extension ChatViewModel: ChatAttachmentCoordinatorDelegate {
     }
 }
 
-extension ChatViewModel: ChatStreamCoordinatorDelegate {
-    var streamCoordinatorSessionID: String? { sessionID }
-    var streamCoordinatorDisplayTitle: String { displayTitle }
-    var streamCoordinatorHasRunningLiveToolCall: Bool { hasRunningLiveToolCall }
-    var streamCoordinatorHasPendingPrompt: Bool {
-        pendingApprovalPrompt != nil || clarificationPrompt != nil
-    }
-    var streamCoordinatorLatestServerLoadHadAssistantResponseAfterLatestUser: Bool {
-        latestServerLoadHadAssistantResponseAfterLatestUser
-    }
-    var streamCoordinatorStreamingAssistantMessageID: String? {
-        get { streamingAssistantMessageID }
-        set {
-            if newValue == nil {
-                flushPendingStreamingContent()
-            }
-            streamingAssistantMessageID = newValue
-        }
-    }
-
-    func streamCoordinatorLoadMessages(modelContext: ModelContext?) async {
-        await loadMessages(modelContext: modelContext)
-    }
-
-    func streamCoordinatorLatestAssistantMessageID() -> String? {
-        Self.latestAssistantMessageID(in: messages)
-    }
-
-    func streamCoordinatorStartAuxiliaryMonitoring() {
-        OpenChatSessionStore.shared.noteStreamingStateChanged()
-    }
-
-    func streamCoordinatorStopAuxiliaryMonitoring(clearPrompt: Bool) {
-        _ = clearPrompt
-        if activeStreamID == nil {
-            cancelOwnedStreamStatusWatch()
-        }
-        OpenChatSessionStore.shared.noteStreamingStateChanged()
-    }
-
-    func streamCoordinatorSaveSnapshotIfNeeded() {
-        flushPendingStreamingContent()
-        saveActiveStreamSnapshotIfNeeded()
-    }
-
-    @discardableResult
-    func streamCoordinatorRestoreSnapshotIfAvailable(streamID: String) -> String? {
-        restoreActiveStreamSnapshotIfAvailable(streamID: streamID)
-    }
-
-    func streamCoordinatorRemoveSnapshot(streamID: String?) {
-        removeActiveStreamSnapshot(streamID: streamID)
-    }
-
-    func streamCoordinatorFlushPinnedLocalNoticesToTranscript() {
-        flushPinnedLocalNoticesToTranscript()
-    }
-
-    func streamCoordinatorDrainQueuedSlashMessageIfIdle() {
-        drainQueuedSlashMessageIfIdle()
-    }
-
-    func streamCoordinatorRefreshCompletedResponseTitleIfNeeded() {
-        refreshCompletedResponseTitleIfNeeded()
-    }
-
-    func streamCoordinatorDidCompleteCurrentResponse(needsTranscriptRefresh: Bool) {
-        responseCompletionNeedsTranscriptRefresh = needsTranscriptRefresh
-        responseCompletionHapticTrigger += 1
-    }
-
-    func streamCoordinatorDidFinishStream() {
-        flushPendingStreamingContent()
-        responseCompletionNeedsTranscriptRefresh = false
-        // Native auth is a user-owned continuation that can outlive the model
-        // response. Its browser-issued component remains valid until the native
-        // submit/cancel/expiry state arrives; clearing it here makes the secure
-        // overlay disappear at the exact point the user needs to enter values.
-    }
-
-    func streamCoordinatorDidReceiveErrorMessage(_ message: String) {
-        sendErrorMessage = message
-    }
-
-    func streamCoordinatorDidReceiveRecoveryError(_ error: Error) {
-        lastError = error
-        if CacheFallbackPolicy.isTransientBlip(error) {
-            return
-        }
-        sendErrorMessage = CacheFallbackPolicy.sendBannerMessage(for: error)
-    }
-
-    func streamCoordinatorDidStartConnection(isReplay: Bool) {
-        activeStreamReplayMatchedPrefixLength = 0
-        activeStreamReplayMatchedInterimLength = 0
-        activeStreamReplayMatchedReasoningLength = 0
-        activeStreamReplayToolMatchIndex = 0
-        activeStreamReplayPendingToolMatchIndex = nil
-    }
-
-    func streamCoordinatorDidResetRecoveryState() {
-        activeStreamReplayMatchedPrefixLength = 0
-        activeStreamReplayMatchedInterimLength = 0
-        activeStreamReplayMatchedReasoningLength = 0
-        activeStreamReplayToolMatchIndex = 0
-        activeStreamReplayPendingToolMatchIndex = nil
-    }
-
-    @discardableResult
-    func streamCoordinatorAppendToken(_ text: String) -> Bool {
-        appendAssistantToken(text)
-    }
-
-    @discardableResult
-    func streamCoordinatorAppendInterimAssistant(_ payload: InterimAssistantStreamEvent) -> Bool {
-        appendInterimAssistant(payload)
-    }
-
-    @discardableResult
-    func streamCoordinatorAppendReasoning(_ text: String) -> Bool {
-        appendReasoning(text)
-    }
-
-    @discardableResult
-    func streamCoordinatorAppendToolCall(_ payload: ToolStreamEvent) -> Bool {
-        appendToolCall(payload)
-    }
-
-    @discardableResult
-    func streamCoordinatorCompleteToolCall(_ payload: ToolStreamEvent) -> Bool {
-        completeToolCall(payload)
-    }
-
-    @discardableResult
-    func streamCoordinatorUpdateTitle(_ payload: TitleStreamEvent) -> Bool {
-        updateTitle(payload)
-    }
-
-    @discardableResult
-    func streamCoordinatorApplyDone(_ payload: DoneStreamEvent) -> Bool {
-        flushPendingStreamingContent()
-        let currentStreamingAssistantID = streamingAssistantMessageID
-        let hasCompletedTranscript = payload.session?.messages?.isEmpty == false
-        if let completedSession = payload.session {
-            applyCompletedStreamSession(completedSession)
-        }
-        if let usage = payload.usage {
-            contextWindowSnapshot = usage
-        }
-        if let finalTokensPerSecond = payload.usage?.tokensPerSecond,
-           finalTokensPerSecond.isFinite,
-           finalTokensPerSecond > 0,
-           let currentStreamingAssistantID {
-            let currentAssistantIndex = messages.firstIndex(where: { $0.messageId == currentStreamingAssistantID })
-                ?? TranscriptTurnClassifier
-                    .currentTurnAssistantAnchorIDs(in: messages, messageOffset: messagesOffset)
-                    .last
-                    .flatMap { currentAssistantAnchorID in
-                        messages.indices.first { index in
-                            TranscriptTurnClassifier.anchorID(
-                                for: messages[index],
-                                at: index,
-                                messageOffset: messagesOffset
-                            ) == currentAssistantAnchorID
-                        }
-                    }
-            guard let index = currentAssistantIndex else {
-                return hasCompletedTranscript
-            }
-            let message = messages[index]
-            messages[index] = ChatMessage(
-                role: message.role,
-                content: message.content,
-                timestamp: message.timestamp,
-                messageId: message.messageId,
-                name: message.name,
-                toolCallId: message.toolCallId,
-                toolUseId: message.toolUseId,
-                toolCalls: message.toolCalls,
-                contentParts: message.contentParts,
-                reasoning: message.reasoning,
-                attachments: message.attachments,
-                turnTps: finalTokensPerSecond
-            )
-        }
-        return hasCompletedTranscript
-    }
-
-
-    @discardableResult
-    func streamCoordinatorEnqueuePendingSteerLeftover(_ text: String) -> Bool {
-        let message = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !message.isEmpty else { return false }
-
-        _ = enqueueQueuedSlashMessage(message, attachments: [])
-        appendLocalNoticeMessage(String(localized: "Steering hint was not consumed before the response ended, so it was queued for the next turn."))
-        return true
-    }
-}
 
 private struct ActiveChatStreamSnapshot: Equatable {
     let messages: [ChatMessage]

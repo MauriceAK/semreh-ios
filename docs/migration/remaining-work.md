@@ -5,9 +5,10 @@ details/evidence: `slice3-tasks.md`, `slice3-verification.md`, `slice4-tasks.md`
 This is the current dispatch checklist, not a new architecture or acceptance waiver.
 Preserve completed Luna work. Root owns integration, notes and native execution.
 
-Current checkpoint: approved website-login retirement verified on `306406c` plus
-the scoped removal diff. Signed login-retirement build-v1, focused-v1:140/0/0,
-full-v2:2197/0/14. Sol Low workers, root integration/review. The
+Current checkpoint: main-chat coordinator retirement verified on `466c8ce` plus
+the scoped removal diff. Signed chat-transport-retirement build-v6/UI-build-v1,
+focused-v2:135/0/0, full-v1:2102/0/14, production UI-v1:1/0/0.
+Sol Low workers, root integration/review. The
 reconciled `secondary-feature-status.md` owns the per-feature current inventory.
 Do not use the historical checkpoints below as the next dispatch instruction.
 
@@ -157,6 +158,47 @@ plus one interrupted-run staging console. Unselected/opaque/OCR/unexported
 contents excluded; no unrelated historical evidence rescan claimed.
 
 ## Implementation batches
+
+- [x] **Main-chat coordinator retirement.** Removed ChatStreamCoordinator,
+  ChatViewModel/OpenChatSessionStore legacy coordinator branches, per-chat status
+  timers/watchers and unused LiveActivityReconciler. Deleted unused HTTP cancel/status
+  wrappers, endpoints and DTOs; old executable goal kickoff now refuses without
+  making a request. Root cleaned project memberships. Retained direct rendering,
+  recovery, attachments, prompts, title/cache/TPS and Live Activity lifecycle.
+  Shared event payloads stay in SSEClient while the legacy BTW implementation
+  remains; BTW is already explicitly unavailable in direct mode. Kanban retains
+  its independent SSE client and dependency. Neither unresolved feature is silently
+  considered migrated by this cleanup. All eight pacing/rendering/performance tests
+  retained through a direct event fixture; applicable Live Activity and mixed
+  rendering tests migrated rather than discarded with old SSE injection.
+  Root review found the direct queue lacked the old coordinator's initial drain
+  trigger: queued messages now drain after authoritative completion only while idle
+  and delivery is unambiguous. Production fake-transport callback regression proves
+  one queued submit; explicit failed-drain retry/no-loop regression retained.
+  Focused execution caught/fixed direct interim excerpt forwarding and immediate
+  excerpt clearing when disabled. No app-wide preference or backend changes.
+  Evidence stem `slice4-chat-transport-retirement`: signed build-v6/UI-build-v1,
+  focused-v1:306/5/0 then affected-three-class focused-v2:135/0/0, full-v1:2102/0/14,
+  UI-v1:1/0/0. Normal production login/tabs/new-chat/send reached the owned stock
+  fixture ACK; exported screenshot independently inspected. Strict signing and
+  ordinary Simulator launch6416 passed. No full-suite or UI runner retry needed.
+  Retained build-v1 duplicate actor attribute; v2 async XCTest autoclosure; v3 one
+  old coordinator recovery callback test; v4 removed query helper still needed by
+  direct tests. Root fixed tests; build-v5 passed. Focused-v1's other three failures
+  were old active-ID/LRU assumptions and a forbidden legitimate direct canonical
+  GET in the new queue fixture; corrected without weakening direct assertions.
+  Targeted audit-v1:5425files/0flags/4exported consoles. Selected new artifacts plus
+  mandatory docs/runtime logs; unselected evidence, arbitrary opaque/OCR and
+  unexported compressed contents excluded. Physical acceptance, real cross-client
+  queue behavior, orphan reconciliation and complete WebUI absence remain open.
+
+- [ ] **Next: BTW side-question transport.** Stock `prompt.btw` returns task_id and
+  session-bound `btw.complete`; use current runtime and correlate exact task/session.
+  Preserve history-independent local answer display and no automatic retry after
+  ambiguous ACK. No private backend patch. Verify disposable auxiliary model route
+  before live invocation. Kanban separately uses optional first-party plugin HTTP
+  and authenticated WebSocket, not the old app SSE contract; disposition/setup
+  must not be silently assumed.
 
 - [x] **Supported Git controls and deferred-control hiding:** direct explicit-file
   stage/unstage, clean local switch/push, canonical Git identity and child sheets;

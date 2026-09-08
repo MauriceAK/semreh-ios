@@ -13,7 +13,7 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
 
     @MainActor
     func testBufferedBurstRevealsWordByWordAtCadence() async throws {
-        let streamClient = PacingSpySSEStreamingClient()
+        let streamClient = DirectPacingEventFixture()
         // 60s lag bound keeps the quota at one word per tick for this backlog.
         let viewModel = try makeViewModel(
             streamClient: streamClient,
@@ -21,8 +21,7 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
             maxLagNanoseconds: 60_000_000_000
         )
 
-        let didStart = viewModel.seedLegacyResponseForTesting("Stream a reply")
-        XCTAssertTrue(didStart)
+        streamClient.startResponse(on: viewModel)
 
         streamClient.emit(.token("alpha beta gamma delta"))
 
@@ -50,7 +49,7 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
 
     @MainActor
     func testLargeBacklogCatchesUpWithinLagBound() async throws {
-        let streamClient = PacingSpySSEStreamingClient()
+        let streamClient = DirectPacingEventFixture()
         // 60 words × 100ms cadence = 6s of backlog; the 300ms lag bound forces a
         // ~20-word quota per tick, so convergence inside the 4s observation window
         // proves catch-up scaling (steady one-word cadence would time out).
@@ -60,8 +59,7 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
             maxLagNanoseconds: 300_000_000
         )
 
-        let didStart = viewModel.seedLegacyResponseForTesting("Stream a reply")
-        XCTAssertTrue(didStart)
+        streamClient.startResponse(on: viewModel)
 
         let words = (0..<60).map { "w\($0) " }
         for word in words {
@@ -80,11 +78,10 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
 
     @MainActor
     func testDoneEventFlushesRemainingBufferImmediately() async throws {
-        let streamClient = PacingSpySSEStreamingClient()
+        let streamClient = DirectPacingEventFixture()
         let viewModel = try makeStalledDrainViewModel(streamClient: streamClient)
 
-        let didStart = viewModel.seedLegacyResponseForTesting("Stream a reply")
-        XCTAssertTrue(didStart)
+        streamClient.startResponse(on: viewModel)
 
         streamClient.emit(.token("alpha beta gamma"))
         _ = try await observeAssistantContent(viewModel, until: "alpha ")
@@ -100,11 +97,10 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
 
     @MainActor
     func testCancelledEventFlushesRemainingBufferImmediately() async throws {
-        let streamClient = PacingSpySSEStreamingClient()
+        let streamClient = DirectPacingEventFixture()
         let viewModel = try makeStalledDrainViewModel(streamClient: streamClient)
 
-        let didStart = viewModel.seedLegacyResponseForTesting("Stream a reply")
-        XCTAssertTrue(didStart)
+        streamClient.startResponse(on: viewModel)
 
         streamClient.emit(.token("alpha beta gamma"))
         _ = try await observeAssistantContent(viewModel, until: "alpha ")
@@ -119,15 +115,14 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
 
     @MainActor
     func testPacedContentConvergesByteIdenticalToUnpacedJoin() async throws {
-        let streamClient = PacingSpySSEStreamingClient()
+        let streamClient = DirectPacingEventFixture()
         let viewModel = try makeViewModel(
             streamClient: streamClient,
             wordCadenceNanoseconds: 1_000_000,
             maxLagNanoseconds: 50_000_000
         )
 
-        let didStart = viewModel.seedLegacyResponseForTesting("Stream a reply")
-        XCTAssertTrue(didStart)
+        streamClient.startResponse(on: viewModel)
 
         // Awkward chunk boundaries: ZWJ family, flag, CRLF, tabs, doubled spaces,
         // and a combining mark split across chunks ("cafe" + U+0301).
@@ -154,15 +149,14 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
 
     @MainActor
     func testOffscreenTranscriptBuffersPresentationUntilReopened() async throws {
-        let streamClient = PacingSpySSEStreamingClient()
+        let streamClient = DirectPacingEventFixture()
         let viewModel = try makeViewModel(
             streamClient: streamClient,
             wordCadenceNanoseconds: 1_000_000,
             maxLagNanoseconds: 50_000_000
         )
 
-        let didStart = viewModel.seedLegacyResponseForTesting("Keep working while I leave")
-        XCTAssertTrue(didStart)
+        streamClient.startResponse(on: viewModel)
         viewModel.setTranscriptPresentationActive(false)
         streamClient.emit(.token("alpha beta gamma"))
         try await Task.sleep(nanoseconds: 50_000_000)
@@ -207,7 +201,7 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
 
     @MainActor
     func testStreamingPositionRecoversAfterStructuralPrepend() async throws {
-        let streamClient = PacingSpySSEStreamingClient()
+        let streamClient = DirectPacingEventFixture()
         let olderMessages: [[String: Any]] = [[
             "role": "user",
             "content": "older page",
@@ -226,8 +220,7 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
         // makeViewModel seeds renderer history directly; no gateway load claim.
         XCTAssertEqual(viewModel.messagesOffset, 1)
 
-        let didStart = viewModel.seedLegacyResponseForTesting("Keep the live tail")
-        XCTAssertTrue(didStart)
+        streamClient.startResponse(on: viewModel)
         streamClient.emit(.token("live"))
         viewModel.flushPendingStreamingContent()
         let liveMessageID = try XCTUnwrap(viewModel.streamingAssistantMessageID)
@@ -272,7 +265,7 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
     /// so completion-path flushes are observable.
     @MainActor
     private func makeStalledDrainViewModel(
-        streamClient: PacingSpySSEStreamingClient
+        streamClient: DirectPacingEventFixture
     ) throws -> ChatViewModel {
         try makeViewModel(
             streamClient: streamClient,
@@ -284,7 +277,7 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
 
     @MainActor
     private func makeViewModel(
-        streamClient: PacingSpySSEStreamingClient,
+        streamClient: DirectPacingEventFixture,
         wordCadenceNanoseconds: UInt64,
         maxLagNanoseconds: UInt64,
         historyMessageCount: Int = 0,
@@ -360,11 +353,12 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
             session: summary,
             server: server,
             client: client,
-            streamClient: streamClient,
             streamingScrollCoalescingDelayNanoseconds: 1_000_000,
             streamingWordRevealCadenceNanoseconds: wordCadenceNanoseconds,
-            streamingMaxRevealLagNanoseconds: maxLagNanoseconds
+            streamingMaxRevealLagNanoseconds: maxLagNanoseconds,
+            gatewayRuntimeProvider: { _ in throw DirectSessionError.invalidResponse }
         )
+        streamClient.attach(viewModel)
         if historyMessageCount > 0 {
             let rows = try decoder.decode([ChatMessage].self, from: JSONSerialization.data(withJSONObject: historyMessages))
             viewModel.seedTranscriptForTesting(rows, messagesOffset: initialMessagesOffset)
@@ -381,7 +375,7 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
 
     @MainActor
     private func timedStreamingHotPaths(historyMessageCount: Int) async throws -> StreamingHotPathBenchmark {
-        let streamClient = PacingSpySSEStreamingClient()
+        let streamClient = DirectPacingEventFixture()
         let viewModel = try makeViewModel(
             streamClient: streamClient,
             wordCadenceNanoseconds: 60_000_000_000,
@@ -389,8 +383,7 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
             historyMessageCount: historyMessageCount
         )
         // Benchmark renderer state only; history is explicitly seeded above.
-        let didStart = viewModel.seedLegacyResponseForTesting("Benchmark live tail")
-        XCTAssertTrue(didStart)
+        streamClient.startResponse(on: viewModel)
         let startedAt = CFAbsoluteTimeGetCurrent()
         streamClient.emit(.token("seed"))
         viewModel.flushPendingStreamingContent()
@@ -521,22 +514,47 @@ final class ChatStreamingMotionTests: XCTestCase {
     }
 }
 
-private final class PacingSpySSEStreamingClient: SSEStreamingClient {
-    private(set) var lastEventID: String?
+@MainActor
+private final class DirectPacingEventFixture {
     private(set) var stopCount = 0
-    private var onEvent: (@MainActor (SSEEvent) -> Void)?
+    private weak var viewModel: ChatViewModel?
+    private var sequence = 0
 
-    func start(url: URL, onEvent: @escaping @MainActor (SSEEvent) -> Void) {
-        lastEventID = nil
-        self.onEvent = onEvent
+    func attach(_ viewModel: ChatViewModel) { self.viewModel = viewModel }
+
+    func startResponse(on viewModel: ChatViewModel) {
+        attach(viewModel)
+        emit(type: "message.start")
     }
 
-    func stop() {
-        stopCount += 1
-    }
-
-    @MainActor
     func emit(_ event: SSEEvent) {
-        onEvent?(event)
+        switch event {
+        case .token(let text):
+            emit(type: "message.delta", payload: ["text": .string(text)])
+        case .interimAssistant(let interim):
+            emit(type: "message.interim", payload: [
+                "text": .string(interim.text ?? ""),
+                "already_streamed": .bool(interim.alreadyStreamed ?? false)
+            ])
+        case .done:
+            emit(type: "message.complete", payload: ["status": .string("complete")])
+        case .cancelled:
+            emit(type: "message.complete", payload: ["status": .string("cancelled")])
+        default:
+            XCTFail("Unsupported direct pacing fixture event: \(event)")
+        }
+    }
+
+    private func emit(type: String, payload: [String: JSONValue] = [:]) {
+        sequence += 1
+        viewModel?.handleDirectEventForTesting(HermesGatewayEvent(
+            method: "event",
+            type: type,
+            sessionID: "runtime-test",
+            sequence: sequence,
+            payload: .object(payload),
+            params: nil,
+            connectionGeneration: 1
+        ))
     }
 }
