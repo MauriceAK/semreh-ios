@@ -5,9 +5,10 @@ details/evidence: `slice3-tasks.md`, `slice3-verification.md`, `slice4-tasks.md`
 This is the current dispatch checklist, not a new architecture or acceptance waiver.
 Preserve completed Luna work. Root owns integration, notes and native execution.
 
-Current checkpoint: main-chat coordinator retirement verified on `466c8ce` plus
-the scoped removal diff. Signed chat-transport-retirement build-v6/UI-build-v1,
-focused-v2:135/0/0, full-v1:2102/0/14, production UI-v1:1/0/0.
+Current checkpoint: direct BTW/chat-SSE retirement on `114609f` plus scoped diff.
+Signed build-v5/UI-build-v3 passed; production BTW UI-v3:1/0/0.
+Final full-v3:2070/0/14 after the UI-discovered refresh fix; signed launch41961.
+Stock live BTW proves exact correlated answer and unchanged canonical history.
 Sol Low workers, root integration/review. The
 reconciled `secondary-feature-status.md` owns the per-feature current inventory.
 Do not use the historical checkpoints below as the next dispatch instruction.
@@ -192,13 +193,48 @@ contents excluded; no unrelated historical evidence rescan claimed.
   unexported compressed contents excluded. Physical acceptance, real cross-client
   queue behavior, orphan reconciliation and complete WebUI absence remain open.
 
-- [ ] **Next: BTW side-question transport.** Stock `prompt.btw` returns task_id and
-  session-bound `btw.complete`; use current runtime and correlate exact task/session.
-  Preserve history-independent local answer display and no automatic retry after
-  ambiguous ACK. No private backend patch. Verify disposable auxiliary model route
-  before live invocation. Kanban separately uses optional first-party plugin HTTP
-  and authenticated WebSocket, not the old app SSE contract; disposition/setup
-  must not be silently assumed.
+- [x] **BTW side-question transport and chat SSE retirement.** Shared runtime
+  `prompt.btw` with exact task/session/profile correlation and completion-before-ACK
+  buffering replaces legacy HTTP/BTW SSE. Single active local-only card, explicit
+  unknown outcomes and no automatic ambiguous retry. Removed chat SSE implementation,
+  stream/BTW API wrappers and obsolete tests; retained direct presentation DTOs and
+  all pacing tests. Kanban alone retains the separate SSE dependency pending its
+  explicit stock-plugin disposition; no silent migration/removal claim.
+  Evidence stem `slice4-btw-retirement`: signed build-v3/UI-build-v1; focused-v1
+  101/4/0 caught a missing controller open before BTW dispatch plus a setup-read
+  test assumption. Fixed; focused-v2 stalled before cases, exact runner21468
+  interrupted73 and retained. Same-build focused-v3:82/1/0 exposed one incorrect
+  assistant-vs-local_assistant test role; corrected only the assertion, single-test
+  focused-v4:1/0/0. Integrated full-v1:2070/0/14 passed without retry.
+  Stock `slice4-btw-live-v1.json` passed correlated exact localhost-fixture answer,
+  unchanged canonical transcript and unchanged configuration. Both possible model
+  routes guarded local; no personal provider/tools or actual fork-vs-fallback claim.
+  UI-v1 caught a genuine delayed terminal-refresh race: idle is published before
+  canonical refresh finishes, and refresh could erase the BTW row. BTW rows now
+  retain explicit exact conversation/profile ownership across reconciliation;
+  no arbitrary optimistic rows or cross-tip retention, no canonical paging change.
+  Signed build-v4/focused-v5:79/0/0 includes reconcile/cross-tip regressions.
+  UI also waits actual idle before typing, preserving the existing busy refusal.
+  UI-v2 screenshot showed the correct card but failed the obsolete one-StaticText
+  selector; adjusted test-only question/answer correlation to actual card geometry.
+  UI-v1/v2 both retain selector timeout and subsequent runner exit75; no claim the
+  exit was a diagnosed product crash. UI-build-v3/UI-v3:1/0/0 passed; root inspected
+  the exported correct question/answer screenshot. Removed the unused non-direct
+  HTTP steer fallback and its API/DTO/tests; direct steer unchanged, caller scan0.
+  Unit-build-v5 passed; final full-v3:2070/0/14, strict signing and ordinary launch41961.
+  Full-v2 stalled before cases; exact runner39419 interrupted73 and retained;
+  one same-build full-v3 retry passed. No runner cause inferred or product edit
+  between these attempts. Targeted audit-v1:9901files/0flags/11console logs.
+  Selected new BTW artifacts plus mandatory docs/runtime logs only; unselected
+  evidence, arbitrary opaque/OCR and unexported compressed contents excluded.
+  Physical acceptance remains separate; no new live probe for dead steering removal.
+
+- [ ] **Next bounded attachment batch.** Text/code `file.attach` already exists:
+  close its remaining canonical roundtrip evidence rather than reimplementing.
+  Restore voice-note send using existing transcription and isolated audio staging,
+  preserving typed draft and unrelated pending attachments. Make existing canonical
+  audio players use guarded direct managed-file bytes. Do not guess relative file
+  roots or exercise external audio providers in the deterministic fixture.
 
 - [x] **Supported Git controls and deferred-control hiding:** direct explicit-file
   stage/unstage, clean local switch/push, canonical Git identity and child sheets;

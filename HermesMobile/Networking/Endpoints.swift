@@ -26,10 +26,7 @@ enum Endpoint {
     case truncateSession
     case updateSession
     case exportSession(sessionID: String, format: SessionExportFormat)
-    case chatStream(streamID: String)
-    case chatSteer
     case submitGoal
-    case btw
     case background
     case backgroundStatus(sessionID: String)
     case directoryList(sessionID: String, path: String?)
@@ -136,14 +133,8 @@ enum Endpoint {
             return "/api/session/update"
         case .exportSession:
             return "/api/session/export"
-        case .chatStream:
-            return "/api/chat/stream"
-        case .chatSteer:
-            return "/api/chat/steer"
         case .submitGoal:
             return "/api/goal"
-        case .btw:
-            return "/api/btw"
         case .background:
             return "/api/background"
         case .backgroundStatus:
@@ -301,8 +292,6 @@ enum Endpoint {
             return items
         case let .sessionStatus(id):
             return [URLQueryItem(name: "session_id", value: id)]
-        case let .chatStream(streamID):
-            return [URLQueryItem(name: "stream_id", value: streamID)]
         case let .exportSession(sessionID, format):
             return [
                 URLQueryItem(name: "session_id", value: sessionID),

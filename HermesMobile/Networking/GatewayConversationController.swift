@@ -17,6 +17,12 @@ enum DirectSessionCompressionError: Error, Equatable, Sendable {
     case invalidResponse
 }
 
+enum DirectBtwError: Error, Equatable, Sendable {
+    case alreadyActive
+    case outcomeUnknown
+    case invalidResponse
+}
+
 /// One conversation on the active server's shared socket. The view model owns
 /// rendering/cache; this owner owns identity and RPC delivery, never a socket.
 @MainActor
@@ -30,6 +36,10 @@ final class GatewayConversationController {
     enum RunState: Equatable { case idle, submitting, running, stopping, deliveryUnknown }
     enum SteerOutcome: String { case accepted, queued, rejected }
     enum CompressionOutcome: Equatable { case compressed, unchanged, aborted, lockSkipped }
+    enum BtwOutcome: Equatable, Sendable {
+        case completed(attemptID: UUID, taskID: String, question: String, text: String)
+        case unknown(attemptID: UUID)
+    }
     struct ReasoningConfiguration: Equatable, Sendable {
         let effort: String
         let deferred: Bool
@@ -91,6 +101,7 @@ final class GatewayConversationController {
     var onRecoveredIdle: ((String) -> Void)?
     private var recoveredIdleCandidate: (lifecycle: Int, turn: Int, binding: GatewaySessionBinding, generation: Int, terminal: String?)?
     var onReasoningConfiguration: ((ReasoningConfiguration) -> Void)?
+    var onBtwOutcome: ((BtwOutcome) -> Void)?
     var onError: ((Error) -> Void)?
     var isVisible = false
     var isEditing = false {
@@ -166,6 +177,16 @@ final class GatewayConversationController {
     /// Controller-lifetime quarantine only; history reads do not prove a lost
     /// compression request has finished, and never authorize automatic retry.
     private(set) var compressionOutcomeUnknown = false
+    private struct ActiveBtw {
+        let attemptID: UUID
+        let question: String
+        let binding: GatewaySessionBinding
+        let bindingEpoch: Int
+        let lifecycle: Int
+        var connectionGeneration: Int?
+        var taskID: String?
+    }
+    private var activeBtw: ActiveBtw?
 
     /// Identity-only accessors used when ownership moves to a child
     /// ChatViewModel. The shared runtime is never recreated or resumed.
@@ -2261,6 +2282,73 @@ final class GatewayConversationController {
         return outcome
     }
 
+    /// Starts one stock side-question task without changing canonical history.
+    /// The caller supplies its local attempt identity before awaiting so a
+    /// completion buffered during the RPC can be rendered during event drain.
+    func startBtw(_ text: String, attemptID: UUID) async throws -> String {
+        let question = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !question.isEmpty else { throw DirectBtwError.invalidResponse }
+        guard activeBtw == nil else { throw DirectBtwError.alreadyActive }
+        guard !disposed, !branchInFlight, let binding else { throw DirectBtwError.invalidResponse }
+        let capturedLifecycle = lifecycle
+        let capturedEpoch = bindingEpoch
+        activeBtw = ActiveBtw(
+            attemptID: attemptID, question: question, binding: binding,
+            bindingEpoch: capturedEpoch, lifecycle: capturedLifecycle,
+            connectionGeneration: nil, taskID: nil
+        )
+        var dispatched = false
+        var acknowledgedTaskID: String?
+        do {
+            try await runtime.withSessionEventsPaused {
+                guard var active = self.activeBtw,
+                      active.attemptID == attemptID,
+                      self.isCurrentBtwScope(active) else {
+                    throw DirectSessionError.staleOperation
+                }
+                active.connectionGeneration = self.runtime.connectionGeneration
+                self.activeBtw = active
+                let result = try await self.runtime.request("prompt.btw", parameters: {
+                    guard let current = self.activeBtw,
+                          current.attemptID == attemptID,
+                          self.isCurrentBtwScope(current) else {
+                        throw DirectSessionError.staleOperation
+                    }
+                    dispatched = true
+                    return self.rpcParams(binding).merging(["text": .string(question)]) { _, new in new }
+                })
+                guard let taskID = result?.gatewayFields["task_id"]?.gatewayString,
+                      !taskID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      var current = self.activeBtw,
+                      current.attemptID == attemptID,
+                      self.isCurrentBtwScope(current) else {
+                    throw DirectBtwError.invalidResponse
+                }
+                current.taskID = taskID
+                self.activeBtw = current
+                acknowledgedTaskID = taskID
+            }
+            guard let acknowledgedTaskID else { throw DirectBtwError.invalidResponse }
+            return acknowledgedTaskID
+        } catch {
+            if activeBtw?.attemptID == attemptID { activeBtw = nil }
+            if !dispatched || Self.isDefinitiveBtwRefusal(error) { throw error }
+            throw DirectBtwError.outcomeUnknown
+        }
+    }
+
+    private func isCurrentBtwScope(_ active: ActiveBtw) -> Bool {
+        !disposed && lifecycle == active.lifecycle && bindingEpoch == active.bindingEpoch &&
+            binding == active.binding && active.binding.profile == profile &&
+            (active.connectionGeneration == nil || active.connectionGeneration == runtime.connectionGeneration)
+    }
+
+    private static func isDefinitiveBtwRefusal(_ error: Error) -> Bool {
+        guard let gatewayError = error as? HermesGatewayError,
+              case .server(_, _, _, let method, _, _) = gatewayError else { return false }
+        return method == "prompt.btw"
+    }
+
     /// The interrupt acknowledgement is not evidence the server has stopped.
     /// Confirm both a matching terminal event and the pinned status contract.
     func interrupt() async throws {
@@ -2378,6 +2466,10 @@ final class GatewayConversationController {
     /// parameter closures and pending attachments fail before async cleanup runs.
     func invalidate() {
         guard !disposed else { return }
+        if let attempt = activeBtw?.attemptID {
+            activeBtw = nil
+            onBtwOutcome?(.unknown(attemptID: attempt))
+        }
         disposed = true
         lifecycle &+= 1
         reasoningRevision &+= 1
@@ -3497,6 +3589,10 @@ final class GatewayConversationController {
     private func receive(_ event: HermesGatewayEvent) {
         guard !disposed else { return }
         if event.method == "local", event.type == "transport.closed" {
+            if let attempt = activeBtw?.attemptID {
+                activeBtw = nil
+                onBtwOutcome?(.unknown(attemptID: attempt))
+            }
             if runState != .idle { runState = .deliveryUnknown }
             approvalPromptQueue.removeAll()
             pendingApprovalPrompt = nil
@@ -3516,6 +3612,21 @@ final class GatewayConversationController {
             latestEventSequence = max(latestEventSequence, sequence)
         }
         switch event.type {
+        case "btw.complete":
+            if let active = activeBtw,
+               isCurrentBtwScope(active),
+               let expectedTaskID = active.taskID,
+               event.payload?.gatewayFields["task_id"]?.gatewayString == expectedTaskID,
+               event.payload?.gatewayFields["question"]?.gatewayString == active.question,
+               let text = event.payload?.gatewayFields["text"]?.gatewayString {
+                activeBtw = nil
+                onBtwOutcome?(.completed(
+                    attemptID: active.attemptID,
+                    taskID: expectedTaskID,
+                    question: active.question,
+                    text: text
+                ))
+            }
         case "clarify.request":
             handleBlockingRequest(event)
         case "clarify.expire":

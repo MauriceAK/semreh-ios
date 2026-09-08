@@ -35,6 +35,49 @@ def load_seed_module():
 
 
 class IOSSmokeGuardTests(unittest.TestCase):
+    def test_slice4_btw_ui_requires_standalone_stock_ui_https(self):
+        message = '--slice4-btw-ui requires --slice2-ui --https --stock-backend and no other test phase'
+        for arguments in (
+            ['--slice4-btw-ui'],
+            ['--slice2-ui', '--slice4-btw-ui'],
+            ['--https', '--slice2-ui', '--slice4-btw-ui'],
+            ['--https', '--stock-backend', '--slice4-btw-ui'],
+            ['--https', '--stock-backend', '--slice2-ui', '--slice4-btw-ui', '--slice4-branch-ui'],
+            ['--https', '--stock-backend', '--slice2-ui', '--slice4-btw-ui', '--slice3-attachment'],
+            ['--https', '--stock-backend', '--slice2-ui', '--slice4-btw-ui', '--cookie-phase', 'login'],
+            ['--https', '--stock-backend', '--slice2-ui', '--slice4-btw-ui', '--tui-created-session-id', 'seed'],
+        ):
+            with self.subTest(arguments=arguments):
+                self.assertRejected(arguments, message)
+
+    def test_slice4_btw_ui_exports_exact_production_ui_target(self):
+        smoke = load_smoke_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            products = Path(temporary).resolve()
+            source = products / 'HermesMobileUIVerification_HermesMobileUIVerification_iphonesimulator.xctestrun'
+            source.write_bytes(plistlib.dumps({'TestConfigurations': [{
+                'TestTargets': [{'BlueprintName': 'HermesMobileUITests'}],
+            }]}))
+            output = products / 'SemrehSlice2LiveUI.xctestrun'
+            with patch.object(smoke, 'PRODUCTS', products), \
+                    patch.object(smoke, 'RUNTIME', products / 'runtime'), \
+                    patch.object(smoke, 'validate') as validate, \
+                    patch.object(sys, 'argv', [
+                        str(SCRIPT), '--https', '--stock-backend', '--slice2-ui', '--slice4-btw-ui'
+                    ]):
+                with redirect_stdout(StringIO()):
+                    smoke.main()
+            validate.assert_called_once_with()
+            target = plistlib.loads(output.read_bytes())['TestConfigurations'][0]['TestTargets'][0]
+            self.assertEqual(target['OnlyTestIdentifiers'], [
+                'LongChatScrollUITests/testOptInLiveProductionLoginNewChatSend',
+            ])
+            environment = target['EnvironmentVariables']
+            self.assertEqual(environment['SEMREH_SLICE4_BTW_UI'], '1')
+            self.assertEqual(environment['SEMREH_SLICE2_UI_BACKEND_MODE'], 'stock')
+            self.assertEqual(environment['SEMREH_SLICE2_UI_BACKEND_SHA'], smoke.PIN)
+            self.assertEqual(environment['SEMREH_SLICE1_HTTPS'], '1')
+
     def test_git_ui_requires_valid_id_and_standalone_stock_https_ui(self):
         base = ['--https', '--stock-backend', '--slice2-ui', '--slice4-git-ui-session-id']
         for arguments in (

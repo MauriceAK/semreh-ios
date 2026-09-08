@@ -53,26 +53,4 @@ final class ClarificationTests: XCTestCase {
         XCTAssertEqual(cleared.relayed, true)
     }
 
-    @MainActor
-    func testSSEDecoderHandlesClarifyAndInitialEvents() {
-        let clarify = SSEEventDecoder.decode(
-            eventType: "clarify",
-            data: #"{"pending":{"clarify_id":"clarify-2","question":"Choose deployment target","choices_offered":["iPhone","iPad"],"session_id":"session-abc"},"pending_count":1}"#
-        )
-        guard case .clarificationPending(let response) = clarify else {
-            return XCTFail("Expected clarificationPending, got \(clarify)")
-        }
-        XCTAssertEqual(response.pending?.clarifyId, "clarify-2")
-        XCTAssertEqual(response.pending?.displayChoices, ["iPhone", "iPad"])
-
-        let initial = SSEEventDecoder.decode(
-            eventType: "initial",
-            data: #"{"pending":{"question":"What should I do next?","choices_offered":["Run tests","Stop"]},"pending_count":1}"#
-        )
-        guard case .clarificationPending(let initialResponse) = initial else {
-            return XCTFail("Expected clarificationPending initial event, got \(initial)")
-        }
-        XCTAssertEqual(initialResponse.pending?.displayQuestion, "What should I do next?")
-        XCTAssertEqual(initialResponse.pending?.displayChoices, ["Run tests", "Stop"])
-    }
 }

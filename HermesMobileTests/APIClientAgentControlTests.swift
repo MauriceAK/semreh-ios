@@ -50,32 +50,6 @@ final class APIClientAgentControlTests: APIClientTestCase {
         XCTAssertEqual(gatewayID.id, "approval-gateway")
     }
 
-    func testSteerChatBuildsExpectedBodyAndDecodesResponse() async throws {
-        let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/chat/steer")
-            XCTAssertEqual(request.httpMethod, "POST")
-
-            let data = try XCTUnwrap(apiTestBodyData(from: request))
-            let body = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-            XCTAssertEqual(body?["session_id"] as? String, "abc123")
-            XCTAssertEqual(body?["text"] as? String, "prefer tests")
-
-            return apiTestJSONResponse("""
-            {
-              "accepted": true,
-              "fallback": null,
-              "stream_id": "stream-123"
-            }
-            """, for: request)
-        }
-
-        let response = try await client.steerChat(sessionID: "abc123", text: "prefer tests")
-
-        XCTAssertEqual(response.accepted, true)
-        XCTAssertNil(response.fallback)
-        XCTAssertEqual(response.streamId, "stream-123")
-    }
-
     func testSubmitGoalBuildsExpectedBodyAndDecodesResponse() async throws {
         let client = makeClient { request in
             XCTAssertEqual(request.url?.path, "/api/goal")
@@ -142,32 +116,6 @@ final class APIClientAgentControlTests: APIClientTestCase {
         XCTAssertEqual(response.decision?.continuationPrompt, "Continue.")
         XCTAssertEqual(response.decision?.messageKey, "goal.continue")
         XCTAssertEqual(response.decision?.messageArgs, [.string("one"), .number(2), .bool(true)])
-    }
-
-    func testStartBtwBuildsExpectedBodyAndDecodesResponse() async throws {
-        let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/btw")
-            XCTAssertEqual(request.httpMethod, "POST")
-
-            let data = try XCTUnwrap(apiTestBodyData(from: request))
-            let body = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-            XCTAssertEqual(body?["session_id"] as? String, "abc123")
-            XCTAssertEqual(body?["question"] as? String, "what changed?")
-
-            return apiTestJSONResponse("""
-            {
-              "stream_id": "stream-btw",
-              "session_id": "ephemeral-1",
-              "parent_session_id": "abc123"
-            }
-            """, for: request)
-        }
-
-        let response = try await client.startBtw(sessionID: "abc123", question: "what changed?")
-
-        XCTAssertEqual(response.streamId, "stream-btw")
-        XCTAssertEqual(response.sessionId, "ephemeral-1")
-        XCTAssertEqual(response.parentSessionId, "abc123")
     }
 
     func testStartBackgroundBuildsExpectedBodyAndDecodesResponse() async throws {

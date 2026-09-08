@@ -87,7 +87,7 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
         _ = try await observeAssistantContent(viewModel, until: "alpha ")
         XCTAssertEqual(assistantContent(of: viewModel), "alpha ")
 
-        streamClient.emit(.done(DoneStreamEvent()))
+        streamClient.emit(.done)
         XCTAssertEqual(assistantContent(of: viewModel), "alpha beta gamma")
 
         // Nothing may trickle in after completion.
@@ -243,10 +243,7 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
         )
 
         let recomputesAfterPrepend = viewModel.transcriptFullRecomputeCountForTesting
-        streamClient.emit(.interimAssistant(InterimAssistantStreamEvent(
-            text: "late interim",
-            alreadyStreamed: false
-        )))
+        streamClient.emit(.interimAssistant(text: "late interim", alreadyStreamed: false))
 
         let expectedContent = "live\n\nlate interim"
         XCTAssertEqual(viewModel.messages.last?.content, expectedContent)
@@ -404,10 +401,7 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
         let interimStartedAt = CFAbsoluteTimeGetCurrent()
         for index in 0..<400 {
             let interimText = "interim-\(index)"
-            streamClient.emit(.interimAssistant(InterimAssistantStreamEvent(
-                text: interimText,
-                alreadyStreamed: false
-            )))
+            streamClient.emit(.interimAssistant(text: interimText, alreadyStreamed: false))
             expectedContent += "\n\n\(interimText)"
         }
         let interimIngestion = CFAbsoluteTimeGetCurrent() - interimStartedAt
@@ -429,7 +423,7 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
             streamClient.emit(.token(chunk))
         }
         let completionStartedAt = CFAbsoluteTimeGetCurrent()
-        streamClient.emit(.done(DoneStreamEvent()))
+        streamClient.emit(.done)
         let completionElapsed = CFAbsoluteTimeGetCurrent() - completionStartedAt
         let elapsed = CFAbsoluteTimeGetCurrent() - startedAt
         print(
@@ -516,6 +510,13 @@ final class ChatStreamingMotionTests: XCTestCase {
 
 @MainActor
 private final class DirectPacingEventFixture {
+    enum Event {
+        case token(String)
+        case interimAssistant(text: String, alreadyStreamed: Bool)
+        case done
+        case cancelled
+    }
+
     private(set) var stopCount = 0
     private weak var viewModel: ChatViewModel?
     private var sequence = 0
@@ -527,21 +528,19 @@ private final class DirectPacingEventFixture {
         emit(type: "message.start")
     }
 
-    func emit(_ event: SSEEvent) {
+    func emit(_ event: Event) {
         switch event {
         case .token(let text):
             emit(type: "message.delta", payload: ["text": .string(text)])
-        case .interimAssistant(let interim):
+        case .interimAssistant(let text, let alreadyStreamed):
             emit(type: "message.interim", payload: [
-                "text": .string(interim.text ?? ""),
-                "already_streamed": .bool(interim.alreadyStreamed ?? false)
+                "text": .string(text),
+                "already_streamed": .bool(alreadyStreamed)
             ])
         case .done:
             emit(type: "message.complete", payload: ["status": .string("complete")])
         case .cancelled:
             emit(type: "message.complete", payload: ["status": .string("cancelled")])
-        default:
-            XCTFail("Unsupported direct pacing fixture event: \(event)")
         }
     }
 

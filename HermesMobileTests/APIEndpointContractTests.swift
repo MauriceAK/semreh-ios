@@ -66,16 +66,7 @@ final class ContractReadinessTests: XCTestCase {
             .init(name: "retry session", method: "POST", endpoint: .retrySession, path: "/api/session/retry"),
             .init(name: "truncate session", method: "POST", endpoint: .truncateSession, path: "/api/session/truncate"),
             .init(name: "update session", method: "POST", endpoint: .updateSession, path: "/api/session/update"),
-            .init(
-                name: "chat stream",
-                method: "GET",
-                endpoint: .chatStream(streamID: "stream-123"),
-                path: "/api/chat/stream",
-                query: ["stream_id": "stream-123"]
-            ),
-            .init(name: "chat steer", method: "POST", endpoint: .chatSteer, path: "/api/chat/steer"),
             .init(name: "goal", method: "POST", endpoint: .submitGoal, path: "/api/goal"),
-            .init(name: "btw", method: "POST", endpoint: .btw, path: "/api/btw"),
             .init(name: "background", method: "POST", endpoint: .background, path: "/api/background"),
             .init(
                 name: "background status",

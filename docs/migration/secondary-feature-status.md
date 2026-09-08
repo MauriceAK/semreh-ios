@@ -1,7 +1,7 @@
 # Secondary feature migration status
 
-Reconciled September 8, 2026 against app `466c8ce` plus the chat-transport retirement:
-signed build-v6/UI-build-v1, full-v1 (2102/0/14), UI-v1 (1/0/0). Backend contract pin:
+Reconciled September 8, 2026 against app `114609f` plus BTW/chat-SSE retirement:
+signed build-v5/UI-build-v3, full-v3 (2070/0/14), UI-v3 (1/0/0). Backend contract pin:
 `29112bef099274229cadff79cdff7bf7b99c4b77`.
 This is the existing dispatch inventory, not release acceptance or a percentage.
 The binding v3 execution plan owns scope and gates; root owns disposition.
@@ -16,7 +16,7 @@ No unsupported feature below has been silently approved for permanent removal.
 | Feature / action | Current implementation | Evidence and remaining gate |
 | --- | --- | --- |
 | Main chat transport | Shared direct runtime only; obsolete main-chat coordinator/status timers/cancel-status APIs removed. Queue drain now follows confirmed idle completion. | chat-transport-retirement full2102/0/14 and production login/new-chat/send UI1/0/0. Pacing/direct renderer/queue/privacy tests retained. Physical and final lifecycle gates remain. |
-| BTW side questions | Explicitly unavailable in direct mode; legacy HTTP/SSE implementation remains pending replacement. | Pinned `prompt.btw` and session-bound `btw.complete` provide a supported equivalent. Task correlation, lost-ACK behavior and disposable auxiliary-route verification needed. |
+| BTW side questions | Direct shared-runtime `prompt.btw` and correlated `btw.complete`; local-only card, single active request and explicit unknown outcomes. Same-conversation local cards survive delayed canonical refresh; no cross-tip carry. Legacy BTW/chat SSE and APIs removed. | Signed build-v5/UI-build-v3, focused79/0/0, final full-v3:2070/0/14, production UI-v3:1/0/0 with inspected screenshot; targeted audit9901files/0flags. Completion-before-ACK, wrong task/session/question, disconnect/invalidation, no-blind-retry and reconcile tests. Owned stock live-v1 proves exact local answer and unchanged canonical history/config. No physical acceptance. |
 | Kanban board live updates | Still old `/api/kanban` contracts and independent SSE client. | Stock optional dashboard plugin offers `/api/plugins/kanban` and authenticated WebSocket, not an interchangeable SSE/Gateway endpoint. Availability/auth/product disposition remains open; package cannot yet be deleted. |
 | Profile inventory / sidebar selection | Direct `/api/profiles` and `/api/profiles/active`; local sidebar selection is not a global switch. | Integrated native tests. Keep current-running distinct from startup default. |
 | Startup default / profile creation | Direct startup-default ACK/readback and create/configure workflow. Confirmed created identity survives optional configuration failure; no blind recreate. | `cd41f5b` includes creation; full2338/0/14. Same-value default live probe passed. Actual create/configuration/provider adoption and changed-default restart/UI remain unverified. |

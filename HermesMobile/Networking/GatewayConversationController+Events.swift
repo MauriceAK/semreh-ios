@@ -101,7 +101,7 @@ extension GatewayConversationController {
         "tool.start", "tool.progress", "tool.complete", "tool.generating",
         "todo.updated", "clarify.request", "approval.request", "sudo.request",
         "secret.request", "background.complete", "error", "skin.changed",
-        "sessions.changed", "cron.changed"
+        "sessions.changed", "cron.changed", "btw.complete"
     ]
 
     private static func tool(from payload: JSONValue?) -> PresentationTool {

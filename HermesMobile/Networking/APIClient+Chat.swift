@@ -1,29 +1,6 @@
 import Foundation
 
 extension APIClient {
-    nonisolated func chatStreamURL(streamID: String, replayAfterSeq: Int? = nil) -> URL {
-        let url = Endpoint.chatStream(streamID: streamID).url(relativeTo: baseURL)
-        guard let replayAfterSeq,
-              var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
-        else {
-            return url
-        }
-
-        var queryItems = components.queryItems ?? []
-        queryItems.append(URLQueryItem(name: "replay", value: "1"))
-        queryItems.append(URLQueryItem(name: "after_seq", value: "\(max(0, replayAfterSeq))"))
-        components.queryItems = queryItems
-        return components.url ?? url
-    }
-
-    func steerChat(sessionID: String, text: String) async throws -> ChatSteerResponse {
-        try await send(
-            endpoint: .chatSteer,
-            method: "POST",
-            body: ChatSteerRequest(sessionId: sessionID, text: text)
-        )
-    }
-
     func submitGoal(
         sessionID: String,
         args: String,
@@ -46,14 +23,6 @@ extension APIClient {
         )
     }
 
-    func startBtw(sessionID: String, question: String) async throws -> BtwStartResponse {
-        try await send(
-            endpoint: .btw,
-            method: "POST",
-            body: BtwRequest(sessionId: sessionID, question: question)
-        )
-    }
-
     func startBackground(sessionID: String, prompt: String) async throws -> BackgroundStartResponse {
         try await send(
             endpoint: .background,
@@ -68,11 +37,6 @@ extension APIClient {
 
 }
 
-private struct ChatSteerRequest: Encodable {
-    let sessionId: String
-    let text: String
-}
-
 private struct GoalSubmissionRequest: Encodable {
     let sessionId: String
     let args: String
@@ -80,11 +44,6 @@ private struct GoalSubmissionRequest: Encodable {
     let model: String?
     let modelProvider: String?
     let profile: String?
-}
-
-private struct BtwRequest: Encodable {
-    let sessionId: String
-    let question: String
 }
 
 private struct BackgroundRequest: Encodable {

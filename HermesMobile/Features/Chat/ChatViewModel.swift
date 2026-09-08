@@ -824,7 +824,6 @@ final class ChatViewModel {
     private let server: URL
     let client: APIClient
     private let attachmentCoordinator: ChatAttachmentCoordinator
-    private let btwStreamClient: SSEStreamingClient
     private let liveActivityManager: any AgentLiveActivityManaging
     private let speechSynthesizerFactory: () -> any ChatSpeechSynthesizing
     private let listenAudioSession: any ListenAudioSessionControlling
@@ -882,10 +881,15 @@ final class ChatViewModel {
     private var isLoadingSkillSlashSuggestions = false
     private var queuedSlashMessages: [QueuedSlashMessage] = []
     private var isDrainingQueuedSlashMessage = false
-    private var activeBtwStreamID: String?
+    private var activeBtwAttemptID: UUID?
+    private var activeBtwTaskID: String?
+    private var activeBtwProfile: String?
     private var activeBtwMessageID: String?
     private var activeBtwQuestion: String?
     private var activeBtwAnswer = ""
+    /// Local BTW cards are history-independent presentation owned only by the
+    /// exact canonical conversation/profile that created them.
+    private var btwLocalRowScopes: [String: (sessionID: String, profile: String)] = [:]
     private var backgroundPromptsByTaskID: [String: String] = [:]
     @ObservationIgnored private var backgroundPollTask: Task<Void, Never>?
     private var isRefreshingCompletedResponseTitle = false
@@ -902,7 +906,6 @@ final class ChatViewModel {
         session: SessionSummary,
         server: URL,
         client: APIClient? = nil,
-        btwStreamClient: SSEStreamingClient? = nil,
         liveActivityManager: (any AgentLiveActivityManaging)? = nil,
         showsLiveActivityResponseExcerpts: Bool = false,
         pollingIntervals: ChatPollingIntervals = .standard,
@@ -938,7 +941,6 @@ final class ChatViewModel {
         let resolvedLiveActivityManager = liveActivityManager ?? AgentLiveActivityManager.shared
         self.client = resolvedClient
         self.attachmentCoordinator = ChatAttachmentCoordinator(client: resolvedClient)
-        self.btwStreamClient = btwStreamClient ?? SSEClient(allowedServerURL: server)
         self.liveActivityManager = resolvedLiveActivityManager
         self.showsLiveActivityResponseExcerpts = showsLiveActivityResponseExcerpts
         self.pollingIntervals = pollingIntervals
@@ -1232,6 +1234,13 @@ final class ChatViewModel {
                 self.drainQueuedSlashMessageIfIdle()
             }
         }
+        controller.onBtwOutcome = { [weak self, weak controller] outcome in
+            guard let self, let controller,
+                  !self.directInvalidated,
+                  self.directConversation === controller,
+                  controller.profile == self.activeBtwProfile else { return }
+            self.applyDirectBtwOutcome(outcome)
+        }
         controller.onError = { [weak self, weak controller] error in
             guard let self, let controller,
                   !self.directInvalidated,
@@ -1387,6 +1396,8 @@ final class ChatViewModel {
 
     func invalidateDirectConversation() {
         guard usesDirectGateway else { return }
+        failActiveBtwAttempt(String(localized: "The Hermes connection changed before the side question finished."))
+        btwLocalRowScopes.removeAll()
         directInvalidated = true
         directReasoningRefreshTask?.cancel()
         directSessionReasoningSupported = false
@@ -1587,9 +1598,28 @@ final class ChatViewModel {
         }
         adoptDirectID(page.sessionID)
         directHistoryID = page.sessionID
+        let profile = directConversation?.profile ?? (Self.nonEmpty(currentProfile) ?? "default")
+        let retainedBtwRows: [ChatMessage]
+        if older {
+            retainedBtwRows = []
+        } else {
+            btwLocalRowScopes = btwLocalRowScopes.filter {
+                $0.value.sessionID == page.sessionID && $0.value.profile == profile
+            }
+            retainedBtwRows = messages.filter { message in
+                guard let id = message.messageId,
+                      let scope = btwLocalRowScopes[id] else { return false }
+                return scope.sessionID == page.sessionID && scope.profile == profile
+            }
+        }
         withBatchedTranscriptDerivedState {
-            messages = older && !canonicalChanged
+            let canonicalMessages = older && !canonicalChanged
                 ? Self.prependingOlderMessages(page.messages, to: messages) : retainedPrefix + page.messages
+            let canonicalIDs = Set(canonicalMessages.compactMap(\.messageId))
+            messages = canonicalMessages + retainedBtwRows.filter { row in
+                guard let id = row.messageId else { return false }
+                return !canonicalIDs.contains(id)
+            }
             // WebUI's forward absolute offset is not the direct backwards cursor.
             // Stable durable row IDs own transcript identity on this path.
             messagesOffset = 0
@@ -3416,6 +3446,7 @@ final class ChatViewModel {
         liveToolCalls = []
         liveReasoningText = ""
         pinnedLocalNotices = []
+        btwLocalRowScopes.removeAll()
         streamingAssistantMessageID = nil
         toolCallAnchorMessageID = nil
         reasoningAnchorMessageID = nil
@@ -3531,32 +3562,7 @@ final class ChatViewModel {
                 return .unsupported(friendlyMessage: "Could not deliver the steering hint. The message was not resent.")
             }
         }
-        let message = args.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !message.isEmpty else {
-            return .unsupported(friendlyMessage: String(localized: "Usage: /steer <message>"))
-        }
-
-        guard let sessionID else {
-            return .unsupported(friendlyMessage: String(localized: "The server did not provide a session ID."))
-        }
-
-        guard activeStreamID != nil else {
-            let sent = await sendMessage(message)
-            return sent ? .executed(message: nil) : .unsupported(friendlyMessage: sendErrorMessage ?? String(localized: "Could not send the steering message."))
-        }
-
-        do {
-            let response = try await client.steerChat(sessionID: sessionID, text: message)
-            if response.accepted == true {
-                return .executed(message: String(localized: "Steering hint delivered."))
-            }
-        } catch {
-            lastError = error
-        }
-
-        _ = enqueueQueuedSlashMessage(message, attachments: attachmentCoordinator.consumePendingAttachments())
-        await cancelActiveStream()
-        return .executed(message: String(localized: "Steer was unavailable, so the message was queued and the current response was stopped."))
+        return .unsupported(friendlyMessage: "Direct Hermes connection is unavailable.")
     }
 
     private func interruptResponseFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
@@ -3609,50 +3615,67 @@ final class ChatViewModel {
     }
 
     private func askBtwFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
-        guard !usesDirectGateway else {
-            return .unsupported(friendlyMessage: String(localized: "/btw is not available in direct Hermes mode yet."))
-        }
-
         let question = args.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !question.isEmpty else {
             return .unsupported(friendlyMessage: String(localized: "Usage: /btw <question>"))
         }
-
-        guard let sessionID else {
-            return .unsupported(friendlyMessage: String(localized: "The server did not provide a session ID."))
+        guard usesDirectGateway, !directInvalidated, !isViewingCachedData else {
+            return .unsupported(friendlyMessage: String(localized: "Reconnect to Hermes to ask a side question."))
         }
-
-        guard !isViewingCachedData else {
-            return .unsupported(friendlyMessage: String(localized: "Reconnect to the server to ask a side question."))
-        }
-
-        guard !isCLISession else {
-            return .unsupported(friendlyMessage: String(localized: "/btw is available for WebUI sessions only."))
-        }
-
         guard activeStreamID == nil else {
             return .unsupported(friendlyMessage: String(localized: "Wait for the current response to finish before using /btw."))
         }
-
-        guard activeBtwStreamID == nil else {
+        guard activeBtwAttemptID == nil else {
             return .unsupported(friendlyMessage: String(localized: "Wait for the current /btw answer to finish first."))
         }
 
         do {
-            let response = try await client.startBtw(sessionID: sessionID, question: question)
-            if let error = response.error, !error.isEmpty {
-                return .unsupported(friendlyMessage: error)
+            let controller = try await ensureDirectConversation()
+            try await controller.open()
+            guard !directInvalidated, directConversation === controller else {
+                throw DirectSessionError.staleOperation
+            }
+            guard activeBtwAttemptID == nil else {
+                return .unsupported(friendlyMessage: String(localized: "Wait for the current /btw answer to finish first."))
+            }
+            let attemptID = UUID()
+            let profile = controller.profile
+            activeBtwAttemptID = attemptID
+            activeBtwTaskID = nil
+            activeBtwProfile = profile
+            activeBtwQuestion = question
+            activeBtwAnswer = ""
+            activeBtwMessageID = appendLocalAssistantMessage(Self.btwMessageText(question: question, answer: nil, isLoading: true))
+            if let messageID = activeBtwMessageID,
+               let sessionID = controller.storedID {
+                btwLocalRowScopes[messageID] = (sessionID, profile)
             }
 
-            guard let streamID = response.streamId, !streamID.isEmpty else {
-                return .unsupported(friendlyMessage: String(localized: "The server did not return a /btw stream."))
+            do {
+                let taskID = try await controller.startBtw(question, attemptID: attemptID)
+                // Completion may have arrived while startBtw was awaiting its ACK.
+                if activeBtwAttemptID == attemptID,
+                   !directInvalidated,
+                   directConversation === controller,
+                   activeBtwProfile == profile {
+                    activeBtwTaskID = taskID
+                }
+                return .executed(message: nil)
+            } catch {
+                if activeBtwAttemptID == attemptID {
+                    let unknown = error is DirectBtwError && (error as? DirectBtwError) == .outcomeUnknown
+                    activeBtwAnswer = unknown
+                        ? String(localized: "Outcome unknown. Check Hermes before asking again.")
+                        : String(localized: "The side question was not accepted by Hermes.")
+                    updateActiveBtwMessage(isLoading: false)
+                    clearActiveBtwAttempt()
+                }
+                lastError = error
+                return .unsupported(friendlyMessage: error.localizedDescription)
             }
-
-            startBtwStream(streamID: streamID, question: question)
-            return .executed(message: nil)
         } catch {
             lastError = error
-            return .unsupported(friendlyMessage: error.localizedDescription)
+            return .unsupported(friendlyMessage: String(localized: "Could not start the side question."))
         }
     }
 
@@ -4890,48 +4913,21 @@ final class ChatViewModel {
     }
 
 
-    private func startBtwStream(streamID: String, question: String) {
-        activeBtwStreamID = streamID
-        activeBtwQuestion = question
-        activeBtwAnswer = ""
-        activeBtwMessageID = appendLocalAssistantMessage(Self.btwMessageText(question: question, answer: nil, isLoading: true))
-
-        btwStreamClient.start(url: client.chatStreamURL(streamID: streamID)) { [weak self] event in
-            self?.handleBtwStreamEvent(event)
-        }
-    }
-
-    private func handleBtwStreamEvent(_ event: SSEEvent) {
-        switch event {
-        case .token(let text):
-            activeBtwAnswer += text
-            updateActiveBtwMessage(isLoading: true)
-        case .interimAssistant(let payload):
-            guard payload.alreadyStreamed != true else { break }
-            let text = payload.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            guard !text.isEmpty else { break }
-            if activeBtwAnswer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                activeBtwAnswer = text
-            } else {
-                activeBtwAnswer += "\n\n\(text)"
-            }
-            updateActiveBtwMessage(isLoading: true)
-        case .done:
+    private func applyDirectBtwOutcome(_ outcome: GatewayConversationController.BtwOutcome) {
+        switch outcome {
+        case .completed(let attemptID, let taskID, let question, let text):
+            guard activeBtwAttemptID == attemptID,
+                  activeBtwTaskID == nil || activeBtwTaskID == taskID,
+                  activeBtwQuestion == question else { return }
+            activeBtwTaskID = taskID
+            activeBtwAnswer = text
             updateActiveBtwMessage(isLoading: false)
-        case .approvalPending, .clarificationPending:
-            break
-        case .streamEnd, .cancelled:
-            finishBtwStream()
-        case .error(let message):
-            activeBtwAnswer = "Error: \(message)"
+            clearActiveBtwAttempt()
+        case .unknown(let attemptID):
+            guard activeBtwAttemptID == attemptID else { return }
+            activeBtwAnswer = String(localized: "Outcome unknown. Check Hermes before asking again.")
             updateActiveBtwMessage(isLoading: false)
-            finishBtwStream()
-        case .transportError(let message):
-            activeBtwAnswer = "Error: \(message)"
-            updateActiveBtwMessage(isLoading: false)
-            finishBtwStream()
-        case .heartbeat, .ignored, .reasoning, .toolStarted, .toolCompleted, .title, .sessionSnapshot, .metering, .pendingSteerLeftover, .lostWorkerBookkeeping:
-            break
+            clearActiveBtwAttempt()
         }
     }
 
@@ -4947,12 +4943,20 @@ final class ChatViewModel {
         )
     }
 
-    private func finishBtwStream() {
-        btwStreamClient.stop()
-        activeBtwStreamID = nil
+    private func clearActiveBtwAttempt() {
+        activeBtwAttemptID = nil
+        activeBtwTaskID = nil
+        activeBtwProfile = nil
         activeBtwMessageID = nil
         activeBtwQuestion = nil
         activeBtwAnswer = ""
+    }
+
+    private func failActiveBtwAttempt(_ message: String) {
+        guard activeBtwAttemptID != nil else { return }
+        activeBtwAnswer = message
+        updateActiveBtwMessage(isLoading: false)
+        clearActiveBtwAttempt()
     }
 
     private func stopBackgroundPolling(clearTrackedPrompts: Bool) {

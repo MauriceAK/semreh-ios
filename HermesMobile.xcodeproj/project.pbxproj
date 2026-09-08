@@ -29,6 +29,7 @@
 		D2EC7000000000000000000B /* SessionListGatewayInvalidationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2EC7000000000000000001B /* SessionListGatewayInvalidationTests.swift */; };
 		D2EC7000000000000000000C /* GatewayConversationBlocking.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2EC7000000000000000001C /* GatewayConversationBlocking.swift */; };
 		D2EC7000000000000000000D /* GatewayConversationBlockingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2EC7000000000000000001D /* GatewayConversationBlockingTests.swift */; };
+		D2B710000000000000000001 /* GatewayConversationBTWTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2B710000000000000000002 /* GatewayConversationBTWTests.swift */; };
 		A5C9E273D4184A71B51C9301 /* GatewayBlockingPromptModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5C9E273D4184A71B51C9302 /* GatewayBlockingPromptModelTests.swift */; };
 		D2EC7000000000000000000A /* ChatViewModelDirectGatewayTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2EC7000000000000000001A /* ChatViewModelDirectGatewayTests.swift */; };
 		D2EC70000000000000000009 /* SessionListDirectTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2EC70000000000000000019 /* SessionListDirectTests.swift */; };
@@ -173,7 +174,7 @@
 		C0DE1E550000000000000023 /* ComposerDraftStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE1E550000000000000024 /* ComposerDraftStoreTests.swift */; };
 		C22600000000000000000003 /* StreamReconnectContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C22600000000000000000004 /* StreamReconnectContractTests.swift */; };
 		1A2B3C4D5E6F7000000000D4 /* ChatViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F7000000000D5 /* ChatViewModel.swift */; };
-		1A2B3C4D5E6F7000000000D6 /* SSEClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F7000000000D7 /* SSEClient.swift */; };
+		1A2B3C4D5E6F7000000000D6 /* ChatPresentationEvents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F7000000000D7 /* ChatPresentationEvents.swift */; };
 		C0FF000000000000000000A1 /* CustomHeader.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0FF000000000000000000A2 /* CustomHeader.swift */; };
 		1A2B3C4D5E6F7000000000D8 /* MessageBubbleView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F7000000000D9 /* MessageBubbleView.swift */; };
 		BEEF02400000000000000001 /* ChatAttachmentPreviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BEEF02400000000000000002 /* ChatAttachmentPreviewView.swift */; };
@@ -210,7 +211,7 @@
 		C0DE34000000000000000003 /* TranscriptMediaParserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE34000000000000000004 /* TranscriptMediaParserTests.swift */; };
 		C0DE3400000000000000000B /* TranscriptMediaPreviewViewModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE3400000000000000000C /* TranscriptMediaPreviewViewModelTests.swift */; };
 		C0DE12000000000000000003 /* TranscriptLinkPreviewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE12000000000000000004 /* TranscriptLinkPreviewTests.swift */; };
-		1A2B3C4D5E6F7000000000DC /* SSEClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F7000000000DD /* SSEClientTests.swift */; };
+		1A2B3C4D5E6F7000000000DC /* ChatPresentationEventsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F7000000000DD /* ChatPresentationEventsTests.swift */; };
 		1A2B3C4D5E6F7000000000DE /* ToolCall.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F7000000000DF /* ToolCall.swift */; };
 		C12800000000000000000001 /* ToolActivityGroupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C12800000000000000000002 /* ToolActivityGroupView.swift */; };
 		1A2B3C4D5E6F7000000000E0 /* ToolCallCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F7000000000E1 /* ToolCallCardView.swift */; };
@@ -444,6 +445,7 @@
 		D2EC70000000000000000015 /* GatewayConversationController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "GatewayConversationController.swift"; sourceTree = "<group>"; };
 		D2EC7000000000000000001C /* GatewayConversationBlocking.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayConversationBlocking.swift; sourceTree = "<group>"; };
 		D2EC7000000000000000001D /* GatewayConversationBlockingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayConversationBlockingTests.swift; sourceTree = "<group>"; };
+		D2B710000000000000000002 /* GatewayConversationBTWTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayConversationBTWTests.swift; sourceTree = "<group>"; };
 		A5C9E273D4184A71B51C9302 /* GatewayBlockingPromptModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayBlockingPromptModelTests.swift; sourceTree = "<group>"; };
 		D1EC70000000000000000016 /* DirectHermesLiveSmokeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectHermesLiveSmokeTests.swift; sourceTree = "<group>"; };
 		D2EC70000000000000000011 /* HermesServerRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HermesServerRuntime.swift; sourceTree = "<group>"; };
@@ -571,7 +573,7 @@
 		C0DE1E550000000000000024 /* ComposerDraftStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerDraftStoreTests.swift; sourceTree = "<group>"; };
 		C22600000000000000000004 /* StreamReconnectContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamReconnectContractTests.swift; sourceTree = "<group>"; };
 		1A2B3C4D5E6F7000000000D5 /* ChatViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatViewModel.swift; sourceTree = "<group>"; };
-		1A2B3C4D5E6F7000000000D7 /* SSEClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSEClient.swift; sourceTree = "<group>"; };
+		1A2B3C4D5E6F7000000000D7 /* ChatPresentationEvents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatPresentationEvents.swift; sourceTree = "<group>"; };
 		C0FF000000000000000000A2 /* CustomHeader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CustomHeader.swift; sourceTree = "<group>"; };
 		1A2B3C4D5E6F7000000000D9 /* MessageBubbleView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageBubbleView.swift; sourceTree = "<group>"; };
 		BEEF02400000000000000002 /* ChatAttachmentPreviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatAttachmentPreviewView.swift; sourceTree = "<group>"; };
@@ -608,7 +610,7 @@
 		C0DE34000000000000000004 /* TranscriptMediaParserTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptMediaParserTests.swift; sourceTree = "<group>"; };
 		C0DE3400000000000000000C /* TranscriptMediaPreviewViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptMediaPreviewViewModelTests.swift; sourceTree = "<group>"; };
 		C0DE12000000000000000004 /* TranscriptLinkPreviewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptLinkPreviewTests.swift; sourceTree = "<group>"; };
-		1A2B3C4D5E6F7000000000DD /* SSEClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSEClientTests.swift; sourceTree = "<group>"; };
+		1A2B3C4D5E6F7000000000DD /* ChatPresentationEventsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatPresentationEventsTests.swift; sourceTree = "<group>"; };
 		1A2B3C4D5E6F7000000000DF /* ToolCall.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolCall.swift; sourceTree = "<group>"; };
 		C12800000000000000000002 /* ToolActivityGroupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolActivityGroupView.swift; sourceTree = "<group>"; };
 		1A2B3C4D5E6F7000000000E1 /* ToolCallCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolCallCardView.swift; sourceTree = "<group>"; };
@@ -887,6 +889,7 @@
 				D2EC7000000000000000001B /* SessionListGatewayInvalidationTests.swift */,
 				D2EC70000000000000000016 /* GatewayConversationControllerTests.swift */,
 				D2EC7000000000000000001D /* GatewayConversationBlockingTests.swift */,
+				D2B710000000000000000002 /* GatewayConversationBTWTests.swift */,
 				A5C9E273D4184A71B51C9302 /* GatewayBlockingPromptModelTests.swift */,
 				D3A270000000000000000012 /* DirectGatewayAttachmentTests.swift */,
 				D3A270000000000000000014 /* DirectPendingAttachmentTests.swift */,
@@ -947,7 +950,7 @@
 				C14300000000000000000004 /* StreamingMarkdownSupportTests.swift */,
 				C13000000000000000000002 /* ChatVerticalScrollAxisGuardTests.swift */,
 				C0DE25000000000000000004 /* ChatScrollPolicyTests.swift */,
-				1A2B3C4D5E6F7000000000DD /* SSEClientTests.swift */,
+				1A2B3C4D5E6F7000000000DD /* ChatPresentationEventsTests.swift */,
 				C22600000000000000000004 /* StreamReconnectContractTests.swift */,
 				C22300000000000000000004 /* CompressionAnchorResolverTests.swift */,
 				C21200000000000000000004 /* StreamingWordDrainTests.swift */,
@@ -1053,7 +1056,6 @@
 				D3A410000000000000000011 /* APIClient+DirectProfiles.swift */,
 				C03270000000000000F101 /* APIClient+SessionExport.swift */,
 				C03250000000000000F103 /* MultipartFormData.swift */,
-				1A2B3C4D5E6F7000000000D7 /* SSEClient.swift */,
 				C0FF000000000000000000A2 /* CustomHeader.swift */,
 				1A2B3C4D5E6F7000000000B3 /* APIError.swift */,
 				C04400000000000000000002 /* CacheFallbackPolicy.swift */,
@@ -1070,6 +1072,7 @@
 				1A2B3C4D5E6F7000000000BD /* Workspace.swift */,
 				C03120000000000000F001 /* GitWorkspace.swift */,
 				1A2B3C4D5E6F7000000000BE /* ServerCatalog.swift */,
+				1A2B3C4D5E6F7000000000D7 /* ChatPresentationEvents.swift */,
 				1A2B3C4D5E6F70000000142 /* ModelFavoritesStore.swift */,
 				1A2B3C4D5E6F700000000301 /* ServerAccount.swift */,
 				1A2B3C4D5E6F7000000000DF /* ToolCall.swift */,
@@ -1814,7 +1817,7 @@
 					C0DE1E550000000000000021 /* ComposerDraftStore.swift in Sources */,
 					C04800000000000000000001 /* ChatAttachmentCoordinator.swift in Sources */,
 					1A2B3C4D5E6F7000000000D4 /* ChatViewModel.swift in Sources */,
-				1A2B3C4D5E6F7000000000D6 /* SSEClient.swift in Sources */,
+				1A2B3C4D5E6F7000000000D6 /* ChatPresentationEvents.swift in Sources */,
 				C0FF000000000000000000A1 /* CustomHeader.swift in Sources */,
 				1A2B3C4D5E6F7000000000D0 /* SessionRowView.swift in Sources */,
 				1A2B3C4D5E6F7000000000D1 /* SessionListViewModel.swift in Sources */,
@@ -1880,6 +1883,7 @@
 				D2EC7000000000000000000B /* SessionListGatewayInvalidationTests.swift in Sources */,
 				D2EC70000000000000000006 /* GatewayConversationControllerTests.swift in Sources */,
 				D2EC7000000000000000000D /* GatewayConversationBlockingTests.swift in Sources */,
+				D2B710000000000000000001 /* GatewayConversationBTWTests.swift in Sources */,
 				A5C9E273D4184A71B51C9301 /* GatewayBlockingPromptModelTests.swift in Sources */,
 				D3A270000000000000000002 /* DirectGatewayAttachmentTests.swift in Sources */,
 				D3A270000000000000000004 /* DirectPendingAttachmentTests.swift in Sources */,
@@ -1940,7 +1944,7 @@
 				C14300000000000000000003 /* StreamingMarkdownSupportTests.swift in Sources */,
 				C13000000000000000000001 /* ChatVerticalScrollAxisGuardTests.swift in Sources */,
 				C0DE25000000000000000003 /* ChatScrollPolicyTests.swift in Sources */,
-				1A2B3C4D5E6F7000000000DC /* SSEClientTests.swift in Sources */,
+				1A2B3C4D5E6F7000000000DC /* ChatPresentationEventsTests.swift in Sources */,
 				C22600000000000000000003 /* StreamReconnectContractTests.swift in Sources */,
 				C22300000000000000000003 /* CompressionAnchorResolverTests.swift in Sources */,
 				C21200000000000000000003 /* StreamingWordDrainTests.swift in Sources */,

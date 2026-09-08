@@ -1,19 +1,5 @@
 import Foundation
 
-struct ChatSteerResponse: Decodable, Equatable {
-    let accepted: Bool?
-    let fallback: String?
-    let streamId: String?
-    let error: String?
-}
-
-struct BtwStartResponse: Decodable, Equatable {
-    let streamId: String?
-    let sessionId: String?
-    let parentSessionId: String?
-    let error: String?
-}
-
 struct BackgroundStartResponse: Decodable, Equatable {
     let taskId: String?
     let streamId: String?

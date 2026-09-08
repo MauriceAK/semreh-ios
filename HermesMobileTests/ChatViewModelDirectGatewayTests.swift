@@ -4,6 +4,118 @@ import XCTest
 
 @MainActor
 final class ChatViewModelDirectGatewayTests: APIClientTestCase {
+    func testDirectBtwRendersCompletionBufferedBeforeAcknowledgementReturns() async throws {
+        let fake = ChatDirectFakeTransport()
+        let gate = ChatDirectAsyncGate()
+        fake.setBtwGate(gate)
+        let runtime = try makeRuntime(fake)
+        let requests = ChatDirectRequestRecorder()
+        let client = makeClient { request in
+            requests.append(request.url?.path ?? "nil")
+            let messages = requests.values().count == 1
+                ? "[]"
+                : #"[{"id":9,"role":"assistant","content":"Reconciled canonical history"}]"#
+            return apiTestJSONResponse("{\"session_id\":\"durable-1\",\"messages\":\(messages),\"pagination\":{\"limit\":120,\"offset\":0,\"order\":\"latest\",\"returned\":1}}", for: request)
+        }
+        let vm = makeViewModel(client: client, runtime: runtime, sessionID: "durable-1")
+        let command = try XCTUnwrap(SlashCommandCatalog.command(named: "btw"))
+
+        let request = Task { await vm.executeSlashCommand(command, args: "What changed?") }
+        await waitUntil { fake.calls().contains { $0.method == "prompt.btw" } }
+        XCTAssertTrue(vm.messages.contains { $0.role == "local_assistant" && $0.content?.contains("**BTW** What changed?") == true && $0.content?.contains("...") == true })
+
+        fake.emit(ChatDirectEventFactory.event(
+            sessionID: "runtime-1", type: "btw.complete", sequence: 1,
+            payload: ["task_id": .string("btw-1"), "question": .string("What changed?"), "text": .string("Only the direct transport.")]
+        ))
+        await gate.release()
+        guard case .executed = await request.value else { return XCTFail("Expected direct BTW dispatch") }
+        await waitUntil { vm.messages.contains { $0.content?.contains("Only the direct transport.") == true } }
+
+        // A terminal refresh scheduled after the controller becomes idle must
+        // not erase the history-independent local BTW card.
+        fake.emitCompletion(sequence: 2)
+        await waitUntil { vm.messages.contains { $0.content == "Reconciled canonical history" } }
+        XCTAssertTrue(vm.messages.contains { $0.content?.contains("Only the direct transport.") == true })
+
+        let call = try XCTUnwrap(fake.calls().first { $0.method == "prompt.btw" })
+        XCTAssertEqual(fields(call.params)?["text"], .string("What changed?"))
+        XCTAssertEqual(fields(call.params)?["profile"], .string("work"))
+        XCTAssertFalse(vm.messages.contains { $0.content?.contains("...") == true })
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testDirectBtwUnknownOutcomeStopsSpinnerWithoutAutomaticRetry() async throws {
+        let fake = ChatDirectFakeTransport()
+        fake.setBlockingError("prompt.btw", .transport("fixture lost acknowledgement"))
+        let runtime = try makeRuntime(fake)
+        let vm = makeViewModel(client: makeDirectBlockingTestClient(), runtime: runtime, sessionID: "durable-1")
+        let command = try XCTUnwrap(SlashCommandCatalog.command(named: "btw"))
+
+        let result = await vm.executeSlashCommand(command, args: "Did this run?")
+        guard case .unsupported = result else { return XCTFail("Expected explicit unknown outcome") }
+        await waitUntil { vm.messages.contains { $0.content?.contains("Outcome unknown") == true } }
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertEqual(fake.calls().filter { $0.method == "prompt.btw" }.count, 1)
+        XCTAssertFalse(vm.messages.contains { $0.content?.contains("...") == true })
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testDirectBtwCardDoesNotCarryAcrossCanonicalConversationChange() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let requests = ChatDirectRequestRecorder()
+        let client = makeClient { request in
+            requests.append(request.url?.path ?? "nil")
+            let first = requests.values().count == 1
+            let sessionID = first ? "durable-1" : "different-tip"
+            let messages = first ? "[]" : #"[{"id":10,"role":"assistant","content":"Different canonical history"}]"#
+            return apiTestJSONResponse("{\"session_id\":\"\(sessionID)\",\"messages\":\(messages),\"pagination\":{\"limit\":120,\"offset\":0,\"order\":\"latest\",\"returned\":1}}", for: request)
+        }
+        let vm = makeViewModel(client: client, runtime: runtime, sessionID: "durable-1")
+        let command = try XCTUnwrap(SlashCommandCatalog.command(named: "btw"))
+
+        guard case .executed = await vm.executeSlashCommand(command, args: "Scoped?") else {
+            return XCTFail("Expected direct BTW dispatch")
+        }
+        fake.emit(ChatDirectEventFactory.event(
+            sessionID: "runtime-1", type: "btw.complete", sequence: 1,
+            payload: ["task_id": .string("btw-1"), "question": .string("Scoped?"), "text": .string("Original conversation only.")]
+        ))
+        await waitUntil { vm.messages.contains { $0.content?.contains("Original conversation only.") == true } }
+
+        fake.emitCompletion(sequence: 2)
+        await waitUntil { vm.messages.contains { $0.content == "Different canonical history" } }
+        XCTAssertFalse(vm.messages.contains { $0.content?.contains("Original conversation only.") == true })
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testDirectBtwAllowsOnlyOneActiveSideQuestion() async throws {
+        let fake = ChatDirectFakeTransport()
+        let gate = ChatDirectAsyncGate()
+        fake.setBtwGate(gate)
+        let runtime = try makeRuntime(fake)
+        let vm = makeViewModel(client: makeDirectBlockingTestClient(), runtime: runtime, sessionID: "durable-1")
+        let command = try XCTUnwrap(SlashCommandCatalog.command(named: "btw"))
+
+        let first = Task { await vm.executeSlashCommand(command, args: "First?") }
+        await waitUntil { fake.calls().filter { $0.method == "prompt.btw" }.count == 1 }
+        let second = await vm.executeSlashCommand(command, args: "Second?")
+        guard case .unsupported(let message) = second else { return XCTFail("Expected active BTW refusal") }
+        XCTAssertTrue(message.contains("current /btw"))
+        XCTAssertEqual(fake.calls().filter { $0.method == "prompt.btw" }.count, 1)
+
+        await gate.release()
+        _ = await first.value
+        vm.invalidateDirectConversation()
+        XCTAssertFalse(vm.messages.contains { $0.content?.contains("...") == true })
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
     func testQueuedMessageDrainsOnceAfterAuthoritativeDirectCompletion() async throws {
         let fake = ChatDirectFakeTransport()
         let runtime = try makeRuntime(fake)
@@ -2994,6 +3106,7 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
     private var connected = false
     private var steerResponse: JSONValue = .object(["status": .string("accepted")])
     private var promptSubmitResponse: JSONValue = .object(["status": .string("streaming")])
+    private var btwGate: ChatDirectAsyncGate?
     private var emitsPromptEvents = true
     private var resumeResponse: JSONValue = .object([
         "session_id": .string("runtime-1"),
@@ -3143,6 +3256,10 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
         withLock { promptSubmitGate = gate }
     }
 
+    func setBtwGate(_ gate: ChatDirectAsyncGate?) {
+        withLock { btwGate = gate }
+    }
+
     func setPromptSubmitCancellation(_ enabled: Bool) {
         withLock { promptSubmitShouldCancel = enabled }
     }
@@ -3194,6 +3311,8 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
                     sink?(ChatDirectEventFactory.event(sessionID: "runtime-1", type: "message.delta", sequence: 2, payload: ["text": .string("streamed answer")]))
                 }
                 return (promptSubmitResponse, nil, promptSubmitGate, false, nil, nil)
+            case "prompt.btw":
+                return (.object(["task_id": .string("btw-1")]), nil, btwGate, false, nil, nil)
             case "session.steer":
                 return (steerResponse, nil, nil, false, nil, nil)
             case "session.interrupt":
@@ -3247,6 +3366,9 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
         if method == "prompt.submit", let gate = behavior.2 {
             await gate.wait()
             if withLock({ promptSubmitShouldCancel }) { throw CancellationError() }
+        }
+        if method == "prompt.btw", let gate = behavior.2 {
+            await gate.wait()
         }
         if let requestError { throw requestError }
         return behavior.0

@@ -530,6 +530,19 @@ final class LongChatScrollUITests: XCTestCase {
         XCTAssertTrue(acknowledgement.exists && acknowledgement.isHittable)
         attachScreenshot(named: "live-production-chat-success")
 
+        if environment["SEMREH_SLICE4_BTW_UI"] == "1" {
+            guard stockBackend else {
+                XCTFail("Slice 4 BTW UI requires the pinned stock backend.")
+                return
+            }
+            // The deterministic ACK can arrive as a delta before the terminal
+            // message.complete. BTW intentionally requires an idle main turn,
+            // so wait for the production action control to leave Stop state.
+            waitForIdle(app: app)
+            exerciseOptInDirectBTWFlow(app: app, composer: composer)
+            return
+        }
+
         if environment["SEMREH_SLICE4_BRANCH_UI"] == "1" {
             guard stockBackend else {
                 XCTFail("Slice 4 branch UI requires the pinned stock backend.")
@@ -586,6 +599,47 @@ final class LongChatScrollUITests: XCTestCase {
                           message: "The TUI-created assistant reply must also be visible.")
             attachScreenshot(named: "live-tui-created-session-in-semreh")
         }
+    }
+
+    @MainActor
+    private func exerciseOptInDirectBTWFlow(app: XCUIApplication, composer: XCUIElement) {
+        let question = "SEMREH_SLICE4_BTW_UI_\(UUID().uuidString)"
+        composer.tap()
+        composer.typeText("/btw \(question)")
+
+        let send = app.buttons["Send"]
+        assertHittable(send, timeout: 10, message: "The production composer must allow the BTW command.")
+        send.tap()
+
+        let questionText = app.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS[c] %@", question)
+        ).firstMatch
+        assertHittable(questionText, timeout: 45,
+                       message: "The local BTW card must retain its unique question.")
+
+        // Markdown exposes the card's question and answer as separate static
+        // texts. Correlate by their layout inside the compact local card: the
+        // final answer must be the nearby row below this run's unique question,
+        // never the identical main-turn ACK rendered above it.
+        let deadline = Date().addingTimeInterval(90)
+        var correlatedAnswer: XCUIElement?
+        repeat {
+            correlatedAnswer = app.staticTexts.matching(
+                NSPredicate(format: "label CONTAINS[c] %@", slice1Acknowledgement)
+            ).allElementsBoundByIndex.first { answer in
+                answer.exists && answer.isHittable
+                    && answer.frame.minY >= questionText.frame.maxY
+                    && answer.frame.minY - questionText.frame.maxY < 160
+                    && abs(answer.frame.minX - questionText.frame.minX) < 40
+            }
+            if correlatedAnswer != nil { break }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        } while Date() < deadline
+        XCTAssertNotNil(
+            correlatedAnswer,
+            "The same local BTW card must replace its placeholder with the final stock answer."
+        )
+        attachScreenshot(named: "slice4-btw-local-answer")
     }
 
     @MainActor
@@ -1958,13 +2012,16 @@ final class LongChatScrollUITests: XCTestCase {
         let deadline = Date().addingTimeInterval(45)
         while Date() < deadline {
             let stop = app.buttons["Stop response"]
-            if !stop.exists {
+            let send = app.buttons["Send"]
+            if !stop.exists && send.exists {
                 return
             }
             RunLoop.main.run(until: Date().addingTimeInterval(0.1))
         }
         XCTAssertFalse(app.buttons["Stop response"].exists,
-                       "Clarification follow-up must settle instead of leaving a running response.")
+                       "The response must settle instead of leaving a running response.")
+        XCTAssertTrue(app.buttons["Send"].exists,
+                      "An idle chat must restore the production Send action.")
     }
 
     private func waitForPostLoginDestination(app: XCUIApplication) {
