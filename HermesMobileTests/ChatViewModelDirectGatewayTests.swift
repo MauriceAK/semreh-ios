@@ -1608,6 +1608,73 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         await runtime.stop()
     }
 
+    func testDirectFullLoadDuringActiveRunSkipsStaleRESTAndPreservesLiveTailCardsAnchorsAndSibling() async throws {
+        let fixture = ChatLongHistoryFixture(chatIDs: ["chat-live-load", "chat-load-sibling"])
+        let fake = ChatLongFixtureTransport(fixture: fixture)
+        let runtime = try makeRuntime(fake)
+        let client = makeLongHistoryClient(fixture: fixture)
+        let vm = makeViewModel(client: client, runtime: runtime, sessionID: "chat-live-load")
+        let sibling = makeViewModel(client: client, runtime: runtime, sessionID: "chat-load-sibling")
+        await vm.loadMessages()
+        await sibling.loadMessages()
+        let durableRows = vm.messages
+        let siblingRows = sibling.messages
+        let requestsBeforeActiveLoad = fixture.requests()
+
+        fake.emit(for: "chat-live-load", type: "message.start", sequence: 10)
+        fake.emit(for: "chat-live-load", type: "message.delta", sequence: 11,
+                  payload: ["text": .string("live answer")])
+        fake.emit(for: "chat-live-load", type: "reasoning.delta", sequence: 12,
+                  payload: ["text": .string("live plan")])
+        fake.emit(for: "chat-live-load", type: "tool.start", sequence: 13,
+                  payload: ["tool_id": .string("live-load-tool"), "name": .string("read_file")])
+        await waitUntil {
+            vm.hasStreamingAssistantMessageContent
+                && vm.liveReasoningText == "live plan"
+                && vm.liveToolCalls.map(\.id) == ["live-load-tool"]
+                && vm.reasoningAnchorMessageID != nil
+                && vm.toolCallAnchorMessageID != nil
+        }
+        let liveID = try XCTUnwrap(vm.streamingAssistantMessageID)
+        let reasoningAnchor = try XCTUnwrap(vm.reasoningAnchorMessageID)
+        let toolAnchor = try XCTUnwrap(vm.toolCallAnchorMessageID)
+        let streamID = try XCTUnwrap(vm.activeStreamID)
+        let connectionCount = fake.connectionCount()
+        let RPCsBeforeActiveLoad = fake.calls()
+
+        // The stock REST transcript is intentionally still the durable snapshot
+        // from before this run. A public full load while active must not fetch and
+        // apply it over the gateway-owned live tail.
+        await vm.loadMessages()
+
+        XCTAssertEqual(fixture.requests(), requestsBeforeActiveLoad)
+        XCTAssertEqual(fake.calls(), RPCsBeforeActiveLoad)
+        XCTAssertEqual(fake.connectionCount(), connectionCount)
+        XCTAssertEqual(Array(vm.messages.dropLast()), durableRows)
+        XCTAssertEqual(vm.messages.last?.messageId, liveID)
+        XCTAssertEqual(vm.messages.last?.content, "live answer")
+        XCTAssertEqual(vm.streamingAssistantMessageID, liveID)
+        XCTAssertEqual(vm.activeStreamID, streamID)
+        XCTAssertEqual(vm.liveReasoningText, "live plan")
+        XCTAssertEqual(vm.liveToolCalls.map(\.id), ["live-load-tool"])
+        XCTAssertEqual(vm.reasoningAnchorMessageID, reasoningAnchor)
+        XCTAssertEqual(vm.toolCallAnchorMessageID, toolAnchor)
+        XCTAssertEqual(sibling.messages, siblingRows)
+        XCTAssertFalse(fake.calls().contains { $0.method == "prompt.submit" })
+
+        fake.emit(for: "chat-live-load", type: "message.delta", sequence: 14,
+                  payload: ["text": .string(" continues")])
+        await waitUntil { vm.messages.last?.content == "live answer continues" }
+        XCTAssertEqual(vm.messages.last?.messageId, liveID)
+        XCTAssertEqual(vm.reasoningAnchorMessageID, reasoningAnchor)
+        XCTAssertEqual(vm.toolCallAnchorMessageID, toolAnchor)
+        XCTAssertEqual(sibling.messages, siblingRows)
+        XCTAssertFalse(fake.calls().contains { $0.method == "prompt.submit" })
+        await vm.disposeDirectConversation()
+        await sibling.disposeDirectConversation()
+        await runtime.stop()
+    }
+
     func testActiveDuplicateOnlyPageAdvancesRawCursorWithoutExhaustingHistory() async throws {
         let fixture = ChatLongHistoryFixture(chatIDs: ["chat-duplicate-page"])
         let fake = ChatLongFixtureTransport(fixture: fixture)
@@ -3286,11 +3353,17 @@ private final class ChatLongHistoryFixture: @unchecked Sendable {
 }
 
 private final class ChatLongFixtureTransport: HermesGatewayTransport, @unchecked Sendable {
+    struct Call: Equatable {
+        let method: String
+        let params: JSONValue?
+    }
+
     private let lock = NSLock()
     private let fixture: ChatLongHistoryFixture
     private var sink: (@Sendable (HermesGatewayEvent) -> Void)?
     private var connected = false
     private var generation = 0
+    private var recordedCalls: [Call] = []
 
     init(fixture: ChatLongHistoryFixture) {
         self.fixture = fixture
@@ -3316,6 +3389,7 @@ private final class ChatLongFixtureTransport: HermesGatewayTransport, @unchecked
     }
 
     func request(method: String, params: JSONValue?, timeout: Duration?) async throws -> JSONValue? {
+        withLock { recordedCalls.append(Call(method: method, params: params)) }
         let values = params.flatMap { value -> [String: JSONValue]? in
             guard case .object(let fields) = value else { return nil }
             return fields
@@ -3341,6 +3415,14 @@ private final class ChatLongFixtureTransport: HermesGatewayTransport, @unchecked
         default:
             return .object([:])
         }
+    }
+
+    func calls() -> [Call] {
+        withLock { recordedCalls }
+    }
+
+    func connectionCount() -> Int {
+        withLock { generation }
     }
 
     func emitCompletion(for chatID: String) {

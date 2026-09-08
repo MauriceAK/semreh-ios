@@ -1540,14 +1540,32 @@ final class ChatViewModel {
         directRuntime = nil
     }
 
+    @ObservationIgnored private var directLoadWaitOwner: UUID?
+
     private func loadDirectMessages(modelContext: ModelContext?) async {
         guard !directInvalidated else { return }
-        directModelContext = modelContext ?? directModelContext
+        messageLoadGeneration &+= 1
+        let generation = messageLoadGeneration
+        let requestedID = canonicalSessionID
+        let requestedProfile = requestProfileName
+        let modelContext = modelContext ?? directModelContext
+        directModelContext = modelContext
+        let waitOwner = UUID()
+        directLoadWaitOwner = waitOwner
+        beginConnectionWaitIfNeeded()
         if let sessionID, messages.isEmpty, let modelContext {
             _ = renderCachedMessagesBeforeReload(sessionID: sessionID, modelContext: modelContext)
         }
-        beginConnectionWaitIfNeeded()
-        defer { endConnectionWait() }
+        let initialMessages = messages
+        errorMessage = nil
+        cacheErrorMessage = nil
+        lastError = nil
+        defer {
+            if directLoadWaitOwner == waitOwner {
+                directLoadWaitOwner = nil
+                endConnectionWait()
+            }
+        }
         do {
             let wasAttached = directConversation?.binding != nil
             let controller = try await ensureDirectConversation()
@@ -1555,13 +1573,55 @@ final class ChatViewModel {
             // refresh needs another; never overwrite an active streamed turn.
             try await controller.open()
             if wasAttached, controller.runState == .idle { try await controller.refresh() }
+            guard messageLoadGeneration == generation, !directInvalidated,
+                  requestedProfile == requestProfileName else { return }
             errorMessage = nil
         } catch DirectSessionError.staleOperation {
             // A newer turn/read owns presentation; this is not a load failure.
         } catch {
+            guard !Task.isCancelled, messageLoadGeneration == generation, !directInvalidated,
+                  requestedID == canonicalSessionID, requestedProfile == requestProfileName else { return }
             lastError = error
-            errorMessage = "Could not load this Hermes conversation."
-            isViewingCachedData = !messages.isEmpty
+            // Only a real cache adoption is offline presentation. Auth/server errors
+            // must not turn a retained online transcript into purported cached data.
+            let useCache: Bool
+            if let gatewayError = error as? HermesGatewayError {
+                switch gatewayError {
+                case .closed, .notConnected, .timeout:
+                    useCache = true
+                case .transport(let operation):
+                    // These are exact local failure codes emitted by our client,
+                    // not server text. Encoding failures are not connectivity loss.
+                    useCache = operation == "WebSocket receive failed" || operation == "WebSocket send failed"
+                default:
+                    useCache = false
+                }
+            } else if case DirectHermesRequestError.http(let status, _) = error {
+                useCache = CacheFallbackPolicy.shouldUseCache(for: APIError.http(statusCode: status, body: nil))
+            } else {
+                useCache = CacheFallbackPolicy.shouldUseCache(for: error)
+            }
+            if useCache, !hasPreservedLiveRun, messages == initialMessages, let requestedID, let modelContext {
+                do {
+                    let cached = try CacheStore.cachedMessages(serverURL: server,
+                        sessionID: transcriptCacheID(requestedID), in: modelContext,
+                        limit: Self.messagePageLimit)
+                    if !cached.isEmpty {
+                        withBatchedTranscriptDerivedState {
+                            messages = cached
+                            messagesOffset = 0
+                        }
+                        hasOlderMessages = false
+                        isViewingCachedData = true
+                        clearCacheFirstMessagePlaceholder()
+                        errorMessage = nil
+                        return
+                    }
+                } catch { cacheErrorMessage = error.localizedDescription }
+            }
+            revertCacheFirstPlaceholderIfNeeded()
+            isViewingCachedData = false
+            errorMessage = error.localizedDescription
         }
     }
 
@@ -3232,204 +3292,7 @@ final class ChatViewModel {
         modelContext: ModelContext? = nil,
         allowApplyDuringLocalStart: Bool = false
     ) async {
-        if usesDirectGateway {
-            await loadDirectMessages(modelContext: modelContext)
-            return
-        }
-        guard let sessionID else {
-            errorMessage = String(localized: "The server did not provide a session ID.")
-            return
-        }
-
-        messageLoadGeneration &+= 1
-        let generation = messageLoadGeneration
-        let streamIDAtLoadStart = activeStreamID
-        if streamIDAtLoadStart == nil {
-            resetPendingStreamingContentBuffers()
-        }
-        latestServerLoadHadAssistantResponseAfterLatestUser = false
-        let streamLoadPreparation = streamCoordinator.prepareForSessionLoad()
-        beginConnectionWaitIfNeeded()
-        errorMessage = nil
-        cacheErrorMessage = nil
-        lastError = nil
-        defer {
-            if messageLoadGeneration == generation {
-                endConnectionWait()
-            }
-        }
-
-        // Cache-first render (#289): reconcile successful server data against the
-        // transcript that existed *before* an optimistic cache placeholder. A
-        // prepared placeholder may overlap a shifted server page; treating it as
-        // real history would retain stale prefix rows and reset pagination to zero.
-        let isUsingPreparedCachePlaceholder = cacheFirstMessagePlaceholder != nil
-            && messages == cacheFirstMessagePlaceholder
-        let previousMessages = isUsingPreparedCachePlaceholder
-            ? messagesBeforeCacheFirstPlaceholder
-            : messages
-        let previousMessagesOffset = isUsingPreparedCachePlaceholder
-            ? messagesOffsetBeforeCacheFirstPlaceholder
-            : messagesOffset
-        if messages.isEmpty, let modelContext {
-            _ = renderCachedMessagesBeforeReload(
-                sessionID: sessionID,
-                modelContext: modelContext
-            )
-        }
-        let renderedCacheFirst = cacheFirstMessagePlaceholder != nil
-
-        do {
-            let response = try await client.session(
-                id: sessionID,
-                includeMessages: true,
-                messageLimit: Self.messagePageLimit
-            )
-            guard messageLoadGeneration == generation else { return }
-            guard allowApplyDuringLocalStart || (!isStartingChat && !isEditingMessage && !isRegeneratingMessage) else { return }
-            guard streamIDAtLoadStart != nil || activeStreamID == nil else { return }
-            let session = response.session
-            let loadedMessages = session?.messages ?? []
-            let loadedActiveStreamID = session?.activeStreamId?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let reloadedMessages: [ChatMessage]
-            if let modelContext {
-                do {
-                    let cachedMessages = try CacheStore.cachedMessages(
-                        serverURL: server,
-                        sessionID: sessionID,
-                        in: modelContext,
-                        limit: Self.messagePageLimit
-                    )
-                    reloadedMessages = Self.mergingLoadedMessages(
-                        loadedMessages,
-                        withCachedLocalOptimisticMessages: cachedMessages
-                    )
-                } catch {
-                    cacheErrorMessage = error.localizedDescription
-                    reloadedMessages = loadedMessages
-                }
-            } else {
-                reloadedMessages = loadedMessages
-            }
-            applyCompressionAnchorMetadata(from: session)
-            applyReloadedMessages(
-                reloadedMessages,
-                from: session,
-                previousMessages: previousMessages,
-                previousMessagesOffset: previousMessagesOffset
-            )
-            if renderedCacheFirst {
-                // The taller server transcript has now replaced the lighter cache-first
-                // render; signal the view to re-pin to the bottom without a visible jump.
-                cacheFirstReconcileScrollToken += 1
-            }
-            clearCacheFirstMessagePlaceholder()
-            latestServerLoadHadAssistantResponseAfterLatestUser = Self.hasAssistantResponseAfterLatestUser(
-                in: messages
-            )
-            responseCompletionNeedsTranscriptRefresh = false
-            isViewingCachedData = false
-            contextWindowSnapshot = ContextWindowSnapshot(
-                contextLength: session?.contextLength,
-                thresholdTokens: session?.thresholdTokens,
-                lastPromptTokens: session?.lastPromptTokens,
-                inputTokens: session?.inputTokens,
-                outputTokens: session?.outputTokens,
-                estimatedCost: session?.estimatedCost
-            )
-            if let modelContext {
-                do {
-                    try CacheStore.cacheMessages(Self.cacheMessageWindow(from: messages), serverURL: server, sessionID: sessionID, in: modelContext)
-                } catch {
-                    cacheErrorMessage = error.localizedDescription
-                }
-            }
-            if let title = session?.title {
-                displayTitle = Self.displayTitle(from: title)
-            }
-            setCompletedToolCallGroups(ToolCallGroup.groups(
-                persistedToolCalls: session?.toolCalls ?? [],
-                messages: messages,
-                messageOffset: messagesOffset
-            ))
-            let preserveLiveChrome = ChatLiveReconcilePolicy.shouldPreserveLiveRunChrome(
-                loadedActiveStreamID: loadedActiveStreamID,
-                localActiveStreamID: activeStreamID ?? streamIDAtLoadStart
-            )
-            if !preserveLiveChrome {
-                completedReasoningGroups = []
-                liveToolCalls = []
-                liveReasoningText = ""
-                pinnedLocalNotices = []
-                toolCallAnchorMessageID = nil
-                reasoningAnchorMessageID = nil
-                attachmentCoordinator.removeAllLocalPreviews()
-            }
-            streamCoordinator.reconcileSessionLoad(
-                loadedActiveStreamID: loadedActiveStreamID,
-                preparation: streamLoadPreparation,
-                usedCacheFallback: false
-            )
-        } catch {
-            guard messageLoadGeneration == generation else { return }
-            guard allowApplyDuringLocalStart || (!isStartingChat && !isEditingMessage && !isRegeneratingMessage) else { return }
-            guard streamIDAtLoadStart != nil || activeStreamID == nil else { return }
-            lastError = error
-            latestServerLoadHadAssistantResponseAfterLatestUser = false
-            if CacheFallbackPolicy.shouldUseCache(for: error), let modelContext {
-                do {
-                    let cachedMessages = try CacheStore.cachedMessages(
-                        serverURL: server,
-                        sessionID: sessionID,
-                        in: modelContext,
-                        limit: Self.messagePageLimit
-                    )
-                    if !cachedMessages.isEmpty {
-                        clearCompressionAnchorMetadata()
-                        withBatchedTranscriptDerivedState {
-                            messages = cachedMessages
-                            messagesOffset = 0
-                        }
-                        latestServerLoadHadAssistantResponseAfterLatestUser = Self.hasAssistantResponseAfterLatestUser(
-                            in: messages
-                        )
-                        responseCompletionNeedsTranscriptRefresh = false
-                        hasOlderMessages = false
-                        isViewingCachedData = true
-                        contextWindowSnapshot = nil
-                        errorMessage = nil
-                        setCompletedToolCallGroups([])
-                        completedReasoningGroups = []
-                        liveToolCalls = []
-                        liveReasoningText = ""
-                        pinnedLocalNotices = []
-                        toolCallAnchorMessageID = nil
-                        reasoningAnchorMessageID = nil
-                        streamingAssistantMessageID = nil
-                        attachmentCoordinator.removeAllLocalPreviews()
-                        clearCacheFirstMessagePlaceholder()
-                        streamCoordinator.reconcileSessionLoad(
-                            loadedActiveStreamID: nil,
-                            preparation: streamLoadPreparation,
-                            usedCacheFallback: true
-                        )
-                    } else {
-                        revertCacheFirstPlaceholderIfNeeded()
-                        isViewingCachedData = false
-                        errorMessage = error.localizedDescription
-                    }
-                } catch {
-                    revertCacheFirstPlaceholderIfNeeded()
-                    cacheErrorMessage = error.localizedDescription
-                    isViewingCachedData = false
-                    errorMessage = lastError?.localizedDescription
-                }
-            } else {
-                revertCacheFirstPlaceholderIfNeeded()
-                isViewingCachedData = false
-                errorMessage = error.localizedDescription
-            }
-        }
+        await loadDirectMessages(modelContext: modelContext)
     }
 
     /// Performs only the fast, local portion of an existing session's first
@@ -4009,6 +3872,17 @@ final class ChatViewModel {
     #if DEBUG
     /// State-only setup for retained legacy renderer/recovery tests. This does not
     /// submit a prompt or exercise the retired WebUI send endpoint.
+    func seedTranscriptForTesting(_ rows: [ChatMessage], messagesOffset offset: Int = 0) {
+        resetPendingStreamingContentBuffers()
+        withBatchedTranscriptDerivedState {
+            messages = rows
+            messagesOffset = offset
+        }
+        hasOlderMessages = offset > 0
+        streamingAssistantMessageID = nil
+        streamingAssistantMessageIndex = nil
+    }
+
     @discardableResult
     func seedLegacyResponseForTesting(_ draft: String, streamID: String = "stream-123", modelContext: ModelContext? = nil) -> Bool {
         guard !usesDirectGateway else { return false }

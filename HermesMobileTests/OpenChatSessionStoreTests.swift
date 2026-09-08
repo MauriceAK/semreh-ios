@@ -766,18 +766,16 @@ final class OpenChatSessionStoreTests: XCTestCase {
     @MainActor
     func testSidebarRefreshReconcilesOpenTranscriptFromCanonicalServer() async throws {
         var sessionFetches = 0
-        let viewModel = try makeViewModel(sessionID: "session-abc") { request in
-            XCTAssertEqual(request.url?.path, "/api/session")
+        let (viewModel, runtime) = try makeDirectRefreshViewModel { request in
+            XCTAssertEqual(request.url?.path, "/api/sessions/session-abc/messages")
             sessionFetches += 1
             return apiTestJSONResponse("""
             {
-              "session": {
                 "session_id": "session-abc",
                 "messages": [
-                  {"role": "user", "content": "Sent from TUI", "message_id": "tui-1", "timestamp": 1770000000},
-                  {"role": "assistant", "content": "Canonical response", "message_id": "assistant-1", "timestamp": 1770000001}
+                  {"role": "user", "content": "Sent from TUI", "id": 1, "timestamp": 1770000000},
+                  {"role": "assistant", "content": "Canonical response", "id": 2, "timestamp": 1770000001}
                 ]
-              }
             }
             """, for: request)
         }
@@ -793,6 +791,8 @@ final class OpenChatSessionStoreTests: XCTestCase {
         XCTAssertEqual(refreshed, 1)
         XCTAssertEqual(sessionFetches, 1)
         XCTAssertEqual(viewModel.messages.map(\.content), ["Sent from TUI", "Canonical response"])
+        await viewModel.disposeDirectConversation()
+        await runtime.stop()
     }
 
     @MainActor
@@ -1015,16 +1015,16 @@ final class OpenChatSessionStoreTests: XCTestCase {
     @MainActor
     func testOverlappingOpenSessionRefreshesShareOneCanonicalLoad() async throws {
         let server = try XCTUnwrap(URL(string: "https://example.test"))
-        let viewModel = try makeViewModel(sessionID: "session-abc") { request in
-            XCTAssertEqual(request.url?.path, "/api/session")
+        var sessionFetches = 0
+        let (viewModel, runtime) = try makeDirectRefreshViewModel { request in
+            XCTAssertEqual(request.url?.path, "/api/sessions/session-abc/messages")
+            sessionFetches += 1
             return apiTestJSONResponse("""
             {
-              "session": {
                 "session_id": "session-abc",
                 "messages": [
-                  {"role": "user", "content": "Canonical", "message_id": "canonical-1", "timestamp": 1770000000}
+                  {"role": "user", "content": "Canonical", "id": 1, "timestamp": 1770000000}
                 ]
-              }
             }
             """, for: request)
         }
@@ -1046,6 +1046,27 @@ final class OpenChatSessionStoreTests: XCTestCase {
         XCTAssertEqual(firstCount, 1)
         XCTAssertEqual(secondCount, 1)
         XCTAssertEqual(viewModel.messages.map(\.content), ["Canonical"])
+        XCTAssertEqual(sessionFetches, 1)
+        await viewModel.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    @MainActor
+    private func makeDirectRefreshViewModel(
+        handler: @escaping (URLRequest) throws -> (HTTPURLResponse, Data)
+    ) throws -> (ChatViewModel, HermesServerRuntime) {
+        MockURLProtocol.requestHandler = handler
+        let server = URL(string: "https://example.test")!
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockURLProtocol.self]
+        let client = APIClient(baseURL: server, session: URLSession(configuration: configuration))
+        let runtime = try HermesServerRuntime(origin: server) { sink in
+            BranchIdentityTransport(sink: sink)
+        }
+        return (ChatViewModel(
+            session: SessionSummary(sessionId: "session-abc", profile: "default"),
+            server: server, client: client, gatewayRuntimeProvider: { _ in runtime }
+        ), runtime)
     }
 
     @MainActor

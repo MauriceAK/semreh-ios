@@ -5,6 +5,31 @@ details/evidence: `slice3-tasks.md`, `slice3-verification.md`, `slice4-tasks.md`
 This is the current dispatch checklist, not a new architecture or acceptance waiver.
 Preserve completed Luna work. Root owns integration, notes and native execution.
 
+Current checkpoint: load/export batch verified on `e43a571` plus scoped diff;
+signed build-v3, full-v5:2371passed/0failed/14intentional skips. Sol Low workers. The
+reconciled `secondary-feature-status.md` owns the per-feature current inventory.
+Do not use the historical checkpoints below as the next dispatch instruction.
+
+Immediate acceptance work from the no-drift audit:
+- [x] Direct missed-terminal recovery restores the complete durable answer in controller/VM tests.
+- [x] Full reload on an already-active chat preserves text/cards/anchors and later deltas.
+- [x] Primed cache, completed initial attachment, then warm refresh plus real send and late auth/transport failure preserves live state. Initial attachment serializes send; no claim it can be bypassed.
+- [x] Run current load/export native gate and independently inspect behavioral coverage.
+
+Load/export evidence: `slice4-load-export-build-v3`, `...full-v5`, strict signing,
+Simulator launch99691. Stock HTTPS `slice4-export-live-v1.json`:4rows/8264bytes,
+no session/provider mutations (authentication control POSTs excluded). Probe4/4
+guard tests passed. Native HTML share navigation and physical UI remain unverified.
+Retained failures: full-v1:2366/5/14 (three new fixture setup errors and two old
+WebUI store-refresh fixtures); full-v3:2370/1/14 (warm refresh incorrectly expected
+a blocking spinner). Corrected fixtures without production changes or dropping
+send/recovery guarantees. full-v2/v4 interrupted after runner stalls, exit73;
+no cause established. Owned Simulator restart preceded full-v5 success.
+Targeted artifact audit-v2:14551files/0flags; three exported test consoles plus
+two interrupted-run staging consoles scanned. Unselected/opaque/OCR/unexported
+contents excluded. Audit-v1 rejected nonexistent empty diagnostic directories
+before scanning; v2 selected actual retained artifacts.
+
 ## Implementation batches
 
 - [x] **Branch UI handoff:** signed production UI-v2 passed1/0/0; root inspected
@@ -16,11 +41,11 @@ Preserve completed Luna work. Root owns integration, notes and native execution.
   after no result for roughly5minutes (exit73), not accepted. Root also added
   adopted-child canonical rekey callback and regression assertion.
 - [ ] **Lineage/compression:** complete supported compression and ancestor-to-tip
-  recovery without losing delivery warnings. Astra Low worker scopes next cut.
+  recovery without losing delivery warnings. Root scopes the remaining core gap.
   Check canonical IDs, scoped markers and conflict handling; real compression
   required before claiming continuation acceptance.
 - [x] **Continuity-sidecar retirement:** remove callers, old auth/config hooks and
-  implementation while retaining direct credentials/accounts. Astra Low owner.
+  implementation while retaining direct credentials/accounts.
   Check direct login/restore/logout and absence of executable sidecar fallback.
   Implementation/settings/auth hooks removed, compatibility regression added;
   integrated focused152/0/0 and successor full suites passed. Source search again
@@ -38,7 +63,7 @@ Preserve completed Luna work. Root owns integration, notes and native execution.
   canonical tail/rebinds; active rollover leaves live identity intact. This is a
   functional improvement, not proof of physical scrolling smoothness.
 - [ ] **Secondary feature migration:** finish supported first-party consumers;
-  Astra Low worker selects a disjoint supported feature first.
+  use the reconciled feature inventory, not a new side project.
   Check exact stock request/response and visible behavior; do not invent routes.
   Skills list/toggle/SKILL.md and active-profile UI propagation authored. Linked
   files explicitly unavailable pending parity decision; no legacy detail request.
@@ -47,7 +72,7 @@ Preserve completed Luna work. Root owns integration, notes and native execution.
   That pre-existing gap is a separate retained requirement, not accepted removal.
   Source-backed invocation contract is being mapped; literal slash text alone
   must not be called verified skill activation.
-- [ ] **Session conveniences:** remaining duplicate/move/export and deletion
+- [ ] **Session conveniences:** remaining duplicate/move and deletion
   disposition; search, rename, pin, archive and counts already have verified work.
   Check exact profile/identity, rollback and no ambiguous automatic retry.
 - [ ] **Feature disposition inventory:** every remaining visible action migrated
@@ -57,7 +82,8 @@ Preserve completed Luna work. Root owns integration, notes and native execution.
 
 - [ ] Memory parity: source audit found builtin MEMORY/USER supported through
   selected profile's returned home plus stock-defined memories paths and managed
-  file APIs; SOUL has its dedicated contract. Implementing, not removal candidates.
+  file APIs; SOUL has its dedicated contract. Implemented/native-tested at cd41f5b;
+  actual editor/model adoption remains unverified. These are not removal candidates.
   Effective project-context discovery remains open (current UI is read-only).
 - [ ] Edit/regenerate release treatment: stock external-rewrite safety gap.
 - [ ] Deletion treatment: stock active-writer concurrency limitation.
@@ -67,7 +93,17 @@ Preserve completed Luna work. Root owns integration, notes and native execution.
 
 ## Integration and acceptance
 
-Latest integrated snapshot: `slice4-final-batch-full-v1` passed
+Latest accepted native product checkpoint: `0d9c6df`,
+`slice4-git-monitor-retirement-full-v3`:2368passed/0failed/14intentional skips.
+Build-v3 plus focused auth-v1:91passed/0failed covers the separately added auth
+negative test. Strict signing and Simulator launch60977 passed.
+`e43a571` adds independently passed stock Git read probe, not new native UI code.
+Load/export is covered by the newer checkpoint above, not those earlier results. Full release
+WebUI-absent, cross-client, recovery and physical gates remain open.
+
+### Historical checkpoint details (not the current dispatch queue)
+
+Earlier integrated snapshot: `slice4-final-batch-full-v1` passed
 2287tests/0fail/14intentional opt-in skips after signed `final-batch-build-v1`.
 This covers journal removal, lineage ACK fixes, direct cancellation/reconnect,
 manual compression mocks, scoped Live Activity idle recovery, profiles/cron reads,

@@ -1240,12 +1240,13 @@ final class SessionListViewModel {
         }
     }
 
-    /// Downloads the session transcript (`GET /api/session/export`) and writes
+    /// Downloads the scoped stock transcript and writes
     /// it to a unique temp directory so the share sheet can offer it as a file
     /// with a real filename. Returns the file URL, or nil after surfacing the
     /// failure through the standard action-error alert. The caller owns
     /// cleanup of the returned file's parent directory after sharing.
-    func export(_ session: SessionSummary, format: SessionExportFormat) async -> URL? {
+    func export(_ session: SessionSummary, format: SessionExportFormat,
+                writeFile: (@Sendable (Data, URL) async throws -> Void)? = nil) async -> URL? {
         guard !isViewingCachedData else {
             actionErrorMessage = String(localized: "Reconnect to the server to export a session.")
             return nil
@@ -1265,6 +1266,8 @@ final class SessionListViewModel {
         // double-tap from firing two exports.
         guard beginSessionMutation(sessionId) else { return nil }
         defer { endSessionMutation(sessionId) }
+        let profileEpoch = activeProfileEpoch
+        let profile = Self.nonEmpty(session.profile) ?? "default"
 
         actionErrorMessage = nil
         lastError = nil
@@ -1273,17 +1276,29 @@ final class SessionListViewModel {
             let file = try await client.exportSession(
                 id: sessionId,
                 format: format,
-                fallbackTitle: session.title
+                fallbackTitle: session.title,
+                profile: profile
             )
+
+            try Task.checkCancellation()
+            guard activeProfileEpoch == profileEpoch else { return nil }
 
             let directory = Self.exportsRootDirectory
                 .appendingPathComponent(UUID().uuidString, isDirectory: true)
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-
             let fileURL = directory.appendingPathComponent(file.filename)
-            try file.data.write(to: fileURL, options: .atomic)
-            return fileURL
+            do {
+                if let writeFile { try await writeFile(file.data, fileURL) }
+                else { try await SessionExportFile.write(file.data, to: fileURL) }
+                try Task.checkCancellation()
+                guard activeProfileEpoch == profileEpoch else { throw CancellationError() }
+                return fileURL
+            } catch {
+                // Only this operation's new UUID directory; never sweep other shares.
+                await Task.detached { try? FileManager.default.removeItem(at: directory) }.value
+                throw error
+            }
         } catch {
+            guard activeProfileEpoch == profileEpoch else { return nil }
             guard !isCancellationError(error) else { return nil }
 
             lastError = error

@@ -223,7 +223,7 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
             olderMessages: olderMessages
         )
 
-        await viewModel.loadMessages()
+        // makeViewModel seeds renderer history directly; no gateway load claim.
         XCTAssertEqual(viewModel.messagesOffset, 1)
 
         let didStart = viewModel.seedLegacyResponseForTesting("Keep the live tail")
@@ -776,7 +776,7 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
             )
         )
 
-        return ChatViewModel(
+        let viewModel = ChatViewModel(
             session: summary,
             server: server,
             client: client,
@@ -787,6 +787,11 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
             streamingWordRevealCadenceNanoseconds: wordCadenceNanoseconds,
             streamingMaxRevealLagNanoseconds: maxLagNanoseconds
         )
+        if historyMessageCount > 0 {
+            let rows = try decoder.decode([ChatMessage].self, from: JSONSerialization.data(withJSONObject: historyMessages))
+            viewModel.seedTranscriptForTesting(rows, messagesOffset: initialMessagesOffset)
+        }
+        return viewModel
     }
 
     @MainActor
@@ -805,7 +810,7 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
             maxLagNanoseconds: 3_600_000_000_000,
             historyMessageCount: historyMessageCount
         )
-        await viewModel.loadMessages()
+        // Benchmark renderer state only; history is explicitly seeded above.
         let didStart = viewModel.seedLegacyResponseForTesting("Benchmark live tail")
         XCTAssertTrue(didStart)
         let startedAt = CFAbsoluteTimeGetCurrent()

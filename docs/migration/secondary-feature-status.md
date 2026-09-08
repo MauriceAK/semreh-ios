@@ -1,69 +1,67 @@
 # Secondary feature migration status
 
-September 7, 2026; bounded source inventory against app `471b8e3` plus the current
-uncommitted integration cohort. Backend contract pin:
-`29112bef099274229cadff79cdff7bf7b99c4b77`. This is a dispatch inventory, not a
-release acceptance report or a completion percentage. Root owns final disposition.
+Reconciled September 7, 2026 against committed app `e43a571` and the explicitly
+load/export diff verified by signed build-v3/full-v5. Backend contract pin:
+`29112bef099274229cadff79cdff7bf7b99c4b77`.
+This is the existing dispatch inventory, not release acceptance or a percentage.
+The binding v3 execution plan owns scope and gates; root owns disposition.
 
-Sources: `slice4-tasks.md` secondary/provider inventories, the binding execution
-plan and reference appendix, current production destinations and their adapters,
-and the independently pinned backend source. Backend paths below are relative to
-that source. Official `hermes serve` REST remains available without the browser
-SPA; `web_server.py`/`web_routers` filenames do not imply a WebUI dependency.
-“Legacy” below means the app still uses its old adapter/contract, even where the
-stock server happens to expose the same route name. A source-supported candidate
-is not evidence of successful UI execution.
+Official first-party Hermes REST is retained. Source names `web_server.py` and
+`web_routers` do not mean the separate WebUI product. “Legacy” means the app still
+uses the old contract. “Implemented/tested” never means physical acceptance.
+No unsupported feature below has been silently approved for permanent removal.
 
-| Feature / visible action | Current adapter and state | Exact known stock contract / source | Concrete remaining task | Owner decision required |
-| --- | --- | --- | --- | --- |
-| Profile inventory in sidebar, Settings summary and default-profile picker | Migrated to direct profile inventory; sidebar local selection preserved across reloads, startup default distinct from running current. | `GET /api/profiles`, `GET /api/profiles/active` at pinned stock. | Integrated native tests passed. | No new selection or server-mutation semantics. |
-| Default-profile change and create-profile form | Startup-default setter uses stock POST plus GET confirmation; no running profile/model retarget. Form catalog now uses running current's direct model options (new tests pending). Create writes/inputs remain legacy. | `POST /api/profiles/active`; `POST /api/profiles`; profile-scoped config/model endpoints support follow-up settings. | Finish multi-step create and optional Base URL/API key configuration with explicit partial-success recovery; never repeat creation automatically. Same-value default live probe passed, changed-default/restart/native-picker gates open. | Clarify clone source in UI; preserve entered credentials/custom URL, do not silently drop fields. No provider activation for verification. |
-| Tasks / cron list, create/edit, pause/resume/run/delete and output | Direct scoped list/detail/runs/delivery reads and pause/resume migrated. Execution badge derives from list enrichment, not un-enriched detail. Create/edit/run/delete remain legacy. | `/api/cron/jobs` plus scoped detail, runs, pause/resume; `/api/cron/delivery-targets`. | Map remaining mutation/output fields. Native pause/resume tests and inert future-job live create/pause/resume/delete probe passed; zero triggers and empty inventory restored. | Unsupported notification/output semantics remain open; no scheduler execution/provider activation authorized. |
-| Skills inventory, enable/disable and SKILL.md | New `directSkills`, `directToggleSkill`, `directSkillContent`; Skills UI and both menu entrypoints propagate selected profile. Legacy helpers remain for separate chat consumers. | `GET /api/skills` bare array with `enabled`; `PUT /api/skills/toggle` `{name,enabled}` → `{ok,name,enabled}`; `GET /api/skills/content` with name/profile → `{name,content,path}` (`web_routers/skills.py:430,465,484`). | Root completes native/UI integration checks. Tag/related metadata and linked-file parity remain open. Direct UI displays linked-files unavailable; components retained. | Root approved the temporary unavailable notice, **not** permanent feature removal. No live toggle was performed. |
-| Tools / toolset management | No standalone production tools/toolsets management consumer found in this bounded secondary-screen scan. Chat tool activity/blocking interactions are separate core work. | Stock `GET /api/tools/toolsets?profile=…`; `PUT /api/tools/toolsets/{name}` and config/provider/env routes exist (`web_routers/tools.py:62,128,233,466,608`). | Do not create a new tools screen merely because routes exist. If a retained control is identified, inventory its actual behavior before choosing a stock method. | New tools administration or activation would expand scope. |
-| Default model picker | `DefaultModelPickerView` uses legacy `models()`, `modelsLive()`, `saveDefaultModel()`. Existing direct model catalog adapter is available elsewhere. | `GET /api/model/options` (web_server.py:7449); `POST /api/model/set` accepts `ModelAssignment`, `scope=main` or `auxiliary`, provider/model and optional profile (line 7719). Writes apply to **new sessions**, not the active session. | Move reads to profile-scoped direct catalog; preserve provider identity and selected/custom model. Verify the chosen catalog filtering policy. Implement main-slot write plus readback as its own package. | No decision for supported inventory. Clarify any UI promise that changes should affect an existing session; do not activate providers as verification. |
-| Providers status catalog | `ProvidersViewModel` still uses legacy `providers()`; inventory previously found no exact stock `/api/providers` replacement. | `directProviders()` targets `/api/auth/providers`: login-provider discovery, **not inference provider health/configuration**. Stock model options and setup/OAuth routes do not by themselves replace the old screen. | Map each displayed status field to a first-party response, or present a concrete disposition proposal. Do not fabricate an aggregate status service. | Retained unsupported status/credential functionality needs disposition. |
-| Git workspace status/branches/diffs and mutation menu | `GitWorkspaceViewModel` uses legacy session-ID based `APIClient+Git.swift`. Supported UI includes fetch/pull/push, checkout, stage/unstage/discard and commit workflows. | Stock reads are repository-path scoped: `GET /api/git/status?path=…`, `/api/git/branches?path=…`, `/api/git/file-diff?path=…&file=…`; richer review routes also exist (`web_routers/git.py:33,95,117`). | Resolve authoritative session cwd first, then map read DTOs without substituting session IDs for repository paths. Audit each retained write body independently; a matching operation name is insufficient. | Destructive/remote actions require their existing user confirmation and an owned test repo; no remote pushes or personal repo access for migration checks. |
-| Memory editors (SOUL, MEMORY, USER, project context) | Direct built-in editors authored; final upload/review/native checks pending. Legacy memory callers removed in working tree. | SOUL dedicated profile route; profile inventory supplies home; stock memory tool defines `memories/MEMORY.md` and `USER.md`; managed file read/upload-stream retains server policy. Global `/api/memory` is metadata, not editor text. | Verify bounded reads, baseline conflict checks, atomic file replacement and confirmed readback; uncertain writes require refresh, never automatic retry. Atomic replacement does not provide concurrent-writer CAS. | Built-in editors are supported, correcting the earlier unsupported inventory. Effective project-context discovery remains open; no permanent removal approved. |
-| Workspace registry / projects | `WorkspaceRegistryViewModel` uses legacy workspace list/suggestions/add/remove/rename/reorder; sidebar projects use `APIClient+Projects.swift`. | Existing inventory identifies `projects` RPC and official profile project-tree reads (`GET /api/profiles/projects/tree`, profiles.py:621). No exact stock equivalence established for the full custom workspace registry's naming/order/removal semantics. | Separate cwd/project selection from app-maintained registry operations. Map project IDs and membership before mutation; propose concrete handling for unsupported registry fields. | Unsupported collection semantics need a product disposition, not silent replacement with arbitrary directories. |
-| File browser and previews | Direct consumer migration authored and independently reviewed; native tests pending. | Stock `/api/files` and bounded `/api/files/read` envelopes, canonical returned path checked against authoritative session cwd. Profile scopes session discovery, not global file routes. | Run focused/native integration; preserve exact binary bytes, PDF limits and cancellation ownership. Raw download avoided because it has no canonical-path receipt. | No access expansion/home fallback. Base64 memory cost bounded; stock post-resolution filesystem race remains. Git/workspace registry separate. |
-| Voice transcription and server speech | Listen and composer transcription migrated, including synchronous live-profile check before inserting transcription. Local commit `3eb648f`; full suite2314/0/14 intentional skips. | `/api/audio/speak` takes text, profile query; `/api/audio/transcribe` takes JSON data URL plus MIME/profile. | Actual audio/device integration remains unverified; dormant voice-note upload/send path separate. | Server-configured voice replaces internal hardcoded voice (no user picker), documented root microdecision. No provider activation/real external audio submission authorized. |
+## Current consumers and remaining work
 
-## Evidence and corrections to older inventory
+| Feature / action | Current implementation | Evidence and remaining gate |
+| --- | --- | --- |
+| Profile inventory / sidebar selection | Direct `/api/profiles` and `/api/profiles/active`; local sidebar selection is not a global switch. | Integrated native tests. Keep current-running distinct from startup default. |
+| Startup default / profile creation | Direct startup-default ACK/readback and create/configure workflow. Confirmed created identity survives optional configuration failure; no blind recreate. | `cd41f5b` includes creation; full2338/0/14. Same-value default live probe passed. Actual create/configuration/provider adoption and changed-default restart/UI remain unverified. |
+| Tasks / cron | Scoped direct list/detail/runs/delivery, pause/resume, create/edit/trigger/delete. Sparse updates preserve fields outside editor; unknown-create inspection prevents automatic retry. | `0cc42ca` full2352/0/14. Inert future-job create/pause/resume/delete live probe passed with zero triggers. Actual trigger/provider execution, output/toast parity and physical UI remain open. |
+| Default model picker | Direct scoped catalog and main-model POST/readback. Exact provider identities, explicit expensive/Nous confirmation, cached then fresh catalog. Applies to new sessions. | `0cc42ca` full2352/0/14. Actual model/provider adoption and production picker interaction unverified; no provider activation authorized. |
+| Skills list/toggle/SKILL.md | Direct scoped `/api/skills`, `/api/skills/toggle`, `/api/skills/content`; selected profile reaches consumers. | Native tests; read-only live58rows plus one SKILL.md. Actual toggle/UI, related metadata and installed linked files remain open. Temporary unavailable notice is not feature-removal approval. |
+| Chat skill activation/search | Still explicitly unavailable in direct chat. List-screen migration is not activation. | Stock command.dispatch lacks profile binding and resolves executable quickcommands/plugins before skills. Raw content omits runtime preprocessing/setup/config/supporting files. Need faithful supported handling or explicit disposition. |
+| Inference provider status | ProvidersViewModel still calls legacy `providers()`. Login-provider discovery is not inference health/configuration. | Map actual displayed fields to stock responses or request disposition; no invented aggregate service or provider activation. |
+| Git reads / diff UI | Direct scoped session cwd → returned worktree root → status/review/branches/diff. Full review inventory beyond200; unknown flags retained. Unproven unstaged diff fails explicitly, avoiding false all-add fallback. | `0d9c6df`: full2368/0/14 plus dedicated91/0/0. `e43a571` live stock reads verified staged/unstaged separation. Native session-root navigation and physical UI not proved. |
+| Git writes / remote operations | Existing checkout/stash, stage/unstage/discard, generated commit message, commit/selected commit, fetch/pull/push still legacy. | Audit each workflow, not just route names. Stock auto-stage/discard/selection semantics differ. No personal/remote mutation verification authorized. |
+| Memory / USER / SOUL | Direct profile scope, managed MEMORY/USER reads and atomic replacement, dedicated SOUL route. Baseline/readback and unknown-write barrier. | `cd41f5b` native2338/0/14. Managed transport live check passed, not actual memory-editor/model adoption. Concurrent-writer CAS and effective project-context discovery remain open. |
+| File browser / preview | Direct managed list/read with canonical target checks, bounded bytes/PDF and cancellation. No unrestricted fs fallback. | `cd41f5b` native2338/0/14; `fd370bf` managed-file65byte live roundtrip. Real navigation/device and stock post-resolution filesystem race remain separate. |
+| Voice transcription / speech | Direct JSON/base64 audio contracts, profile checks, local fallback preserved. | `3eb648f` native2314/0/14. Actual microphone/audio provider/device unverified. Sending recorded voice attachments remains unavailable, not accepted removal. |
+| Workspace registry / projects | WorkspaceRegistry and project mutations still legacy; stock cwd/project-tree reads are not equivalent to naming/order/membership workflows. | Map exact retained semantics. No arbitrary-directory substitution or unapproved deletion. |
+| Session JSON / HTML export | Scoped stock JSON export; escaped self-contained HTML rendered locally, bounded I/O off main thread, cancellation/profile guards and owned-temp cleanup. | Signed build-v3/full-v5:2371/0/14. Stock HTTPS export live-v1:4rows/8264bytes; probe4/4 guards. Both formats and complete metadata preserved in native fixtures. Live HTML share navigation/physical UI remain unverified. |
+| Session move / duplicate | Existing SessionMutator paths still legacy. Direct branch exists in core chat but list duplicate needs runtime/binding ownership, not a stateless endpoint swap. | Move project-membership semantics not mapped. Separate API-server fork is not a substitute for this deployed serve surface. |
+| Search / rename / pin / archive / counts | Direct work already integrated in earlier checkpoints. | Exact scope and ambiguous-mutation recovery remain relevant to final navigation/device gate; deletion writer concurrency and destructive history are separate core requirements. |
+| Standalone tools/toolsets administration | No retained standalone consumer identified by bounded audit. | Do not create a new screen simply because stock routes exist. Chat tools/blocking are core migration work. |
 
-The skills read-only probe now supplies stock runtime evidence, superseding the
-older blanket “secondary live checks unexecuted” statement for **skills reads
-only**: `/Users/maurice/workspace/semreh-slice1-evidence/slice4-skills-readonly-live-v1.json`.
-It observed 58 list rows and one nonempty SKILL.md with matching name; no names,
-content or host paths were retained. Authentication cleanup passed. Zero skill
-mutations. Its six Python tests passed. This does not prove literal Skills UI,
-non-default-profile behavior, or toggle execution on the stock runtime.
+## Source and evidence pointers
 
-Sidebar selection is already local and must not regress to the old global
-profile-switch endpoint. Default-profile settings remain a distinct action.
-Providers login discovery remains unrelated to inference-provider status.
-Stock audio uses JSON/base64 contracts, so retaining the legacy multipart/raw
-transport cannot be counted as voice migration. Tools route availability does
-not establish an existing tools administration product requirement.
+- Profiles: stock `web_routers/profiles.py`; default/create production consumer
+  `DefaultProfilePickerView` plus profile networking helpers.
+- Cron: stock `/api/cron/jobs` family; app `APIClient+Cron`, Tasks and TaskDetail.
+- Model: stock `/api/model/options`, `/api/model/set`; app DefaultModelPicker.
+- Skills: `web_routers/skills.py:430,465,484`; runtime invocation in
+  `tui_gateway/methods_tools.py` and `agent/skill_commands.py`.
+- Git: `web_routers/git.py`, `hermes_cli/web_git.py`; app `APIClient+Git`.
+- Export: `web_routers/sessions.py:847–907` streams full JSON in500row keyset chunks.
+- Evidence root: `/Users/maurice/workspace/semreh-slice1-evidence`.
+  Relevant stems: `slice4-files-memory-profiles`, `slice4-send-cron-model`,
+  `slice4-git-monitor-retirement`, `slice4-managed-files-live-v1.json`,
+  `slice4-git-read-live-v1.json`, `slice4-skills-readonly-live-v1.json`.
+- Full native suites contain14 intentional opt-in skips; their green result is
+  not a claim every live/device gate ran. Sanitized audits have stated exclusions.
+  Exact prior failure history remains in remaining-work/verification documents
+  and retained artifacts, not erased by this inventory reconciliation.
 
-## Next independent implementation package
+## Dispatch priority after the no-drift audit
 
-**Profile inventory reader cutover** is the smallest supported package without
-an unresolved feature-removal or provider decision. Reuse `directProfiles()` for
-the remaining secondary readers in `SessionListViewModel`, `SettingsView` and
-`DefaultProfilePickerView`, with focused stock-shape tests. Preserve the sidebar's
-existing local active selection. Do not combine this with create-profile or
-sticky-default writes. First inspect the stock row flags and existing
-`ProfilesResponse` fallback logic so missing legacy envelope fields do not reset
-the selected profile or mislabel the configured default.
+1. Close the three direct loading/recovery behavioral coverage holes and verify
+   the current load/export batch. Do not count unrelated tests as replacements.
+2. Complete legacy execution/auth/SSE/dependency removal while preserving actual
+   direct user behavior, not dead protocol-specific fixture scaffolding.
+3. Address core recovery/compression, destructive targeting and skill-activation
+   contract gaps alongside remaining visible legacy features above.
+4. Demonstrate WebUI-absent operation, cross-client continuity and physical-device
+   acceptance. Deferred visual polish does not waive broken behavior.
 
-Coordinate Settings ownership with the active retirement worker; root owns
-native execution. Acceptance should demonstrate refresh retaining a non-default
-local selection and the picker displaying the stock catalog without legacy auth
-classification. A read-only stock capture can cover inventory; it does not prove
-profile creation, sticky-default mutation, or full profile UI acceptance.
-
-Next larger independent package: explicit-profile cron list/detail adapters and
-DTOs, followed by an inert read-only fixture. Keep mutation and unsupported
-output/notification mapping as explicit follow-ups rather than claiming the
-whole Tasks screen migrated.
+Use `remaining-work.md` as the dispatch checklist and the binding plan as final
+acceptance. Do not create another competing inventory or infer feature waivers.

@@ -8,6 +8,83 @@ import UniformTypeIdentifiers
 
 final class SessionListMutationTests: XCTestCase {
     @MainActor
+    func testExportCleansOwnedWrittenFileWhenCancelledOrProfileChangesDuringWrite() async throws {
+        for cancel in [false, true] {
+            let written = expectation(description: "owned file written")
+            let gate = SessionExportWriterGate()
+            let viewModel = try makeViewModel {
+                apiTestJSONResponse(#"{"id":"export-row","messages":[]}"#, for: $0)
+            }
+            let task = Task { @MainActor in
+                await viewModel.export(SessionSummary(sessionId: "export-row", title: "Fixture"), format: .json) { data, url in
+                    try await SessionExportFile.write(data, to: url)
+                    await gate.hold(url, written: written)
+                }
+            }
+            await fulfillment(of: [written], timeout: 2)
+            let writtenURL = await gate.url
+            let url = try XCTUnwrap(writtenURL)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+            if cancel { task.cancel() }
+            else {
+                let profile = try JSONDecoder().decode(ProfileSummary.self, from: Data(#"{"name":"other"}"#.utf8))
+                let switched = await viewModel.switchActiveProfile(profile)
+                XCTAssertTrue(switched)
+            }
+            await gate.release()
+            let result = await task.value
+            XCTAssertNil(result)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: url.deletingLastPathComponent().path))
+            XCTAssertNil(viewModel.actionErrorMessage)
+        }
+    }
+
+    @MainActor
+    func testExportUsesRowsExplicitProfileAndPublishesCompleteJSONFile() async throws {
+        let payload = #"{"id":"export-row","messages":[{"role":"tool","content":"fixture output"}],"fixture":true}"#
+        let viewModel = try makeViewModel { request in
+            XCTAssertEqual(request.url?.path, "/api/sessions/export-row/export")
+            XCTAssertEqual(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems,
+                           [URLQueryItem(name: "profile", value: "work")])
+            return apiTestJSONResponse(payload, for: request)
+        }
+        let row = SessionSummary(sessionId: "export-row", title: "Export fixture", profile: "work")
+        let result = await viewModel.export(row, format: .json)
+        let url = try XCTUnwrap(result)
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        XCTAssertEqual(try Data(contentsOf: url), Data(payload.utf8))
+        XCTAssertEqual(url.lastPathComponent, "Export fixture.json")
+        XCTAssertNil(viewModel.actionErrorMessage)
+    }
+
+    @MainActor
+    func testExportDoesNotPublishAfterProfileSwitchOrCancellation() async throws {
+        for cancel in [false, true] {
+            let started = expectation(description: "export started")
+            let release = DispatchSemaphore(value: 0)
+            let viewModel = try makeViewModel { request in
+                started.fulfill()
+                release.wait()
+                return apiTestJSONResponse(#"{"id":"export-row","messages":[]}"#, for: request)
+            }
+            let task = Task { @MainActor in
+                await viewModel.export(SessionSummary(sessionId: "export-row", title: "Fixture"), format: .json)
+            }
+            await fulfillment(of: [started], timeout: 2)
+            if cancel { task.cancel() }
+            else {
+                let profile = try JSONDecoder().decode(ProfileSummary.self, from: Data(#"{"name":"other"}"#.utf8))
+                let switched = await viewModel.switchActiveProfile(profile)
+                XCTAssertTrue(switched)
+            }
+            release.signal()
+            let result = await task.value
+            XCTAssertNil(result)
+            XCTAssertNil(viewModel.actionErrorMessage)
+        }
+    }
+
+    @MainActor
     func testStockProfileRefreshPreservesExplicitLocalSelectionAndRefreshesMetadata() async throws {
         var readCount = 0
         let viewModel = try makeViewModel { request in
@@ -3590,6 +3667,27 @@ final class SessionListMutationTests: XCTestCase {
             }
             """.utf8)
         )
+    }
+}
+
+private actor SessionExportWriterGate {
+    private(set) var url: URL?
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var released = false
+
+    func hold(_ url: URL, written: XCTestExpectation) async {
+        self.url = url
+        await withCheckedContinuation { continuation in
+            if released { continuation.resume() }
+            else { self.continuation = continuation }
+            written.fulfill()
+        }
+    }
+
+    func release() {
+        released = true
+        continuation?.resume()
+        continuation = nil
     }
 }
 

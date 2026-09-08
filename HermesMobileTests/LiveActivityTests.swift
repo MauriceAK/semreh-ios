@@ -569,168 +569,23 @@ final class LiveActivityTests: XCTestCase {
         XCTAssertNil(viewModel.activeStreamID)
     }
 
-    func testStatusRefreshCompletionEndsLiveActivityFromCompletedTranscript() async throws {
-        let baseURL = URL(string: "https://example.test")!
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [LiveActivityURLProtocol.self]
-        let client = APIClient(baseURL: baseURL, session: URLSession(configuration: configuration))
-        let streamClient = LiveActivitySpySSEClient()
-        let approvalStreamClient = LiveActivitySpySSEClient()
-        let clarifyStreamClient = LiveActivitySpySSEClient()
-        let manager = SpyAgentLiveActivityManager()
-        let session = try Self.sessionSummary(id: "session-abc", title: "Live work")
-        var requestPaths: [String] = []
-
-        LiveActivityURLProtocol.handler = { request in
-            requestPaths.append(request.url?.path ?? "")
-
-            switch request.url?.path {
-            case "/api/chat/start":
-                return Self.jsonResponse(#"{"stream_id":"stream-123","session_id":"session-abc"}"#, for: request)
-            case "/api/chat/stream/status":
-                return Self.jsonResponse(#"{"active":false,"stream_id":"stream-123"}"#, for: request)
-            case "/api/session":
-                return Self.jsonResponse("""
-                {
-                  "session": {
-                    "session_id": "session-abc",
-                    "title": "Live work",
-                    "messages": [
-                      {
-                        "role": "user",
-                        "content": "Keep working",
-                        "timestamp": 1770000100,
-                        "message_id": "user-1"
-                      },
-                      {
-                        "role": "assistant",
-                        "content": "Completed from transcript refresh.",
-                        "timestamp": 1770000110,
-                        "message_id": "assistant-1"
-                      }
-                    ]
-                  }
-                }
-                """, for: request)
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
-
-        let viewModel = ChatViewModel(
-            session: session,
-            server: baseURL,
-            client: client,
-            streamClient: streamClient,
-            approvalStreamClient: approvalStreamClient,
-            clarifyStreamClient: clarifyStreamClient,
-            liveActivityManager: manager
-        )
-
-        let didStart = viewModel.seedLegacyResponseForTesting("Keep working")
-        XCTAssertTrue(didStart)
-        streamClient.emit(.toolStarted(ToolStreamEvent(
-            eventType: nil,
-            name: "shell_command",
-            preview: nil,
-            args: nil,
-            duration: nil,
-            isError: nil
-        )))
-
-        await viewModel.refreshTranscriptIfActiveStreamCompleted(streamID: "stream-123")
-
-        XCTAssertEqual(manager.ends, [
-            SpyAgentLiveActivityManager.End(
-                status: .complete,
-                activity: "Response complete",
-                errorSummary: nil
-            )
-        ])
-        XCTAssertNil(viewModel.activeStreamID)
-        XCTAssertEqual(streamClient.stopCount, 1)
-        XCTAssertEqual(viewModel.responseCompletionHapticTrigger, 1)
-        XCTAssertEqual(viewModel.messages.compactMap(\.content), [
-            "Keep working",
-            "Completed from transcript refresh."
-        ])
-        XCTAssertEqual(requestPaths, ["/api/chat/stream/status", "/api/session"])
-    }
-
-    func testStatusRefreshWithoutFinalAssistantDoesNotCompleteLiveActivity() async throws {
-        let baseURL = URL(string: "https://example.test")!
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [LiveActivityURLProtocol.self]
-        let client = APIClient(baseURL: baseURL, session: URLSession(configuration: configuration))
-        let streamClient = LiveActivitySpySSEClient()
-        let approvalStreamClient = LiveActivitySpySSEClient()
-        let clarifyStreamClient = LiveActivitySpySSEClient()
-        let manager = SpyAgentLiveActivityManager()
-        let session = try Self.sessionSummary(id: "session-abc", title: "Live work")
-
-        LiveActivityURLProtocol.handler = { request in
-            switch request.url?.path {
-            case "/api/chat/start":
-                return Self.jsonResponse(#"{"stream_id":"stream-123","session_id":"session-abc"}"#, for: request)
-            case "/api/chat/stream/status":
-                return Self.jsonResponse(#"{"active":false,"stream_id":"stream-123"}"#, for: request)
-            case "/api/session":
-                return Self.jsonResponse("""
-                {
-                  "session": {
-                    "session_id": "session-abc",
-                    "title": "Live work",
-                    "messages": [
-                      {
-                        "role": "user",
-                        "content": "Keep working",
-                        "timestamp": 1770000100,
-                        "message_id": "user-1"
-                      }
-                    ]
-                  }
-                }
-                """, for: request)
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
-
-        let viewModel = ChatViewModel(
-            session: session,
-            server: baseURL,
-            client: client,
-            streamClient: streamClient,
-            approvalStreamClient: approvalStreamClient,
-            clarifyStreamClient: clarifyStreamClient,
-            liveActivityManager: manager
-        )
-
-        let didStart = viewModel.seedLegacyResponseForTesting("Keep working")
-        XCTAssertTrue(didStart)
-        streamClient.emit(.toolStarted(ToolStreamEvent(
-            eventType: nil,
-            name: "shell_command",
-            preview: nil,
-            args: nil,
-            duration: nil,
-            isError: nil
-        )))
-
-        await viewModel.refreshTranscriptIfActiveStreamCompleted(streamID: "stream-123")
-
-        XCTAssertTrue(manager.ends.isEmpty)
-        XCTAssertEqual(viewModel.activeStreamID, "stream-123")
-        XCTAssertEqual(streamClient.stopCount, 0)
-        XCTAssertEqual(viewModel.responseCompletionHapticTrigger, 0)
-    }
+    // Retired WebUI status-refresh coverage maps to the direct recovery tests below:
+    // completion/text convergence -> testDirectIdleRecoveryEndsWithoutClaimingSuccessAndAllowsFollowup
+    // unknown/running/read failure -> testDirectRecoveryRequiresExplicitIdleAndSuccessfulCanonicalRead
 
     func testDirectIdleRecoveryEndsWithoutClaimingSuccessAndAllowsFollowup() async throws {
         let manager = SpyAgentLiveActivityManager()
         let fixture = try await makeDirectActivityFixture(manager: manager)
         await fixture.emit("message.start")
+        await fixture.emit("message.delta", payload: ["text": .string("Partial answer")])
+        fixture.viewModel.flushPendingStreamingContent()
+        XCTAssertEqual(fixture.viewModel.messages.compactMap(\.content), ["Partial answer"])
+        fixture.transcript.messages = [
+            ChatMessage(role: "user", content: "Original prompt", timestamp: 1,
+                messageId: "1"),
+            ChatMessage(role: "assistant", content: "Complete durable answer", timestamp: 2,
+                messageId: "2")
+        ]
         XCTAssertEqual(manager.starts.count, 1)
         fixture.transport.setRunning(false)
 
@@ -738,6 +593,12 @@ final class LiveActivityTests: XCTestCase {
         _ = await fixture.viewModel.reconnectStreamIfNeeded()
 
         XCTAssertEqual(manager.ends, [.init(status: .ended, activity: "No longer running", errorSummary: nil)])
+        XCTAssertEqual(fixture.viewModel.messages.compactMap(\.content),
+            ["Original prompt", "Complete durable answer"])
+        XCTAssertEqual(fixture.viewModel.messages.compactMap(\.messageId), ["1", "2"])
+        XCTAssertFalse(fixture.viewModel.messages.contains { $0.content == "Partial answer" })
+        XCTAssertEqual(fixture.transport.methods(), ["session.resume", "session.resume"])
+        XCTAssertFalse(fixture.transport.methods().contains("prompt.submit"))
         XCTAssertNil(fixture.viewModel.activeStreamID)
         try await fixture.runtime.reconnect()
         XCTAssertEqual(manager.ends.count, 1, "Repeated idle recovery cannot finalize twice")
@@ -866,7 +727,11 @@ final class LiveActivityTests: XCTestCase {
             loadTranscript: { id, _, _, _ in
                 await transcript.beforeRead?()
                 if transcript.fails { throw DirectSessionError.invalidResponse }
-                return DirectHermesTranscriptPage(sessionID: transcript.canonicalID ?? id, messages: [], pagination: nil)
+                return DirectHermesTranscriptPage(
+                    sessionID: transcript.canonicalID ?? id,
+                    messages: transcript.messages,
+                    pagination: nil
+                )
             }
         )
         try await controller.open()
@@ -1248,6 +1113,7 @@ final class LiveActivityTests: XCTestCase {
 private final class DirectActivityTranscript {
     var fails = false
     var canonicalID: String?
+    var messages: [ChatMessage] = []
     var beforeRead: (@MainActor () async -> Void)?
 }
 
@@ -1273,17 +1139,20 @@ private final class DirectActivityTransport: HermesGatewayTransport, @unchecked 
     private var generation = 0
     private var sequence = 0
     private var terminalOnResume = false
+    private var recordedMethods: [String] = []
 
     init(sessionID: String) { self.sessionID = sessionID }
     func installSink(_ sink: @escaping @Sendable (HermesGatewayEvent) -> Void) {
         lock.withLock { self.sink = sink }
     }
     func setRunning(_ value: Bool?) { lock.withLock { running = value } }
+    func methods() -> [String] { lock.withLock { recordedMethods } }
     func emitTerminalOnResume() { lock.withLock { terminalOnResume = true } }
     func connect() async throws { lock.withLock { generation += 1 } }
     func close() async { }
     func connectionIdentifier() async -> Int? { lock.withLock { generation } }
     func request(method: String, params: JSONValue?, timeout: Duration?) async throws -> JSONValue? {
+        lock.withLock { recordedMethods.append(method) }
         guard method == "session.resume" else { return .object([:]) }
         let shouldEmit = lock.withLock {
             let value = terminalOnResume
