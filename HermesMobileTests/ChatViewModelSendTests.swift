@@ -5806,278 +5806,85 @@ final class ChatViewModelSendTests: XCTestCase {
     }
 
     @MainActor
-    func testEditUserMessageTruncatesBeforeMessageThenStartsChatWithEditedText() async throws {
-        var requestPaths: [String] = []
-        var truncateKeepCount: Int?
-        var startedMessage: String?
-        let streamClient = SpySSEStreamingClient()
-        let viewModel = try makeViewModel(streamClient: streamClient) { request in
-            requestPaths.append(request.url?.path ?? "")
-            switch request.url?.path {
-            case "/api/session":
-                return apiTestJSONResponse("""
-                {
-                  "session": {
-                    "session_id": "session-abc",
-                    "_messages_offset": 10,
-                    "messages": [
-                      {"role": "user", "content": "First question", "timestamp": 1, "message_id": "u-10"},
-                      {"role": "assistant", "content": "First answer", "timestamp": 2, "message_id": "a-11"},
-                      {"role": "user", "content": "Original question", "timestamp": 3, "message_id": "u-12"},
-                      {"role": "assistant", "content": "Original answer", "timestamp": 4, "message_id": "a-13"}
-                    ]
-                  }
-                }
-                """, for: request)
-            case "/api/session/truncate":
-                let body = try XCTUnwrap(apiTestJSONBody(from: request))
-                XCTAssertEqual(body["session_id"] as? String, "session-abc")
-                truncateKeepCount = body["keep_count"] as? Int
-                return apiTestJSONResponse("""
-                {
-                  "session": {
-                    "session_id": "session-abc",
-                    "_messages_offset": 10,
-                    "messages": [
-                      {"role": "user", "content": "First question", "timestamp": 1, "message_id": "u-10"},
-                      {"role": "assistant", "content": "First answer", "timestamp": 2, "message_id": "a-11"}
-                    ]
-                  }
-                }
-                """, for: request)
-            case "/api/chat/start":
-                let body = try XCTUnwrap(apiTestJSONBody(from: request))
-                XCTAssertEqual(body["session_id"] as? String, "session-abc")
-                startedMessage = body["message"] as? String
-                return apiTestJSONResponse("""
-                {
-                  "session_id": "session-abc",
-                  "stream_id": "stream-edit"
-                }
-                """, for: request)
+    private func assertDirectDestructiveActionRefused(action: String, staleOrRepeated: Bool) async throws {
+        let transport = SendRetirementDirectTransport()
+        let server = URL(string: "https://example.test")!
+        let runtime = try HermesServerRuntime(origin: server) { sink in
+            transport.installSink(sink)
+            return transport
+        }
+        var requests = 0
+        MockURLProtocol.requestHandler = { request in
+            requests += 1
+            XCTAssertEqual(request.httpMethod, "GET")
+            XCTAssertEqual(request.url?.path, "/api/sessions/durable-1/messages")
+            XCTAssertEqual(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "profile" }?.value, "work")
+            return apiTestJSONResponse(#"{"session_id":"durable-1","messages":[{"id":11,"role":"user","content":"Original question"},{"id":12,"role":"assistant","content":"Completed answer"}],"pagination":{"limit":120,"offset":0,"order":"latest","returned":2}}"#, for: request)
+        }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockURLProtocol.self]
+        let client = APIClient(baseURL: server, session: URLSession(configuration: configuration))
+        let viewModel = ChatViewModel(session: SessionSummary(sessionId: "durable-1", profile: "work"),
+            server: server, client: client, gatewayRuntimeProvider: { _ in runtime })
+        await viewModel.loadMessages()
+        XCTAssertEqual(viewModel.messages.compactMap(\.content), ["Original question", "Completed answer"])
+        let originalIDs = viewModel.messages.map(\.id)
+        let originalRequests = requests
+        let originalMethods = transport.methods()
+        let originalStream = viewModel.activeStreamID
+        let role = action == "edit" ? "user" : "assistant"
+        let index = action == "edit" ? 0 : 1
+        let selected = staleOrRepeated
+            ? ChatMessage(role: role, content: "Stale selection", timestamp: 1, messageId: "stale-row")
+            : viewModel.messages[index]
+        let context = try XCTUnwrap(MessageActionContext(message: selected, visibleIndex: index,
+            messagesOffset: staleOrRepeated ? 900 : 0))
+
+        for _ in 0..<(staleOrRepeated ? 2 : 1) {
+            switch action {
+            case "edit":
+                let accepted = await viewModel.editMessage(context, newText: "Edited question")
+                XCTAssertFalse(accepted)
+                XCTAssertEqual(viewModel.messageActionErrorMessage, "Editing is not available in direct Hermes mode yet.")
+            case "regenerate":
+                let accepted = await viewModel.regenerateAssistantResponse(context)
+                XCTAssertFalse(accepted)
+                XCTAssertEqual(viewModel.messageActionErrorMessage, "Regeneration is not available in direct Hermes mode yet.")
             default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
+                let result = await viewModel.executeSlashCommand(try XCTUnwrap(SlashCommandCatalog.command(named: "retry")))
+                XCTAssertEqual(result, .unsupported(friendlyMessage: "Retry is not available in direct Hermes mode yet."))
             }
         }
-
-        await viewModel.loadMessages()
-        let context = try XCTUnwrap(viewModel.actionContext(for: viewModel.messages[2], visibleIndex: 2))
-        let didEdit = await viewModel.editMessage(context, newText: "  Edited question  ")
-
-        XCTAssertTrue(didEdit)
-        XCTAssertEqual(requestPaths, ["/api/session", "/api/session/truncate", "/api/chat/start"])
-        XCTAssertEqual(truncateKeepCount, 12)
-        XCTAssertEqual(startedMessage, "Edited question")
-        XCTAssertEqual(viewModel.messages.compactMap(\.content), ["First question", "First answer", "Edited question"])
-        XCTAssertEqual(viewModel.activeStreamID, "stream-edit")
-        XCTAssertEqual(streamClient.startedURLs.count, 1)
+        XCTAssertEqual(viewModel.messages.map(\.id), originalIDs)
+        XCTAssertEqual(viewModel.messages.compactMap(\.content), ["Original question", "Completed answer"])
+        XCTAssertEqual(viewModel.activeStreamID, originalStream)
+        XCTAssertFalse(viewModel.isStartingChat)
+        XCTAssertFalse(viewModel.isEditingMessage)
+        XCTAssertFalse(viewModel.isRegeneratingMessage)
+        XCTAssertEqual(requests, originalRequests)
+        XCTAssertEqual(transport.methods(), originalMethods)
+        await viewModel.disposeDirectConversation()
+        await runtime.stop()
     }
 
     @MainActor
-    func testRegenerateAssistantResponseUsesPrecedingUserAndTruncatesAtAssistantIndex() async throws {
-        var truncateKeepCount: Int?
-        var startedMessage: String?
-        let streamClient = SpySSEStreamingClient()
-        let viewModel = try makeViewModel(streamClient: streamClient) { request in
-            switch request.url?.path {
-            case "/api/session":
-                return apiTestJSONResponse("""
-                {
-                  "session": {
-                    "session_id": "session-abc",
-                    "_messages_offset": 5,
-                    "messages": [
-                      {"role": "user", "content": "First question", "timestamp": 1, "message_id": "u-5"},
-                      {"role": "assistant", "content": "First answer", "timestamp": 2, "message_id": "a-6"},
-                      {"role": "user", "content": "Second question", "timestamp": 3, "message_id": "u-7"},
-                      {"role": "assistant", "content": "Second answer", "timestamp": 4, "message_id": "a-8"}
-                    ]
-                  }
-                }
-                """, for: request)
-            case "/api/session/truncate":
-                let body = try XCTUnwrap(apiTestJSONBody(from: request))
-                truncateKeepCount = body["keep_count"] as? Int
-                return apiTestJSONResponse("""
-                {
-                  "session": {
-                    "session_id": "session-abc",
-                    "_messages_offset": 5,
-                    "messages": [
-                      {"role": "user", "content": "First question", "timestamp": 1, "message_id": "u-5"},
-                      {"role": "assistant", "content": "First answer", "timestamp": 2, "message_id": "a-6"},
-                      {"role": "user", "content": "Second question", "timestamp": 3, "message_id": "u-7"}
-                    ]
-                  }
-                }
-                """, for: request)
-            case "/api/chat/start":
-                let body = try XCTUnwrap(apiTestJSONBody(from: request))
-                startedMessage = body["message"] as? String
-                return apiTestJSONResponse("""
-                {
-                  "session_id": "session-abc",
-                  "stream_id": "stream-regen"
-                }
-                """, for: request)
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
-
-        await viewModel.loadMessages()
-        let context = try XCTUnwrap(viewModel.actionContext(for: viewModel.messages[3], visibleIndex: 3))
-        let didRegenerate = await viewModel.regenerateAssistantResponse(context)
-
-        XCTAssertTrue(didRegenerate)
-        XCTAssertEqual(truncateKeepCount, 8)
-        XCTAssertEqual(startedMessage, "Second question")
-        XCTAssertEqual(viewModel.messages.compactMap(\.content), ["First question", "First answer", "Second question"])
-        XCTAssertEqual(viewModel.activeStreamID, "stream-regen")
-        XCTAssertEqual(streamClient.startedURLs.count, 1)
+    func testDirectEditRefusalPreservesDurableHistoryAndMakesNoRequest() async throws {
+        try await assertDirectDestructiveActionRefused(action: "edit", staleOrRepeated: false)
     }
 
     @MainActor
-    func testDelayedSceneRefreshCannotRestoreHistoryDiscardedByEdit() async throws {
-        var sessionLoads = 0
-        let streamClient = SpySSEStreamingClient()
-        let viewModel = try makeViewModel(streamClient: streamClient) { request in
-            switch request.url?.path {
-            case "/api/session":
-                sessionLoads += 1
-                if sessionLoads == 1 {
-                    return apiTestJSONResponse("""
-                    {
-                      "session": {
-                        "session_id": "session-abc",
-                        "messages": [
-                          {"role":"user","content":"Keep me","timestamp":1,"message_id":"u-1"},
-                          {"role":"assistant","content":"Keep answer","timestamp":2,"message_id":"a-2"},
-                          {"role":"user","content":"Discard me","timestamp":3,"message_id":"u-3"},
-                          {"role":"assistant","content":"Discarded answer","timestamp":4,"message_id":"a-4"}
-                        ]
-                      }
-                    }
-                    """, for: request)
-                }
-                Thread.sleep(forTimeInterval: 0.20)
-                return apiTestJSONResponse("""
-                {
-                  "session": {
-                    "session_id": "session-abc",
-                    "messages": [
-                      {"role":"user","content":"Keep me","timestamp":1,"message_id":"u-1"},
-                      {"role":"assistant","content":"Keep answer","timestamp":2,"message_id":"a-2"},
-                      {"role":"user","content":"Discard me","timestamp":3,"message_id":"u-3"},
-                      {"role":"assistant","content":"Discarded answer","timestamp":4,"message_id":"a-4"}
-                    ]
-                  }
-                }
-                """, for: request)
-            case "/api/session/truncate":
-                return apiTestJSONResponse("""
-                {
-                  "session": {
-                    "session_id": "session-abc",
-                    "messages": [
-                      {"role":"user","content":"Keep me","timestamp":1,"message_id":"u-1"},
-                      {"role":"assistant","content":"Keep answer","timestamp":2,"message_id":"a-2"}
-                    ]
-                  }
-                }
-                """, for: request)
-            case "/api/chat/start":
-                Thread.sleep(forTimeInterval: 0.25)
-                return apiTestJSONResponse(#"{"session_id":"session-abc","stream_id":"stream-edit"}"#, for: request)
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
-
-        await viewModel.loadMessages()
-        let context = try XCTUnwrap(viewModel.actionContext(for: viewModel.messages[2], visibleIndex: 2))
-        let delayedRefresh = Task { @MainActor in
-            await viewModel.refreshAfterSceneActivation()
-        }
-        try await Task.sleep(nanoseconds: 20_000_000)
-        let didEdit = await viewModel.editMessage(context, newText: "Edited question")
-        await delayedRefresh.value
-
-        XCTAssertTrue(didEdit)
-        XCTAssertEqual(viewModel.activeStreamID, "stream-edit")
-        XCTAssertEqual(viewModel.messages.compactMap(\.content), ["Keep me", "Keep answer", "Edited question"])
-        XCTAssertFalse(viewModel.messages.compactMap(\.content).contains("Discarded answer"))
+    func testDirectRegenerateRefusalPreservesDurableHistoryAndMakesNoRequest() async throws {
+        try await assertDirectDestructiveActionRefused(action: "regenerate", staleOrRepeated: false)
     }
 
     @MainActor
-    func testDelayedSceneRefreshCannotRestoreHistoryDiscardedByRegenerate() async throws {
-        var sessionLoads = 0
-        let streamClient = SpySSEStreamingClient()
-        let viewModel = try makeViewModel(streamClient: streamClient) { request in
-            switch request.url?.path {
-            case "/api/session":
-                sessionLoads += 1
-                if sessionLoads == 1 {
-                    return apiTestJSONResponse("""
-                    {
-                      "session": {
-                        "session_id": "session-abc",
-                        "messages": [
-                          {"role":"user","content":"Keep question","timestamp":1,"message_id":"u-1"},
-                          {"role":"assistant","content":"Old answer","timestamp":2,"message_id":"a-2"}
-                        ]
-                      }
-                    }
-                    """, for: request)
-                }
-                Thread.sleep(forTimeInterval: 0.20)
-                return apiTestJSONResponse("""
-                {
-                  "session": {
-                    "session_id": "session-abc",
-                    "messages": [
-                      {"role":"user","content":"Keep question","timestamp":1,"message_id":"u-1"},
-                      {"role":"assistant","content":"Old answer","timestamp":2,"message_id":"a-2"}
-                    ]
-                  }
-                }
-                """, for: request)
-            case "/api/session/truncate":
-                return apiTestJSONResponse("""
-                {
-                  "session": {
-                    "session_id": "session-abc",
-                    "messages": [
-                      {"role":"user","content":"Keep question","timestamp":1,"message_id":"u-1"}
-                    ]
-                  }
-                }
-                """, for: request)
-            case "/api/chat/start":
-                Thread.sleep(forTimeInterval: 0.25)
-                return apiTestJSONResponse(#"{"session_id":"session-abc","stream_id":"stream-regen"}"#, for: request)
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
+    func testDirectEditRefusalWithStaleContextCannotTruncateCurrentHistory() async throws {
+        try await assertDirectDestructiveActionRefused(action: "edit", staleOrRepeated: true)
+    }
 
-        await viewModel.loadMessages()
-        let context = try XCTUnwrap(viewModel.actionContext(for: viewModel.messages[1], visibleIndex: 1))
-        let delayedRefresh = Task { @MainActor in
-            await viewModel.refreshAfterSceneActivation()
-        }
-        try await Task.sleep(nanoseconds: 20_000_000)
-        let didRegenerate = await viewModel.regenerateAssistantResponse(context)
-        await delayedRefresh.value
-
-        XCTAssertTrue(didRegenerate)
-        XCTAssertEqual(viewModel.activeStreamID, "stream-regen")
-        XCTAssertEqual(viewModel.messages.compactMap(\.content), ["Keep question"])
-        XCTAssertFalse(viewModel.messages.compactMap(\.content).contains("Old answer"))
+    @MainActor
+    func testDirectRegenerateRefusalWithStaleContextCannotTruncateCurrentHistory() async throws {
+        try await assertDirectDestructiveActionRefused(action: "regenerate", staleOrRepeated: true)
     }
 
     @MainActor
@@ -6207,120 +6014,13 @@ final class ChatViewModelSendTests: XCTestCase {
     }
 
     @MainActor
-    func testRetrySlashCommandReloadsTruncatedSessionThenStartsChatWithLastUserText() async throws {
-        var requestPaths: [String] = []
-        var startedMessage: String?
-        let streamClient = SpySSEStreamingClient()
-        let viewModel = try makeViewModel(streamClient: streamClient) { request in
-            requestPaths.append(request.url?.path ?? "")
-            switch request.url?.path {
-            case "/api/session/retry":
-                let body = try XCTUnwrap(apiTestJSONBody(from: request))
-                XCTAssertEqual(body["session_id"] as? String, "session-abc")
-                return apiTestJSONResponse("""
-                {
-                  "ok": true,
-                  "last_user_text": "Summarize the logs",
-                  "removed_count": 2
-                }
-                """, for: request)
-            case "/api/session":
-                return apiTestJSONResponse("""
-                {
-                  "session": {
-                    "session_id": "session-abc",
-                    "messages": [
-                      {"role": "user", "content": "Earlier message", "timestamp": 1, "message_id": "u-1"}
-                    ]
-                  }
-                }
-                """, for: request)
-            case "/api/chat/start":
-                let body = try XCTUnwrap(apiTestJSONBody(from: request))
-                startedMessage = body["message"] as? String
-                return apiTestJSONResponse("""
-                {
-                  "session_id": "session-abc",
-                  "stream_id": "stream-retry"
-                }
-                """, for: request)
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
-
-        let result = await viewModel.executeSlashCommand(try XCTUnwrap(SlashCommandCatalog.command(named: "retry")))
-
-        XCTAssertEqual(result, .executed(message: nil))
-        XCTAssertEqual(requestPaths, ["/api/session/retry", "/api/session", "/api/chat/start"])
-        XCTAssertEqual(startedMessage, "Summarize the logs")
-        XCTAssertEqual(viewModel.messages.compactMap(\.content), ["Earlier message", "Summarize the logs"])
-        XCTAssertEqual(viewModel.activeStreamID, "stream-retry")
-        XCTAssertEqual(streamClient.startedURLs.count, 1)
+    func testDirectRetryRefusalPreservesDurableHistoryAndMakesNoRequest() async throws {
+        try await assertDirectDestructiveActionRefused(action: "retry", staleOrRepeated: false)
     }
 
     @MainActor
-    func testRetrySlashCommandHandlesMissingLastUserTextAndMissingStreamID() async throws {
-        var retryCount = 0
-        var startCount = 0
-        let viewModel = try makeViewModel { request in
-            switch request.url?.path {
-            case "/api/session/retry":
-                retryCount += 1
-                if retryCount == 1 {
-                    return apiTestJSONResponse("""
-                    {
-                      "ok": true,
-                      "removed_count": 2
-                    }
-                    """, for: request)
-                }
-
-                return apiTestJSONResponse("""
-                {
-                  "ok": true,
-                  "last_user_text": "Try again",
-                  "removed_count": 2
-                }
-                """, for: request)
-            case "/api/session":
-                return apiTestJSONResponse("""
-                {
-                  "session": {
-                    "session_id": "session-abc",
-                    "messages": []
-                  }
-                }
-                """, for: request)
-            case "/api/chat/start":
-                startCount += 1
-                return apiTestJSONResponse("""
-                {
-                  "session_id": "session-abc",
-                  "error": "No stream"
-                }
-                """, for: request)
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
-
-        let retry = try XCTUnwrap(SlashCommandCatalog.command(named: "retry"))
-        let missingTextResult = await viewModel.executeSlashCommand(retry)
-        let missingStreamResult = await viewModel.executeSlashCommand(retry)
-
-        XCTAssertEqual(
-            missingTextResult,
-            .unsupported(friendlyMessage: "The server did not return a message to retry.")
-        )
-        XCTAssertEqual(
-            missingStreamResult,
-            .unsupported(friendlyMessage: "No stream")
-        )
-        XCTAssertEqual(startCount, 1)
-        XCTAssertNil(viewModel.activeStreamID)
+    func testDirectRetryRepeatedRefusalDoesNotMutateOrStartStream() async throws {
+        try await assertDirectDestructiveActionRefused(action: "retry", staleOrRepeated: true)
     }
 
     @MainActor

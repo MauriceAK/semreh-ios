@@ -10,6 +10,7 @@ import Foundation
 final class GitWorkspaceViewModel {
     private let session: SessionSummary
     private let apiClient: APIClient
+    private var readGeneration = 0
 
     private(set) var status: GitStatus?
     private(set) var isLoading = false
@@ -41,6 +42,9 @@ final class GitWorkspaceViewModel {
 
     @MainActor
     func load() async {
+        readGeneration += 1
+        let generation = readGeneration
+        defer { if generation == readGeneration { isLoading = false } }
         guard let sessionID = session.sessionId else {
             errorMessage = String(localized: "Session ID is missing.")
             return
@@ -51,15 +55,16 @@ final class GitWorkspaceViewModel {
         lastError = nil
 
         do {
-            let response = try await apiClient.gitStatus(sessionID: sessionID)
+            let response = try await apiClient.directGitStatus(sessionID: sessionID, profile: session.profile ?? "default")
+            guard generation == readGeneration, !Task.isCancelled else { return }
             status = response.git
             hasLoaded = true
         } catch {
+            guard generation == readGeneration, !Task.isCancelled else { return }
             lastError = error
             errorMessage = error.localizedDescription
         }
 
-        isLoading = false
     }
 }
 
@@ -69,6 +74,8 @@ final class GitWorkspaceViewModel {
 final class GitWorkspaceAvailabilityViewModel {
     private let session: SessionSummary
     private let apiClient: APIClient
+    private var readGeneration = 0
+    private var branchGeneration = 0
 
     private(set) var hasRepository = false
     private(set) var isLoading = false
@@ -87,6 +94,13 @@ final class GitWorkspaceAvailabilityViewModel {
     private(set) var lastActionMessage: String?
     private var hasLoaded = false
 
+    #if DEBUG
+    func seedStatusForTesting(_ value: GitStatus) {
+        status = value
+        hasRepository = value.isGit == true
+    }
+    #endif
+
     init(session: SessionSummary, server: URL, apiClient: APIClient? = nil) {
         self.session = session
         self.apiClient = apiClient ?? APIClient(baseURL: server)
@@ -100,6 +114,9 @@ final class GitWorkspaceAvailabilityViewModel {
 
     @MainActor
     func load() async {
+        readGeneration += 1
+        let generation = readGeneration
+        defer { if generation == readGeneration { isLoading = false; isStatusLoading = false } }
         guard let sessionID = session.sessionId else {
             hasRepository = false
             lastError = nil
@@ -107,27 +124,21 @@ final class GitWorkspaceAvailabilityViewModel {
         }
 
         isLoading = true
-
+        isStatusLoading = true
         do {
-            let response = try await apiClient.gitInfo(sessionID: sessionID)
-            gitInfo = response.git
+            let response = try await apiClient.directGitStatus(sessionID: sessionID, profile: session.profile ?? "default")
+            guard generation == readGeneration, !Task.isCancelled else { return }
+            status = response.git
+            gitInfo = response.git.map { GitInfo(branch: $0.branch, dirty: $0.totals?.changed,
+                modified: nil, untracked: $0.totals?.untracked, ahead: $0.ahead, behind: $0.behind, isGit: $0.isGit) }
             hasRepository = response.git?.isGit == true
             lastError = nil
+            statusError = nil
+            hasLoaded = true
+            isStatusLoading = false
 
             if hasRepository {
-                isStatusLoading = true
-                do {
-                    status = try await apiClient.gitStatus(sessionID: sessionID).git
-                    statusError = nil
-                    hasLoaded = true
-                } catch {
-                    status = nil
-                    statusError = error
-                }
-                isStatusLoading = false
-                if statusError == nil {
-                    await loadBranches()
-                }
+                await loadBranches()
             } else {
                 status = nil
                 statusError = nil
@@ -136,14 +147,14 @@ final class GitWorkspaceAvailabilityViewModel {
                 hasLoaded = true
             }
         } catch {
+            guard generation == readGeneration, !Task.isCancelled else { return }
             hasRepository = false
             gitInfo = nil
             status = nil
-            statusError = nil
+            statusError = error
             lastError = error
         }
 
-        isLoading = false
     }
 
     var currentBranchName: String {
@@ -166,21 +177,30 @@ final class GitWorkspaceAvailabilityViewModel {
 
     @MainActor
     func loadBranches() async {
-        guard let sessionID = session.sessionId, hasRepository, !isLoadingBranches else { return }
+        let generation = readGeneration
+        guard let sessionID = session.sessionId, hasRepository else { return }
+        branchGeneration += 1
+        let branchRequest = branchGeneration
         isLoadingBranches = true
+        defer { if branchRequest == branchGeneration { isLoadingBranches = false } }
         branchesError = nil
         do {
-            branches = try await apiClient.gitBranches(sessionID: sessionID).branches
+            let refreshed = try await apiClient.directGitBranches(sessionID: sessionID, profile: session.profile ?? "default").branches
+            guard generation == readGeneration, branchRequest == branchGeneration, !Task.isCancelled else { return }
+            branches = refreshed
         } catch {
+            guard generation == readGeneration, branchRequest == branchGeneration, !Task.isCancelled else { return }
             branchesError = error
         }
-        isLoadingBranches = false
     }
 
     @MainActor
     func checkout(_ target: GitCheckoutTarget, stashingChanges: Bool = false) async -> GitCheckoutOutcome {
         guard let sessionID = session.sessionId, !isSwitchingBranch else { return .failure }
+        readGeneration += 1
         isSwitchingBranch = true
+        isLoading = false
+        isStatusLoading = false
         actionErrorMessage = nil
         defer { isSwitchingBranch = false }
 
@@ -211,7 +231,10 @@ final class GitWorkspaceAvailabilityViewModel {
     @MainActor
     func performRemoteAction(_ action: GitRemoteAction) async -> Bool {
         guard let sessionID = session.sessionId, runningRemoteAction == nil else { return false }
+        readGeneration += 1
         runningRemoteAction = action
+        isLoading = false
+        isStatusLoading = false
         actionErrorMessage = nil
         defer { runningRemoteAction = nil }
 
@@ -240,25 +263,28 @@ final class GitWorkspaceAvailabilityViewModel {
     @MainActor
     func quickCommit(push: Bool, onPhase: ((GitCommitPhase) -> Void)? = nil) async -> GitQuickCommitOutcome {
         guard let sessionID = session.sessionId, commitPhase == nil else { return .failure }
+        guard statusError == nil else {
+            actionErrorMessage = String(localized: "Refresh the changed-file inventory before quick-committing.")
+            return .failure
+        }
 
         let pathsToStage = (status?.trackedFiles ?? []).compactMap { file -> String? in
             let path = file.path ?? file.workspacePath
             let trimmed = path?.trimmingCharacters(in: .whitespacesAndNewlines)
             return (trimmed?.isEmpty == false) ? trimmed : nil
         }
-        guard !pathsToStage.isEmpty else { return .nothingToCommit }
-
-        // The server caps git status at 500 changed files (STATUS_FILE_LIMIT) and flags the
-        // list as `truncated`. `pathsToStage` would then cover only the first 500 files, so a
-        // one-tap commit would silently leave files 501+ uncommitted while reporting success.
-        // Block the quick-commit path entirely in that case rather than commit a partial set;
-        // a >500-file commit needs a server-side "stage all" that doesn't exist yet.
+        // Stock status and full review inventory are separate snapshots. A mismatch
+        // must not authorize a quick commit of an unconfirmed partial file set.
         guard status?.truncated != true else {
-            actionErrorMessage = String(localized: "Too many changes to quick-commit (over 500 files). Commit in smaller batches, or use git directly.")
+            actionErrorMessage = String(localized: "The complete changed-file inventory could not be confirmed. Refresh before quick-committing, or use git directly.")
             return .tooManyChanges
         }
+        guard !pathsToStage.isEmpty else { return .nothingToCommit }
 
         actionErrorMessage = nil
+        readGeneration += 1
+        isLoading = false
+        isStatusLoading = false
         setCommitPhase(.generatingMessage, notify: onPhase)
         defer { commitPhase = nil }
 
@@ -322,12 +348,32 @@ final class GitWorkspaceAvailabilityViewModel {
     /// working tree, so the toolbar badge and Changes row stay in sync.
     @MainActor
     func refreshAfterExternalMutation() async {
-        await refreshGitInfo()
-        guard let sessionID = session.sessionId, hasRepository else { return }
-        if let refreshed = try? await apiClient.gitStatus(sessionID: sessionID).git {
+        readGeneration += 1
+        let generation = readGeneration
+        isLoading = false
+        isStatusLoading = false
+        guard let sessionID = session.sessionId else { return }
+        do {
+            guard let refreshed = try await apiClient.directGitStatus(sessionID: sessionID, profile: session.profile ?? "default").git else {
+                throw DirectGitReadError.invalidResponse
+            }
+            guard generation == readGeneration, !Task.isCancelled else { return }
             status = refreshed
+            gitInfo = GitInfo(branch: refreshed.branch, dirty: refreshed.totals?.changed,
+                modified: nil, untracked: refreshed.totals?.untracked, ahead: refreshed.ahead,
+                behind: refreshed.behind, isGit: refreshed.isGit)
+            hasRepository = refreshed.isGit == true
             statusError = nil
+            lastError = nil
+        } catch {
+            guard generation == readGeneration, !Task.isCancelled else { return }
+            status = nil
+            statusError = error
+            lastError = error
+            hasLoaded = false
+            return
         }
+        guard generation == readGeneration, !Task.isCancelled else { return }
         await loadBranches()
     }
 
@@ -342,8 +388,10 @@ final class GitWorkspaceAvailabilityViewModel {
 
     @MainActor
     private func refreshGitInfo() async {
+        let generation = readGeneration
         guard let sessionID = session.sessionId else { return }
-        if let response = try? await apiClient.gitInfo(sessionID: sessionID) {
+        if let response = try? await apiClient.directGitInfo(sessionID: sessionID, profile: session.profile ?? "default") {
+            guard generation == readGeneration, !Task.isCancelled else { return }
             gitInfo = response.git
             hasRepository = response.git?.isGit == true
         }
@@ -513,6 +561,7 @@ enum GitCommitOperation: Equatable {
 final class GitCommitViewModel {
     private let session: SessionSummary
     private let apiClient: APIClient
+    private var readGeneration = 0
 
     private(set) var status: GitStatus?
     private(set) var isLoading = false
@@ -572,6 +621,9 @@ final class GitCommitViewModel {
     }
 
     func load() async {
+        readGeneration += 1
+        let generation = readGeneration
+        defer { if generation == readGeneration { isLoading = false } }
         guard let sessionID = session.sessionId else {
             loadErrorMessage = String(localized: "Session ID is missing.")
             return
@@ -580,13 +632,15 @@ final class GitCommitViewModel {
         loadErrorMessage = nil
         lastError = nil
         do {
-            status = try await apiClient.gitStatus(sessionID: sessionID).git
+            let refreshed = try await apiClient.directGitStatus(sessionID: sessionID, profile: session.profile ?? "default").git
+            guard generation == readGeneration, !Task.isCancelled else { return }
+            status = refreshed
             pruneSelectionToCurrentFiles()
         } catch {
+            guard generation == readGeneration, !Task.isCancelled else { return }
             lastError = error
             loadErrorMessage = error.localizedDescription
         }
-        isLoading = false
     }
 
     func stageSelectedOrAll() async {
@@ -673,6 +727,8 @@ final class GitCommitViewModel {
             actionErrorMessage = String(localized: "Enter a commit message first.")
             return false
         }
+        readGeneration += 1
+        isLoading = false
         busyOperation = .committing
         actionErrorMessage = nil
         defer { busyOperation = nil }
@@ -711,6 +767,8 @@ final class GitCommitViewModel {
         _ call: @escaping (String, [String]) async throws -> GitMutationResponse
     ) async {
         guard let sessionID = session.sessionId, busyOperation == nil, !paths.isEmpty else { return }
+        readGeneration += 1
+        isLoading = false
         busyOperation = operation
         actionErrorMessage = nil
         defer { busyOperation = nil }

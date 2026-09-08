@@ -148,6 +148,27 @@ them to a proven product or infrastructure cause.
 
 ## Cadence
 
+Git/monitor/caller retirement batch: stock Git reads now scope via session profile,
+returned workspace and worktree root; initial screen refresh uses one status
+snapshot. Full review inventory is retained beyond200 files; unknown unstaged
+metadata refuses an unprovable diff rather than stock's misleading all-add fallback.
+Incomplete inventory and failed external refresh block quick commit; Git write
+routes themselves remain legacy/unmigrated and this is not whole Git parity.
+Session-list monitor no longer requests WebUI stream status. Ready observation
+uses existing coalesced gateway invalidation; disconnected fallback is15s (was1s),
+with cache/loading/edit/mutation/cancellation guards. Tests cover ready/no-fetch
+and disconnect/direct refresh. Three remaining ChatVM startChat callers removed;
+edit/regenerate/retry still refuse, and their required product disposition is open.
+Signed build-v2 and full-v3 passed2368/0/14. Full-v2's sole new auth fixture failure
+was corrected to pinned middleware's unauthenticated value, without broadening
+expiry classification. Full-v1 runner option typo failed before testing. One
+additional generic-401 negative test landed after build-v2; build-v3 and dedicated
+SessionListMutation suite passed91/0/0, including that exact added test. Strict
+signing and ordinary Simulator launch60977 passed. Targeted audit-v1 scanned
+9925files/zero flags/three exported consoles, including failed test evidence;
+unselected/opaque/unexported contents are excluded as usual.
+No live Git, production Git UI, physical device, or whole-cutover acceptance claim.
+
 Managed file transport live proof: `slice4-managed-files-live-v1.json` passed on
 the pinned isolated HTTPS gateway: unique 65-byte Markdown multipart upload with
 overwrite=false, exact byte readback, listing and receipt/identity-guarded cleanup.

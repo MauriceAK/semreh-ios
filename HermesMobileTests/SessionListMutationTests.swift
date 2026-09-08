@@ -712,120 +712,81 @@ final class SessionListMutationTests: XCTestCase {
     }
 
     @MainActor
-    func testInactiveActiveStreamStatusReloadsSessionsToClearStreamingIndicator() async throws {
-        var loadCount = 0
-        var requestPaths: [String] = []
+    func testActiveMonitorFallbackReloadsThroughScopedDirectListWithoutStreamStatus() async throws {
+        var paths: [String] = []
         let viewModel = try makeViewModel { request in
-            let path = request.url?.path ?? "nil"
-            requestPaths.append(path)
-
-            switch path {
-            case "/api/profiles/sessions":
-                loadCount += 1
-                let activeStreamIDField = loadCount == 1 ? #","active_stream_id":"stream-123""# : ""
-                return apiTestJSONResponse("""
-                {
-                  "sessions": [
-                    {
-                      "id": "session-streaming",
-                      "title": "Streaming work",
-                      "archived": false\(activeStreamIDField)
-                    }
-                  ]
-                }
-                """, for: request)
-            case "/api/chat/stream/status":
-                let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
-                let streamID = components?.queryItems?.first { $0.name == "stream_id" }?.value
-                XCTAssertEqual(streamID, "stream-123")
-                return apiTestJSONResponse(
-                    #"{"active":false,"stream_id":"stream-123"}"#,
-                    for: request
-                )
-            default:
-                XCTFail("Unexpected request path: \(path)")
-                throw URLError(.badURL)
-            }
+            paths.append(request.url?.path ?? "")
+            XCTAssertEqual(request.httpMethod, "GET")
+            XCTAssertEqual(request.url?.path, "/api/profiles/sessions")
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems
+            XCTAssertEqual(query?.first { $0.name == "profile" }?.value, "default")
+            return apiTestJSONResponse(#"{"sessions":[{"id":"session-streaming","title":"Updated direct row","archived":false}]}"#, for: request)
         }
-
-        await viewModel.load()
-        XCTAssertNil(viewModel.sessions.first?.activeStreamId)
-
-        let refreshResult = await viewModel.refreshActiveSessionStatesIfNeeded(streamIDs: ["stream-123"])
-
-        XCTAssertEqual(refreshResult, .reloaded)
-        XCTAssertNil(viewModel.sessions.first?.activeStreamId)
-        XCTAssertEqual(requestPaths, ["/api/profiles/sessions", "/api/chat/stream/status", "/api/profiles/sessions"])
+        let result = await viewModel.refreshActiveSessionStatesIfNeeded()
+        XCTAssertEqual(result, .reloaded)
+        XCTAssertEqual(paths, ["/api/profiles/sessions"])
+        XCTAssertEqual(viewModel.sessions.first?.title, "Updated direct row")
     }
 
     @MainActor
-    func testActiveStreamStatusDoesNotReloadSessionsWhileStillActive() async throws {
-        var loadCount = 0
-        var statusCount = 0
-        let viewModel = try makeViewModel { request in
-            switch request.url?.path {
-            case "/api/profiles/sessions":
-                loadCount += 1
-                return apiTestJSONResponse("""
-                {
-                  "sessions": [
-                    {
-                      "id": "session-streaming",
-                      "title": "Streaming work",
-                      "archived": false,
-                      "active_stream_id": "stream-123"
-                    }
-                  ]
-                }
-                """, for: request)
-            case "/api/chat/stream/status":
-                statusCount += 1
-                return apiTestJSONResponse(
-                    #"{"active":true,"stream_id":"stream-123"}"#,
-                    for: request
-                )
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
-            }
+    func testActiveMonitorDefersWhileSidebarEditingOrDestructiveActionPending() async throws {
+        let viewModel = try makeViewModel { _ in
+            XCTFail("Blocked monitor must not issue a list or stream-status request")
+            throw URLError(.badURL)
         }
-
-        await viewModel.load()
-        let refreshResult = await viewModel.refreshActiveSessionStatesIfNeeded(streamIDs: ["stream-123"])
-
-        XCTAssertEqual(refreshResult, .unchanged)
-        XCTAssertEqual(loadCount, 1)
-        XCTAssertEqual(statusCount, 1)
-        XCTAssertNil(viewModel.sessions.first?.activeStreamId)
+        viewModel.setSidebarEditing(true)
+        let editing = await viewModel.refreshActiveSessionStatesIfNeeded()
+        XCTAssertEqual(editing, .unchanged)
+        viewModel.setSidebarEditing(false)
+        viewModel.setSidebarDestructiveActionPending(true)
+        let pending = await viewModel.refreshActiveSessionStatesIfNeeded()
+        XCTAssertEqual(pending, .unchanged)
+        XCTAssertNil(viewModel.lastError)
     }
 
     @MainActor
-    func testActiveStreamStatusUnauthorizedIsPreservedForAuthHandling() async throws {
+    func testActiveMonitorDirectUnauthorizedIsPreservedForAuthHandling() async throws {
         let viewModel = try makeViewModel { request in
-            switch request.url?.path {
-            case "/api/chat/stream/status":
-                let response = HTTPURLResponse(
-                    url: try XCTUnwrap(request.url),
-                    statusCode: 401,
-                    httpVersion: nil,
-                    headerFields: ["Content-Type": "application/json"]
-                )
-                return (try XCTUnwrap(response), Data(#"{"error":"unauthorized"}"#.utf8))
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
-            }
+            XCTAssertEqual(request.url?.path, "/api/profiles/sessions")
+            let response = try XCTUnwrap(HTTPURLResponse(url: request.url!, statusCode: 401,
+                httpVersion: nil, headerFields: ["Content-Type": "application/json"]))
+            // Stock dashboard_auth/middleware.py uses this structured code;
+            // a generic unauthorized response must not imply cookie expiry.
+            return (response, Data(#"{"error":"unauthenticated"}"#.utf8))
         }
+        let result = await viewModel.refreshActiveSessionStatesIfNeeded()
+        XCTAssertEqual(result, .failed)
+        XCTAssertEqual(viewModel.lastError as? DirectHermesAuthError, .sessionExpired)
+    }
 
-        let refreshResult = await viewModel.refreshActiveSessionStatesIfNeeded(streamIDs: ["stream-123"])
-
-        XCTAssertEqual(refreshResult, .failed)
-        guard let lastError = viewModel.lastError,
-              case APIError.unauthorized = lastError
-        else {
-            XCTFail("Expected unauthorized lastError, got \(String(describing: viewModel.lastError))")
-            return
+    @MainActor
+    func testCancelledActiveMonitorMakesNoRequest() async throws {
+        let viewModel = try makeViewModel { _ in
+            XCTFail("Cancelled monitor must not issue a request")
+            throw URLError(.badURL)
         }
+        let task = Task { @MainActor in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await viewModel.refreshActiveSessionStatesIfNeeded()
+        }
+        let result = await task.value
+        XCTAssertEqual(result, .unchanged)
+        XCTAssertNil(viewModel.lastError)
+    }
+
+    @MainActor
+    func testActiveMonitorGenericUnauthorizedDoesNotClaimSessionExpiry() async throws {
+        let viewModel = try makeViewModel { request in
+            XCTAssertEqual(request.url?.path, "/api/profiles/sessions")
+            let response = try XCTUnwrap(HTTPURLResponse(url: request.url!, statusCode: 401,
+                httpVersion: nil, headerFields: ["Content-Type": "application/json"]))
+            return (response, Data(#"{"error":"unauthorized"}"#.utf8))
+        }
+        let result = await viewModel.refreshActiveSessionStatesIfNeeded()
+        XCTAssertEqual(result, .failed)
+        XCTAssertEqual(viewModel.lastError as? DirectHermesRequestError,
+            .http(statusCode: 401, reason: .unauthorized))
+        XCTAssertNil(viewModel.lastError as? DirectHermesAuthError)
     }
 
     @MainActor

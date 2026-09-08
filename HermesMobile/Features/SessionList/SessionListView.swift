@@ -1068,13 +1068,11 @@ struct SessionListView: View {
 
     private var activeSessionMonitorTaskID: ActiveSessionMonitorTaskID {
         let liveOwnerSessionIDs = OpenChatSessionStore.shared.liveSessionIDs(for: server)
-        let liveOwnerStreamIDs = OpenChatSessionStore.shared.liveStreamIDs(for: server)
         let activeSessions = visibleSessions.filter {
             SessionRowView.isActiveStreaming($0, liveOwnerSessionIDs: liveOwnerSessionIDs)
         }
         return ActiveSessionMonitorTaskID(
-            streamIDs: SessionListViewModel.activeStreamIDs(in: activeSessions) + liveOwnerStreamIDs,
-            hasActiveRows: !activeSessions.isEmpty || !liveOwnerStreamIDs.isEmpty,
+            hasActiveRows: !activeSessions.isEmpty || !liveOwnerSessionIDs.isEmpty,
             isViewingCachedData: viewModel.isViewingCachedData
         )
     }
@@ -1206,7 +1204,7 @@ struct SessionListView: View {
             guard taskID.hasActiveRows, !taskID.isViewingCachedData else { return }
 
             do {
-                try await Task.sleep(nanoseconds: 1_000_000_000)
+                try await Task.sleep(nanoseconds: 15_000_000_000)
             } catch {
                 return
             }
@@ -1214,7 +1212,6 @@ struct SessionListView: View {
             guard !Task.isCancelled else { return }
 
             let refreshResult = await viewModel.refreshActiveSessionStatesIfNeeded(
-                streamIDs: taskID.streamIDs,
                 modelContext: modelContext
             )
             if refreshResult == .reloaded || refreshResult == .failed {
@@ -1645,7 +1642,6 @@ private struct SessionSearchTaskID: Hashable {
 }
 
 private struct ActiveSessionMonitorTaskID: Hashable {
-    let streamIDs: [String]
     let hasActiveRows: Bool
     let isViewingCachedData: Bool
 }

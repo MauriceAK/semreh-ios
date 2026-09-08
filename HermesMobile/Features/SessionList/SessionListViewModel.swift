@@ -951,32 +951,16 @@ final class SessionListViewModel {
 
     @discardableResult
     func refreshActiveSessionStatesIfNeeded(
-        streamIDs rawStreamIDs: [String],
         modelContext: ModelContext? = nil
     ) async -> ActiveSessionStateRefreshResult {
-        guard !isViewingCachedData, !isLoading else { return .unchanged }
-
-        let streamIDs = Self.normalizedStreamIDs(rawStreamIDs)
-        guard !streamIDs.isEmpty else {
-            return await load(modelContext: modelContext) ? .reloaded : loadFailureRefreshResult
-        }
-
-        for streamID in streamIDs {
-            do {
-                let response = try await client.chatStreamStatus(streamID: streamID)
-                guard response.active == false else { continue }
-                return await load(modelContext: modelContext) ? .reloaded : loadFailureRefreshResult
-            } catch {
-                guard !isCancellationError(error) else { return .unchanged }
-                if case APIError.unauthorized = error {
-                    lastError = error
-                    return .failed
-                }
-                continue
-            }
-        }
-
-        return .unchanged
+        guard !Task.isCancelled, !isViewingCachedData, !isLoading,
+              !sidebarRefreshBlocked else { return .unchanged }
+        // Connected direct sessions use the existing coalesced invalidation path.
+        // The slow monitor is only a fallback while gateway observation is unavailable.
+        if gatewayObservationEnabled, gatewayObserverID != nil,
+           let observedGatewayRuntime, observedGatewayRuntime.origin == server,
+           observedGatewayRuntime.state == .ready { return .unchanged }
+        return await load(modelContext: modelContext) ? .reloaded : loadFailureRefreshResult
     }
 
     func loadSessionForDeepLink(id rawSessionID: String, modelContext: ModelContext? = nil) async -> SessionSummary? {
@@ -1550,14 +1534,6 @@ final class SessionListViewModel {
 
     private static func normalizedSearchQuery(_ value: String) -> String {
         value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-    }
-
-    static func activeStreamIDs(in sessions: [SessionSummary]) -> [String] {
-        normalizedStreamIDs(sessions.compactMap(\.activeStreamId))
-    }
-
-    private static func normalizedStreamIDs(_ rawStreamIDs: [String]) -> [String] {
-        Array(Set(rawStreamIDs.compactMap(nonEmpty))).sorted()
     }
 
     private static func nonEmpty(_ value: String?) -> String? {

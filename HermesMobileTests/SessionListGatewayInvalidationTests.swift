@@ -4,6 +4,40 @@ import XCTest
 
 @MainActor
 final class SessionListGatewayInvalidationTests: APIClientTestCase {
+    func testActiveMonitorSkipsReadyObserverAndFallsBackAfterDisconnect() async throws {
+        let server = try XCTUnwrap(URL(string: "https://fixture.example"))
+        let transport = SessionListInvalidationFakeTransport()
+        let runtime = try makeRuntime(server: server, transport: transport)
+        let requests = SessionListRequestCounter()
+        let viewModel = makeViewModel(server: server, requests: requests, runtime: runtime)
+        try await startObservation(for: viewModel)
+        // Allow the existing runtime-ready invalidation to settle before measuring
+        // the monitor; that invalidation remains the connected refresh owner.
+        try await Task.sleep(for: .milliseconds(450))
+        XCTAssertEqual(runtime.state, .ready)
+        XCTAssertFalse(viewModel.isLoading)
+        XCTAssertGreaterThan(requests.visibleListValue, 0)
+        let visibleBefore = requests.visibleListValue
+        let archiveBefore = requests.archiveCountValue
+
+        let readyResult = await viewModel.refreshActiveSessionStatesIfNeeded()
+        XCTAssertEqual(readyResult, .unchanged)
+        XCTAssertEqual(requests.visibleListValue, visibleBefore)
+        XCTAssertEqual(requests.archiveCountValue, archiveBefore)
+
+        transport.emit(event: HermesGatewayEvent(method: "local", type: "transport.closed",
+            sessionID: nil, sequence: nil, payload: nil, params: nil, connectionGeneration: 1))
+        for _ in 0..<50 where runtime.state == .ready {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(runtime.state, .disconnected)
+        let disconnectedResult = await viewModel.refreshActiveSessionStatesIfNeeded()
+        XCTAssertEqual(disconnectedResult, .reloaded)
+        XCTAssertEqual(requests.visibleListValue, visibleBefore + 1)
+        XCTAssertEqual(requests.archiveCountValue, archiveBefore + 1)
+        await runtime.stop()
+    }
+
     func testSessionsChangedBurstCoalescesToOneDirectListRefresh() async throws {
         let server = try XCTUnwrap(URL(string: "https://fixture.example"))
         let transport = SessionListInvalidationFakeTransport()

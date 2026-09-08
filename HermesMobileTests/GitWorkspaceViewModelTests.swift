@@ -1,8 +1,130 @@
 import XCTest
 @testable import HermesMobile
 
+/// Holds one stock read without blocking URLProtocol's delivery queue.
+private final class GitReadFixtureGate: URLProtocol {
+    private static let lock = NSLock()
+    private static var route = ""
+    private static var observed: XCTestExpectation?
+    private static var held: GitReadFixtureGate?
+    private static var count = 0
+
+    static func configure(route: String, observed: XCTestExpectation) {
+        lock.lock(); defer { lock.unlock() }
+        self.route = route; self.observed = observed; held = nil; count = 0
+    }
+    static func reset() {
+        lock.lock(); defer { lock.unlock() }
+        held = nil; observed = nil
+    }
+    static func release() {
+        lock.lock()
+        let pending = held
+        held = nil
+        lock.unlock()
+        pending?.respond(pending?.request.url?.path == "/api/git/branches"
+            ? #"{"branches":[{"name":"older","isRemote":false}]}"#
+            : #"{"branch":"older","changed":0,"files":[]}"#)
+    }
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func stopLoading() { }
+    override func startLoading() {
+        Self.lock.lock()
+        if request.url?.path == Self.route {
+            Self.count += 1
+            if Self.count == 1 {
+                Self.held = self
+                let observed = Self.observed
+                Self.lock.unlock()
+                observed?.fulfill()
+                return
+            }
+        }
+        Self.lock.unlock()
+        switch request.url?.path {
+        case "/api/sessions/s1":
+            respond(#"{"id":"s1","profile":"default","cwd":"/tmp/s1"}"#)
+        case "/api/git/worktrees":
+            respond(#"{"worktrees":[{"path":"/tmp/s1"}]}"#)
+        case "/api/git/status":
+            respond(#"{"branch":"newer","changed":0,"files":[]}"#)
+        case "/api/git/review/list":
+            respond(#"{"files":[]}"#)
+        case "/api/git/branches":
+            respond(#"{"branches":[{"name":"newer","isRemote":false}]}"#)
+        default:
+            XCTFail("Unexpected stock Git fixture route")
+            respond("{}")
+        }
+    }
+    private func respond(_ json: String) {
+        let (response, data) = apiTestJSONResponse(json, for: request)
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: data)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+}
+
 /// View-model behaviour + diff parsing for the workspace-git feature (issue #312, Slice A).
 final class GitWorkspaceViewModelTests: APIClientTestCase {
+
+    /// Reuses semantic Git rows for these behavior tests, but emits only the
+    /// pinned stock read envelopes. Write fixtures remain unchanged.
+    private func makeStockGitClient(nonRepository: Bool = false,
+        handler: @escaping (URLRequest) throws -> (HTTPURLResponse, Data)
+    ) -> APIClient {
+        makeClient { request in
+            let route = request.url?.path ?? ""
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            if route.hasPrefix("/api/sessions/") {
+                XCTAssertEqual(request.httpMethod, "GET")
+                XCTAssertEqual(query.first { $0.name == "profile" }?.value, "default")
+                let id = request.url!.lastPathComponent
+                return apiTestJSONResponse(#"{"id":"\#(id)","profile":"default","cwd":"/tmp/\#(id)"}"#, for: request)
+            }
+            if route == "/api/git/worktrees" {
+                let root = try XCTUnwrap(query.first { $0.name == "path" }?.value)
+                XCTAssertTrue(root.hasPrefix("/tmp/"))
+                return apiTestJSONResponse(nonRepository ? #"{"worktrees":[]}"# : #"{"worktrees":[{"path":"\#(root)"}]}"#, for: request)
+            }
+            let response = try handler(request)
+            guard request.httpMethod == "GET", response.0.statusCode == 200,
+                  ["/api/git/status", "/api/git/review/list", "/api/git/branches"].contains(route) else { return response }
+            XCTAssertNotNil(query.first { $0.name == "path" })
+            XCTAssertNil(query.first { $0.name == "session_id" })
+            let fixture = try JSONSerialization.jsonObject(with: response.1) as? [String: Any] ?? [:]
+            let git = fixture["git"] as? [String: Any] ?? [:]
+            let rows = (git["files"] as? [[String: Any]] ?? []).filter { ($0["ignored"] as? Bool) != true }
+            let body: Any
+            if route == "/api/git/branches" {
+                let branches = fixture["branches"] as? [String: Any] ?? [:]
+                var values: [[String: Any]] = []
+                for key in ["local", "remote"] {
+                    values += (branches[key] as? [[String: Any]] ?? []).map { ["name": $0["name"] ?? "", "isRemote": key == "remote"] }
+                }
+                body = ["branches": values]
+            } else if route == "/api/git/review/list" {
+                XCTAssertEqual(query.first { $0.name == "scope" }?.value, "uncommitted")
+                body = ["files": rows.map { row -> [String: Any] in
+                    ["path": row["path"] ?? "", "status": row["status"] ?? "M",
+                     "staged": row["staged"] ?? false, "added": row["additions"] ?? 0,
+                     "removed": row["deletions"] ?? 0]
+                }]
+            } else if nonRepository {
+                body = NSNull()
+            } else {
+                var status = git
+                status.removeValue(forKey: "is_git")
+                status.removeValue(forKey: "totals")
+                status.removeValue(forKey: "truncated")
+                status["files"] = rows
+                status["changed"] = (git["totals"] as? [String: Any])?["changed"] ?? rows.count
+                body = status
+            }
+            return (response.0, try JSONSerialization.data(withJSONObject: body, options: .fragmentsAllowed))
+        }
+    }
 
     private func session(id: String) throws -> SessionSummary {
         let decoder = JSONDecoder()
@@ -30,8 +152,131 @@ final class GitWorkspaceViewModelTests: APIClientTestCase {
     // MARK: - Loading
 
     @MainActor
+    func testNewerStockLoadOwnsStatusAfterOlderResponseFinishes() async throws {
+        let observed = expectation(description: "older status held")
+        let client = gatedStockClient(route: "/api/git/status", observed: observed)
+        defer { GitReadFixtureGate.reset() }
+        let vm = GitWorkspaceViewModel(session: try session(id: "s1"), server: URL(string: "https://example.test")!, apiClient: client)
+        let older = Task { await vm.load() }
+        await fulfillment(of: [observed], timeout: 2)
+        await vm.load()
+        XCTAssertEqual(vm.status?.branch, "newer")
+        GitReadFixtureGate.release()
+        await older.value
+        XCTAssertEqual(vm.status?.branch, "newer")
+        XCTAssertFalse(vm.isLoading)
+    }
+
+    @MainActor
+    func testCancelledStockBranchReadCannotPublishHeldBranches() async throws {
+        let observed = expectation(description: "branches held")
+        let client = gatedStockClient(route: "/api/git/branches", observed: observed)
+        defer { GitReadFixtureGate.reset() }
+        let vm = GitWorkspaceAvailabilityViewModel(session: try session(id: "s1"), server: URL(string: "https://example.test")!, apiClient: client)
+        vm.seedStatusForTesting(try decodedStatus(Self.statusWithOneFile))
+        let loading = Task { await vm.loadBranches() }
+        await fulfillment(of: [observed], timeout: 2)
+        loading.cancel()
+        GitReadFixtureGate.release()
+        await loading.value
+        XCTAssertNil(vm.branches)
+        XCTAssertFalse(vm.isLoadingBranches)
+    }
+
+    private func gatedStockClient(route: String, observed: XCTestExpectation) -> APIClient {
+        GitReadFixtureGate.configure(route: route, observed: observed)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [GitReadFixtureGate.self]
+        return APIClient(baseURL: URL(string: "https://example.test")!, session: URLSession(configuration: configuration))
+    }
+
+    private func decodedStatus(_ json: String) throws -> GitStatus {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try XCTUnwrap(decoder.decode(GitStatusResponse.self, from: Data(json.utf8)).git)
+    }
+
+    @MainActor
+    func testGenericTruncatedStateBlocksQuickCommitWithoutAnyRequest() async throws {
+        let client = makeClient { _ in
+            XCTFail("A structurally truncated state must block all writes")
+            throw URLError(.badURL)
+        }
+        let vm = GitWorkspaceAvailabilityViewModel(session: try session(id: "s1"), server: URL(string: "https://example.test")!, apiClient: client)
+        vm.seedStatusForTesting(try decodedStatus(Self.truncatedStatus))
+        let result = await vm.quickCommit(push: true)
+        XCTAssertEqual(result, .tooManyChanges)
+        XCTAssertNil(vm.commitPhase)
+        XCTAssertNotNil(vm.actionErrorMessage)
+    }
+
+    @MainActor
+    func testDuplicateStockReviewInventoryCannotQuickCommit() async throws {
+        var writes = 0
+        let client = makeStockGitClient { request in
+            if request.httpMethod != "GET" { writes += 1 }
+            return apiTestJSONResponse(#"{"git":{"is_git":true,"branch":"main","totals":{"changed":2},"files":[{"path":"same.swift","status":"M"},{"path":"same.swift","status":"M"}]}}"#, for: request)
+        }
+        let vm = GitWorkspaceAvailabilityViewModel(session: try session(id: "s1"), server: URL(string: "https://example.test")!, apiClient: client)
+        await vm.load()
+        XCTAssertEqual(vm.status?.truncated, true)
+        let result = await vm.quickCommit(push: true)
+        XCTAssertEqual(result, .tooManyChanges)
+        XCTAssertEqual(writes, 0)
+    }
+
+    @MainActor
+    func testEmptyStockReviewWithReportedChangesIsNotNothingToCommit() async throws {
+        var writes = 0
+        let client = makeStockGitClient { request in
+            if request.httpMethod != "GET" { writes += 1 }
+            return apiTestJSONResponse(#"{"git":{"is_git":true,"branch":"main","totals":{"changed":3},"files":[]}}"#, for: request)
+        }
+        let vm = GitWorkspaceAvailabilityViewModel(session: try session(id: "s1"), server: URL(string: "https://example.test")!, apiClient: client)
+        await vm.load()
+        XCTAssertEqual(vm.status?.truncated, true)
+        XCTAssertEqual(vm.status?.trackedFiles.count, 0)
+        let result = await vm.quickCommit(push: false)
+        XCTAssertEqual(result, .tooManyChanges, "An empty incomplete page is not proof of a clean workspace.")
+        XCTAssertNotNil(vm.actionErrorMessage)
+        XCTAssertEqual(writes, 0)
+    }
+
+    @MainActor
+    func testFailedExternalRefreshBlocksPreviouslyCommittableInventoryUntilReload() async throws {
+        var failRead = false
+        var writes = 0
+        let client = makeStockGitClient { request in
+            if request.httpMethod != "GET" { writes += 1 }
+            if failRead && request.url?.path == "/api/git/review/list" {
+                return (HTTPURLResponse(url: request.url!, statusCode: 500, httpVersion: nil, headerFields: nil)!, Data())
+            }
+            return apiTestJSONResponse(Self.statusWithOneFile, for: request)
+        }
+        let vm = GitWorkspaceAvailabilityViewModel(session: try session(id: "s1"), server: URL(string: "https://example.test")!, apiClient: client)
+        await vm.load()
+        XCTAssertTrue(vm.hasCommittableChanges)
+        XCTAssertEqual(vm.status?.truncated, false)
+        failRead = true
+        await vm.refreshAfterExternalMutation()
+        XCTAssertNil(vm.status)
+        XCTAssertNotNil(vm.statusError)
+        XCTAssertNotNil(vm.lastError)
+        let outcome = await vm.quickCommit(push: true)
+        XCTAssertEqual(outcome, .failure)
+        XCTAssertNotNil(vm.actionErrorMessage)
+        XCTAssertEqual(writes, 0)
+        failRead = false
+        await vm.loadIfNeeded()
+        XCTAssertTrue(vm.hasCommittableChanges)
+        XCTAssertNil(vm.statusError)
+        XCTAssertNil(vm.lastError)
+        XCTAssertEqual(writes, 0, "Recovery reads must not retry the blocked commit.")
+    }
+
+    @MainActor
     func testLoadExcludesIgnoredFilesFromCountsAndTotals() async throws {
-        let client = makeClient { request in
+        let client = makeStockGitClient { request in
             apiTestJSONResponse(Self.statusWithIgnored, for: request)
         }
         let viewModel = GitWorkspaceViewModel(session: try session(id: "s1"), server: URL(string: "https://example.test")!, apiClient: client)
@@ -41,7 +286,12 @@ final class GitWorkspaceViewModelTests: APIClientTestCase {
         XCTAssertTrue(viewModel.hasRepository)
         XCTAssertFalse(viewModel.isNonRepository)
         let status = try XCTUnwrap(viewModel.status)
-        XCTAssertEqual(status.files?.count, 2)
+        XCTAssertEqual(status.files?.count, 1, "Stock inventory excludes ignored paths.")
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let legacyRows = try decoder.decode(GitStatusResponse.self, from: Data(Self.statusWithIgnored.utf8))
+        XCTAssertEqual(legacyRows.git?.files?.count, 2)
+        XCTAssertEqual(legacyRows.git?.trackedFiles.count, 1, "Generic ignored-row presentation remains covered independently.")
         XCTAssertEqual(status.trackedFiles.count, 1)
         XCTAssertEqual(status.changedCount, 1)
         XCTAssertEqual(status.totalAdditions, 3)
@@ -52,7 +302,7 @@ final class GitWorkspaceViewModelTests: APIClientTestCase {
     @MainActor
     func testRefreshReplacesStaleData() async throws {
         var dirty = true
-        let client = makeClient { request in
+        let client = makeStockGitClient { request in
             let json = dirty ? Self.statusWithIgnored : #"{"git": {"is_git": true, "branch": "main", "files": [], "totals": {"changed": 0}}}"#
             return apiTestJSONResponse(json, for: request)
         }
@@ -70,10 +320,10 @@ final class GitWorkspaceViewModelTests: APIClientTestCase {
     @MainActor
     func testDifferentSessionsHaveIndependentState() async throws {
         // One handler that answers per session_id; two view models, each scoped to its session.
-        let client = makeClient { request in
+        let client = makeStockGitClient { request in
             let components = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)
-            let sessionID = components?.queryItems?.first { $0.name == "session_id" }?.value
-            let branch = sessionID == "s1" ? "main" : "feature/x"
+            let workspace = components?.queryItems?.first { $0.name == "path" }?.value
+            let branch = workspace == "/tmp/s1" ? "main" : "feature/x"
             return apiTestJSONResponse(#"{"git": {"is_git": true, "branch": "\#(branch)", "files": []}}"#, for: request)
         }
 
@@ -90,7 +340,7 @@ final class GitWorkspaceViewModelTests: APIClientTestCase {
     @MainActor
     func testLoadIfNeededLoadsOnlyOnce() async throws {
         var requestCount = 0
-        let client = makeClient { request in
+        let client = makeStockGitClient { request in
             requestCount += 1
             return apiTestJSONResponse(#"{"git": {"is_git": true, "branch": "main", "files": []}}"#, for: request)
         }
@@ -99,16 +349,16 @@ final class GitWorkspaceViewModelTests: APIClientTestCase {
         await viewModel.loadIfNeeded()
         await viewModel.loadIfNeeded()
 
-        XCTAssertEqual(requestCount, 1)
+        XCTAssertEqual(requestCount, 2, "One load reads stock status and review inventory.")
     }
 
     @MainActor
     func testLoadIfNeededRetriesAfterTransientFailure() async throws {
         var shouldFail = true
         var requestCount = 0
-        let client = makeClient { request in
-            requestCount += 1
-            if shouldFail {
+        let client = makeStockGitClient { request in
+            if request.url?.path == "/api/git/status" { requestCount += 1 }
+            if shouldFail && request.url?.path == "/api/git/status" {
                 shouldFail = false
                 let response = HTTPURLResponse(url: request.url!, statusCode: 500, httpVersion: nil, headerFields: nil)!
                 return (response, Data(#"{"error": "boom"}"#.utf8))
@@ -131,7 +381,7 @@ final class GitWorkspaceViewModelTests: APIClientTestCase {
 
     @MainActor
     func testNonRepositoryWorkspaceSetsEmptyState() async throws {
-        let client = makeClient { request in
+        let client = makeStockGitClient(nonRepository: true) { request in
             apiTestJSONResponse(#"{"git": {"is_git": false}}"#, for: request)
         }
         let viewModel = GitWorkspaceViewModel(session: try session(id: "s1"), server: URL(string: "https://example.test")!, apiClient: client)
@@ -145,7 +395,7 @@ final class GitWorkspaceViewModelTests: APIClientTestCase {
 
     @MainActor
     func testLoadSurfacesErrorOnHTTPFailure() async throws {
-        let client = makeClient { request in
+        let client = makeStockGitClient { request in
             let response = HTTPURLResponse(url: request.url!, statusCode: 500, httpVersion: nil, headerFields: nil)!
             return (response, Data(#"{"error": "boom"}"#.utf8))
         }
@@ -162,11 +412,11 @@ final class GitWorkspaceViewModelTests: APIClientTestCase {
 
     @MainActor
     func testAvailabilityShowsOnlyWhenGitInfoConfirmsRepository() async throws {
-        let client = makeClient { request in
+        let client = makeStockGitClient { request in
             if request.url?.path == "/api/git-info" {
                 return apiTestJSONResponse(#"{"git": {"is_git": true, "branch": "main"}}"#, for: request)
             }
-            if request.url?.path == "/api/git/status" {
+            if ["/api/git/status", "/api/git/review/list"].contains(request.url?.path ?? "") {
                 return apiTestJSONResponse(#"{"git": {"is_git": true, "branch": "main", "files": []}}"#, for: request)
             }
             XCTAssertEqual(request.url?.path, "/api/git/branches")
@@ -223,7 +473,7 @@ final class GitWorkspaceViewModelTests: APIClientTestCase {
     @MainActor
     func testAvailabilityHidesForNonRepositoryAndNullGitInfo() async throws {
         var returnsNullGit = false
-        let client = makeClient { request in
+        let client = makeStockGitClient(nonRepository: true) { request in
             let json = returnsNullGit ? #"{"git": null}"# : #"{"git": {"is_git": false}}"#
             return apiTestJSONResponse(json, for: request)
         }
@@ -240,7 +490,7 @@ final class GitWorkspaceViewModelTests: APIClientTestCase {
 
     @MainActor
     func testAvailabilityHidesOnHTTPFailure() async throws {
-        let client = makeClient { request in
+        let client = makeStockGitClient { request in
             let response = HTTPURLResponse(url: request.url!, statusCode: 500, httpVersion: nil, headerFields: nil)!
             return (response, Data(#"{"error": "boom"}"#.utf8))
         }
@@ -256,9 +506,9 @@ final class GitWorkspaceViewModelTests: APIClientTestCase {
     func testAvailabilityLoadIfNeededRetriesAfterTransientFailure() async throws {
         var shouldFail = true
         var requestCount = 0
-        let client = makeClient { request in
-            requestCount += 1
-            if shouldFail {
+        let client = makeStockGitClient { request in
+            if request.url?.path == "/api/git/status" { requestCount += 1 }
+            if shouldFail && request.url?.path == "/api/git/status" {
                 shouldFail = false
                 let response = HTTPURLResponse(url: request.url!, statusCode: 500, httpVersion: nil, headerFields: nil)!
                 return (response, Data(#"{"error": "boom"}"#.utf8))
@@ -275,22 +525,19 @@ final class GitWorkspaceViewModelTests: APIClientTestCase {
 
         await viewModel.loadIfNeeded()
 
-        XCTAssertEqual(requestCount, 4, "Successful availability also loads menu status and branches.")
+        XCTAssertEqual(requestCount, 3, "One failed status, one successful snapshot, and branches status read.")
         XCTAssertTrue(viewModel.hasRepository)
         XCTAssertNil(viewModel.lastError)
     }
 
     @MainActor
     func testAvailabilityLoadIfNeededRetriesAfterTransientStatusFailure() async throws {
-        var statusShouldFail = true
+        var reviewCount = 0
         var requestCount = 0
-        let client = makeClient { request in
-            requestCount += 1
-            if request.url?.path == "/api/git-info" {
-                return apiTestJSONResponse(#"{"git": {"is_git": true, "branch": "main"}}"#, for: request)
-            }
-            if statusShouldFail {
-                statusShouldFail = false
+        let client = makeStockGitClient { request in
+            if request.url?.path == "/api/git/status" { requestCount += 1 }
+            if request.url?.path == "/api/git/review/list" { reviewCount += 1 }
+            if request.url?.path == "/api/git/review/list" && reviewCount == 1 {
                 let response = HTTPURLResponse(url: request.url!, statusCode: 500, httpVersion: nil, headerFields: nil)!
                 return (response, Data(#"{"error": "boom"}"#.utf8))
             }
@@ -299,13 +546,13 @@ final class GitWorkspaceViewModelTests: APIClientTestCase {
         let viewModel = GitWorkspaceAvailabilityViewModel(session: try session(id: "s1"), server: URL(string: "https://example.test")!, apiClient: client)
 
         await viewModel.loadIfNeeded()
-        XCTAssertTrue(viewModel.hasRepository)
+        XCTAssertFalse(viewModel.hasRepository, "Failed first stock snapshot cannot prove a repository.")
         XCTAssertNil(viewModel.status)
         XCTAssertNotNil(viewModel.statusError)
 
         await viewModel.loadIfNeeded()
 
-        XCTAssertEqual(requestCount, 5)
+        XCTAssertEqual(requestCount, 3)
         XCTAssertEqual(viewModel.status?.changedCount, 0)
         XCTAssertNil(viewModel.statusError)
     }
@@ -315,11 +562,11 @@ final class GitWorkspaceViewModelTests: APIClientTestCase {
         // Stateful mock: the server reflects the new current branch on every read after a
         // checkout, so the post-checkout branch reload sees "feature", not stale "main".
         var currentBranch = "main"
-        let client = makeClient { request in
+        let client = makeStockGitClient { request in
             switch request.url?.path {
             case "/api/git-info":
                 return apiTestJSONResponse(#"{"git":{"is_git":true,"branch":"\#(currentBranch)"}}"#, for: request)
-            case "/api/git/status":
+            case "/api/git/status", "/api/git/review/list":
                 return apiTestJSONResponse(#"{"git":{"is_git":true,"branch":"\#(currentBranch)","files":[]}}"#, for: request)
             case "/api/git/branches":
                 return apiTestJSONResponse(#"{"branches":{"is_git":true,"current":"\#(currentBranch)","local":[{"name":"main"},{"name":"feature"}],"remote":[]}}"#, for: request)
@@ -349,11 +596,11 @@ final class GitWorkspaceViewModelTests: APIClientTestCase {
 
     @MainActor
     func testCheckoutDirtyWorktreeRequestsStashConfirmation() async throws {
-        let client = makeClient { request in
+        let client = makeStockGitClient { request in
             switch request.url?.path {
             case "/api/git-info":
                 return apiTestJSONResponse(#"{"git":{"is_git":true,"branch":"main"}}"#, for: request)
-            case "/api/git/status":
+            case "/api/git/status", "/api/git/review/list":
                 return apiTestJSONResponse(#"{"git":{"is_git":true,"branch":"main"}}"#, for: request)
             case "/api/git/branches":
                 return apiTestJSONResponse(#"{"branches":{"is_git":true,"current":"main"}}"#, for: request)
@@ -380,11 +627,11 @@ final class GitWorkspaceViewModelTests: APIClientTestCase {
     @MainActor
     func testStashCheckoutSurfacesRestoreFailureOnSuccess() async throws {
         var currentBranch = "main"
-        let client = makeClient { request in
+        let client = makeStockGitClient { request in
             switch request.url?.path {
             case "/api/git-info":
                 return apiTestJSONResponse(#"{"git":{"is_git":true,"branch":"\#(currentBranch)"}}"#, for: request)
-            case "/api/git/status":
+            case "/api/git/status", "/api/git/review/list":
                 return apiTestJSONResponse(#"{"git":{"is_git":true,"branch":"\#(currentBranch)"}}"#, for: request)
             case "/api/git/branches":
                 return apiTestJSONResponse(#"{"branches":{"is_git":true,"current":"\#(currentBranch)","local":[{"name":"main"},{"name":"feature"}]}}"#, for: request)
@@ -548,13 +795,13 @@ final class GitWorkspaceViewModelTests: APIClientTestCase {
         truncated: Bool = false,
         record: ((String) -> Void)? = nil
     ) -> APIClient {
-        makeClient { request in
+        makeStockGitClient { request in
             let path = request.url?.path ?? ""
             record?(path)
             switch path {
             case "/api/git-info":
                 return apiTestJSONResponse(#"{"git":{"is_git":true,"branch":"main","dirty":1}}"#, for: request)
-            case "/api/git/status":
+            case "/api/git/status", "/api/git/review/list":
                 return apiTestJSONResponse(truncated ? Self.truncatedStatus : Self.statusWithOneFile, for: request)
             case "/api/git/branches":
                 return apiTestJSONResponse(#"{"branches":{"is_git":true,"current":"main","local":[],"remote":[]}}"#, for: request)
@@ -634,13 +881,13 @@ final class GitWorkspaceViewModelTests: APIClientTestCase {
         XCTAssertNotNil(vm.actionErrorMessage)
         XCTAssertNil(vm.commitPhase, "Phase resets even when push fails.")
         XCTAssertTrue(paths.contains("/api/git/push"), "push was attempted.")
-        XCTAssertTrue(paths.filter { $0 == "/api/git-info" }.count >= 2, "refreshGitInfo runs after a push failure (load + post-commit).")
+        XCTAssertTrue(paths.filter { $0 == "/api/git/status" }.count >= 2, "Scoped Git reads refresh after a push failure.")
         XCTAssertEqual(vm.status?.changedCount, 0, "Status reflects the post-commit state.")
     }
 
     @MainActor
     func testQuickCommitReturnsNothingToCommitWhenClean() async throws {
-        let client = makeClient { request in
+        let client = makeStockGitClient { request in
             let path = request.url?.path ?? ""
             if path == "/api/git-info" { return apiTestJSONResponse(#"{"git":{"is_git":true,"branch":"main"}}"#, for: request) }
             if path == "/api/git/branches" { return apiTestJSONResponse(#"{"branches":{"is_git":true,"current":"main"}}"#, for: request) }
@@ -656,9 +903,9 @@ final class GitWorkspaceViewModelTests: APIClientTestCase {
 
     @MainActor
     func testQuickCommitBlocksWhenStatusTruncated() async throws {
-        // >500 changed files → server truncates the status list, so the client only knows the
-        // first 500. Quick-commit must refuse (no stage/commit/push) instead of silently
-        // committing a partial set. Both the plain Commit and Commit & Push rows are blocked.
+        // Stock status reports 501 changes but review returns one: this is an
+        // incomplete inventory, not a fictitious stock `truncated` field.
+        // Both Commit and Commit & Push must refuse all writes.
         for push in [true, false] {
             var paths: [String] = []
             let client = commitPipelineClient(truncated: true) { paths.append($0) }
@@ -694,7 +941,7 @@ final class GitWorkspaceViewModelTests: APIClientTestCase {
     @MainActor
     func testRefreshAfterExternalMutationPicksUpNewStatus() async throws {
         var changed = true
-        let client = makeClient { request in
+        let client = makeStockGitClient { request in
             switch request.url?.path {
             case "/api/git-info":
                 return apiTestJSONResponse(#"{"git":{"is_git":true,"branch":"main"}}"#, for: request)
@@ -722,7 +969,7 @@ final class GitWorkspaceViewModelTests: APIClientTestCase {
         discardStatus: Int = 200,
         pushStatus: Int = 200
     ) -> APIClient {
-        makeClient { request in
+        makeStockGitClient { request in
             let path = request.url?.path ?? ""
             switch path {
             case "/api/git/push":
@@ -731,7 +978,7 @@ final class GitWorkspaceViewModelTests: APIClientTestCase {
                     return (response, Data(#"{"error":"Remote rejected the push","code":"push_failed"}"#.utf8))
                 }
                 return apiTestJSONResponse(#"{"ok":true,"message":"pushed","status":{"is_git":true,"branch":"main","files":[]}}"#, for: request)
-            case "/api/git/status":
+            case "/api/git/status", "/api/git/review/list":
                 return apiTestJSONResponse(Self.statusWithOneFile, for: request)
             case "/api/git/commit-message":
                 return apiTestJSONResponse(#"{"ok":true,"message":"Generated message","truncated":true}"#, for: request)
@@ -863,10 +1110,10 @@ final class GitWorkspaceViewModelTests: APIClientTestCase {
           {"path":"a.swift","status":"M","staged":true,"additions":3,"deletions":1}
         ]}}
         """
-        let client = makeClient { request in
+        let client = makeStockGitClient { request in
             let path = request.url?.path ?? ""
             switch path {
-            case "/api/git/status":
+            case "/api/git/status", "/api/git/review/list":
                 return apiTestJSONResponse(stagedStatus, for: request)
             case "/api/git/unstage", "/api/git/discard":
                 calls.append(path)
@@ -890,10 +1137,10 @@ final class GitWorkspaceViewModelTests: APIClientTestCase {
     func testCommitSheetDiscardSkipsUnstageWhenNoStagedTargets() async throws {
         // A purely unstaged change needs no unstage step — discard alone reverts the worktree.
         var calls: [String] = []
-        let client = makeClient { request in
+        let client = makeStockGitClient { request in
             let path = request.url?.path ?? ""
             switch path {
-            case "/api/git/status":
+            case "/api/git/status", "/api/git/review/list":
                 return apiTestJSONResponse(Self.statusWithOneFile, for: request)
             case "/api/git/unstage", "/api/git/discard":
                 calls.append(path)
