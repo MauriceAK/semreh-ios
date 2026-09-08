@@ -148,6 +148,13 @@ them to a proven product or infrastructure cause.
 
 ## Cadence
 
+Managed file transport live proof: `slice4-managed-files-live-v1.json` passed on
+the pinned isolated HTTPS gateway: unique 65-byte Markdown multipart upload with
+overwrite=false, exact byte readback, listing and receipt/identity-guarded cleanup.
+Six local probe tests passed; targeted audit-v1 scanned58files/zero flags.
+This does not establish memory-editor adoption, provider ingestion, or native UI.
+Ambiguous upload receipts deliberately leave possible files untouched for review.
+
 Latest native checkpoint: ordinary send fallback retirement, scoped cron mutations,
 and main-model picker passed signed `slice4-send-cron-model-build-v4` and
 `slice4-send-cron-model-full-v2`: 2352 passed, zero failed, 14 intentional skips.
