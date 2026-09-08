@@ -148,6 +148,13 @@ them to a proven product or infrastructure cause.
 
 ## Cadence
 
+Live stock Git read proof: `slice4-git-read-live-v1.json` passed against the clean
+pinned HTTPS fixture: worktree root, status, full review list, branches and distinct
+staged/unstaged diffs. Five local probe guard tests passed. A unique tiny local
+test repo was moved intact to runtime/tmp after the check (no tree deletion,
+no remotes or server Git mutations). Native session-to-root navigation and Git
+write migration are explicitly not established by this protocol check.
+
 Git/monitor/caller retirement batch: stock Git reads now scope via session profile,
 returned workspace and worktree root; initial screen refresh uses one status
 snapshot. Full review inventory is retained beyond200 files; unknown unstaged
