@@ -49,8 +49,54 @@ Stock commit auto-stages all if no index entries exist, and discard removes
 matching untracked files; do not silently adopt those different semantics.
 Agent-driven Git through chat remains available when tools/permissions allow.
 Revisit deferred controls after migration; no new backend dependency. The binding
-plan records this decision. UI hiding/legacy consumer retirement is still to do;
-no Git implementation changed merely by documenting approval.
+plan records this decision. Git batch on206b216 plus scoped diff now replaces
+stage/unstage, clean existing-local switch and push with stock routes, hides the
+deferred controls (including manual commit and new/remote branch checkout), and
+removes legacy Git APIs/endpoints. Stage/unstage sends explicit exact file paths,
+never a nil/all-files body; validation runs before each file dispatch. Partial and
+unknown outcomes are explicit; unknown push requires a successful explicit refresh
+before retry. Push confirmation discloses stock origin/upstream fallback.
+These client checks do not make stock filesystem/Git operations atomic against
+other clients. Root fixed a filename-trimming retarget risk, sanitizer-changing
+branch suffixes and a hidden staging error during review.
+Signed builds-v1/v2/v3 passed; focused-v1:52/0/0; Python harness45/0. Owned stock
+`slice4-git-mutation-live-v1.json` confirms explicit stage/unstage, clean local
+switch and index/worktree readback in a fresh disposable repository, no remote
+operations. Full-v3:2233/0/14 passed; signed UI build-v1 and strict signing passed.
+Production UI navigation results follow below. Evidence stem `slice4-git-controls`;
+no new physical/remote-push acceptance. Retained full-v1:2233/1/14 failed solely
+because LocalizationCatalog required the removed branch-creation placeholder.
+That obsolete test was removed; supported branding and direct behavior retained.
+Full-v2 failed before runner connection with no test cases executed; same-build
+full-v3 passed, without a claimed runner root cause or product fix.
+Production UI-v1 then caught a real missed startup call: direct chats skipped Git
+availability loading. Root enabled the retained direct VM's existing loader;
+UI-build-v2/UI-v2 passed1/0/0, with independently inspected menu/staging screenshots.
+Review also fixed draft/lineage canonical rebinding: preserve the retained Git VM,
+adopt only the store's confirmed target/profile, invalidate stale reads/dispatch,
+retain busy/unknown push barriers, and pass canonical identity to Git child sheets.
+Unit-build-v4/v5 and UI-build-v3 passed; focused-v2:94/0/0; full-v5:2235/0/14.
+The v5 unit rebuild corrected a new test's old-target ID to match its held-read
+fixture before execution; no product assertion was removed. Full-v4 stalled
+before any cases; exact owned runner interrupted73 after about2minutes, retained.
+Same-build full-v5 passed. Final UI-v3 passed1/0/0; both exported screenshots were
+independently inspected, showing the actual supported menu and populated staging
+sheet. Strict signing and ordinary Simulator launch67165 passed. Targeted
+audit-v1:14381files/0flags/10console files (nine exported plus the interrupted
+full-v4 staging console). Only new selected artifacts plus mandatory docs/runtime
+logs; unselected evidence, opaque/OCR and unexported compressed contents excluded.
+These are Simulator navigation/mock canonicalization and disposable stock Git
+mutation checks, not physical-device acceptance or actual remote-push execution.
+
+Reproduce the bounded Git checks using fresh result paths and the existing signed
+HermesMobile / HermesMobileUIVerification schemes on the owned Simulator:
+`python -m unittest scripts/test_direct_hermes_ios_smoke.py scripts/test_direct_hermes_git_mutation_probe.py`;
+focused XCTest classes APIClientGitTests, GitWorkspaceViewModelTests and
+OpenChatSessionStoreTests, then the full HermesMobile XCTest target. The UI run
+file comes from `scripts/direct_hermes_ios_smoke.py --https --stock-backend
+--slice2-ui --slice4-git-ui-session-id 20260908_114848_b18c0d` and targets the
+production login/session/menu test only. All native runs use signing,
+parallel-testing NO and collect-test-diagnostics never.
 
 Immediate acceptance work from the no-drift audit:
 - [x] Direct missed-terminal recovery restores the complete durable answer in controller/VM tests.
@@ -92,6 +138,11 @@ plus one interrupted-run staging console. Unselected/opaque/OCR/unexported
 contents excluded; no unrelated historical evidence rescan claimed.
 
 ## Implementation batches
+
+- [x] **Supported Git controls and deferred-control hiding:** direct explicit-file
+  stage/unstage, clean local switch/push, canonical Git identity and child sheets;
+  old Git API/endpoint retirement. Current signed/native/live/UI checkpoint above.
+  Physical acceptance, real remote push and deferred controls remain distinct.
 
 - [x] **Settings/preferences and unused configuration API retirement:** Settings
   version/liveness now uses stock status. CLI/Claude visibility remains immediate
@@ -211,6 +262,15 @@ contents excluded; no unrelated historical evidence rescan claimed.
   or explicitly approved for removal/deferral. Unsupported items listed below.
 
 ## Decisions / limitations that implementation workers must not silently resolve
+
+- [ ] In-chat website-login/native credential-form overlays have no equivalent
+  at the stock pin: proprietary `website_login`/`native_component(_state)` SSE
+  and `/api/native-auth/*`, `/api/work/login/*` responses cannot be replaced by
+  unrelated MCP OAuth or secret/sudo. Recommend temporary defer/hide with explicit
+  product approval before retirement. Preserve ordinary app login and supported
+  direct blocking prompts. Read-only audit: `tui_gateway/server.py`,
+  `methods_prompt.py`, `methods_tools.py`; app `WebsiteLogin.swift`,
+  `APIClient+Chat.swift` and ChatView overlays. No implementation change yet.
 
 - [x] Legacy named workspace/project registry and moving chats between those
   projects have no equivalent in the pinned serve contracts. Revised proposal:

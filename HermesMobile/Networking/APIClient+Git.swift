@@ -12,6 +12,33 @@ enum DirectGitReadError: LocalizedError {
     }
 }
 
+enum DirectGitWriteError: LocalizedError {
+    case invalidPaths
+    case validationChanged
+    case incompleteStatus
+    case dirtyWorktree
+    case unavailableLocalBranch
+    case detachedHead
+    case partial(completed: Int, total: Int)
+    case unknown(completed: Int, total: Int)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidPaths: "Select explicit repository-relative files before changing Git state."
+        case .validationChanged: "The Git selection changed before the request was sent. Refresh and review it again."
+        case .incompleteStatus: "Hermes could not confirm the complete Git state. Refresh before trying again."
+        case .dirtyWorktree: "Commit or discard local changes before switching branches."
+        case .unavailableLocalBranch: "That local branch is no longer available. Refresh the branch list."
+        case .detachedHead: "Push is unavailable while the repository has no checked-out branch."
+        case let .partial(completed, total): "Git changed \(completed) of \(total) selected files before an error. Refresh before retrying."
+        case let .unknown(completed, total): "The outcome is unknown after \(completed) of \(total) selected files were confirmed. Refresh before retrying."
+        }
+    }
+}
+
+private struct DirectGitOKResponse: Decodable { let ok: Bool? }
+private struct DirectGitBranchSwitchResponse: Decodable { let branch: String? }
+
 extension APIClient {
     private func directGitRead(_ route: String, path: String, query: [URLQueryItem] = []) async throws -> Data {
         var components = URLComponents()
@@ -50,6 +77,176 @@ extension APIClient {
         let status = try await directGitRead("/api/git/status", path: cwd)
         if (try JSONSerialization.jsonObject(with: status, options: .fragmentsAllowed)) is NSNull { return nil }
         throw DirectGitReadError.unprovenRoot
+    }
+
+    private func directGitPost(_ route: String, body: [String: Any]) async throws -> DirectGitOKResponse {
+        let bytes = try JSONSerialization.data(withJSONObject: body)
+        return try decode(DirectGitOKResponse.self, from: await sendDirectData(
+            path: route, method: "POST", encodedBody: bytes, classifyStructuredAuthExpiry: true
+        ))
+    }
+
+    private func validatedDirectGitPaths(_ paths: [String]) throws -> [String] {
+        guard !paths.isEmpty else { throw DirectGitWriteError.invalidPaths }
+        var seen = Set<String>()
+        let result = try paths.map { raw -> String in
+            let parts = raw.split(separator: "/", omittingEmptySubsequences: false)
+            guard !raw.isEmpty, raw != ".", !raw.hasPrefix("/"), !raw.hasPrefix(":"),
+                  !raw.contains("\0"), !raw.contains(where: { "*?[".contains($0) }),
+                  !parts.contains(""), !parts.contains("."), !parts.contains(".."),
+                  seen.insert(raw).inserted else { throw DirectGitWriteError.invalidPaths }
+            return raw
+        }
+        return result
+    }
+
+    private func isAmbiguousDirectGitDispatchError(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        if let apiError = error as? APIError {
+            switch apiError {
+            case .network, .decoding: return true
+            case .http(let statusCode, _): return statusCode < 0 || statusCode >= 500
+            case .invalidServerURL, .unauthorized: return false
+            }
+        }
+        if let directError = error as? DirectHermesRequestError,
+           case let .http(statusCode, _) = directError {
+            return statusCode >= 500
+        }
+        return false
+    }
+
+    private func directGitFilesMutation(
+        route: String,
+        sessionID: String,
+        profile: String,
+        paths: [String],
+        validateBeforeDispatch: @MainActor @Sendable () async -> Bool
+    ) async throws -> GitMutationResponse {
+        let files = try validatedDirectGitPaths(paths)
+        guard let root = try await directGitRoot(sessionID: sessionID, profile: profile) else {
+            throw DirectGitReadError.unprovenRoot
+        }
+        var completed = 0
+        for file in files {
+            guard await validateBeforeDispatch(), !Task.isCancelled else {
+                if completed > 0 {
+                    throw DirectGitWriteError.partial(completed: completed, total: files.count)
+                }
+                throw DirectGitWriteError.validationChanged
+            }
+            do {
+                let response = try await directGitPost(route, body: ["path": root, "file": file])
+                guard response.ok == true else {
+                    throw DirectGitWriteError.unknown(completed: completed, total: files.count)
+                }
+                completed += 1
+            } catch let error as DirectGitWriteError {
+                throw error
+            } catch {
+                if isAmbiguousDirectGitDispatchError(error) {
+                    throw DirectGitWriteError.unknown(completed: completed, total: files.count)
+                }
+                if completed > 0 { throw DirectGitWriteError.partial(completed: completed, total: files.count) }
+                throw error
+            }
+        }
+        return GitMutationResponse(ok: true, git: nil)
+    }
+
+    func directGitStage(
+        sessionID: String, profile: String, paths: [String],
+        validateBeforeDispatch: @MainActor @Sendable () async -> Bool
+    ) async throws -> GitMutationResponse {
+        try await directGitFilesMutation(route: "/api/git/review/stage", sessionID: sessionID,
+            profile: profile, paths: paths, validateBeforeDispatch: validateBeforeDispatch)
+    }
+
+    func directGitUnstage(
+        sessionID: String, profile: String, paths: [String],
+        validateBeforeDispatch: @MainActor @Sendable () async -> Bool
+    ) async throws -> GitMutationResponse {
+        try await directGitFilesMutation(route: "/api/git/review/unstage", sessionID: sessionID,
+            profile: profile, paths: paths, validateBeforeDispatch: validateBeforeDispatch)
+    }
+
+    func directGitPush(
+        sessionID: String, profile: String,
+        validateBeforeDispatch: @MainActor @Sendable () async -> Bool
+    ) async throws -> GitRemoteActionResponse {
+        guard let root = try await directGitRoot(sessionID: sessionID, profile: profile) else {
+            throw DirectGitReadError.unprovenRoot
+        }
+        let status = try JSONSerialization.jsonObject(with: await directGitRead("/api/git/status", path: root)) as? [String: Any]
+        guard status?["detached"] as? Bool == false,
+              let branch = status?["branch"] as? String, !branch.isEmpty else {
+            throw DirectGitWriteError.detachedHead
+        }
+        guard await validateBeforeDispatch(), !Task.isCancelled else { throw DirectGitWriteError.validationChanged }
+        do {
+            let response = try await directGitPost("/api/git/review/push", body: ["path": root])
+            guard response.ok == true else { throw DirectGitWriteError.unknown(completed: 0, total: 1) }
+        } catch {
+            if isAmbiguousDirectGitDispatchError(error) {
+                throw DirectGitWriteError.unknown(completed: 0, total: 1)
+            }
+            throw error
+        }
+        return GitRemoteActionResponse(ok: true, message: nil, status: nil)
+    }
+
+    func directGitSwitchLocalBranch(
+        sessionID: String, profile: String, branch: String,
+        validateBeforeDispatch: @MainActor @Sendable () async -> Bool
+    ) async throws -> GitCheckoutResponse {
+        let target = branch.trimmingCharacters(in: .whitespacesAndNewlines)
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_./-"))
+        guard !target.isEmpty, target == branch, !target.contains("\0"),
+              target.unicodeScalars.allSatisfy(allowed.contains),
+              !target.hasPrefix("-"), !target.hasPrefix("."), !target.hasPrefix("/"),
+              !target.hasSuffix("-"), !target.hasSuffix("."), !target.hasSuffix("/"),
+              !target.contains(".."), !target.contains("//"), !target.contains("--") else {
+            throw DirectGitWriteError.unavailableLocalBranch
+        }
+        guard let root = try await directGitRoot(sessionID: sessionID, profile: profile) else {
+            throw DirectGitReadError.unprovenRoot
+        }
+        async let statusBytes = directGitRead("/api/git/status", path: root)
+        async let reviewBytes = directGitRead("/api/git/review/list", path: root,
+            query: [URLQueryItem(name: "scope", value: "uncommitted")])
+        async let branchBytes = directGitRead("/api/git/branches", path: root)
+        let (rawStatus, rawReview, rawBranches) = try await (statusBytes, reviewBytes, branchBytes)
+        guard let status = try JSONSerialization.jsonObject(with: rawStatus) as? [String: Any],
+              let review = try JSONSerialization.jsonObject(with: rawReview) as? [String: Any],
+              let files = review["files"] as? [[String: Any]],
+              let changed = status["changed"] as? Int,
+              Set(files.compactMap { $0["path"] as? String }).count == files.count,
+              changed == files.count else {
+            throw DirectGitWriteError.incompleteStatus
+        }
+        guard changed == 0 else { throw DirectGitWriteError.dirtyWorktree }
+        guard let envelope = try JSONSerialization.jsonObject(with: rawBranches) as? [String: Any],
+              let rows = envelope["branches"] as? [[String: Any]],
+              rows.contains(where: { ($0["name"] as? String) == target && ($0["isRemote"] as? Bool) == false }) else {
+            throw DirectGitWriteError.unavailableLocalBranch
+        }
+        guard await validateBeforeDispatch(), !Task.isCancelled else { throw DirectGitWriteError.validationChanged }
+        do {
+            let body = try JSONSerialization.data(withJSONObject: ["path": root, "branch": target])
+            let response = try decode(DirectGitBranchSwitchResponse.self, from: await sendDirectData(
+                path: "/api/git/branch/switch", method: "POST", encodedBody: body,
+                classifyStructuredAuthExpiry: true
+            ))
+            guard response.branch == target else { throw DirectGitWriteError.unknown(completed: 0, total: 1) }
+        } catch {
+            if isAmbiguousDirectGitDispatchError(error) {
+                throw DirectGitWriteError.unknown(completed: 0, total: 1)
+            }
+            throw error
+        }
+        return GitCheckoutResponse(ok: true, message: nil, status: nil, git: nil, branches: nil,
+            currentBranch: target, stashName: nil, stashed: nil, restoredStash: nil,
+            restoreFailed: nil, restoreError: nil, restoreStash: nil)
     }
 
     func directGitStatus(sessionID: String, profile: String) async throws -> GitStatusResponse {
@@ -149,160 +346,5 @@ extension APIClient {
         let binary = text.split(separator: "\n").contains { $0.hasPrefix("Binary files ") || $0 == "GIT binary patch" }
         return GitDiffResponse(diff: GitDiff(path: path, kind: staged ? "staged" : "unstaged",
             binary: binary, tooLarge: tooLarge, additions: nil, deletions: nil, diff: tooLarge ? "" : text))
-    }
-}
-
-// Workspace Git calls. Every call is scoped to a chat session via `session_id`; the
-// server resolves the workspace path itself, mirroring `APIClient+Workspace.swift`.
-extension APIClient {
-    func gitInfo(sessionID: String) async throws -> GitInfoResponse {
-        try await send(endpoint: .gitInfo(sessionID: sessionID), method: "GET")
-    }
-
-    func gitStatus(sessionID: String) async throws -> GitStatusResponse {
-        try await send(endpoint: .gitStatus(sessionID: sessionID), method: "GET")
-    }
-
-    func gitBranches(sessionID: String) async throws -> GitBranchesResponse {
-        try await send(endpoint: .gitBranches(sessionID: sessionID), method: "GET")
-    }
-
-    func gitDiff(sessionID: String, path: String, kind: String = "unstaged") async throws -> GitDiffResponse {
-        try await send(
-            endpoint: .gitDiff(sessionID: sessionID, path: path, kind: kind),
-            method: "GET"
-        )
-    }
-
-    func gitFetch(sessionID: String) async throws -> GitRemoteActionResponse {
-        try await send(endpoint: .gitFetch, method: "POST", body: GitSessionRequest(sessionID: sessionID))
-    }
-
-    func gitPull(sessionID: String) async throws -> GitRemoteActionResponse {
-        try await send(endpoint: .gitPull, method: "POST", body: GitSessionRequest(sessionID: sessionID))
-    }
-
-    func gitPush(sessionID: String) async throws -> GitRemoteActionResponse {
-        try await send(endpoint: .gitPush, method: "POST", body: GitSessionRequest(sessionID: sessionID))
-    }
-
-    func gitCheckout(sessionID: String, target: GitCheckoutTarget) async throws -> GitCheckoutResponse {
-        try await send(
-            endpoint: .gitCheckout,
-            method: "POST",
-            body: GitCheckoutRequest(sessionID: sessionID, target: target, includesDirtyMode: true)
-        )
-    }
-
-    func gitStashCheckout(sessionID: String, target: GitCheckoutTarget) async throws -> GitCheckoutResponse {
-        try await send(
-            endpoint: .gitStashCheckout,
-            method: "POST",
-            body: GitCheckoutRequest(sessionID: sessionID, target: target, includesDirtyMode: false)
-        )
-    }
-
-    // MARK: - Commit flow (issue #315, Slice C)
-
-    func gitStage(sessionID: String, paths: [String]) async throws -> GitMutationResponse {
-        try await send(endpoint: .gitStage, method: "POST", body: GitPathsRequest(sessionID: sessionID, paths: paths))
-    }
-
-    func gitUnstage(sessionID: String, paths: [String]) async throws -> GitMutationResponse {
-        try await send(endpoint: .gitUnstage, method: "POST", body: GitPathsRequest(sessionID: sessionID, paths: paths))
-    }
-
-    func gitDiscard(sessionID: String, paths: [String], deleteUntracked: Bool = false) async throws -> GitMutationResponse {
-        try await send(
-            endpoint: .gitDiscard,
-            method: "POST",
-            body: GitDiscardRequest(sessionID: sessionID, paths: paths, deleteUntracked: deleteUntracked)
-        )
-    }
-
-    func gitCommit(sessionID: String, message: String) async throws -> GitCommitResponse {
-        try await send(endpoint: .gitCommit, method: "POST", body: GitCommitRequest(sessionID: sessionID, message: message))
-    }
-
-    func gitCommitSelected(sessionID: String, message: String, paths: [String]) async throws -> GitCommitResponse {
-        try await send(
-            endpoint: .gitCommitSelected,
-            method: "POST",
-            body: GitCommitSelectedRequest(sessionID: sessionID, message: message, paths: paths)
-        )
-    }
-
-    /// Generate a commit message from the staged diff. Not gated by the destructive flag.
-    /// Generation runs an LLM server-side, so it gets a wider timeout than other calls.
-    func gitCommitMessage(sessionID: String) async throws -> GitCommitMessageResponse {
-        try await send(
-            endpoint: .gitCommitMessage,
-            method: "POST",
-            body: GitSessionRequest(sessionID: sessionID),
-            timeout: Self.commitMessageTimeout
-        )
-    }
-
-    /// Generate a commit message from the selected paths' diff. Not gated by the destructive flag.
-    func gitCommitMessageSelected(sessionID: String, paths: [String]) async throws -> GitCommitMessageResponse {
-        try await send(
-            endpoint: .gitCommitMessageSelected,
-            method: "POST",
-            body: GitPathsRequest(sessionID: sessionID, paths: paths),
-            timeout: Self.commitMessageTimeout
-        )
-    }
-
-    /// LLM commit-message generation can take far longer than the 60s session default,
-    /// especially over a cold tunnel; allow up to two minutes before timing out.
-    private static let commitMessageTimeout: TimeInterval = 120
-}
-
-private struct GitSessionRequest: Encodable {
-    let sessionID: String
-}
-
-private struct GitPathsRequest: Encodable {
-    let sessionID: String
-    let paths: [String]
-}
-
-private struct GitDiscardRequest: Encodable {
-    let sessionID: String
-    let paths: [String]
-    let deleteUntracked: Bool
-}
-
-private struct GitCommitRequest: Encodable {
-    let sessionID: String
-    let message: String
-}
-
-private struct GitCommitSelectedRequest: Encodable {
-    let sessionID: String
-    let message: String
-    let paths: [String]
-}
-
-private struct GitCheckoutRequest: Encodable {
-    let sessionID: String
-    let ref: String
-    let mode: String
-    let newBranch: String?
-    let track: Bool?
-    let dirtyMode: String?
-
-    init(sessionID: String, target: GitCheckoutTarget, includesDirtyMode: Bool) {
-        self.sessionID = sessionID
-        ref = target.ref
-        // Creating a brand-new local branch must use the server's "new" mode. The
-        // "local" mode only switches to an existing branch and ignores `new_branch`
-        // entirely, so sending it for a create silently switches to `ref` instead
-        // (a no-op when already on it). Remote checkouts keep "remote" — that mode
-        // creates a tracking branch itself.
-        mode = (target.mode == .local && target.newBranch != nil) ? "new" : target.mode.rawValue
-        newBranch = target.newBranch
-        track = target.track ? true : nil
-        dirtyMode = includesDirtyMode ? "block" : nil
     }
 }

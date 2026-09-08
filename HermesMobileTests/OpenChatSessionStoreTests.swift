@@ -590,16 +590,42 @@ final class OpenChatSessionStoreTests: XCTestCase {
 
         let ancestor = SessionSummary(sessionId: nil, title: "draft", createdAt: 1, profile: "alpha")
         let model = store.viewModel(session: ancestor, server: server)
+        let git = store.gitAvailabilityViewModel(session: ancestor, server: server, chatViewModel: model)
         let ancestorKeyID = ancestor.id
         model.onDirectCanonicalID?("canonical-alpha")
 
         XCTAssertEqual(store.retainedSessionIDsForTesting(for: server), ["canonical-alpha"])
         let reopened = store.viewModel(session: ancestor, server: server)
         XCTAssertTrue(reopened === model)
+        let reopenedGit = store.gitAvailabilityViewModel(session: ancestor, server: server, chatViewModel: reopened)
+        XCTAssertTrue(reopenedGit === git)
+        XCTAssertEqual(reopenedGit.bindingForTesting.sessionID, "canonical-alpha")
+        XCTAssertEqual(reopenedGit.bindingForTesting.profile, "alpha")
+        XCTAssertEqual(reopenedGit.requestSession.sessionId, "canonical-alpha")
+        XCTAssertEqual(reopenedGit.requestSession.profile, "alpha")
         XCTAssertNotEqual(ancestorKeyID, "canonical-alpha")
         XCTAssertEqual(store.retainedViewModelCountForTesting(for: server), 1)
 
         await model.disposeDirectConversation()
+        store.activateGateway(server: nil)
+    }
+
+    @MainActor
+    func testGitModelCreatedAfterCanonicalAliasUsesConfirmedDurableBinding() async throws {
+        let server = try XCTUnwrap(URL(string: "https://gateway.example.test"))
+        let store = OpenChatSessionStore.shared
+        store.activateGateway(server: server)
+        let draft = SessionSummary(sessionId: nil, title: "draft", createdAt: 2, profile: "alpha")
+        let chat = store.viewModel(session: draft, server: server)
+        chat.onDirectCanonicalID?("canonical-late")
+
+        let git = store.gitAvailabilityViewModel(session: draft, server: server, chatViewModel: chat)
+
+        XCTAssertEqual(git.bindingForTesting.sessionID, "canonical-late")
+        XCTAssertEqual(git.bindingForTesting.profile, "alpha")
+        XCTAssertEqual(git.requestSession.sessionId, "canonical-late")
+        XCTAssertEqual(git.requestSession.profile, "alpha")
+        await chat.disposeDirectConversation()
         store.activateGateway(server: nil)
     }
 

@@ -197,7 +197,10 @@ final class OpenChatSessionStore {
                 profile: target.profile
             )
             viewModels.removeValue(forKey: key)
-            if let git = gitAvailabilityViewModels.removeValue(forKey: key) { gitAvailabilityViewModels[target] = git }
+            if let git = gitAvailabilityViewModels.removeValue(forKey: key) {
+                git.rebindToCanonicalSession(sessionID: target.sessionID, profile: target.profile)
+                gitAvailabilityViewModels[target] = git
+            }
             accessOrder.removeAll { $0 == key }
             canonicalAliases[key] = target
             for alias in Array(canonicalAliases.keys) where canonicalAliases[alias] == key {
@@ -234,6 +237,7 @@ final class OpenChatSessionStore {
             server: server,
             apiClient: retainedChatViewModel.client
         )
+        created.rebindToCanonicalSession(sessionID: key.sessionID, profile: key.profile)
         gitAvailabilityViewModels[key] = created
         touch(key)
         trimIdleViewModels(forServer: key.server)

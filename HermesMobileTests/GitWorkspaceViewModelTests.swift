@@ -68,6 +68,169 @@ private final class GitReadFixtureGate: URLProtocol {
 
 /// View-model behaviour + diff parsing for the workspace-git feature (issue #312, Slice A).
 final class GitWorkspaceViewModelTests: APIClientTestCase {
+    @MainActor
+    func testDeferredGitControlsRefuseWithoutNetworkRequests() async throws {
+        let client = makeClient { request in
+            XCTFail("Deferred Git control sent \(request.httpMethod ?? "?") \(request.url?.path ?? "nil")")
+            throw URLError(.badURL)
+        }
+        let row = try session(id: "s1")
+        let availability = GitWorkspaceAvailabilityViewModel(
+            session: row, server: URL(string: "https://example.test")!, apiClient: client
+        )
+        let commit = GitCommitViewModel(
+            session: row, server: URL(string: "https://example.test")!, apiClient: client
+        )
+
+        let stash = await availability.checkout(
+            GitCheckoutTarget(ref: "feature", mode: .local), stashingChanges: true
+        )
+        let remote = await availability.checkout(GitCheckoutTarget(ref: "origin/feature", mode: .remote))
+        let fetched = await availability.performRemoteAction(.fetch)
+        let pulled = await availability.performRemoteAction(.pull)
+        let quick = await availability.quickCommit(push: true)
+        await commit.suggestMessage()
+        await commit.discardSelectedOrAll(deleteUntracked: true)
+        let committed = await commit.commit(push: true)
+        let selected = await commit.commitSelected(push: true)
+
+        XCTAssertEqual(stash, .failure)
+        XCTAssertEqual(remote, .failure)
+        XCTAssertFalse(fetched)
+        XCTAssertFalse(pulled)
+        XCTAssertEqual(quick, .failure)
+        XCTAssertFalse(committed)
+        XCTAssertFalse(selected)
+        XCTAssertNotNil(commit.actionErrorMessage)
+    }
+
+    @MainActor
+    func testDirectStageAndUnstageReloadStatusAndPreserveExplicitProfile() async throws {
+        var staged = false
+        var posts: [String] = []
+        let client = directWriteClient { request in
+            if request.httpMethod == "POST" {
+                posts.append(request.url?.path ?? "")
+                staged = request.url?.path == "/api/git/review/stage"
+                return apiTestJSONResponse(#"{"ok":true}"#, for: request)
+            }
+            return self.directGitReadResponse(request, branch: "main", staged: staged)
+        }
+        let vm = GitCommitViewModel(
+            session: try session(id: "s1"), server: URL(string: "https://example.test")!, apiClient: client
+        )
+        await vm.load()
+        XCTAssertEqual(vm.trackedFiles.first?.staged, false)
+        await vm.stageSelectedOrAll()
+        XCTAssertEqual(vm.trackedFiles.first?.staged, true)
+        await vm.unstageSelectedOrAll()
+        XCTAssertEqual(vm.trackedFiles.first?.staged, false)
+        XCTAssertEqual(posts, ["/api/git/review/stage", "/api/git/review/unstage"])
+        XCTAssertNil(vm.actionErrorMessage)
+    }
+
+    @MainActor
+    func testDirectStagePreservesWhitespaceInExactFilename() async throws {
+        var sentFile: String?
+        let client = directWriteClient { request in
+            if request.url?.path == "/api/git/review/stage" {
+                let body = try XCTUnwrap(apiTestBodyData(from: request))
+                sentFile = (try JSONSerialization.jsonObject(with: body) as? [String: Any])?["file"] as? String
+                return apiTestJSONResponse(#"{"ok":true}"#, for: request)
+            }
+            return self.directGitReadResponse(request, branch: "main", staged: false, file: " spaced.swift ")
+        }
+        let vm = GitCommitViewModel(
+            session: try session(id: "s1"), server: URL(string: "https://example.test")!, apiClient: client
+        )
+        await vm.load()
+        await vm.stageSelectedOrAll()
+        XCTAssertEqual(sentFile, " spaced.swift ")
+    }
+
+    @MainActor
+    func testDirectCleanLocalSwitchAndPushReloadCanonicalReads() async throws {
+        var branch = "main"
+        var posts: [String] = []
+        let client = directWriteClient { request in
+            if request.httpMethod == "POST" {
+                let path = request.url?.path ?? ""
+                posts.append(path)
+                if path == "/api/git/branch/switch" { branch = "feature" }
+                return apiTestJSONResponse(
+                    path == "/api/git/branch/switch" ? #"{"branch":"feature"}"# : #"{"ok":true}"#,
+                    for: request
+                )
+            }
+            return self.directGitReadResponse(request, branch: branch, staged: false, changed: 0)
+        }
+        let vm = GitWorkspaceAvailabilityViewModel(
+            session: try session(id: "s1"), server: URL(string: "https://example.test")!, apiClient: client
+        )
+        await vm.load()
+        let switched = await vm.checkout(GitCheckoutTarget(ref: "feature", mode: .local))
+        let pushed = await vm.performRemoteAction(.push)
+        XCTAssertEqual(switched, .success)
+        XCTAssertTrue(pushed)
+        XCTAssertEqual(vm.currentBranchName, "feature")
+        XCTAssertEqual(posts, ["/api/git/branch/switch", "/api/git/review/push"])
+    }
+
+    @MainActor
+    func testUnknownPushBlocksRepeatUntilExplicitSuccessfulReadback() async throws {
+        var pushAttempts = 0
+        let client = directWriteClient { request in
+            if request.url?.path == "/api/git/review/push" {
+                pushAttempts += 1
+                throw URLError(.networkConnectionLost)
+            }
+            return self.directGitReadResponse(request, branch: "main", staged: false, changed: 0)
+        }
+        let vm = GitWorkspaceAvailabilityViewModel(
+            session: try session(id: "s1"), server: URL(string: "https://example.test")!, apiClient: client
+        )
+        await vm.load()
+        let first = await vm.performRemoteAction(.push)
+        let repeated = await vm.performRemoteAction(.push)
+        XCTAssertFalse(first)
+        XCTAssertFalse(repeated)
+        XCTAssertEqual(pushAttempts, 1)
+        await vm.load()
+        let afterReadback = await vm.performRemoteAction(.push)
+        XCTAssertFalse(afterReadback)
+        XCTAssertEqual(pushAttempts, 2)
+    }
+
+    private func directWriteClient(
+        _ handler: @escaping (URLRequest) throws -> (HTTPURLResponse, Data)
+    ) -> APIClient {
+        makeClient(handler: handler)
+    }
+
+    private func directGitReadResponse(
+        _ request: URLRequest,
+        branch: String,
+        staged: Bool,
+        changed: Int = 1,
+        file: String = "a.swift"
+    ) -> (HTTPURLResponse, Data) {
+        switch request.url?.path {
+        case "/api/sessions/s1":
+            return apiTestJSONResponse(#"{"id":"s1","profile":"default","cwd":"/tmp/s1"}"#, for: request)
+        case "/api/git/worktrees":
+            return apiTestJSONResponse(#"{"worktrees":[{"path":"/tmp/s1"}]}"#, for: request)
+        case "/api/git/status":
+            let files = changed == 0 ? "[]" : "[{\"path\":\"\(file)\",\"unstaged\":\(!staged)}]"
+            return apiTestJSONResponse("{\"branch\":\"\(branch)\",\"detached\":false,\"changed\":\(changed),\"files\":\(files)}", for: request)
+        case "/api/git/review/list":
+            let files = changed == 0 ? "[]" : "[{\"path\":\"\(file)\",\"status\":\"M\",\"staged\":\(staged),\"added\":1,\"removed\":0}]"
+            return apiTestJSONResponse("{\"files\":\(files)}", for: request)
+        case "/api/git/branches":
+            return apiTestJSONResponse(#"{"branches":[{"name":"main","isRemote":false},{"name":"feature","isRemote":false}]}"#, for: request)
+        default:
+            return apiTestJSONResponse("{}", for: request)
+        }
+    }
 
     /// Reuses semantic Git rows for these behavior tests, but emits only the
     /// pinned stock read envelopes. Write fixtures remain unchanged.
@@ -183,6 +346,29 @@ final class GitWorkspaceViewModelTests: APIClientTestCase {
         XCTAssertFalse(vm.isLoadingBranches)
     }
 
+    @MainActor
+    func testCanonicalRebindInvalidatesOldTargetReadPublication() async throws {
+        let observed = expectation(description: "old target status held")
+        let client = gatedStockClient(route: "/api/git/status", observed: observed)
+        defer { GitReadFixtureGate.reset() }
+        let vm = GitWorkspaceAvailabilityViewModel(
+            session: try session(id: "s1"), server: URL(string: "https://example.test")!, apiClient: client
+        )
+        let loading = Task { await vm.load() }
+        await fulfillment(of: [observed], timeout: 2)
+
+        vm.rebindToCanonicalSession(sessionID: "durable-id", profile: "work")
+        GitReadFixtureGate.release()
+        await loading.value
+
+        XCTAssertNil(vm.status)
+        XCTAssertFalse(vm.hasRepository)
+        XCTAssertEqual(vm.bindingForTesting.sessionID, "durable-id")
+        XCTAssertEqual(vm.bindingForTesting.profile, "work")
+        XCTAssertEqual(vm.requestSession.sessionId, "durable-id")
+        XCTAssertEqual(vm.requestSession.profile, "work")
+    }
+
     private func gatedStockClient(route: String, observed: XCTestExpectation) -> APIClient {
         GitReadFixtureGate.configure(route: route, observed: observed)
         let configuration = URLSessionConfiguration.ephemeral
@@ -205,7 +391,7 @@ final class GitWorkspaceViewModelTests: APIClientTestCase {
         let vm = GitWorkspaceAvailabilityViewModel(session: try session(id: "s1"), server: URL(string: "https://example.test")!, apiClient: client)
         vm.seedStatusForTesting(try decodedStatus(Self.truncatedStatus))
         let result = await vm.quickCommit(push: true)
-        XCTAssertEqual(result, .tooManyChanges)
+        XCTAssertEqual(result, .failure)
         XCTAssertNil(vm.commitPhase)
         XCTAssertNotNil(vm.actionErrorMessage)
     }
@@ -221,7 +407,7 @@ final class GitWorkspaceViewModelTests: APIClientTestCase {
         await vm.load()
         XCTAssertEqual(vm.status?.truncated, true)
         let result = await vm.quickCommit(push: true)
-        XCTAssertEqual(result, .tooManyChanges)
+        XCTAssertEqual(result, .failure)
         XCTAssertEqual(writes, 0)
     }
 
@@ -237,7 +423,7 @@ final class GitWorkspaceViewModelTests: APIClientTestCase {
         XCTAssertEqual(vm.status?.truncated, true)
         XCTAssertEqual(vm.status?.trackedFiles.count, 0)
         let result = await vm.quickCommit(push: false)
-        XCTAssertEqual(result, .tooManyChanges, "An empty incomplete page is not proof of a clean workspace.")
+        XCTAssertEqual(result, .failure, "Quick commit remains unavailable on stock Hermes.")
         XCTAssertNotNil(vm.actionErrorMessage)
         XCTAssertEqual(writes, 0)
     }
@@ -557,112 +743,6 @@ final class GitWorkspaceViewModelTests: APIClientTestCase {
         XCTAssertNil(viewModel.statusError)
     }
 
-    @MainActor
-    func testAvailabilityLoadsBranchesAndCheckoutRefreshesSharedState() async throws {
-        // Stateful mock: the server reflects the new current branch on every read after a
-        // checkout, so the post-checkout branch reload sees "feature", not stale "main".
-        var currentBranch = "main"
-        let client = makeStockGitClient { request in
-            switch request.url?.path {
-            case "/api/git-info":
-                return apiTestJSONResponse(#"{"git":{"is_git":true,"branch":"\#(currentBranch)"}}"#, for: request)
-            case "/api/git/status", "/api/git/review/list":
-                return apiTestJSONResponse(#"{"git":{"is_git":true,"branch":"\#(currentBranch)","files":[]}}"#, for: request)
-            case "/api/git/branches":
-                return apiTestJSONResponse(#"{"branches":{"is_git":true,"current":"\#(currentBranch)","local":[{"name":"main"},{"name":"feature"}],"remote":[]}}"#, for: request)
-            case "/api/git/checkout":
-                currentBranch = "feature"
-                return apiTestJSONResponse(#"{"ok":true,"current_branch":"feature","status":{"is_git":true,"branch":"feature"},"branches":{"is_git":true,"current":"feature","local":[{"name":"main"},{"name":"feature"}]}}"#, for: request)
-            default:
-                XCTFail("Unexpected request: \(request.url?.path ?? "nil")")
-                return apiTestJSONResponse("{}", for: request)
-            }
-        }
-        let viewModel = GitWorkspaceAvailabilityViewModel(
-            session: try session(id: "s1"),
-            server: URL(string: "https://example.test")!,
-            apiClient: client
-        )
-
-        await viewModel.load()
-        XCTAssertEqual(viewModel.branches?.local?.compactMap(\.name), ["main", "feature"])
-
-        let outcome = await viewModel.checkout(GitCheckoutTarget(ref: "feature", mode: .local))
-
-        XCTAssertEqual(outcome, .success)
-        XCTAssertEqual(viewModel.currentBranchName, "feature")
-        XCTAssertEqual(viewModel.status?.branch, "feature")
-    }
-
-    @MainActor
-    func testCheckoutDirtyWorktreeRequestsStashConfirmation() async throws {
-        let client = makeStockGitClient { request in
-            switch request.url?.path {
-            case "/api/git-info":
-                return apiTestJSONResponse(#"{"git":{"is_git":true,"branch":"main"}}"#, for: request)
-            case "/api/git/status", "/api/git/review/list":
-                return apiTestJSONResponse(#"{"git":{"is_git":true,"branch":"main"}}"#, for: request)
-            case "/api/git/branches":
-                return apiTestJSONResponse(#"{"branches":{"is_git":true,"current":"main"}}"#, for: request)
-            case "/api/git/checkout":
-                let response = HTTPURLResponse(url: request.url!, statusCode: 400, httpVersion: nil, headerFields: nil)!
-                return (response, Data(#"{"error":"Checkout blocked","code":"dirty_worktree"}"#.utf8))
-            default:
-                return apiTestJSONResponse("{}", for: request)
-            }
-        }
-        let viewModel = GitWorkspaceAvailabilityViewModel(
-            session: try session(id: "s1"),
-            server: URL(string: "https://example.test")!,
-            apiClient: client
-        )
-        await viewModel.load()
-
-        let outcome = await viewModel.checkout(GitCheckoutTarget(ref: "feature", mode: .local))
-
-        XCTAssertEqual(outcome, .requiresStash)
-        XCTAssertNil(viewModel.actionErrorMessage)
-    }
-
-    @MainActor
-    func testStashCheckoutSurfacesRestoreFailureOnSuccess() async throws {
-        var currentBranch = "main"
-        let client = makeStockGitClient { request in
-            switch request.url?.path {
-            case "/api/git-info":
-                return apiTestJSONResponse(#"{"git":{"is_git":true,"branch":"\#(currentBranch)"}}"#, for: request)
-            case "/api/git/status", "/api/git/review/list":
-                return apiTestJSONResponse(#"{"git":{"is_git":true,"branch":"\#(currentBranch)"}}"#, for: request)
-            case "/api/git/branches":
-                return apiTestJSONResponse(#"{"branches":{"is_git":true,"current":"\#(currentBranch)","local":[{"name":"main"},{"name":"feature"}]}}"#, for: request)
-            case "/api/git/stash-checkout":
-                currentBranch = "feature"
-                return apiTestJSONResponse(#"{"ok":true,"current_branch":"feature","status":{"is_git":true,"branch":"feature"},"branches":{"is_git":true,"current":"feature","local":[{"name":"main"},{"name":"feature"}]},"restore_failed":true,"restore_error":"CONFLICT: stash could not be restored"}"#, for: request)
-            default:
-                XCTFail("Unexpected request: \(request.url?.path ?? "nil")")
-                return apiTestJSONResponse("{}", for: request)
-            }
-        }
-        let viewModel = GitWorkspaceAvailabilityViewModel(
-            session: try session(id: "s1"),
-            server: URL(string: "https://example.test")!,
-            apiClient: client
-        )
-        await viewModel.load()
-
-        let outcome = await viewModel.checkout(
-            GitCheckoutTarget(ref: "feature", mode: .local),
-            stashingChanges: true
-        )
-
-        // The branch switch itself succeeded, so the outcome stays .success...
-        XCTAssertEqual(outcome, .success)
-        XCTAssertEqual(viewModel.currentBranchName, "feature")
-        // ...but the restore failure must surface so the UI can alert the user that
-        // their stashed changes were not re-applied.
-        XCTAssertEqual(viewModel.actionErrorMessage, "CONFLICT: stash could not be restored")
-    }
-
     func testWriteAvailabilityDisablesWritesDuringStreamAndCachedMode() {
         XCTAssertFalse(GitWriteAvailability(isStreaming: false, isViewingCachedData: false).writesDisabled)
         XCTAssertTrue(GitWriteAvailability(isStreaming: true, isViewingCachedData: false).writesDisabled)
@@ -828,117 +908,6 @@ final class GitWorkspaceViewModelTests: APIClientTestCase {
     }
 
     @MainActor
-    func testQuickCommitWithPushRunsFullPipelineAndReportsPhases() async throws {
-        var phases: [GitCommitPhase] = []
-        var paths: [String] = []
-        let client = commitPipelineClient { paths.append($0) }
-        let vm = GitWorkspaceAvailabilityViewModel(session: try session(id: "s1"), server: URL(string: "https://example.test")!, apiClient: client)
-        await vm.load()
-        XCTAssertTrue(vm.hasCommittableChanges)
-
-        let outcome = await vm.quickCommit(push: true) { phases.append($0) }
-
-        guard case .success(let result) = outcome else { return XCTFail("Expected success, got \(outcome)") }
-        XCTAssertEqual(result.shortSHA, "abc1234")
-        XCTAssertTrue(result.didPush)
-        XCTAssertFalse(result.truncatedMessage)
-        XCTAssertEqual(phases, [.generatingMessage, .committing, .pushing])
-        XCTAssertNil(vm.commitPhase, "Phase resets after the pipeline finishes.")
-        XCTAssertTrue(paths.contains("/api/git/stage"))
-        XCTAssertTrue(paths.contains("/api/git/push"))
-        XCTAssertEqual(vm.status?.changedCount, 0, "Status refreshes to the post-commit state.")
-    }
-
-    @MainActor
-    func testQuickCommitWithoutPushSkipsPushCall() async throws {
-        var paths: [String] = []
-        let client = commitPipelineClient { paths.append($0) }
-        let vm = GitWorkspaceAvailabilityViewModel(session: try session(id: "s1"), server: URL(string: "https://example.test")!, apiClient: client)
-        await vm.load()
-
-        let outcome = await vm.quickCommit(push: false)
-
-        guard case .success(let result) = outcome else { return XCTFail("Expected success, got \(outcome)") }
-        XCTAssertFalse(result.didPush)
-        XCTAssertFalse(paths.contains("/api/git/push"), "push must not run for a plain Commit.")
-    }
-
-    @MainActor
-    func testQuickCommitReportsSuccessWhenCommitSucceedsButPushFails() async throws {
-        var paths: [String] = []
-        let client = commitPipelineClient(pushStatus: 500) { paths.append($0) }
-        let vm = GitWorkspaceAvailabilityViewModel(session: try session(id: "s1"), server: URL(string: "https://example.test")!, apiClient: client)
-        await vm.load()
-
-        let outcome = await vm.quickCommit(push: true)
-
-        // The commit already landed, so a push failure must NOT collapse to .failure:
-        // the SHA is reported, the push error is surfaced, and the badge/status refresh runs.
-        guard case .success(let result) = outcome else { return XCTFail("Expected success, got \(outcome)") }
-        XCTAssertEqual(result.shortSHA, "abc1234")
-        XCTAssertFalse(result.didPush, "Push failed, so didPush stays false.")
-        XCTAssertNotNil(result.pushFailureMessage, "The push failure is surfaced to the caller.")
-        XCTAssertNotNil(vm.actionErrorMessage)
-        XCTAssertNil(vm.commitPhase, "Phase resets even when push fails.")
-        XCTAssertTrue(paths.contains("/api/git/push"), "push was attempted.")
-        XCTAssertTrue(paths.filter { $0 == "/api/git/status" }.count >= 2, "Scoped Git reads refresh after a push failure.")
-        XCTAssertEqual(vm.status?.changedCount, 0, "Status reflects the post-commit state.")
-    }
-
-    @MainActor
-    func testQuickCommitReturnsNothingToCommitWhenClean() async throws {
-        let client = makeStockGitClient { request in
-            let path = request.url?.path ?? ""
-            if path == "/api/git-info" { return apiTestJSONResponse(#"{"git":{"is_git":true,"branch":"main"}}"#, for: request) }
-            if path == "/api/git/branches" { return apiTestJSONResponse(#"{"branches":{"is_git":true,"current":"main"}}"#, for: request) }
-            return apiTestJSONResponse(#"{"git":{"is_git":true,"branch":"main","files":[],"totals":{"changed":0}}}"#, for: request)
-        }
-        let vm = GitWorkspaceAvailabilityViewModel(session: try session(id: "s1"), server: URL(string: "https://example.test")!, apiClient: client)
-        await vm.load()
-
-        let outcome = await vm.quickCommit(push: true)
-        XCTAssertEqual(outcome, .nothingToCommit)
-        XCTAssertNil(vm.commitPhase)
-    }
-
-    @MainActor
-    func testQuickCommitBlocksWhenStatusTruncated() async throws {
-        // Stock status reports 501 changes but review returns one: this is an
-        // incomplete inventory, not a fictitious stock `truncated` field.
-        // Both Commit and Commit & Push must refuse all writes.
-        for push in [true, false] {
-            var paths: [String] = []
-            let client = commitPipelineClient(truncated: true) { paths.append($0) }
-            let vm = GitWorkspaceAvailabilityViewModel(session: try session(id: "s1"), server: URL(string: "https://example.test")!, apiClient: client)
-            await vm.load()
-            XCTAssertEqual(vm.status?.truncated, true)
-            XCTAssertTrue(vm.hasCommittableChanges)
-
-            paths.removeAll()
-            let outcome = await vm.quickCommit(push: push)
-
-            XCTAssertEqual(outcome, .tooManyChanges, "push=\(push)")
-            XCTAssertNil(vm.commitPhase, "Phase resets after the blocked commit (push=\(push)).")
-            XCTAssertNotNil(vm.actionErrorMessage, "A blocked message is surfaced (push=\(push)).")
-            XCTAssertFalse(paths.contains("/api/git/stage"), "No staging when truncated (push=\(push)).")
-            XCTAssertFalse(paths.contains("/api/git/commit"), "No commit when truncated (push=\(push)).")
-            XCTAssertFalse(paths.contains("/api/git/push"), "No push when truncated (push=\(push)).")
-        }
-    }
-
-    @MainActor
-    func testQuickCommitFailsWithFriendlyMessageWhenWritesDisabled() async throws {
-        let client = commitPipelineClient(stageStatus: 403)
-        let vm = GitWorkspaceAvailabilityViewModel(session: try session(id: "s1"), server: URL(string: "https://example.test")!, apiClient: client)
-        await vm.load()
-
-        let outcome = await vm.quickCommit(push: true)
-        XCTAssertEqual(outcome, .failure)
-        XCTAssertNil(vm.commitPhase)
-        XCTAssertEqual(vm.actionErrorMessage?.contains("Writes disabled"), true)
-    }
-
-    @MainActor
     func testRefreshAfterExternalMutationPicksUpNewStatus() async throws {
         var changed = true
         let client = makeStockGitClient { request in
@@ -1002,159 +971,4 @@ final class GitWorkspaceViewModelTests: APIClientTestCase {
         }
     }
 
-    @MainActor
-    func testCommitSheetSuggestMessagePopulatesFieldWithoutSelection() async throws {
-        let vm = GitCommitViewModel(session: try session(id: "s1"), server: URL(string: "https://example.test")!, apiClient: commitSheetClient())
-        await vm.load()
-        XCTAssertTrue(vm.message.isEmpty)
-
-        await vm.suggestMessage()
-
-        XCTAssertEqual(vm.message, "Generated message")
-        XCTAssertTrue(vm.messageWasTruncated, "The large-diff flag is surfaced.")
-    }
-
-    @MainActor
-    func testCommitSheetSuggestUsesSelectedEndpointWhenFilesSelected() async throws {
-        let vm = GitCommitViewModel(session: try session(id: "s1"), server: URL(string: "https://example.test")!, apiClient: commitSheetClient())
-        await vm.load()
-        let file = try XCTUnwrap(vm.trackedFiles.first)
-        vm.toggleSelection(file)
-        XCTAssertTrue(vm.hasSelection)
-
-        await vm.suggestMessage()
-
-        XCTAssertEqual(vm.message, "selected msg")
-        XCTAssertFalse(vm.messageWasTruncated)
-    }
-
-    @MainActor
-    func testCommitSheetCommitClearsMessageAndBumpsRevision() async throws {
-        let vm = GitCommitViewModel(session: try session(id: "s1"), server: URL(string: "https://example.test")!, apiClient: commitSheetClient())
-        await vm.load()
-        vm.message = "Real commit"
-
-        let ok = await vm.commit(push: false)
-
-        XCTAssertTrue(ok)
-        XCTAssertEqual(vm.lastCommitSHA, "abc1234")
-        XCTAssertEqual(vm.committedRevision, 1)
-        XCTAssertTrue(vm.message.isEmpty, "The message field clears after a successful commit.")
-    }
-
-    @MainActor
-    func testCommitSheetCommitSucceedsAndClearsStateEvenWhenPushFails() async throws {
-        let vm = GitCommitViewModel(session: try session(id: "s1"), server: URL(string: "https://example.test")!, apiClient: commitSheetClient(pushStatus: 500))
-        await vm.load()
-        vm.message = "Real commit"
-
-        let ok = await vm.commit(push: true)
-
-        // Commit landed; a push failure must still run the success cleanup so the caller
-        // (GitCommitView) calls onCommitted() and the toolbar refreshes — while the sheet
-        // banner reports that only the push failed.
-        XCTAssertTrue(ok, "A push failure after a successful commit still returns true.")
-        XCTAssertEqual(vm.lastCommitSHA, "abc1234")
-        XCTAssertEqual(vm.committedRevision, 1, "committedRevision still bumps so the toolbar refreshes.")
-        XCTAssertTrue(vm.message.isEmpty, "The message field clears after the commit lands.")
-        let banner = try XCTUnwrap(vm.actionErrorMessage, "The push failure is surfaced in the sheet banner.")
-        XCTAssertTrue(banner.contains("push failed"), "The banner reads as a partial success, not a failed commit.")
-        XCTAssertTrue(banner.contains("Remote rejected the push"), "The server's push error detail is preserved.")
-    }
-
-    @MainActor
-    func testCommitSheetCommitRequiresNonEmptyMessage() async throws {
-        let vm = GitCommitViewModel(session: try session(id: "s1"), server: URL(string: "https://example.test")!, apiClient: commitSheetClient())
-        await vm.load()
-
-        let ok = await vm.commit(push: false)
-
-        XCTAssertFalse(ok)
-        XCTAssertEqual(vm.committedRevision, 0)
-        XCTAssertNotNil(vm.actionErrorMessage)
-    }
-
-    @MainActor
-    func testCommitSheetCommitSelectedCommitsChosenPaths() async throws {
-        let vm = GitCommitViewModel(session: try session(id: "s1"), server: URL(string: "https://example.test")!, apiClient: commitSheetClient())
-        await vm.load()
-        let file = try XCTUnwrap(vm.trackedFiles.first)
-        vm.toggleSelection(file)
-        vm.message = "Partial"
-
-        let ok = await vm.commitSelected(push: false)
-
-        XCTAssertTrue(ok)
-        XCTAssertEqual(vm.lastCommitSHA, "deadbee")
-        XCTAssertFalse(vm.hasSelection, "Selection clears after committing it.")
-    }
-
-    @MainActor
-    func testCommitSheetDiscardSurfacesFriendlyErrorWhenDisabled() async throws {
-        let vm = GitCommitViewModel(session: try session(id: "s1"), server: URL(string: "https://example.test")!, apiClient: commitSheetClient(discardStatus: 403))
-        await vm.load()
-
-        await vm.discardSelectedOrAll(deleteUntracked: false)
-
-        XCTAssertEqual(vm.actionErrorMessage?.contains("Writes disabled"), true)
-    }
-
-    @MainActor
-    func testCommitSheetDiscardUnstagesStagedFilesFirst() async throws {
-        // The server's discard only restores the worktree, leaving the index intact, so a
-        // staged change would survive. The sheet must unstage staged targets before
-        // discarding (and in that order) for the discard to actually take effect.
-        var calls: [String] = []
-        let stagedStatus = """
-        {"git":{"is_git":true,"branch":"main","totals":{"changed":1},"files":[
-          {"path":"a.swift","status":"M","staged":true,"additions":3,"deletions":1}
-        ]}}
-        """
-        let client = makeStockGitClient { request in
-            let path = request.url?.path ?? ""
-            switch path {
-            case "/api/git/status", "/api/git/review/list":
-                return apiTestJSONResponse(stagedStatus, for: request)
-            case "/api/git/unstage", "/api/git/discard":
-                calls.append(path)
-                return apiTestJSONResponse(#"{"ok":true,"git":{"is_git":true,"branch":"main","files":[]}}"#, for: request)
-            default:
-                return apiTestJSONResponse("{}", for: request)
-            }
-        }
-        let vm = GitCommitViewModel(session: try session(id: "s1"), server: URL(string: "https://example.test")!, apiClient: client)
-        await vm.load()
-        XCTAssertEqual(vm.trackedFiles.first?.staged, true)
-
-        await vm.discardSelectedOrAll(deleteUntracked: false)
-
-        XCTAssertNil(vm.actionErrorMessage)
-        XCTAssertEqual(calls, ["/api/git/unstage", "/api/git/discard"],
-                       "Staged targets are unstaged before discard so the index is reverted too.")
-    }
-
-    @MainActor
-    func testCommitSheetDiscardSkipsUnstageWhenNoStagedTargets() async throws {
-        // A purely unstaged change needs no unstage step — discard alone reverts the worktree.
-        var calls: [String] = []
-        let client = makeStockGitClient { request in
-            let path = request.url?.path ?? ""
-            switch path {
-            case "/api/git/status", "/api/git/review/list":
-                return apiTestJSONResponse(Self.statusWithOneFile, for: request)
-            case "/api/git/unstage", "/api/git/discard":
-                calls.append(path)
-                return apiTestJSONResponse(#"{"ok":true,"git":{"is_git":true,"branch":"main","files":[]}}"#, for: request)
-            default:
-                return apiTestJSONResponse("{}", for: request)
-            }
-        }
-        let vm = GitCommitViewModel(session: try session(id: "s1"), server: URL(string: "https://example.test")!, apiClient: client)
-        await vm.load()
-        XCTAssertEqual(vm.trackedFiles.first?.unstaged, true)
-
-        await vm.discardSelectedOrAll(deleteUntracked: false)
-
-        XCTAssertEqual(calls, ["/api/git/discard"], "No staged targets means no unstage call.")
-    }
 }

@@ -35,6 +35,39 @@ def load_seed_module():
 
 
 class IOSSmokeGuardTests(unittest.TestCase):
+    def test_git_ui_requires_valid_id_and_standalone_stock_https_ui(self):
+        base = ['--https', '--stock-backend', '--slice2-ui', '--slice4-git-ui-session-id']
+        for arguments in (
+            ['--slice4-git-ui-session-id', 'owned-session'],
+            ['--https', '--slice2-ui', '--slice4-git-ui-session-id', 'owned-session'],
+            base + [''], base + ['../unsafe'], base + ['a' * 129],
+            base + ['owned-session', '--slice4-branch-ui'],
+            base + ['owned-session', '--slice3-attachment'],
+        ):
+            with self.subTest(arguments=arguments):
+                self.assertRejected(arguments, '--slice4-git-ui-session-id requires')
+
+    def test_git_ui_exports_exact_owned_session_and_production_target(self):
+        smoke = load_smoke_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            products = Path(temporary).resolve()
+            source = products / 'HermesMobileUIVerification_HermesMobileUIVerification_iphonesimulator.xctestrun'
+            source.write_bytes(plistlib.dumps({'TestConfigurations': [{
+                'TestTargets': [{'BlueprintName': 'HermesMobileUITests'}],
+            }]}))
+            with patch.object(smoke, 'PRODUCTS', products), \
+                    patch.object(smoke, 'RUNTIME', products / 'runtime'), \
+                    patch.object(smoke, 'validate'), \
+                    patch.object(sys, 'argv', [str(SCRIPT), '--https', '--stock-backend',
+                        '--slice2-ui', '--slice4-git-ui-session-id', 'owned-session']):
+                with redirect_stdout(StringIO()):
+                    smoke.main()
+            target = plistlib.loads((products / 'SemrehSlice2LiveUI.xctestrun').read_bytes())['TestConfigurations'][0]['TestTargets'][0]
+            self.assertEqual(target['OnlyTestIdentifiers'], [
+                'LongChatScrollUITests/testOptInLiveProductionLoginNewChatSend'])
+            self.assertEqual(target['EnvironmentVariables']['SEMREH_SLICE4_GIT_UI_SESSION_ID'], 'owned-session')
+            self.assertEqual(target['EnvironmentVariables']['SEMREH_SLICE2_UI_BACKEND_MODE'], 'stock')
+
     def test_slice4_branch_ui_requires_standalone_stock_ui_https(self):
         message = '--slice4-branch-ui requires --slice2-ui --https --stock-backend and no other test phase'
         for arguments in (

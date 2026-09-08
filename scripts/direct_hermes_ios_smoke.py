@@ -40,6 +40,7 @@ def main():
     parser.add_argument('--slice4-session-metadata', action='store_true')
     parser.add_argument('--slice4-branch', action='store_true')
     parser.add_argument('--slice4-branch-ui', action='store_true')
+    parser.add_argument('--slice4-git-ui-session-id')
     parser.add_argument('--gateway-restart-nonce')
     parser.add_argument('--tui-created-session-id')
     parser.add_argument('--slice3-relaunch-seed-text')
@@ -47,6 +48,13 @@ def main():
     parser.add_argument('--stock-backend', action='store_true')
     parser.add_argument('--cookie-phase', choices=['login', 'restore', 'logout'])
     args = parser.parse_args()
+    if args.slice4_git_ui_session_id is not None and (
+        not args.slice2_ui or not args.https or not args.stock_backend
+        or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', args.slice4_git_ui_session_id)
+        or any(value for name, value in vars(args).items()
+               if name not in {'slice4_git_ui_session_id', 'slice2_ui', 'https', 'stock_backend'})
+    ):
+        parser.error('--slice4-git-ui-session-id requires --slice2-ui --https --stock-backend and no other phase')
     if args.slice4_branch_ui and (
         not args.slice2_ui or not args.https or not args.stock_backend
         or args.development_backend_sha or args.cookie_phase
@@ -374,6 +382,8 @@ def main():
             target['EnvironmentVariables']['SEMREH_SLICE3_UNCERTAINTY_UI'] = '1'
         if args.slice4_branch_ui:
             target['EnvironmentVariables']['SEMREH_SLICE4_BRANCH_UI'] = '1'
+        if args.slice4_git_ui_session_id:
+            target['EnvironmentVariables']['SEMREH_SLICE4_GIT_UI_SESSION_ID'] = args.slice4_git_ui_session_id
         if args.tui_created_session_id:
             target['EnvironmentVariables']['SEMREH_SLICE2_TUI_CREATED_SESSION_ID'] = args.tui_created_session_id
         if args.slice3_relaunch_seed_text:

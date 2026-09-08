@@ -1,22 +1,14 @@
 import SwiftUI
 
-/// Advanced staging & commit sheet (issue #315, Slice C, surface C).
-///
-/// Lets the user select changed files, stage / unstage / discard them, generate or write
-/// a commit message, and commit (all staged) or commit only the selected paths — with an
-/// optional push afterwards. All write actions are disabled while the chat is streaming or
-/// viewing cached data; "Suggest message" stays available because it is a read-only call.
+/// Bounded staging sheet. Commit generation/creation and destructive discard are
+/// deferred until stock Hermes can preserve the app's prior semantics.
 struct GitCommitView: View {
     private let session: SessionSummary
     private let server: URL
     let writesDisabled: Bool
     let onAPIError: (Error) -> Void
-    /// Called after every successful commit so the host can refresh the toolbar badge.
-    let onCommitted: () -> Void
 
     @State private var viewModel: GitCommitViewModel
-    @State private var showsDiscardConfirmation = false
-    @State private var pushAfterCommit = false
     @AppStorage(AppHaptics.isEnabledKey) private var isHapticsEnabled = true
     @Environment(\.dismiss) private var dismiss
 
@@ -24,21 +16,19 @@ struct GitCommitView: View {
         session: SessionSummary,
         server: URL,
         writesDisabled: Bool,
-        onAPIError: @escaping (Error) -> Void,
-        onCommitted: @escaping () -> Void
+        onAPIError: @escaping (Error) -> Void
     ) {
         self.session = session
         self.server = server
         self.writesDisabled = writesDisabled
         self.onAPIError = onAPIError
-        self.onCommitted = onCommitted
         _viewModel = State(initialValue: GitCommitViewModel(session: session, server: server))
     }
 
     var body: some View {
         NavigationStack {
             content
-                .navigationTitle("Commit Changes")
+                .navigationTitle("Stage Changes")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .topBarTrailing) {
@@ -52,16 +42,6 @@ struct GitCommitView: View {
         }
         .presentationDetents([.large])
         .adaptivePagePresentation()
-        .alert("Discard local changes?", isPresented: $showsDiscardConfirmation) {
-            Button("Cancel", role: .cancel) {}
-            Button("Discard Changes", role: .destructive) {
-                Task { await viewModel.discardSelectedOrAll(deleteUntracked: discardIncludesUntracked) }
-            }
-        } message: {
-            Text(discardIncludesUntracked
-                ? "This removes local uncommitted changes and deletes untracked files. This cannot be undone."
-                : "This removes local uncommitted changes. This cannot be undone.")
-        }
     }
 
     @ViewBuilder
@@ -80,18 +60,15 @@ struct GitCommitView: View {
             emptyState
         } else {
             fileList
-                .safeAreaInset(edge: .bottom) { commitBar }
         }
     }
 
-    /// Shown when the working tree is clean. Normally "No Changes", but a commit + push can
-    /// leave the tree clean while the push fails — the commit bar (the error's usual home)
-    /// is gone, so surface `actionErrorMessage` here instead of swallowing it.
+    /// Surface any staging error even when the working tree has no visible rows.
     @ViewBuilder
     private var emptyState: some View {
         if let error = viewModel.actionErrorMessage {
             ContentUnavailableView {
-                Label("Changes Committed", systemImage: "exclamationmark.icloud")
+                Label("Git Action Needs Attention", systemImage: "exclamationmark.icloud")
             } description: {
                 Text(error)
             }
@@ -108,6 +85,17 @@ struct GitCommitView: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 10) {
                 batchActionsBar
+
+                if let error = viewModel.actionErrorMessage ?? viewModel.loadErrorMessage {
+                    Text(error)
+                        .font(AppFont.footnote())
+                        .foregroundStyle(.red)
+                        .accessibilityIdentifier("git-staging-error")
+                }
+
+                Text("Commit, discard, and other Git work can be requested through chat.")
+                    .font(AppFont.footnote())
+                    .foregroundStyle(.secondary)
 
                 ForEach(viewModel.trackedFiles) { file in
                     GitCommitFileRow(
@@ -146,9 +134,6 @@ struct GitCommitView: View {
             batchButton("Unstage", systemImage: "minus.circle", running: viewModel.busyOperation == .unstaging) {
                 Task { await viewModel.unstageSelectedOrAll() }
             }
-            batchButton("Discard", systemImage: "trash", running: viewModel.busyOperation == .discarding, role: .destructive) {
-                showsDiscardConfirmation = true
-            }
         }
     }
 
@@ -178,103 +163,6 @@ struct GitCommitView: View {
         .disabled(writesDisabled || viewModel.isBusy)
     }
 
-    private var commitBar: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if let error = viewModel.actionErrorMessage {
-                Label(error, systemImage: "exclamationmark.circle")
-                    .font(AppFont.caption())
-                    .foregroundStyle(.orange)
-            }
-
-            HStack(alignment: .top, spacing: 8) {
-                TextField("Commit message", text: $viewModel.message, axis: .vertical)
-                    .font(AppFont.mono(style: .subheadline))
-                    .lineLimit(1...4)
-                    .textFieldStyle(.roundedBorder)
-
-                Button {
-                    HapticButtonHaptics.tap(isEnabled: isHapticsEnabled)
-                    Task { await viewModel.suggestMessage() }
-                } label: {
-                    if viewModel.busyOperation == .suggesting {
-                        ProgressView().controlSize(.small).frame(width: 22)
-                    } else {
-                        Image(systemName: "sparkles")
-                    }
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.regular)
-                .disabled(viewModel.isBusy || !viewModel.hasChanges)
-                .accessibilityLabel("Suggest commit message")
-            }
-
-            if viewModel.messageWasTruncated {
-                Text("Diff was large; message may be partial.")
-                    .font(AppFont.caption())
-                    .foregroundStyle(.secondary)
-            }
-
-            Toggle("Push after commit", isOn: $pushAfterCommit)
-                .font(AppFont.subheadline())
-                .disabled(writesDisabled || viewModel.isBusy)
-
-            HStack(spacing: 10) {
-                if viewModel.hasSelection {
-                    Button {
-                        Task { await runCommit { await viewModel.commitSelected(push: pushAfterCommit) } }
-                    } label: {
-                        commitLabel("Commit Selected")
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(commitDisabled)
-                }
-
-                Button {
-                    Task { await runCommit { await viewModel.commit(push: pushAfterCommit) } }
-                } label: {
-                    commitLabel(pushAfterCommit ? "Commit & Push" : "Commit")
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(commitDisabled || !viewModel.hasStagedChanges)
-            }
-        }
-        .padding(16)
-        .background(.bar)
-    }
-
-    private func commitLabel(_ title: LocalizedStringKey) -> some View {
-        HStack(spacing: 6) {
-            if viewModel.busyOperation == .committing {
-                ProgressView().controlSize(.small)
-            }
-            Text(title)
-        }
-        .frame(maxWidth: .infinity)
-    }
-
-    private var commitDisabled: Bool {
-        writesDisabled || viewModel.isBusy || viewModel.trimmedMessage.isEmpty
-    }
-
-    /// True when discarding the targets can delete a file from disk — i.e. any new file:
-    /// untracked, or a staged add/rename (which discard turns into an untracked file to
-    /// delete once it is unstaged). Drives the stronger "deletes files" confirmation copy
-    /// and the `deleteUntracked` flag, so the server never rejects the discard.
-    private var discardIncludesUntracked: Bool {
-        let targets = viewModel.hasSelection
-            ? viewModel.trackedFiles.filter { viewModel.isSelected($0) }
-            : viewModel.trackedFiles
-        return targets.contains {
-            $0.untracked == true || $0.changeKind == .added || $0.changeKind == .renamed
-        }
-    }
-
-    private func runCommit(_ commit: @escaping () async -> Bool) async {
-        HapticButtonHaptics.tap(isEnabled: isHapticsEnabled)
-        if await commit() {
-            onCommitted()
-        }
-    }
 }
 
 /// One selectable changed-file row in the staging sheet, showing a selection checkbox,

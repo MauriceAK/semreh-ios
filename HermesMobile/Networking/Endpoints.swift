@@ -43,22 +43,6 @@ enum Endpoint {
     case file(sessionID: String, path: String)
     case rawFile(sessionID: String, path: String)
     case media(sessionID: String, path: String)
-    case gitInfo(sessionID: String)
-    case gitStatus(sessionID: String)
-    case gitBranches(sessionID: String)
-    case gitDiff(sessionID: String, path: String, kind: String)
-    case gitFetch
-    case gitPull
-    case gitPush
-    case gitCheckout
-    case gitStashCheckout
-    case gitStage
-    case gitUnstage
-    case gitDiscard
-    case gitCommit
-    case gitCommitSelected
-    case gitCommitMessage
-    case gitCommitMessageSelected
     case personalities
     case setPersonality
     case insights(days: Int)
@@ -193,38 +177,6 @@ enum Endpoint {
             return "/api/file/raw"
         case .media:
             return "/api/media"
-        case .gitInfo:
-            return "/api/git-info"
-        case .gitStatus:
-            return "/api/git/status"
-        case .gitBranches:
-            return "/api/git/branches"
-        case .gitDiff:
-            return "/api/git/diff"
-        case .gitFetch:
-            return "/api/git/fetch"
-        case .gitPull:
-            return "/api/git/pull"
-        case .gitPush:
-            return "/api/git/push"
-        case .gitCheckout:
-            return "/api/git/checkout"
-        case .gitStashCheckout:
-            return "/api/git/stash-checkout"
-        case .gitStage:
-            return "/api/git/stage"
-        case .gitUnstage:
-            return "/api/git/unstage"
-        case .gitDiscard:
-            return "/api/git/discard"
-        case .gitCommit:
-            return "/api/git/commit"
-        case .gitCommitSelected:
-            return "/api/git/commit-selected"
-        case .gitCommitMessage:
-            return "/api/git/commit-message"
-        case .gitCommitMessageSelected:
-            return "/api/git/commit-message-selected"
         case .personalities:
             return "/api/personalities"
         case .setPersonality:
@@ -402,16 +354,6 @@ enum Endpoint {
             return [
                 URLQueryItem(name: "session_id", value: sessionID),
                 URLQueryItem(name: "path", value: path)
-            ]
-        case let .gitInfo(sessionID),
-            let .gitStatus(sessionID),
-            let .gitBranches(sessionID):
-            return [URLQueryItem(name: "session_id", value: sessionID)]
-        case let .gitDiff(sessionID, path, kind):
-            return [
-                URLQueryItem(name: "session_id", value: sessionID),
-                URLQueryItem(name: "path", value: path),
-                URLQueryItem(name: "kind", value: kind)
             ]
         case let .cronStatus(jobID):
             guard let jobID else { return [] }

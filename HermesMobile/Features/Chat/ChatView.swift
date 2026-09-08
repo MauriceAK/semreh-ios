@@ -17,13 +17,11 @@ private struct ImportedPhotoVideo: Transferable {
 
 private enum GitChatAlert: Identifiable {
     case confirmRemote(GitRemoteAction)
-    case dirtyCheckout(GitCheckoutTarget)
     case error(String)
 
     var id: String {
         switch self {
         case .confirmRemote(let action): "remote:\(action.rawValue)"
-        case .dirtyCheckout(let target): "checkout:\(target.id)"
         case .error(let message): "error:\(message)"
         }
     }
@@ -31,7 +29,7 @@ private enum GitChatAlert: Identifiable {
 
 private enum ActiveGitSheet: Identifiable {
     case changes
-    case commit
+    case stage
 
     var id: Self { self }
 }
@@ -1094,8 +1092,12 @@ struct ChatView: View {
                 }
             }
             .sheet(item: $transcriptMediaPreviewItem, content: transcriptMediaPreviewView)
-            .sheet(item: $activeGitSheet, content: gitSheet)
-            .sheet(item: $turnDiffPresentation, content: turnDiffSheet)
+            .sheet(item: $activeGitSheet) { sheet in
+                gitSheet(sheet).id(gitAvailabilityViewModel.requestSession)
+            }
+            .sheet(item: $turnDiffPresentation) { presentation in
+                turnDiffSheet(presentation).id(gitAvailabilityViewModel.requestSession)
+            }
             .alert(item: $gitAlert, content: gitAlertPresentation)
             .sheet(isPresented: $showsGoalSheet) {
                 GoalSubmissionSheet(
@@ -1233,16 +1235,13 @@ struct ChatView: View {
     private func gitSheet(_ sheet: ActiveGitSheet) -> some View {
         switch sheet {
         case .changes:
-            GitWorkspaceView(session: session, server: server, onAPIError: onAPIError)
-        case .commit:
+            GitWorkspaceView(session: gitAvailabilityViewModel.requestSession, server: server, onAPIError: onAPIError)
+        case .stage:
             GitCommitView(
-                session: session,
+                session: gitAvailabilityViewModel.requestSession,
                 server: server,
                 writesDisabled: gitWriteAvailability.writesDisabled,
-                onAPIError: onAPIError,
-                onCommitted: {
-                    Task { await gitAvailabilityViewModel.refreshAfterExternalMutation() }
-                }
+                onAPIError: onAPIError
             )
         }
     }
@@ -1251,9 +1250,9 @@ struct ChatView: View {
     private func turnDiffSheet(_ presentation: TurnDiffPresentation) -> some View {
         switch presentation {
         case .turnFiles(let files):
-            GitTurnDiffSheet(session: session, server: server, files: files, onAPIError: onAPIError)
+            GitTurnDiffSheet(session: gitAvailabilityViewModel.requestSession, server: server, files: files, onAPIError: onAPIError)
         case .file(let file):
-            GitDiffView(session: session, server: server, file: file, onAPIError: onAPIError)
+            GitDiffView(session: gitAvailabilityViewModel.requestSession, server: server, file: file, onAPIError: onAPIError)
         }
     }
 
@@ -1267,7 +1266,6 @@ struct ChatView: View {
                 statusFailed: gitAvailabilityViewModel.statusError != nil
             ),
             isEnabled: !viewModel.isViewingCachedData,
-            fetchDisabled: gitWriteAvailability.fetchDisabled,
             writesDisabled: gitWriteAvailability.writesDisabled,
             isRunningAction: gitAvailabilityViewModel.isRunningGitAction,
             onTap: {
@@ -1277,38 +1275,11 @@ struct ChatView: View {
                 activeGitSheet = .changes
             },
             onStageEdit: {
-                activeGitSheet = .commit
-            },
-            onCommit: {
-                Task { await performQuickCommit(push: false) }
-            },
-            onCommitAndPush: {
-                Task { await performQuickCommit(push: true) }
-            },
-            onFetch: {
-                Task { await performGitRemoteAction(.fetch) }
-            },
-            onPull: {
-                gitAlert = .confirmRemote(.pull)
+                activeGitSheet = .stage
             },
             onPush: {
                 gitAlert = .confirmRemote(.push)
             }
-        )
-    }
-
-    /// Inputs for the inline "Commit & Push" button shown under the latest assistant turn.
-    /// Only for git workspaces, when the latest message is an assistant turn (not while a
-    /// response streams), and there is something to commit (or a commit is in flight).
-    private var inlineCommitContext: ChatInlineCommitContext? {
-        guard gitAvailabilityViewModel.hasRepository,
-              viewModel.activeStreamID == nil,
-              latestTranscriptMessageRole == "assistant",
-              gitAvailabilityViewModel.hasCommittableChanges || gitAvailabilityViewModel.isCommitting
-        else { return nil }
-        return ChatInlineCommitContext(
-            runningPhase: gitAvailabilityViewModel.commitPhase,
-            isDisabled: gitWriteAvailability.writesDisabled
         )
     }
 
@@ -1336,65 +1307,10 @@ struct ChatView: View {
     }
 
     @MainActor
-    private func performQuickCommit(push: Bool) async {
-        guard !gitAvailabilityViewModel.isCommitting else { return }
-
-        let branch = gitAvailabilityViewModel.currentBranchName
-        gitToastState.showProgress(GitActionProgress(
-            title: GitCommitPhase.generatingMessage.progressTitle,
-            subtitle: branch
-        ))
-
-        let outcome = await gitAvailabilityViewModel.quickCommit(push: push) { phase in
-            gitToastState.showProgress(GitActionProgress(
-                title: phase.progressTitle,
-                subtitle: gitAvailabilityViewModel.currentBranchName
-            ))
-        }
-
-        switch outcome {
-        case .success(let result):
-            var detailLines: [String] = []
-            if let sha = result.shortSHA { detailLines.append(String(localized: "Commit \(sha)")) }
-            if result.truncatedMessage { detailLines.append(String(localized: "Diff was large; message may be partial.")) }
-            if let pushError = result.pushFailureMessage {
-                // The commit landed but the requested push failed — report partial success
-                // so the user knows the local commit is safe and only the push needs retrying.
-                detailLines.append(String(localized: "Push failed: \(pushError)"))
-            }
-            gitToastState.showSuccess(GitActionSuccess(
-                title: result.pushFailureMessage != nil
-                    ? String(localized: "Committed — push failed")
-                    : (result.didPush ? String(localized: "Commit & push complete") : String(localized: "Commit complete")),
-                subtitle: result.branch,
-                detailLines: detailLines
-            ))
-        case .nothingToCommit:
-            gitToastState.dismissProgress()
-            gitAlert = .error(String(localized: "There are no changes to commit."))
-        case .tooManyChanges:
-            // Status was truncated (>500 files): the commit was blocked to avoid silently
-            // dropping files 501+. Always surface a message — falling back to a hardcoded
-            // string if the view model ever leaves actionErrorMessage unset — because a
-            // blocked commit with no feedback would be the very silent failure this guards
-            // against. (Kept separate from .failure, which intentionally stays quiet when its
-            // busy/no-session guard returns with no message.) No success toast/SHA.
-            gitToastState.dismissProgress()
-            gitAlert = .error(gitAvailabilityViewModel.actionErrorMessage
-                ?? String(localized: "Too many changes to quick-commit. Commit in smaller batches, or use git directly."))
-        case .failure:
-            gitToastState.dismissProgress()
-            if let message = gitAvailabilityViewModel.actionErrorMessage {
-                gitAlert = .error(message)
-            }
-        }
-    }
-
-    @MainActor
     private func performGitCheckout(_ target: GitCheckoutTarget, stashingChanges: Bool = false) async {
         let outcome = await gitAvailabilityViewModel.checkout(target, stashingChanges: stashingChanges)
         if outcome == .requiresStash {
-            gitAlert = .dirtyCheckout(target)
+            gitAlert = .error(String(localized: "Switching a branch with local changes is deferred. Commit or clean the workspace through chat first."))
         } else if let message = gitAvailabilityViewModel.actionErrorMessage {
             // Surface real failures and partial successes (branch switched but the
             // stashed changes could not be restored) — the view model sets
@@ -1430,21 +1346,10 @@ struct ChatView: View {
         switch alert {
         case .confirmRemote(let action):
             return Alert(
-                title: Text(action == .pull ? "Pull Remote Changes?" : "Push Local Commits?"),
-                message: Text(action == .pull
-                    ? "Pull uses fast-forward only and will not create a merge commit."
-                    : "Push the current branch to its configured upstream remote?"),
-                primaryButton: .default(Text(action == .pull ? "Pull" : "Push")) {
+                title: Text("Push Local Commits?"),
+                message: Text("Push the current branch to its upstream, or to origin and set its upstream if none is configured?"),
+                primaryButton: .default(Text("Push")) {
                     Task { await performGitRemoteAction(action) }
-                },
-                secondaryButton: .cancel()
-            )
-        case .dirtyCheckout(let target):
-            return Alert(
-                title: Text("Uncommitted Changes"),
-                message: Text("This workspace has uncommitted changes. Save them temporarily, switch branches, then restore any saved changes for the destination branch."),
-                primaryButton: .default(Text("Stash & Switch")) {
-                    Task { await performGitCheckout(target, stashingChanges: true) }
                 },
                 secondaryButton: .cancel()
             )
@@ -1631,10 +1536,8 @@ struct ChatView: View {
             onCopy: { context in
                 UIPasteboard.general.string = context.copyText
             },
-            inlineCommitContext: inlineCommitContext,
-            onInlineCommit: {
-                Task { await performQuickCommit(push: true) }
-            },
+            inlineCommitContext: nil,
+            onInlineCommit: {},
             turnChangesSummary: turnChangesRecapSummary,
             onOpenTurnDiff: {
                 presentTurnDiff(for: turnChangesRecapSummary)
@@ -1844,7 +1747,10 @@ struct ChatView: View {
     }
 
     private func loadInitialGitAvailability() async {
-        guard !viewModel.usesDirectGateway else { return }
+        if viewModel.usesDirectGateway {
+            await gitAvailabilityViewModel.loadIfNeeded()
+            return
+        }
         let availabilityViewModel = GitWorkspaceAvailabilityViewModel(session: session, server: server)
         gitAvailabilityViewModel = availabilityViewModel
         await availabilityViewModel.loadIfNeeded()

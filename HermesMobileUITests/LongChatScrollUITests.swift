@@ -412,6 +412,36 @@ final class LongChatScrollUITests: XCTestCase {
         // navigation control before asserting the shell tabs.
         waitForPostLoginDestination(app: app)
 
+        if let storedID = environment["SEMREH_SLICE4_GIT_UI_SESSION_ID"] {
+            guard stockBackend,
+                  storedID.range(of: "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$", options: .regularExpression) != nil else {
+                XCTFail("Git UI verification requires the owned stock fixture and plain seeded ID.")
+                return
+            }
+            try openSeededSession(app: app, storedID: storedID)
+            assertHittable(app.staticTexts["SEMREH_SLICE4_GIT_UI_SEED"], timeout: 30,
+                          message: "Open the owned Git fixture through the normal session deep link.")
+            let gitMenu = app.buttons["Git actions"]
+            assertHittable(gitMenu, timeout: 20, message: "The seeded repository must expose Git actions.")
+            gitMenu.tap()
+            XCTAssertTrue(app.buttons["Push"].waitForExistence(timeout: 10))
+            for deferred in ["Fetch", "Pull", "Commit", "Commit & Push"] {
+                XCTAssertFalse(app.buttons[deferred].exists, "Deferred action must not be offered: \(deferred)")
+            }
+            attachScreenshot(named: "slice4-git-supported-menu")
+            let staging = app.buttons["Stage Changes…"]
+            assertHittable(staging, timeout: 10, message: "Staging must remain reachable from production Git menu.")
+            staging.tap()
+            XCTAssertTrue(app.navigationBars["Stage Changes"].waitForExistence(timeout: 15))
+            for deferred in ["Suggest message", "Commit", "Commit Selected", "Discard Changes"] {
+                XCTAssertFalse(app.buttons[deferred].exists)
+            }
+            attachScreenshot(named: "slice4-git-staging-only")
+            app.buttons["Done"].tap()
+            // Read-only navigation check: never tap Push, stage, or branch writes.
+            return
+        }
+
         if environment["SEMREH_SLICE3_APP_KILL_UI"] == "1" {
             guard stockBackend else {
                 XCTFail("Slice 3 app-kill UI requires the pinned stock backend.")
