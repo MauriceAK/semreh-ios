@@ -267,6 +267,21 @@ struct DirectPromptDeliveryRecoveryTarget: Equatable {
     let markerToken: UUID
 }
 
+/// A direct branch owns an already-bound child controller. Consumers must
+/// retain this handoff instead of constructing a new ChatViewModel from only
+/// the summary, which would resume the child a second time.
+struct DirectBranchHandoff: Equatable {
+    let session: SessionSummary
+    let viewModel: ChatViewModel
+    let origin: URL
+    let profile: String
+    let identity: UUID
+
+    static func == (lhs: DirectBranchHandoff, rhs: DirectBranchHandoff) -> Bool {
+        lhs.identity == rhs.identity
+    }
+}
+
 struct ChatPollingIntervals: Equatable {
     let approvalNanoseconds: UInt64
     let clarificationNanoseconds: UInt64
@@ -701,6 +716,28 @@ final class ChatViewModel {
     var directConversationHasPromptDeliveryUncertainty: Bool {
         usesDirectGateway && directConversation?.hasAmbiguousPromptDelivery == true
     }
+    var directBranchIdentity: (origin: URL, profile: String, sessionID: String)? {
+        guard usesDirectGateway,
+              !directInvalidated,
+              let controller = directConversation,
+              !controller.isDisposed,
+              let controllerSessionID = controller.storedID,
+              let binding = controller.binding,
+              !controllerSessionID.isEmpty,
+              binding.storedID == controllerSessionID,
+              binding.profile == controller.profile,
+              !binding.runtimeID.isEmpty,
+              canonicalSessionID == controllerSessionID,
+              controller.runtimeOrigin == server,
+              controller.profile == (Self.nonEmpty(currentProfile) ?? "default") else {
+            return nil
+        }
+        return (
+            origin: controller.runtimeOrigin,
+            profile: controller.profile,
+            sessionID: controllerSessionID
+        )
+    }
     var directPromptDeliveryHasConfirmedAcceptance: Bool {
         usesDirectGateway && directConversation?.promptDeliveryUncertaintyHasConfirmedAcceptance == true
     }
@@ -842,6 +879,7 @@ final class ChatViewModel {
     @ObservationIgnored private var directAttachmentTask: Task<GatewayConversationController, Error>?
     private var directInvalidated = false
     private var directVisible = false
+    private var directLiveActivityRun: (owner: UUID, sessionID: String, profile: String)?
     private(set) var directClarificationPrompt: ClarificationPromptState? = nil
     private(set) var isRespondingToDirectClarification = false
     private(set) var directClarificationErrorMessage: String? = nil
@@ -877,7 +915,6 @@ final class ChatViewModel {
     private let pendingActionCoordinator: ChatPendingActionCoordinator
     private let attachmentCoordinator: ChatAttachmentCoordinator
     private let btwStreamClient: SSEStreamingClient
-    private let sessionEventStreamCoordinator: SessionEventStreamCoordinator
     private let liveActivityManager: any AgentLiveActivityManaging
     private let speechSynthesizerFactory: () -> any ChatSpeechSynthesizing
     private let listenAudioSession: any ListenAudioSessionControlling
@@ -941,8 +978,6 @@ final class ChatViewModel {
     private var activeBtwAnswer = ""
     private var backgroundPromptsByTaskID: [String: String] = [:]
     @ObservationIgnored private var backgroundPollTask: Task<Void, Never>?
-    @ObservationIgnored private var sessionEventReconcileTask: Task<Void, Never>?
-    @ObservationIgnored private var didStartSessionEventSync = false
     @ObservationIgnored private var streamStatusWatchTask: Task<Void, Never>?
     private var isRefreshingCompletedResponseTitle = false
     private var isActiveStreamReplayConnection: Bool { streamCoordinator.isReplayConnection }
@@ -963,7 +998,6 @@ final class ChatViewModel {
         approvalStreamClient: SSEStreamingClient? = nil,
         clarifyStreamClient: SSEStreamingClient? = nil,
         btwStreamClient: SSEStreamingClient? = nil,
-        sessionEventStreamClient: SSEStreamingClient? = nil,
         liveActivityManager: (any AgentLiveActivityManaging)? = nil,
         showsLiveActivityResponseExcerpts: Bool = false,
         pollingIntervals: ChatPollingIntervals = .standard,
@@ -978,7 +1012,8 @@ final class ChatViewModel {
         gatewayRuntimeProvider: (@MainActor (APIClient) async throws -> HermesServerRuntime)? = nil,
         directAttachmentPreparer: (@Sendable (Data, String, Data?) async throws -> DirectPendingAttachment)? = nil,
         directAttachmentRecoveryMarkerStore: any DirectGatewayAttachmentRecoveryMarkerStoreProtocol = DirectGatewayAttachmentRecoveryMarkerStore(),
-        promptUncertaintyStore: any DirectPromptDeliveryUncertaintyStoreProtocol = DirectPromptDeliveryUncertaintyStore()
+        promptUncertaintyStore: any DirectPromptDeliveryUncertaintyStoreProtocol = DirectPromptDeliveryUncertaintyStore(),
+        initialDirectConversation: GatewayConversationController? = nil
     ) {
         sessionID = session.sessionId
         currentWorkspace = session.workspace
@@ -992,16 +1027,15 @@ final class ChatViewModel {
         self.directAttachmentPreparer = directAttachmentPreparer
         self.directAttachmentRecoveryMarkerStore = directAttachmentRecoveryMarkerStore
         self.promptUncertaintyStore = promptUncertaintyStore
+        self.directConversation = initialDirectConversation
+        self.directRuntime = initialDirectConversation?.sharedRuntime
         #if DEBUG
         self.nativeAuthE2EAutoSubmitController = NativeAuthE2EAutoSubmitController.processController(
             serverURL: server
         )
         #endif
         let resolvedClient = client ?? APIClient(baseURL: server)
-        let resolvedStreamClient = streamClient ?? OfficialHermesStreamClient(
-            client: resolvedClient,
-            serverURL: server
-        )
+        let resolvedStreamClient = streamClient ?? SSEClient(allowedServerURL: server)
         let resolvedLiveActivityManager = liveActivityManager ?? AgentLiveActivityManager.shared
         self.client = resolvedClient
         self.streamCoordinator = ChatStreamCoordinator(
@@ -1018,13 +1052,6 @@ final class ChatViewModel {
         )
         self.attachmentCoordinator = ChatAttachmentCoordinator(client: resolvedClient)
         self.btwStreamClient = btwStreamClient ?? SSEClient(allowedServerURL: server)
-        self.sessionEventStreamCoordinator = SessionEventStreamCoordinator(
-            server: server,
-            sessionID: session.sessionId ?? "",
-            profile: session.profile,
-            streamClient: sessionEventStreamClient ?? SSEClient(allowedServerURL: server),
-            userDefaults: userDefaults
-        )
         self.liveActivityManager = resolvedLiveActivityManager
         self.showsLiveActivityResponseExcerpts = showsLiveActivityResponseExcerpts
         self.pollingIntervals = pollingIntervals
@@ -1051,22 +1078,18 @@ final class ChatViewModel {
         self.serverTTSAudioPlayerFactory = serverTTSAudioPlayerFactory
             ?? { try ServerTTSAudioPlayer(data: $0) }
         displayTitle = Self.displayTitle(from: session.title)
-        self.sessionEventStreamCoordinator.onSnapshot = { [weak self] snapshot in
-            self?.applySessionEventSnapshot(snapshot) ?? false
-        }
-        self.sessionEventStreamCoordinator.onEvent = { [weak self] event in
-            self?.handleSessionEvent(event)
-        }
         self.streamCoordinator.attach(delegate: self)
         self.pendingActionCoordinator.delegate = self
         self.attachmentCoordinator.delegate = self
         if gatewayRuntimeProvider == nil { streamCoordinator.adoptKnownLiveStreamIfNeeded(session.activeStreamId) }
+        if let initialDirectConversation {
+            configureDirectConversation(initialDirectConversation)
+        }
     }
 
     deinit {
         directReasoningRefreshTask?.cancel()
         backgroundPollTask?.cancel()
-        sessionEventReconcileTask?.cancel()
         streamStatusWatchTask?.cancel()
         pendingStreamingScrollTriggerTask?.cancel()
         pendingStreamingContentFlushTask?.cancel()
@@ -1246,72 +1269,230 @@ final class ChatViewModel {
                 recoveryMarkerStore: self.directAttachmentRecoveryMarkerStore,
                 promptUncertaintyStore: self.promptUncertaintyStore
             )
-            controller.isVisible = self.directVisible
-            controller.isEditing = self.directComposerIsEditing
-            controller.onBinding = { [weak self] binding in self?.adoptDirectID(binding.storedID) }
-            controller.onCanonicalID = { [weak self] id in self?.adoptDirectID(id) }
-            controller.onResume = { [weak self, weak controller] result in
-                guard let self, let controller,
-                      !self.directInvalidated,
-                      self.directConversation === controller,
-                      controller.storedID == self.canonicalSessionID else { return }
-                self.applyDirectSessionInfo(result?.gatewayFields["info"])
-                self.syncDirectClarificationPrompt()
-                self.directBlockingInteractionErrorMessage = nil
-                self.directBlockingInteractionErrorIdentity = nil
-                if controller.hasAmbiguousPromptDelivery {
-                    self.sendErrorMessage = self.promptDeliveryWarning(for: controller)
-                }
-            }
-            controller.onReasoningConfiguration = { [weak self, weak controller] configuration in
-                guard let self, let controller,
-                      !self.directInvalidated,
-                      self.directConversation === controller,
-                      controller.storedID == self.canonicalSessionID else { return }
-                self.applyDirectReasoningConfiguration(configuration)
-            }
-            controller.onTranscript = { [weak self] page, older in
-                guard let self, !self.directInvalidated else { return }
-                self.applyDirectTranscript(page, older: older)
-            }
-            controller.onEvent = { [weak self] event in
-                guard let self, !self.directInvalidated else { return }
-                let previousPrompt = self.directClarificationPrompt
-                self.applyDirectEvent(event)
-                if event.type == "clarify.request",
-                   let currentPrompt = self.directConversation?.pendingBlockingPrompt,
-                   previousPrompt?.gatewayIdentity != currentPrompt.identity {
-                    self.clearDirectClarificationOwnedSendError()
-                    self.directClarificationErrorMessage = nil
-                } else if event.type == "clarify.expire",
-                          let requestID = event.payload?.gatewayFields["request_id"]?.gatewayString,
-                          previousPrompt?.pending.clarifyId == requestID {
-                    let message = "That clarification expired before it was answered."
-                    self.directClarificationErrorMessage = message
-                    self.setDirectClarificationSendError(message)
-                }
-                self.syncDirectClarificationPrompt()
-            }
-            controller.onError = { [weak self] error in
-                guard let self, !self.directInvalidated else { return }
-                if let blockingError = error as? GatewayBlockingError {
-                    let message = self.directClarificationMessage(for: blockingError)
-                    self.directClarificationErrorMessage = message
-                    if self.directClarificationPrompt == nil {
-                        self.setDirectClarificationSendError(message)
-                    }
-                    return
-                }
-                self.lastError = error
-                self.sendErrorMessage = "The Hermes connection needs attention. No message was automatically resent."
-            }
             self.directRuntime = runtime
             self.directConversation = controller
+            self.configureDirectConversation(controller)
             return controller
         }
         directAttachmentTask = task
         defer { directAttachmentTask = nil }
         return try await task.value
+    }
+
+    private func configureDirectConversation(_ controller: GatewayConversationController) {
+        controller.isVisible = directVisible
+        controller.isEditing = directComposerIsEditing
+        controller.onRecoveredIdle = { [weak self, weak controller] recoveredID in
+            guard let self, let controller,
+                  !self.directInvalidated, self.directConversation === controller,
+                  controller.storedID == recoveredID, self.canonicalSessionID == recoveredID,
+                  self.directHistoryID == recoveredID,
+                  let ownedRun = self.directLiveActivityRun,
+                  ownedRun.sessionID == recoveredID, ownedRun.profile == controller.profile else { return }
+            self.endDirectLiveActivity(status: .ended, activity: String(localized: "No longer running"))
+        }
+        controller.onBinding = { [weak self, weak controller] binding in
+            guard let self, let controller,
+                  !self.directInvalidated,
+                  self.directConversation === controller else { return }
+            self.adoptDirectID(binding.storedID)
+        }
+        controller.onCanonicalID = { [weak self, weak controller] id in
+            guard let self, let controller,
+                  !self.directInvalidated,
+                  self.directConversation === controller else { return }
+            self.adoptDirectID(id)
+        }
+        controller.onResume = { [weak self, weak controller] result in
+            guard let self, let controller,
+                  !self.directInvalidated,
+                  self.directConversation === controller,
+                  controller.storedID == self.canonicalSessionID else { return }
+            self.applyDirectSessionInfo(result?.gatewayFields["info"])
+            self.syncDirectClarificationPrompt()
+            self.directBlockingInteractionErrorMessage = nil
+            self.directBlockingInteractionErrorIdentity = nil
+            if controller.hasAmbiguousPromptDelivery {
+                self.sendErrorMessage = self.promptDeliveryWarning(for: controller)
+            }
+        }
+        controller.onReasoningConfiguration = { [weak self, weak controller] configuration in
+            guard let self, let controller,
+                  !self.directInvalidated,
+                  self.directConversation === controller,
+                  controller.storedID == self.canonicalSessionID else { return }
+            self.applyDirectReasoningConfiguration(configuration)
+        }
+        controller.onTranscript = { [weak self, weak controller] page, older in
+            guard let self, let controller,
+                  !self.directInvalidated,
+                  self.directConversation === controller else { return }
+            self.applyDirectTranscript(page, older: older)
+        }
+        controller.onEvent = { [weak self, weak controller] event in
+            guard let self, let controller,
+                  !self.directInvalidated,
+                  self.directConversation === controller else { return }
+            let previousPrompt = self.directClarificationPrompt
+            self.applyDirectEvent(event)
+            if event.type == "clarify.request",
+               let currentPrompt = controller.pendingBlockingPrompt,
+               previousPrompt?.gatewayIdentity != currentPrompt.identity {
+                self.clearDirectClarificationOwnedSendError()
+                self.directClarificationErrorMessage = nil
+            } else if event.type == "clarify.expire",
+                      let requestID = event.payload?.gatewayFields["request_id"]?.gatewayString,
+                      previousPrompt?.pending.clarifyId == requestID {
+                let message = "That clarification expired before it was answered."
+                self.directClarificationErrorMessage = message
+                self.setDirectClarificationSendError(message)
+            }
+            self.syncDirectClarificationPrompt()
+        }
+        controller.onError = { [weak self, weak controller] error in
+            guard let self, let controller,
+                  !self.directInvalidated,
+                  self.directConversation === controller else { return }
+            if let blockingError = error as? GatewayBlockingError {
+                let message = self.directClarificationMessage(for: blockingError)
+                self.directClarificationErrorMessage = message
+                if self.directClarificationPrompt == nil {
+                    self.setDirectClarificationSendError(message)
+                }
+                return
+            }
+            self.lastError = error
+            self.sendErrorMessage = "The Hermes connection needs attention. No message was automatically resent."
+        }
+    }
+
+    /// Branches a direct Hermes conversation and transfers the already-bound
+    /// child controller to a new ChatViewModel. The optional name is rejected
+    /// explicitly until the controller seam carries the stock name field;
+    /// it is never silently discarded.
+    func branchDirectConversation(name: String = "") async -> SlashCommandExecutionResult {
+        guard usesDirectGateway else {
+            return .unsupported(friendlyMessage: "Branching is not available outside direct Hermes mode.")
+        }
+        guard name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return .unsupported(friendlyMessage: "Named direct branches are not available yet.")
+        }
+        guard !directInvalidated, !isViewingCachedData, !isStartingChat,
+              activeStreamID == nil else {
+            return .unsupported(friendlyMessage: "Wait for the current response to finish before branching.")
+        }
+
+        let expectedProfile = Self.nonEmpty(currentProfile) ?? "default"
+        var detachedChild: GatewayConversationController?
+        var detachedChildViewModel: ChatViewModel?
+        do {
+            let parent = try await ensureDirectConversation()
+            guard !directInvalidated,
+                  directConversation === parent,
+                  parent.profile == expectedProfile,
+                  parent.runtimeOrigin == server,
+                  parent.runState == .idle else {
+                throw DirectSessionError.ambiguousPrompt
+            }
+            try await parent.open()
+            guard !directInvalidated,
+                  directConversation === parent,
+                  parent.profile == expectedProfile,
+                  parent.runtimeOrigin == server,
+                  parent.runState == .idle,
+                  let expectedParentBinding = parent.binding,
+                  let expectedParentID = parent.storedID,
+                  expectedParentID == canonicalSessionID else {
+                throw DirectSessionError.staleOperation
+            }
+            let expectedParentCanonicalID = canonicalSessionID
+            let expectedParentRuntime = parent.sharedRuntime
+            func parentScopeIsCurrent() -> Bool {
+                !directInvalidated &&
+                    directConversation === parent &&
+                    parent.binding == expectedParentBinding &&
+                    parent.storedID == expectedParentID &&
+                    canonicalSessionID == expectedParentCanonicalID &&
+                    parent.profile == expectedProfile &&
+                    parent.runtimeOrigin == server &&
+                    parent.sharedRuntime === expectedParentRuntime &&
+                    directRuntime === expectedParentRuntime
+            }
+
+            let child = try await parent.branch()
+            detachedChild = child
+            guard parentScopeIsCurrent() else {
+                throw DirectSessionError.staleOperation
+            }
+            guard child.profile == expectedProfile,
+                  child.runtimeOrigin == server,
+                  child.sharedRuntime === parent.sharedRuntime,
+                  let childID = child.storedID,
+                  !childID.isEmpty else {
+                throw DirectSessionBranchError.invalidResponse
+            }
+
+            // Detail is the authoritative summary used by the session store;
+            // do not synthesize sidebar metadata from the branch RPC.
+            let summary = try await client.directSessionDetail(
+                sessionID: childID,
+                profile: expectedProfile
+            )
+            guard summary.sessionId == childID,
+                  summary.profile == expectedProfile else {
+                throw DirectHermesRESTError.profileMismatch
+            }
+            guard !directInvalidated,
+                  parentScopeIsCurrent(),
+                  parent.sharedRuntime === child.sharedRuntime else {
+                throw DirectSessionError.staleOperation
+            }
+
+            let childViewModel = ChatViewModel(
+                session: summary,
+                server: server,
+                client: client,
+                liveActivityManager: liveActivityManager,
+                showsLiveActivityResponseExcerpts: showsLiveActivityResponseExcerpts,
+                pollingIntervals: pollingIntervals,
+                userDefaults: userDefaults,
+                gatewayRuntimeProvider: gatewayRuntimeProvider,
+                directAttachmentPreparer: directAttachmentPreparer,
+                directAttachmentRecoveryMarkerStore: directAttachmentRecoveryMarkerStore,
+                promptUncertaintyStore: promptUncertaintyStore,
+                initialDirectConversation: child
+            )
+            detachedChildViewModel = childViewModel
+
+            // The controller performed its branch-time verification; refresh
+            // once after callback wiring so the child VM owns its transcript.
+            try await child.refresh()
+            guard !childViewModel.directInvalidated,
+                  childViewModel.directConversation === child,
+                  child.storedID == childID,
+                  parentScopeIsCurrent() else {
+                throw DirectSessionError.staleOperation
+            }
+
+            let handoff = DirectBranchHandoff(
+                session: summary,
+                viewModel: childViewModel,
+                origin: server,
+                profile: expectedProfile,
+                identity: UUID()
+            )
+            return .openedDirectBranch(handoff)
+        } catch {
+            if let detachedChildViewModel {
+                detachedChildViewModel.invalidateDirectConversation()
+                await detachedChildViewModel.disposeDirectConversation()
+            } else if let detachedChild {
+                detachedChild.invalidate()
+                try? await detachedChild.dispose()
+            }
+            lastError = error
+            return .unsupported(friendlyMessage: "The direct Hermes branch could not be opened safely.")
+        }
     }
 
     private func adoptDirectID(_ id: String) {
@@ -1701,7 +1882,7 @@ final class ChatViewModel {
                 sendErrorMessage = nil
             }
             let cancelled = terminal.status == "cancelled" || terminal.status == "interrupted"
-            liveActivityManager.end(status: terminal.error != nil ? .failed : (cancelled ? .cancelled : .complete),
+            endDirectLiveActivity(status: terminal.error != nil ? .failed : (cancelled ? .cancelled : .complete),
                 activity: cancelled ? "Response stopped" : "Response complete", errorSummary: terminal.error)
         case .control(let raw):
             if raw.type == "message.start" {
@@ -1712,7 +1893,9 @@ final class ChatViewModel {
                 streamingAssistantMessageIndex = nil
                 if let sessionID {
                     // A local activity identity is not a gateway runtime ID.
-                    liveActivityManager.start(sessionID: sessionID, sessionTitle: displayTitle, streamID: nil)
+                    let owner = UUID()
+                    directLiveActivityRun = (owner, sessionID, directConversation?.profile ?? "default")
+                    liveActivityManager.startDirect(owner: owner, sessionID: sessionID, sessionTitle: displayTitle)
                 }
             } else if raw.type == "session.info" {
                 applyDirectSessionInfo(raw.payload)
@@ -1725,6 +1908,14 @@ final class ChatViewModel {
             }
         case .unknown: break
         }
+    }
+
+    private func endDirectLiveActivity(status: AgentRunActivityStatus, activity: String, errorSummary: String? = nil) {
+        guard let ownedRun = directLiveActivityRun,
+              ownedRun.sessionID == canonicalSessionID,
+              ownedRun.profile == directConversation?.profile else { return }
+        directLiveActivityRun = nil
+        liveActivityManager.endDirect(owner: ownedRun.owner, status: status, activity: activity, errorSummary: errorSummary)
     }
 
     private func syncDirectClarificationPrompt() {
@@ -1870,99 +2061,16 @@ final class ChatViewModel {
         ActiveChatStreamSnapshotStore.shared.removeAll()
     }
 
+    /// Chat visibility controls reconciliation on the shared direct gateway.
+    /// Merely becoming visible does not create a runtime or open a second stream.
     func startSessionEventSync() {
-        if usesDirectGateway {
-            directVisible = true
-            directConversation?.isVisible = true
-            return
-        }
-        guard !didStartSessionEventSync else { return }
-        didStartSessionEventSync = true
-
-        // Preserve the mature WebUI lifecycle synchronously. Only a configured
-        // official sidecar needs an asynchronous capability decision.
-        guard client.officialContinuityClient != nil else {
-            sessionEventStreamCoordinator.start()
-            return
-        }
-
-        // `/api/sessions/{id}/events` is a community-WebUI journal route, not
-        // part of the official continuity surface. Avoid opening it for an
-        // official session; completed-turn reconciliation uses GET messages.
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            guard await client.continuityTransport() == .webUI else {
-                didStartSessionEventSync = false
-                return
-            }
-            guard didStartSessionEventSync else { return }
-            sessionEventStreamCoordinator.start()
-        }
+        directVisible = true
+        directConversation?.isVisible = true
     }
 
     func stopSessionEventSync() {
         directVisible = false
         directConversation?.isVisible = false
-        guard !usesDirectGateway else { return }
-        didStartSessionEventSync = false
-        sessionEventReconcileTask?.cancel()
-        sessionEventReconcileTask = nil
-        sessionEventStreamCoordinator.stop()
-    }
-
-    private func handleSessionEvent(_ event: SSEEvent) {
-        switch event {
-        case .done, .streamEnd, .cancelled, .error, .lostWorkerBookkeeping:
-            scheduleSessionEventReconcile()
-        default:
-            break
-        }
-    }
-
-    private func scheduleSessionEventReconcile() {
-        sessionEventReconcileTask?.cancel()
-        sessionEventReconcileTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 150_000_000)
-            guard !Task.isCancelled, let self else { return }
-            await self.loadMessages()
-        }
-    }
-
-    private func applySessionEventSnapshot(_ snapshot: SessionSummary) -> Bool {
-        let snapshotID = (snapshot.sessionId ?? snapshot.id).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let sessionID, snapshotID == sessionID.trimmingCharacters(in: .whitespacesAndNewlines) else {
-            return false
-        }
-
-        // Snapshots are metadata deltas in the current server contract. Older or
-        // partially populated snapshots may omit fields; absence must not erase
-        // the warm session's known values while transcript reconciliation runs.
-        if let workspace = snapshot.workspace {
-            currentWorkspace = workspace
-        }
-        if let model = snapshot.model {
-            currentModel = model
-        }
-        if let provider = snapshot.modelProvider {
-            currentModelProvider = provider
-        }
-        currentProfile = snapshot.profile ?? currentProfile
-        if let title = snapshot.title {
-            displayTitle = Self.displayTitle(from: title)
-        }
-
-        // A session snapshot is metadata, not an authoritative transcript. Reconcile
-        // the transcript separately and keep the visible/live state until that load
-        // wins its own generation check.
-        if activeStreamID == nil {
-            sessionEventReconcileTask?.cancel()
-            sessionEventReconcileTask = Task { @MainActor [weak self] in
-                try? await Task.sleep(nanoseconds: 150_000_000)
-                guard !Task.isCancelled, let self else { return }
-                await self.loadMessages()
-            }
-        }
-        return true
     }
 
     func markReusedFromOpenSessionStore() {
@@ -4062,13 +4170,6 @@ final class ChatViewModel {
         attachmentsToRestoreOnFailure: [PendingAttachment],
         modelContext: ModelContext?
     ) async -> Bool {
-        do {
-            try await client.validateChatAttachments(apiPayloads)
-        } catch {
-            sendErrorMessage = error.localizedDescription
-            lastError = error
-            return false
-        }
         isStartingChat = true
         sendErrorMessage = nil
         lastError = nil
@@ -4936,8 +5037,8 @@ final class ChatViewModel {
     }
 
     private func branchSessionFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
-        guard !usesDirectGateway else {
-            return .unsupported(friendlyMessage: String(localized: "Forking is not available in direct Hermes mode yet."))
+        if usesDirectGateway {
+            return await branchDirectConversation(name: args)
         }
 
         guard !isViewingCachedData else {
@@ -5027,10 +5128,40 @@ final class ChatViewModel {
         }
     }
 
-    private func compressSessionFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
-        guard !usesDirectGateway else {
-            return .unsupported(friendlyMessage: String(localized: "Compression is not available in direct Hermes mode yet."))
+    private func compressDirectSessionFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
+        guard !directInvalidated, !isViewingCachedData, !isStartingChat,
+              !isCompressingSession, activeStreamID == nil else {
+            return .unsupported(friendlyMessage: "Wait for the current response to finish before compressing context.")
         }
+        let expectedProfile = Self.nonEmpty(currentProfile) ?? "default"
+        isCompressingSession = true
+        defer { isCompressingSession = false }
+        do {
+            let controller = try await ensureDirectConversation()
+            try await controller.open()
+            guard !directInvalidated, directConversation === controller,
+                  controller.profile == expectedProfile, controller.runtimeOrigin == server,
+                  controller.storedID == canonicalSessionID else { throw DirectSessionError.staleOperation }
+            let outcome = try await controller.compress(focusTopic: args)
+            guard !directInvalidated, directConversation === controller,
+                  controller.profile == expectedProfile, controller.runtimeOrigin == server,
+                  controller.storedID == canonicalSessionID else { throw DirectSessionError.staleOperation }
+            switch outcome {
+            case .compressed: return .executed(message: "Context compressed.")
+            case .unchanged: return .executed(message: "No changes from compression.")
+            case .aborted: return .executed(message: "Compression was aborted; context was preserved.")
+            case .lockSkipped: return .executed(message: "Compression was skipped because the session's compression lock was unavailable.")
+            }
+        } catch DirectSessionCompressionError.outcomeUnknown {
+            return .unsupported(friendlyMessage: "The compression outcome could not be confirmed. It has not been retried; sending and compression are paused for this open chat.")
+        } catch {
+            lastError = error
+            return .unsupported(friendlyMessage: "Context could not be compressed safely.")
+        }
+    }
+
+    private func compressSessionFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
+        if usesDirectGateway { return await compressDirectSessionFromSlashCommand(args) }
 
         guard !isViewingCachedData else {
             return .unsupported(friendlyMessage: String(localized: "Reconnect to the server to compress context."))
@@ -5656,39 +5787,17 @@ final class ChatViewModel {
 
     @discardableResult
     func cancelActiveStream() async -> Bool {
-        if usesDirectGateway {
-            guard !isCancellingStream else { return false }
-            isCancellingStream = true
-            defer { isCancellingStream = false }
-            do {
-                let controller = try await ensureDirectConversation()
-                try await controller.interrupt()
-                OpenChatSessionStore.shared.noteStreamingStateChanged()
-                return true
-            } catch {
-                lastError = error
-                sendErrorMessage = "Hermes has not confirmed that the response stopped."
-                return false
-            }
-        }
-        guard activeStreamID != nil else { return false }
-
+        guard !isCancellingStream else { return false }
         isCancellingStream = true
-        sendErrorMessage = nil
-        lastError = nil
         defer { isCancellingStream = false }
-
         do {
-            guard let response = try await streamCoordinator.cancelActiveStream() else { return false }
-            if response.ok == false {
-                sendErrorMessage = response.error ?? String(localized: "The server could not stop the current response.")
-                return false
-            }
-
+            let controller = try await ensureDirectConversation()
+            try await controller.interrupt()
+            OpenChatSessionStore.shared.noteStreamingStateChanged()
             return true
         } catch {
             lastError = error
-            sendErrorMessage = error.localizedDescription
+            sendErrorMessage = "Hermes has not confirmed that the response stopped."
             return false
         }
     }
@@ -5884,14 +5993,11 @@ final class ChatViewModel {
 
     @discardableResult
     func reconnectStreamIfNeeded(modelContext: ModelContext? = nil) async -> Bool {
-        if usesDirectGateway {
-            do {
-                let controller = try await ensureDirectConversation()
-                try await controller.open()
-                return activeStreamID != nil
-            } catch { lastError = error; return false }
-        }
-        return await streamCoordinator.reconnectIfNeeded(modelContext: modelContext)
+        do {
+            let controller = try await ensureDirectConversation()
+            try await controller.open()
+            return activeStreamID != nil
+        } catch { lastError = error; return false }
     }
 
     func refreshTranscriptIfActiveStreamCompleted(

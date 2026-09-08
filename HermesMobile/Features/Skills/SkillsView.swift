@@ -2,16 +2,18 @@ import SwiftUI
 
 struct SkillsView: View {
     let server: URL
+    let profile: String
     let onAPIError: (Error) -> Void
 
     @State private var viewModel: SkillsViewModel
     @State private var selectedSkill: SkillSummary?
     @State private var searchText = ""
 
-    init(server: URL, onAPIError: @escaping (Error) -> Void) {
+    init(server: URL, profile: String, onAPIError: @escaping (Error) -> Void) {
         self.server = server
+        self.profile = profile
         self.onAPIError = onAPIError
-        _viewModel = State(initialValue: SkillsViewModel(server: server))
+        _viewModel = State(initialValue: SkillsViewModel(server: server, profile: profile))
     }
 
     var body: some View {
@@ -77,6 +79,7 @@ struct SkillsView: View {
                             category: group.category,
                             skills: group.skills,
                             server: server,
+                            profile: profile,
                             togglingSkillNames: viewModel.togglingSkillNames,
                             onToggleSkill: { skill, enabled in
                                 await toggle(skill: skill, enabled: enabled)
@@ -116,6 +119,7 @@ private struct SkillCategorySection: View {
     let category: String
     let skills: [SkillSummary]
     let server: URL
+    let profile: String
     let togglingSkillNames: Set<String>
     let onToggleSkill: (SkillSummary, Bool) async -> Void
     let onAPIError: (Error) -> Void
@@ -134,6 +138,7 @@ private struct SkillCategorySection: View {
                         SkillDetailView(
                             skill: skill,
                             server: server,
+                            profile: profile,
                             onAPIError: onAPIError
                         )
                     } label: {
@@ -277,6 +282,7 @@ private struct SkillRow: View {
 struct SkillDetailView: View {
     let skill: SkillSummary
     let server: URL
+    let profile: String
     let onAPIError: (Error) -> Void
 
     @State private var detail: SkillDetailResponse?
@@ -341,14 +347,10 @@ struct SkillDetailView: View {
                             .padding(.horizontal)
                     }
 
-                    if let linkedFiles = detail.linkedFiles, !linkedFiles.isEmpty {
-                        SkillLinkedFilesSection(
-                            fileNames: linkedFiles,
-                            onSelect: { fileName in
-                                Task { await loadLinkedFile(named: fileName) }
-                            }
-                        )
-                    }
+                    Text("Linked skill files are not available from this Hermes server.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal)
                 }
                 .padding(.vertical)
             }
@@ -368,7 +370,7 @@ struct SkillDetailView: View {
         defer { isLoading = false }
 
         do {
-            let response = try await APIClient(baseURL: server).skillContent(name: name)
+            let response = try await APIClient(baseURL: server).directSkillContent(name: name, profile: profile)
             detail = response
         } catch {
             errorMessage = error.localizedDescription
@@ -377,17 +379,13 @@ struct SkillDetailView: View {
     }
 
     private func loadLinkedFile(named fileName: String) async {
-        guard let name = skill.name else { return }
+        guard skill.name != nil else { return }
         isLoadingFile = true
         selectedFile = fileName
         defer { isLoadingFile = false }
 
-        do {
-            let response = try await APIClient(baseURL: server).skillContent(name: name, file: fileName)
-            fileContent = response.content
-        } catch {
-            fileContent = String(localized: "Could not load file: \(error.localizedDescription)")
-        }
+        // Retained presentation for future parity; stock has no linked-file route.
+        fileContent = String(localized: "Linked skill files are not available from this Hermes server.")
     }
 }
 

@@ -734,14 +734,21 @@ final class SessionListViewModel {
         defer { isLoadingActiveProfile = false }
 
         do {
-            let response = try await client.profiles()
-            applyActiveProfile(response)
+            let response = try await client.directProfiles()
+            // Resolve the local selection after the await: a user may have
+            // switched profiles while this inventory request was pending.
+            let scoped = ProfilesResponse(profiles: response.profiles,
+                                          active: locallySelectedProfileName ?? response.active,
+                                          singleProfileMode: response.singleProfileMode)
+            applyActiveProfile(scoped)
         } catch {
             guard !isCancellationError(error) else { return }
 
             activeProfileErrorMessage = error.localizedDescription
         }
     }
+
+    private var locallySelectedProfileName: String?
 
     func switchActiveProfile(_ profile: ProfileSummary) async -> Bool {
         guard !isViewingCachedData else {
@@ -754,6 +761,7 @@ final class SessionListViewModel {
             return false
         }
 
+        locallySelectedProfileName = profileName
         guard profileName != activeProfileName else {
             return true
         }

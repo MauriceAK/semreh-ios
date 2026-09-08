@@ -3,6 +3,37 @@ import XCTest
 
 final class SkillsViewModelTests: APIClientTestCase {
     @MainActor
+    func testDirectListPreservesGroupingSearchAndDisabledSkills() async throws {
+        let client = makeClient { request in
+            return apiTestJSONResponse("""
+            [{"name":"zeta","category":"coding","description":"Swift helper","enabled":false},
+             {"name":"Alpha","category":"coding","description":"Other","enabled":true}]
+            """, for: request)
+        }
+        let model = SkillsViewModel(client: client, profile: "work")
+        await model.load()
+        XCTAssertEqual(model.groupedSkills.first?.skills.map(\.name), ["Alpha", "zeta"])
+        XCTAssertEqual(model.filteredGroupedSkills(searchText: "Swift").first?.skills.first?.name, "zeta")
+        XCTAssertEqual(model.skills.first?.disabled, true)
+    }
+
+    @MainActor
+    func testUnconfirmedToggleSurfacesErrorAndRestoresDisplayedState() async throws {
+        let client = makeClient { request in
+            if request.url?.path == "/api/skills" {
+                return apiTestJSONResponse("[{\"name\":\"tool\",\"enabled\":true}]", for: request)
+            }
+            return apiTestJSONResponse("{\"ok\":true,\"name\":\"wrong\",\"enabled\":false}", for: request)
+        }
+        let model = SkillsViewModel(client: client, profile: "work")
+        await model.load()
+        await model.setSkill(try XCTUnwrap(model.skills.first), enabled: false)
+        XCTAssertNotNil(model.lastError)
+        XCTAssertEqual(model.skills.first?.disabled, false)
+        XCTAssertTrue(model.togglingSkillNames.isEmpty)
+    }
+
+    @MainActor
     func testGroupedSkillsNormalizesBlankCategoriesAndSortsRows() {
         let groups = SkillsViewModel.groupedSkills(for: [
             SkillSummary(name: "zed", category: " coding ", description: nil, path: nil),
@@ -22,14 +53,16 @@ final class SkillsViewModelTests: APIClientTestCase {
         var skillsLoadCount = 0
         let client = makeClient { request in
             paths.append(request.url?.path ?? "")
+            XCTAssertEqual(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.first?.value, "work")
             switch request.url?.path {
             case "/api/skills":
                 skillsLoadCount += 1
                 let disabled = skillsLoadCount > 1
                 return apiTestJSONResponse("""
-                {"skills": [{"name": "swift-refactor", "category": "coding", "disabled": \(disabled)}]}
+                [{"name": "swift-refactor", "category": "coding", "enabled": \(!disabled)}]
                 """, for: request)
             case "/api/skills/toggle":
+                XCTAssertEqual(request.httpMethod, "PUT")
                 let body = try apiTestJSONBody(from: request)
                 XCTAssertEqual(body["name"] as? String, "swift-refactor")
                 XCTAssertEqual(body["enabled"] as? Bool, false)
@@ -41,7 +74,7 @@ final class SkillsViewModelTests: APIClientTestCase {
                 return apiTestJSONResponse("{}", for: request)
             }
         }
-        let model = SkillsViewModel(client: client)
+        let model = SkillsViewModel(client: client, profile: "work")
 
         await model.load()
         await model.setSkill(try XCTUnwrap(model.skills.first), enabled: false)
@@ -58,7 +91,7 @@ final class SkillsViewModelTests: APIClientTestCase {
             switch request.url?.path {
             case "/api/skills":
                 return apiTestJSONResponse("""
-                {"skills": [{"name": "swift-refactor", "category": "coding", "disabled": false}]}
+                [{"name": "swift-refactor", "category": "coding", "enabled": true}]
                 """, for: request)
             case "/api/skills/toggle":
                 shouldFailToggle = true

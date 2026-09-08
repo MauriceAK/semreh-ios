@@ -198,7 +198,59 @@ final class CronManagementModelTests: XCTestCase {
 final class CronManagementViewModelTests: XCTestCase {
     override func tearDown() {
         MockURLProtocol.requestHandler = nil
+        CronReadGateURLProtocol.reset()
         super.tearDown()
+    }
+
+    @MainActor
+    func testNewerTaskListLoadOwnsRowsAfterOlderResponseCompletes() async throws {
+        let observed = expectation(description: "older list held")
+        let client = makeGatedClient(path: "/api/cron/jobs",
+                                    first: #"[{"id":"old","profile":"default","name":"Old"}]"#,
+                                    later: #"[{"id":"new","profile":"default","name":"New"}]"#,
+                                    observed: observed)
+        let model = TasksViewModel(server: URL(string: "https://example.test")!, client: client)
+        let oldLoad = Task { await model.load() }
+        await fulfillment(of: [observed], timeout: 2)
+        await model.load()
+        XCTAssertEqual(model.jobs.first?.name, "New")
+        XCTAssertFalse(model.isLoading)
+        CronReadGateURLProtocol.release()
+        await oldLoad.value
+        XCTAssertEqual(model.jobs.first?.name, "New")
+        XCTAssertFalse(model.isLoading)
+        XCTAssertNil(model.errorMessage)
+    }
+
+    @MainActor
+    func testNewerTaskDetailLoadOwnsMetadataAndClearsCompletedRunningState() async throws {
+        let observed = expectation(description: "older detail held")
+        let client = makeGatedClient(path: "/api/cron/jobs/job1",
+                                    first: #"{"id":"job1","profile":"default","name":"Old","latest_execution":{"status":"running","started_at":"2026-09-07T00:00:00Z"}}"#,
+                                    later: #"{"id":"job1","profile":"default","name":"New","latest_execution":{"status":"completed"}}"#,
+                                    observed: observed)
+        let job = try decodeCronJob(#"{"id":"job1","profile":"default"}"#)
+        let model = TaskDetailViewModel(job: job, runningElapsed: 42,
+                                        server: URL(string: "https://example.test")!, client: client)
+        let oldLoad = Task { await model.load() }
+        await fulfillment(of: [observed], timeout: 2)
+        await model.load()
+        XCTAssertEqual(model.job.name, "New")
+        XCTAssertNil(model.runningElapsed)
+        CronReadGateURLProtocol.release()
+        await oldLoad.value
+        XCTAssertEqual(model.job.name, "New")
+        XCTAssertNil(model.runningElapsed)
+        XCTAssertFalse(model.isLoading)
+        XCTAssertNil(model.errorMessage)
+    }
+
+    private func makeGatedClient(path: String, first: String, later: String,
+                                 observed: XCTestExpectation) -> APIClient {
+        CronReadGateURLProtocol.configure(path: path, first: first, later: later, observed: observed)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [CronReadGateURLProtocol.self]
+        return APIClient(baseURL: URL(string: "https://example.test")!, session: URLSession(configuration: configuration))
     }
 
     @MainActor
@@ -239,13 +291,11 @@ final class CronManagementViewModelTests: XCTestCase {
     func testTasksViewModelLoadPopulatesDeliveryOptions() async throws {
         let client = makeClient { request in
             switch request.url?.path {
-            case "/api/crons":
-                return apiTestJSONResponse(#"{"jobs": []}"#, for: request)
-            case "/api/crons/status":
-                return apiTestJSONResponse(#"{"running": {}}"#, for: request)
-            case "/api/crons/delivery-options":
+            case "/api/cron/jobs":
+                return apiTestJSONResponse("[]", for: request)
+            case "/api/cron/delivery-targets":
                 return apiTestJSONResponse(
-                    #"{"platforms": [{"value": "local", "label": "Local (save output only)"}]}"#,
+                    #"{"targets": [{"id": "local", "name": "Local (save output only)"}]}"#,
                     for: request
                 )
             default:
@@ -266,11 +316,9 @@ final class CronManagementViewModelTests: XCTestCase {
     func testTasksViewModelLoadToleratesDeliveryOptionsFailure() async throws {
         let client = makeClient { request in
             switch request.url?.path {
-            case "/api/crons":
-                return apiTestJSONResponse(#"{"jobs": [{"id": "job123", "name": "Digest"}]}"#, for: request)
-            case "/api/crons/status":
-                return apiTestJSONResponse(#"{"running": {}}"#, for: request)
-            case "/api/crons/delivery-options":
+            case "/api/cron/jobs":
+                return apiTestJSONResponse(#"[{"id": "job123", "name": "Digest", "profile": "default"}]"#, for: request)
+            case "/api/cron/delivery-targets":
                 let response = HTTPURLResponse(
                     url: request.url!,
                     statusCode: 404,
@@ -380,5 +428,69 @@ final class CronManagementViewModelTests: XCTestCase {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         return try decoder.decode(CronJob.self, from: Data(json.utf8))
+    }
+}
+
+/// Holds only the first selected response without blocking URLProtocol's queue.
+private final class CronReadGateURLProtocol: URLProtocol {
+    private static let lock = NSLock()
+    private static var path = ""
+    private static var first = ""
+    private static var later = ""
+    private static var observed: XCTestExpectation?
+    private static var held: CronReadGateURLProtocol?
+    private static var selectedCount = 0
+
+    static func configure(path: String, first: String, later: String, observed: XCTestExpectation) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.path = path; self.first = first; self.later = later
+        self.observed = observed; held = nil; selectedCount = 0
+    }
+
+    static func reset() {
+        lock.lock()
+        defer { lock.unlock() }
+        held = nil; observed = nil; selectedCount = 0
+    }
+
+    static func release() {
+        lock.lock()
+        let pending = held
+        let payload = first
+        held = nil
+        lock.unlock()
+        pending?.respond(payload)
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func stopLoading() { }
+
+    override func startLoading() {
+        Self.lock.lock()
+        if request.url?.path == Self.path {
+            Self.selectedCount += 1
+            if Self.selectedCount == 1 {
+                Self.held = self
+                let observed = Self.observed
+                Self.lock.unlock()
+                observed?.fulfill()
+                return
+            }
+            let payload = Self.later
+            Self.lock.unlock()
+            respond(payload)
+            return
+        }
+        Self.lock.unlock()
+        respond(request.url?.path.hasSuffix("/runs") == true ? #"{"runs":[],"limit":5}"# : #"{"targets":[]}"#)
+    }
+
+    private func respond(_ payload: String) {
+        let (response, data) = apiTestJSONResponse(payload, for: request)
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: data)
+        client?.urlProtocolDidFinishLoading(self)
     }
 }

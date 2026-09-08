@@ -6,7 +6,6 @@ final class AuthManagerStateTests: XCTestCase {
     private struct PreconditionFailure: Error {}
 
     private static let sessionExpiredMessage = "Your session expired. Sign in again."
-    private static let officialCapabilitiesJSON = #"{"features":{"session_resources":true,"session_chat":true,"session_chat_streaming":true},"endpoints":{"sessions":{"method":"GET","path":"/api/sessions"},"session_create":{"method":"POST","path":"/api/sessions"},"session":{"method":"GET","path":"/api/sessions/{session_id}"},"session_messages":{"method":"GET","path":"/api/sessions/{session_id}/messages"},"session_chat_stream":{"method":"POST","path":"/api/sessions/{session_id}/chat/stream"}}}"#
 
     // These tests assert against the global HTTPCookieStorage; reset it on both
     // sides so pre-existing cookies or a mid-test failure can't leak across tests.
@@ -618,107 +617,44 @@ final class AuthManagerStateTests: XCTestCase {
         XCTAssertEqual(defaults.string(forKey: HeaderLogoColor.storageKey), "#5B7CFF")
     }
 
-    func testOfficialContinuitySaveSwitchAndDisableKeepServerSecretsIsolated() async throws {
+    func testRetiredSidecarMetadataDoesNotDisturbDirectAccountsOnRestoreAndSwitch() throws {
         let keychain = InMemoryKeychainStore()
         let registry = ServerRegistry.inMemory(keychain: keychain)
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [MockURLProtocol.self]
-        let session = URLSession(configuration: configuration)
-        let officialFactory: @Sendable (URL, String) -> OfficialHermesContinuityClient = { url, key in
-            OfficialHermesContinuityClient(baseURL: url, session: session, customHeaderProvider: {
-                [CustomHeader(name: "Authorization", value: "Bearer \(key)")]
-            })
+        let a = try XCTUnwrap(URL(string: "https://a.test"))
+        let b = try XCTUnwrap(URL(string: "https://b.test"))
+        for server in [a, b] {
+            registry.activate(url: server)
+            var account = try XCTUnwrap(registry.activeServer)
+            account.officialAPIURLString = "https://retired-sidecar.test"
+            registry.update(account)
+            try keychain.save("legacy-test-key", forKey: .officialAPIKey, scope: server.absoluteString)
+            let headers = [CustomHeader(name: "X-Test-Server", value: server.host!)]
+            try keychain.save(try XCTUnwrap(headers.encodedForStorage()), forKey: .customHeaders, scope: server.absoluteString)
+            HTTPCookieStorage.shared.setCookie(try makeSessionCookie(for: server, value: "direct-test-cookie"))
         }
-        let officialStore = OfficialContinuityConfigurationStore(factory: officialFactory)
-        MockURLProtocol.requestHandler = { request in
-            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization")?.hasPrefix("Bearer "), true)
-            if request.url?.path == "/health" {
-                return apiTestJSONResponse(#"{"status":"ok"}"#, for: request)
-            }
-            return apiTestJSONResponse(Self.officialCapabilitiesJSON, for: request)
-        }
-        let webUIClient = MockAuthAPIClient(authStatus: AuthStatusResponse(authEnabled: false))
+        try keychain.save(a.absoluteString, forKey: .serverURL)
+        let headers = CustomHeaderStore()
         let manager = AuthManager(
             keychain: keychain,
-            clientFactory: { _ in webUIClient },
-            probeClientFactory: { _, _ in webUIClient },
-            serverRegistry: registry,
-            officialStore: officialStore,
-            officialClientFactory: officialFactory
+            clientFactory: { _ in
+                XCTFail("Restoring or switching a direct account must not probe a retired sidecar")
+                return MockAuthAPIClient(authStatus: AuthStatusResponse(authEnabled: false))
+            },
+            headerStore: headers,
+            serverRegistry: registry
         )
 
-        await manager.configure(serverURLString: "https://a.test", password: "")
-        await manager.testAndSaveOfficialContinuity(
-            officialURLString: "https://official-a.test",
-            apiKey: "secret-a"
-        )
-        XCTAssertEqual(
-            keychain.scopedValue(.officialAPIKey, scope: "https://a.test"),
-            "secret-a"
-        )
-        XCTAssertEqual(registry.activeServer?.officialAPIURLString, "https://official-a.test")
-
-        let addBOutcome = await manager.addServer(serverURLString: "https://b.test", password: "")
-        XCTAssertEqual(
-            addBOutcome,
-            .added(try XCTUnwrap(URL(string: "https://b.test")))
-        )
-        await manager.testAndSaveOfficialContinuity(
-            officialURLString: "https://official-b.test",
-            apiKey: "secret-b"
-        )
-        XCTAssertEqual(
-            keychain.scopedValue(.officialAPIKey, scope: "https://b.test"),
-            "secret-b"
-        )
-
-        let aAccount = try XCTUnwrap(registry.servers.first { $0.id == "https://a.test" })
-        manager.switchActiveServer(to: aAccount)
-        XCTAssertEqual(officialStore.client(for: try XCTUnwrap(URL(string: "https://a.test")))?.baseURL.host, "official-a.test")
-
-        manager.disableOfficialContinuity()
-        XCTAssertNil(keychain.scopedValue(.officialAPIKey, scope: "https://a.test"))
-        XCTAssertNil(officialStore.client(for: try XCTUnwrap(URL(string: "https://a.test"))))
-        XCTAssertEqual(keychain.scopedValue(.officialAPIKey, scope: "https://b.test"), "secret-b")
-        XCTAssertEqual(officialStore.client(for: try XCTUnwrap(URL(string: "https://b.test")))?.baseURL.host, "official-b.test")
-    }
-
-    func testInvalidOfficialContinuityProbeDoesNotPersistConfiguration() async throws {
-        let keychain = InMemoryKeychainStore()
-        let registry = ServerRegistry.inMemory(keychain: keychain)
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [MockURLProtocol.self]
-        let session = URLSession(configuration: configuration)
-        let factory: @Sendable (URL, String) -> OfficialHermesContinuityClient = { url, key in
-            OfficialHermesContinuityClient(baseURL: url, session: session, customHeaderProvider: {
-                [CustomHeader(name: "Authorization", value: "Bearer \(key)")]
-            })
+        XCTAssertEqual(manager.state, .loggedIn(server: a))
+        XCTAssertEqual(headers.snapshot().first?.value, "a.test")
+        manager.switchActiveServer(to: try XCTUnwrap(registry.servers.first { $0.id == b.absoluteString }))
+        XCTAssertEqual(manager.state, .loggedIn(server: b))
+        XCTAssertEqual(headers.snapshot().first?.value, "b.test")
+        XCTAssertEqual(registry.servers.count, 2)
+        for server in [a, b] {
+            XCTAssertEqual(keychain.scopedValue(.officialAPIKey, scope: server.absoluteString), "legacy-test-key")
+            XCTAssertEqual(registry.servers.first { $0.id == server.absoluteString }?.officialAPIURLString, "https://retired-sidecar.test")
+            XCTAssertEqual(HTTPCookieStorage.shared.cookies(for: server)?.first?.value, "direct-test-cookie")
         }
-        let officialStore = OfficialContinuityConfigurationStore(factory: factory)
-        MockURLProtocol.requestHandler = { request in
-            if request.url?.path == "/health" {
-                return apiTestJSONResponse(#"{"status":"ok"}"#, for: request)
-            }
-            return apiTestJSONResponse(#"{"features":{},"endpoints":{}}"#, for: request)
-        }
-        let manager = AuthManager(
-            keychain: keychain,
-            clientFactory: { _ in MockAuthAPIClient(authStatus: AuthStatusResponse(authEnabled: false)) },
-            serverRegistry: registry,
-            officialStore: officialStore,
-            officialClientFactory: factory
-        )
-        await manager.configure(serverURLString: "https://a.test", password: "")
-
-        await manager.testAndSaveOfficialContinuity(
-            officialURLString: "https://official-a.test",
-            apiKey: "rejected-secret"
-        )
-
-        XCTAssertNil(keychain.scopedValue(.officialAPIKey, scope: "https://a.test"))
-        XCTAssertNil(registry.activeServer?.officialAPIURLString)
-        XCTAssertNil(officialStore.client(for: try XCTUnwrap(URL(string: "https://a.test"))))
-        XCTAssertNotNil(manager.lastErrorMessage)
     }
 
     /// Builds a manager with two registered servers: `a.test` signed in + active,

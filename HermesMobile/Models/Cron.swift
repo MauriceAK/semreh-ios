@@ -59,6 +59,7 @@ struct CronJob: Decodable, Equatable, Identifiable {
     let provider: String?
     let profile: String?
     let toastNotifications: Bool?
+    let latestExecution: DirectCronExecution?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -81,6 +82,7 @@ struct CronJob: Decodable, Equatable, Identifiable {
         case provider
         case profile
         case toastNotifications
+        case latestExecution
     }
 
     init(from decoder: Decoder) throws {
@@ -105,6 +107,7 @@ struct CronJob: Decodable, Equatable, Identifiable {
         provider = container.decodeLossyStringIfPresent(forKey: .provider)
         profile = container.decodeLossyStringIfPresent(forKey: .profile)
         toastNotifications = container.decodeLossyBoolIfPresent(forKey: .toastNotifications)
+        latestExecution = try container.decodeIfPresent(DirectCronExecution.self, forKey: .latestExecution)
     }
 
     var displayName: String {
@@ -160,6 +163,25 @@ struct CronJob: Decodable, Equatable, Identifiable {
     private var isRecurring: Bool {
         schedule?.kind == "cron" || schedule?.kind == "interval"
     }
+}
+
+struct DirectCronExecution: Decodable, Equatable {
+    let status: String?
+    let startedAt: CronDateValue?
+
+    func runningElapsed(now: Date = Date()) -> Double? {
+        guard status == "running", let startedAt else { return nil }
+        return max(0, now.timeIntervalSince(startedAt.date))
+    }
+}
+
+struct DirectCronRun: Decodable, Equatable, Identifiable {
+    let id: String?
+    let profile: String?
+    let title: String?
+    let startedAt: CronDateValue?
+    let endedAt: CronDateValue?
+    let isActive: Bool?
 }
 
 struct CronSchedule: Decodable, Equatable {

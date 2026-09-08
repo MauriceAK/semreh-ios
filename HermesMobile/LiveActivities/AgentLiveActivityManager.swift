@@ -32,6 +32,9 @@ struct OrphanedLiveActivity: Equatable {
 @MainActor
 protocol AgentLiveActivityManaging: AnyObject {
     func start(sessionID: String, sessionTitle: String, streamID: String?)
+    func startDirect(owner: UUID, sessionID: String, sessionTitle: String)
+    @discardableResult
+    func endDirect(owner: UUID, status: AgentRunActivityStatus, activity: String, errorSummary: String?) -> Bool
     func update(_ event: AgentLiveActivityEvent)
     func markStale()
     func end(status: AgentRunActivityStatus, activity: String, errorSummary: String?)
@@ -48,6 +51,12 @@ protocol AgentLiveActivityManaging: AnyObject {
 }
 
 extension AgentLiveActivityManaging {
+    func startDirect(owner: UUID, sessionID: String, sessionTitle: String) {
+        start(sessionID: sessionID, sessionTitle: sessionTitle, streamID: nil)
+    }
+    /// Non-ActivityKit clients must explicitly implement ownership before recovery can end a run.
+    @discardableResult
+    func endDirect(owner: UUID, status: AgentRunActivityStatus, activity: String, errorSummary: String?) -> Bool { false }
     // Defaults so test spies and non-ActivityKit conformers don't have to care
     // about reconciliation; the real manager overrides both.
     func orphanedActivities() -> [OrphanedLiveActivity] { [] }
@@ -64,6 +73,7 @@ final class AgentLiveActivityManager: AgentLiveActivityManaging {
     private var currentState: AgentRunActivityAttributes.ContentState?
     private var currentSessionID: String?
     private var currentStreamID: String?
+    private var directOwner: UUID?
     // StreamID of the run whose SSE is live in THIS process right now: set when the
     // coordinator (re)connects (`start`), cleared the moment it suspends/hits trouble
     // (`markStale`) or finalizes (`end`/`reset`). The orphan reconciler skips it so a
@@ -83,6 +93,7 @@ final class AgentLiveActivityManager: AgentLiveActivityManaging {
     }
 
     func start(sessionID: String, sessionTitle: String, streamID: String?) {
+        directOwner = nil
         let normalizedSessionID = sessionID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedSessionID.isEmpty else { return }
         let normalizedStreamID = AgentLiveActivityReusePolicy.normalizedStreamID(streamID)
@@ -190,6 +201,18 @@ final class AgentLiveActivityManager: AgentLiveActivityManaging {
         }
     }
 
+    func startDirect(owner: UUID, sessionID: String, sessionTitle: String) {
+        start(sessionID: sessionID, sessionTitle: sessionTitle, streamID: nil)
+        directOwner = owner
+    }
+
+    @discardableResult
+    func endDirect(owner: UUID, status: AgentRunActivityStatus, activity: String, errorSummary: String?) -> Bool {
+        guard directOwner == owner, currentState?.isFinal == false else { return false }
+        end(status: status, activity: activity, errorSummary: errorSummary)
+        return true
+    }
+
     func markStale() {
         // Suspended / troubled: the live SSE no longer owns completion, so the
         // stream is eligible for server-truth reconciliation again (PR #266 #3).
@@ -202,6 +225,7 @@ final class AgentLiveActivityManager: AgentLiveActivityManaging {
     }
 
     func end(status: AgentRunActivityStatus, activity activityLine: String, errorSummary: String? = nil) {
+        directOwner = nil
         // The run is finalizing — drop the live-connection claim (PR #266 #3).
         activeConnectedStreamID = nil
         guard let currentState else { return }
@@ -461,7 +485,7 @@ final class AgentLiveActivityManager: AgentLiveActivityManaging {
         switch status {
         case .complete:
             .after(Date().addingTimeInterval(300))
-        case .failed, .cancelled:
+        case .failed, .cancelled, .ended:
             .after(Date().addingTimeInterval(30))
         default:
             .default

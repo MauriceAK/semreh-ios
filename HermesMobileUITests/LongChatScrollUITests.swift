@@ -500,6 +500,15 @@ final class LongChatScrollUITests: XCTestCase {
         XCTAssertTrue(acknowledgement.exists && acknowledgement.isHittable)
         attachScreenshot(named: "live-production-chat-success")
 
+        if environment["SEMREH_SLICE4_BRANCH_UI"] == "1" {
+            guard stockBackend else {
+                XCTFail("Slice 4 branch UI requires the pinned stock backend.")
+                return
+            }
+            exerciseOptInDirectBranchFlow(app: app, parentComposer: composer)
+            return
+        }
+
         if environment["SEMREH_SLICE3_ATTACHMENT_UI"] == "1" {
             guard stockBackend else {
                 XCTFail("Slice 3 attachment UI requires the pinned stock backend.")
@@ -547,6 +556,83 @@ final class LongChatScrollUITests: XCTestCase {
                           message: "The TUI-created assistant reply must also be visible.")
             attachScreenshot(named: "live-tui-created-session-in-semreh")
         }
+    }
+
+    @MainActor
+    private func exerciseOptInDirectBranchFlow(
+        app: XCUIApplication,
+        parentComposer: XCUIElement
+    ) {
+        let parentIdentifier = parentComposer.identifier
+        XCTAssertTrue(parentIdentifier.hasPrefix("chat-detail:"))
+
+        parentComposer.tap()
+        parentComposer.typeText("/branch")
+        let send = app.buttons["Send"]
+        assertHittable(send, timeout: 10, message: "The production composer must allow the branch command.")
+        send.tap()
+
+        let deadline = Date().addingTimeInterval(45)
+        var childComposer: XCUIElement?
+        repeat {
+            childComposer = app.textViews.matching(
+                NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
+            ).allElementsBoundByIndex.first {
+                $0.exists && $0.isHittable && $0.identifier != parentIdentifier
+            }
+            if childComposer != nil { break }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        } while Date() < deadline
+        guard let childComposer else {
+            XCTFail("The branch command must navigate to a distinct retained child chat.")
+            return
+        }
+
+        let copiedDeadline = Date().addingTimeInterval(20)
+        var copiedAcknowledgement: XCUIElement?
+        repeat {
+            copiedAcknowledgement = app.staticTexts.matching(
+                NSPredicate(format: "label == %@", slice1Acknowledgement)
+            ).allElementsBoundByIndex.first { $0.exists && $0.isHittable }
+            if copiedAcknowledgement != nil { break }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        } while Date() < copiedDeadline
+        XCTAssertNotNil(copiedAcknowledgement, "The child must display the copied parent acknowledgement.")
+        attachScreenshot(named: "slice4-branch-child-copied-history")
+
+        let childPrompt = "SEMREH_SLICE4_BRANCH_CHILD_\(UUID().uuidString)"
+        childComposer.tap()
+        childComposer.typeText(childPrompt)
+        assertHittable(send, timeout: 10, message: "The retained child composer must allow an independent turn.")
+        send.tap()
+        let childPromptElement = app.staticTexts.matching(
+            NSPredicate(format: "label == %@", childPrompt)
+        ).firstMatch
+        assertHittable(childPromptElement, timeout: 20, message: "The exact child-only prompt must appear.")
+        XCTAssertNotNil(
+            waitForVisibleAcknowledgement(below: childPromptElement, app: app),
+            "The child-only turn must complete with exactly one visible fixture acknowledgement."
+        )
+        attachScreenshot(named: "slice4-branch-child-independent-turn")
+
+        let back = app.buttons["BackButton"]
+        assertHittable(back, timeout: 10, message: "The child chat must provide production back navigation.")
+        back.tap()
+        let parentPrompt = app.staticTexts.matching(
+            NSPredicate(format: "label == %@", "SEMREH_SLICE1_PROMPT")
+        ).firstMatch
+        assertHittable(parentPrompt, timeout: 20, message: "Back navigation must restore the parent transcript.")
+        XCTAssertFalse(
+            app.staticTexts.matching(NSPredicate(format: "label == %@", childPrompt))
+                .allElementsBoundByIndex.contains { $0.exists && $0.isHittable },
+            "The independent child prompt must not appear in the parent transcript."
+        )
+        XCTAssertTrue(
+            app.staticTexts.matching(NSPredicate(format: "label == %@", slice1Acknowledgement))
+                .allElementsBoundByIndex.contains { $0.exists && $0.isHittable },
+            "The parent acknowledgement must remain visible and unchanged."
+        )
+        attachScreenshot(named: "slice4-branch-parent-unchanged")
     }
 
     @MainActor
@@ -1858,19 +1944,33 @@ final class LongChatScrollUITests: XCTestCase {
         ).firstMatch
         let deadline = Date().addingTimeInterval(45)
         while !sessions.exists && !chat.exists && Date() < deadline {
+            dismissKnownPasswordSavePrompt(app: app, timeout: 0)
             RunLoop.main.run(until: Date().addingTimeInterval(0.1))
         }
+        // The password sheet can arrive after the authenticated destination has
+        // already appeared in the hierarchy. Resolve that known overlay before
+        // evaluating navigation hittability.
+        dismissKnownPasswordSavePrompt(app: app)
         guard sessions.exists || chat.exists else {
             XCTFail("Successful login must expose Sessions or a known restored chat detail.")
             return
         }
-        guard chat.exists else { return }
+        guard chat.exists else {
+            XCTAssertTrue(sessions.isHittable, "The Sessions destination must be hittable after login.")
+            return
+        }
 
         let backButton = app.navigationBars.buttons["BackButton"]
         XCTAssertTrue(
             backButton.waitForExistence(timeout: 5),
             "A restored chat detail must expose its known NavigationStack BackButton."
         )
+        let navigationDeadline = Date().addingTimeInterval(5)
+        while !backButton.isHittable && Date() < navigationDeadline {
+            dismissKnownPasswordSavePrompt(app: app, timeout: 0)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        }
+        dismissKnownPasswordSavePrompt(app: app, timeout: 0)
         XCTAssertTrue(backButton.isHittable, "The restored chat BackButton must be hittable.")
         guard backButton.exists && backButton.isHittable else { return }
         backButton.tap()
@@ -1881,6 +1981,7 @@ final class LongChatScrollUITests: XCTestCase {
         )
         wait(for: [leftChat], timeout: 10)
         XCTAssertFalse(chat.exists, "BackButton must return from the restored chat detail to the shell.")
+        dismissKnownPasswordSavePrompt(app: app)
     }
 
     private func prepareNormalSignIn(app: XCUIApplication) {
@@ -1942,17 +2043,34 @@ final class LongChatScrollUITests: XCTestCase {
         field.typeText(value)
     }
 
-    private func dismissKnownPasswordSavePrompt(app: XCUIApplication) {
-        for title in ["Save Password?", "Save This Password?"] {
-            // iOS can present this as a remote sheet, not an AX alert.
-            let prompt = app.staticTexts[title]
-            if prompt.waitForExistence(timeout: 1) {
-                let notNow = app.buttons["Not Now"]
-                XCTAssertTrue(notNow.exists)
-                notNow.tap()
-                return
+    private func dismissKnownPasswordSavePrompt(app: XCUIApplication, timeout: TimeInterval = 2) {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            for title in ["Save Password?", "Save This Password?"] {
+                // The captured iOS hierarchy exposes a remote Sheet titled
+                // "Save Password?". Scope Not Now to that exact known surface;
+                // an unrelated alert or button must never be dismissed.
+                for prompt in [app.sheets[title], app.alerts[title]] where prompt.exists {
+                    let notNow = prompt.buttons["Not Now"]
+                    let hittable = XCTNSPredicateExpectation(
+                        predicate: NSPredicate(format: "exists == true AND hittable == true"),
+                        object: notNow
+                    )
+                    XCTAssertEqual(XCTWaiter.wait(for: [hittable], timeout: 5), .completed,
+                                   "The known password-save prompt must expose a hittable Not Now button.")
+                    guard notNow.exists && notNow.isHittable else { return }
+                    notNow.tap()
+                    let dismissed = XCTNSPredicateExpectation(
+                        predicate: NSPredicate(format: "exists == false"), object: prompt
+                    )
+                    XCTAssertEqual(XCTWaiter.wait(for: [dismissed], timeout: 5), .completed,
+                                   "Not Now must dismiss the known password-save prompt.")
+                    return
+                }
             }
-        }
+            guard Date() < deadline else { return }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        } while Date() < deadline
     }
 
     private struct DisposableCredentials: Decodable {

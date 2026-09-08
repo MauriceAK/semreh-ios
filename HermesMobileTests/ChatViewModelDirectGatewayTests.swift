@@ -475,6 +475,54 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         await runtime.stop()
     }
 
+    func testSceneActivationDiscoversExternalDirectRunAndRoutesItsEvents() async throws {
+        let fake = ChatDirectFakeTransport()
+        fake.setResumeResponse(.object([
+            "session_id": .string("runtime-1"),
+            "session_key": .string("durable-1"),
+            "running": .bool(true)
+        ]))
+        let runtime = try makeRuntime(fake)
+        let requests = ChatDirectRequestRecorder()
+        let client = makeClient { request in
+            requests.append(request.url?.path ?? "nil")
+            guard request.url?.path == "/api/sessions/durable-1/messages" else {
+                XCTFail("External-run discovery must use direct canonical history")
+                throw URLError(.badURL)
+            }
+            return apiTestJSONResponse(
+                #"{"session_id":"durable-1","messages":[{"id":1,"role":"user","content":"Work externally","timestamp":1},{"id":2,"role":"assistant","content":"Latest external progress","timestamp":2}],"pagination":{"limit":120,"offset":0,"order":"latest","returned":2}}"#,
+                for: request
+            )
+        }
+        let viewModel = makeViewModel(client: client, runtime: runtime, sessionID: "durable-1")
+
+        await viewModel.refreshAfterSceneActivation()
+
+        XCTAssertEqual(requests.values(), ["/api/sessions/durable-1/messages"])
+        XCTAssertEqual(fake.calls().filter { $0.method == "session.resume" }.count, 1)
+        XCTAssertFalse(fake.calls().contains { $0.method == "session.create" || $0.method == "prompt.submit" })
+        XCTAssertEqual(viewModel.messages.compactMap(\.content), ["Work externally", "Latest external progress"])
+        XCTAssertEqual(viewModel.activeStreamID, "direct-run:durable-1")
+        XCTAssertFalse(viewModel.isActiveStreamConnectionSuspended)
+
+        fake.emit(ChatDirectEventFactory.event(
+            sessionID: "other-runtime", type: "message.delta", sequence: 1,
+            payload: ["text": .string("Sibling-only token")]
+        ))
+        fake.emit(ChatDirectEventFactory.event(
+            sessionID: "runtime-1", type: "message.delta", sequence: 2,
+            payload: ["text": .string("External stream continues")]
+        ))
+        await waitUntil { viewModel.messages.contains { $0.content?.contains("External stream continues") == true } }
+
+        XCTAssertTrue(viewModel.messages.contains { $0.content == "Work externally" })
+        XCTAssertFalse(viewModel.messages.contains { $0.content?.contains("Sibling-only token") == true })
+        XCTAssertEqual(requests.values(), ["/api/sessions/durable-1/messages"])
+        await viewModel.disposeDirectConversation()
+        await runtime.stop()
+    }
+
     func testLocalDraftLoadDoesNotCreateOrCallREST() async throws {
         let fake = ChatDirectFakeTransport()
         let runtime = try makeRuntime(fake)
@@ -585,6 +633,224 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         XCTAssertTrue(viewModel.liveToolCalls.isEmpty)
         XCTAssertTrue(viewModel.completedReasoningGroups.isEmpty)
         XCTAssertTrue(viewModel.completedToolCallGroups.isEmpty)
+        await viewModel.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testDirectCompressSlashCommandUsesGatewayAndReportsNoop() async throws {
+        let fake = ChatDirectFakeTransport()
+        fake.setResumeResponse(.object(["session_id": .string("runtime-parent"), "session_key": .string("parent")]))
+        fake.setCompressResponse(.object([
+            "status": .string("compressed"),
+            "summary": .object(["noop": .bool(true), "aborted": .bool(false)]),
+            "info": .object(["stored_session_id": .string("parent"), "profile_name": .string("work")])
+        ]))
+        let runtime = try makeRuntime(fake)
+        let client = makeClient { request in
+            XCTAssertEqual(request.url?.path, "/api/sessions/parent/messages")
+            return apiTestJSONResponse(#"{"session_id":"parent","messages":[],"pagination":{"limit":120,"offset":0,"order":"latest","returned":0}}"#, for: request)
+        }
+        let viewModel = makeViewModel(client: client, runtime: runtime, sessionID: "parent")
+        let command = try XCTUnwrap(SlashCommandCatalog.command(named: "compress"))
+        let result = await viewModel.executeSlashCommand(command)
+        guard case .executed(let message) = result else {
+            XCTFail("Expected direct compression outcome")
+            await runtime.stop()
+            return
+        }
+        XCTAssertEqual(message, "No changes from compression.")
+        XCTAssertEqual(fake.calls().filter { $0.method == "session.compress" }.count, 1)
+        XCTAssertEqual(fake.calls().filter { $0.method == "session.resume" }.count, 1)
+        XCTAssertFalse(viewModel.isCompressingSession)
+        await viewModel.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testDirectBranchTransfersBoundChildWithoutResumingParentOrChild() async throws {
+        let fake = ChatDirectFakeTransport()
+        fake.setResumeResponse(.object([
+            "session_id": .string("runtime-parent"),
+            "session_key": .string("parent")
+        ]))
+        fake.setBranchResponse(.object([
+            "session_id": .string("runtime-child"),
+            "stored_session_id": .string("child"),
+            "parent": .string("parent"),
+            "message_count": .number(2),
+            "info": .object(["profile_name": .string("work")])
+        ]))
+        let runtime = try makeRuntime(fake)
+        let requestedPaths = ChatDirectRequestRecorder()
+        let client = makeClient { request in
+            let path = request.url?.path ?? "nil"
+            requestedPaths.append(path)
+            if path == "/api/sessions/parent/messages" || path == "/api/sessions/child/messages" {
+                let id = path.contains("/child/") ? "child" : "parent"
+                let messages = id == "parent"
+                    ? #"[{"id":"parent-user","role":"user","content":"Parent question"},{"id":"parent-assistant","role":"assistant","content":"Parent answer"}]"#
+                    : #"[{"id":"child-user","role":"user","content":"Parent question"},{"id":"child-assistant","role":"assistant","content":"Parent answer"}]"#
+                return apiTestJSONResponse(
+                    #"{"session_id":"\#(id)","messages":\#(messages),"pagination":{"limit":120,"offset":0,"order":"desc","returned":2}}"#,
+                    for: request
+                )
+            }
+            guard path == "/api/sessions/child" else {
+                XCTFail("Unexpected direct branch path: \(path)")
+                throw URLError(.badURL)
+            }
+            return apiTestJSONResponse(
+                #"{"id":"child","profile":"work","title":"Child branch","message_count":2}"#,
+                for: request
+            )
+        }
+        let parentViewModel = makeViewModel(client: client, runtime: runtime, sessionID: "parent")
+        await parentViewModel.loadMessages()
+
+        let branchCommand = try XCTUnwrap(SlashCommandCatalog.command(named: "branch"))
+        let result = await parentViewModel.executeSlashCommand(branchCommand)
+        guard case .openedDirectBranch(let handoff) = result else {
+            XCTFail("Direct branch should return an owned handoff")
+            await runtime.stop()
+            return
+        }
+
+        XCTAssertEqual(handoff.session.sessionId, "child")
+        XCTAssertEqual(handoff.session.profile, "work")
+        XCTAssertEqual(handoff.origin, testServer)
+        XCTAssertEqual(handoff.profile, "work")
+        XCTAssertEqual(fake.calls().filter { $0.method == "session.resume" }.count, 1)
+        XCTAssertEqual(fake.calls().filter { $0.method == "session.branch" }.count, 1)
+
+        await handoff.viewModel.loadMessages()
+        XCTAssertEqual(fake.calls().filter { $0.method == "session.resume" }.count, 1)
+        XCTAssertEqual(parentViewModel.messages.map(\.content), ["Parent question", "Parent answer"])
+        XCTAssertEqual(handoff.viewModel.messages.map(\.content), ["Parent question", "Parent answer"])
+        XCTAssertFalse(parentViewModel.messages.contains { $0.messageId == "child-user" })
+        XCTAssertTrue(requestedPaths.values().contains("/api/sessions/child"))
+
+        await parentViewModel.disposeDirectConversation()
+        await handoff.viewModel.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testDirectBranchRejectsDetailIdentityMismatchWithoutHandoff() async throws {
+        let fake = ChatDirectFakeTransport()
+        fake.setResumeResponse(.object([
+            "session_id": .string("runtime-parent"),
+            "session_key": .string("parent")
+        ]))
+        fake.setBranchResponse(.object([
+            "session_id": .string("runtime-child"),
+            "stored_session_id": .string("child"),
+            "parent": .string("parent"),
+            "message_count": .number(2),
+            "info": .object(["profile_name": .string("work")])
+        ]))
+        let runtime = try makeRuntime(fake)
+        let client = makeClient { request in
+            let path = request.url?.path ?? "nil"
+            if path.hasSuffix("/messages") {
+                let id = path.contains("/child/") ? "child" : "parent"
+                return apiTestJSONResponse(
+                    #"{"session_id":"\#(id)","messages":[],"pagination":{"limit":120,"offset":0,"order":"desc","returned":0}}"#,
+                    for: request
+                )
+            }
+            guard path == "/api/sessions/child" else {
+                XCTFail("Unexpected direct branch path: \(path)")
+                throw URLError(.badURL)
+            }
+            return apiTestJSONResponse(
+                #"{"id":"other-child","profile":"work","title":"Wrong child"}"#,
+                for: request
+            )
+        }
+        let parentViewModel = makeViewModel(client: client, runtime: runtime, sessionID: "parent")
+        await parentViewModel.loadMessages()
+
+        let result = await parentViewModel.branchDirectConversation()
+        guard case .unsupported = result else {
+            XCTFail("A detail identity mismatch must not produce a child handoff")
+            await runtime.stop()
+            return
+        }
+        XCTAssertEqual(fake.calls().filter { $0.method == "session.resume" }.count, 1)
+        XCTAssertEqual(fake.calls().filter { $0.method == "session.branch" }.count, 1)
+        XCTAssertTrue(parentViewModel.messages.isEmpty)
+
+        await parentViewModel.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testDirectBranchColdParentResumesBeforeBranchWithoutPreload() async throws {
+        let fake = ChatDirectFakeTransport()
+        fake.setResumeResponse(.object([
+            "session_id": .string("runtime-parent"),
+            "session_key": .string("parent")
+        ]))
+        fake.setBranchResponse(.object([
+            "session_id": .string("runtime-child"),
+            "stored_session_id": .string("child"),
+            "parent": .string("parent"),
+            "message_count": .number(2),
+            "info": .object(["profile_name": .string("work")])
+        ]))
+        let runtime = try makeRuntime(fake)
+        let client = makeClient { request in
+            let path = request.url?.path ?? "nil"
+            if path.hasSuffix("/messages") {
+                let id = path.contains("/child/") ? "child" : "parent"
+                return apiTestJSONResponse(
+                    #"{"session_id":"\#(id)","messages":[],"pagination":{"limit":120,"offset":0,"order":"desc","returned":0}}"#,
+                    for: request
+                )
+            }
+            guard path == "/api/sessions/child" else {
+                XCTFail("Unexpected cold branch path: \(path)")
+                throw URLError(.badURL)
+            }
+            return apiTestJSONResponse(
+                #"{"id":"child","profile":"work","title":"Cold child","message_count":2}"#,
+                for: request
+            )
+        }
+        let parentViewModel = makeViewModel(client: client, runtime: runtime, sessionID: "parent")
+
+        let result = await parentViewModel.branchDirectConversation()
+        guard case .openedDirectBranch(let handoff) = result else {
+            XCTFail("A cold retained chat should resume before branching")
+            await runtime.stop()
+            return
+        }
+        XCTAssertEqual(fake.calls().filter { $0.method == "session.resume" }.count, 1)
+        XCTAssertEqual(fake.calls().filter { $0.method == "session.branch" }.count, 1)
+        XCTAssertEqual(handoff.session.sessionId, "child")
+
+        await parentViewModel.disposeDirectConversation()
+        await handoff.viewModel.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testDirectNamedBranchIsExplicitlyUnsupportedUntilNameIsWired() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let viewModel = makeViewModel(
+            client: makeClient { _ in
+                XCTFail("A named branch must be rejected before RPC")
+                throw URLError(.badURL)
+            },
+            runtime: runtime,
+            sessionID: "parent"
+        )
+
+        let result = await viewModel.branchDirectConversation(name: "named child")
+        guard case .unsupported(let message) = result else {
+            XCTFail("Named branch must not be silently ignored")
+            await runtime.stop()
+            return
+        }
+        XCTAssertTrue(message.contains("Named direct branches"))
+        XCTAssertTrue(fake.calls().isEmpty)
         await viewModel.disposeDirectConversation()
         await runtime.stop()
     }
@@ -2217,6 +2483,8 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
             "reasoning_effort": .string("medium")
         ])
     ])
+    private var branchResponse: JSONValue?
+    private var compressResponse: JSONValue?
     private var reasoningGetResponse: JSONValue = .object([
         "value": .string("medium"),
         "display": .string("show"),
@@ -2258,6 +2526,14 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
 
     func setResumeResponse(_ response: JSONValue) {
         withLock { resumeResponse = response }
+    }
+
+    func setBranchResponse(_ response: JSONValue) {
+        withLock { branchResponse = response }
+    }
+
+    func setCompressResponse(_ response: JSONValue) {
+        withLock { compressResponse = response }
     }
 
     func setReasoningGetResponse(_ response: JSONValue) {
@@ -2372,6 +2648,10 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
                 ]), nil, nil, false, nil, nil)
             case "session.resume", "session.info":
                 return (resumeResponse, nil, nil, false, nil, nil)
+            case "session.branch":
+                return (branchResponse ?? .object([:]), nil, nil, false, nil, nil)
+            case "session.compress":
+                return (compressResponse ?? .object([:]), nil, nil, false, nil, nil)
             case "config.get":
                 return (reasoningGetResponse, nil, nil, false, nil, nil)
             case "config.set":

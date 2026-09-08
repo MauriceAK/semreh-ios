@@ -50,8 +50,6 @@ final class AuthManager {
     private let headerStore: CustomHeaderStore
     private let logoutTimeout: Duration
     private let serverRegistry: ServerRegistry
-    private let officialStore: OfficialContinuityConfigurationStore
-    private let officialClientFactory: @Sendable (URL, String) -> OfficialHermesContinuityClient
     /// Structured expiry can arrive from a request started before a fresh login.
     /// Validate the current cookie first, and bind the result to this auth epoch.
     private var authEpoch = 0
@@ -68,13 +66,7 @@ final class AuthManager {
         },
         headerStore: CustomHeaderStore = .shared,
         logoutTimeout: Duration = .seconds(5),
-        serverRegistry: ServerRegistry = .shared,
-        officialStore: OfficialContinuityConfigurationStore = .shared,
-        officialClientFactory: @escaping @Sendable (URL, String) -> OfficialHermesContinuityClient = { url, key in
-            OfficialHermesContinuityClient(baseURL: url, customHeaderProvider: {
-                [CustomHeader(name: "Authorization", value: "Bearer \(key)")]
-            })
-        }
+        serverRegistry: ServerRegistry = .shared
     ) {
         self.keychain = keychain
         self.clientFactory = clientFactory
@@ -82,8 +74,6 @@ final class AuthManager {
         self.headerStore = headerStore
         self.logoutTimeout = logoutTimeout
         self.serverRegistry = serverRegistry
-        self.officialStore = officialStore
-        self.officialClientFactory = officialClientFactory
         restoreSavedServer()
         refreshServers()
     }
@@ -463,7 +453,6 @@ final class AuthManager {
     private func clearLocalArtifacts(for server: URL) {
         try? keychain.delete(.customHeaders, scope: server.absoluteString)
         try? keychain.delete(.officialAPIKey, scope: server.absoluteString)
-        officialStore.remove(primaryURL: server)
         clearSessionCookies(for: server)
     }
 
@@ -644,7 +633,6 @@ final class AuthManager {
         serverRegistry.forgetActiveServer()
         refreshServers()
         headerStore.replace(with: [])
-        if let server { officialStore.remove(primaryURL: server) }
         // Drop the App Intents profile picker cache (#339) so a signed-out user doesn't see
         // the previous server's profiles lingering in Shortcuts / Siri.
         ProfileEntityCache.shared.save([])
@@ -726,38 +714,6 @@ final class AuthManager {
         // request after launch carries the saved headers (#255/#16).
         hydrateCustomHeaders(for: savedURL)
         state = .loggedIn(server: savedURL)
-    }
-
-    func testAndSaveOfficialContinuity(officialURLString: String, apiKey: String) async {
-        guard let primary = state.server,
-              !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            lastErrorMessage = String(localized: "Enter an official API URL and API key.")
-            return
-        }
-        do {
-            let officialURL = try Self.normalizedServerURL(from: officialURLString)
-            let client = officialClientFactory(officialURL, apiKey)
-            try await client.probeSessionContinuity()
-            try keychain.save(apiKey, forKey: .officialAPIKey, scope: primary.absoluteString)
-            officialStore.configure(primaryURL: primary, officialURL: officialURL, bearerKey: apiKey)
-            if var account = serverRegistry.activeServer {
-                account.officialAPIURLString = officialURL.absoluteString
-                serverRegistry.update(account)
-                refreshServers()
-            }
-            lastErrorMessage = nil
-        } catch { lastErrorMessage = error.localizedDescription }
-    }
-
-    func disableOfficialContinuity() {
-        guard let primary = state.server else { return }
-        try? keychain.delete(.officialAPIKey, scope: primary.absoluteString)
-        officialStore.remove(primaryURL: primary)
-        if var account = serverRegistry.activeServer {
-            account.officialAPIURLString = nil
-            serverRegistry.update(account)
-            refreshServers()
-        }
     }
 
     /// Direct Hermes auth relies on host-scoped Secure cookies. A configured

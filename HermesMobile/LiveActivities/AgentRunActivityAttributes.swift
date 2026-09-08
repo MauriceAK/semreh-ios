@@ -65,6 +65,8 @@ enum AgentRunActivityStatus: String, Codable, Hashable, CaseIterable {
     case complete
     case failed
     case cancelled
+    /// Canonical recovery confirmed idle, without evidence of how the run finished.
+    case ended
 
     var title: String {
         switch self {
@@ -92,6 +94,8 @@ enum AgentRunActivityStatus: String, Codable, Hashable, CaseIterable {
             String(localized: "Failed")
         case .cancelled:
             String(localized: "Cancelled")
+        case .ended:
+            String(localized: "Ended")
         }
     }
 
@@ -121,6 +125,8 @@ enum AgentRunActivityStatus: String, Codable, Hashable, CaseIterable {
             String(localized: "Fail")
         case .cancelled:
             String(localized: "Stop")
+        case .ended:
+            String(localized: "Ended")
         }
     }
 }

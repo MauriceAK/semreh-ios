@@ -13,9 +13,6 @@ extension APIClient {
     /// `archivedLimit` optionally caps how many archived rows the server appends
     /// (issue #17). Defaults keep today's request untouched.
     func sessions(includeArchived: Bool = false, archivedLimit: Int? = nil) async throws -> SessionsResponse {
-        if !includeArchived, await officialCapabilityValid() {
-            return try await officialSessionsResponse()
-        }
         return try await send(
             endpoint: .sessions(includeArchived: includeArchived, archivedLimit: archivedLimit),
             method: "GET"
@@ -36,14 +33,6 @@ extension APIClient {
         messageBefore: Int? = nil,
         expandRenderable: Bool = false
     ) async throws -> SessionResponse {
-        if await officialCapabilityValid() {
-            return try await officialSessionResponse(
-                id: id,
-                includeMessages: includeMessages,
-                messageLimit: messageLimit,
-                messageBefore: messageBefore
-            )
-        }
         return try await send(
             endpoint: .session(
                 id: id,
@@ -61,11 +50,6 @@ extension APIClient {
     }
 
     func createSession(workspace: String?, model: String?, modelProvider: String?, profile: String?) async throws -> SessionResponse {
-        if modelProvider == nil, profile == nil, await officialCapabilityValid() {
-            // Workspace/profile are not fields in the authoritative official
-            // create handler. The server owns canonical session placement.
-            return try await officialCreateSessionResponse(model: model)
-        }
         return try await send(
             endpoint: .newSession,
             method: "POST",

@@ -12,6 +12,11 @@ enum DirectSessionBranchError: Error, Equatable, Sendable {
     case invalidResponse
 }
 
+enum DirectSessionCompressionError: Error, Equatable, Sendable {
+    case outcomeUnknown
+    case invalidResponse
+}
+
 /// One conversation on the active server's shared socket. The view model owns
 /// rendering/cache; this owner owns identity and RPC delivery, never a socket.
 @MainActor
@@ -19,6 +24,7 @@ enum DirectSessionBranchError: Error, Equatable, Sendable {
 final class GatewayConversationController {
     enum RunState: Equatable { case idle, submitting, running, stopping, deliveryUnknown }
     enum SteerOutcome: String { case accepted, queued, rejected }
+    enum CompressionOutcome: Equatable { case compressed, unchanged, aborted, lockSkipped }
     struct ReasoningConfiguration: Equatable, Sendable {
         let effort: String
         let deferred: Bool
@@ -75,6 +81,9 @@ final class GatewayConversationController {
     var onEvent: ((HermesGatewayEvent) -> Void)?
     var onTranscript: ((DirectHermesTranscriptPage, Bool) -> Void)?
     var onResume: ((JSONValue?) -> Void)?
+    /// A reconnect verified canonical history and explicit idle for the unchanged run.
+    var onRecoveredIdle: ((String) -> Void)?
+    private var recoveredIdleCandidate: (lifecycle: Int, turn: Int, binding: GatewaySessionBinding, generation: Int, terminal: String?)?
     var onReasoningConfiguration: ((ReasoningConfiguration) -> Void)?
     var onError: ((Error) -> Void)?
     var isVisible = false
@@ -141,9 +150,22 @@ final class GatewayConversationController {
     private var recoveryPromptObservation: RecoveryPromptObservation?
     private var promptUncertaintyMarker: DirectPromptDeliveryUncertaintyMarker?
     private var promptUncertaintyLoadFailed = false
+    private var promptLineageResolutionFailed = false
+    private var lastClearedPromptUncertaintyMarker: DirectPromptDeliveryUncertaintyMarker?
     private var promptUncertaintyAbandonInFlight = false
+    /// Shared exclusion lease for branch and manual compression. Existing
+    /// mutation entrypoints already honor this lease; reads remain available.
     private var branchInFlight = false
     private(set) var branchOutcomeUnknown = false
+    /// Controller-lifetime quarantine only; history reads do not prove a lost
+    /// compression request has finished, and never authorize automatic retry.
+    private(set) var compressionOutcomeUnknown = false
+
+    /// Identity-only accessors used when ownership moves to a child
+    /// ChatViewModel. The shared runtime is never recreated or resumed.
+    var runtimeOrigin: URL { runtime.origin }
+    var sharedRuntime: HermesServerRuntime { runtime }
+    var isDisposed: Bool { disposed }
 
     init(
         runtime: HermesServerRuntime,
@@ -168,11 +190,14 @@ final class GatewayConversationController {
             self?.receive(event)
         }, recover: { [weak self] transport in
             guard let self, !self.disposed else { return }
+            self.recoveredIdleCandidate = nil
             // Fresh, unsent runtime sessions have no durable row to resume.
             self.invalidateBinding()
             if self.hasSubmittedPrompt, self.storedID != nil {
                 try await self.resume(using: transport)
             }
+        }, ready: { [weak self] in
+            self?.publishRecoveredIdleAfterEventDrain()
         })
     }
 
@@ -248,7 +273,7 @@ final class GatewayConversationController {
         do {
             promptUncertaintyMarker = try promptUncertaintyStore.load(for: identity)
             promptUncertaintyLoadFailed = false
-            hasAmbiguousPromptDelivery = promptUncertaintyMarker != nil
+            hasAmbiguousPromptDelivery = promptUncertaintyMarker != nil || promptLineageResolutionFailed
             promptDeliveryUncertaintyHasConfirmedAcceptance = false
         } catch {
             promptUncertaintyMarker = nil
@@ -259,6 +284,8 @@ final class GatewayConversationController {
     }
 
     private func persistPromptUncertaintyBeforeDispatch() throws -> DirectPromptDeliveryUncertaintyMarker {
+        guard !compressionOutcomeUnknown else { throw DirectSessionCompressionError.outcomeUnknown }
+        guard !promptLineageResolutionFailed else { throw DirectSessionError.ambiguousPrompt }
         guard let storedID else { throw DirectSessionError.invalidBinding }
         let identity: DirectPromptDeliveryUncertaintyIdentity
         do { identity = try promptUncertaintyIdentity(for: storedID) }
@@ -300,6 +327,10 @@ final class GatewayConversationController {
         retainBarrierOnFailure: Bool
     ) -> Bool {
         do {
+            guard !promptLineageResolutionFailed else {
+                promptDeliveryUncertaintyHasConfirmedAcceptance = !retainBarrierOnFailure
+                return false
+            }
             guard let current = promptUncertaintyMarker,
                   current.token == marker.token else {
                 hasAmbiguousPromptDelivery = true
@@ -332,6 +363,7 @@ final class GatewayConversationController {
                 return false
             }
             promptUncertaintyMarker = nil
+            lastClearedPromptUncertaintyMarker = current
             promptUncertaintyLoadFailed = false
             hasAmbiguousPromptDelivery = false
             promptDeliveryUncertaintyHasConfirmedAcceptance = false
@@ -364,7 +396,9 @@ final class GatewayConversationController {
         )
         do {
             if let existing = try promptUncertaintyStore.load(for: identity) {
-                guard existing.token == marker.token else {
+                guard existing.token == marker.token,
+                      existing.status == marker.status,
+                      existing.createdAt == marker.createdAt else {
                     throw DirectSessionError.ambiguousPrompt
                 }
                 promptUncertaintyMarker = existing
@@ -386,10 +420,105 @@ final class GatewayConversationController {
         }
     }
 
+    /// The opened tip may have no exact marker while an ancestor does. Resolve
+    /// every valid marker in this origin/profile through the authoritative REST
+    /// messages contract before choosing a token or removing any aliases.
+    private func resolvePromptUncertaintyLineage(
+        requestedID: String,
+        canonicalID: String,
+        validate: () throws -> Void
+    ) async throws {
+        let hadLineageFailure = promptLineageResolutionFailed
+        let ownedMarker = promptInFlight ? promptUncertaintyMarker : nil
+        do {
+            let identity = try promptUncertaintyIdentity(for: canonicalID)
+            // Retain exact-ID corruption handling even though legacy discovery
+            // cannot attribute unreadable records to an origin/profile.
+            var exact = try promptUncertaintyStore.load(for: identity)
+            let candidates = try promptUncertaintyStore.candidates(for: identity, limit: 64)
+            var matching: [DirectPromptDeliveryUncertaintyMarker] = []
+            var readAncestor = false
+            for candidate in candidates {
+                let resolvedID: String
+                if candidate.identity.storedID == requestedID || candidate.identity.storedID == canonicalID {
+                    resolvedID = canonicalID
+                } else {
+                    readAncestor = true
+                    let page = try await loadTranscript(candidate.identity.storedID, profile, 1, 0)
+                    try validate()
+                    guard !page.sessionID.isEmpty else { throw DirectSessionError.invalidBinding }
+                    resolvedID = page.sessionID
+                }
+                if resolvedID == canonicalID { matching.append(candidate) }
+            }
+            if readAncestor {
+                let confirmed = try await loadTranscript(canonicalID, profile, 1, 0)
+                try validate()
+                guard confirmed.sessionID == canonicalID else { throw DirectSessionError.staleOperation }
+            }
+            try validate()
+            // No awaits below: another controller cannot replace a token in the
+            // middle of the local write/remove transaction on the main actor.
+            let currentCandidates = try promptUncertaintyStore.candidates(for: identity, limit: 64)
+            let currentExact = try promptUncertaintyStore.load(for: identity)
+            if currentCandidates != candidates || currentExact != exact {
+                // An ACK can finish this controller's own submit during an
+                // ancestor read. Accept only proven local cleanup of that same
+                // marker; every other candidate must remain byte-for-byte equal.
+                guard let ownedMarker, let cleared = lastClearedPromptUncertaintyMarker,
+                      ownedMarker.token == cleared.token,
+                      ownedMarker.status == cleared.status,
+                      ownedMarker.createdAt == cleared.createdAt,
+                      promptUncertaintyMarker == nil else { throw DirectSessionError.ambiguousPrompt }
+                let removed = candidates.filter { candidate in
+                    matching.contains(candidate) && candidate.token == ownedMarker.token &&
+                        candidate.status == ownedMarker.status && candidate.createdAt == ownedMarker.createdAt &&
+                        !currentCandidates.contains(candidate)
+                }
+                guard !removed.isEmpty,
+                      currentCandidates == candidates.filter({ !removed.contains($0) }),
+                      currentExact == (exact.map { removed.contains($0) } == true ? nil : exact) else {
+                    throw DirectSessionError.ambiguousPrompt
+                }
+                matching.removeAll { removed.contains($0) }
+                exact = currentExact
+            }
+            if let exact, !matching.contains(exact) { matching.append(exact) }
+            if let first = matching.first {
+                guard matching.allSatisfy({ $0.token == first.token && $0.status == first.status && $0.createdAt == first.createdAt }) else {
+                    throw DirectSessionError.ambiguousPrompt
+                }
+                let tip = exact ?? DirectPromptDeliveryUncertaintyMarker(
+                    token: first.token, identity: identity, status: first.status, createdAt: first.createdAt
+                )
+                if exact == nil { try promptUncertaintyStore.write(tip) }
+                promptUncertaintyMarker = tip
+                if !promptInFlight || first.identity != identity { hasAmbiguousPromptDelivery = true }
+                for alias in matching where alias.identity != identity {
+                    try promptUncertaintyStore.remove(alias)
+                }
+            }
+            promptLineageResolutionFailed = false
+            if hadLineageFailure, matching.isEmpty, exact == nil,
+               promptUncertaintyMarker == nil, !promptUncertaintyLoadFailed {
+                hasAmbiguousPromptDelivery = false
+                promptDeliveryUncertaintyHasConfirmedAcceptance = false
+            }
+        } catch {
+            // A superseded read must not poison the replacement conversation.
+            try validate()
+            promptLineageResolutionFailed = true
+            hasAmbiguousPromptDelivery = true
+            promptDeliveryUncertaintyHasConfirmedAcceptance = false
+            throw error
+        }
+    }
+
     /// Clears only the local uncertainty marker after a fresh canonical read
     /// and idle status proof. It never closes, resends, or mutates history.
     func abandonPromptDeliveryUncertainty(expectedToken: UUID) async throws {
         guard !disposed,
+              !promptLineageResolutionFailed,
               let marker = promptUncertaintyMarker,
               marker.token == expectedToken,
               let binding,
@@ -639,6 +768,7 @@ final class GatewayConversationController {
     /// The parent remains bound and is never mutated by this operation.
     func branch() async throws -> GatewayConversationController {
         guard !disposed,
+              !compressionOutcomeUnknown,
               !branchOutcomeUnknown,
               !branchInFlight,
               hasSubmittedPrompt,
@@ -817,6 +947,81 @@ final class GatewayConversationController {
         }
     }
 
+    func compress(focusTopic: String = "") async throws -> CompressionOutcome {
+        guard hasSubmittedPrompt, !branchInFlight, !compressionOutcomeUnknown,
+              let capturedBinding = binding else { throw DirectSessionError.ambiguousPrompt }
+        let capturedLifecycle = lifecycle
+        let capturedEpoch = bindingEpoch
+        let capturedGeneration = runtime.connectionGeneration
+        let capturedOrigin = runtime.origin
+        func checkScope() throws {
+            guard isCurrentBranchScope(binding: capturedBinding, lifecycle: capturedLifecycle,
+                                       bindingEpoch: capturedEpoch, connectionGeneration: capturedGeneration,
+                                       origin: capturedOrigin), pendingReasoningEffort == nil,
+                  ambiguousReasoningEffort == nil else { throw DirectSessionError.staleOperation }
+        }
+        try checkScope()
+        branchInFlight = true
+        defer { branchInFlight = false }
+        var dispatched = false
+        var outcome: CompressionOutcome?
+        do {
+            try await runtime.withSessionEventsPaused {
+                let result = try await runtime.request("session.compress", parameters: {
+                    try checkScope()
+                    dispatched = true
+                    var params = self.rpcParams(capturedBinding)
+                    let focus = focusTopic.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !focus.isEmpty { params["focus_topic"] = .string(focus) }
+                    return params
+                })
+                try checkScope()
+                guard case .object(let fields) = result else { throw DirectSessionCompressionError.invalidResponse }
+                if fields["compressed"] == .bool(false), fields["lock_held"] == .bool(true) {
+                    outcome = .lockSkipped
+                    return
+                }
+                guard let status = fields["status"]?.gatewayString,
+                      status == "compressed" || status == "aborted",
+                      let info = fields["info"]?.gatewayFields,
+                      info["profile_name"]?.gatewayString == self.profile,
+                      let durableID = info["stored_session_id"]?.gatewayString,
+                      !durableID.isEmpty,
+                      let summary = fields["summary"]?.gatewayFields,
+                      case .bool(let noop) = summary["noop"],
+                      case .bool(let aborted) = summary["aborted"],
+                      aborted == (status == "aborted") else {
+                    throw DirectSessionCompressionError.invalidResponse
+                }
+                // REST resolves the ancestor first. Only its matching durable
+                // identity authorizes reusing the runtime that stock reanchors.
+                try await self.refresh()
+                guard !self.disposed, self.lifecycle == capturedLifecycle,
+                      self.runtime.origin == capturedOrigin,
+                      self.runtime.connectionGeneration == capturedGeneration,
+                      self.runtime.state == .ready, self.storedID == durableID else {
+                    throw DirectSessionCompressionError.invalidResponse
+                }
+                try self.adopt(GatewaySessionBinding(storedID: durableID, runtimeID: capturedBinding.runtimeID, profile: self.profile))
+                outcome = aborted ? .aborted : (noop ? .unchanged : .compressed)
+            }
+            guard let outcome, !disposed, lifecycle == capturedLifecycle,
+                  runtime.connectionGeneration == capturedGeneration,
+                  runtime.state == .ready, binding?.runtimeID == capturedBinding.runtimeID,
+                  binding?.storedID == storedID else { throw DirectSessionCompressionError.invalidResponse }
+            return outcome
+        } catch {
+            if !dispatched { throw error }
+            if case HermesGatewayError.server(let code, _, _, let method, _, _) = error,
+               method == "session.compress", code == 4001 {
+                throw error
+            }
+            compressionOutcomeUnknown = true
+            invalidateBinding()
+            throw DirectSessionCompressionError.outcomeUnknown
+        }
+    }
+
     private func isCurrentBranchScope(
         binding: GatewaySessionBinding,
         lifecycle expectedLifecycle: Int,
@@ -944,6 +1149,7 @@ final class GatewayConversationController {
     /// next `open()` resumes that stored conversation with a fresh runtime.
     func resetPendingAttachments(expectedToken: UUID? = nil) async throws {
         guard !disposed else { throw DirectSessionError.stopped }
+        guard !compressionOutcomeUnknown else { throw DirectSessionCompressionError.outcomeUnknown }
         guard !branchInFlight else { throw DirectSessionError.ambiguousPrompt }
         guard recoveryMarker != nil || recoveryMarkerLoadFailed else {
             throw DirectSessionError.unresolvedAttachment
@@ -1080,6 +1286,7 @@ final class GatewayConversationController {
     /// unknown or stale receipts remain quarantined and are never guessed.
     func removeStagedAttachment(_ pending: DirectPendingAttachment) async throws {
         guard !disposed else { throw DirectSessionError.stopped }
+        guard !compressionOutcomeUnknown else { throw DirectSessionCompressionError.outcomeUnknown }
         guard !branchInFlight else { throw DirectSessionError.ambiguousPrompt }
         guard pending.source.kind != .file else { throw DirectSessionError.invalidResponse }
         guard !hasAmbiguousPromptDelivery,
@@ -1236,7 +1443,7 @@ final class GatewayConversationController {
         _ pending: DirectPendingAttachment,
         create: [String: JSONValue] = [:]
     ) async throws -> DirectGatewayAttachmentStageResult {
-        guard !branchInFlight else {
+        guard !branchInFlight, !compressionOutcomeUnknown else {
             throw DirectGatewayAttachmentStageError.definiteBeforeStage(
                 kind: pending.source.kind,
                 reason: .controllerBusy
@@ -1605,6 +1812,7 @@ final class GatewayConversationController {
         stagedAttachments: [DirectPendingAttachment] = [],
         create: [String: JSONValue] = [:]
     ) async throws {
+        guard !compressionOutcomeUnknown else { throw DirectSessionCompressionError.outcomeUnknown }
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw DirectSessionError.invalidResponse }
         guard !branchInFlight else { throw DirectSessionError.ambiguousPrompt }
         guard !promptUncertaintyLoadFailed else { throw DirectSessionError.staleOperation }
@@ -1935,6 +2143,7 @@ final class GatewayConversationController {
     }
 
     func steer(_ text: String) async throws -> SteerOutcome {
+        guard !compressionOutcomeUnknown else { throw DirectSessionCompressionError.outcomeUnknown }
         guard !disposed, !branchInFlight, binding != nil, runState == .running,
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw DirectSessionError.invalidResponse }
         let result = try await runtime.request("session.steer", parameters: {
@@ -1996,6 +2205,11 @@ final class GatewayConversationController {
               readGeneration == latestReadGeneration else { throw DirectSessionError.staleOperation }
         let canonical = page.sessionID
         guard !canonical.isEmpty else { throw DirectSessionError.invalidBinding }
+        try await resolvePromptUncertaintyLineage(requestedID: storedID, canonicalID: canonical) {
+            try self.checkLifecycle(generation)
+            guard epoch == self.bindingEpoch, turn == self.turnEpoch, storedID == self.storedID,
+                  readGeneration == self.latestReadGeneration else { throw DirectSessionError.staleOperation }
+        }
         durableRowConfirmed = true
         if canonical != storedID {
             try migratePromptUncertaintyMarkerIfNeeded(to: canonical)
@@ -2068,9 +2282,12 @@ final class GatewayConversationController {
                 if self.hasSubmittedPrompt, self.storedID != nil {
                     // Recovery uses the raw transport under the server barrier;
                     // ordinary attachment uses the runtime's generation guard.
+                    let recoveringTurn = self.turnEpoch
+                    let recoveringID = self.storedID
                     let result = try await self.runtime.request("session.resume", params: self.resumeParams())
                     try self.checkLifecycle(generation)
                     try await self.applyResume(result)
+                    try self.stageRecoveredIdle(result, generation: generation, turn: recoveringTurn, storedID: recoveringID)
                 } else {
                     var params = create.filter { ["cwd", "model", "provider", "reasoning_effort", "fast"].contains($0.key) }
                     params["profile"] = .string(self.profile)
@@ -2080,6 +2297,7 @@ final class GatewayConversationController {
                     try self.adopt(GatewaySessionBinding.resolve(result, profile: self.profile))
                 }
             }
+            self.publishRecoveredIdleAfterEventDrain()
         }
         attachmentTask = task
         defer { if lifecycle == generation { attachmentTask = nil } }
@@ -2088,9 +2306,34 @@ final class GatewayConversationController {
 
     private func resume(using transport: any HermesGatewayTransport) async throws {
         let generation = lifecycle
+        let recoveringTurn = turnEpoch
+        let recoveringID = storedID
         let result = try await transport.request(method: "session.resume", params: .object(resumeParams()), timeout: nil)
         try checkLifecycle(generation)
         try await applyResume(result)
+        try stageRecoveredIdle(result, generation: generation, turn: recoveringTurn, storedID: recoveringID)
+    }
+
+    private func stageRecoveredIdle(_ result: JSONValue?, generation: Int, turn recoveringTurn: Int, storedID recoveringID: String?) throws {
+        try checkLifecycle(generation)
+        guard recoveringTurn == turnEpoch,
+              let recoveringID, recoveringID == storedID,
+              binding?.storedID == recoveringID,
+              result?.gatewayFields["running"] == .bool(false),
+              runState == .idle, !promptInFlight, !hasAmbiguousPromptDelivery else { return }
+        guard let binding else { return }
+        recoveredIdleCandidate = (generation, recoveringTurn, binding, runtime.connectionGeneration, terminalReceipt)
+    }
+
+    private func publishRecoveredIdleAfterEventDrain() {
+        guard let candidate = recoveredIdleCandidate else { return }
+        recoveredIdleCandidate = nil
+        guard !disposed, lifecycle == candidate.lifecycle, turnEpoch == candidate.turn,
+              binding == candidate.binding, storedID == candidate.binding.storedID,
+              runtime.connectionGeneration == candidate.generation, runtime.state == .ready,
+              terminalReceipt == candidate.terminal,
+              runState == .idle, !promptInFlight, !hasAmbiguousPromptDelivery else { return }
+        onRecoveredIdle?(candidate.binding.storedID)
     }
 
     private func applyResume(_ result: JSONValue?) async throws {

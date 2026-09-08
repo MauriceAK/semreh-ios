@@ -469,6 +469,11 @@ struct ChatView: View {
     /// the cache-first → network reconcile re-pins to the bottom without a jump (#289).
     @State private var cacheFirstSnapUntil: Date?
     @State private var forkedSession: SessionSummary?
+    /// A direct branch already owns a bound child controller. Keep the handoff
+    /// alive through navigation so the destination can use the retained VM
+    /// instead of resuming the child a second time.
+    @State private var directBranchHandoff: DirectBranchHandoff?
+    @State private var isShowingDirectBranch = false
     @State private var editContext: MessageActionContext?
     @State private var editDraft = ""
     @State private var showEditSheet = false
@@ -1074,6 +1079,23 @@ struct ChatView: View {
             }
             .navigationDestination(item: $forkedSession) { session in
                 ChatView(session: session, server: server, onAPIError: onAPIError)
+            }
+            .navigationDestination(isPresented: $isShowingDirectBranch) {
+                if let directBranchHandoff {
+                    ChatView(
+                        session: directBranchHandoff.session,
+                        server: directBranchHandoff.origin,
+                        onAPIError: onAPIError,
+                        retainedViewModel: directBranchHandoff.viewModel
+                    )
+                }
+            }
+            .onChange(of: isShowingDirectBranch) { _, isPresented in
+                guard !isPresented else { return }
+                // The store owns the adopted child after transfer. Drop the
+                // navigation state's extra strong reference so bounded eviction
+                // remains effective after the child is popped.
+                directBranchHandoff = nil
             }
             .fullScreenCover(item: $selectableResponseText) { selectableText in
                 SelectableTextPresentationView(selection: selectableText)
@@ -2047,6 +2069,15 @@ struct ChatView: View {
             draftMessage = ""
         case .openedSession(let session):
             forkedSession = session
+            draftMessage = ""
+        case .openedDirectBranch(let handoff):
+            guard OpenChatSessionStore.shared.adoptBranch(handoff) != nil else {
+                OpenChatSessionStore.shared.releaseUnadoptedBranch(handoff)
+                viewModel.setSendErrorMessage(String(localized: "The direct branch could not be opened safely."))
+                return
+            }
+            directBranchHandoff = handoff
+            isShowingDirectBranch = true
             draftMessage = ""
         case .unsupported(let friendlyMessage):
             viewModel.setSendErrorMessage(friendlyMessage)
@@ -3209,7 +3240,7 @@ private enum PastedFileError: LocalizedError {
 private extension SlashCommandExecutionResult {
     var isSuccessfulSubmission: Bool {
         switch self {
-        case .executed, .openedSession:
+        case .executed, .openedSession, .openedDirectBranch:
             true
         case .sendAsMessage, .unsupported, .needsSubArg:
             false

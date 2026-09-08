@@ -7,6 +7,64 @@ import UniformTypeIdentifiers
 @testable import HermesMobile
 
 final class APIClientCronEndpointTests: APIClientTestCase {
+    func testDirectCronListUsesExplicitProfileAndStockBareArray() async throws {
+        let client = makeClient { request in
+            XCTAssertEqual(request.url?.path, "/api/cron/jobs")
+            XCTAssertEqual(request.httpMethod, "GET")
+            XCTAssertEqual(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems,
+                           [URLQueryItem(name: "profile", value: "work")])
+            return apiTestJSONResponse("""
+            [{"id":"job1","profile":"work","name":"Digest","enabled":false,
+              "schedule":{"kind":"cron","expr":"0 9 * * *"},
+              "latest_execution":{"status":"running","started_at":"2026-09-07T00:00:00+00:00"}}]
+            """, for: request)
+        }
+        let jobs = try await client.directCronJobs(profile: "work")
+        XCTAssertEqual(jobs.first?.jobId, "job1")
+        XCTAssertEqual(jobs.first?.enabled, false)
+        XCTAssertEqual(jobs.first?.scheduleText, "0 9 * * *")
+        XCTAssertEqual(jobs.first?.latestExecution?.status, "running")
+        XCTAssertNotNil(jobs.first?.latestExecution?.startedAt)
+    }
+
+    func testDirectCronDetailUsesExactIDAndProfile() async throws {
+        let client = makeClient { request in
+            XCTAssertEqual(request.url?.path, "/api/cron/jobs/job1")
+            XCTAssertEqual(request.httpMethod, "GET")
+            XCTAssertEqual(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems,
+                           [URLQueryItem(name: "profile", value: "work")])
+            return apiTestJSONResponse(#"{"id":"job1","profile":"work","prompt":"fixture","state":"paused"}"#, for: request)
+        }
+        let job = try await client.directCronJob(jobID: "job1", profile: "work")
+        XCTAssertEqual(job.prompt, "fixture")
+        XCTAssertEqual(job.status, .paused)
+    }
+
+    func testDirectCronRunsUsesBoundedProfileQueryAndSessionMetadata() async throws {
+        let client = makeClient { request in
+            XCTAssertEqual(request.url?.path, "/api/cron/jobs/job1/runs")
+            XCTAssertEqual(request.httpMethod, "GET")
+            XCTAssertEqual(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems,
+                           [URLQueryItem(name: "profile", value: "work"), URLQueryItem(name: "limit", value: "5")])
+            return apiTestJSONResponse(#"{"runs":[{"id":"cron_job1_20260907","profile":"work","title":"Run","started_at":1788739200,"is_active":false}],"limit":5}"#, for: request)
+        }
+        let runs = try await client.directCronRuns(jobID: "job1", profile: "work")
+        XCTAssertEqual(runs.first?.id, "cron_job1_20260907")
+        XCTAssertEqual(runs.first?.title, "Run")
+        XCTAssertNotNil(runs.first?.startedAt)
+    }
+
+    func testDirectCronDeliveryTargetsMapsGlobalStockFields() async throws {
+        let client = makeClient { request in
+            XCTAssertEqual(request.url?.path, "/api/cron/delivery-targets")
+            XCTAssertNil(request.url?.query)
+            XCTAssertEqual(request.httpMethod, "GET")
+            return apiTestJSONResponse(#"{"targets":[{"id":"local","name":"Local (save only)","home_target_set":true}]}"#, for: request)
+        }
+        let options = try await client.directCronDeliveryOptions()
+        XCTAssertEqual(options, [CronDeliveryOption(value: "local", label: "Local (save only)")])
+    }
+
     func testCronsBuildsExpectedPathAndDecodesTolerantJobList() async throws {
         let client = makeClient { request in
             XCTAssertEqual(request.url?.path, "/api/crons")

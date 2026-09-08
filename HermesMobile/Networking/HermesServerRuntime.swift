@@ -64,6 +64,9 @@ final class HermesServerRuntime {
     @ObservationIgnored private var observers: [UUID: (event: EventSink, recover: Recovery, ready: @MainActor () -> Void)] = [:]
     @ObservationIgnored private var pendingEvents: [HermesGatewayEvent] = []
     @ObservationIgnored private var bufferOverflowed = false
+#if DEBUG
+    var bufferedEventCountForTesting: Int { pendingEvents.count }
+#endif
     @ObservationIgnored private var acceptedTransportGeneration: Int?
     @ObservationIgnored private var bindingBarrierDepth = 0
     private static let maximumBufferedEvents = 1024

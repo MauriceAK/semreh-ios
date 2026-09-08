@@ -11,14 +11,6 @@ extension APIClient {
         explicitModelPick: Bool = false,
         attachments: [JSONValue]? = nil
     ) async throws -> ChatStartResponse {
-        if await officialCapabilityValid() {
-            return try officialChatStartResponse(
-                sessionID: sessionID,
-                message: message,
-                model: model,
-                provider: modelProvider
-            )
-        }
         return try await send(
             endpoint: .chatStart,
             method: "POST",
@@ -40,9 +32,6 @@ extension APIClient {
     }
 
     nonisolated func chatStreamURL(streamID: String, replayAfterSeq: Int? = nil) -> URL {
-        if streamID.hasPrefix("official_"), let officialContinuityClient {
-            return officialContinuityClient.streamURL(id: streamID)
-        }
         let url = Endpoint.chatStream(streamID: streamID).url(relativeTo: baseURL)
         guard let replayAfterSeq,
               var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
@@ -58,22 +47,10 @@ extension APIClient {
     }
 
     func cancelChat(streamID: String) async throws -> ChatCancelResponse {
-        if streamID.hasPrefix("official_") {
-            cancelOfficialChat(streamID: streamID)
-            return ChatCancelResponse(ok: true, cancelled: true, streamId: streamID, error: nil)
-        }
         return try await send(endpoint: .chatCancel(streamID: streamID), method: "GET")
     }
 
     func chatStreamStatus(streamID: String) async throws -> ChatStreamStatusResponse {
-        if let active = officialChatIsActive(streamID: streamID) {
-            return ChatStreamStatusResponse(
-                active: active,
-                streamId: streamID,
-                replayAvailable: false,
-                journal: nil
-            )
-        }
         return try await send(endpoint: .chatStreamStatus(streamID: streamID), method: "GET")
     }
 

@@ -39,6 +39,7 @@ def main():
     parser.add_argument('--slice3-uncertainty', action='store_true')
     parser.add_argument('--slice4-session-metadata', action='store_true')
     parser.add_argument('--slice4-branch', action='store_true')
+    parser.add_argument('--slice4-branch-ui', action='store_true')
     parser.add_argument('--gateway-restart-nonce')
     parser.add_argument('--tui-created-session-id')
     parser.add_argument('--slice3-relaunch-seed-text')
@@ -46,6 +47,16 @@ def main():
     parser.add_argument('--stock-backend', action='store_true')
     parser.add_argument('--cookie-phase', choices=['login', 'restore', 'logout'])
     args = parser.parse_args()
+    if args.slice4_branch_ui and (
+        not args.slice2_ui or not args.https or not args.stock_backend
+        or args.development_backend_sha or args.cookie_phase
+        or args.gateway_restart_nonce or args.tui_created_session_id
+        or args.slice3_relaunch_seed_text or args.slice4_session_metadata
+        or args.slice4_branch or args.slice2_foundation or args.slice2_native
+        or args.slice2_reasoning
+        or any(value for name, value in vars(args).items() if name.startswith('slice3_'))
+    ):
+        parser.error('--slice4-branch-ui requires --slice2-ui --https --stock-backend and no other test phase')
     if args.slice4_branch and (
         not args.https or not args.stock_backend or args.development_backend_sha
         or args.cookie_phase or args.gateway_restart_nonce or args.tui_created_session_id
@@ -213,7 +224,7 @@ def main():
         args.slice3_pre_ack_loss or args.slice3_active_socket_loss or args.slice2_reasoning or args.slice2_ui or args.slice3_file_picker or args.slice3_recovery
         or args.slice3_completed_away or args.slice3_relaunch or args.slice3_gateway_restart
         or args.slice3_uncertainty or args.slice4_session_metadata
-        or args.slice4_branch
+        or args.slice4_branch or args.slice4_branch_ui
     )
     if args.stock_backend and not backend_phase:
         parser.error('--stock-backend requires --slice2-reasoning, --slice2-ui, --slice3-file-picker, --slice3-completed-away, --slice3-relaunch, --slice3-gateway-restart, or --slice3-uncertainty')
@@ -361,6 +372,8 @@ def main():
             target['EnvironmentVariables']['SEMREH_SLICE3_APP_KILL_UI'] = '1'
         if args.slice3_uncertainty:
             target['EnvironmentVariables']['SEMREH_SLICE3_UNCERTAINTY_UI'] = '1'
+        if args.slice4_branch_ui:
+            target['EnvironmentVariables']['SEMREH_SLICE4_BRANCH_UI'] = '1'
         if args.tui_created_session_id:
             target['EnvironmentVariables']['SEMREH_SLICE2_TUI_CREATED_SESSION_ID'] = args.tui_created_session_id
         if args.slice3_relaunch_seed_text:

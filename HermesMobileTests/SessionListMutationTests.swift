@@ -7,6 +7,49 @@ import UniformTypeIdentifiers
 @testable import HermesMobile
 
 final class SessionListMutationTests: XCTestCase {
+    @MainActor
+    func testStockProfileRefreshPreservesExplicitLocalSelectionAndRefreshesMetadata() async throws {
+        var readCount = 0
+        let viewModel = try makeViewModel { request in
+            XCTAssertEqual(request.url?.path, "/api/profiles")
+            XCTAssertEqual(request.httpMethod, "GET")
+            readCount += 1
+            return apiTestJSONResponse("""
+            {"profiles":[{"name":"default","is_default":true},
+                         {"name":"work","is_default":false,"model":"fixture-\(readCount)","provider":"custom"}]}
+            """, for: request)
+        }
+        await viewModel.loadActiveProfile()
+        let work = try XCTUnwrap(viewModel.profileOptions.first { $0.name == "work" })
+        let switched = await viewModel.switchActiveProfile(work)
+        XCTAssertTrue(switched)
+        await viewModel.loadActiveProfile()
+        XCTAssertEqual(readCount, 2)
+        XCTAssertEqual(viewModel.activeProfileName, "work")
+        XCTAssertEqual(viewModel.activeProfileModel, "fixture-2")
+        XCTAssertEqual(viewModel.activeProfileProvider, "custom")
+        XCTAssertNil(viewModel.activeProfileErrorMessage)
+    }
+
+    @MainActor
+    func testStockProfileMissingSelectionDoesNotSilentlyRetargetLocalConversation() async throws {
+        var reads = 0
+        let viewModel = try makeViewModel { request in
+            reads += 1
+            return apiTestJSONResponse(reads == 1
+                ? "{\"profiles\":[{\"name\":\"default\",\"is_default\":true},{\"name\":\"work\"}]}"
+                : "{\"profiles\":[{\"name\":\"default\",\"is_default\":true}]}", for: request)
+        }
+        await viewModel.loadActiveProfile()
+        let work = try XCTUnwrap(viewModel.profileOptions.first { $0.name == "work" })
+        let switched = await viewModel.switchActiveProfile(work)
+        XCTAssertTrue(switched)
+        await viewModel.loadActiveProfile()
+        XCTAssertEqual(viewModel.activeProfileName, "work")
+        XCTAssertEqual(viewModel.profileOptions.count, 1)
+        XCTAssertNil(viewModel.activeProfileModel)
+    }
+
     override func tearDown() {
         MockURLProtocol.requestHandler = nil
         OverlappingDeleteURLProtocol.reset()

@@ -4,6 +4,390 @@ import XCTest
 
 @MainActor
 final class GatewayConversationControllerTests: XCTestCase {
+    func testManualCompressionAdoptsAuthoritativeTipOnSameRuntimeAndForwardsFocus() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setResumeResponse(.object(["session_id": .string("runtime-parent"), "session_key": .string("parent")]))
+        fake.setCompressResponse(compressionResponse(id: "tip"))
+        let runtime = try makeRuntime(fake)
+        var canonical = "parent"
+        let controller = makeController(runtime: runtime, storedID: "parent") { _, _, _, _ in self.page(canonical) }
+        try await controller.open()
+        canonical = "tip"
+        let outcome = try await controller.compress(focusTopic: "  release notes  ")
+        XCTAssertEqual(outcome, .compressed)
+        XCTAssertEqual(controller.binding, GatewaySessionBinding(storedID: "tip", runtimeID: "runtime-parent", profile: "default"))
+        let call = try XCTUnwrap(fake.calls().first { $0.method == "session.compress" })
+        XCTAssertEqual(objectFields(call.params)?["session_id"], .string("runtime-parent"))
+        XCTAssertEqual(objectFields(call.params)?["profile"], .string("default"))
+        XCTAssertEqual(objectFields(call.params)?["focus_topic"], .string("release notes"))
+        XCTAssertEqual(fake.calls().filter { $0.method == "session.resume" }.count, 1)
+        XCTAssertFalse(controller.compressionOutcomeUnknown)
+        await runtime.stop()
+    }
+
+    func testManualCompressionDistinguishesNoopAbortedAndLockSkip() async throws {
+        let cases: [(JSONValue, GatewayConversationController.CompressionOutcome)] = [
+            (compressionResponse(id: "parent", noop: true), .unchanged),
+            (compressionResponse(id: "parent", noop: true, aborted: true), .aborted),
+            (.object(["compressed": .bool(false), "lock_held": .bool(true)]), .lockSkipped)
+        ]
+        for (response, expected) in cases {
+            let fake = ControllerFakeTransport()
+            fake.setResumeResponse(.object(["session_id": .string("runtime-parent"), "session_key": .string("parent")]))
+            fake.setCompressResponse(response)
+            let runtime = try makeRuntime(fake)
+            let controller = makeController(runtime: runtime, storedID: "parent")
+            try await controller.open()
+            let outcome = try await controller.compress()
+            XCTAssertEqual(outcome, expected)
+            XCTAssertFalse(controller.compressionOutcomeUnknown)
+            XCTAssertNil(objectFields(fake.calls().last?.params)?["focus_topic"])
+            await runtime.stop()
+        }
+    }
+
+    func testManualCompressionMismatchedCanonicalResponseBlocksRetryAndSendButAllowsReads() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setResumeResponse(.object(["session_id": .string("runtime-parent"), "session_key": .string("parent")]))
+        fake.setCompressResponse(compressionResponse(id: "unproven-tip"))
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime, storedID: "parent")
+        try await controller.open()
+        do { _ = try await controller.compress(); XCTFail("Expected unresolved outcome") }
+        catch DirectSessionCompressionError.outcomeUnknown { }
+        XCTAssertTrue(controller.compressionOutcomeUnknown)
+        XCTAssertNil(controller.binding)
+        try await controller.refresh()
+        do { _ = try await controller.compress(); XCTFail("Must not retry") }
+        catch DirectSessionError.ambiguousPrompt { }
+        do { try await controller.submit("unsafe"); XCTFail("Must not send") }
+        catch DirectSessionCompressionError.outcomeUnknown { }
+        XCTAssertEqual(fake.calls().filter { $0.method == "session.compress" }.count, 1)
+        XCTAssertFalse(fake.calls().contains { $0.method == "prompt.submit" })
+        await runtime.stop()
+    }
+
+    func testManualCompressionExcludesCompetingSubmitAndBranch() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setResumeResponse(.object(["session_id": .string("runtime-parent"), "session_key": .string("parent")]))
+        let gate = AsyncGate()
+        fake.setCompressResponse(compressionResponse(id: "parent", noop: true), gate: gate)
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime, storedID: "parent")
+        try await controller.open()
+        let compress = Task { try await controller.compress() }
+        await yieldUntil { fake.calls().contains { $0.method == "session.compress" } }
+        do { try await controller.submit("blocked"); XCTFail("Concurrent submit") }
+        catch DirectSessionError.ambiguousPrompt { }
+        do { _ = try await controller.branch(); XCTFail("Concurrent branch") }
+        catch DirectSessionError.ambiguousPrompt { }
+        await gate.release()
+        let outcome = try await compress.value
+        XCTAssertEqual(outcome, .unchanged)
+        XCTAssertFalse(fake.calls().contains { $0.method == "prompt.submit" || $0.method == "session.branch" })
+        await runtime.stop()
+    }
+
+    func testManualCompressionRefusesRunningSessionBeforeDispatch() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setResumeResponse(.object([
+            "session_id": .string("runtime-parent"), "session_key": .string("parent"),
+            "running": .bool(true)
+        ]))
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime, storedID: "parent")
+        try await controller.open()
+        XCTAssertEqual(controller.runState, .running)
+        do { _ = try await controller.compress(); XCTFail("A running session must refuse compression") }
+        catch DirectSessionError.staleOperation { }
+        XCTAssertFalse(fake.calls().contains { $0.method == "session.compress" })
+        XCTAssertFalse(controller.compressionOutcomeUnknown)
+        XCTAssertEqual(controller.binding?.runtimeID, "runtime-parent")
+        await runtime.stop()
+    }
+
+    func testManualCompressionRejectsScopeInvalidatedByBufferedEventDrain() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setResumeResponse(.object(["session_id": .string("runtime-parent"), "session_key": .string("parent")]))
+        let gate = AsyncGate()
+        fake.setCompressResponse(compressionResponse(id: "parent", noop: true), gate: gate)
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime, storedID: "parent")
+        try await controller.open()
+        var delivered = false
+        controller.onEvent = { _ in
+            delivered = true
+            controller.invalidate()
+        }
+        let compress = Task { try await controller.compress() }
+        await yieldUntil { fake.calls().contains { $0.method == "session.compress" } }
+        fake.emit(event(sessionID: "runtime-parent", type: "session.usage", sequence: 1))
+        // Synchronize on actual receipt, not a sleep: delivery is deliberately
+        // paused until the compression operation drains its shared barrier.
+        func queuedEventCount() -> Int {
+            (Mirror(reflecting: runtime).descendant("pendingEvents") as? [HermesGatewayEvent])?.count ?? 0
+        }
+        await yieldUntil { queuedEventCount() == 1 }
+        XCTAssertEqual(queuedEventCount(), 1)
+        XCTAssertFalse(delivered)
+        await gate.release()
+        do { _ = try await compress.value; XCTFail("A drained event invalidated the success scope") }
+        catch DirectSessionCompressionError.outcomeUnknown { }
+        XCTAssertTrue(delivered)
+        XCTAssertTrue(controller.isDisposed)
+        XCTAssertTrue(controller.compressionOutcomeUnknown)
+        XCTAssertNil(controller.binding)
+        XCTAssertEqual(fake.calls().filter { $0.method == "session.compress" }.count, 1)
+        await runtime.stop()
+    }
+
+    private func compressionResponse(id: String, noop: Bool = false, aborted: Bool = false) -> JSONValue {
+        .object([
+            "status": .string(aborted ? "aborted" : "compressed"),
+            "summary": .object(["noop": .bool(noop), "aborted": .bool(aborted)]),
+            "info": .object(["stored_session_id": .string(id), "profile_name": .string("default")])
+        ])
+    }
+
+    func testManualCompressionPostDispatchServerFailureIsUnknownAndNeverRetried() async throws {
+        for code in [5005, 4009] {
+            let fake = ControllerFakeTransport()
+            fake.setResumeResponse(.object(["session_id": .string("runtime-parent"), "session_key": .string("parent")]))
+            fake.setCompressResponse(.object([:]), error: .server(code: code, message: "fixture error", data: nil, method: "session.compress", requestID: "compress-fixture", server: nil))
+            let runtime = try makeRuntime(fake)
+            let controller = makeController(runtime: runtime, storedID: "parent")
+            try await controller.open()
+            do { _ = try await controller.compress(); XCTFail("Expected unknown outcome") }
+            catch DirectSessionCompressionError.outcomeUnknown { }
+            XCTAssertTrue(controller.compressionOutcomeUnknown)
+            XCTAssertNil(controller.binding)
+            do { _ = try await controller.compress(); XCTFail("Must not retry") }
+            catch DirectSessionError.ambiguousPrompt { }
+            XCTAssertEqual(fake.calls().filter { $0.method == "session.compress" }.count, 1)
+            await runtime.stop()
+        }
+    }
+
+    func testColdTipFindsAncestorMarkerAndRemovesSameTokenAliases() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setResumeResponse(.object(["session_id": .string("runtime-tip"), "session_key": .string("tip")]))
+        let runtime = try makeRuntime(fake)
+        let store = InMemoryDirectPromptDeliveryUncertaintyStore()
+        let token = UUID()
+        let createdAt = Date()
+        for id in ["ancestor-a", "ancestor-b", "tip"] {
+            try store.write(DirectPromptDeliveryUncertaintyMarker(token: token, identity: lineageIdentity(id), createdAt: createdAt))
+        }
+        try store.write(DirectPromptDeliveryUncertaintyMarker(identity: lineageIdentity("unrelated", profile: "other")))
+        var reads: [String] = []
+        let controller = makeController(runtime: runtime, storedID: "tip", promptUncertaintyStore: store) { id, profile, limit, offset in
+            reads.append(id)
+            XCTAssertEqual(profile, "default")
+            XCTAssertEqual(offset, 0)
+            if id != "tip" { XCTAssertEqual(limit, 1) }
+            return self.page("tip")
+        }
+        try await controller.open()
+        XCTAssertEqual(reads, ["tip", "ancestor-a", "ancestor-b", "tip"])
+        XCTAssertEqual(controller.promptDeliveryUncertaintyToken, token)
+        XCTAssertTrue(controller.hasAmbiguousPromptDelivery)
+        XCTAssertEqual(store.markers.map(\.identity.storedID).sorted(), ["tip", "unrelated"])
+        do { try await controller.submit("must not resend"); XCTFail("Expected delivery barrier") }
+        catch DirectSessionError.ambiguousPrompt { }
+        XCTAssertFalse(fake.calls().contains { $0.method == "prompt.submit" })
+        await runtime.stop()
+    }
+
+    func testColdTipChecksAncestorsEvenWhenExactMarkerHasConflictingToken() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setResumeResponse(.object(["session_id": .string("runtime-tip"), "session_key": .string("tip")]))
+        let runtime = try makeRuntime(fake)
+        let store = InMemoryDirectPromptDeliveryUncertaintyStore()
+        try store.write(DirectPromptDeliveryUncertaintyMarker(identity: lineageIdentity("ancestor")))
+        try store.write(DirectPromptDeliveryUncertaintyMarker(identity: lineageIdentity("tip")))
+        let original = store.markers
+        let controller = makeController(runtime: runtime, storedID: "tip", promptUncertaintyStore: store) { _, _, _, _ in self.page("tip") }
+        do { try await controller.open(); XCTFail("Conflicting tokens must fail closed") }
+        catch DirectSessionError.ambiguousPrompt { }
+        XCTAssertEqual(store.markers, original)
+        XCTAssertTrue(controller.hasAmbiguousPromptDelivery)
+        do { try await controller.submit("blocked"); XCTFail("Expected delivery barrier") }
+        catch DirectSessionError.ambiguousPrompt { }
+        XCTAssertFalse(fake.calls().contains { $0.method == "prompt.submit" })
+        await runtime.stop()
+    }
+
+    func testColdTipAliasRemovalFailureRetainsTipAndBlocksAbandon() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setResumeResponse(.object(["session_id": .string("runtime-tip"), "session_key": .string("tip")]))
+        let runtime = try makeRuntime(fake)
+        let store = InMemoryDirectPromptDeliveryUncertaintyStore()
+        let marker = DirectPromptDeliveryUncertaintyMarker(identity: try lineageIdentity("ancestor"))
+        try store.write(marker)
+        store.failRemove = true
+        let controller = makeController(runtime: runtime, storedID: "tip", promptUncertaintyStore: store) { _, _, _, _ in self.page("tip") }
+        do { try await controller.open(); XCTFail("Expected alias removal failure") }
+        catch DirectPromptDeliveryUncertaintyStoreError.io { }
+        XCTAssertEqual(store.markers.map(\.identity.storedID).sorted(), ["ancestor", "tip"])
+        do { try await controller.abandonPromptDeliveryUncertainty(expectedToken: marker.token); XCTFail("Remaining alias must block abandonment") }
+        catch DirectSessionError.staleOperation { }
+        store.failRemove = false
+        try await controller.refresh()
+        XCTAssertEqual(store.markers.map(\.identity.storedID), ["tip"])
+        XCTAssertTrue(controller.hasAmbiguousPromptDelivery)
+        await runtime.stop()
+    }
+
+    func testColdTipRejectsSameTokenWithConflictingCreationMetadata() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setResumeResponse(.object(["session_id": .string("runtime-tip"), "session_key": .string("tip")]))
+        let runtime = try makeRuntime(fake)
+        let store = InMemoryDirectPromptDeliveryUncertaintyStore()
+        let token = UUID()
+        try store.write(DirectPromptDeliveryUncertaintyMarker(token: token, identity: lineageIdentity("ancestor"), createdAt: Date(timeIntervalSince1970: 1)))
+        try store.write(DirectPromptDeliveryUncertaintyMarker(token: token, identity: lineageIdentity("tip"), createdAt: Date(timeIntervalSince1970: 2)))
+        let original = store.markers
+        let controller = makeController(runtime: runtime, storedID: "tip", promptUncertaintyStore: store) { _, _, _, _ in self.page("tip") }
+        do { try await controller.open(); XCTFail("Conflicting metadata must fail closed") }
+        catch DirectSessionError.ambiguousPrompt { }
+        XCTAssertEqual(store.markers, original)
+        XCTAssertTrue(controller.hasAmbiguousPromptDelivery)
+        await runtime.stop()
+    }
+
+    func testColdTipDoesNotAdoptUnrelatedResolvedSessionMarker() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setResumeResponse(.object(["session_id": .string("runtime-tip"), "session_key": .string("tip")]))
+        let runtime = try makeRuntime(fake)
+        let store = InMemoryDirectPromptDeliveryUncertaintyStore()
+        let marker = DirectPromptDeliveryUncertaintyMarker(identity: try lineageIdentity("other"))
+        try store.write(marker)
+        let controller = makeController(runtime: runtime, storedID: "tip", promptUncertaintyStore: store) { id, _, _, _ in self.page(id) }
+        try await controller.open()
+        XCTAssertFalse(controller.hasAmbiguousPromptDelivery)
+        XCTAssertEqual(store.markers, [marker])
+        await runtime.stop()
+    }
+
+    private func lineageIdentity(_ id: String, profile: String = "default") throws -> DirectPromptDeliveryUncertaintyIdentity {
+        try DirectPromptDeliveryUncertaintyIdentity(origin: URL(string: "https://fixture.example")!, profile: profile, storedID: id)
+    }
+
+    func testLazySubmitResolvesAncestorBeforeAnyPromptDispatch() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setResumeResponse(.object(["session_id": .string("runtime-tip"), "session_key": .string("tip")]))
+        let runtime = try makeRuntime(fake)
+        let store = InMemoryDirectPromptDeliveryUncertaintyStore()
+        let marker = DirectPromptDeliveryUncertaintyMarker(identity: try lineageIdentity("ancestor"))
+        try store.write(marker)
+        let controller = makeController(runtime: runtime, storedID: "tip", promptUncertaintyStore: store) { _, _, _, _ in self.page("tip") }
+        XCTAssertFalse(controller.hasAmbiguousPromptDelivery)
+        do { try await controller.submit("do not resend"); XCTFail("Expected ancestor delivery barrier") }
+        catch DirectSessionError.ambiguousPrompt { }
+        XCTAssertTrue(controller.hasAmbiguousPromptDelivery)
+        XCTAssertEqual(controller.promptDeliveryUncertaintyToken, marker.token)
+        XCTAssertFalse(fake.calls().contains { $0.method == "prompt.submit" })
+        await runtime.stop()
+    }
+
+    func testAncestorResolutionRejectsTipChangingDuringScanWithoutMarkerMutation() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setResumeResponse(.object(["session_id": .string("runtime-tip"), "session_key": .string("tip")]))
+        let runtime = try makeRuntime(fake)
+        let store = InMemoryDirectPromptDeliveryUncertaintyStore()
+        let marker = DirectPromptDeliveryUncertaintyMarker(identity: try lineageIdentity("ancestor"))
+        try store.write(marker)
+        var tipReads = 0
+        let controller = makeController(runtime: runtime, storedID: "tip", promptUncertaintyStore: store) { id, _, _, _ in
+            if id == "tip" { tipReads += 1 }
+            return self.page(tipReads > 1 ? "new-tip" : "tip")
+        }
+        do { try await controller.open(); XCTFail("Changed canonical tip must fail closed") }
+        catch DirectSessionError.staleOperation { }
+        XCTAssertEqual(store.markers, [marker])
+        XCTAssertTrue(controller.hasAmbiguousPromptDelivery)
+        await runtime.stop()
+    }
+
+    func testAncestorResolutionRejectsTokenReplacementDuringRead() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setResumeResponse(.object(["session_id": .string("runtime-tip"), "session_key": .string("tip")]))
+        let runtime = try makeRuntime(fake)
+        let store = InMemoryDirectPromptDeliveryUncertaintyStore()
+        let identity = try lineageIdentity("ancestor")
+        try store.write(DirectPromptDeliveryUncertaintyMarker(identity: identity))
+        let replacement = DirectPromptDeliveryUncertaintyMarker(identity: identity)
+        let controller = makeController(runtime: runtime, storedID: "tip", promptUncertaintyStore: store) { id, _, _, _ in
+            if id == "ancestor" { try store.write(replacement) }
+            return self.page("tip")
+        }
+        do { try await controller.open(); XCTFail("Replaced marker must fail closed") }
+        catch DirectSessionError.ambiguousPrompt { }
+        XCTAssertEqual(store.markers, [replacement])
+        XCTAssertTrue(controller.hasAmbiguousPromptDelivery)
+        await runtime.stop()
+    }
+
+    func testSuccessfulEmptyLineageRetryClearsOnlyResolutionFailureAndAllowsSend() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setResumeResponse(.object(["session_id": .string("runtime-tip"), "session_key": .string("tip")]))
+        let runtime = try makeRuntime(fake)
+        let store = InMemoryDirectPromptDeliveryUncertaintyStore()
+        let other = DirectPromptDeliveryUncertaintyMarker(identity: try lineageIdentity("other"))
+        try store.write(other)
+        var failOther = true
+        let controller = makeController(runtime: runtime, storedID: "tip", promptUncertaintyStore: store) { id, _, _, _ in
+            if id == "other", failOther { throw DirectSessionError.invalidResponse }
+            return self.page(id)
+        }
+        do { try await controller.open(); XCTFail("Expected scoped resolution failure") }
+        catch DirectSessionError.invalidResponse { }
+        XCTAssertTrue(controller.hasAmbiguousPromptDelivery)
+        XCTAssertNil(controller.promptDeliveryUncertaintyToken)
+        failOther = false
+        try await controller.refresh()
+        XCTAssertFalse(controller.hasAmbiguousPromptDelivery)
+        try await controller.submit("safe after complete retry")
+        XCTAssertEqual(fake.calls().filter { $0.method == "prompt.submit" }.count, 1)
+        XCTAssertEqual(store.markers, [other])
+        await runtime.stop()
+    }
+
+    func testOwnSuccessfulAckDuringAncestorScanDoesNotResurrectDeliveryWarning() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setResumeResponse(.object(["session_id": .string("runtime-tip"), "session_key": .string("tip")]))
+        let promptGate = AsyncGate()
+        fake.setPromptResponseGate(promptGate)
+        let runtime = try makeRuntime(fake)
+        let store = InMemoryDirectPromptDeliveryUncertaintyStore()
+        let other = DirectPromptDeliveryUncertaintyMarker(identity: try lineageIdentity("other"))
+        try store.write(other)
+        let readGate = AsyncGate()
+        var suspendOther = false
+        var enteredOther = false
+        let controller = makeController(runtime: runtime, storedID: "tip", promptUncertaintyStore: store) { id, _, _, _ in
+            if id == "other", suspendOther {
+                enteredOther = true
+                await readGate.wait()
+            }
+            return self.page(id)
+        }
+        try await controller.open()
+        let submit = Task { try await controller.submit("accepted during scan") }
+        await yieldUntil { fake.calls().contains { $0.method == "prompt.submit" } }
+        suspendOther = true
+        let refresh = Task { try await controller.refresh() }
+        await yieldUntil { enteredOther }
+        await promptGate.release()
+        try await submit.value
+        await readGate.release()
+        try await refresh.value
+        XCTAssertFalse(controller.hasAmbiguousPromptDelivery)
+        XCTAssertNil(controller.promptDeliveryUncertaintyToken)
+        XCTAssertEqual(store.markers, [other])
+        await runtime.stop()
+    }
+
     func testFirstSubmitCreatesOnceAndUsesRuntimeIDAndProfile() async throws {
         let fake = ControllerFakeTransport()
         let runtime = try makeRuntime(fake)
@@ -59,6 +443,9 @@ final class GatewayConversationControllerTests: XCTestCase {
         await yieldUntil { fake.calls().contains { $0.method == "prompt.submit" } }
         let ancestorMarker = try XCTUnwrap(promptStore.markers.first)
         XCTAssertEqual(ancestorMarker.identity.storedID, "ancestor")
+
+        try await controller.refresh()
+        XCTAssertFalse(controller.hasAmbiguousPromptDelivery, "An ordinary refresh must not turn the in-flight marker into an unknown outcome")
 
         canonicalID = "tip"
         try await controller.refresh()
@@ -1500,6 +1887,9 @@ private final class ControllerFakeTransport: HermesGatewayTransport, @unchecked 
     private var branchResponse: JSONValue?
     private var branchResponseGate: AsyncGate?
     private var branchServerError: HermesGatewayError?
+    private var compressResponse: JSONValue?
+    private var compressGate: AsyncGate?
+    private var compressError: HermesGatewayError?
     private var interruptResponse: JSONValue = .object([:])
     private var interruptEvent: HermesGatewayEvent?
     private var reasoningGetResponse: JSONValue = .object([
@@ -1531,6 +1921,10 @@ private final class ControllerFakeTransport: HermesGatewayTransport, @unchecked 
 
     func setResumeResponse(_ response: JSONValue) {
         withLock { resumeResponse = response }
+    }
+
+    func setCompressResponse(_ response: JSONValue, gate: AsyncGate? = nil, error: HermesGatewayError? = nil) {
+        withLock { compressResponse = response; compressGate = gate; compressError = error }
     }
 
     func setResumeEventsBeforeResponse(
@@ -1687,6 +2081,11 @@ private final class ControllerFakeTransport: HermesGatewayTransport, @unchecked 
             if let gate { await gate.wait() }
             if let error { throw error }
             return response ?? .object([:])
+        case "session.compress":
+            let (response, gate, error) = withLock { (compressResponse, compressGate, compressError) }
+            if let gate { await gate.wait() }
+            if let error { throw error }
+            return response
         case "session.steer":
             return behavior.5
         case "session.interrupt":

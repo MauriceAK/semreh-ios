@@ -11,13 +11,16 @@ final class SkillsViewModel {
     private(set) var togglingSkillNames: Set<String> = []
 
     private let client: APIClient
+    private let profile: String
 
-    init(server: URL) {
+    init(server: URL, profile: String = "default") {
         client = APIClient(baseURL: server)
+        self.profile = profile
     }
 
-    init(client: APIClient) {
+    init(client: APIClient, profile: String = "default") {
         self.client = client
+        self.profile = profile
     }
 
     func load() async {
@@ -27,7 +30,7 @@ final class SkillsViewModel {
         defer { isLoading = false }
 
         do {
-            let response = try await client.skills()
+            let response = try await client.directSkills(profile: profile)
             skills = response.skills ?? []
         } catch {
             lastError = error
@@ -66,7 +69,7 @@ final class SkillsViewModel {
         defer { togglingSkillNames.remove(name) }
 
         do {
-            _ = try await client.toggleSkill(name: name, enabled: enabled)
+            _ = try await client.directToggleSkill(name: name, enabled: enabled, profile: profile)
             await load()
         } catch {
             updateSkill(named: name, disabled: enabled)

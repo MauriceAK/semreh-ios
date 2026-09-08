@@ -7,6 +7,60 @@ import UniformTypeIdentifiers
 @testable import HermesMobile
 
 final class APIClientConfigurationTests: APIClientTestCase {
+    func testDirectProfilesDecodesStockRowsWithoutInventingActiveEnvelope() async throws {
+        let client = makeClient { request in
+            XCTAssertEqual(request.url?.path, "/api/profiles")
+            XCTAssertEqual(request.httpMethod, "GET")
+            return apiTestJSONResponse("""
+            {"profiles":[{"name":"default","is_default":true,"gateway_running":false},
+                         {"name":"work","is_default":false,"model":"fixture","provider":"custom","skill_count":2}]}
+            """, for: request)
+        }
+        let response = try await client.directProfiles()
+        XCTAssertNil(response.active)
+        XCTAssertNil(response.singleProfileMode)
+        XCTAssertEqual(response.profiles?.first?.isDefault, true)
+        XCTAssertNil(response.profiles?.first?.isActive)
+        XCTAssertEqual(response.profiles?.last?.model, "fixture")
+        XCTAssertEqual(response.profiles?.last?.skillCount, 2)
+    }
+
+    func testDirectActiveProfileKeepsStartupDefaultDistinctFromRunningProfile() async throws {
+        let client = makeClient { request in
+            XCTAssertEqual(request.url?.path, "/api/profiles/active")
+            XCTAssertEqual(request.httpMethod, "GET")
+            return apiTestJSONResponse("{\"active\":\"work\",\"current\":\"default\"}", for: request)
+        }
+        let response = try await client.directActiveProfile()
+        XCTAssertEqual(response.startupDefaultName, "work")
+        XCTAssertEqual(response.current, "default")
+    }
+
+    func testDirectActiveProfileMissingDefaultDoesNotFallBackToRunningProfile() async throws {
+        for payload in ["{\"current\":\"work\"}", "{\"active\":\"  \",\"current\":\"work\"}"] {
+            let client = makeClient { apiTestJSONResponse(payload, for: $0) }
+            let response = try await client.directActiveProfile()
+            XCTAssertNil(response.startupDefaultName)
+            XCTAssertEqual(response.current, "work")
+        }
+    }
+
+    func testDirectProfileReadersClassifyStructuredAuthenticationExpiry() async throws {
+        let client = makeClient { request in
+            let response = try XCTUnwrap(HTTPURLResponse(url: try XCTUnwrap(request.url), statusCode: 401,
+                                                        httpVersion: nil, headerFields: ["Content-Type": "application/json"]))
+            return (response, Data(#"{"error":"unauthenticated","detail":"Unauthorized"}"#.utf8))
+        }
+        do {
+            _ = try await client.directProfiles()
+            XCTFail("Expected expired authentication")
+        } catch DirectHermesAuthError.sessionExpired { }
+        do {
+            _ = try await client.directActiveProfile()
+            XCTFail("Expected expired authentication")
+        } catch DirectHermesAuthError.sessionExpired { }
+    }
+
     func testReasoningDisplayPrefersStructuredThinkingAndStripsVisibleAnswerEcho() {
         let finalAnswer = """
         **Terminal:** `/Users/hermes` directory listed.

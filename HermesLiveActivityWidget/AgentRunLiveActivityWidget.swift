@@ -290,7 +290,7 @@ private struct AgentRunProgressRail: View {
             0.78
         case .complete:
             1
-        case .failed, .cancelled:
+        case .failed, .cancelled, .ended:
             1
         }
     }
@@ -376,7 +376,7 @@ private enum AgentRunStatusStyle {
             return Color(red: 0.310, green: 0.839, blue: 0.631) // #4FD6A1
         case .failed:
             return Color(red: 0.910, green: 0.475, blue: 0.502) // #E87980
-        case .cancelled:
+        case .cancelled, .ended:
             return AgentRunLiveActivityTheme.secondaryText.opacity(0.82)
         }
     }
@@ -407,6 +407,8 @@ private enum AgentRunStatusStyle {
             "exclamationmark"
         case .cancelled:
             "xmark"
+        case .ended:
+            "minus"
         }
     }
 }

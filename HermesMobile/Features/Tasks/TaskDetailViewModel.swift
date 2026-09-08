@@ -8,6 +8,7 @@ final class TaskDetailViewModel {
     private(set) var runningElapsed: Double?
 
     private(set) var outputs: [CronOutputItem] = []
+    private(set) var runs: [DirectCronRun] = []
     /// Server-provided deliver targets; `nil` while unknown or when the
     /// endpoint is unavailable (the editor then falls back to free text).
     private(set) var deliveryOptions: [CronDeliveryOption]?
@@ -19,14 +20,19 @@ final class TaskDetailViewModel {
     private(set) var lastMutation: CronJobListMutation?
 
     private let client: APIClient
+    private let profile: String
+    private var loadGeneration = 0
 
-    init(job: CronJob, runningElapsed: Double?, server: URL, client: APIClient? = nil) {
+    init(job: CronJob, runningElapsed: Double?, server: URL, client: APIClient? = nil, profile: String = "default") {
         self.job = job
         self.runningElapsed = runningElapsed
         self.client = client ?? APIClient(baseURL: server)
+        self.profile = profile
     }
 
     func load() async {
+        loadGeneration += 1
+        let generation = loadGeneration
         guard let jobID = job.jobId else {
             errorMessage = String(localized: "Missing job identifier.")
             return
@@ -35,21 +41,29 @@ final class TaskDetailViewModel {
         isLoading = true
         errorMessage = nil
         lastError = nil
-        defer { isLoading = false }
+        defer { if generation == loadGeneration { isLoading = false } }
 
         // Optional endpoint: failure must not break the detail view, and a
         // nil result keeps the editor's free-text deliver fallback.
-        async let deliveryOptionsResponse = try? client.cronDeliveryOptions()
+        async let deliveryOptionsResponse = try? client.directCronDeliveryOptions()
 
         do {
-            let response = try await client.cronOutput(jobID: jobID, limit: 5)
-            outputs = response.outputs ?? []
+            async let detail = client.directCronJob(jobID: jobID, profile: profile)
+            async let history = client.directCronRuns(jobID: jobID, profile: profile)
+            let (freshJob, freshRuns) = try await (detail, history)
+            let options = await deliveryOptionsResponse
+            guard generation == loadGeneration else { return }
+            job = freshJob
+            runs = freshRuns
+            runningElapsed = freshJob.latestExecution?.runningElapsed()
+            deliveryOptions = options
         } catch {
+            let options = await deliveryOptionsResponse
+            guard generation == loadGeneration else { return }
             lastError = error
             errorMessage = error.localizedDescription
+            deliveryOptions = options
         }
-
-        deliveryOptions = await deliveryOptionsResponse?.platforms
     }
 
     func clearActionError() {

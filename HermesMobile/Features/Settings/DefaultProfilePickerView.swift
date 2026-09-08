@@ -31,6 +31,10 @@ struct DefaultProfilePickerView: View {
                 VStack(spacing: 24) {
                     ProfilePickerSearchField(text: $searchText)
 
+                    Text("The default is used when starting Hermes. It can differ from the profile selected in this app.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+
                     if let saveError {
                         Text(saveError)
                             .font(.caption)
@@ -250,9 +254,11 @@ struct DefaultProfilePickerView: View {
         errorMessage = nil
 
         do {
-            let response = try await APIClient(baseURL: server).profiles()
+            let client = APIClient(baseURL: server)
+            let response = try await client.directProfiles()
+            let active = try await client.directActiveProfile()
             profiles = response.profiles ?? []
-            activeProfileName = response.effectiveDefaultProfileName ?? currentDefaultProfileName
+            activeProfileName = active.startupDefaultName
             isSingleProfileMode = response.singleProfileMode ?? false
         } catch {
             // A cancelled .task (view dismissed mid-load) must not surface a

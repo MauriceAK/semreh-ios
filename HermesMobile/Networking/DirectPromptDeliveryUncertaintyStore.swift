@@ -101,6 +101,7 @@ struct DirectPromptDeliveryUncertaintyMarker: Codable, Equatable, Sendable {
 
 protocol DirectPromptDeliveryUncertaintyStoreProtocol: AnyObject {
     func load(for identity: DirectPromptDeliveryUncertaintyIdentity) throws -> DirectPromptDeliveryUncertaintyMarker?
+    func candidates(for identity: DirectPromptDeliveryUncertaintyIdentity, limit: Int) throws -> [DirectPromptDeliveryUncertaintyMarker]
     func write(_ marker: DirectPromptDeliveryUncertaintyMarker) throws
     func remove(_ marker: DirectPromptDeliveryUncertaintyMarker) throws
 }
@@ -112,6 +113,7 @@ enum DirectPromptDeliveryUncertaintyStoreError: Error, Equatable, Sendable {
     case tokenMismatch
     case missing
     case io
+    case candidateLimitExceeded
 }
 
 /// Metadata-only, one-file-per-chat persistence. It never stores prompt text,
@@ -173,6 +175,32 @@ final class DirectPromptDeliveryUncertaintyStore: DirectPromptDeliveryUncertaint
         } catch {
             throw DirectPromptDeliveryUncertaintyStoreError.io
         }
+    }
+
+    /// Legacy filenames hash the entire identity, so discovery must inspect the
+    /// flat directory. Only valid, attributable records participate. An invalid
+    /// legacy record cannot be scoped here; exact-ID load still fails closed.
+    func candidates(for identity: DirectPromptDeliveryUncertaintyIdentity, limit: Int) throws -> [DirectPromptDeliveryUncertaintyMarker] {
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: rootURL.path, isDirectory: &isDirectory) else { return [] }
+        guard isDirectory.boolValue else { throw DirectPromptDeliveryUncertaintyStoreError.io }
+        let urls: [URL]
+        do { urls = try fileManager.contentsOfDirectory(at: rootURL, includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey]) }
+        catch { throw DirectPromptDeliveryUncertaintyStoreError.io }
+        var result: [DirectPromptDeliveryUncertaintyMarker] = []
+        for url in urls where url.lastPathComponent.hasPrefix("marker-") && url.pathExtension == "json" {
+            guard let metadata = try? url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey]),
+                  metadata.isRegularFile == true,
+                  let size = metadata.fileSize, size <= 16_384,
+                  let data = try? Data(contentsOf: url),
+                  let marker = try? JSONDecoder().decode(DirectPromptDeliveryUncertaintyMarker.self, from: data),
+                  marker.identity.origin == identity.origin,
+                  marker.identity.profile == identity.profile,
+                  try markerURL(for: marker.identity) == url else { continue }
+            guard result.count < limit else { throw DirectPromptDeliveryUncertaintyStoreError.candidateLimitExceeded }
+            result.append(marker)
+        }
+        return result.sorted { $0.identity.storedID < $1.identity.storedID }
     }
 
     func remove(_ marker: DirectPromptDeliveryUncertaintyMarker) throws {

@@ -21,29 +21,39 @@ final class TasksViewModel {
     private(set) var lastError: Error?
 
     private let client: APIClient
+    private let profile: String
+    private var loadGeneration = 0
 
-    init(server: URL, client: APIClient? = nil) {
+    init(server: URL, client: APIClient? = nil, profile: String = "default") {
         self.client = client ?? APIClient(baseURL: server)
+        self.profile = profile
     }
 
     func load() async {
+        loadGeneration += 1
+        let generation = loadGeneration
         isLoading = true
         errorMessage = nil
         lastError = nil
-        defer { isLoading = false }
+        defer { if generation == loadGeneration { isLoading = false } }
 
         do {
-            async let jobsResponse = client.crons()
-            async let statusResponse = client.cronStatus()
+            async let jobsResponse = client.directCronJobs(profile: profile)
             // Optional endpoint: failure must not break the task list, and a
             // nil result keeps the editor's free-text deliver fallback.
-            async let deliveryOptionsResponse = try? client.cronDeliveryOptions()
+            async let deliveryOptionsResponse = try? client.directCronDeliveryOptions()
 
-            let (jobsResult, statusResult) = try await (jobsResponse, statusResponse)
-            runningJobs = statusResult.runningJobs ?? [:]
-            jobs = (jobsResult.jobs ?? []).sorted(by: sortJobs)
-            deliveryOptions = await deliveryOptionsResponse?.platforms
+            let jobsResult = try await jobsResponse
+            let options = await deliveryOptionsResponse
+            guard generation == loadGeneration else { return }
+            runningJobs = Dictionary(jobsResult.compactMap { job in
+                guard let id = job.jobId, let elapsed = job.latestExecution?.runningElapsed() else { return nil }
+                return (id, elapsed)
+            }, uniquingKeysWith: { _, newest in newest })
+            jobs = jobsResult.sorted(by: sortJobs)
+            deliveryOptions = options
         } catch {
+            guard generation == loadGeneration else { return }
             lastError = error
             errorMessage = error.localizedDescription
         }

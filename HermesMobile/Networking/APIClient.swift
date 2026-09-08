@@ -33,27 +33,15 @@ actor APIClient {
     /// Internal, not private, because the upload and transcribe extensions build
     /// their multipart requests by hand and need the same header injection (#61).
     let customHeaderProvider: @Sendable () -> [CustomHeader]
-    /// Optional explicit sidecar for tests/specialized callers. Otherwise the
-    /// process-wide store is consulted dynamically so Settings changes affect
-    /// already-open Sessions/Chat view models without rebuilding API clients.
-    private nonisolated let injectedOfficialContinuityClient: OfficialHermesContinuityClient?
-    private nonisolated let officialConfigurationStore: OfficialContinuityConfigurationStore
-    nonisolated var officialContinuityClient: OfficialHermesContinuityClient? {
-        injectedOfficialContinuityClient ?? officialConfigurationStore.client(for: baseURL)
-    }
 
     init(
         baseURL: URL,
         session: URLSession? = nil,
         publicMediaSession: URLSession? = nil,
-        customHeaderProvider: @escaping @Sendable () -> [CustomHeader] = { CustomHeaderStore.shared.snapshot() },
-        officialContinuityClient: OfficialHermesContinuityClient? = nil,
-        officialConfigurationStore: OfficialContinuityConfigurationStore = .shared
+        customHeaderProvider: @escaping @Sendable () -> [CustomHeader] = { CustomHeaderStore.shared.snapshot() }
     ) {
         self.baseURL = baseURL
         self.customHeaderProvider = customHeaderProvider
-        self.injectedOfficialContinuityClient = officialContinuityClient
-        self.officialConfigurationStore = officialConfigurationStore
 
         // One redirect guard shared by both sessions (same origin + same header
         // provider). Wired into the default sessions so a server-issued
@@ -98,22 +86,6 @@ actor APIClient {
 
     func health() async throws -> HealthResponse {
         try await send(endpoint: .health, method: "GET")
-    }
-
-    func authStatus() async throws -> AuthStatusResponse {
-        try await send(endpoint: .authStatus, method: "GET")
-    }
-
-    func login(password: String) async throws -> LoginResponse {
-        try await send(
-            endpoint: .login,
-            method: "POST",
-            body: LoginRequest(password: password)
-        )
-    }
-
-    func logout() async throws -> LoginResponse {
-        try await send(endpoint: .logout, method: "POST", body: EmptyBody())
     }
 
     func send<Response: Decodable>(
@@ -481,12 +453,6 @@ private extension APIClient {
         return URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
     }
 }
-
-private struct LoginRequest: Encodable {
-    let password: String
-}
-
-private struct EmptyBody: Encodable {}
 
 /// A `URLSession` redirect guard that removes the user's custom request headers
 /// when the server redirects a **same-origin** request to a **cross-origin** host.

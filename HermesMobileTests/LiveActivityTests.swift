@@ -727,90 +727,155 @@ final class LiveActivityTests: XCTestCase {
         XCTAssertEqual(viewModel.responseCompletionHapticTrigger, 0)
     }
 
-    func testForegroundReconnectCompletionEndsLiveActivityAndAllowsFollowupStream() async throws {
-        let baseURL = URL(string: "https://example.test")!
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [LiveActivityURLProtocol.self]
-        let client = APIClient(baseURL: baseURL, session: URLSession(configuration: configuration))
-        let streamClient = LiveActivitySpySSEClient()
-        let approvalStreamClient = LiveActivitySpySSEClient()
-        let clarifyStreamClient = LiveActivitySpySSEClient()
+    func testDirectIdleRecoveryEndsWithoutClaimingSuccessAndAllowsFollowup() async throws {
         let manager = SpyAgentLiveActivityManager()
-        let session = try Self.sessionSummary(id: "session-abc", title: "Live work")
-        var nextStreamNumber = 1
+        let fixture = try await makeDirectActivityFixture(manager: manager)
+        await fixture.emit("message.start")
+        XCTAssertEqual(manager.starts.count, 1)
+        fixture.transport.setRunning(false)
 
-        LiveActivityURLProtocol.handler = { request in
-            switch request.url?.path {
-            case "/api/chat/start":
-                let streamID = "stream-\(nextStreamNumber)"
-                nextStreamNumber += 1
-                return Self.jsonResponse(#"{"stream_id":"\#(streamID)","session_id":"session-abc"}"#, for: request)
-            case "/api/chat/stream/status":
-                return Self.jsonResponse(#"{"active":false,"stream_id":"stream-1","replay_available":false}"#, for: request)
-            case "/api/session":
-                return Self.jsonResponse("""
-                {
-                  "session": {
-                    "session_id": "session-abc",
-                    "title": "Live work",
-                    "messages": [
-                      {
-                        "role": "user",
-                        "content": "Keep working",
-                        "timestamp": 1770000100,
-                        "message_id": "user-1"
-                      },
-                      {
-                        "role": "assistant",
-                        "content": "Completed after foreground reconnect.",
-                        "timestamp": 1770000110,
-                        "message_id": "assistant-1"
-                      }
-                    ]
-                  }
-                }
-                """, for: request)
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
+        try await fixture.runtime.reconnect()
+        _ = await fixture.viewModel.reconnectStreamIfNeeded()
+
+        XCTAssertEqual(manager.ends, [.init(status: .ended, activity: "No longer running", errorSummary: nil)])
+        XCTAssertNil(fixture.viewModel.activeStreamID)
+        try await fixture.runtime.reconnect()
+        XCTAssertEqual(manager.ends.count, 1, "Repeated idle recovery cannot finalize twice")
+
+        await fixture.emit("message.start")
+        XCTAssertEqual(manager.starts.count, 2)
+        await fixture.emit("message.complete", payload: ["status": .string("complete")])
+        XCTAssertEqual(manager.ends.last?.status, .complete)
+        await fixture.runtime.stop()
+    }
+
+    func testDirectRecoveryAndTerminalCannotEndSiblingActivity() async throws {
+        let manager = SpyAgentLiveActivityManager()
+        let first = try await makeDirectActivityFixture(manager: manager, sessionID: "first")
+        let sibling = try await makeDirectActivityFixture(manager: manager, sessionID: "sibling")
+        await first.emit("message.start")
+        await sibling.emit("message.start")
+        first.transport.setRunning(false)
+        try await first.runtime.reconnect()
+        XCTAssertTrue(manager.ends.isEmpty)
+
+        await first.emit("message.start")
+        await sibling.emit("message.start")
+        await first.emit("message.complete", payload: ["status": .string("cancelled")])
+        XCTAssertTrue(manager.ends.isEmpty)
+        await sibling.emit("message.complete", payload: ["status": .string("cancelled")])
+        XCTAssertEqual(manager.ends.map(\.status), [.cancelled])
+        await first.runtime.stop()
+        await sibling.runtime.stop()
+    }
+
+    func testBufferedTerminalWinsOverNeutralIdleRecovery() async throws {
+        let manager = SpyAgentLiveActivityManager()
+        let fixture = try await makeDirectActivityFixture(manager: manager)
+        await fixture.emit("message.start")
+        fixture.transport.setRunning(false)
+        fixture.transport.emitTerminalOnResume()
+        fixture.transcript.beforeRead = {
+            fixture.transcript.beforeRead = nil
+            for _ in 0..<1000 {
+                if fixture.runtime.bufferedEventCountForTesting > 0 { break }
+                await Task.yield()
             }
+            XCTAssertEqual(fixture.runtime.bufferedEventCountForTesting, 1)
+            // The canonical read is still behind the reconnect barrier here.
+            XCTAssertTrue(manager.ends.isEmpty)
         }
 
-        let viewModel = ChatViewModel(
-            session: session,
-            server: baseURL,
-            client: client,
-            streamClient: streamClient,
-            approvalStreamClient: approvalStreamClient,
-            clarifyStreamClient: clarifyStreamClient,
-            liveActivityManager: manager
+        try await fixture.runtime.reconnect()
+        fixture.transcript.beforeRead = nil
+
+        XCTAssertEqual(manager.ends.map(\.status), [.complete])
+        await fixture.runtime.stop()
+    }
+
+    func testDirectRecoveryRequiresExplicitIdleAndSuccessfulCanonicalRead() async throws {
+        let manager = SpyAgentLiveActivityManager()
+        let fixture = try await makeDirectActivityFixture(manager: manager)
+        await fixture.emit("message.start")
+        fixture.transport.setRunning(nil)
+        try await fixture.runtime.reconnect()
+        XCTAssertTrue(manager.ends.isEmpty)
+        fixture.transport.setRunning(true)
+        try await fixture.runtime.reconnect()
+        XCTAssertTrue(manager.ends.isEmpty)
+
+        fixture.transport.setRunning(false)
+        fixture.transcript.fails = true
+        do {
+            try await fixture.runtime.reconnect()
+            XCTFail("Canonical read failure must fail recovery")
+        } catch { }
+        XCTAssertTrue(manager.ends.isEmpty)
+        fixture.transcript.fails = false
+        fixture.transcript.canonicalID = "different-session"
+        do {
+            try await fixture.runtime.reconnect()
+            XCTFail("Changed canonical identity must invalidate the recovered binding")
+        } catch { }
+        XCTAssertTrue(manager.ends.isEmpty)
+        await fixture.runtime.stop()
+    }
+
+    func testDirectRecoveryCannotEndActivityAfterOwnerInvalidation() async throws {
+        let manager = SpyAgentLiveActivityManager()
+        let fixture = try await makeDirectActivityFixture(manager: manager)
+        await fixture.emit("message.start")
+        fixture.viewModel.invalidateDirectConversation()
+        fixture.transport.setRunning(false)
+
+        try await fixture.runtime.reconnect()
+
+        XCTAssertTrue(manager.ends.isEmpty)
+        await fixture.runtime.stop()
+    }
+
+    func testEndedActivityIsFinalNeutralAndPreservesExcerpt() throws {
+        let initial = AgentRunActivityStateReducer.initialState(sessionID: "session", sessionTitle: "Work")
+        let responding = AgentRunActivityStateReducer.appendingToken("Partial answer", to: initial)
+        let ended = AgentRunActivityStateReducer.final(
+            status: .ended, activity: "No longer running", state: responding
         )
+        XCTAssertTrue(ended.isFinal)
+        XCTAssertFalse(ended.isStale)
+        XCTAssertNil(ended.errorSummary)
+        XCTAssertEqual(ended.responseExcerpt, "Partial answer")
+        XCTAssertEqual(ended.status.title, "Ended")
+        XCTAssertEqual(ended.status.compactTitle, "Ended")
+        XCTAssertEqual(try JSONDecoder().decode(AgentRunActivityAttributes.ContentState.self,
+            from: JSONEncoder().encode(ended)), ended)
+    }
 
-        let didStartFirstResponse = await viewModel.sendMessage("Keep working")
-        XCTAssertTrue(didStartFirstResponse)
-        streamClient.emit(.reasoning("Thinking about the final answer."))
-        viewModel.suspendStreamForBackground()
-
-        await viewModel.reconnectStreamIfNeeded()
-
-        XCTAssertTrue(manager.didMarkStale)
-        XCTAssertEqual(manager.ends, [
-            SpyAgentLiveActivityManager.End(
-                status: .complete,
-                activity: "Response complete",
-                errorSummary: nil
-            )
-        ])
-        XCTAssertNil(viewModel.activeStreamID)
-        XCTAssertEqual(streamClient.stopCount, 2)
-
-        let didStartFollowup = await viewModel.sendMessage("Follow up")
-        XCTAssertTrue(didStartFollowup)
-        XCTAssertEqual(manager.starts, [
-            SpyAgentLiveActivityManager.Start(sessionID: "session-abc", sessionTitle: "Live work", streamID: "stream-1"),
-            SpyAgentLiveActivityManager.Start(sessionID: "session-abc", sessionTitle: "Live work", streamID: "stream-2")
-        ])
-        XCTAssertEqual(viewModel.activeStreamID, "stream-2")
+    private func makeDirectActivityFixture(
+        manager: SpyAgentLiveActivityManager,
+        sessionID: String = "session-abc"
+    ) async throws -> DirectActivityFixture {
+        let server = try XCTUnwrap(URL(string: "https://activity.example.test"))
+        let transport = DirectActivityTransport(sessionID: sessionID)
+        let runtime = try HermesServerRuntime(origin: server) { sink in
+            transport.installSink(sink)
+            return transport
+        }
+        let transcript = DirectActivityTranscript()
+        let controller = GatewayConversationController(
+            runtime: runtime, storedID: sessionID, profile: "default",
+            loadTranscript: { id, _, _, _ in
+                await transcript.beforeRead?()
+                if transcript.fails { throw DirectSessionError.invalidResponse }
+                return DirectHermesTranscriptPage(sessionID: transcript.canonicalID ?? id, messages: [], pagination: nil)
+            }
+        )
+        try await controller.open()
+        let viewModel = ChatViewModel(
+            session: SessionSummary(sessionId: sessionID, title: "Live work"),
+            server: server, liveActivityManager: manager,
+            gatewayRuntimeProvider: { _ in runtime }, initialDirectConversation: controller
+        )
+        return DirectActivityFixture(viewModel: viewModel, runtime: runtime, transport: transport, transcript: transcript)
     }
 
     func testFinalLiveActivityStateKeepsExcerptVisible() {
@@ -1180,6 +1245,73 @@ final class LiveActivityTests: XCTestCase {
 }
 
 @MainActor
+private final class DirectActivityTranscript {
+    var fails = false
+    var canonicalID: String?
+    var beforeRead: (@MainActor () async -> Void)?
+}
+
+@MainActor
+private struct DirectActivityFixture {
+    let viewModel: ChatViewModel
+    let runtime: HermesServerRuntime
+    let transport: DirectActivityTransport
+    let transcript: DirectActivityTranscript
+
+    func emit(_ type: String, payload: [String: JSONValue] = [:]) async {
+        transport.emit(type, payload: payload)
+        // The runtime delivers transport callbacks on its buffered event task.
+        for _ in 0..<40 { await Task.yield() }
+    }
+}
+
+private final class DirectActivityTransport: HermesGatewayTransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private let sessionID: String
+    private var sink: (@Sendable (HermesGatewayEvent) -> Void)?
+    private var running: Bool? = false
+    private var generation = 0
+    private var sequence = 0
+    private var terminalOnResume = false
+
+    init(sessionID: String) { self.sessionID = sessionID }
+    func installSink(_ sink: @escaping @Sendable (HermesGatewayEvent) -> Void) {
+        lock.withLock { self.sink = sink }
+    }
+    func setRunning(_ value: Bool?) { lock.withLock { running = value } }
+    func emitTerminalOnResume() { lock.withLock { terminalOnResume = true } }
+    func connect() async throws { lock.withLock { generation += 1 } }
+    func close() async { }
+    func connectionIdentifier() async -> Int? { lock.withLock { generation } }
+    func request(method: String, params: JSONValue?, timeout: Duration?) async throws -> JSONValue? {
+        guard method == "session.resume" else { return .object([:]) }
+        let shouldEmit = lock.withLock {
+            let value = terminalOnResume
+            terminalOnResume = false
+            return value
+        }
+        if shouldEmit { emit("message.complete", payload: ["status": .string("complete")]) }
+        return lock.withLock {
+            var fields: [String: JSONValue] = [
+                "session_id": .string("runtime-\(sessionID)"),
+                "session_key": .string(sessionID)
+            ]
+            if let running { fields["running"] = .bool(running) }
+            return .object(fields)
+        }
+    }
+    func emit(_ type: String, payload: [String: JSONValue]) {
+        let delivery = lock.withLock { () -> ((@Sendable (HermesGatewayEvent) -> Void)?, HermesGatewayEvent) in
+            sequence += 1
+            return (sink, HermesGatewayEvent(
+                method: "event", type: type, sessionID: "runtime-\(sessionID)", sequence: sequence,
+                payload: .object(payload), params: nil, connectionGeneration: generation
+            ))
+        }
+        delivery.0?(delivery.1)
+    }
+}
+
 private final class SpyAgentLiveActivityManager: AgentLiveActivityManaging {
     struct Start: Equatable {
         let sessionID: String
@@ -1197,9 +1329,22 @@ private final class SpyAgentLiveActivityManager: AgentLiveActivityManaging {
     private(set) var updates: [AgentLiveActivityEvent] = []
     private(set) var didMarkStale = false
     private(set) var ends: [End] = []
+    private var directOwner: UUID?
 
     func start(sessionID: String, sessionTitle: String, streamID: String?) {
+        directOwner = nil
         starts.append(Start(sessionID: sessionID, sessionTitle: sessionTitle, streamID: streamID))
+    }
+
+    func startDirect(owner: UUID, sessionID: String, sessionTitle: String) {
+        start(sessionID: sessionID, sessionTitle: sessionTitle, streamID: nil)
+        directOwner = owner
+    }
+
+    func endDirect(owner: UUID, status: AgentRunActivityStatus, activity: String, errorSummary: String?) -> Bool {
+        guard directOwner == owner else { return false }
+        end(status: status, activity: activity, errorSummary: errorSummary)
+        return true
     }
 
     func update(_ event: AgentLiveActivityEvent) {
@@ -1211,6 +1356,7 @@ private final class SpyAgentLiveActivityManager: AgentLiveActivityManaging {
     }
 
     func end(status: AgentRunActivityStatus, activity: String, errorSummary: String?) {
+        directOwner = nil
         ends.append(End(status: status, activity: activity, errorSummary: errorSummary))
     }
 }

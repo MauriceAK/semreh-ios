@@ -229,11 +229,13 @@ struct ControlView: View {
         case .settings(let scrollTo):
             SettingsView(authManager: authManager, server: server, initialScrollTarget: scrollTo)
         case .tasks:
-            TasksView(server: server, onAPIError: authManager.handleAPIError)
+            TasksView(server: server, profile: viewModel.activeProfileName ?? "default", onAPIError: authManager.handleAPIError)
+                .id(viewModel.activeProfileName ?? "default")
         case .kanban:
             KanbanView(server: server, onAPIError: authManager.handleAPIError)
         case .skills:
-            SkillsView(server: server, onAPIError: authManager.handleAPIError)
+            SkillsView(server: server, profile: viewModel.activeProfileName ?? "default", onAPIError: authManager.handleAPIError)
+                .id(viewModel.activeProfileName ?? "default")
         case .memory:
             MemoryView(server: server, onAPIError: authManager.handleAPIError)
         case .insights:

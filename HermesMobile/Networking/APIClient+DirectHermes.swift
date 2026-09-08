@@ -1,5 +1,18 @@
 import Foundation
 
+/// `active` is the sticky startup default; `current` belongs to the running
+/// server process. Neither overrides the sidebar's explicit local selection.
+struct DirectHermesActiveProfile: Decodable, Equatable {
+    let active: String?
+    let current: String?
+
+    var startupDefaultName: String? {
+        guard let value = active?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else { return nil }
+        return value
+    }
+}
+
 /// Pinned first-party `/api/model/options` inventory. Do not decode the old
 /// WebUI `/api/models` envelope or infer the provider from a model's slash prefix.
 struct DirectHermesModelOptions: Decodable, Sendable {
@@ -74,6 +87,12 @@ extension APIClient {
     func directProfiles() async throws -> ProfilesResponse {
         let data = try await sendDirectData(path: "/api/profiles", method: "GET", classifyStructuredAuthExpiry: true)
         return try decode(ProfilesResponse.self, from: data)
+    }
+
+    func directActiveProfile() async throws -> DirectHermesActiveProfile {
+        let data = try await sendDirectData(path: "/api/profiles/active", method: "GET",
+                                            classifyStructuredAuthExpiry: true)
+        return try decode(DirectHermesActiveProfile.self, from: data)
     }
 
     /// Canonical direct-Hermes provider discovery. This does not consult any

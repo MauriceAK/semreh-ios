@@ -9,6 +9,7 @@ struct ParsedSlashCommand: Equatable {
 enum SlashCommandExecutionResult: Equatable {
     case executed(message: String?)
     case openedSession(SessionSummary)
+    case openedDirectBranch(DirectBranchHandoff)
     case sendAsMessage
     case unsupported(friendlyMessage: String)
     case needsSubArg

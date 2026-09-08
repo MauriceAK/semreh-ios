@@ -2,15 +2,17 @@ import SwiftUI
 
 struct TasksView: View {
     let server: URL
+    let profile: String
     let onAPIError: (Error) -> Void
 
     @State private var viewModel: TasksViewModel
     @State private var isPresentingCreateTask = false
 
-    init(server: URL, onAPIError: @escaping (Error) -> Void) {
+    init(server: URL, profile: String, onAPIError: @escaping (Error) -> Void) {
         self.server = server
+        self.profile = profile
         self.onAPIError = onAPIError
-        _viewModel = State(initialValue: TasksViewModel(server: server))
+        _viewModel = State(initialValue: TasksViewModel(server: server, profile: profile))
     }
 
     var body: some View {
@@ -99,6 +101,7 @@ struct TasksView: View {
                                 job: job,
                                 runningElapsed: viewModel.runningElapsed(for: job),
                                 server: server,
+                                profile: profile,
                                 onAPIError: onAPIError,
                                 onMutation: { mutation in
                                     viewModel.apply(mutation)

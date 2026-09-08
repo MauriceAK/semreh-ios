@@ -8,6 +8,13 @@ final class InMemoryDirectPromptDeliveryUncertaintyStore: DirectPromptDeliveryUn
     var failWrite = false
     var failRemove = false
 
+    func candidates(for identity: DirectPromptDeliveryUncertaintyIdentity, limit: Int) throws -> [DirectPromptDeliveryUncertaintyMarker] {
+        if failLoad { throw DirectPromptDeliveryUncertaintyStoreError.io }
+        let scoped = markers.filter { $0.identity.origin == identity.origin && $0.identity.profile == identity.profile }
+        guard scoped.count <= limit else { throw DirectPromptDeliveryUncertaintyStoreError.candidateLimitExceeded }
+        return scoped.sorted { $0.identity.storedID < $1.identity.storedID }
+    }
+
     func load(for identity: DirectPromptDeliveryUncertaintyIdentity) throws -> DirectPromptDeliveryUncertaintyMarker? {
         if failLoad { throw DirectPromptDeliveryUncertaintyStoreError.io }
         return markers.first { $0.identity == identity }
@@ -32,6 +39,29 @@ final class InMemoryDirectPromptDeliveryUncertaintyStore: DirectPromptDeliveryUn
 }
 
 final class DirectPromptDeliveryUncertaintyStoreTests: XCTestCase {
+    func testCandidatesAreScopedBoundedAndIgnoreUnattributableLegacyCorruption() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("PromptCandidates-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = DirectPromptDeliveryUncertaintyStore(rootURL: root)
+        let requested = try identity(origin: "https://fixture.example", profile: "work", storedID: "tip")
+        let ancestor = try identity(origin: "https://fixture.example", profile: "work", storedID: "ancestor")
+        let otherProfile = try identity(origin: "https://fixture.example", profile: "other", storedID: "ancestor")
+        let otherOrigin = try identity(origin: "https://other.example", profile: "work", storedID: "ancestor")
+        for value in [requested, ancestor, otherProfile, otherOrigin] {
+            try store.write(DirectPromptDeliveryUncertaintyMarker(identity: value))
+        }
+        try Data("invalid legacy record".utf8).write(to: root.appendingPathComponent("marker-unattributable.json"))
+        XCTAssertEqual(try store.candidates(for: requested, limit: 2).map(\.identity.storedID), ["ancestor", "tip"])
+        XCTAssertThrowsError(try store.candidates(for: requested, limit: 1)) {
+            XCTAssertEqual($0 as? DirectPromptDeliveryUncertaintyStoreError, .candidateLimitExceeded)
+        }
+        try Data("invalid exact record".utf8).write(to: store.markerURL(for: requested))
+        XCTAssertThrowsError(try store.load(for: requested)) {
+            XCTAssertEqual($0 as? DirectPromptDeliveryUncertaintyStoreError, .corrupt)
+        }
+        XCTAssertEqual(try store.candidates(for: requested, limit: 2).map(\.identity.storedID), ["ancestor"])
+    }
+
     func testRoundTripAndIdentityIsolation() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("DirectPromptDeliveryUncertainty-\(UUID().uuidString)", isDirectory: true)

@@ -1,6 +1,63 @@
 import Foundation
 
 extension APIClient {
+    func directCronJobs(profile: String) async throws -> [CronJob] {
+        let data = try await sendDirectData(path: directCronPath("/api/cron/jobs", profile: profile),
+                                            method: "GET", classifyStructuredAuthExpiry: true)
+        let jobs = try decode([CronJob].self, from: data)
+        guard jobs.allSatisfy({ $0.profile == profile && $0.jobId?.isEmpty == false }) else {
+            throw DirectCronReadError.invalidIdentity
+        }
+        return jobs
+    }
+
+    func directCronJob(jobID: String, profile: String) async throws -> CronJob {
+        let path = try directCronJobPath(jobID, profile: profile)
+        let data = try await sendDirectData(path: path, method: "GET", classifyStructuredAuthExpiry: true)
+        let job = try decode(CronJob.self, from: data)
+        guard job.jobId == jobID, job.profile == profile else { throw DirectCronReadError.invalidIdentity }
+        return job
+    }
+
+    func directCronRuns(jobID: String, profile: String, limit: Int = 5) async throws -> [DirectCronRun] {
+        guard (1...100).contains(limit) else { throw DirectCronReadError.invalidScope }
+        let path = try directCronJobPath(jobID, profile: profile, suffix: "/runs", limit: limit)
+        let data = try await sendDirectData(path: path, method: "GET", classifyStructuredAuthExpiry: true)
+        let response = try decode(DirectCronRunsResponse.self, from: data)
+        guard response.limit == limit, let runs = response.runs, runs.count <= limit,
+              runs.allSatisfy({ $0.profile == profile && $0.id?.hasPrefix("cron_\(jobID)_") == true }) else {
+            throw DirectCronReadError.invalidIdentity
+        }
+        return runs
+    }
+
+    func directCronDeliveryOptions() async throws -> [CronDeliveryOption] {
+        // Stock discovery is process-global: the handler accepts no profile.
+        let data = try await sendDirectData(path: "/api/cron/delivery-targets", method: "GET",
+                                            classifyStructuredAuthExpiry: true)
+        let response = try decode(DirectCronDeliveryTargets.self, from: data)
+        return (response.targets ?? []).map { CronDeliveryOption(value: $0.id, label: $0.name) }
+    }
+
+    private func directCronPath(_ path: String, profile: String, limit: Int? = nil) throws -> String {
+        guard !profile.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, profile.lowercased() != "all" else {
+            throw DirectCronReadError.invalidScope
+        }
+        var components = URLComponents()
+        components.path = path
+        components.queryItems = [URLQueryItem(name: "profile", value: profile)]
+        if let limit { components.queryItems?.append(URLQueryItem(name: "limit", value: String(limit))) }
+        guard let result = components.string else { throw APIError.invalidServerURL }
+        return result
+    }
+
+    private func directCronJobPath(_ jobID: String, profile: String, suffix: String = "", limit: Int? = nil) throws -> String {
+        guard !jobID.isEmpty, jobID != ".", jobID != "..", !jobID.contains("/"), !jobID.contains("\\") else {
+            throw DirectCronReadError.invalidIdentity
+        }
+        return try directCronPath("/api/cron/jobs/\(jobID)\(suffix)", profile: profile, limit: limit)
+    }
+
     func crons() async throws -> CronJobsResponse {
         try await send(endpoint: .crons, method: "GET")
     }
@@ -108,6 +165,18 @@ extension APIClient {
     }
 }
 
+enum DirectCronReadError: Error { case invalidScope, invalidIdentity }
+
+private struct DirectCronRunsResponse: Decodable {
+    let runs: [DirectCronRun]?
+    let limit: Int?
+}
+
+private struct DirectCronDeliveryTargets: Decodable {
+    struct Target: Decodable { let id: String?; let name: String? }
+    let targets: [Target]?
+}
+
 private struct CronCreateRequest: Encodable {
     let prompt: String
     let schedule: String
@@ -137,4 +206,3 @@ private struct CronJobIDRequest: Encodable {
     let jobId: String
     let reason: String?
 }
-
