@@ -1,36 +1,6 @@
 import Foundation
 
 extension APIClient {
-    func startChat(
-        sessionID: String,
-        message: String,
-        workspace: String?,
-        model: String?,
-        modelProvider: String? = nil,
-        profile: String? = nil,
-        explicitModelPick: Bool = false,
-        attachments: [JSONValue]? = nil
-    ) async throws -> ChatStartResponse {
-        return try await send(
-            endpoint: .chatStart,
-            method: "POST",
-            body: ChatStartRequest(
-                sessionId: sessionID,
-                message: message,
-                workspace: workspace,
-                model: model,
-                modelProvider: modelProvider,
-                profile: profile,
-                explicitModelPick: explicitModelPick ? true : nil,
-                attachments: attachments
-            )
-        )
-    }
-
-    nonisolated func sessionEventsURL(sessionID: String) -> URL {
-        Endpoint.sessionEvents(sessionID: sessionID).url(relativeTo: baseURL)
-    }
-
     nonisolated func chatStreamURL(streamID: String, replayAfterSeq: Int? = nil) -> URL {
         let url = Endpoint.chatStream(streamID: streamID).url(relativeTo: baseURL)
         guard let replayAfterSeq,

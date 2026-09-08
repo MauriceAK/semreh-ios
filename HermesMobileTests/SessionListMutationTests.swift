@@ -1053,30 +1053,32 @@ final class SessionListMutationTests: XCTestCase {
         XCTAssertNil(viewModel.lastError)
     }
 
+    @MainActor
     func testSessionMutatorDuplicateBranchesThenLoadsReturnedSession() async throws {
         var requestedPaths: [String] = []
+        let transport = SessionDuplicateTransport()
+        let runtime = try HermesServerRuntime(origin: URL(string: "https://example.test")!) { sink in
+            transport.installSink(sink)
+            return transport
+        }
         let client = try makeClient { request in
             let path = request.url?.path ?? "nil"
             requestedPaths.append(path)
 
             switch path {
-            case "/api/session/branch":
-                let body = try XCTUnwrap(apiTestJSONBody(from: request))
-                XCTAssertEqual(body["session_id"] as? String, "session-abc")
-                XCTAssertEqual(body["title"] as? String, "Planning (copy)")
-                return apiTestJSONResponse(#"{"session_id":"copy-123"}"#, for: request)
-            case "/api/session":
-                XCTAssertEqual(request.url?.query?.contains("session_id=copy-123"), true)
+            case "/api/sessions/session-abc/messages":
                 return apiTestJSONResponse(
-                    """
-                    {
-                      "session": {
-                        "session_id": "copy-123",
-                        "title": "Planning (copy)",
-                        "archived": false
-                      }
-                    }
-                    """,
+                    #"{"session_id":"session-abc","messages":[],"pagination":{"returned":0}}"#,
+                    for: request
+                )
+            case "/api/sessions/copy-123/messages":
+                return apiTestJSONResponse(
+                    #"{"session_id":"copy-123","messages":[],"pagination":{"returned":0}}"#,
+                    for: request
+                )
+            case "/api/sessions/copy-123":
+                return apiTestJSONResponse(
+                    #"{"id":"copy-123","profile":"work","title":"Planning (copy)","archived":0}"#,
                     for: request
                 )
             default:
@@ -1087,13 +1089,24 @@ final class SessionListMutationTests: XCTestCase {
 
         let result = try await SessionMutator(client: client).duplicate(
             sessionID: "session-abc",
-            title: "Planning (copy)"
+            title: "Planning (copy)",
+            profile: "work",
+            runtime: runtime
         )
 
-        XCTAssertEqual(requestedPaths, ["/api/session/branch", "/api/session"])
+        XCTAssertEqual(requestedPaths, [
+            "/api/sessions/session-abc/messages",
+            "/api/sessions/copy-123/messages",
+            "/api/sessions/copy-123"
+        ])
+        XCTAssertEqual(transport.methods(), ["session.resume", "session.branch"])
+        XCTAssertEqual(transport.branchFields()["name"], .string("Planning (copy)"))
+        XCTAssertEqual(transport.branchFields()["profile"], .string("work"))
         XCTAssertEqual(result.session?.sessionId, "copy-123")
         XCTAssertEqual(result.session?.title, "Planning (copy)")
+        XCTAssertEqual(result.createdSessionID, "copy-123")
         XCTAssertNil(result.errorMessage)
+        await runtime.stop()
     }
 
     @MainActor
@@ -2670,7 +2683,11 @@ final class SessionListMutationTests: XCTestCase {
 
     @MainActor
     func testDuplicateBranchesWithCopyTitleLoadsDetailAndInsertsWhenReloadOmitsCopy() async throws {
-        var branchCount = 0
+        let transport = SessionDuplicateTransport(profile: "default")
+        let runtime = try HermesServerRuntime(origin: URL(string: "https://example.test")!) { sink in
+            transport.installSink(sink)
+            return transport
+        }
         var didRequestDuplicatedDetail = false
         let source = try makeSessionSummary(
             id: "session-abc",
@@ -2678,39 +2695,24 @@ final class SessionListMutationTests: XCTestCase {
             pinned: false,
             archived: false
         )
-        let viewModel = try makeViewModel { request in
+        let viewModel = try makeViewModel(gatewayRuntimeProvider: { _ in runtime }) { request in
             switch request.url?.path {
-            case "/api/session/branch":
-                branchCount += 1
-                let body = try XCTUnwrap(apiTestJSONBody(from: request))
-                XCTAssertEqual(body["session_id"] as? String, "session-abc")
-                XCTAssertEqual(body["title"] as? String, "Planning (copy)")
-
-                if branchCount == 1 {
-                    return apiTestJSONResponse("""
-                    {
-                      "session_id": "copy-123",
-                      "parent_session_id": "session-abc"
-                    }
-                    """, for: request)
-                }
-
-                return apiTestJSONResponse("""
-                {
-                  "error": "copy failed"
-                }
-                """, for: request)
-            case "/api/session":
+            case "/api/sessions/session-abc/messages":
+                return apiTestJSONResponse(
+                    #"{"session_id":"session-abc","messages":[],"pagination":{"returned":0}}"#,
+                    for: request
+                )
+            case "/api/sessions/copy-123/messages":
+                return apiTestJSONResponse(
+                    #"{"session_id":"copy-123","messages":[],"pagination":{"returned":0}}"#,
+                    for: request
+                )
+            case "/api/sessions/copy-123":
                 didRequestDuplicatedDetail = true
-                return apiTestJSONResponse("""
-                {
-                  "session": {
-                    "session_id": "copy-123",
-                    "title": "Planning (copy)",
-                    "archived": false
-                  }
-                }
-                """, for: request)
+                return apiTestJSONResponse(
+                    #"{"id":"copy-123","profile":"default","title":"Planning (copy)","archived":0}"#,
+                    for: request
+                )
             case "/api/profiles/sessions":
                 return apiTestJSONResponse("""
                 {
@@ -2730,13 +2732,210 @@ final class SessionListMutationTests: XCTestCase {
         }
 
         let duplicated = await viewModel.duplicate(source)
-        let missingID = await viewModel.duplicate(source)
 
         XCTAssertTrue(didRequestDuplicatedDetail)
+        XCTAssertEqual(transport.methods(), ["session.resume", "session.branch"])
+        XCTAssertEqual(transport.branchFields()["name"], .string("Planning (copy)"))
         XCTAssertEqual(duplicated?.sessionId, "copy-123")
         XCTAssertEqual(viewModel.sessions.compactMap(\.sessionId), ["copy-123", "session-abc"])
-        XCTAssertNil(missingID)
-        XCTAssertEqual(viewModel.actionErrorMessage, "copy failed")
+        XCTAssertNil(viewModel.actionErrorMessage)
+        await runtime.stop()
+    }
+
+    @MainActor
+    func testDuplicateUnknownOutcomeBlocksSecondBranchAfterTemporaryControllerInvalidates() async throws {
+        let transport = SessionDuplicateTransport(
+            profile: "default",
+            branchError: .timeout(method: "session.branch", requestID: "lost-ack")
+        )
+        let runtime = try HermesServerRuntime(origin: URL(string: "https://example.test")!) { sink in
+            transport.installSink(sink)
+            return transport
+        }
+        let source = SessionSummary(sessionId: "session-abc", title: "Planning")
+        let viewModel = try makeViewModel(gatewayRuntimeProvider: { _ in runtime }) { request in
+            guard request.url?.path == "/api/sessions/session-abc/messages" else {
+                XCTFail("Unexpected request: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+            return apiTestJSONResponse(
+                #"{"session_id":"session-abc","messages":[],"pagination":{"returned":0}}"#,
+                for: request
+            )
+        }
+
+        let first = await viewModel.duplicate(source)
+        let second = await viewModel.duplicate(source)
+        XCTAssertNil(first)
+        XCTAssertNil(second)
+
+        XCTAssertEqual(transport.methods().filter { $0 == "session.branch" }.count, 1)
+        XCTAssertTrue(viewModel.actionErrorMessage?.contains("another duplicate is blocked") == true)
+        await runtime.stop()
+    }
+
+    @MainActor
+    func testDuplicateRunningSourceRefusesWithoutBranch() async throws {
+        let transport = SessionDuplicateTransport(profile: "default", running: true)
+        let runtime = try HermesServerRuntime(origin: URL(string: "https://example.test")!) { sink in
+            transport.installSink(sink); return transport
+        }
+        let viewModel = try makeViewModel(gatewayRuntimeProvider: { _ in runtime }) { request in
+            XCTAssertEqual(request.url?.path, "/api/sessions/session-abc/messages")
+            return apiTestJSONResponse(
+                #"{"session_id":"session-abc","messages":[],"pagination":{"returned":0}}"#,
+                for: request
+            )
+        }
+
+        let result = await viewModel.duplicate(SessionSummary(sessionId: "session-abc", title: "Planning"))
+
+        XCTAssertNil(result)
+        XCTAssertFalse(transport.methods().contains("session.branch"))
+        XCTAssertTrue(viewModel.actionErrorMessage?.contains("still responding") == true)
+        await runtime.stop()
+    }
+
+    @MainActor
+    func testKnownChildDetailFailureRecoversExactListRowWithoutRebranch() async throws {
+        let transport = SessionDuplicateTransport(profile: "default")
+        let runtime = try HermesServerRuntime(origin: URL(string: "https://example.test")!) { sink in
+            transport.installSink(sink); return transport
+        }
+        let viewModel = try makeViewModel(gatewayRuntimeProvider: { _ in runtime }) { request in
+            switch request.url?.path {
+            case "/api/sessions/session-abc/messages", "/api/sessions/copy-123/messages":
+                let id = request.url!.path.contains("copy-123") ? "copy-123" : "session-abc"
+                return apiTestJSONResponse(
+                    #"{"session_id":"\#(id)","messages":[],"pagination":{"returned":0}}"#,
+                    for: request
+                )
+            case "/api/sessions/copy-123":
+                throw URLError(.networkConnectionLost)
+            case "/api/profiles/sessions":
+                return apiTestJSONResponse(
+                    #"{"sessions":[{"id":"copy-123","profile":"default","title":"Planning (copy)"},{"id":"session-abc","profile":"default","title":"Planning"}]}"#,
+                    for: request
+                )
+            default:
+                XCTFail("Unexpected request: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+        }
+
+        let result = await viewModel.duplicate(SessionSummary(sessionId: "session-abc", title: "Planning"))
+
+        XCTAssertEqual(result?.sessionId, "copy-123")
+        XCTAssertEqual(transport.methods().filter { $0 == "session.branch" }.count, 1)
+        XCTAssertNil(viewModel.actionErrorMessage)
+        await runtime.stop()
+    }
+
+    @MainActor
+    func testProfileSwitchDuringKnownChildDetailFailureKeepsOriginalScopeBlocked() async throws {
+        let detailStarted = expectation(description: "child detail started")
+        let releaseDetail = DispatchSemaphore(value: 0)
+        let transport = SessionDuplicateTransport(profile: "default")
+        let runtime = try HermesServerRuntime(origin: URL(string: "https://example.test")!) { sink in
+            transport.installSink(sink); return transport
+        }
+        let viewModel = try makeViewModel(gatewayRuntimeProvider: { _ in runtime }) { request in
+            switch request.url?.path {
+            case "/api/sessions/session-abc/messages", "/api/sessions/copy-123/messages":
+                let id = request.url!.path.contains("copy-123") ? "copy-123" : "session-abc"
+                return apiTestJSONResponse(
+                    #"{"session_id":"\#(id)","messages":[],"pagination":{"returned":0}}"#,
+                    for: request
+                )
+            case "/api/sessions/copy-123":
+                detailStarted.fulfill()
+                guard releaseDetail.wait(timeout: .now() + 2) == .success else {
+                    throw URLError(.timedOut)
+                }
+                throw URLError(.networkConnectionLost)
+            default:
+                XCTFail("Unexpected request: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+        }
+        let source = SessionSummary(sessionId: "session-abc", title: "Planning", profile: "default")
+        let other = try JSONDecoder().decode(ProfileSummary.self, from: Data(#"{"name":"other"}"#.utf8))
+        let original = try JSONDecoder().decode(ProfileSummary.self, from: Data(#"{"name":"default"}"#.utf8))
+
+        let duplicate = Task { @MainActor in await viewModel.duplicate(source) }
+        await fulfillment(of: [detailStarted], timeout: 1)
+        let switchedAway = await viewModel.switchActiveProfile(other)
+        releaseDetail.signal()
+        let staleResult = await duplicate.value
+        XCTAssertTrue(switchedAway)
+        XCTAssertNil(staleResult)
+        XCTAssertNil(viewModel.actionErrorMessage, "The old profile cannot surface an error in the new scope")
+        let switchedBack = await viewModel.switchActiveProfile(original)
+        XCTAssertTrue(switchedBack)
+        let blocked = await viewModel.duplicate(source)
+
+        XCTAssertNil(blocked)
+        XCTAssertEqual(transport.methods().filter { $0 == "session.branch" }.count, 1)
+        XCTAssertTrue(viewModel.actionErrorMessage?.contains("another duplicate is blocked") == true)
+        await runtime.stop()
+    }
+
+    @MainActor
+    func testSidebarDuplicateDoesNotInvalidateOpenControllerOnSharedRuntime() async throws {
+        let transport = SessionDuplicateTransport(profile: "default")
+        let runtime = try HermesServerRuntime(origin: URL(string: "https://example.test")!) { sink in
+            transport.installSink(sink); return transport
+        }
+        let client = try makeClient { request in
+            if Self.isArchivedCountRequest(request) {
+                let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems
+                XCTAssertEqual(request.httpMethod, "GET")
+                XCTAssertEqual(query?.first { $0.name == "profile" }?.value, "default")
+                return apiTestJSONResponse(#"{"sessions":[],"total":0,"limit":0,"offset":0}"#, for: request)
+            }
+            switch request.url?.path {
+            case "/api/sessions/session-abc/messages", "/api/sessions/copy-123/messages":
+                let id = request.url!.path.contains("copy-123") ? "copy-123" : "session-abc"
+                return apiTestJSONResponse(
+                    #"{"session_id":"\#(id)","messages":[],"pagination":{"returned":0}}"#,
+                    for: request
+                )
+            case "/api/sessions/copy-123":
+                return apiTestJSONResponse(
+                    #"{"id":"copy-123","profile":"default","title":"Planning (copy)"}"#,
+                    for: request
+                )
+            case "/api/profiles/sessions":
+                return apiTestJSONResponse(#"{"sessions":[{"id":"session-abc","profile":"default"}]}"#, for: request)
+            default:
+                XCTFail("Unexpected request: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+        }
+        let openController = GatewayConversationController(
+            runtime: runtime, client: client, storedID: "session-abc", profile: "default"
+        )
+        try await openController.open()
+        var delivered = 0
+        let eventDelivered = expectation(description: "open controller still receives events")
+        openController.onEvent = { _ in delivered += 1; eventDelivered.fulfill() }
+        let viewModel = SessionListViewModel(
+            server: URL(string: "https://example.test")!, client: client,
+            gatewayRuntimeProvider: { _ in runtime }
+        )
+
+        let duplicated = await viewModel.duplicate(
+            SessionSummary(sessionId: "session-abc", title: "Planning", profile: "default")
+        )
+        transport.emit(type: "message.start", sessionID: "runtime-parent")
+        await fulfillment(of: [eventDelivered], timeout: 1)
+
+        XCTAssertEqual(duplicated?.sessionId, "copy-123")
+        XCTAssertEqual(delivered, 1)
+        XCTAssertFalse(openController.isDisposed)
+        XCTAssertFalse(transport.methods().contains("session.close"))
+        openController.invalidate()
+        await runtime.stop()
     }
 
     @MainActor
@@ -3457,6 +3656,7 @@ final class SessionListMutationTests: XCTestCase {
     @MainActor
     private func makeViewModel(
         handlesArchivedCount: Bool = true,
+        gatewayRuntimeProvider: SessionListViewModel.GatewayRuntimeProvider? = nil,
         handler: @escaping (URLRequest) throws -> (HTTPURLResponse, Data)
     ) throws -> SessionListViewModel {
         let server = try XCTUnwrap(URL(string: "https://example.test"))
@@ -3475,7 +3675,11 @@ final class SessionListMutationTests: XCTestCase {
             return try handler(request)
         }
 
-        return SessionListViewModel(server: server, client: client)
+        return SessionListViewModel(
+            server: server,
+            client: client,
+            gatewayRuntimeProvider: gatewayRuntimeProvider
+        )
     }
 
     private static func isArchivedCountRequest(_ request: URLRequest) -> Bool {
@@ -4120,5 +4324,86 @@ private final class OverlappingDeleteURLProtocol: URLProtocol {
 
     override func stopLoading() {
         loadingTask?.cancel()
+    }
+}
+
+private final class SessionDuplicateTransport: HermesGatewayTransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private var sink: (@Sendable (HermesGatewayEvent) -> Void)?
+    private var recorded: [(String, JSONValue?)] = []
+    private var generation = 0
+    private var sequence = 0
+    private let parentID: String
+    private let childID: String
+    private let profile: String
+    private let branchError: HermesGatewayError?
+    private let running: Bool
+
+    init(
+        parentID: String = "session-abc",
+        childID: String = "copy-123",
+        profile: String = "work",
+        running: Bool = false,
+        branchError: HermesGatewayError? = nil
+    ) {
+        self.parentID = parentID
+        self.childID = childID
+        self.profile = profile
+        self.running = running
+        self.branchError = branchError
+    }
+
+    func installSink(_ sink: @escaping @Sendable (HermesGatewayEvent) -> Void) {
+        lock.withLock { self.sink = sink }
+    }
+
+    func connect() async throws { lock.withLock { generation += 1 } }
+    func close() async { }
+    func connectionIdentifier() async -> Int? { lock.withLock { generation } }
+
+    func request(method: String, params: JSONValue?, timeout: Duration?) async throws -> JSONValue? {
+        lock.withLock { recorded.append((method, params)) }
+        switch method {
+        case "session.resume":
+            return .object([
+                "session_id": .string("runtime-parent"),
+                "session_key": .string(parentID),
+                "running": .bool(running),
+                "info": .object(["profile_name": .string(profile)])
+            ])
+        case "session.branch":
+            if let branchError { throw branchError }
+            return .object([
+                "session_id": .string("runtime-child"),
+                "stored_session_id": .string(childID),
+                "session_key": .string(childID),
+                "parent": .string(parentID),
+                "message_count": .number(2),
+                "info": .object(["profile_name": .string(profile)])
+            ])
+        default:
+            throw DirectSessionError.invalidResponse
+        }
+    }
+
+    func methods() -> [String] { lock.withLock { recorded.map(\.0) } }
+
+    func branchFields() -> [String: JSONValue] {
+        lock.withLock {
+            guard let params = recorded.first(where: { $0.0 == "session.branch" })?.1,
+                  case .object(let fields) = params else { return [:] }
+            return fields
+        }
+    }
+
+    func emit(type: String, sessionID: String) {
+        let delivery = lock.withLock { () -> ((@Sendable (HermesGatewayEvent) -> Void)?, HermesGatewayEvent) in
+            sequence += 1
+            return (sink, HermesGatewayEvent(
+                method: "event", type: type, sessionID: sessionID, sequence: sequence,
+                payload: .object([:]), params: nil, connectionGeneration: generation
+            ))
+        }
+        delivery.0?(delivery.1)
     }
 }

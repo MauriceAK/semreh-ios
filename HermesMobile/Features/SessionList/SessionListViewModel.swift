@@ -169,6 +169,10 @@ final class SessionListViewModel {
     /// response. It prevents an older overlapping sidebar response from
     /// erasing a confirmed pin/title/archive change.
     private var pendingMetadataMutations: [PendingMetadataKey: PendingMetadataMutation] = [:]
+    /// A duplicate may already exist after a dispatched branch loses its ACK,
+    /// or after a known child cannot be read back. Never branch that source
+    /// again blindly during this view-model lifetime.
+    private var duplicateOutcomeUnknownKeys: Set<PendingMetadataKey> = []
     private var activeProfileEpoch = 0
     private var metadataConfirmationRevision = 0
     private var archivedCountRequestGeneration = 0
@@ -1203,6 +1207,19 @@ final class SessionListViewModel {
             return nil
         }
 
+        let profile = Self.nonEmpty(session.profile) ?? Self.nonEmpty(activeProfileName) ?? "default"
+        let activeProfile = Self.nonEmpty(activeProfileName) ?? "default"
+        guard profile == activeProfile else {
+            actionErrorMessage = String(localized: "Switch to this session's profile before duplicating it.")
+            return nil
+        }
+        let scope = PendingMetadataKey(profile: profile, sessionID: sessionId)
+        guard !duplicateOutcomeUnknownKeys.contains(scope) else {
+            actionErrorMessage = String(localized: "Hermes may already have duplicated this session. Inspect the session list for the copy; another duplicate is blocked.")
+            return nil
+        }
+        let profileEpoch = activeProfileEpoch
+
         guard beginSessionMutation(sessionId) else { return nil }
         defer { endSessionMutation(sessionId) }
 
@@ -1210,17 +1227,45 @@ final class SessionListViewModel {
         lastError = nil
 
         do {
+            let runtime = try await gatewayRuntimeProvider(client)
+            guard !Task.isCancelled, activeProfileEpoch == profileEpoch,
+                  (Self.nonEmpty(activeProfileName) ?? "default") == profile else { return nil }
             let result = try await sessionMutator.duplicate(
                 sessionID: sessionId,
-                title: duplicateTitle(for: session)
+                title: duplicateTitle(for: session),
+                profile: profile,
+                runtime: runtime
             )
 
+            if result.session == nil, result.createdSessionID != nil {
+                // Record this against the original scope before considering the
+                // currently displayed profile. The child exists even if the UI
+                // switched profiles while its detail read was pending.
+                duplicateOutcomeUnknownKeys.insert(scope)
+            }
+            guard !Task.isCancelled, activeProfileEpoch == profileEpoch,
+                  (Self.nonEmpty(activeProfileName) ?? "default") == profile else { return nil }
+
             guard let duplicatedSession = result.session else {
+                if let childID = result.createdSessionID {
+                    await load(modelContext: modelContext)
+                    guard !Task.isCancelled, activeProfileEpoch == profileEpoch,
+                          (Self.nonEmpty(activeProfileName) ?? "default") == profile else { return nil }
+                    if let recovered = sessions.first(where: {
+                        Self.nonEmpty($0.sessionId) == childID
+                            && (Self.nonEmpty($0.profile) ?? profile) == profile
+                    }) {
+                        duplicateOutcomeUnknownKeys.remove(scope)
+                        return recovered
+                    }
+                }
                 actionErrorMessage = result.errorMessage
                 return nil
             }
 
             await load(modelContext: modelContext)
+            guard !Task.isCancelled, activeProfileEpoch == profileEpoch,
+                  (Self.nonEmpty(activeProfileName) ?? "default") == profile else { return nil }
             if !sessions.contains(where: { $0.sessionId == duplicatedSession.sessionId }) {
                 sessions.insert(duplicatedSession, at: 0)
 
@@ -1233,7 +1278,15 @@ final class SessionListViewModel {
                 }
             }
             return duplicatedSession
+        } catch DirectSessionBranchError.outcomeUnknown {
+            duplicateOutcomeUnknownKeys.insert(scope)
+            guard !Task.isCancelled, activeProfileEpoch == profileEpoch,
+                  (Self.nonEmpty(activeProfileName) ?? "default") == profile else { return nil }
+            actionErrorMessage = String(localized: "Hermes may already have duplicated this session. Inspect the session list for the copy; another duplicate is blocked.")
+            return nil
         } catch {
+            guard !Task.isCancelled, activeProfileEpoch == profileEpoch,
+                  (Self.nonEmpty(activeProfileName) ?? "default") == profile else { return nil }
             lastError = error
             actionErrorMessage = error.localizedDescription
             return nil

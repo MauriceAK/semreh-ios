@@ -767,7 +767,8 @@ final class GatewayConversationController {
     /// `session.branch` returns a live child runtime; the child controller is
     /// therefore adopted directly and must not resume or create another one.
     /// The parent remains bound and is never mutated by this operation.
-    func branch() async throws -> GatewayConversationController {
+    func branch(name rawName: String = "") async throws -> GatewayConversationController {
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !disposed,
               !compressionOutcomeUnknown,
               !branchOutcomeUnknown,
@@ -834,10 +835,12 @@ final class GatewayConversationController {
                         throw DirectSessionError.staleOperation
                     }
                     requestWasDispatched = true
-                    return [
+                    var parameters: [String: JSONValue] = [
                         "session_id": .string(capturedBinding.runtimeID),
                         "profile": .string(profile)
                     ]
+                    if !name.isEmpty { parameters["name"] = .string(name) }
+                    return parameters
                 })
 
                 // Parse the child identity before any post-ACK scope guard so a

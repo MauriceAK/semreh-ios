@@ -79,7 +79,6 @@ final class ContractReadinessTests: XCTestCase {
             .init(name: "create project", method: "POST", endpoint: .createProject, path: "/api/projects/create"),
             .init(name: "rename project", method: "POST", endpoint: .renameProject, path: "/api/projects/rename"),
             .init(name: "delete project", method: "POST", endpoint: .deleteProject, path: "/api/projects/delete"),
-            .init(name: "chat start", method: "POST", endpoint: .chatStart, path: "/api/chat/start"),
             .init(
                 name: "chat stream",
                 method: "GET",

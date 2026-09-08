@@ -1,7 +1,7 @@
 # Secondary feature migration status
 
-Reconciled September 7, 2026 against committed app `e43a571` and the explicitly
-load/export diff verified by signed build-v3/full-v5. Backend contract pin:
+Reconciled September 7, 2026 against committed app `32be0ac` plus the sidebar
+duplicate diff verified by signed build-v4/full-v3. Backend contract pin:
 `29112bef099274229cadff79cdff7bf7b99c4b77`.
 This is the existing dispatch inventory, not release acceptance or a percentage.
 The binding v3 execution plan owns scope and gates; root owns disposition.
@@ -29,7 +29,8 @@ No unsupported feature below has been silently approved for permanent removal.
 | Voice transcription / speech | Direct JSON/base64 audio contracts, profile checks, local fallback preserved. | `3eb648f` native2314/0/14. Actual microphone/audio provider/device unverified. Sending recorded voice attachments remains unavailable, not accepted removal. |
 | Workspace registry / projects | WorkspaceRegistry and project mutations still legacy; stock cwd/project-tree reads are not equivalent to naming/order/membership workflows. | Map exact retained semantics. No arbitrary-directory substitution or unapproved deletion. |
 | Session JSON / HTML export | Scoped stock JSON export; escaped self-contained HTML rendered locally, bounded I/O off main thread, cancellation/profile guards and owned-temp cleanup. | Signed build-v3/full-v5:2371/0/14. Stock HTTPS export live-v1:4rows/8264bytes; probe4/4 guards. Both formats and complete metadata preserved in native fixtures. Live HTML share navigation/physical UI remain unverified. |
-| Session move / duplicate | Existing SessionMutator paths still legacy. Direct branch exists in core chat but list duplicate needs runtime/binding ownership, not a stateless endpoint swap. | Move project-membership semantics not mapped. Separate API-server fork is not a substitute for this deployed serve surface. |
+| Session duplicate | Stock named branch via shared runtime and temporary controllers; exact child detail/list recovery, scoped unknown-outcome barrier, no successful parent/child close. | Signed build-v4/full-v3:2372/0/14 including named/default params, running refusal, profile-switch/detail failure, no repeat and surviving open controller. No live sidebar/physical acceptance or cross-relaunch idempotency claim. |
+| Session move | SessionMutator move remains legacy; stock metadata PATCH has no equivalent project-membership mutation. | Defer-and-hide recommendation pending explicit approval. Separate API-server fork is not a substitute for this deployed serve surface. |
 | Search / rename / pin / archive / counts | Direct work already integrated in earlier checkpoints. | Exact scope and ambiguous-mutation recovery remain relevant to final navigation/device gate; deletion writer concurrency and destructive history are separate core requirements. |
 | Standalone tools/toolsets administration | No retained standalone consumer identified by bounded audit. | Do not create a new screen simply because stock routes exist. Chat tools/blocking are core migration work. |
 

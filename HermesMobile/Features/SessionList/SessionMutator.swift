@@ -2,7 +2,14 @@ import Foundation
 
 struct SessionDuplicateResult {
     let session: SessionSummary?
+    let createdSessionID: String?
     let errorMessage: String?
+}
+
+private struct SessionDuplicateWhileRunningError: LocalizedError {
+    var errorDescription: String? {
+        String(localized: "This session is still responding, so it can't be duplicated yet. Try again when it finishes.")
+    }
 }
 
 /// The server refuses `/api/session/move` with a 503 while the session is
@@ -103,32 +110,42 @@ struct SessionMutator {
         }
     }
 
-    func duplicate(sessionID: String, title: String) async throws -> SessionDuplicateResult {
-        let response = try await client.branchSession(id: sessionID, title: title)
+    @MainActor
+    func duplicate(
+        sessionID: String,
+        title: String,
+        profile: String,
+        runtime: HermesServerRuntime
+    ) async throws -> SessionDuplicateResult {
+        let parent = GatewayConversationController(
+            runtime: runtime,
+            client: client,
+            storedID: sessionID,
+            profile: profile
+        )
+        defer { parent.invalidate() }
+        try await parent.open()
+        guard parent.runState == .idle else { throw SessionDuplicateWhileRunningError() }
 
-        guard let duplicatedSessionID = response.sessionId else {
-            return SessionDuplicateResult(
-                session: nil,
-                errorMessage: response.error ?? String(localized: "The server did not return the duplicated session ID.")
-            )
+        let child = try await parent.branch(name: title)
+        defer { child.invalidate() }
+        guard let childID = child.storedID, !childID.isEmpty,
+              child.profile == profile else {
+            throw DirectSessionBranchError.invalidResponse
         }
 
-        let duplicatedResponse = try await client.session(
-            id: duplicatedSessionID,
-            includeMessages: false,
-            messageLimit: nil
-        )
-
-        guard let duplicatedSessionDetail = duplicatedResponse.session else {
+        do {
+            let detail = try await client.directSessionDetail(sessionID: childID, profile: profile)
+            guard detail.sessionId == childID, (detail.profile ?? profile) == profile else {
+                throw DirectHermesRESTError.profileMismatch
+            }
+            return SessionDuplicateResult(session: detail, createdSessionID: childID, errorMessage: nil)
+        } catch {
             return SessionDuplicateResult(
                 session: nil,
-                errorMessage: String(localized: "The server did not return the duplicated session.")
+                createdSessionID: childID,
+                errorMessage: String(localized: "The session was duplicated, but its details could not be loaded.")
             )
         }
-
-        return SessionDuplicateResult(
-            session: SessionSummary(from: duplicatedSessionDetail),
-            errorMessage: nil
-        )
     }
 }

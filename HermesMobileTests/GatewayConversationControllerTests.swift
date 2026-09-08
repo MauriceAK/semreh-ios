@@ -775,7 +775,7 @@ final class GatewayConversationControllerTests: XCTestCase {
         await runtime.stop()
     }
 
-    func testBranchAdoptsReturnedChildOnSharedRuntimeWithoutResumeOrCreate() async throws {
+    func testNamedBranchAdoptsReturnedChildOnSharedRuntimeWithoutResumeOrCreate() async throws {
         let fake = ControllerFakeTransport()
         fake.setResumeResponse(.object([
             "session_id": .string("runtime-parent"),
@@ -793,7 +793,7 @@ final class GatewayConversationControllerTests: XCTestCase {
         let parent = makeController(runtime: runtime, storedID: "parent", profile: "work")
         try await parent.open()
 
-        let child = try await parent.branch()
+        let child = try await parent.branch(name: "  Planning (copy)  ")
 
         XCTAssertEqual(parent.binding, GatewaySessionBinding(
             storedID: "parent", runtimeID: "runtime-parent", profile: "work"
@@ -805,7 +805,8 @@ final class GatewayConversationControllerTests: XCTestCase {
         let branchCall = try XCTUnwrap(fake.calls().last)
         XCTAssertEqual(objectFields(branchCall.params), [
             "session_id": .string("runtime-parent"),
-            "profile": .string("work")
+            "profile": .string("work"),
+            "name": .string("Planning (copy)")
         ])
         await runtime.stop()
     }
@@ -828,6 +829,9 @@ final class GatewayConversationControllerTests: XCTestCase {
         let parent = makeController(runtime: runtime, storedID: "parent")
         try await parent.open()
         let child = try await parent.branch()
+        let unnamedBranch = try XCTUnwrap(fake.calls().last { $0.method == "session.branch" })
+        let unnamedFields = try XCTUnwrap(objectFields(unnamedBranch.params))
+        XCTAssertNil(unnamedFields["name"])
         var parentEvents = 0
         var childEvents = 0
         let childEventDelivered = expectation(description: "child event is routed to the adopted child")

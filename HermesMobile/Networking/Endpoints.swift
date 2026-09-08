@@ -14,7 +14,6 @@ enum Endpoint {
     case sessions(includeArchived: Bool = false, archivedLimit: Int? = nil)
     case sessionsSearch(query: String, content: Bool, depth: Int)
     case session(id: String, includeMessages: Bool, messageLimit: Int?, messageBefore: Int?, expandRenderable: Bool = false)
-    case sessionEvents(sessionID: String)
     case sessionStatus(id: String)
     case newSession
     case renameSession
@@ -34,7 +33,6 @@ enum Endpoint {
     case createProject
     case renameProject
     case deleteProject
-    case chatStart
     case chatStream(streamID: String)
     case chatCancel(streamID: String)
     case chatStreamStatus(streamID: String)
@@ -168,8 +166,6 @@ enum Endpoint {
             return "/api/sessions/search"
         case .session:
             return "/api/session"
-        case .sessionEvents:
-            return "/api/sessions"
         case .sessionStatus:
             return "/api/session/status"
         case .newSession:
@@ -208,8 +204,6 @@ enum Endpoint {
             return "/api/projects/rename"
         case .deleteProject:
             return "/api/projects/delete"
-        case .chatStart:
-            return "/api/chat/start"
         case .chatStream:
             return "/api/chat/stream"
         case .chatCancel:
@@ -593,8 +587,6 @@ enum Endpoint {
             url = officialSessionURL(relativeTo: baseURL, id: id, suffix: "/messages")
         case let .officialSessionChatStream(id):
             url = officialSessionURL(relativeTo: baseURL, id: id, suffix: "/chat/stream")
-        case let .sessionEvents(sessionID):
-            url = sessionEventsURL(relativeTo: baseURL, sessionID: sessionID)
         case let .kanbanCardDetail(request):
             url = kanbanTaskURL(relativeTo: baseURL, cardID: request.cardID)
         case let .kanbanEditBoard(request):
@@ -635,17 +627,6 @@ enum Endpoint {
             return root
         }
         components.percentEncodedPath += "/\(encodedCardID)\(suffix)"
-        return components.url ?? root
-    }
-
-    private func sessionEventsURL(relativeTo baseURL: URL, sessionID: String) -> URL {
-        let root = baseURL.appending(path: "/api/sessions")
-        guard var components = URLComponents(url: root, resolvingAgainstBaseURL: false),
-              let encodedSessionID = sessionID.addingPercentEncoding(withAllowedCharacters: Self.pathSegmentAllowed)
-        else {
-            return root
-        }
-        components.percentEncodedPath += "/\(encodedSessionID)/events"
         return components.url ?? root
     }
 

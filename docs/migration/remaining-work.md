@@ -5,8 +5,9 @@ details/evidence: `slice3-tasks.md`, `slice3-verification.md`, `slice4-tasks.md`
 This is the current dispatch checklist, not a new architecture or acceptance waiver.
 Preserve completed Luna work. Root owns integration, notes and native execution.
 
-Current checkpoint: load/export batch verified on `e43a571` plus scoped diff;
-signed build-v3, full-v5:2371passed/0failed/14intentional skips. Sol Low workers. The
+Current checkpoint: sidebar duplicate and unused API retirement verified on
+`32be0ac` plus scoped diff; signed build-v4/full-v3:2372passed/0failed/14intentional
+skips. Sol Low workers, root integration and independent review. The
 reconciled `secondary-feature-status.md` owns the per-feature current inventory.
 Do not use the historical checkpoints below as the next dispatch instruction.
 
@@ -29,6 +30,25 @@ Targeted artifact audit-v2:14551files/0flags; three exported test consoles plus
 two interrupted-run staging consoles scanned. Unselected/opaque/OCR/unexported
 contents excluded. Audit-v1 rejected nonexistent empty diagnostic directories
 before scanning; v2 selected actual retained artifacts.
+
+Latest duplicate/retirement checkpoint: `slice4-duplicate-retirement-build-v4`
+and `...full-v3`, strict signing and Simulator launch17185. Stock named branch,
+scoped temporary-controller ownership, running refusal, exact-child recovery,
+profile-switch barrier and no blind repeat after ambiguous dispatch have native
+tests. Existing unnamed branch shape remains checked. Stock branch snapshots are
+not atomic across durable/live reads; no stronger external-writer guarantee.
+Unknown duplicate barrier is VM-lifetime only, not persistent cross-relaunch
+idempotency. No new live sidebar/named-copy or physical acceptance claimed.
+Unused sessionEvents URL and ordinary startChat API/endpoint removed; four
+obsolete API protocol test methods and one matrix assertion removed. Direct
+send/recovery/renderer tests retained; SSE/status/Kanban dependency still present.
+Failures retained: build-v1 optional test-field unwrap; build-v2 missing fake
+running parameter; full-v1:2371/1/14 missing normal archived-count fixture.
+Root corrected tests only. full-v2 stalled before recorded cases, interrupted73;
+Simulator restart did not reliably solve it. Same-build full-v3 passed.
+Targeted duplicate/retirement audit-v1:9735files/0flags, two exported consoles
+plus one interrupted-run staging console. Unselected/opaque/OCR/unexported
+contents excluded; no unrelated historical evidence rescan claimed.
 
 ## Implementation batches
 
@@ -72,14 +92,19 @@ before scanning; v2 selected actual retained artifacts.
   That pre-existing gap is a separate retained requirement, not accepted removal.
   Source-backed invocation contract is being mapped; literal slash text alone
   must not be called verified skill activation.
-- [ ] **Session conveniences:** remaining duplicate/move and deletion
+- [ ] **Session conveniences:** remaining move and deletion
   disposition; search, rename, pin, archive and counts already have verified work.
+  Sidebar duplication now direct/native-tested in the latest checkpoint above.
   Check exact profile/identity, rollback and no ambiguous automatic retry.
 - [ ] **Feature disposition inventory:** every remaining visible action migrated
   or explicitly approved for removal/deferral. Unsupported items listed below.
 
 ## Decisions / limitations that implementation workers must not silently resolve
 
+- [ ] Legacy named workspace/project registry and moving chats between those
+  projects have no equivalent in the pinned serve contracts. Recommend temporary
+  defer-and-hide for the initial direct release, keeping ordinary file browsing
+  and supported cwd behavior. Requires Maurice's approval; not yet accepted.
 - [ ] Memory parity: source audit found builtin MEMORY/USER supported through
   selected profile's returned home plus stock-defined memories paths and managed
   file APIs; SOUL has its dedicated contract. Implemented/native-tested at cd41f5b;
