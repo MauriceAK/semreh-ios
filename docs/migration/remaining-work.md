@@ -42,11 +42,15 @@ unselected evidence, arbitrary opaque/OCR and unexported compressed contents
 are not covered. Final updater/delete legacy-route search found no remaining
 `/api/updates/*` or `/api/session/delete` app/test consumers.
 
-Next Git disposition question is awaiting Maurice: stock has no fetch/pull,
-stash checkout or generated message routes; commit auto-stages all if no index
-entries exist and discard always removes matching untracked files. Proposed
-deferral/hiding of unmatched Git controls while retaining views and supported
-actions is NOT yet approved. No Git implementation changed in this batch.
+Git disposition approved September 8: defer/hide unmatched dedicated controls
+(fetch/pull, stash checkout, generated messages, selected/quick commit and the
+existing discard workflow); retain Git viewing and migrate supported actions.
+Stock commit auto-stages all if no index entries exist, and discard removes
+matching untracked files; do not silently adopt those different semantics.
+Agent-driven Git through chat remains available when tools/permissions allow.
+Revisit deferred controls after migration; no new backend dependency. The binding
+plan records this decision. UI hiding/legacy consumer retirement is still to do;
+no Git implementation changed merely by documenting approval.
 
 Immediate acceptance work from the no-drift audit:
 - [x] Direct missed-terminal recovery restores the complete durable answer in controller/VM tests.

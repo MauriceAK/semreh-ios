@@ -102,6 +102,23 @@ preflight makes the operation atomic. This narrows the external-mutation guarant
 in the Slice 4 gate, not normal targeting, error handling or verification duties.
 No private backend dependency, personal-data mutation or deployment is authorized.
 
+## Approved Git control deferral — September 8, 2026
+
+Maurice approved deferring and hiding dedicated Git controls that the pinned
+stock server cannot faithfully support: fetch/pull, stash-assisted checkout,
+generated commit messages, selected/quick commit and the existing discard
+workflow. Retain Git viewing and migrate supported controls with their actual
+stock semantics. Do not silently substitute auto-stage-all commits or deletion
+of untracked files for the previous behavior. This is a temporary feature
+disposition, not permanent removal; revisit after migration when suitable stock
+contracts or another explicitly approved approach are available.
+
+The deferral concerns Semreh's dedicated controls, not agent tool capabilities.
+Users can still request Git work through chat when their Hermes tools and
+permissions allow it. It grants no new tool access to the disposable fixture,
+no permission to mutate personal repositories, and no private backend dependency.
+Recording this decision does not claim the buttons have already been hidden.
+
 ## Historical Slice 2 reasoning experiment — September 5, 2026
 
 Maurice requires per-session reasoning changes, including selecting the next
