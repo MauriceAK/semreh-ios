@@ -4,6 +4,7 @@ import argparse
 import asyncio
 from contextlib import redirect_stdout
 import io
+import hashlib
 import json
 from pathlib import Path
 from urllib.parse import quote
@@ -28,6 +29,55 @@ async def get(client, route, params=None):
     if response.status_code != 200:
         raise RuntimeError("secondary read failed")
     return response.json()
+
+
+def startup_default_snapshot():
+    """No writes: prove the fixed fixture root and absent sticky-default file."""
+    with redirect_stdout(io.StringIO()):
+        stock_probe.validate()
+    home = stock_probe.RUNTIME / "home"
+    active_file = home / "active_profile"
+    if home.is_symlink() or home.resolve() != home or not home.is_dir():
+        raise AssertionError("unexpected startup-default root")
+    if active_file.is_symlink() or active_file.exists():
+        raise AssertionError("same-value probe requires absent startup-default file")
+    return hashlib.sha256((home / "config.yaml").read_bytes()).digest()
+
+
+async def verify_startup_default_same_value(client, evidence):
+    state = {"verified": False, "post_attempts": 0,
+             "changed_default_tested": False, "restart_tested": False,
+             "native_picker_tested": False}
+    evidence["startup_default_same_value"] = state
+    before_config = startup_default_snapshot()
+    profiles = await get(client, "/api/profiles")
+    rows = profiles.get("profiles") if isinstance(profiles, dict) else None
+    if not isinstance(rows, list):
+        raise AssertionError("invalid profile inventory")
+    defaults = [row for row in rows if isinstance(row, dict) and row.get("name") == "default"]
+    if len(defaults) != 1 or defaults[0].get("path") != str(stock_probe.RUNTIME / "home"):
+        raise AssertionError("server default profile is outside dedicated fixture")
+    active = await get(client, "/api/profiles/active")
+    if not isinstance(active, dict) or active.get("active") != "default" or active.get("current") != "default":
+        raise AssertionError("same-value probe requires default startup and running profiles")
+    if startup_default_snapshot() != before_config:
+        raise AssertionError("fixture configuration changed before write")
+    try:
+        state["post_attempts"] = 1
+        response = await client.post("/api/profiles/active", json={"name": "default"})
+        if response.status_code != 200:
+            raise AssertionError("startup-default acknowledgement failed")
+        ack = response.json()
+        if not isinstance(ack, dict) or ack.get("ok") is not True or ack.get("active") != "default":
+            raise AssertionError("startup-default acknowledgement mismatch")
+        after = await get(client, "/api/profiles/active")
+        if not isinstance(after, dict) or any(after.get(key) != active[key] for key in ("active", "current")):
+            raise AssertionError("startup-default readback changed")
+    finally:
+        if startup_default_snapshot() != before_config:
+            raise AssertionError("fixture configuration changed after write")
+    state.update(verified=True, startup_and_running_unchanged=True,
+                 config_unchanged=True, active_profile_file_absent=True)
 
 
 async def exercise(client, evidence):
@@ -74,21 +124,23 @@ async def exercise(client, evidence):
                                    "all_run_identities_match": True}
 
 
-async def _run_authenticated(credentials, evidence):
+async def _run_authenticated(credentials, evidence, *, verify_startup_default=False):
     async with authenticated(credentials, evidence, base=stock_probe.HTTPS_ORIGIN,
                              origin=stock_probe.HTTPS_ORIGIN) as (client, _ticket):
         await exercise(client, evidence)
+        if verify_startup_default:
+            await verify_startup_default_same_value(client, evidence)
 
 
-def run(output: Path):
+def run(output: Path, *, verify_startup_default=False):
     with redirect_stdout(io.StringIO()):
         stock_probe.validate()
     credentials = json.loads((stock_probe.RUNTIME / "credentials.json").read_text())
     evidence = {"sanitized": True, "source_pin": stock_probe.PIN, "outcome": "failed",
-                "profile": PROFILE, "bounded_read_only": True, "cron_mutations": 0,
+                "profile": PROFILE, "bounded_read_only": not verify_startup_default, "cron_mutations": 0,
                 "cleanup_errors": []}
     try:
-        asyncio.run(_run_authenticated(credentials, evidence))
+        asyncio.run(_run_authenticated(credentials, evidence, verify_startup_default=verify_startup_default))
         if evidence["cleanup_errors"]:
             raise AssertionError("authentication cleanup failed")
         evidence["outcome"] = "passed" if evidence["detail_runs"]["verified"] else "partial"
@@ -105,4 +157,7 @@ def run(output: Path):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True)
-    run(_output_path(parser.parse_args().output))
+    parser.add_argument("--verify-startup-default-same-value", action="store_true",
+                        help="Opt in to one same-value default POST and readback in the dedicated fixture.")
+    args = parser.parse_args()
+    run(_output_path(args.output), verify_startup_default=args.verify_startup_default_same_value)

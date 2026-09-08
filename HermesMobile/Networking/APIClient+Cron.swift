@@ -1,6 +1,28 @@
 import Foundation
 
 extension APIClient {
+    func directPauseCron(jobID: String, profile: String, reason: String? = nil) async throws -> CronJob {
+        guard reason?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false else {
+            throw DirectCronMutationError.unsupportedPauseReason
+        }
+        return try await directCronPauseResume(jobID: jobID, profile: profile, paused: true)
+    }
+
+    func directResumeCron(jobID: String, profile: String) async throws -> CronJob {
+        try await directCronPauseResume(jobID: jobID, profile: profile, paused: false)
+    }
+
+    private func directCronPauseResume(jobID: String, profile: String, paused: Bool) async throws -> CronJob {
+        let path = try directCronJobPath(jobID, profile: profile, suffix: paused ? "/pause" : "/resume")
+        let data = try await sendDirectData(path: path, method: "POST", classifyStructuredAuthExpiry: true)
+        let job = try decode(CronJob.self, from: data)
+        guard job.jobId == jobID, job.profile == profile, job.enabled == !paused,
+              job.state == (paused ? "paused" : "scheduled") else {
+            throw DirectCronMutationError.unconfirmedResponse
+        }
+        return job
+    }
+
     func directCronJobs(profile: String) async throws -> [CronJob] {
         let data = try await sendDirectData(path: directCronPath("/api/cron/jobs", profile: profile),
                                             method: "GET", classifyStructuredAuthExpiry: true)
@@ -166,6 +188,20 @@ extension APIClient {
 }
 
 enum DirectCronReadError: Error { case invalidScope, invalidIdentity }
+
+enum DirectCronMutationError: LocalizedError {
+    case unsupportedPauseReason
+    case unconfirmedResponse
+
+    var errorDescription: String? {
+        switch self {
+        case .unsupportedPauseReason:
+            String(localized: "This Hermes server does not support a pause reason.")
+        case .unconfirmedResponse:
+            String(localized: "Hermes did not confirm the task change. Refresh before trying again.")
+        }
+    }
+}
 
 private struct DirectCronRunsResponse: Decodable {
     let runs: [DirectCronRun]?

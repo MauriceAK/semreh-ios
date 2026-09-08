@@ -7,6 +7,40 @@ import UniformTypeIdentifiers
 @testable import HermesMobile
 
 final class APIClientConfigurationTests: APIClientTestCase {
+    func testProfileCreationCatalogReadsRunningProfileWithoutSwitchingStartupDefault() async throws {
+        var paths: [String] = []
+        let client = makeClient { request in
+            XCTAssertEqual(request.httpMethod, "GET")
+            paths.append(request.url?.path ?? "")
+            if request.url?.path == "/api/profiles/active" {
+                return apiTestJSONResponse(#"{"active":"next-start","current":"running"}"#, for: request)
+            }
+            XCTAssertEqual(request.url?.path, "/api/model/options")
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems
+            XCTAssertEqual(query?.first(where: { $0.name == "profile" })?.value, "running")
+            XCTAssertEqual(query?.first(where: { $0.name == "explicit_only" })?.value, "true")
+            return apiTestJSONResponse(#"{"providers":[{"slug":"custom","name":"Fixture","authenticated":true,"models":["same-model","same-model"]}]}"#, for: request)
+        }
+        let groups = try await ProfileCreationCatalog.load(client: client)
+        XCTAssertEqual(paths, ["/api/profiles/active", "/api/model/options"])
+        XCTAssertEqual(groups.first?.providerID, "custom")
+        XCTAssertEqual(groups.first?.models.map(\.id), ["same-model"])
+    }
+
+    func testProfileCreationCatalogDoesNotSubstituteStartupDefaultWhenRunningProfileMissing() async throws {
+        var requests = 0
+        let client = makeClient { request in
+            requests += 1
+            XCTAssertEqual(request.url?.path, "/api/profiles/active")
+            return apiTestJSONResponse(#"{"active":"next-start"}"#, for: request)
+        }
+        do {
+            _ = try await ProfileCreationCatalog.load(client: client)
+            XCTFail("Missing current profile must not switch catalog scope")
+        } catch ProfileCreationCatalog.LoadError.missingRunningProfile { }
+        XCTAssertEqual(requests, 1)
+    }
+
     func testDirectProfilesDecodesStockRowsWithoutInventingActiveEnvelope() async throws {
         let client = makeClient { request in
             XCTAssertEqual(request.url?.path, "/api/profiles")

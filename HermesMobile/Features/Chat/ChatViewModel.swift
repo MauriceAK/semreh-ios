@@ -947,7 +947,7 @@ final class ChatViewModel {
     // `activeListeningUtteranceID`: a stale finish callback from a superseded player
     // must not clear the new listen state or deactivate the session.
     private var activeListenPlayerID: ObjectIdentifier?
-    // In-flight `POST /api/tts` fetch for the Listen action. Cancelled by
+    // In-flight `POST /api/audio/speak` fetch for the Listen action. Cancelled by
     // `stopListening()`; exposed (read-only) so tests can await the async
     // server-first path deterministically.
     @ObservationIgnored private(set) var listenPreparationTask: Task<Void, Never>?
@@ -1567,15 +1567,21 @@ final class ChatViewModel {
 
     private func loadOlderDirectMessages(modelContext: ModelContext?) async -> Bool {
         guard !directInvalidated, !isLoadingOlderMessages, hasOlderMessages,
-              directConversation?.runState == .idle else { return false }
+              directConversation != nil else { return false }
         directModelContext = modelContext ?? directModelContext
         isLoadingOlderMessages = true
         defer { isLoadingOlderMessages = false }
         let count = messages.count
         do {
             let controller = try await ensureDirectConversation()
-            try await controller.refresh(limit: 120, offset: directOlderOffset)
+            let anchor = controller.runState == .idle ? nil : messages.first?.messageId
+            guard controller.runState == .idle || anchor != nil else { return false }
+            try await controller.refresh(limit: 120, offset: directOlderOffset, olderAnchorID: anchor)
             return messages.count > count
+        } catch GatewayConversationController.OlderPageError.canonicalChanged {
+            // An active turn keeps its live identity. Terminal/reconnect owns
+            // canonical revalidation; never retry this as a different page.
+            return false
         } catch DirectSessionError.staleOperation {
             // A newer tail/rebind won the race. Its cursor is authoritative;
             // leave the current rows in place and allow another explicit page.
@@ -1584,6 +1590,39 @@ final class ChatViewModel {
     }
 
     private func applyDirectTranscript(_ page: DirectHermesTranscriptPage, older: Bool) {
+        if older {
+            // Paging expands only the existing durable history. It must not
+            // reset the transient live tail, tool/reasoning groups, or timers.
+            guard directHistoryID == page.sessionID else { return }
+            streamingAssistantMessageIndex = nil
+            withBatchedTranscriptDerivedState {
+                messages = Self.prependingOlderMessages(page.messages, to: messages)
+            }
+            let knownToolIDs = Set(completedToolCallGroups.flatMap { $0.toolCalls.map(\.id) } + liveToolCalls.map(\.id))
+            let olderGroups = ToolCallGroup.groups(persistedToolCalls: [], messages: messages, messageOffset: 0)
+                .compactMap { group -> ToolCallGroup? in
+                    let newTools = group.toolCalls.filter { !knownToolIDs.contains($0.id) }
+                    guard !newTools.isEmpty else { return nil }
+                    return ToolCallGroup(id: group.id, anchorMessageID: group.anchorMessageID, toolCalls: newTools)
+                }
+            var retainedGroups = completedToolCallGroups
+            var prependedGroups: [ToolCallGroup] = []
+            for group in olderGroups {
+                if let index = retainedGroups.firstIndex(where: { $0.anchorMessageID == group.anchorMessageID }) {
+                    let existing = retainedGroups[index]
+                    retainedGroups[index] = ToolCallGroup(id: existing.id,
+                        anchorMessageID: existing.anchorMessageID, toolCalls: group.toolCalls + existing.toolCalls)
+                } else {
+                    prependedGroups.append(group)
+                }
+            }
+            setCompletedToolCallGroups(prependedGroups + retainedGroups)
+            let returned = page.pagination?.returned ?? page.messages.count
+            directOlderOffset = (page.pagination?.offset ?? directOlderOffset) + returned
+            hasOlderMessages = returned >= (page.pagination?.limit ?? 120)
+            cacheCurrentMessages(sessionID: page.sessionID, modelContext: directModelContext)
+            return
+        }
         let renderedCache = cacheFirstMessagePlaceholder != nil
         flushPendingStreamingContent()
         resetPendingStreamingContentBuffers()
@@ -3476,90 +3515,7 @@ final class ChatViewModel {
 
     @discardableResult
     func loadOlderMessages(modelContext: ModelContext? = nil) async -> Bool {
-        if usesDirectGateway { return await loadOlderDirectMessages(modelContext: modelContext) }
-        guard let sessionID else {
-            errorMessage = String(localized: "The server did not provide a session ID.")
-            return false
-        }
-
-        guard !isLoadingOlderMessages, hasOlderMessages else {
-            return false
-        }
-
-        guard messagesOffset > 0 else {
-            hasOlderMessages = false
-            return false
-        }
-
-        resetPendingStreamingContentBuffers()
-        let messageBefore = messagesOffset
-        isLoadingOlderMessages = true
-        errorMessage = nil
-        cacheErrorMessage = nil
-        lastError = nil
-        defer { isLoadingOlderMessages = false }
-
-        do {
-            let response = try await client.session(
-                id: sessionID,
-                includeMessages: true,
-                messageLimit: Self.messagePageLimit,
-                messageBefore: messageBefore
-            )
-            guard let session = response.session else {
-                hasOlderMessages = false
-                return false
-            }
-
-            let olderMessages = session.messages ?? []
-            let mergedMessages = Self.prependingOlderMessages(olderMessages, to: messages)
-            let didAddMessages = mergedMessages.count > messages.count
-            applyCompressionAnchorMetadata(from: session)
-            withBatchedTranscriptDerivedState {
-                messages = mergedMessages
-                updateOlderMessagePagination(from: session, loadedMessageCount: mergedMessages.count)
-            }
-            latestServerLoadHadAssistantResponseAfterLatestUser = Self.hasAssistantResponseAfterLatestUser(
-                in: messages
-            )
-            responseCompletionNeedsTranscriptRefresh = false
-            isViewingCachedData = false
-            contextWindowSnapshot = ContextWindowSnapshot(
-                contextLength: session.contextLength,
-                thresholdTokens: session.thresholdTokens,
-                lastPromptTokens: session.lastPromptTokens,
-                inputTokens: session.inputTokens,
-                outputTokens: session.outputTokens,
-                estimatedCost: session.estimatedCost
-            )
-            if let title = session.title {
-                displayTitle = Self.displayTitle(from: title)
-            }
-            currentWorkspace = session.workspace ?? currentWorkspace
-            currentModel = session.model ?? currentModel
-            currentModelProvider = session.modelProvider ?? currentModelProvider
-            currentProfile = session.profile ?? currentProfile
-            setCompletedToolCallGroups(ToolCallGroup.groups(
-                persistedToolCalls: session.toolCalls ?? [],
-                messages: messages,
-                messageOffset: messagesOffset
-            ))
-            completedReasoningGroups = []
-
-            if let modelContext {
-                do {
-                    try CacheStore.cacheMessages(Self.cacheMessageWindow(from: messages), serverURL: server, sessionID: sessionID, in: modelContext)
-                } catch {
-                    cacheErrorMessage = error.localizedDescription
-                }
-            }
-
-            return didAddMessages
-        } catch {
-            lastError = error
-            errorMessage = error.localizedDescription
-            return false
-        }
+        await loadOlderDirectMessages(modelContext: modelContext)
     }
 
     func actionContext(for message: ChatMessage, visibleIndex: Int) -> MessageActionContext? {
@@ -5817,7 +5773,7 @@ final class ChatViewModel {
         // Tapping the message that is already listening — fetching server audio or
         // playing on either engine — toggles it off. Matching on `listeningMessageID`
         // alone (not `isSpeaking`) also debounces rapid double-taps: the second tap
-        // stops cleanly instead of firing a second `/api/tts` call into the server's
+        // stops cleanly instead of firing a second `/api/audio/speak` call into the server's
         // ~2 s rate limit or stacking audio (#15).
         if listeningMessageID == context.messageID {
             stopListening()
@@ -5825,7 +5781,7 @@ final class ChatViewModel {
         }
 
         stopListening()
-        // The audio session is NOT activated here: `/api/tts` can be slow or
+        // The audio session is NOT activated here: `/api/audio/speak` can be slow or
         // unreachable, and activating the non-mixable playback session before the
         // fetch would silence other audio while Semreh has nothing to play (review
         // on #35). Activation happens at the two playback-start points instead —
@@ -5834,7 +5790,7 @@ final class ChatViewModel {
         beginListenPlaybackPreparation(for: context)
 
         guard ServerTTSPolicy.shouldUseServerTTS(for: listenText) else {
-            // Over the server's 5000-char request cap: go straight to the on-device
+            // Over the client's 5000-char Listen cap: go straight to the on-device
             // path (chunking is a non-goal of #15).
             clearListenPlaybackState()
             speakWithOnDeviceSynthesizer(listenText)
@@ -5846,6 +5802,7 @@ final class ChatViewModel {
         // synthesizer — no error alert (#15).
         let requestID = UUID()
         activeListenRequestID = requestID
+        let speechProfile = requestProfileName ?? "default"
         listenPreparationTask = Task { [weak self, client] in
             guard !Task.isCancelled else {
                 // Stopped before the fetch began (e.g. a rapid second tap): skip
@@ -5856,8 +5813,7 @@ final class ChatViewModel {
             let audioData: Data?
             do {
                 audioData = try await client.synthesizeSpeech(
-                    text: listenText,
-                    voice: ServerTTSPolicy.defaultVoice
+                    text: listenText, profile: speechProfile
                 )
             } catch {
                 audioData = nil
@@ -5869,6 +5825,10 @@ final class ChatViewModel {
                 return
             }
 
+            guard (self.requestProfileName ?? "default") == speechProfile else {
+                self.finishListening()
+                return
+            }
             if let audioData, self.startServerAudioPlayback(audioData, title: self.listenPlaybackTitle) {
                 return
             }
@@ -7186,7 +7146,7 @@ final class ChatViewModel {
     /// path, kept as the offline/failure fallback for server TTS.
     private func speakWithOnDeviceSynthesizer(_ text: String) {
         // Route speech to the speaker (not the receiver/earpiece) immediately before
-        // speech starts — not when the Listen tap lands — so a slow `/api/tts` fetch
+        // speech starts — not when the Listen tap lands — so a slow `/api/audio/speak` fetch
         // never interrupts other audio while Semreh is silent (review on #35).
         // Released again in `finishListening()` once playback ends. See #252.
         listenAudioSession.activate()
@@ -8701,17 +8661,12 @@ struct SpeechTextNormalizer {
 }
 
 /// Routing policy for the "Listen" action (#15): prefer the server's neural TTS
-/// (`POST /api/tts`, edge engine — no API key needed) and fall back to the
+/// (`POST /api/audio/speak`, configured profile provider/voice) and fall back to the
 /// on-device synthesizer when the server can't serve the request.
 enum ServerTTSPolicy {
-    /// Server-enforced request cap (`400 text too long` above it); longer text
-    /// routes straight to the on-device synthesizer (chunking is a non-goal).
+    /// Client-side Listen cap; longer text routes straight to the on-device
+    /// synthesizer to preserve the existing bounded playback policy.
     static let maximumTextLength = 5000
-    /// The server's own default voice is `zh-CN-XiaoxiaoNeural`, so the client
-    /// must always send an explicit voice. A voice picker is a non-goal of #15;
-    /// this is the issue-specified default (verified live 2026-07-02).
-    static let defaultVoice = "en-US-AriaNeural"
-
     static func shouldUseServerTTS(for text: String) -> Bool {
         text.count <= maximumTextLength
     }
@@ -8884,6 +8839,14 @@ private final class SpeechSynthesizerDelegate: NSObject, AVSpeechSynthesizerDele
 
 #if DEBUG
 extension ChatViewModel {
+    /// Structural reducer coverage only; this does not enable gateway paging during a run.
+    func prependMessagesForTesting(_ olderMessages: [ChatMessage]) {
+        withBatchedTranscriptDerivedState {
+            messages = Self.prependingOlderMessages(olderMessages, to: messages)
+            messagesOffset = max(0, messagesOffset - olderMessages.count)
+        }
+    }
+
     /// Server-free fixture that exercises the exact production ChatView,
     /// transcript rows, Markdown renderer, restoration, and bottom-scroll loop.
     @MainActor

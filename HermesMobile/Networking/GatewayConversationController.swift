@@ -45,6 +45,7 @@ final class GatewayConversationController {
     ]
     private static let reasoningDisplays: Set<String> = ["show", "hide"]
     typealias TranscriptLoader = @MainActor (String, String, Int, Int) async throws -> DirectHermesTranscriptPage
+    enum OlderPageError: Error { case canonicalChanged }
 
     private(set) var binding: GatewaySessionBinding?
     private(set) var storedID: String?
@@ -2189,26 +2190,74 @@ final class GatewayConversationController {
         throw DirectSessionError.stopUnconfirmed
     }
 
-    func refresh(limit: Int = 120, offset: Int = 0) async throws {
+    func refresh(limit: Int = 120, offset: Int = 0, olderAnchorID: String? = nil) async throws {
         guard !disposed, let storedID, hasSubmittedPrompt else { return }
         let generation = lifecycle
         let epoch = bindingEpoch
         let turn = turnEpoch
+        let pagingBinding = binding
+        let pagingConnection = runtime.connectionGeneration
+        let pagingTerminal = terminalReceipt
         // Backwards offsets belong to a particular tail. An older request
         // crossing a new tail read must not rewind its cursor or prepend stale
         // rows. Likewise, a slow tail response cannot replace a newer one.
         if offset == 0 { latestReadGeneration &+= 1 }
         let readGeneration = latestReadGeneration
-        let page = try await loadTranscript(storedID, profile, limit, offset)
+        var requestOffset = olderAnchorID == nil ? offset : max(0, offset - 1)
+        var page = try await loadTranscript(storedID, profile, limit, requestOffset)
+        if let olderAnchorID {
+            // A running writer can move the backwards cursor by whole pages.
+            // Seek the exact loaded boundary; unknown/newer rows never prepend.
+            var scans = 1
+            while !page.messages.contains(where: { $0.messageId == olderAnchorID }) {
+                try checkLifecycle(generation)
+                guard epoch == bindingEpoch, turn == turnEpoch, storedID == self.storedID,
+                      binding == pagingBinding, runtime.connectionGeneration == pagingConnection,
+                      terminalReceipt == pagingTerminal, readGeneration == latestReadGeneration,
+                      page.sessionID == storedID, scans < 8,
+                      (page.pagination?.returned ?? page.messages.count) >= limit else {
+                    throw DirectSessionError.staleOperation
+                }
+                requestOffset += max(1, (page.pagination?.returned ?? page.messages.count) - 1)
+                page = try await loadTranscript(storedID, profile, limit, requestOffset)
+                scans += 1
+            }
+            let anchor = page.messages.firstIndex { $0.messageId == olderAnchorID }!
+            page = DirectHermesTranscriptPage(sessionID: page.sessionID,
+                messages: Array(page.messages[..<anchor]),
+                pagination: DirectHermesTranscriptPagination(limit: page.pagination?.limit ?? limit,
+                    offset: page.pagination?.offset ?? requestOffset, order: page.pagination?.order ?? "latest",
+                    returned: page.pagination?.returned ?? page.messages.count))
+        }
         try checkLifecycle(generation)
         guard epoch == bindingEpoch, turn == turnEpoch, storedID == self.storedID,
-              readGeneration == latestReadGeneration else { throw DirectSessionError.staleOperation }
+              readGeneration == latestReadGeneration,
+              offset == 0 || (binding == pagingBinding && runtime.connectionGeneration == pagingConnection
+                && terminalReceipt == pagingTerminal) else { throw DirectSessionError.staleOperation }
         let canonical = page.sessionID
         guard !canonical.isEmpty else { throw DirectSessionError.invalidBinding }
+        // An older page cannot replace the live tail or rebind it to a new tip.
+        // A fresh canonical tail read owns continuation adoption instead.
+        if offset > 0, canonical != storedID {
+            guard runState == .idle, !promptInFlight, !hasAmbiguousPromptDelivery else {
+                throw OlderPageError.canonicalChanged
+            }
+            // Only an idle, still-owned scope may recover through the ordinary
+            // canonical tail read. Never apply this older page to the old tail.
+            try await refresh(limit: limit)
+            try checkLifecycle(generation)
+            guard turn == turnEpoch, runState == .idle, !promptInFlight else {
+                throw DirectSessionError.staleOperation
+            }
+            try await open()
+            return
+        }
         try await resolvePromptUncertaintyLineage(requestedID: storedID, canonicalID: canonical) {
             try self.checkLifecycle(generation)
             guard epoch == self.bindingEpoch, turn == self.turnEpoch, storedID == self.storedID,
-                  readGeneration == self.latestReadGeneration else { throw DirectSessionError.staleOperation }
+                  readGeneration == self.latestReadGeneration,
+                  offset == 0 || (self.binding == pagingBinding && self.runtime.connectionGeneration == pagingConnection
+                    && self.terminalReceipt == pagingTerminal) else { throw DirectSessionError.staleOperation }
         }
         durableRowConfirmed = true
         if canonical != storedID {
@@ -2218,7 +2267,7 @@ final class GatewayConversationController {
             invalidateBinding()
             onCanonicalID?(canonical)
         }
-        transcriptDirty = false
+        if offset == 0 { transcriptDirty = false }
         onTranscript?(page, offset > 0)
     }
 

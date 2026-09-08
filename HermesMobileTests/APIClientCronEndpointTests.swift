@@ -7,6 +7,67 @@ import UniformTypeIdentifiers
 @testable import HermesMobile
 
 final class APIClientCronEndpointTests: APIClientTestCase {
+    func testDirectPauseResumeUseBodylessScopedPostAndRawJobReceipt() async throws {
+        for paused in [true, false] {
+            let client = makeClient { request in
+                XCTAssertEqual(request.url?.path, "/api/cron/jobs/job1/\(paused ? "pause" : "resume")")
+                XCTAssertEqual(request.httpMethod, "POST")
+                XCTAssertNil(apiTestBodyData(from: request))
+                XCTAssertEqual(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems,
+                               [URLQueryItem(name: "profile", value: "work")])
+                return apiTestJSONResponse("""
+                {"id":"job1","profile":"work","enabled":\(!paused),"state":"\(paused ? "paused" : "scheduled")"}
+                """, for: request)
+            }
+            let job = try await (paused ? client.directPauseCron(jobID: "job1", profile: "work")
+                                 : client.directResumeCron(jobID: "job1", profile: "work"))
+            XCTAssertEqual(job.enabled, !paused)
+        }
+    }
+
+    func testDirectPauseRejectsUnsupportedReasonBeforeRequest() async throws {
+        let client = makeClient { request in
+            XCTFail("Unsupported reason must not be discarded")
+            return apiTestJSONResponse("{}", for: request)
+        }
+        do {
+            _ = try await client.directPauseCron(jobID: "job1", profile: "work", reason: "vacation")
+            XCTFail("Expected unsupported reason")
+        } catch DirectCronMutationError.unsupportedPauseReason { }
+    }
+
+    func testDirectPauseRejectsIdentityAndStateMismatchWithoutRetry() async throws {
+        for body in [#"{"id":"other","profile":"work","enabled":false,"state":"paused"}"#,
+                     #"{"id":"job1","profile":"other","enabled":false,"state":"paused"}"#,
+                     #"{"id":"job1","profile":"work","enabled":true,"state":"paused"}"#,
+                     #"{"id":"job1","profile":"work","enabled":false,"state":"scheduled"}"#,
+                     #"{"ok":true,"job":{"id":"job1"}}"#] {
+            var calls = 0
+            let client = makeClient { request in
+                calls += 1
+                return apiTestJSONResponse(body, for: request)
+            }
+            do {
+                _ = try await client.directPauseCron(jobID: "job1", profile: "work")
+                XCTFail("Expected unconfirmed receipt")
+            } catch DirectCronMutationError.unconfirmedResponse { }
+            XCTAssertEqual(calls, 1)
+        }
+    }
+
+    func testDirectResumeTransportFailureIsNotRetried() async throws {
+        var calls = 0
+        let client = makeClient { _ in
+            calls += 1
+            throw URLError(.networkConnectionLost)
+        }
+        do {
+            _ = try await client.directResumeCron(jobID: "job1", profile: "work")
+            XCTFail("Expected failure")
+        } catch { }
+        XCTAssertEqual(calls, 1)
+    }
+
     func testDirectCronListUsesExplicitProfileAndStockBareArray() async throws {
         let client = makeClient { request in
             XCTAssertEqual(request.url?.path, "/api/cron/jobs")

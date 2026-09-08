@@ -1721,6 +1721,135 @@ final class GatewayConversationControllerTests: XCTestCase {
         await runtime.stop()
     }
 
+    func testActiveOlderAnchorSearchIsBoundedAndNeverPublishesUnprovenRows() async throws {
+        let runtime = try makeRuntime(ControllerFakeTransport())
+        var offsets: [Int] = []
+        let controller = makeController(runtime: runtime, storedID: "durable-1") { id, _, limit, offset in
+            offsets.append(offset)
+            return DirectHermesTranscriptPage(sessionID: id,
+                messages: (0..<limit).map { ChatMessage(role: "assistant", content: "newer", timestamp: nil, messageId: "new-\(offset)-\($0)") },
+                pagination: DirectHermesTranscriptPagination(limit: limit, offset: offset, order: "latest", returned: limit))
+        }
+        var publications = 0
+        controller.onTranscript = { _, _ in publications += 1 }
+        do { try await controller.refresh(offset: 120, olderAnchorID: "old-boundary"); XCTFail("An absent anchor must fail closed") }
+        catch DirectSessionError.staleOperation { }
+        XCTAssertEqual(offsets, (1...8).map { $0 * 119 })
+        XCTAssertEqual(publications, 0)
+        await runtime.stop()
+    }
+
+    func testHeldOlderPageRejectsTerminalReceiptBeforeAnyTailRefreshStarts() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setResumeResponse(.object(["session_id": .string("runtime-1"), "session_key": .string("durable-1")]))
+        let runtime = try makeRuntime(fake)
+        let started = AsyncGate()
+        let release = AsyncGate()
+        let controller = makeController(runtime: runtime, storedID: "durable-1") { id, _, _, offset in
+            if offset > 0 { await started.release(); await release.wait() }
+            return self.page(id)
+        }
+        try await controller.open()
+        var appliedOlder = 0
+        var receivedTerminal = false
+        controller.onTranscript = { _, older in if older { appliedOlder += 1 } }
+        controller.onEvent = { if $0.type == "error" { receivedTerminal = true } }
+        let read = Task { try await controller.refresh(offset: 120) }
+        await started.wait()
+        // This stock pre-agent terminal records a receipt without scheduling a
+        // canonical tail read, so only the receipt guard can reject the page.
+        fake.emit(event(sessionID: "runtime-1", type: "error", sequence: 80,
+            payload: .object(["message": .string("Turn cancelled before the agent was ready")])))
+        await yieldUntil { receivedTerminal }
+        await release.release()
+        do { try await read.value; XCTFail("Terminal must invalidate a held older page") }
+        catch DirectSessionError.staleOperation { }
+        XCTAssertEqual(appliedOlder, 0)
+        await runtime.stop()
+    }
+
+    func testHeldOlderPageRejectsNewTurnAndReconnect() async throws {
+        for reconnect in [false, true] {
+            let fake = ControllerFakeTransport()
+            fake.setResumeResponse(.object(["session_id": .string("runtime-1"), "session_key": .string("durable-1")]))
+            let runtime = try makeRuntime(fake)
+            let started = AsyncGate()
+            let release = AsyncGate()
+            let controller = makeController(runtime: runtime, storedID: "durable-1") { id, _, _, offset in
+                if offset > 0 { await started.release(); await release.wait() }
+                return self.page(id)
+            }
+            try await controller.open()
+            var appliedOlder = 0
+            var receivedStart = false
+            controller.onTranscript = { _, older in if older { appliedOlder += 1 } }
+            controller.onEvent = { if $0.type == "message.start" { receivedStart = true } }
+            let read = Task { try await controller.refresh(offset: 120) }
+            await started.wait()
+            if reconnect {
+                try await runtime.reconnect()
+            } else {
+                fake.emit(event(sessionID: "runtime-1", type: "message.start", sequence: 81))
+                await yieldUntil { receivedStart }
+            }
+            await release.release()
+            do { try await read.value; XCTFail("A different turn or connection must invalidate the older page") }
+            catch DirectSessionError.staleOperation { }
+            XCTAssertEqual(appliedOlder, 0)
+            await runtime.stop()
+        }
+    }
+
+    func testOlderCanonicalRolloverDoesNotRebindOrPublishOverLiveTail() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setResumeResponse(.object(["session_id": .string("runtime-1"), "session_key": .string("durable-1")]))
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime, storedID: "durable-1") { id, _, _, offset in self.page(offset > 0 ? "new-tip" : id) }
+        try await controller.open()
+        var started = false
+        controller.onEvent = { if $0.type == "message.start" { started = true } }
+        fake.emit(event(sessionID: "runtime-1", type: "message.start", sequence: 82))
+        await yieldUntil { started }
+        let binding = controller.binding
+        var publications = 0
+        controller.onTranscript = { _, _ in publications += 1 }
+        controller.onCanonicalID = { _ in XCTFail("Older page must not adopt a new canonical tip") }
+        do { try await controller.refresh(offset: 120); XCTFail("Older canonical rollover must be rejected") }
+        catch GatewayConversationController.OlderPageError.canonicalChanged { }
+        XCTAssertEqual(controller.storedID, "durable-1")
+        XCTAssertEqual(controller.binding, binding)
+        XCTAssertEqual(publications, 0)
+        await runtime.stop()
+    }
+
+    func testIdleOlderCanonicalRolloverRefreshesTailAndRebindsWithoutSubmitting() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setResumeResponse(.object(["session_id": .string("runtime-1"), "session_key": .string("durable-1")]))
+        let runtime = try makeRuntime(fake)
+        var moved = false
+        var reads: [String] = []
+        let controller = makeController(runtime: runtime, storedID: "durable-1") { id, _, _, offset in
+            reads.append("\(id):\(offset)")
+            return self.page(moved ? "new-tip" : id)
+        }
+        try await controller.open()
+        moved = true
+        fake.setResumeResponse(.object(["session_id": .string("runtime-tip"), "session_key": .string("new-tip")]))
+        var published: [String] = []
+        controller.onTranscript = { page, older in
+            XCTAssertFalse(older, "Recovery must publish a canonical tail, never the rollover older page")
+            published.append(page.sessionID)
+        }
+        try await controller.refresh(offset: 120)
+        XCTAssertEqual(reads, ["durable-1:0", "durable-1:120", "durable-1:0", "new-tip:0"])
+        XCTAssertEqual(published, ["new-tip", "new-tip"])
+        XCTAssertEqual(controller.storedID, "new-tip")
+        XCTAssertEqual(controller.binding?.runtimeID, "runtime-tip")
+        XCTAssertEqual(controller.binding?.storedID, "new-tip")
+        XCTAssertFalse(fake.calls().contains { $0.method == "prompt.submit" || $0.method == "session.create" })
+        await runtime.stop()
+    }
+
     func testOlderResponseCrossingNewTailReadIsRejectedWithoutApplyingStaleCursor() async throws {
         let runtime = try makeRuntime(ControllerFakeTransport())
         let olderStarted = AsyncGate()

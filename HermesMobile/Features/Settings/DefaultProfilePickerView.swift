@@ -24,6 +24,7 @@ struct DefaultProfilePickerView: View {
     @State private var saveError: String?
     @State private var isSingleProfileMode = false
     @State private var showsCreateProfile = false
+    @State private var presentationGeneration = 0
 
     var body: some View {
         NavigationStack {
@@ -76,6 +77,7 @@ struct DefaultProfilePickerView: View {
             }
         }
         .adaptiveFormPresentation()
+        .onDisappear { presentationGeneration &+= 1 }
     }
 
     private var newProfileButton: some View {
@@ -291,7 +293,8 @@ struct DefaultProfilePickerView: View {
     }
 
     private func save(_ profile: ProfileSummary) async {
-        guard let name = profile.normalizedName else { return }
+        guard !isSaving, let name = profile.normalizedName else { return }
+        let generation = presentationGeneration
 
         isSaving = true
         saveError = nil
@@ -299,28 +302,22 @@ struct DefaultProfilePickerView: View {
         defer { isSaving = false }
 
         do {
-            let response = try await APIClient(baseURL: server).switchProfile(name: name)
-            if let error = response.error?.trimmingCharacters(in: .whitespacesAndNewlines), !error.isEmpty {
-                saveError = error
-                selectedProfileName = nil
-                return
-            }
-
-            let returnedActiveName = response.active?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let resolvedName = returnedActiveName?.isEmpty == false ? returnedActiveName : name
-            let updatedProfiles = response.profiles ?? profiles
-            let selectionResponse = ProfilesResponse(profiles: updatedProfiles, active: resolvedName)
-            profiles = updatedProfiles
-            activeProfileName = selectionResponse.effectiveDefaultProfileName ?? name
+            let response = try await APIClient(baseURL: server).directSetStartupDefaultProfile(name: name)
+            guard generation == presentationGeneration, !Task.isCancelled,
+                  let confirmedName = response.startupDefaultName else { return }
+            let selectionResponse = ProfilesResponse(profiles: profiles, active: confirmedName)
+            activeProfileName = confirmedName
 
             let selection = DefaultProfileSelection(
-                name: activeProfileName ?? name,
+                name: confirmedName,
                 displayName: selectionResponse.displayName(for: activeProfileName) ?? profile.displayName,
-                defaultModel: response.defaultModel
+                // This write changes no running model or local chat profile.
+                defaultModel: nil
             )
             onSave(selection)
             dismiss()
         } catch {
+            guard generation == presentationGeneration, !Task.isCancelled else { return }
             saveError = error.localizedDescription
             selectedProfileName = nil
         }
@@ -459,10 +456,9 @@ private struct CreateProfileSheet: View {
     }
 
     private func loadModels() async {
-        // Best-effort, like the webui form: on failure the picker simply keeps
-        // only the "Use active profile default" option.
-        guard let response = try? await APIClient(baseURL: server).models() else { return }
-        modelGroups = response.catalogGroups
+        // Keep the selected model unchanged while refreshing available options.
+        guard let groups = try? await ProfileCreationCatalog.load(client: APIClient(baseURL: server)) else { return }
+        modelGroups = groups
     }
 
     private func create() async {
@@ -497,6 +493,19 @@ private struct CreateProfileSheet: View {
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+}
+
+enum ProfileCreationCatalog {
+    enum LoadError: Error { case missingRunningProfile }
+
+    static func load(client: APIClient) async throws -> [ModelCatalogGroup] {
+        // The old unscoped catalog belonged to the running server. `active`
+        // is only its sticky startup default and must not retarget this read.
+        let context = try await client.directActiveProfile()
+        guard let profile = context.current?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !profile.isEmpty else { throw LoadError.missingRunningProfile }
+        return try await client.directModelOptions(profile: profile).catalogGroups
     }
 }
 

@@ -1363,6 +1363,139 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         await runtime.stop()
     }
 
+    func testDirectActivePagingPreservesLiveTailCardsAnchorsAndSibling() async throws {
+        let fixture = ChatLongHistoryFixture(chatIDs: ["chat-live-page", "chat-sibling"])
+        fixture.installHistoricalTool(in: "chat-live-page")
+        let fake = ChatLongFixtureTransport(fixture: fixture)
+        let runtime = try makeRuntime(fake)
+        let client = makeLongHistoryClient(fixture: fixture)
+        let vm = makeViewModel(client: client, runtime: runtime, sessionID: "chat-live-page")
+        let sibling = makeViewModel(client: client, runtime: runtime, sessionID: "chat-sibling")
+        await vm.loadMessages()
+        await sibling.loadMessages()
+        let siblingRows = sibling.messages
+        let oldest = try XCTUnwrap(vm.displayedTranscriptMessages.first)
+        fake.emit(for: "chat-live-page", type: "message.start", sequence: 10)
+        fake.emit(for: "chat-live-page", type: "message.delta", sequence: 11, payload: ["text": .string("before page")])
+        fake.emit(for: "chat-live-page", type: "reasoning.delta", sequence: 12, payload: ["text": .string("keep plan")])
+        fake.emit(for: "chat-live-page", type: "tool.start", sequence: 13, payload: ["tool_id": .string("paging-tool"), "name": .string("read_file")])
+        await waitUntil { vm.hasStreamingAssistantMessageContent && vm.liveReasoningText == "keep plan" && vm.liveToolCalls.count == 1 }
+        let liveID = try XCTUnwrap(vm.streamingAssistantMessageID)
+        let reasoningAnchor = vm.reasoningAnchorMessageID
+        let toolAnchor = vm.toolCallAnchorMessageID
+        let streamID = vm.activeStreamID
+        let tools = vm.liveToolCalls
+        // More than two pages of durable growth moves the backwards cursor
+        // past wholly newer rows. None may be prepended ahead of the old tail.
+        fixture.appendRows(250, to: "chat-live-page")
+
+        let loaded = await vm.loadOlderMessages()
+        XCTAssertTrue(loaded)
+        XCTAssertEqual(vm.messages.count, 228)
+        XCTAssertEqual(Array(vm.messages.compactMap(\.messageId).dropLast()),
+            (1773..<2000).map { "chat-live-page-row-\($0)" })
+        XCTAssertEqual(fixture.requests().filter { $0.chatID == "chat-live-page" }.map(\.offset), [0, 119, 238, 357])
+        XCTAssertTrue(vm.completedToolCallGroups.flatMap(\.toolCalls).contains { $0.name == "historical_lookup" })
+        XCTAssertEqual(vm.messages.last?.id, liveID)
+        XCTAssertEqual(vm.streamingAssistantMessageID, liveID)
+        XCTAssertEqual(vm.activeStreamID, streamID)
+        XCTAssertEqual(vm.liveReasoningText, "keep plan")
+        XCTAssertEqual(vm.liveToolCalls, tools)
+        XCTAssertEqual(vm.reasoningAnchorMessageID, reasoningAnchor)
+        XCTAssertEqual(vm.toolCallAnchorMessageID, toolAnchor)
+        XCTAssertEqual(vm.displayedTranscriptMessages.first { $0.message.id == oldest.message.id }?.renderID, oldest.renderID)
+        XCTAssertEqual(sibling.messages, siblingRows)
+
+        fake.emit(for: "chat-live-page", type: "message.delta", sequence: 14, payload: ["text": .string(" after page")])
+        await waitUntil { vm.messages.last?.content == "before page after page" }
+        XCTAssertEqual(vm.messages.last?.id, liveID)
+        let beforeFailure = vm.messages
+        fixture.failNextOlderPage()
+        let failed = await vm.loadOlderMessages()
+        XCTAssertFalse(failed)
+        XCTAssertEqual(vm.messages, beforeFailure)
+        XCTAssertEqual(vm.streamingAssistantMessageID, liveID)
+        XCTAssertEqual(vm.liveToolCalls, tools)
+        XCTAssertEqual(vm.liveReasoningText, "keep plan")
+        XCTAssertEqual(sibling.messages, siblingRows)
+        await vm.disposeDirectConversation()
+        await sibling.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testActiveDuplicateOnlyPageAdvancesRawCursorWithoutExhaustingHistory() async throws {
+        let fixture = ChatLongHistoryFixture(chatIDs: ["chat-duplicate-page"])
+        let fake = ChatLongFixtureTransport(fixture: fixture)
+        let runtime = try makeRuntime(fake)
+        let vm = makeViewModel(client: makeLongHistoryClient(fixture: fixture), runtime: runtime, sessionID: "chat-duplicate-page")
+        await vm.loadMessages()
+        fake.emit(for: "chat-duplicate-page", type: "message.start", sequence: 10)
+        fake.emit(for: "chat-duplicate-page", type: "message.delta", sequence: 11, payload: ["text": .string("live")])
+        await waitUntil { vm.hasStreamingAssistantMessageContent }
+        let before = vm.messages
+        fixture.appendRows(119, to: "chat-duplicate-page")
+        let duplicateOnly = await vm.loadOlderMessages()
+        XCTAssertFalse(duplicateOnly)
+        XCTAssertEqual(vm.messages, before)
+        XCTAssertTrue(vm.hasOlderMessages)
+        let next = await vm.loadOlderMessages()
+        XCTAssertTrue(next)
+        XCTAssertEqual(fixture.requests().map(\.offset), [0, 119, 238])
+        XCTAssertEqual(vm.messages.first?.messageId, "chat-duplicate-page-row-1761")
+        XCTAssertEqual(vm.messages.last?.content, "live")
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testDirectOlderPageFailurePreservesRowsAnchorAndCursorForRetry() async throws {
+        let fixture = ChatLongHistoryFixture(chatIDs: ["chat-page-failure"])
+        let runtime = try makeRuntime(ChatLongFixtureTransport(fixture: fixture))
+        let vm = makeViewModel(client: makeLongHistoryClient(fixture: fixture), runtime: runtime, sessionID: "chat-page-failure")
+        await vm.loadMessages()
+        let before = vm.messages
+        let anchor = try XCTUnwrap(vm.displayedTranscriptMessages.first?.renderID)
+        fixture.failNextOlderPage()
+
+        let failed = await vm.loadOlderMessages()
+        XCTAssertFalse(failed)
+        XCTAssertEqual(vm.messages, before)
+        XCTAssertEqual(vm.displayedTranscriptMessages.first?.renderID, anchor)
+        XCTAssertTrue(vm.hasOlderMessages)
+        XCTAssertFalse(vm.isLoadingOlderMessages)
+        XCTAssertNotNil(vm.errorMessage)
+
+        let retried = await vm.loadOlderMessages()
+        XCTAssertTrue(retried)
+        XCTAssertEqual(fixture.requests().map(\.offset), [0, 120, 120])
+        XCTAssertEqual(vm.messages.compactMap(\.messageId), Array(fixture.messageIDs(for: "chat-page-failure").suffix(240)))
+        XCTAssertEqual(vm.displayedTranscriptMessages.first { $0.message.messageId == before.first?.messageId }?.renderID, anchor)
+        XCTAssertTrue(vm.hasOlderMessages)
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testDirectOlderOverlapDeduplicatesAndTailReloadPreservesExpandedHistory() async throws {
+        let fixture = ChatLongHistoryFixture(chatIDs: ["chat-page-overlap"])
+        let runtime = try makeRuntime(ChatLongFixtureTransport(fixture: fixture))
+        let vm = makeViewModel(client: makeLongHistoryClient(fixture: fixture), runtime: runtime, sessionID: "chat-page-overlap")
+        await vm.loadMessages()
+        let anchor = try XCTUnwrap(vm.displayedTranscriptMessages.first?.renderID)
+        fixture.overlapNextOlderPage()
+        let loaded = await vm.loadOlderMessages()
+        XCTAssertTrue(loaded)
+        let ids = vm.messages.compactMap(\.messageId)
+        XCTAssertEqual(ids, Array(fixture.messageIDs(for: "chat-page-overlap").suffix(239)))
+        XCTAssertEqual(Set(ids).count, ids.count)
+        XCTAssertEqual(vm.messagesOffset, 0, "Direct row identity is durable, not a WebUI absolute index")
+        XCTAssertTrue(vm.hasOlderMessages)
+        XCTAssertEqual(vm.displayedTranscriptMessages.first { $0.message.messageId == "chat-page-overlap-row-1880" }?.renderID, anchor)
+        await vm.loadMessages()
+        XCTAssertEqual(vm.messages.compactMap(\.messageId), ids)
+        XCTAssertEqual(fixture.requests().map(\.offset), [0, 120, 0])
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
     func testLongHistoriesPageChronologicallyAcrossThreeChatsAndReopenWithoutCrossRouting() async throws {
         let fixture = ChatLongHistoryFixture(chatIDs: ["chat-a", "chat-b", "chat-c"])
         let fake = ChatLongFixtureTransport(fixture: fixture)
@@ -2814,6 +2947,34 @@ private final class ChatLongHistoryFixture: @unchecked Sendable {
     private let lock = NSLock()
     private var rowsByChat: [String: [[String: Any]]]
     private var requestsValue: [Request] = []
+    private var failOlderPage = false
+    private var overlapOlderPage = false
+
+    func failNextOlderPage() { withLock { failOlderPage = true } }
+    func overlapNextOlderPage() { withLock { overlapOlderPage = true } }
+
+    func appendRows(_ count: Int, to chatID: String) {
+        withLock {
+            let start = rowsByChat[chatID, default: []].count
+            for index in start..<(start + count) {
+                rowsByChat[chatID, default: []].append([
+                    "id": "\(chatID)-row-\(index)", "role": "assistant",
+                    "content": "new durable tail \(index)", "timestamp": 1_770_000_000 + index
+                ])
+            }
+        }
+    }
+
+    func installHistoricalTool(in chatID: String) {
+        withLock {
+            rowsByChat[chatID]?[1801]["tool_calls"] = [[
+                "id": "historical-tool", "type": "function",
+                "function": ["name": "historical_lookup", "arguments": "{}"]
+            ]]
+            rowsByChat[chatID]?[1802]["role"] = "tool"
+            rowsByChat[chatID]?[1802]["tool_call_id"] = "historical-tool"
+        }
+    }
 
     init(chatIDs: [String]) {
         rowsByChat = Dictionary(uniqueKeysWithValues: chatIDs.map { chatID in
@@ -2884,7 +3045,12 @@ private final class ChatLongHistoryFixture: @unchecked Sendable {
         let offset = max(0, Int(query["offset"] ?? "0") ?? 0)
         let rows = withLock { rowsByChat[chatID] ?? [] }
         let boundedLimit = min(max(limit ?? 0, 1), 120)
-        let end = max(0, rows.count - offset)
+        let behavior = withLock { () -> (fail: Bool, overlap: Bool) in
+            guard offset > 0 else { return (false, false) }
+            defer { failOlderPage = false; overlapOlderPage = false }
+            return (failOlderPage, overlapOlderPage)
+        }
+        let end = min(rows.count, max(0, rows.count - offset) + (behavior.overlap ? 1 : 0))
         let start = max(0, end - boundedLimit)
         let page = Array(rows[start..<end])
         let result: [String: Any] = [
@@ -2908,7 +3074,7 @@ private final class ChatLongHistoryFixture: @unchecked Sendable {
         )
         withLock { requestsValue.append(recorded) }
         return (HTTPURLResponse(
-            url: request.url!, statusCode: 200, httpVersion: nil,
+            url: request.url!, statusCode: behavior.fail ? 503 : 200, httpVersion: nil,
             headerFields: ["Content-Type": "application/json"]
         )!, data)
     }
@@ -2988,6 +3154,11 @@ private final class ChatLongFixtureTransport: HermesGatewayTransport, @unchecked
             sessionID: "runtime-" + chatID, type: "message.complete", sequence: 3,
             payload: ["text": .string("streamed answer")]
         ))
+    }
+
+    func emit(for chatID: String, type: String, sequence: Int, payload: [String: JSONValue] = [:]) {
+        let sink = withLock { self.sink }
+        sink?(ChatDirectEventFactory.event(sessionID: "runtime-" + chatID, type: type, sequence: sequence, payload: payload))
     }
 
     func restRequests() -> [ChatLongHistoryFixture.Request] {

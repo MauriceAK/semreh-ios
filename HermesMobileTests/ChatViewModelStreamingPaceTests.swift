@@ -206,7 +206,7 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
     }
 
     @MainActor
-    func testStreamingPositionRecoversAfterOlderPagePrependsRows() async throws {
+    func testStreamingPositionRecoversAfterStructuralPrepend() async throws {
         let streamClient = PacingSpySSEStreamingClient()
         let olderMessages: [[String: Any]] = [[
             "role": "user",
@@ -233,8 +233,15 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
         let liveMessageID = try XCTUnwrap(viewModel.streamingAssistantMessageID)
         XCTAssertTrue(viewModel.hasStreamingAssistantMessageContent)
 
-        let didLoadOlderMessages = await viewModel.loadOlderMessages()
-        XCTAssertTrue(didLoadOlderMessages)
+        // Exercise the shared structural reducer, not gateway pagination;
+        // direct active-run paging has separate boundary and event-routing tests.
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let olderRows = try decoder.decode(
+            [ChatMessage].self,
+            from: JSONSerialization.data(withJSONObject: olderMessages)
+        )
+        viewModel.prependMessagesForTesting(olderRows)
         XCTAssertEqual(viewModel.messages.first?.id, "older-page-0")
         XCTAssertEqual(viewModel.messages.last?.id, liveMessageID)
         XCTAssertTrue(

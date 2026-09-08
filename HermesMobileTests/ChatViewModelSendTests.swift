@@ -92,7 +92,7 @@ final class ChatViewModelSendTests: XCTestCase {
         ) { request in
             // Listen now prefers server TTS (#15); refuse it so the on-device
             // fallback path is what creates the synthesizer.
-            XCTAssertEqual(request.url?.path, "/api/tts")
+            XCTAssertEqual(request.url?.path, "/api/audio/speak")
             return Self.ttsUnavailableResponse(for: request)
         }
         let context = try XCTUnwrap(MessageActionContext(
@@ -149,7 +149,7 @@ final class ChatViewModelSendTests: XCTestCase {
 
         viewModel.toggleListening(to: context)
         // Regression (review on #35): the tap itself must NOT activate the session —
-        // a slow `/api/tts` fetch would otherwise silence other audio while Semreh
+        // a slow `/api/audio/speak` fetch would otherwise silence other audio while Semreh
         // has nothing to play. Activation belongs to the moment playback starts.
         XCTAssertEqual(audioSession.activateCount, 0)
         await viewModel.listenPreparationTask?.value
@@ -263,21 +263,15 @@ final class ChatViewModelSendTests: XCTestCase {
             },
             userDefaults: userDefaults
         ) { request in
-            XCTAssertEqual(request.url?.path, "/api/tts")
+            XCTAssertEqual(request.url?.path, "/api/audio/speak")
             guard let body = apiTestBodyData(from: request),
                   let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else {
                 XCTFail("Missing TTS request body")
                 throw URLError(.badServerResponse)
             }
             XCTAssertEqual(json["text"] as? String, "Neural, please.")
-            XCTAssertEqual(json["voice"] as? String, ServerTTSPolicy.defaultVoice)
-            let response = HTTPURLResponse(
-                url: request.url!,
-                statusCode: 200,
-                httpVersion: nil,
-                headerFields: ["Content-Type": "audio/mpeg"]
-            )!
-            return (response, serverAudio)
+            XCTAssertEqual(Set(json.keys), ["text"])
+            return try Self.ttsAudioResponse(serverAudio, for: request)
         }
         let context = try XCTUnwrap(MessageActionContext(
             message: ChatMessage(
@@ -337,13 +331,7 @@ final class ChatViewModelSendTests: XCTestCase {
             listenRemoteControlCenter: remoteControlCenter,
             serverTTSAudioPlayerFactory: { _ in player }
         ) { request in
-            let response = HTTPURLResponse(
-                url: request.url!,
-                statusCode: 200,
-                httpVersion: nil,
-                headerFields: ["Content-Type": "audio/mpeg"]
-            )!
-            return (response, Data([0xFF, 0xF3]))
+            return try Self.ttsAudioResponse(Data([0xFF, 0xF3]), for: request)
         }
         let context = try XCTUnwrap(MessageActionContext(
             message: ChatMessage(
@@ -391,13 +379,7 @@ final class ChatViewModelSendTests: XCTestCase {
             listenRemoteControlCenter: remoteControlCenter,
             serverTTSAudioPlayerFactory: { _ in player }
         ) { request in
-            let response = HTTPURLResponse(
-                url: request.url!,
-                statusCode: 200,
-                httpVersion: nil,
-                headerFields: ["Content-Type": "audio/mpeg"]
-            )!
-            return (response, Data([0xFF, 0xF3]))
+            return try Self.ttsAudioResponse(Data([0xFF, 0xF3]), for: request)
         }
         let context = try XCTUnwrap(MessageActionContext(
             message: ChatMessage(
@@ -434,13 +416,7 @@ final class ChatViewModelSendTests: XCTestCase {
             serverTTSAudioPlayerFactory: { _ in player },
             userDefaults: userDefaults
         ) { request in
-            let response = HTTPURLResponse(
-                url: request.url!,
-                statusCode: 200,
-                httpVersion: nil,
-                headerFields: ["Content-Type": "audio/mpeg"]
-            )!
-            return (response, Data([0xFF, 0xF3]))
+            return try Self.ttsAudioResponse(Data([0xFF, 0xF3]), for: request)
         }
         let context = try XCTUnwrap(MessageActionContext(
             message: ChatMessage(
@@ -486,13 +462,7 @@ final class ChatViewModelSendTests: XCTestCase {
                 players.removeFirst()
             }
         ) { request in
-            let response = HTTPURLResponse(
-                url: request.url!,
-                statusCode: 200,
-                httpVersion: nil,
-                headerFields: ["Content-Type": "audio/mpeg"]
-            )!
-            return (response, Data([0xFF, 0xF3]))
+            return try Self.ttsAudioResponse(Data([0xFF, 0xF3]), for: request)
         }
         func makeContext(_ id: String, text: String, visibleIndex: Int) throws -> MessageActionContext {
             try XCTUnwrap(MessageActionContext(
@@ -563,13 +533,7 @@ final class ChatViewModelSendTests: XCTestCase {
                 throw URLError(.cannotDecodeContentData)
             }
         ) { request in
-            let response = HTTPURLResponse(
-                url: request.url!,
-                statusCode: 200,
-                httpVersion: nil,
-                headerFields: ["Content-Type": "audio/mpeg"]
-            )!
-            return (response, Data("not really audio".utf8))
+            return try Self.ttsAudioResponse(Data("not really audio".utf8), for: request)
         }
         let context = try XCTUnwrap(MessageActionContext(
             message: ChatMessage(
@@ -595,7 +559,7 @@ final class ChatViewModelSendTests: XCTestCase {
         let viewModel = try makeViewModel(
             speechSynthesizerFactory: { speechSynthesizer }
         ) { request in
-            XCTFail("Text over the 5000-char cap must not hit /api/tts.")
+            XCTFail("Text over the 5000-char cap must not hit /api/audio/speak.")
             return apiTestJSONResponse("{}", for: request)
         }
         let longText = String(repeating: "a", count: ServerTTSPolicy.maximumTextLength + 1)
@@ -631,13 +595,7 @@ final class ChatViewModelSendTests: XCTestCase {
             }
         ) { request in
             ttsRequests += 1
-            let response = HTTPURLResponse(
-                url: request.url!,
-                statusCode: 200,
-                httpVersion: nil,
-                headerFields: ["Content-Type": "audio/mpeg"]
-            )!
-            return (response, Data([0xFF, 0xF3]))
+            return try Self.ttsAudioResponse(Data([0xFF, 0xF3]), for: request)
         }
         let context = try XCTUnwrap(MessageActionContext(
             message: ChatMessage(
@@ -653,7 +611,7 @@ final class ChatViewModelSendTests: XCTestCase {
         viewModel.toggleListening(to: context)
         let firstFetch = viewModel.listenPreparationTask
         // Second tap lands while the server fetch is still in flight: it must act
-        // as "Stop Listening", not queue a second /api/tts call (#15 double-tap).
+        // as "Stop Listening", not queue a second /api/audio/speak call (#15 double-tap).
         viewModel.toggleListening(to: context)
 
         XCTAssertNil(viewModel.listeningMessageID)
@@ -668,10 +626,9 @@ final class ChatViewModelSendTests: XCTestCase {
         XCTAssertLessThanOrEqual(ttsRequests, 1)
     }
 
-    func testServerTTSPolicyRoutesByServerTextCap() {
+    func testServerTTSPolicyRoutesByClientTextCap() {
         XCTAssertTrue(ServerTTSPolicy.shouldUseServerTTS(for: String(repeating: "a", count: 5000)))
         XCTAssertFalse(ServerTTSPolicy.shouldUseServerTTS(for: String(repeating: "a", count: 5001)))
-        XCTAssertEqual(ServerTTSPolicy.defaultVoice, "en-US-AriaNeural")
     }
 
     @MainActor
@@ -4469,93 +4426,6 @@ final class ChatViewModelSendTests: XCTestCase {
     }
 
     @MainActor
-    func testStaleActiveStreamReplayDedupSurvivesLoadOlderMessages() async throws {
-        let streamClient = SpySSEStreamingClient()
-        let viewModel = try makeViewModel(streamClient: streamClient) { request in
-            switch request.url?.path {
-            case "/api/session":
-                let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
-                let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
-                if query["msg_before"] == "2" {
-                    return apiTestJSONResponse("""
-                    {
-                      "session": {
-                        "session_id": "session-abc",
-                        "messages": [
-                          {"role": "user", "content": "Old question", "timestamp": 1, "message_id": "u-0"},
-                          {"role": "assistant", "content": "Old answer", "timestamp": 2, "message_id": "a-1"},
-                          {"role": "user", "content": "Recent question", "timestamp": 3, "message_id": "u-2"}
-                        ],
-                        "_messages_truncated": false,
-                        "_messages_offset": 0
-                      }
-                    }
-                    """, for: request)
-                }
-                return apiTestJSONResponse("""
-                {
-                  "session": {
-                    "session_id": "session-abc",
-                    "messages": [
-                      {"role": "user", "content": "Recent question", "timestamp": 3, "message_id": "u-2"}
-                    ],
-                    "_messages_truncated": true,
-                    "_messages_offset": 2
-                  }
-                }
-                """, for: request)
-            case "/api/chat/start":
-                return apiTestJSONResponse("""
-                {
-                  "session_id": "session-abc",
-                  "stream_id": "stream-123"
-                }
-                """, for: request)
-            case "/api/chat/stream/status":
-                return apiTestJSONResponse("""
-                {
-                  "active": true,
-                  "stream_id": "stream-123",
-                  "replay_available": true
-                }
-                """, for: request)
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
-
-        await viewModel.loadMessages()
-        XCTAssertTrue(viewModel.hasOlderMessages)
-
-        let didStart = await viewModel.sendMessage("Keep working")
-        XCTAssertTrue(didStart)
-        streamClient.emit(.token("First "))
-        streamClient.emit(.token("middle "))
-
-        await viewModel.recoverStaleActiveStreamIfNeeded(now: Date().addingTimeInterval(20))
-
-        // Partial replay match keeps the replay connection armed mid-stride...
-        streamClient.emit(.token("First "))
-
-        // ...then the user paginates older messages, which drops pending buffers.
-        let didLoadOlder = await viewModel.loadOlderMessages()
-        XCTAssertTrue(didLoadOlder)
-
-        // Replay continues: the duplicate must still dedup, the new token must append.
-        streamClient.emit(.token("middle "))
-        streamClient.emit(.token("last."))
-
-        XCTAssertEqual(viewModel.messages.compactMap(\.content), [
-            "Old question",
-            "Old answer",
-            "Recent question",
-            "Keep working",
-            "First middle last."
-        ])
-    }
-
-    @MainActor
     func testStaleActiveStreamReplayDeduplicatesStridingOverlap() async throws {
         let streamClient = SpySSEStreamingClient()
         let viewModel = try makeViewModel(streamClient: streamClient) { request in
@@ -6618,316 +6488,6 @@ final class ChatViewModelSendTests: XCTestCase {
     }
 
     @MainActor
-    func testLoadOlderMessagesUsesCurrentOffsetAndPrependsWithoutDuplicates() async throws {
-        var requestQueries: [[String: String]] = []
-        let viewModel = try makeViewModel { request in
-            XCTAssertEqual(request.url?.path, "/api/session")
-            let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
-            let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
-            requestQueries.append(query)
-
-            switch query["msg_before"] {
-            case nil:
-                return apiTestJSONResponse("""
-                {
-                  "session": {
-                    "session_id": "session-abc",
-                    "messages": [
-                      {"role": "user", "content": "Recent question", "timestamp": 3, "message_id": "u-2"},
-                      {"role": "assistant", "content": "Recent answer", "timestamp": 4, "message_id": "a-3"}
-                    ],
-                    "_messages_truncated": true,
-                    "_messages_offset": 2
-                  }
-                }
-                """, for: request)
-            case "2":
-                return apiTestJSONResponse("""
-                {
-                  "session": {
-                    "session_id": "session-abc",
-                    "messages": [
-                      {"role": "user", "content": "Older question", "timestamp": 1, "message_id": "u-0"},
-                      {"role": "assistant", "content": "Older answer", "timestamp": 2, "message_id": "a-1"},
-                      {"role": "user", "content": "Recent question", "timestamp": 3, "message_id": "u-2"}
-                    ],
-                    "_messages_truncated": false,
-                    "_messages_offset": 0
-                  }
-                }
-                """, for: request)
-            default:
-                XCTFail("Unexpected query: \(query)")
-                throw URLError(.badURL)
-            }
-        }
-
-        await viewModel.loadMessages()
-        let didLoadOlder = await viewModel.loadOlderMessages()
-
-        XCTAssertTrue(didLoadOlder)
-        XCTAssertEqual(requestQueries.count, 2)
-        XCTAssertNil(requestQueries[0]["msg_before"])
-        XCTAssertEqual(requestQueries[1]["msg_before"], "2")
-        XCTAssertEqual(requestQueries[1]["msg_limit"], "50")
-        XCTAssertEqual(viewModel.messages.compactMap(\.content), [
-            "Older question",
-            "Older answer",
-            "Recent question",
-            "Recent answer"
-        ])
-        XCTAssertEqual(viewModel.messagesOffset, 0)
-        XCTAssertFalse(viewModel.hasOlderMessages)
-    }
-
-    @MainActor
-    func testLoadOlderMessagesFallbackOffsetUsesMergedTranscriptCount() async throws {
-        let viewModel = try makeViewModel { request in
-            XCTAssertEqual(request.url?.path, "/api/session")
-            let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
-            let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
-
-            switch query["msg_before"] {
-            case nil:
-                return apiTestJSONResponse("""
-                {
-                  "session": {
-                    "session_id": "session-abc",
-                    "messages": [
-                      {"role": "user", "content": "Recent question", "timestamp": 5, "message_id": "u-4"},
-                      {"role": "assistant", "content": "Recent answer", "timestamp": 6, "message_id": "a-5"}
-                    ],
-                    "_messages_truncated": true,
-                    "_messages_offset": 4
-                  }
-                }
-                """, for: request)
-            case "4":
-                return apiTestJSONResponse("""
-                {
-                  "session": {
-                    "session_id": "session-abc",
-                    "message_count": 6,
-                    "messages": [
-                      {"role": "user", "content": "Middle question", "timestamp": 3, "message_id": "u-2"},
-                      {"role": "assistant", "content": "Middle answer", "timestamp": 4, "message_id": "a-3"}
-                    ],
-                    "_messages_truncated": true
-                  }
-                }
-                """, for: request)
-            default:
-                XCTFail("Unexpected query: \(query)")
-                throw URLError(.badURL)
-            }
-        }
-
-        await viewModel.loadMessages()
-        let didLoadOlder = await viewModel.loadOlderMessages()
-
-        XCTAssertTrue(didLoadOlder)
-        XCTAssertEqual(viewModel.messages.compactMap(\.content), [
-            "Middle question",
-            "Middle answer",
-            "Recent question",
-            "Recent answer"
-        ])
-        XCTAssertEqual(viewModel.messagesOffset, 2)
-        XCTAssertTrue(viewModel.hasOlderMessages)
-    }
-
-    @MainActor
-    func testLoadMessagesPreservesExpandedTranscriptWhenReloadReturnsLatestWindow() async throws {
-        var latestLoadCount = 0
-        let viewModel = try makeViewModel { request in
-            XCTAssertEqual(request.url?.path, "/api/session")
-            let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
-            let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
-
-            switch query["msg_before"] {
-            case nil:
-                latestLoadCount += 1
-                return apiTestJSONResponse("""
-                {
-                  "session": {
-                    "session_id": "session-abc",
-                    "messages": [
-                      {"role": "user", "content": "Recent question", "timestamp": 3, "message_id": "u-2"},
-                      {"role": "assistant", "content": "Recent answer", "timestamp": 4, "message_id": "a-3"}
-                    ],
-                    "_messages_truncated": true,
-                    "_messages_offset": 2
-                  }
-                }
-                """, for: request)
-            case "2":
-                return apiTestJSONResponse("""
-                {
-                  "session": {
-                    "session_id": "session-abc",
-                    "messages": [
-                      {"role": "user", "content": "Older question", "timestamp": 1, "message_id": "u-0"},
-                      {"role": "assistant", "content": "Older answer", "timestamp": 2, "message_id": "a-1"}
-                    ],
-                    "_messages_truncated": false,
-                    "_messages_offset": 0
-                  }
-                }
-                """, for: request)
-            default:
-                XCTFail("Unexpected query: \(query)")
-                throw URLError(.badURL)
-            }
-        }
-
-        await viewModel.loadMessages()
-        let didLoadOlder = await viewModel.loadOlderMessages()
-        await viewModel.loadMessages()
-
-        XCTAssertTrue(didLoadOlder)
-        XCTAssertEqual(latestLoadCount, 2)
-        XCTAssertEqual(viewModel.messages.compactMap(\.content), [
-            "Older question",
-            "Older answer",
-            "Recent question",
-            "Recent answer"
-        ])
-        XCTAssertEqual(viewModel.messagesOffset, 0)
-        XCTAssertFalse(viewModel.hasOlderMessages)
-    }
-
-    @MainActor
-    func testCompletedStreamSessionPreservesExpandedTranscriptWhenDoneReturnsLatestWindow() async throws {
-        let streamClient = SpySSEStreamingClient()
-        let viewModel = try makeViewModel(streamClient: streamClient) { request in
-            switch request.url?.path {
-            case "/api/session":
-                let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
-                let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
-
-                if query["msg_before"] == "2" {
-                    return apiTestJSONResponse("""
-                    {
-                      "session": {
-                        "session_id": "session-abc",
-                        "messages": [
-                          {"role": "user", "content": "Older question", "timestamp": 1, "message_id": "u-0"},
-                          {"role": "assistant", "content": "Older answer", "timestamp": 2, "message_id": "a-1"}
-                        ],
-                        "_messages_truncated": false,
-                        "_messages_offset": 0
-                      }
-                    }
-                    """, for: request)
-                }
-
-                return apiTestJSONResponse("""
-                {
-                  "session": {
-                    "session_id": "session-abc",
-                    "messages": [
-                      {"role": "user", "content": "Recent question", "timestamp": 3, "message_id": "u-2"},
-                      {"role": "assistant", "content": "Recent answer", "timestamp": 4, "message_id": "a-3"}
-                    ],
-                    "_messages_truncated": true,
-                    "_messages_offset": 2
-                  }
-                }
-                """, for: request)
-            case "/api/chat/start":
-                return apiTestJSONResponse("""
-                {
-                  "session_id": "session-abc",
-                  "stream_id": "stream-123"
-                }
-                """, for: request)
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
-
-        await viewModel.loadMessages()
-        let didLoadOlder = await viewModel.loadOlderMessages()
-        let didStart = await viewModel.sendMessage("Newest question")
-        let completedSession = try makeSessionDetail("""
-        {
-          "session_id": "session-abc",
-          "messages": [
-            {"role": "user", "content": "Recent question", "message_id": "u-2"},
-            {"role": "assistant", "content": "Recent answer", "message_id": "a-3"},
-            {"role": "user", "content": "Newest question", "message_id": "u-4"},
-            {"role": "assistant", "content": "Newest answer", "message_id": "a-5"}
-          ],
-          "_messages_truncated": true,
-          "_messages_offset": 2
-        }
-        """)
-
-        streamClient.emit(.done(DoneStreamEvent(session: completedSession)))
-
-        XCTAssertTrue(didLoadOlder)
-        XCTAssertTrue(didStart)
-        XCTAssertEqual(viewModel.messages.compactMap(\.content), [
-            "Older question",
-            "Older answer",
-            "Recent question",
-            "Recent answer",
-            "Newest question",
-            "Newest answer"
-        ])
-        XCTAssertEqual(viewModel.messagesOffset, 0)
-        XCTAssertFalse(viewModel.hasOlderMessages)
-        XCTAssertFalse(viewModel.responseCompletionNeedsTranscriptRefresh)
-    }
-
-    @MainActor
-    func testLoadOlderMessagesKeepsAffordanceWhenAnotherOlderPageExists() async throws {
-        let viewModel = try makeViewModel { request in
-            XCTAssertEqual(request.url?.path, "/api/session")
-            let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
-            let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
-
-            if query["msg_before"] == nil {
-                return apiTestJSONResponse("""
-                {
-                  "session": {
-                    "session_id": "session-abc",
-                    "messages": [
-                      {"role": "user", "content": "Tail", "timestamp": 51, "message_id": "u-50"}
-                    ],
-                    "_messages_truncated": true,
-                    "_messages_offset": 50
-                  }
-                }
-                """, for: request)
-            }
-
-            XCTAssertEqual(query["msg_before"], "50")
-            return apiTestJSONResponse("""
-            {
-              "session": {
-                "session_id": "session-abc",
-                "messages": [
-                  {"role": "assistant", "content": "Earlier page", "timestamp": 50, "message_id": "a-49"}
-                ],
-                "_messages_truncated": true,
-                "_messages_offset": 49
-              }
-            }
-            """, for: request)
-        }
-
-        await viewModel.loadMessages()
-        let didLoadOlder = await viewModel.loadOlderMessages()
-
-        XCTAssertTrue(didLoadOlder)
-        XCTAssertEqual(viewModel.messages.compactMap(\.content), ["Earlier page", "Tail"])
-        XCTAssertEqual(viewModel.messagesOffset, 49)
-        XCTAssertTrue(viewModel.hasOlderMessages)
-    }
-
-    @MainActor
     func testSkillShortcutWithoutArgsReturnsLocalSkillInfoWithoutStartingChat() async throws {
         var didRequestSkills = false
         let viewModel = try makeViewModel { request in
@@ -7661,8 +7221,16 @@ final class ChatViewModelSendTests: XCTestCase {
         await Task { @MainActor in }.value
     }
 
-    /// A `503 {"error": ...}` for `/api/tts` — the canonical "server TTS refused,
+    /// A `503 {"error": ...}` for `/api/audio/speak` — the canonical "server TTS refused,
     /// use the on-device fallback" stimulus for Listen tests (#15).
+    private static func ttsAudioResponse(_ audio: Data, for request: URLRequest) throws -> (HTTPURLResponse, Data) {
+        let data = try JSONSerialization.data(withJSONObject: [
+            "ok": true, "mime_type": "audio/mpeg",
+            "data_url": "data:audio/mpeg;base64,\(audio.base64EncodedString())"
+        ])
+        return apiTestJSONResponse(String(decoding: data, as: UTF8.self), for: request)
+    }
+
     private static func ttsUnavailableResponse(for request: URLRequest) -> (HTTPURLResponse, Data) {
         let response = HTTPURLResponse(
             url: request.url!,

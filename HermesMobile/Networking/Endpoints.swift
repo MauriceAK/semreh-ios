@@ -135,7 +135,6 @@ enum Endpoint {
     case toggleSkill
     case upload
     case transcribe
-    case tts
 
     var path: String {
         switch self {
@@ -409,8 +408,6 @@ enum Endpoint {
             return "/api/upload"
         case .transcribe:
             return "/api/transcribe"
-        case .tts:
-            return "/api/tts"
         }
     }
 

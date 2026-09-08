@@ -29,6 +29,14 @@ Preserve completed Luna work. Root owns integration, notes and native execution.
 - [ ] **Legacy chat/SSE retirement:** remove replaced chat/event/prompt branches,
   obsolete DTOs/tests/fixtures and unused package references after caller removal.
   Check direct send/recovery/blocking prompts, build, and repository caller search.
+- [ ] **Older history during an active response:** implementation and deterministic
+  native tests now pass; actual-device acceptance remains. Older-page application
+  preserves the live response/tools/reasoning and seeks an exact boundary anchor
+  across at most eight overlapping reads. Missing/unproven anchors leave history
+  intact. Tests cover250new durable rows, stale terminal/turn/binding responses,
+  historical tool visibility and canonical rollover. Idle rollover refreshes the
+  canonical tail/rebinds; active rollover leaves live identity intact. This is a
+  functional improvement, not proof of physical scrolling smoothness.
 - [ ] **Secondary feature migration:** finish supported first-party consumers;
   Astra Low worker selects a disjoint supported feature first.
   Check exact stock request/response and visible behavior; do not invent routes.
@@ -73,6 +81,34 @@ speech synthesis. Reasonable migration decision: Listen uses stock Hermes's
 configured voice; old AriaNeural was an internal hardcoded constant, not a user
 picker. Preserve on-device fallback; remove the obsolete voice request argument
 rather than silently ignoring it. No server configuration/provider activation.
+`slice4-secondary-writes-build-v1` and `full-v1` passed2306/0/14intentional skips.
+This snapshot includes exact scoped task pause/resume, authoritative list-derived
+execution status (pausing a schedule does not interrupt its current run),
+startup-default ACK/readback, and profile-scoped bounded speech audio decoding.
+Mock/native fallback tests passed; actual audio provider activation remains out
+of scope. Bounded live endpoint probes are being prepared, not yet executed.
+
+Successor checkpoint: `slice4-paging-retirement-full-v1` passed2302/0/14.
+Six legacy paging test methods were retired/migrated (including obsolete WebUI
+offset/SSE-only expectations), two direct paging regressions added, and the
+structural prepend/index performance assertion retained. This snapshot does not
+cover the subsequent active-response paging implementation currently in review.
+
+Live probes: `slice4-startup-default-live-v1.json` confirms one same-value default
+POST plus unchanged active/current/config/file state; it does not prove a changed
+default or restart/native-picker behavior. `slice4-cron-mutations-live-v1.json`
+confirms exact scoped pause/resume receipts and readback on one future2099 job,
+then exact owned deletion and empty inventory restoration, zero triggers and
+cleanup errors. Python probe tests passed12/12 and7/7. Audit
+`slice4-secondary-paging-audit-v1.jsonl`:286671files,0flags,170exported consoles;
+known-secret/obviousbearer scope only, not opaque/OCR/quarantined diagnostics.
+
+Active paging integration: `slice4-active-paging-build-v1` and `full-v1` passed
+2311/0/14intentional skips, including the updated profile-create catalog reads.
+Independent reviewer found/fixed moving-tail ordering, missing historical tool
+groups and idle canonical rollover before native verification. Strict signing and
+ordinary Simulator launch91834 passed. Audit-v1:291375files/0flags/171consoles,
+same limited scope above. Subsequent transcription edits are not covered here.
 Skills read-only stock probe verified58rows and one SKILL.md; no skill mutations.
 Combined build-and-test attempts twice produced no result and were interrupted;
 separate build-for-testing then test-without-building produced the passing runs.

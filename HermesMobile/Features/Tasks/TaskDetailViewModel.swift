@@ -31,6 +31,7 @@ final class TaskDetailViewModel {
     }
 
     func load() async {
+        guard !isMutating else { return }
         loadGeneration += 1
         let generation = loadGeneration
         guard let jobID = job.jobId else {
@@ -50,12 +51,17 @@ final class TaskDetailViewModel {
         do {
             async let detail = client.directCronJob(jobID: jobID, profile: profile)
             async let history = client.directCronRuns(jobID: jobID, profile: profile)
-            let (freshJob, freshRuns) = try await (detail, history)
+            // Stock get_job omits execution enrichment; only list_jobs adds it.
+            async let inventory = client.directCronJobs(profile: profile)
+            let (freshJob, freshRuns, jobs) = try await (detail, history, inventory)
+            guard let executionJob = jobs.first(where: { $0.jobId == jobID }) else {
+                throw DirectCronReadError.invalidIdentity
+            }
             let options = await deliveryOptionsResponse
             guard generation == loadGeneration else { return }
             job = freshJob
             runs = freshRuns
-            runningElapsed = freshJob.latestExecution?.runningElapsed()
+            runningElapsed = executionJob.latestExecution?.runningElapsed()
             deliveryOptions = options
         } catch {
             let options = await deliveryOptionsResponse
@@ -82,18 +88,22 @@ final class TaskDetailViewModel {
 
     func pause(reason: String? = nil) async -> Bool {
         let success = await mutateJob { jobID in
-            try await client.pauseCron(jobID: jobID, reason: reason)
+            let updated = try await client.directPauseCron(jobID: jobID, profile: profile, reason: reason)
+            return CronMutationResponse(ok: true, job: updated, error: nil)
         }
         if success {
-            runningElapsed = nil
+            await load()
         }
         return success
     }
 
     func resume() async -> Bool {
-        return await mutateJob { jobID in
-            try await client.resumeCron(jobID: jobID)
+        let success = await mutateJob { jobID in
+            let updated = try await client.directResumeCron(jobID: jobID, profile: profile)
+            return CronMutationResponse(ok: true, job: updated, error: nil)
         }
+        if success { await load() }
+        return success
     }
 
     func update(from draft: CronJobEditorDraft) async -> Bool {
@@ -119,6 +129,7 @@ final class TaskDetailViewModel {
     }
 
     func delete() async -> Bool {
+        guard !isMutating else { return false }
         guard let jobID = job.jobId else {
             actionErrorMessage = String(localized: "Missing job identifier.")
             return false
@@ -149,12 +160,16 @@ final class TaskDetailViewModel {
     private func mutateJob(
         action: (String) async throws -> CronMutationResponse
     ) async -> Bool {
+        guard !isMutating else { return false }
         guard let jobID = job.jobId else {
             actionErrorMessage = String(localized: "Missing job identifier.")
             return false
         }
 
         isMutating = true
+        // A pre-mutation read may no longer publish its old job or error.
+        loadGeneration += 1
+        isLoading = false
         actionErrorMessage = nil
         lastError = nil
         lastMutation = nil

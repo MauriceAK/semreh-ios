@@ -196,6 +196,52 @@ final class CronManagementModelTests: XCTestCase {
 }
 
 final class CronManagementViewModelTests: XCTestCase {
+    @MainActor
+    func testPauseKeepsExecutingRunFromStockListEnrichment() async throws {
+        let rawJob = #"{"id":"job1","profile":"default","enabled":false,"state":"paused"}"#
+        let client = makeClient { request in
+            switch request.url?.path {
+            case "/api/cron/jobs/job1/pause", "/api/cron/jobs/job1":
+                return apiTestJSONResponse(rawJob, for: request)
+            case "/api/cron/jobs":
+                return apiTestJSONResponse(#"[{"id":"job1","profile":"default","enabled":false,"state":"paused","latest_execution":{"status":"running","started_at":"2026-01-01T00:00:00Z"}}]"#, for: request)
+            case "/api/cron/jobs/job1/runs":
+                return apiTestJSONResponse(#"{"runs":[],"limit":5}"#, for: request)
+            case "/api/cron/delivery-targets":
+                return apiTestJSONResponse(#"{"targets":[]}"#, for: request)
+            default:
+                XCTFail("Unexpected route")
+                throw URLError(.badURL)
+            }
+        }
+        let model = TaskDetailViewModel(job: try decodeCronJob(rawJob), runningElapsed: 12,
+                                        server: URL(string: "https://example.test")!, client: client)
+        let paused = await model.pause()
+        XCTAssertTrue(paused)
+        XCTAssertEqual(model.job.state, "paused")
+        XCTAssertNil(model.job.latestExecution, "Stock detail does not enrich execution state")
+        XCTAssertGreaterThan(try XCTUnwrap(model.runningElapsed), 0)
+    }
+
+    @MainActor
+    func testExecutionInventoryFailurePreservesPreviousRunningBadgeAndReportsError() async throws {
+        let rawJob = #"{"id":"job1","profile":"default","enabled":false,"state":"paused"}"#
+        let client = makeClient { request in
+            switch request.url?.path {
+            case "/api/cron/jobs/job1": return apiTestJSONResponse(rawJob, for: request)
+            case "/api/cron/jobs/job1/runs": return apiTestJSONResponse(#"{"runs":[],"limit":5}"#, for: request)
+            case "/api/cron/delivery-targets": return apiTestJSONResponse(#"{"targets":[]}"#, for: request)
+            default: throw URLError(.networkConnectionLost)
+            }
+        }
+        let model = TaskDetailViewModel(job: try decodeCronJob(rawJob), runningElapsed: 12,
+                                        server: URL(string: "https://example.test")!, client: client)
+        await model.load()
+        XCTAssertEqual(model.runningElapsed, 12)
+        XCTAssertNotNil(model.lastError)
+        XCTAssertNotNil(model.errorMessage)
+    }
+
     override func tearDown() {
         MockURLProtocol.requestHandler = nil
         CronReadGateURLProtocol.reset()
@@ -343,19 +389,25 @@ final class CronManagementViewModelTests: XCTestCase {
     @MainActor
     func testTaskDetailViewModelPauseUpdatesJobAndPublishesMutation() async throws {
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/crons/pause")
-
+            if request.url?.path == "/api/cron/jobs" {
+                return apiTestJSONResponse(#"[{"id":"job123","profile":"default","enabled":false,"state":"paused","latest_execution":{"status":"completed"}}]"#, for: request)
+            }
+            if request.url?.path == "/api/cron/delivery-targets" {
+                return apiTestJSONResponse(#"{"targets":[]}"#, for: request)
+            }
+            if request.url?.path == "/api/cron/jobs/job123/runs" {
+                return apiTestJSONResponse(#"{"runs":[],"limit":5}"#, for: request)
+            }
+            XCTAssertTrue(["/api/cron/jobs/job123/pause", "/api/cron/jobs/job123"].contains(request.url?.path ?? ""))
             return apiTestJSONResponse("""
             {
-              "ok": true,
-              "job": {
                 "id": "job123",
+                "profile": "default",
                 "name": "Digest",
                 "prompt": "Run it",
                 "schedule": {"kind": "cron", "expr": "0 7 * * *"},
-                "enabled": true,
+                "enabled": false,
                 "state": "paused"
-              }
             }
             """, for: request)
         }
@@ -385,6 +437,44 @@ final class CronManagementViewModelTests: XCTestCase {
             return
         }
         XCTAssertEqual(updatedJob.jobId, "job123")
+    }
+
+    @MainActor
+    func testPauseRejectsConcurrentResumeUntilReceiptArrives() async throws {
+        let observed = expectation(description: "pause held")
+        let paused = #"{"id":"job1","profile":"default","enabled":false,"state":"paused"}"#
+        let client = makeGatedClient(path: "/api/cron/jobs/job1/pause", first: paused, later: paused, observed: observed)
+        let model = TaskDetailViewModel(job: try decodeCronJob(#"{"id":"job1","profile":"default"}"#),
+                                        runningElapsed: nil, server: URL(string: "https://example.test")!, client: client)
+        let pause = Task { await model.pause() }
+        await fulfillment(of: [observed], timeout: 2)
+        let resumed = await model.resume()
+        XCTAssertFalse(resumed)
+        XCTAssertTrue(model.isMutating)
+        CronReadGateURLProtocol.release()
+        let result = await pause.value
+        XCTAssertTrue(result)
+        XCTAssertEqual(model.job.state, "paused")
+        XCTAssertFalse(model.isMutating)
+    }
+
+    @MainActor
+    func testPrePauseReadCannotOverwriteConfirmedPausedJob() async throws {
+        let observed = expectation(description: "old detail held")
+        let client = makeGatedClient(path: "/api/cron/jobs/job1",
+                                    first: #"{"id":"job1","profile":"default","enabled":true,"state":"scheduled"}"#,
+                                    later: #"{"id":"job1","profile":"default","enabled":false,"state":"paused"}"#,
+                                    observed: observed)
+        let model = TaskDetailViewModel(job: try decodeCronJob(#"{"id":"job1","profile":"default"}"#),
+                                        runningElapsed: nil, server: URL(string: "https://example.test")!, client: client)
+        let oldLoad = Task { await model.load() }
+        await fulfillment(of: [observed], timeout: 2)
+        let paused = await model.pause()
+        XCTAssertTrue(paused)
+        CronReadGateURLProtocol.release()
+        await oldLoad.value
+        XCTAssertEqual(model.job.state, "paused")
+        XCTAssertNil(model.errorMessage)
     }
 
     @MainActor
@@ -483,8 +573,17 @@ private final class CronReadGateURLProtocol: URLProtocol {
             respond(payload)
             return
         }
+        let later = Self.later
         Self.lock.unlock()
-        respond(request.url?.path.hasSuffix("/runs") == true ? #"{"runs":[],"limit":5}"# : #"{"targets":[]}"#)
+        if request.url?.path == "/api/cron/jobs" {
+            respond("[\(later)]")
+        } else if request.url?.path.hasSuffix("/runs") == true {
+            respond(#"{"runs":[],"limit":5}"#)
+        } else if request.url?.path.hasPrefix("/api/cron/jobs/") == true {
+            respond(later)
+        } else {
+            respond(#"{"targets":[]}"#)
+        }
     }
 
     private func respond(_ payload: String) {
