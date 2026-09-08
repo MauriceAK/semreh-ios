@@ -34,3 +34,10 @@ large-jump/switch lag remains. Evidence lives in `slice2-verification.md`.
 
 User reports upstream chronology fix merged; release inclusion/pin upgrade and
 ordering regression rerun are separate compatibility work, not verified here.
+
+September8 bounded improvement: AppShell's perpetual60Hz selection-capsule timeline
+now schedules only frames through transition settlement, preserving retargeting,
+residual deformation and Reduce Motion. Motion tests16/0/0 and production chat/
+background UI1/0/0 passed. Earlier UI attempt exceeded180s amid repeated animation
+idle waits; some waits remained after the change. This removes continuous work,
+but is not proof of the timeout's sole cause or a measured long-chat/device win.

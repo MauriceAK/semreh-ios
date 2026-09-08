@@ -229,12 +229,52 @@ contents excluded; no unrelated historical evidence rescan claimed.
   evidence, arbitrary opaque/OCR and unexported compressed contents excluded.
   Physical acceptance remains separate; no new live probe for dead steering removal.
 
-- [ ] **Next bounded attachment batch.** Text/code `file.attach` already exists:
+- [x] **Bounded audio implementation batch** (remaining attachment acceptance below). Text/code `file.attach` already exists:
   close its remaining canonical roundtrip evidence rather than reimplementing.
   Restore voice-note send using existing transcription and isolated audio staging,
   preserving typed draft and unrelated pending attachments. Make existing canonical
   audio players use guarded direct managed-file bytes. Do not guess relative file
   roots or exercise external audio providers in the deterministic fixture.
+  Audio/background batch now implemented; signed build-v5 and affected focused-v2
+  passed106/0/0. Previous focused-v1:109passed/6failed; real Apple `.m4a` MIME
+  mismatch corrected to `audio/mp4`, plus background fixtures corrected to model
+  method refusal separately from disconnect and use unique task IDs. Earlier
+  build-v1/v2 private-state test access and v3 missing test closure return were
+  corrected; build-v4/v5 passed. Final integrated full-v2:2092/0/14 and UI-v2:1/0/0
+  passed, not whole-migration or physical voice acceptance.
+  Voice send transcribes/stages only its own clip, retains unrelated draft files,
+  blocks paid STT while busy/uncertain, and preserves attachments on ambiguous
+  delivery without resending. Canonical absolute audio refs use managed-file reads;
+  relative refs and actual microphone/provider/device remain unverified.
+  Reuse existing text canonical proof (`slice3-attachment-contract-v2.json`,
+  `slice3-file-picker-canonical-v6.json`); no duplicate probe. Stock outside-cwd
+  `@file` references retain a Context Warning and proceed without automatic text
+  expansion, not a blocked send; model/tool ingestion remains unverified.
+
+- [x] **Direct background tasks.** Shared `prompt.background`
+  supports multiple correlated attempts, completion-before-ACK, exact session/task
+  identity, unknown-on-disconnect/rebind, and no automatic retries. Local cards
+  retain same-session/profile ownership across canonical refresh. Old REST/polling
+  wrappers, endpoints and DTOs removed. Owned stock `slice4-background-live-v1.json`
+  passed two ACK/results, exact fixture replies and unchanged canonical history/
+  config; no external provider/tools. Background UI launcher offline45/0 and
+  probe offline3/0 passed; final UI-v2:1/0/0 and full-v2:2092/0/14 passed.
+  UI-v1 exceeded180s before prompt submission with repeated60s animation-idle
+  waits, not a background contract failure. Bounded AppShell change replaces a
+  perpetual60Hz capsule timeline with finite dates through final settlement;
+  visual motion/retarget/reduce-motion behavior preserved. Motion-v1 caught an
+  endpoint floating-point edge (15pass/1fail); terminal date now advances one
+  representable instant, with current-era and residual-deformation tests. Signed
+  build-v6/v7 and motion-v2:16/0/0 passed. Signed UI-build-v2/UI-v2:1/0/0 passed;
+  root inspected background-card screenshot E724735F-25D9-450F-A968-C43ECD9B6FE7.png.
+  Some idle waits remained; no exclusive root-cause or measured physical
+  performance claim. Full-v1 stalled before cases; exact runner77842 interrupted73,
+  retained, and one same-build full-v2 retry passed2092/0/14. No product edits
+  between full attempts. Strict signing and ordinary Simulator launch passed.
+  Unchanged live evidence reused. Targeted audit-v1:5233files/0flags/8exported
+  consoles; new audio/background artifacts and background-live receipt/log plus
+  mandatory docs/runtime logs. Opaque/OCR/unselected evidence and unexported
+  compressed contents excluded. Ordinary signed launch80371; no phone install.
 
 - [x] **Supported Git controls and deferred-control hiding:** direct explicit-file
   stage/unstage, clean local switch/push, canonical Git identity and child sheets;

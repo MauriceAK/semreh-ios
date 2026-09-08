@@ -1,23 +1,5 @@
 import Foundation
 
-struct BackgroundStartResponse: Decodable, Equatable {
-    let taskId: String?
-    let streamId: String?
-    let sessionId: String?
-    let error: String?
-}
-
-struct BackgroundStatusResponse: Decodable, Equatable {
-    let results: [BackgroundResult]?
-}
-
-struct BackgroundResult: Decodable, Equatable {
-    let taskId: String?
-    let prompt: String?
-    let answer: String?
-    let completedAt: Double?
-}
-
 struct ModelsResponse: Decodable, Equatable {
     let groups: [JSONValue]?
     let models: [JSONValue]?

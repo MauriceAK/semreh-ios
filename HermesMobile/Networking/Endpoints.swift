@@ -27,8 +27,6 @@ enum Endpoint {
     case updateSession
     case exportSession(sessionID: String, format: SessionExportFormat)
     case submitGoal
-    case background
-    case backgroundStatus(sessionID: String)
     case directoryList(sessionID: String, path: String?)
     case file(sessionID: String, path: String)
     case rawFile(sessionID: String, path: String)
@@ -135,10 +133,6 @@ enum Endpoint {
             return "/api/session/export"
         case .submitGoal:
             return "/api/goal"
-        case .background:
-            return "/api/background"
-        case .backgroundStatus:
-            return "/api/background/status"
         case .directoryList:
             return "/api/list"
         case .file:
@@ -297,8 +291,6 @@ enum Endpoint {
                 URLQueryItem(name: "session_id", value: sessionID),
                 URLQueryItem(name: "format", value: format.rawValue)
             ]
-        case let .backgroundStatus(sessionID):
-            return [URLQueryItem(name: "session_id", value: sessionID)]
         case let .directoryList(sessionID, path):
             var items = [URLQueryItem(name: "session_id", value: sessionID)]
             if let path {

@@ -106,7 +106,25 @@ final class GatewayConversationBTWTests: XCTestCase {
         await fixture.runtime.stop()
     }
 
-    private func makeFixture(mode: BtwTransport.Mode = .normal) async throws -> (
+    func testCanonicalRebindReportsActiveSideQuestionUnknown() async throws {
+        let fixture = try await makeFixture(rebindOnRefresh: true)
+        let attempt = UUID()
+        var outcomes: [GatewayConversationController.BtwOutcome] = []
+        fixture.controller.onBtwOutcome = { outcomes.append($0) }
+        _ = try await fixture.controller.startBtw("Old tip?", attemptID: attempt)
+
+        try await fixture.controller.refresh()
+        XCTAssertEqual(outcomes, [.unknown(attemptID: attempt)])
+        fixture.transport.emitCompletion(taskID: "btw_123456", question: "Old tip?", text: "late")
+        await drainEvents()
+        XCTAssertEqual(outcomes, [.unknown(attemptID: attempt)])
+        await fixture.runtime.stop()
+    }
+
+    private func makeFixture(
+        mode: BtwTransport.Mode = .normal,
+        rebindOnRefresh: Bool = false
+    ) async throws -> (
         controller: GatewayConversationController,
         runtime: HermesServerRuntime,
         transport: BtwTransport,
@@ -120,7 +138,8 @@ final class GatewayConversationBTWTests: XCTestCase {
         let loads = LockedCounter()
         let controller = GatewayConversationController(runtime: runtime, storedID: "stored-session") { id, _, _, _ in
             loads.increment()
-            return DirectHermesTranscriptPage(sessionID: id, messages: [], pagination: nil)
+            let resolvedID = rebindOnRefresh && loads.value > 1 ? "different-tip" : id
+            return DirectHermesTranscriptPage(sessionID: resolvedID, messages: [], pagination: nil)
         }
         try await controller.open()
         return (controller, runtime, transport, loads)

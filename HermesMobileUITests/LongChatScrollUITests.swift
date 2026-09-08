@@ -543,6 +543,16 @@ final class LongChatScrollUITests: XCTestCase {
             return
         }
 
+        if environment["SEMREH_SLICE4_BACKGROUND_UI"] == "1" {
+            guard stockBackend else {
+                XCTFail("Slice 4 background UI requires the pinned stock backend.")
+                return
+            }
+            waitForIdle(app: app)
+            exerciseOptInDirectBackgroundFlow(app: app, composer: composer)
+            return
+        }
+
         if environment["SEMREH_SLICE4_BRANCH_UI"] == "1" {
             guard stockBackend else {
                 XCTFail("Slice 4 branch UI requires the pinned stock backend.")
@@ -617,29 +627,53 @@ final class LongChatScrollUITests: XCTestCase {
         assertHittable(questionText, timeout: 45,
                        message: "The local BTW card must retain its unique question.")
 
-        // Markdown exposes the card's question and answer as separate static
-        // texts. Correlate by their layout inside the compact local card: the
-        // final answer must be the nearby row below this run's unique question,
-        // never the identical main-turn ACK rendered above it.
+        XCTAssertNotNil(
+            correlatedCardAnswer(app: app, anchor: questionText, answerText: slice1Acknowledgement),
+            "The same local BTW card must replace its placeholder with the final stock answer."
+        )
+        attachScreenshot(named: "slice4-btw-local-answer")
+    }
+
+    @MainActor
+    private func exerciseOptInDirectBackgroundFlow(app: XCUIApplication, composer: XCUIElement) {
+        let prompt = "BG_\(UUID().uuidString): reply exactly \(slice1Acknowledgement)"
+        XCTAssertLessThanOrEqual(prompt.count, 80)
+        composer.tap()
+        composer.typeText("/background \(prompt)")
+        let send = app.buttons["Send"]
+        assertHittable(send, timeout: 10, message: "The production composer must allow the background command.")
+        send.tap()
+
+        let promptText = app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", prompt)).firstMatch
+        assertHittable(promptText, timeout: 45, message: "The local Background card must retain its unique prompt.")
+        XCTAssertNotNil(
+            correlatedCardAnswer(app: app, anchor: promptText, answerText: slice1Acknowledgement),
+            "The correlated Background card must show the expected stock answer."
+        )
+        attachScreenshot(named: "slice4-background-local-answer")
+    }
+
+    @MainActor
+    private func correlatedCardAnswer(
+        app: XCUIApplication,
+        anchor: XCUIElement,
+        answerText: String
+    ) -> XCUIElement? {
         let deadline = Date().addingTimeInterval(90)
         var correlatedAnswer: XCUIElement?
         repeat {
             correlatedAnswer = app.staticTexts.matching(
-                NSPredicate(format: "label CONTAINS[c] %@", slice1Acknowledgement)
+                NSPredicate(format: "label CONTAINS[c] %@", answerText)
             ).allElementsBoundByIndex.first { answer in
                 answer.exists && answer.isHittable
-                    && answer.frame.minY >= questionText.frame.maxY
-                    && answer.frame.minY - questionText.frame.maxY < 160
-                    && abs(answer.frame.minX - questionText.frame.minX) < 40
+                    && answer.frame.minY >= anchor.frame.maxY
+                    && answer.frame.minY - anchor.frame.maxY < 160
+                    && abs(answer.frame.minX - anchor.frame.minX) < 40
             }
             if correlatedAnswer != nil { break }
             RunLoop.main.run(until: Date().addingTimeInterval(0.1))
         } while Date() < deadline
-        XCTAssertNotNil(
-            correlatedAnswer,
-            "The same local BTW card must replace its placeholder with the final stock answer."
-        )
-        attachScreenshot(named: "slice4-btw-local-answer")
+        return correlatedAnswer
     }
 
     @MainActor

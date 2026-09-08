@@ -30,6 +30,7 @@
 		D2EC7000000000000000000C /* GatewayConversationBlocking.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2EC7000000000000000001C /* GatewayConversationBlocking.swift */; };
 		D2EC7000000000000000000D /* GatewayConversationBlockingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2EC7000000000000000001D /* GatewayConversationBlockingTests.swift */; };
 		D2B710000000000000000001 /* GatewayConversationBTWTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2B710000000000000000002 /* GatewayConversationBTWTests.swift */; };
+		D2B710000000000000000003 /* GatewayConversationBackgroundTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2B710000000000000000004 /* GatewayConversationBackgroundTests.swift */; };
 		A5C9E273D4184A71B51C9301 /* GatewayBlockingPromptModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5C9E273D4184A71B51C9302 /* GatewayBlockingPromptModelTests.swift */; };
 		D2EC7000000000000000000A /* ChatViewModelDirectGatewayTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2EC7000000000000000001A /* ChatViewModelDirectGatewayTests.swift */; };
 		D2EC70000000000000000009 /* SessionListDirectTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2EC70000000000000000019 /* SessionListDirectTests.swift */; };
@@ -446,6 +447,7 @@
 		D2EC7000000000000000001C /* GatewayConversationBlocking.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayConversationBlocking.swift; sourceTree = "<group>"; };
 		D2EC7000000000000000001D /* GatewayConversationBlockingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayConversationBlockingTests.swift; sourceTree = "<group>"; };
 		D2B710000000000000000002 /* GatewayConversationBTWTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayConversationBTWTests.swift; sourceTree = "<group>"; };
+		D2B710000000000000000004 /* GatewayConversationBackgroundTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayConversationBackgroundTests.swift; sourceTree = "<group>"; };
 		A5C9E273D4184A71B51C9302 /* GatewayBlockingPromptModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayBlockingPromptModelTests.swift; sourceTree = "<group>"; };
 		D1EC70000000000000000016 /* DirectHermesLiveSmokeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectHermesLiveSmokeTests.swift; sourceTree = "<group>"; };
 		D2EC70000000000000000011 /* HermesServerRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HermesServerRuntime.swift; sourceTree = "<group>"; };
@@ -890,6 +892,7 @@
 				D2EC70000000000000000016 /* GatewayConversationControllerTests.swift */,
 				D2EC7000000000000000001D /* GatewayConversationBlockingTests.swift */,
 				D2B710000000000000000002 /* GatewayConversationBTWTests.swift */,
+				D2B710000000000000000004 /* GatewayConversationBackgroundTests.swift */,
 				A5C9E273D4184A71B51C9302 /* GatewayBlockingPromptModelTests.swift */,
 				D3A270000000000000000012 /* DirectGatewayAttachmentTests.swift */,
 				D3A270000000000000000014 /* DirectPendingAttachmentTests.swift */,
@@ -1884,6 +1887,7 @@
 				D2EC70000000000000000006 /* GatewayConversationControllerTests.swift in Sources */,
 				D2EC7000000000000000000D /* GatewayConversationBlockingTests.swift in Sources */,
 				D2B710000000000000000001 /* GatewayConversationBTWTests.swift in Sources */,
+				D2B710000000000000000003 /* GatewayConversationBackgroundTests.swift in Sources */,
 				A5C9E273D4184A71B51C9301 /* GatewayBlockingPromptModelTests.swift in Sources */,
 				D3A270000000000000000002 /* DirectGatewayAttachmentTests.swift in Sources */,
 				D3A270000000000000000004 /* DirectPendingAttachmentTests.swift in Sources */,

@@ -23,6 +23,11 @@ enum DirectBtwError: Error, Equatable, Sendable {
     case invalidResponse
 }
 
+enum DirectBackgroundError: Error, Equatable, Sendable {
+    case outcomeUnknown
+    case invalidResponse
+}
+
 /// One conversation on the active server's shared socket. The view model owns
 /// rendering/cache; this owner owns identity and RPC delivery, never a socket.
 @MainActor
@@ -38,6 +43,10 @@ final class GatewayConversationController {
     enum CompressionOutcome: Equatable { case compressed, unchanged, aborted, lockSkipped }
     enum BtwOutcome: Equatable, Sendable {
         case completed(attemptID: UUID, taskID: String, question: String, text: String)
+        case unknown(attemptID: UUID)
+    }
+    enum BackgroundOutcome: Equatable, Sendable {
+        case completed(attemptID: UUID, taskID: String, prompt: String, text: String)
         case unknown(attemptID: UUID)
     }
     struct ReasoningConfiguration: Equatable, Sendable {
@@ -102,6 +111,7 @@ final class GatewayConversationController {
     private var recoveredIdleCandidate: (lifecycle: Int, turn: Int, binding: GatewaySessionBinding, generation: Int, terminal: String?)?
     var onReasoningConfiguration: ((ReasoningConfiguration) -> Void)?
     var onBtwOutcome: ((BtwOutcome) -> Void)?
+    var onBackgroundOutcome: ((BackgroundOutcome) -> Void)?
     var onError: ((Error) -> Void)?
     var isVisible = false
     var isEditing = false {
@@ -187,6 +197,16 @@ final class GatewayConversationController {
         var taskID: String?
     }
     private var activeBtw: ActiveBtw?
+    private struct ActiveBackground {
+        let attemptID: UUID
+        let prompt: String
+        let binding: GatewaySessionBinding
+        let bindingEpoch: Int
+        let lifecycle: Int
+        var connectionGeneration: Int?
+        var taskID: String?
+    }
+    private var activeBackgroundByAttempt: [UUID: ActiveBackground] = [:]
 
     /// Identity-only accessors used when ownership moves to a child
     /// ChatViewModel. The shared runtime is never recreated or resumed.
@@ -2349,6 +2369,81 @@ final class GatewayConversationController {
         return method == "prompt.btw"
     }
 
+    /// Starts one independently correlated stock background task. Multiple
+    /// attempts may coexist; an uncertain or completed attempt never drops a sibling.
+    func startBackground(_ text: String, attemptID: UUID) async throws -> String {
+        let prompt = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty, activeBackgroundByAttempt[attemptID] == nil,
+              !disposed, !branchInFlight, let binding else {
+            throw DirectBackgroundError.invalidResponse
+        }
+        let active = ActiveBackground(
+            attemptID: attemptID, prompt: prompt, binding: binding,
+            bindingEpoch: bindingEpoch, lifecycle: lifecycle,
+            connectionGeneration: nil, taskID: nil
+        )
+        activeBackgroundByAttempt[attemptID] = active
+        var dispatched = false
+        var acknowledgedTaskID: String?
+        do {
+            try await runtime.withSessionEventsPaused {
+                guard var current = self.activeBackgroundByAttempt[attemptID],
+                      self.isCurrentBackgroundScope(current) else {
+                    throw DirectSessionError.staleOperation
+                }
+                current.connectionGeneration = self.runtime.connectionGeneration
+                self.activeBackgroundByAttempt[attemptID] = current
+                let result = try await self.runtime.request("prompt.background", parameters: {
+                    guard let current = self.activeBackgroundByAttempt[attemptID],
+                          self.isCurrentBackgroundScope(current) else {
+                        throw DirectSessionError.staleOperation
+                    }
+                    dispatched = true
+                    return self.rpcParams(binding).merging(["text": .string(prompt)]) { _, new in new }
+                })
+                guard let taskID = result?.gatewayFields["task_id"]?.gatewayString,
+                      !taskID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw DirectBackgroundError.invalidResponse
+                }
+                let collisions = self.activeBackgroundByAttempt.values.filter {
+                    $0.attemptID != attemptID && $0.taskID == taskID
+                }
+                if !collisions.isEmpty {
+                    for collision in collisions {
+                        self.activeBackgroundByAttempt.removeValue(forKey: collision.attemptID)
+                        self.onBackgroundOutcome?(.unknown(attemptID: collision.attemptID))
+                    }
+                    throw DirectBackgroundError.invalidResponse
+                }
+                guard var acknowledged = self.activeBackgroundByAttempt[attemptID],
+                      self.isCurrentBackgroundScope(acknowledged) else {
+                    throw DirectBackgroundError.invalidResponse
+                }
+                acknowledged.taskID = taskID
+                self.activeBackgroundByAttempt[attemptID] = acknowledged
+                acknowledgedTaskID = taskID
+            }
+            guard let acknowledgedTaskID else { throw DirectBackgroundError.invalidResponse }
+            return acknowledgedTaskID
+        } catch {
+            activeBackgroundByAttempt.removeValue(forKey: attemptID)
+            if !dispatched || Self.isDefinitiveBackgroundRefusal(error) { throw error }
+            throw DirectBackgroundError.outcomeUnknown
+        }
+    }
+
+    private func isCurrentBackgroundScope(_ active: ActiveBackground) -> Bool {
+        !disposed && lifecycle == active.lifecycle && bindingEpoch == active.bindingEpoch &&
+            binding == active.binding && active.binding.profile == profile &&
+            (active.connectionGeneration == nil || active.connectionGeneration == runtime.connectionGeneration)
+    }
+
+    private static func isDefinitiveBackgroundRefusal(_ error: Error) -> Bool {
+        guard let gatewayError = error as? HermesGatewayError,
+              case .server(_, _, _, let method, _, _) = gatewayError else { return false }
+        return method == "prompt.background"
+    }
+
     /// The interrupt acknowledgement is not evidence the server has stopped.
     /// Confirm both a matching terminal event and the pinned status contract.
     func interrupt() async throws {
@@ -2470,6 +2565,7 @@ final class GatewayConversationController {
             activeBtw = nil
             onBtwOutcome?(.unknown(attemptID: attempt))
         }
+        abandonBackgroundAttemptsAsUnknown()
         disposed = true
         lifecycle &+= 1
         reasoningRevision &+= 1
@@ -2975,8 +3071,21 @@ final class GatewayConversationController {
     }
 
     private func invalidateBinding() {
+        if let attempt = activeBtw?.attemptID {
+            activeBtw = nil
+            onBtwOutcome?(.unknown(attemptID: attempt))
+        }
+        abandonBackgroundAttemptsAsUnknown()
         bindingEpoch &+= 1
         binding = nil
+    }
+
+    private func abandonBackgroundAttemptsAsUnknown() {
+        let attempts = Array(activeBackgroundByAttempt.keys)
+        activeBackgroundByAttempt.removeAll()
+        for attempt in attempts {
+            onBackgroundOutcome?(.unknown(attemptID: attempt))
+        }
     }
 
     private func readReasoningCapability() async throws -> ReasoningCapability {
@@ -3593,6 +3702,7 @@ final class GatewayConversationController {
                 activeBtw = nil
                 onBtwOutcome?(.unknown(attemptID: attempt))
             }
+            abandonBackgroundAttemptsAsUnknown()
             if runState != .idle { runState = .deliveryUnknown }
             approvalPromptQueue.removeAll()
             pendingApprovalPrompt = nil
@@ -3612,6 +3722,19 @@ final class GatewayConversationController {
             latestEventSequence = max(latestEventSequence, sequence)
         }
         switch event.type {
+        case "background.complete":
+            if let taskID = event.payload?.gatewayFields["task_id"]?.gatewayString,
+               let active = activeBackgroundByAttempt.values.first(where: { $0.taskID == taskID }),
+               isCurrentBackgroundScope(active),
+               let text = event.payload?.gatewayFields["text"]?.gatewayString {
+                activeBackgroundByAttempt.removeValue(forKey: active.attemptID)
+                onBackgroundOutcome?(.completed(
+                    attemptID: active.attemptID,
+                    taskID: taskID,
+                    prompt: active.prompt,
+                    text: text
+                ))
+            }
         case "btw.complete":
             if let active = activeBtw,
                isCurrentBtwScope(active),

@@ -23,18 +23,6 @@ extension APIClient {
         )
     }
 
-    func startBackground(sessionID: String, prompt: String) async throws -> BackgroundStartResponse {
-        try await send(
-            endpoint: .background,
-            method: "POST",
-            body: BackgroundRequest(sessionId: sessionID, prompt: prompt)
-        )
-    }
-
-    func backgroundStatus(sessionID: String) async throws -> BackgroundStatusResponse {
-        try await send(endpoint: .backgroundStatus(sessionID: sessionID), method: "GET")
-    }
-
 }
 
 private struct GoalSubmissionRequest: Encodable {
@@ -44,9 +32,4 @@ private struct GoalSubmissionRequest: Encodable {
     let model: String?
     let modelProvider: String?
     let profile: String?
-}
-
-private struct BackgroundRequest: Encodable {
-    let sessionId: String
-    let prompt: String
 }

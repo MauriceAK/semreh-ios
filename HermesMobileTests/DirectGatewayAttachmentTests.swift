@@ -39,6 +39,20 @@ final class DirectGatewayAttachmentTests: XCTestCase {
         XCTAssertNil(parameters["path"])
     }
 
+    func testVoiceClipUsesAudioMIMEThroughTheGenericFileContract() async throws {
+        let bytes = Data("synthetic-m4a".utf8)
+        let attachment = try DirectGatewayAttachment.file(data: bytes, filename: "voice-note.m4a")
+
+        XCTAssertEqual(attachment.kind, .file)
+        XCTAssertEqual(attachment.displayFilename, "voice-note.m4a")
+        XCTAssertEqual(attachment.mimeType, "audio/mp4")
+        let parameters = try await attachment.rpcParameters()
+        XCTAssertEqual(parameters, [
+            "data_url": .string("data:audio/mp4;base64,\(bytes.base64EncodedString())"),
+            "name": .string("voice-note.m4a")
+        ])
+    }
+
     func testPDFRetainsOriginalBytesAndBuildsContentBase64Shape() async throws {
         let bytes = Data("%PDF-1.4\n% synthetic\n".utf8)
         let attachment = try DirectGatewayAttachment.pdf(data: bytes, filename: "report")

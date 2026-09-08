@@ -136,6 +136,50 @@ final class AppShellNavigationTests: XCTestCase {
         XCTAssertEqual(motion.position(at: start.addingTimeInterval(0.28)), 1, accuracy: 0.001)
     }
 
+    func testCapsuleTimelineIsFiniteAndIncludesTheSettledEndpoint() throws {
+        let start = Date(timeIntervalSinceReferenceDate: 10)
+        let motion = AppShellCapsuleMotion(start: 0, target: 1, startedAt: start)
+        let dates = motion.timelineDates(reduceMotion: false, now: start)
+
+        XCTAssertEqual(dates.first, start)
+        XCTAssertEqual(try XCTUnwrap(dates.last).timeIntervalSince(start), 0.28, accuracy: 0.001)
+        XCTAssertEqual(dates.count, 18)
+        XCTAssertTrue(motion.frame(at: try XCTUnwrap(dates.last), tabWidth: 100).isSettled)
+
+        let retargetedAt = start.addingTimeInterval(0.1)
+        let retargeted = motion.retargeted(to: 2, at: retargetedAt)
+        let retargetedDates = retargeted.timelineDates(reduceMotion: false, now: retargetedAt)
+        XCTAssertEqual(retargetedDates.first, retargetedAt)
+        XCTAssertEqual(
+            try XCTUnwrap(retargetedDates.last).timeIntervalSince(retargetedAt),
+            AppShellCapsuleMotion.totalDuration,
+            accuracy: 0.001
+        )
+
+        let currentStart = Date()
+        let currentMotion = AppShellCapsuleMotion(start: 0, target: 1, startedAt: currentStart)
+        let currentEnd = currentMotion.timelineDates(reduceMotion: false, now: currentStart).last
+        XCTAssertTrue(currentMotion.frame(at: try XCTUnwrap(currentEnd), tabWidth: 100).isSettled)
+    }
+
+    func testCapsuleTimelineUsesOneFrameWhenSettledOrReduceMotionIsEnabled() {
+        let start = Date(timeIntervalSinceReferenceDate: 10)
+        let afterTravel = start.addingTimeInterval(1)
+        let moving = AppShellCapsuleMotion(start: 0, target: 1, startedAt: start)
+        let settled = AppShellCapsuleMotion(start: 1, target: 1, startedAt: start)
+        let residual = AppShellCapsuleMotion(
+            start: 1,
+            target: 1,
+            startedAt: start,
+            initialLeftPull: 0.1
+        )
+
+        XCTAssertEqual(moving.timelineDates(reduceMotion: false, now: afterTravel), [afterTravel])
+        XCTAssertEqual(moving.timelineDates(reduceMotion: true, now: start), [start])
+        XCTAssertEqual(settled.timelineDates(reduceMotion: false, now: start), [start])
+        XCTAssertGreaterThan(residual.timelineDates(reduceMotion: false, now: start).count, 1)
+    }
+
     func testCapsuleMotionRetargetsContinuouslyAndReduceMotionCanSettleImmediately() {
         let start = Date(timeIntervalSinceReferenceDate: 0)
         let motion = AppShellCapsuleMotion(start: 0, target: 2, startedAt: start)

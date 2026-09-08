@@ -107,9 +107,17 @@ struct DirectGatewayAttachment: Equatable, Sendable {
 
         let filenameWithExtension = Self.filenameWithExtension(filename, for: kind, type: type)
         let extensionName = URL(fileURLWithPath: filenameWithExtension).pathExtension.lowercased()
-        let mimeType = UTType(filenameExtension: extensionName)?.preferredMIMEType
-            ?? type.preferredMIMEType
-            ?? Self.defaultMIMEType(for: kind)
+        // Apple's UTType mapping reports `audio/x-m4a` on some SDKs, while
+        // Hermes' recorder/transcription contract accepts the standard MP4
+        // audio media type for `.m4a` clips.
+        let mimeType: String
+        if kind == .file && extensionName == "m4a" {
+            mimeType = "audio/mp4"
+        } else {
+            mimeType = UTType(filenameExtension: extensionName)?.preferredMIMEType
+                ?? type.preferredMIMEType
+                ?? Self.defaultMIMEType(for: kind)
+        }
 
         switch kind {
         case .image:

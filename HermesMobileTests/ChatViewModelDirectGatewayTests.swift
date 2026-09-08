@@ -4,6 +4,170 @@ import XCTest
 
 @MainActor
 final class ChatViewModelDirectGatewayTests: APIClientTestCase {
+    func testDirectBackgroundTasksCompleteInterleavedAndStatusTracksPendingCount() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let vm = makeViewModel(client: makeDirectBlockingTestClient(), runtime: runtime, sessionID: "durable-1")
+        let command = try XCTUnwrap(SlashCommandCatalog.command(named: "background"))
+        let status = try XCTUnwrap(SlashCommandCatalog.command(named: "status"))
+
+        guard case .executed(let firstNotice) = await vm.executeSlashCommand(command, args: "First audit"),
+              case .executed = await vm.executeSlashCommand(command, args: "Second audit") else {
+            return XCTFail("Expected both direct background starts")
+        }
+        XCTAssertEqual(firstNotice, "Background task started. I'll add the result here when it completes.")
+        guard case .executed(let pendingStatus) = await vm.executeSlashCommand(status) else {
+            return XCTFail("Expected status")
+        }
+        XCTAssertTrue(pendingStatus?.contains("Background tasks: 2") == true)
+
+        fake.emit(ChatDirectEventFactory.event(sessionID: "runtime-1", type: "background.complete", sequence: 1,
+            payload: ["task_id": .string("background-2"), "text": .string("error: opaque second result")]))
+        fake.emit(ChatDirectEventFactory.event(sessionID: "runtime-1", type: "background.complete", sequence: 2,
+            payload: ["task_id": .string("background-1"), "text": .string("First result")]))
+        await waitUntil { vm.messages.filter { $0.content?.contains("**Background**") == true }.count == 2 }
+        let cards = vm.messages.compactMap(\.content).filter { $0.contains("**Background**") }
+        XCTAssertEqual(cards, [
+            "**Background** Second audit\n\nerror: opaque second result",
+            "**Background** First audit\n\nFirst result",
+        ])
+        guard case .executed(let completedStatus) = await vm.executeSlashCommand(status) else {
+            return XCTFail("Expected completed status")
+        }
+        XCTAssertTrue(completedStatus?.contains("Background tasks: 0") == true)
+        XCTAssertEqual(fake.calls().filter { $0.method == "prompt.background" }.count, 2)
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testDirectBackgroundCompletionBufferedBeforeAcknowledgementReturns() async throws {
+        let fake = ChatDirectFakeTransport()
+        let gate = ChatDirectAsyncGate()
+        fake.setBackgroundGate(gate)
+        let runtime = try makeRuntime(fake)
+        let vm = makeViewModel(client: makeDirectBlockingTestClient(), runtime: runtime, sessionID: "durable-1")
+        let command = try XCTUnwrap(SlashCommandCatalog.command(named: "background"))
+
+        let request = Task { await vm.executeSlashCommand(command, args: "Fast task") }
+        await waitUntil { fake.calls().contains { $0.method == "prompt.background" } }
+        fake.emit(ChatDirectEventFactory.event(sessionID: "runtime-1", type: "background.complete", sequence: 1,
+            payload: ["task_id": .string("background-1"), "text": .string("Fast answer")]))
+        await gate.release()
+        guard case .executed = await request.value else { return XCTFail("Expected background start") }
+        await waitUntil { vm.messages.contains { $0.content == "**Background** Fast task\n\nFast answer" } }
+        XCTAssertEqual(fake.calls().filter { $0.method == "prompt.background" }.count, 1)
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testDirectBackgroundBufferedCloseAfterAcknowledgementReturnsUnknownNotStarted() async throws {
+        let fake = ChatDirectFakeTransport()
+        let gate = ChatDirectAsyncGate()
+        fake.setBackgroundGate(gate)
+        let runtime = try makeRuntime(fake)
+        let vm = makeViewModel(client: makeDirectBlockingTestClient(), runtime: runtime, sessionID: "durable-1")
+        let command = try XCTUnwrap(SlashCommandCatalog.command(named: "background"))
+
+        let request = Task { await vm.executeSlashCommand(command, args: "Close at ACK") }
+        await waitUntil { fake.calls().contains { $0.method == "prompt.background" } }
+        fake.emitClosed()
+        await gate.release()
+
+        guard case .unsupported(let message) = await request.value else {
+            return XCTFail("A buffered close must not report that the background task started")
+        }
+        XCTAssertTrue(message.contains("Check Hermes"))
+        XCTAssertEqual(vm.messages.filter {
+            $0.content == "**Background** Close at ACK\n\nOutcome unknown. Check Hermes before starting it again."
+        }.count, 1)
+        XCTAssertEqual(fake.calls().filter { $0.method == "prompt.background" }.count, 1)
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testDirectBackgroundUnknownClearsPendingCountAndNeverRetries() async throws {
+        let fake = ChatDirectFakeTransport()
+        fake.setBlockingError("prompt.background", .transport("fixture lost acknowledgement"))
+        let runtime = try makeRuntime(fake)
+        let vm = makeViewModel(client: makeDirectBlockingTestClient(), runtime: runtime, sessionID: "durable-1")
+        let command = try XCTUnwrap(SlashCommandCatalog.command(named: "background"))
+        let status = try XCTUnwrap(SlashCommandCatalog.command(named: "status"))
+
+        guard case .unsupported(let message) = await vm.executeSlashCommand(command, args: "Uncertain task") else {
+            return XCTFail("Expected explicit unknown outcome")
+        }
+        XCTAssertTrue(message.contains("Check Hermes"))
+        XCTAssertTrue(vm.messages.contains {
+            $0.content == "**Background** Uncertain task\n\nOutcome unknown. Check Hermes before starting it again."
+        })
+        guard case .executed(let text) = await vm.executeSlashCommand(status) else { return XCTFail("Expected status") }
+        XCTAssertTrue(text?.contains("Background tasks: 0") == true)
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertEqual(fake.calls().filter { $0.method == "prompt.background" }.count, 1)
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testDirectBackgroundInvalidationMarksEveryPendingAttemptUnknownWithoutRetry() async throws {
+        let fake = ChatDirectFakeTransport()
+        let gate = ChatDirectAsyncGate()
+        fake.setBackgroundGate(gate)
+        let runtime = try makeRuntime(fake)
+        let vm = makeViewModel(client: makeDirectBlockingTestClient(), runtime: runtime, sessionID: "durable-1")
+        let command = try XCTUnwrap(SlashCommandCatalog.command(named: "background"))
+
+        let request = Task { await vm.executeSlashCommand(command, args: "Interrupted task") }
+        await waitUntil { fake.calls().contains { $0.method == "prompt.background" } }
+        vm.invalidateDirectConversation()
+        await gate.release()
+        guard case .unsupported = await request.value else { return XCTFail("Expected invalidated start refusal") }
+        XCTAssertTrue(vm.messages.contains {
+            $0.content == "**Background** Interrupted task\n\nOutcome unknown. Check Hermes before starting it again."
+        })
+        XCTAssertEqual(fake.calls().filter { $0.method == "prompt.background" }.count, 1)
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testDirectBackgroundCardSurvivesScopedRefreshButNotCanonicalChange() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let requests = ChatDirectRequestRecorder()
+        let client = makeClient { request in
+            requests.append(request.url?.path ?? "nil")
+            let requestCount = requests.values().count
+            let changed = requestCount > 2
+            let sessionID = changed ? "different-tip" : "durable-1"
+            let messages: String
+            if changed {
+                messages = #"[{"id":10,"role":"assistant","content":"Different canonical history"}]"#
+            } else if requestCount == 2 {
+                messages = #"[{"id":9,"role":"assistant","content":"Scoped canonical refresh"}]"#
+            } else {
+                messages = "[]"
+            }
+            let returned = messages == "[]" ? 0 : 1
+            return apiTestJSONResponse("{\"session_id\":\"\(sessionID)\",\"messages\":\(messages),\"pagination\":{\"limit\":120,\"offset\":0,\"order\":\"latest\",\"returned\":\(returned)}}", for: request)
+        }
+        let vm = makeViewModel(client: client, runtime: runtime, sessionID: "durable-1")
+        let command = try XCTUnwrap(SlashCommandCatalog.command(named: "background"))
+        guard case .executed = await vm.executeSlashCommand(command, args: "Scoped task") else {
+            return XCTFail("Expected background start")
+        }
+        fake.emit(ChatDirectEventFactory.event(sessionID: "runtime-1", type: "background.complete", sequence: 1,
+            payload: ["task_id": .string("background-1"), "text": .string("Scoped result")]))
+        await waitUntil { vm.messages.contains { $0.content?.contains("Scoped result") == true } }
+
+        fake.emitCompletion(sequence: 2)
+        await waitUntil { vm.messages.contains { $0.content == "Scoped canonical refresh" } }
+        XCTAssertTrue(vm.messages.contains { $0.content?.contains("Scoped result") == true })
+        await vm.loadMessages()
+        await waitUntil { vm.messages.contains { $0.content == "Different canonical history" } }
+        XCTAssertFalse(vm.messages.contains { $0.content?.contains("Scoped result") == true })
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
     func testDirectBtwRendersCompletionBufferedBeforeAcknowledgementReturns() async throws {
         let fake = ChatDirectFakeTransport()
         let gate = ChatDirectAsyncGate()
@@ -321,19 +485,112 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         await runtime.stop()
     }
 
-    func testVoiceNoteRefusesWithoutTranscriptionUploadOrPromptWhileDictationRemainsSeparate() async throws {
+    func testVoiceNoteTranscribesStagesOnlyItsClipAndSubmitsOnce() async throws {
         let fake = ChatDirectFakeTransport()
         let runtime = try makeRuntime(fake)
-        let vm = makeViewModel(client: makeClient { _ in
-            XCTFail("Unsupported voice attachment must not transcribe or upload")
-            throw URLError(.badURL)
+        let client = makeClient { request in
+            XCTAssertEqual(request.url?.path, "/api/audio/transcribe")
+            XCTAssertEqual(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?
+                .first { $0.name == "profile" }?.value, "work")
+            return apiTestJSONResponse(#"{"ok":true,"transcript":"Spoken request"}"#, for: request)
+        }
+        let vm = makeViewModel(client: client, runtime: runtime, sessionID: nil)
+        await vm.uploadAttachment(data: Data("draft".utf8), filename: "draft.txt")
+        let draftID = try XCTUnwrap(vm.directPendingAttachments.first?.id)
+
+        let accepted = await vm.sendVoiceNote(audioData: Data("recording".utf8), filename: "voice.m4a")
+
+        XCTAssertTrue(accepted)
+        XCTAssertFalse(vm.isSendingVoiceNote)
+        XCTAssertEqual(vm.directPendingAttachments.map(\.id), [draftID])
+        XCTAssertEqual(fake.calls().map(\.method), ["session.create", "file.attach", "prompt.submit"])
+        let file = try XCTUnwrap(fake.calls().first { $0.method == "file.attach" })
+        XCTAssertEqual(fields(file.params)?["name"], .string("voice.m4a"))
+        let submit = try XCTUnwrap(fake.calls().first { $0.method == "prompt.submit" })
+        XCTAssertTrue(fields(submit.params)?["text"]?.gatewayString?.hasPrefix("Spoken request\n@file:") == true)
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testVoiceNoteTranscriptionFailurePreservesDraftAndDoesNotStage() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let vm = makeViewModel(client: makeClient { request in
+            XCTAssertEqual(request.url?.path, "/api/audio/transcribe")
+            return apiTestJSONResponse(#"{"ok":false,"error":"STT unavailable"}"#, for: request)
         }, runtime: runtime, sessionID: nil)
+        await vm.uploadAttachment(data: Data("draft".utf8), filename: "draft.txt")
+        let ids = vm.directPendingAttachments.map(\.id)
+
         let accepted = await vm.sendVoiceNote(audioData: Data("recording".utf8), filename: "voice.m4a")
         XCTAssertFalse(accepted)
-        XCTAssertTrue(vm.messages.isEmpty)
+        XCTAssertEqual(vm.directPendingAttachments.map(\.id), ids)
         XCTAssertTrue(fake.calls().isEmpty)
         XCTAssertFalse(vm.isSendingVoiceNote)
-        XCTAssertEqual(vm.sendErrorMessage, "Direct Hermes voice attachments are not available yet.")
+        await runtime.stop()
+    }
+
+    func testVoiceNoteStageFailurePreservesVoiceAndDraftWithoutPrompt() async throws {
+        let fake = ChatDirectFakeTransport()
+        fake.setAttachmentError("file.attach", .server(code: 4015, message: "rejected", data: nil,
+            method: "file.attach", requestID: "voice-stage", server: nil))
+        let runtime = try makeRuntime(fake)
+        let vm = makeViewModel(client: makeClient { request in
+            apiTestJSONResponse(#"{"ok":true,"transcript":"Spoken request"}"#, for: request)
+        }, runtime: runtime, sessionID: nil)
+        await vm.uploadAttachment(data: Data("draft".utf8), filename: "draft.txt")
+
+        let accepted = await vm.sendVoiceNote(audioData: Data("recording".utf8), filename: "voice.m4a")
+        XCTAssertFalse(accepted)
+        XCTAssertEqual(vm.directPendingAttachments.map(\.displayFilename), ["draft.txt", "voice.m4a"])
+        XCTAssertEqual(fake.calls().map(\.method), ["session.create", "file.attach"])
+        XCTAssertFalse(fake.calls().contains { $0.method == "prompt.submit" })
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testVoiceNoteAmbiguousPromptPreservesAttachmentsAndNeverResends() async throws {
+        let fake = ChatDirectFakeTransport()
+        fake.setPromptSubmitResponse(.object([:]))
+        let runtime = try makeRuntime(fake)
+        var transcriptionRequests = 0
+        let vm = makeViewModel(client: makeClient { request in
+            transcriptionRequests += 1
+            return apiTestJSONResponse(#"{"ok":true,"transcript":"Spoken request"}"#, for: request)
+        }, runtime: runtime, sessionID: nil)
+        await vm.uploadAttachment(data: Data("draft".utf8), filename: "draft.txt")
+
+        let accepted = await vm.sendVoiceNote(audioData: Data("recording".utf8), filename: "voice.m4a")
+        XCTAssertTrue(accepted)
+        XCTAssertTrue(vm.directConversationHasPromptDeliveryUncertainty)
+        XCTAssertEqual(vm.directPendingAttachments.map(\.displayFilename), ["draft.txt", "voice.m4a"])
+        let retry = await vm.sendVoiceNote(audioData: Data("retry".utf8), filename: "retry.m4a")
+        XCTAssertFalse(retry)
+        XCTAssertEqual(transcriptionRequests, 1)
+        XCTAssertEqual(fake.calls().filter { $0.method == "prompt.submit" }.count, 1)
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testVoiceNoteActiveRunRefusesBeforeTranscription() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        var transcriptionRequests = 0
+        let vm = makeViewModel(client: makeClient { request in
+            transcriptionRequests += 1
+            XCTFail("Active direct run must refuse voice before STT: \(request.url?.path ?? "nil")")
+            throw URLError(.badURL)
+        }, runtime: runtime, sessionID: nil)
+        let started = await vm.sendMessage("Already running")
+        XCTAssertTrue(started)
+        await waitUntil { vm.activeStreamID != nil }
+
+        let accepted = await vm.sendVoiceNote(audioData: Data("recording".utf8), filename: "voice.m4a")
+
+        XCTAssertFalse(accepted)
+        XCTAssertEqual(transcriptionRequests, 0)
+        XCTAssertEqual(fake.calls().filter { $0.method == "prompt.submit" }.count, 1)
+        await vm.disposeDirectConversation()
         await runtime.stop()
     }
 
@@ -2420,6 +2677,66 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         await runtime.stop()
     }
 
+    func testDirectAttachmentRawDataUsesExactAuthenticatedManagedPath() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let bytes = Data("voice-bytes".utf8)
+        let encoded = bytes.base64EncodedString()
+        var requests = 0
+        let viewModel = makeViewModel(client: makeClient { request in
+            requests += 1
+            XCTAssertEqual(request.httpMethod, "GET")
+            XCTAssertEqual(request.url?.path, "/api/files/read")
+            let query = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.queryItems
+            XCTAssertEqual(query?.first { $0.name == "path" }?.value, "/profile/attachments/voice.m4a")
+            XCTAssertNil(query?.first { $0.name == "session_id" })
+            return apiTestJSONResponse("{\"data_url\":\"data:audio/mp4;base64,\(encoded)\"}", for: request)
+        }, runtime: runtime, sessionID: "durable-1")
+
+        let loaded = await viewModel.attachmentRawData(path: "/profile/attachments/voice.m4a")
+        XCTAssertEqual(loaded, bytes)
+        XCTAssertEqual(requests, 1)
+        await runtime.stop()
+    }
+
+    func testDirectAttachmentRawDataRejectsRelativeAndDropsStaleResponse() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let requests = ChatDirectRequestRecorder()
+        let gate = DispatchSemaphore(value: 0)
+        let viewModel = makeViewModel(client: makeClient { request in
+            requests.append(request.url?.path ?? "nil")
+            gate.wait()
+            return apiTestJSONResponse(#"{"data_url":"data:audio/mp4;base64,Y2xpcA=="}"#, for: request)
+        }, runtime: runtime, sessionID: "durable-1")
+
+        let relative = await viewModel.attachmentRawData(path: "attachments/voice.m4a")
+        XCTAssertNil(relative)
+        XCTAssertTrue(requests.values().isEmpty)
+        let load = Task { await viewModel.attachmentRawData(path: "/profile/attachments/voice.m4a") }
+        await waitUntil { requests.values() == ["/api/files/read"] }
+        viewModel.invalidateDirectConversation()
+        gate.signal()
+        let stale = await load.value
+        XCTAssertNil(stale)
+        await runtime.stop()
+    }
+
+    func testDirectAttachmentRawDataFailureReturnsNilWithoutFallback() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        var requests = 0
+        let viewModel = makeViewModel(client: makeClient { _ in
+            requests += 1
+            throw URLError(.cannotDecodeContentData)
+        }, runtime: runtime, sessionID: "durable-1")
+
+        let loaded = await viewModel.attachmentRawData(path: "/profile/attachments/voice.m4a")
+        XCTAssertNil(loaded)
+        XCTAssertEqual(requests, 1)
+        await runtime.stop()
+    }
+
     func testDirectSendStagesSelectionAndClearsConsumedBytes() async throws {
         let fake = ChatDirectFakeTransport()
         let runtime = try makeRuntime(fake)
@@ -3107,6 +3424,8 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
     private var steerResponse: JSONValue = .object(["status": .string("accepted")])
     private var promptSubmitResponse: JSONValue = .object(["status": .string("streaming")])
     private var btwGate: ChatDirectAsyncGate?
+    private var backgroundGate: ChatDirectAsyncGate?
+    private var backgroundRequestCount = 0
     private var emitsPromptEvents = true
     private var resumeResponse: JSONValue = .object([
         "session_id": .string("runtime-1"),
@@ -3260,6 +3579,10 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
         withLock { btwGate = gate }
     }
 
+    func setBackgroundGate(_ gate: ChatDirectAsyncGate?) {
+        withLock { backgroundGate = gate }
+    }
+
     func setPromptSubmitCancellation(_ enabled: Bool) {
         withLock { promptSubmitShouldCancel = enabled }
     }
@@ -3313,6 +3636,10 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
                 return (promptSubmitResponse, nil, promptSubmitGate, false, nil, nil)
             case "prompt.btw":
                 return (.object(["task_id": .string("btw-1")]), nil, btwGate, false, nil, nil)
+            case "prompt.background":
+                backgroundRequestCount += 1
+                return (.object(["task_id": .string("background-\(backgroundRequestCount)")]),
+                        nil, backgroundGate, false, nil, nil)
             case "session.steer":
                 return (steerResponse, nil, nil, false, nil, nil)
             case "session.interrupt":
@@ -3370,6 +3697,9 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
         if method == "prompt.btw", let gate = behavior.2 {
             await gate.wait()
         }
+        if method == "prompt.background", let gate = behavior.2 {
+            await gate.wait()
+        }
         if let requestError { throw requestError }
         return behavior.0
     }
@@ -3423,6 +3753,13 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
     func emit(_ event: HermesGatewayEvent) {
         let sink = withLock { self.sink }
         sink?(event)
+    }
+
+    func emitClosed() {
+        emit(HermesGatewayEvent(
+            method: "local", type: "transport.closed", sessionID: nil,
+            sequence: nil, payload: nil, params: nil, connectionGeneration: 1
+        ))
     }
 
     private func withLock<T>(_ body: () -> T) -> T {

@@ -67,14 +67,6 @@ final class ContractReadinessTests: XCTestCase {
             .init(name: "truncate session", method: "POST", endpoint: .truncateSession, path: "/api/session/truncate"),
             .init(name: "update session", method: "POST", endpoint: .updateSession, path: "/api/session/update"),
             .init(name: "goal", method: "POST", endpoint: .submitGoal, path: "/api/goal"),
-            .init(name: "background", method: "POST", endpoint: .background, path: "/api/background"),
-            .init(
-                name: "background status",
-                method: "GET",
-                endpoint: .backgroundStatus(sessionID: "session-123"),
-                path: "/api/background/status",
-                query: ["session_id": "session-123"]
-            ),
             .init(
                 name: "directory list root",
                 method: "GET",

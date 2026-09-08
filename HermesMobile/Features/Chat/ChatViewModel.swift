@@ -250,6 +250,18 @@ struct ChatPollingIntervals: Equatable {
     )
 }
 
+private struct DirectBackgroundAttempt {
+    let prompt: String
+    let sessionID: String
+    let profile: String
+    var taskID: String?
+}
+
+private enum DirectBackgroundAttemptResolution: Equatable {
+    case completed
+    case unknown
+}
+
 enum ActiveStreamRecoveryState: Equatable {
     case idle
     case checking
@@ -890,8 +902,12 @@ final class ChatViewModel {
     /// Local BTW cards are history-independent presentation owned only by the
     /// exact canonical conversation/profile that created them.
     private var btwLocalRowScopes: [String: (sessionID: String, profile: String)] = [:]
-    private var backgroundPromptsByTaskID: [String: String] = [:]
-    @ObservationIgnored private var backgroundPollTask: Task<Void, Never>?
+    private var directBackgroundAttempts: [UUID: DirectBackgroundAttempt] = [:]
+    private var directBackgroundStartsInFlight: Set<UUID> = []
+    private var directBackgroundResolutions: [UUID: DirectBackgroundAttemptResolution] = [:]
+    /// Background result cards, like BTW cards, are history-independent local
+    /// presentation owned by one exact canonical conversation and profile.
+    private var backgroundLocalRowScopes: [String: (sessionID: String, profile: String)] = [:]
     private var isRefreshingCompletedResponseTitle = false
     private var isActiveStreamReplayConnection: Bool { false }
     private var activeStreamReplayMatchedPrefixLength = 0
@@ -969,7 +985,6 @@ final class ChatViewModel {
 
     deinit {
         directReasoningRefreshTask?.cancel()
-        backgroundPollTask?.cancel()
         pendingStreamingScrollTriggerTask?.cancel()
         pendingStreamingContentFlushTask?.cancel()
         connectionVisibilityTask?.cancel()
@@ -1241,6 +1256,12 @@ final class ChatViewModel {
                   controller.profile == self.activeBtwProfile else { return }
             self.applyDirectBtwOutcome(outcome)
         }
+        controller.onBackgroundOutcome = { [weak self, weak controller] outcome in
+            guard let self, let controller,
+                  !self.directInvalidated,
+                  self.directConversation === controller else { return }
+            self.applyDirectBackgroundOutcome(outcome, controller: controller)
+        }
         controller.onError = { [weak self, weak controller] error in
             guard let self, let controller,
                   !self.directInvalidated,
@@ -1397,7 +1418,9 @@ final class ChatViewModel {
     func invalidateDirectConversation() {
         guard usesDirectGateway else { return }
         failActiveBtwAttempt(String(localized: "The Hermes connection changed before the side question finished."))
+        failDirectBackgroundAttempts()
         btwLocalRowScopes.removeAll()
+        backgroundLocalRowScopes.removeAll()
         directInvalidated = true
         directReasoningRefreshTask?.cancel()
         directSessionReasoningSupported = false
@@ -1599,16 +1622,20 @@ final class ChatViewModel {
         adoptDirectID(page.sessionID)
         directHistoryID = page.sessionID
         let profile = directConversation?.profile ?? (Self.nonEmpty(currentProfile) ?? "default")
-        let retainedBtwRows: [ChatMessage]
+        let retainedLocalRows: [ChatMessage]
         if older {
-            retainedBtwRows = []
+            retainedLocalRows = []
         } else {
             btwLocalRowScopes = btwLocalRowScopes.filter {
                 $0.value.sessionID == page.sessionID && $0.value.profile == profile
             }
-            retainedBtwRows = messages.filter { message in
-                guard let id = message.messageId,
-                      let scope = btwLocalRowScopes[id] else { return false }
+            backgroundLocalRowScopes = backgroundLocalRowScopes.filter {
+                $0.value.sessionID == page.sessionID && $0.value.profile == profile
+            }
+            retainedLocalRows = messages.filter { message in
+                guard let id = message.messageId else { return false }
+                let scope = btwLocalRowScopes[id] ?? backgroundLocalRowScopes[id]
+                guard let scope else { return false }
                 return scope.sessionID == page.sessionID && scope.profile == profile
             }
         }
@@ -1616,7 +1643,7 @@ final class ChatViewModel {
             let canonicalMessages = older && !canonicalChanged
                 ? Self.prependingOlderMessages(page.messages, to: messages) : retainedPrefix + page.messages
             let canonicalIDs = Set(canonicalMessages.compactMap(\.messageId))
-            messages = canonicalMessages + retainedBtwRows.filter { row in
+            messages = canonicalMessages + retainedLocalRows.filter { row in
                 guard let id = row.messageId else { return false }
                 return !canonicalIDs.contains(id)
             }
@@ -1642,7 +1669,12 @@ final class ChatViewModel {
         cacheCurrentMessages(sessionID: page.sessionID, modelContext: directModelContext)
     }
 
-    private func sendDirectMessage(_ draft: String, modelContext: ModelContext?) async -> Bool {
+    private func sendDirectMessage(
+        _ draft: String,
+        modelContext: ModelContext?,
+        selectedAttachmentIDs: Set<UUID>? = nil,
+        removeSelectedAttachmentsOnAmbiguousDelivery: Bool = true
+    ) async -> Bool {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !directInvalidated, !isStartingChat,
               !isUpdatingComposerConfiguration else { return false }
@@ -1673,7 +1705,8 @@ final class ChatViewModel {
         }
         let localID = "local-\(UUID().uuidString)"
         let wasDraft = canonicalSessionID == nil
-        let attachmentIDs = Set(directPendingAttachments.map(\.id))
+        let hasExplicitAttachmentSelection = selectedAttachmentIDs != nil
+        let attachmentIDs = selectedAttachmentIDs ?? Set(directPendingAttachments.map(\.id))
         let selectionGeneration = directAttachmentSelectionGeneration
         do {
             let controller = try await ensureDirectConversation()
@@ -1694,9 +1727,12 @@ final class ChatViewModel {
                 create: creation
             )
             try Task.checkCancellation()
+            let currentAttachmentIDs = Set(directPendingAttachments.map(\.id))
             guard !directInvalidated,
                   selectionGeneration == directAttachmentSelectionGeneration,
-                  Set(directPendingAttachments.map(\.id)) == attachmentIDs else {
+                  (hasExplicitAttachmentSelection
+                    ? attachmentIDs.isSubset(of: currentAttachmentIDs)
+                    : attachmentIDs == currentAttachmentIDs) else {
                 throw DirectSessionError.staleOperation
             }
 
@@ -1747,7 +1783,9 @@ final class ChatViewModel {
         } catch is CancellationError {
             if directConversation?.hasAmbiguousPromptDelivery == true
                 || directConversation?.runState == .deliveryUnknown {
-                removeDirectPendingAttachments(ids: attachmentIDs)
+                if removeSelectedAttachmentsOnAmbiguousDelivery {
+                    removeDirectPendingAttachments(ids: attachmentIDs)
+                }
                 sendErrorMessage = promptDeliveryWarning(for: directConversation)
                 return true
             }
@@ -1759,7 +1797,9 @@ final class ChatViewModel {
                 || directConversation?.runState == .deliveryUnknown {
                 // Keep the staged row as uncertain. Canonical history is refreshed,
                 // but only explicit local abandonment unlocks a different message.
-                removeDirectPendingAttachments(ids: attachmentIDs)
+                if removeSelectedAttachmentsOnAmbiguousDelivery {
+                    removeDirectPendingAttachments(ids: attachmentIDs)
+                }
                 sendErrorMessage = promptDeliveryWarning(for: directConversation)
                 return true
             }
@@ -2771,7 +2811,28 @@ final class ChatViewModel {
     }
 
     func attachmentRawData(path: String) async -> Data? {
-        if usesDirectGateway { return nil }
+        if usesDirectGateway {
+            let trimmedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmedPath.hasPrefix("/"), !directInvalidated,
+                  let expectedSessionID = canonicalSessionID else { return nil }
+            let expectedProfile = directConversation?.profile
+                ?? (Self.nonEmpty(currentProfile) ?? "default")
+            let expectedController = directConversation
+            do {
+                let data = try await client.directReadManagedFile(
+                    path: trimmedPath,
+                    maximumBytes: APIClient.maximumTranscriptionBytes
+                ).data
+                let currentProfile = directConversation?.profile
+                    ?? (Self.nonEmpty(self.currentProfile) ?? "default")
+                guard !directInvalidated, expectedSessionID == canonicalSessionID,
+                      expectedProfile == currentProfile,
+                      directConversation === expectedController else { return nil }
+                return data
+            } catch {
+                return nil
+            }
+        }
         return await attachmentCoordinator.attachmentRawData(path: path)
     }
 
@@ -3352,15 +3413,102 @@ final class ChatViewModel {
             sendErrorMessage = "Direct Hermes connection is unavailable."
             return false
         }
+        guard !isSendingVoiceNote else { return false }
         return await sendDirectMessage(draft, modelContext: modelContext)
     }
 
-    /// Voice dictation remains supported through the composer. Sending the audio
-    /// recording itself is not a supported direct attachment operation.
     @discardableResult
     func sendVoiceNote(audioData: Data, filename: String, modelContext: ModelContext? = nil) async -> Bool {
-        sendErrorMessage = "Direct Hermes voice attachments are not available yet."
-        return false
+        guard usesDirectGateway, !audioData.isEmpty, !isSendingVoiceNote,
+              !isStartingChat, !directInvalidated,
+              !isUpdatingComposerConfiguration else { return false }
+        guard !attachmentRecoveryIsBusy else {
+            sendErrorMessage = "Resetting unresolved attachment delivery. The voice note was not sent."
+            return false
+        }
+        guard directConversation?.hasAmbiguousPromptDelivery != true else {
+            sendErrorMessage = promptDeliveryWarning(for: directConversation)
+            return false
+        }
+        guard directConversation?.runState == nil || directConversation?.runState == .idle else {
+            return false
+        }
+        if attachmentRecoveryNeedsReset, directPendingAttachments.isEmpty {
+            sendErrorMessage = "An attachment delivery is unresolved. Reset the pending upload before continuing."
+            return false
+        }
+        guard pendingAttachments.isEmpty, !isPreparingDirectAttachment else {
+            sendErrorMessage = "Wait for attachment preparation to finish before sending the voice note."
+            return false
+        }
+        let expectedProfile = directConversation?.profile
+            ?? (Self.nonEmpty(currentProfile) ?? "default")
+        let expectedSessionID = canonicalSessionID
+        let expectedController = directConversation
+        let selectionGeneration = directAttachmentSelectionGeneration
+        let expectedAttachmentIDs = Set(directPendingAttachments.map(\.id))
+        isSendingVoiceNote = true
+        setUploadAttachmentError(nil)
+        sendErrorMessage = nil
+        lastError = nil
+        defer { isSendingVoiceNote = false }
+
+        let pending: DirectPendingAttachment
+        do {
+            let source = try await Task.detached(priority: .utility) {
+                try DirectGatewayAttachment.file(data: audioData, filename: filename)
+            }.value
+            try Task.checkCancellation()
+            pending = DirectPendingAttachment(source: source, thumbnailData: audioData)
+        } catch {
+            lastError = error
+            setUploadAttachmentError(directAttachmentPreparationMessage(for: error))
+            return false
+        }
+
+        guard !directInvalidated, expectedSessionID == canonicalSessionID,
+              expectedProfile == (directConversation?.profile
+                ?? (Self.nonEmpty(self.currentProfile) ?? "default")),
+              directConversation === expectedController,
+              selectionGeneration == directAttachmentSelectionGeneration,
+              Set(directPendingAttachments.map(\.id)) == expectedAttachmentIDs else {
+            sendErrorMessage = "The chat changed before the voice note could be sent."
+            return false
+        }
+
+        let transcript: String
+        do {
+            let response = try await client.transcribeAudio(
+                data: audioData,
+                mimeType: pending.mimeType,
+                profile: expectedProfile
+            )
+            transcript = (response.transcript ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !transcript.isEmpty else { throw DirectTranscriptionError.invalidAcknowledgement }
+        } catch {
+            lastError = error
+            setUploadAttachmentError(error.localizedDescription)
+            return false
+        }
+
+        let currentProfile = directConversation?.profile
+            ?? (Self.nonEmpty(self.currentProfile) ?? "default")
+        guard !directInvalidated, expectedSessionID == canonicalSessionID,
+              expectedProfile == currentProfile,
+              directConversation === expectedController,
+              selectionGeneration == directAttachmentSelectionGeneration,
+              Set(directPendingAttachments.map(\.id)) == expectedAttachmentIDs else {
+            sendErrorMessage = "The chat changed before the voice note could be sent."
+            return false
+        }
+        directPendingAttachments.append(pending)
+        return await sendDirectMessage(
+            transcript,
+            modelContext: modelContext,
+            selectedAttachmentIDs: Set([pending.id]),
+            removeSelectedAttachmentsOnAmbiguousDelivery: false
+        )
     }
 
     #if DEBUG
@@ -3447,6 +3595,10 @@ final class ChatViewModel {
         liveReasoningText = ""
         pinnedLocalNotices = []
         btwLocalRowScopes.removeAll()
+        backgroundLocalRowScopes.removeAll()
+        directBackgroundAttempts.removeAll()
+        directBackgroundStartsInFlight.removeAll()
+        directBackgroundResolutions.removeAll()
         streamingAssistantMessageID = nil
         toolCallAnchorMessageID = nil
         reasoningAnchorMessageID = nil
@@ -3589,7 +3741,7 @@ final class ChatViewModel {
     private func statusMessageFromSlashCommand() -> String {
         let running = activeStreamID == nil ? String(localized: "No") : String(localized: "Yes")
         let queued = queuedSlashMessages.count
-        let backgroundTasks = backgroundPromptsByTaskID.count
+        let backgroundTasks = directBackgroundAttempts.count
         let profile = selectedProfileName ?? currentProfile ?? "default"
         let workspace = currentWorkspace ?? String(localized: "Unknown")
         let model = currentModel ?? String(localized: "Unknown")
@@ -3680,40 +3832,66 @@ final class ChatViewModel {
     }
 
     private func startBackgroundFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
-        guard !usesDirectGateway else {
-            return .unsupported(friendlyMessage: String(localized: "/background is not available in direct Hermes mode yet."))
-        }
-
         let prompt = args.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else {
             return .unsupported(friendlyMessage: String(localized: "Usage: /background <prompt>"))
         }
-
-        guard let sessionID else {
-            return .unsupported(friendlyMessage: String(localized: "The server did not provide a session ID."))
+        guard usesDirectGateway, !directInvalidated, !isViewingCachedData else {
+            return .unsupported(friendlyMessage: String(localized: "Reconnect to Hermes to start a background task."))
         }
-
-        guard !isViewingCachedData else {
-            return .unsupported(friendlyMessage: String(localized: "Reconnect to the server to start a background task."))
-        }
-
-        guard !isCLISession else {
-            return .unsupported(friendlyMessage: String(localized: "/background is available for WebUI sessions only."))
-        }
-
         do {
-            let response = try await client.startBackground(sessionID: sessionID, prompt: prompt)
-            if let error = response.error, !error.isEmpty {
-                return .unsupported(friendlyMessage: error)
+            let controller = try await ensureDirectConversation()
+            try await controller.open()
+            guard !directInvalidated, directConversation === controller,
+                  let sessionID = controller.storedID,
+                  canonicalSessionID == sessionID else {
+                throw DirectSessionError.staleOperation
             }
-
-            guard let taskID = response.taskId, !taskID.isEmpty else {
-                return .unsupported(friendlyMessage: String(localized: "The server did not return a background task."))
+            let attemptID = UUID()
+            let profile = controller.profile
+            directBackgroundAttempts[attemptID] = DirectBackgroundAttempt(
+                prompt: prompt, sessionID: sessionID, profile: profile, taskID: nil
+            )
+            directBackgroundStartsInFlight.insert(attemptID)
+            do {
+                let taskID = try await controller.startBackground(prompt, attemptID: attemptID)
+                directBackgroundStartsInFlight.remove(attemptID)
+                let resolution = directBackgroundResolutions.removeValue(forKey: attemptID)
+                guard !directInvalidated, directConversation === controller,
+                      canonicalSessionID == sessionID,
+                      controller.storedID == sessionID,
+                      controller.profile == profile else {
+                    directBackgroundAttempts.removeValue(forKey: attemptID)
+                    lastError = DirectBackgroundError.outcomeUnknown
+                    return .unsupported(friendlyMessage: String(localized: "Outcome unknown. Check Hermes before starting the background task again."))
+                }
+                if var attempt = directBackgroundAttempts[attemptID] {
+                    attempt.taskID = taskID
+                    directBackgroundAttempts[attemptID] = attempt
+                } else if resolution != .completed {
+                    lastError = DirectBackgroundError.outcomeUnknown
+                    return .unsupported(friendlyMessage: String(localized: "Outcome unknown. Check Hermes before starting the background task again."))
+                }
+                return .executed(message: String(localized: "Background task started. I'll add the result here when it completes."))
+            } catch {
+                directBackgroundStartsInFlight.remove(attemptID)
+                let wasAlreadyUnknown = directBackgroundResolutions.removeValue(forKey: attemptID) == .unknown
+                let unknown = wasAlreadyUnknown || (error as? DirectBackgroundError) == .outcomeUnknown
+                let attempt = directBackgroundAttempts.removeValue(forKey: attemptID)
+                if let attempt, unknown {
+                    appendDirectBackgroundResult(
+                        prompt: attempt.prompt,
+                        answer: String(localized: "Outcome unknown. Check Hermes before starting it again."),
+                        sessionID: attempt.sessionID,
+                        profile: attempt.profile
+                    )
+                }
+                lastError = error
+                let message = unknown
+                    ? String(localized: "Outcome unknown. Check Hermes before starting the background task again.")
+                    : error.localizedDescription
+                return .unsupported(friendlyMessage: message)
             }
-
-            backgroundPromptsByTaskID[taskID] = prompt
-            startBackgroundPollingIfNeeded(parentSessionID: sessionID)
-            return .executed(message: String(localized: "Background task started. I'll add the result here when it completes."))
         } catch {
             lastError = error
             return .unsupported(friendlyMessage: error.localizedDescription)
@@ -4591,7 +4769,9 @@ final class ChatViewModel {
     }
 
     func cleanupPollingTasks() {
-        stopBackgroundPolling(clearTrackedPrompts: true)
+        failDirectBackgroundAttempts()
+        directBackgroundStartsInFlight.removeAll()
+        directBackgroundResolutions.removeAll()
     }
 
     /// Reconciles an open chat when the scene becomes active. A known suspended
@@ -4959,63 +5139,66 @@ final class ChatViewModel {
         clearActiveBtwAttempt()
     }
 
-    private func stopBackgroundPolling(clearTrackedPrompts: Bool) {
-        backgroundPollTask?.cancel()
-        backgroundPollTask = nil
-        if clearTrackedPrompts {
-            backgroundPromptsByTaskID.removeAll()
+    private func applyDirectBackgroundOutcome(
+        _ outcome: GatewayConversationController.BackgroundOutcome,
+        controller: GatewayConversationController
+    ) {
+        switch outcome {
+        case .completed(let attemptID, let taskID, let prompt, let text):
+            guard let attempt = directBackgroundAttempts[attemptID],
+                  attempt.taskID == nil || attempt.taskID == taskID,
+                  attempt.prompt == prompt,
+                  attempt.sessionID == canonicalSessionID,
+                  attempt.sessionID == controller.storedID,
+                  attempt.profile == controller.profile else { return }
+            directBackgroundAttempts.removeValue(forKey: attemptID)
+            if directBackgroundStartsInFlight.contains(attemptID) {
+                directBackgroundResolutions[attemptID] = .completed
+            }
+            appendDirectBackgroundResult(
+                prompt: prompt, answer: text,
+                sessionID: attempt.sessionID, profile: attempt.profile
+            )
+        case .unknown(let attemptID):
+            guard let attempt = directBackgroundAttempts.removeValue(forKey: attemptID) else { return }
+            if directBackgroundStartsInFlight.contains(attemptID) {
+                directBackgroundResolutions[attemptID] = .unknown
+            }
+            appendDirectBackgroundResult(
+                prompt: attempt.prompt,
+                answer: String(localized: "Outcome unknown. Check Hermes before starting it again."),
+                sessionID: attempt.sessionID,
+                profile: attempt.profile
+            )
         }
     }
 
-    private func startBackgroundPollingIfNeeded(parentSessionID: String) {
-        guard backgroundPollTask == nil else { return }
-
-        let pollingInterval = pollingIntervals.backgroundNanoseconds
-        backgroundPollTask = Task { @MainActor [weak self] in
-            pollingLoop: while !Task.isCancelled {
-                do {
-                    guard let self,
-                          !self.backgroundPromptsByTaskID.isEmpty
-                    else { break pollingLoop }
-
-                    do {
-                        let response = try await self.client.backgroundStatus(sessionID: parentSessionID)
-                        self.handleBackgroundResults(response.results ?? [])
-                    } catch {
-                        self.lastError = error
-                    }
-
-                    guard !Task.isCancelled, !self.backgroundPromptsByTaskID.isEmpty else {
-                        break pollingLoop
-                    }
-                }
-
-                try? await Task.sleep(nanoseconds: pollingInterval)
-            }
-
-            if !Task.isCancelled {
-                self?.backgroundPollTask = nil
-            }
-        }
+    private func appendDirectBackgroundResult(
+        prompt: String,
+        answer: String,
+        sessionID: String,
+        profile: String
+    ) {
+        guard !directInvalidated, canonicalSessionID == sessionID,
+              directConversation?.storedID == sessionID,
+              directConversation?.profile == profile,
+              let messageID = appendLocalAssistantMessage(
+                Self.backgroundResultText(prompt: prompt, answer: answer)
+              ) else { return }
+        backgroundLocalRowScopes[messageID] = (sessionID, profile)
     }
 
-    private func handleBackgroundResults(_ results: [BackgroundResult]) {
-        for result in results {
-            let prompt: String
-            if let taskID = result.taskId,
-               let trackedPrompt = backgroundPromptsByTaskID.removeValue(forKey: taskID) {
-                prompt = trackedPrompt
-            } else if let resultPrompt = result.prompt, !resultPrompt.isEmpty {
-                prompt = resultPrompt
-            } else {
-                prompt = "Background task"
-            }
-
-            appendLocalAssistantMessage(
-                Self.backgroundResultText(
-                    prompt: prompt,
-                    answer: result.answer
-                )
+    private func failDirectBackgroundAttempts() {
+        let attempts = directBackgroundAttempts
+        directBackgroundAttempts.removeAll()
+        directBackgroundStartsInFlight.removeAll()
+        directBackgroundResolutions.removeAll()
+        for (_, attempt) in attempts {
+            appendDirectBackgroundResult(
+                prompt: attempt.prompt,
+                answer: String(localized: "Outcome unknown. Check Hermes before starting it again."),
+                sessionID: attempt.sessionID,
+                profile: attempt.profile
             )
         }
     }

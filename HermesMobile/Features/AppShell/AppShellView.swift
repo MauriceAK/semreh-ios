@@ -365,7 +365,8 @@ private struct AppShellSelectionCapsule: View {
     var body: some View {
         GeometryReader { proxy in
             let tabWidth = (proxy.size.width - AppShellBottomBarMotion.tabSpacing * 2) / 3
-            TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: reduceMotion)) { context in
+            let timelineDates = motion.timelineDates(reduceMotion: reduceMotion, now: Date())
+            TimelineView(.explicit(timelineDates)) { context in
                 let frame = motion.frame(at: context.date, tabWidth: tabWidth)
                 let inFlightHighlight = reduceTransparency
                     ? 0.16
@@ -502,6 +503,28 @@ struct AppShellCapsuleMotion: Equatable {
     func travelProgress(at date: Date) -> CGFloat {
         guard start != target else { return 1 }
         return min(max(date.timeIntervalSince(startedAt) / Self.travelDuration, 0), 1)
+    }
+
+    func timelineDates(reduceMotion: Bool, now: Date) -> [Date] {
+        let end = startedAt.addingTimeInterval(Self.totalDuration)
+        let settledEnd = Date(timeIntervalSinceReferenceDate: end.timeIntervalSinceReferenceDate.nextUp)
+        let hasVisualMotion = start != target
+            || initialDeformation != 0
+            || initialLeftPull != 0
+            || initialRightPull != 0
+            || initialCompression != 0
+            || initialHighlight != 0.14
+        guard !reduceMotion, hasVisualMotion, now < settledEnd else { return [now] }
+
+        let interval = 1.0 / 60.0
+        var dates = [now]
+        var next = now.addingTimeInterval(interval)
+        while next < settledEnd {
+            dates.append(next)
+            next = next.addingTimeInterval(interval)
+        }
+        dates.append(settledEnd)
+        return dates
     }
 
     func position(at date: Date) -> CGFloat {
