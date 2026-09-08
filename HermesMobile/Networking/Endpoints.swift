@@ -60,17 +60,8 @@ enum Endpoint {
     case gitCommitSelected
     case gitCommitMessage
     case gitCommitMessageSelected
-    case models
-    case modelsLive
-    case commands
-    case defaultModel
-    case reasoning(model: String? = nil, provider: String? = nil, sessionID: String? = nil)
     case personalities
     case setPersonality
-    case profiles
-    case switchProfile
-    case createProfile
-    case settings
     case updatesCheck
     case updatesApply
     case insights(days: Int)
@@ -239,28 +230,10 @@ enum Endpoint {
             return "/api/git/commit-message"
         case .gitCommitMessageSelected:
             return "/api/git/commit-message-selected"
-        case .models:
-            return "/api/models"
-        case .modelsLive:
-            return "/api/models/live"
-        case .commands:
-            return "/api/commands"
-        case .defaultModel:
-            return "/api/default-model"
-        case .reasoning:
-            return "/api/reasoning"
         case .personalities:
             return "/api/personalities"
         case .setPersonality:
             return "/api/personality/set"
-        case .profiles:
-            return "/api/profiles"
-        case .switchProfile:
-            return "/api/profile/switch"
-        case .createProfile:
-            return "/api/profile/create"
-        case .settings:
-            return "/api/settings"
         case .updatesCheck:
             return "/api/updates/check"
         case .updatesApply:
@@ -486,18 +459,6 @@ enum Endpoint {
             return request.queryItems
         case let .kanbanAddDependency(request), let .kanbanRemoveDependency(request):
             return request.queryItems
-        case let .reasoning(model, provider, sessionID):
-            var items: [URLQueryItem] = []
-            if let model, !model.isEmpty {
-                items.append(URLQueryItem(name: "model", value: model))
-            }
-            if let provider, !provider.isEmpty {
-                items.append(URLQueryItem(name: "provider", value: provider))
-            }
-            if let sessionID, !sessionID.isEmpty {
-                items.append(URLQueryItem(name: "session_id", value: sessionID))
-            }
-            return items
         case let .insights(days):
             return [URLQueryItem(name: "days", value: "\(days)")]
         case let .skillContent(name, file):

@@ -5,9 +5,9 @@ details/evidence: `slice3-tasks.md`, `slice3-verification.md`, `slice4-tasks.md`
 This is the current dispatch checklist, not a new architecture or acceptance waiver.
 Preserve completed Luna work. Root owns integration, notes and native execution.
 
-Current checkpoint: composer/workspace-registry retirement verified on
-`c5b9df3` plus scoped diff; signed composer-registry-retirement build-v3/full-v1:
-2291passed/0failed/14intentional skips. Sol Low workers, root integration/review. The
+Current checkpoint: Settings/configuration retirement verified on
+`a758ff6` plus scoped diff; signed settings-config-retirement build-v1/full-v1:
+2265passed/0failed/14intentional skips. Sol Low workers, root integration/review. The
 reconciled `secondary-feature-status.md` owns the per-feature current inventory.
 Do not use the historical checkpoints below as the next dispatch instruction.
 
@@ -51,6 +51,25 @@ plus one interrupted-run staging console. Unselected/opaque/OCR/unexported
 contents excluded; no unrelated historical evidence rescan claimed.
 
 ## Implementation batches
+
+- [x] **Settings/preferences and unused configuration API retirement:** Settings
+  version/liveness now uses stock status. CLI/Claude visibility remains immediate
+  with explicitly device-local per-server persistence; existing keys, legacy
+  fallback and independent child choice retained without importing/deleting data.
+  Shortcuts profile picker uses existing directProfiles; headers/cache fallback
+  unchanged. Removed unused composer/settings/profile HTTP wrappers, request and
+  clearly orphan response DTOs, endpoint cases and obsolete API tests. Shared
+  presentation types, direct contracts, updater/insights/personality remain.
+  Evidence stem slice4-settings-config-retirement: signed build-v1 passed first
+  attempt; focused-v1 63/0/0; full-v1 2265/0/14; strict signing and Simulator
+  launch23201 passed. Targeted audit-v1:4837files/0flags/2exported consoles;
+  unselected evidence, opaque/OCR and unexported compressed contents excluded.
+  No failed attempts. No new live contract implementation,
+  physical Settings/Siri interaction or full migration acceptance claimed.
+  Local-only preference scope is a documented engineering decision, not a new
+  server feature. Updater migration remains separate; its latest receipt cannot
+  alone prove the requested action completed. Cross-client destructive-action
+  limitation question sent to Maurice; no new waiver inferred without a reply.
 
 - [x] **Legacy composer/workspace-registry retirement:** removed the old composer
   loader, HTTP configuration selection branches and unused registry APIs/DTOs/

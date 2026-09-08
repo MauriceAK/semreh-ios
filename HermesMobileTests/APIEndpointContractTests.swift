@@ -134,32 +134,8 @@ final class ContractReadinessTests: XCTestCase {
                 path: "/api/media",
                 query: ["session_id": "session-123", "path": "Assets/icon.png"]
             ),
-            .init(name: "models", method: "GET", endpoint: .models, path: "/api/models"),
-            .init(name: "models live", method: "GET", endpoint: .modelsLive, path: "/api/models/live"),
-            .init(name: "commands", method: "GET", endpoint: .commands, path: "/api/commands"),
-            .init(name: "default model", method: "POST", endpoint: .defaultModel, path: "/api/default-model"),
-            .init(name: "reasoning read", method: "GET", endpoint: .reasoning(), path: "/api/reasoning"),
-            .init(
-                name: "reasoning read scoped to model",
-                method: "GET",
-                endpoint: .reasoning(model: "gpt-5.4", provider: "openai"),
-                path: "/api/reasoning",
-                query: ["model": "gpt-5.4", "provider": "openai"]
-            ),
-            .init(
-                name: "reasoning read scoped to session ID, model, and provider",
-                method: "GET",
-                endpoint: .reasoning(model: "gpt-5.4", provider: "openai", sessionID: "session-abc"),
-                path: "/api/reasoning",
-                query: ["model": "gpt-5.4", "provider": "openai", "session_id": "session-abc"]
-            ),
-            .init(name: "reasoning save", method: "POST", endpoint: .reasoning(), path: "/api/reasoning"),
             .init(name: "personalities", method: "GET", endpoint: .personalities, path: "/api/personalities"),
             .init(name: "set personality", method: "POST", endpoint: .setPersonality, path: "/api/personality/set"),
-            .init(name: "profiles", method: "GET", endpoint: .profiles, path: "/api/profiles"),
-            .init(name: "switch profile", method: "POST", endpoint: .switchProfile, path: "/api/profile/switch"),
-            .init(name: "create profile", method: "POST", endpoint: .createProfile, path: "/api/profile/create"),
-            .init(name: "settings", method: "GET", endpoint: .settings, path: "/api/settings"),
             .init(
                 name: "insights",
                 method: "GET",

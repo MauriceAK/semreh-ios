@@ -28,16 +28,7 @@ struct SettingsView: View {
         self.server = server
         self.initialScrollTarget = initialScrollTarget
         self.header = header
-        // The CLI-sessions toggle is server-synced (#19): loads adopt the
-        // server's `show_cli_sessions`, toggles POST it back, failures revert.
-        // Stored per-server so one server's value never leaks into another.
-        _cliSessionsSync = State(initialValue: CliSessionsSyncModel(server: server) { value in
-            let client = APIClient(baseURL: server)
-            _ = try await client.updateSettings(showCliSessions: value)
-        } writeClaudeCodeToServer: { value in
-            let client = APIClient(baseURL: server)
-            _ = try await client.updateSettings(showClaudeCodeSessions: value)
-        })
+        _cliSessionsSync = State(initialValue: CliSessionsSyncModel(server: server))
     }
 
     @ScaledMetric(relativeTo: .body) private var settingsCardSpacing: CGFloat = 18
@@ -426,13 +417,7 @@ struct SettingsView: View {
                         isOn: $showsSubagentSessions
                     )
 
-                    if let syncError = cliSessionsSync.syncErrorMessage
-                        ?? cliSessionsSync.claudeCodeSyncErrorMessage {
-                        SettingsErrorFootnote(syncError)
-                    } else if cliSessionsSync.serverSyncsCliSessions
-                        || cliSessionsSync.serverSyncsClaudeCodeSessions {
-                        SettingsFootnote(String(localized: "Session visibility is synced with this server, so the WebUI follows it too."))
-                    }
+                    SettingsFootnote(String(localized: "Session visibility is saved on this device for this server."))
                 }
 
                 SettingsCard(title: String(localized: "Siri & Shortcuts")) {
@@ -1021,12 +1006,8 @@ struct SettingsView: View {
         let client = APIClient(baseURL: server)
 
         do {
-            let settings = try await client.settings()
-            serverVersion = settings.webuiVersion
-            // Server wins on conflict: `show_cli_sessions` is the cross-device
-            // truth, the local value is just its offline cache (#19).
-            cliSessionsSync.adopt(serverValue: settings.showCliSessions)
-            cliSessionsSync.adoptClaudeCode(serverValue: settings.showClaudeCodeSessions)
+            let status = try await client.directStatus()
+            serverVersion = status.version
             if serverVersion == nil {
                 serverSettingsError = String(localized: "Unknown")
             }
@@ -1172,13 +1153,13 @@ struct SettingsView: View {
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             guard !Task.isCancelled else { return }
 
-            // One reachable settings call gives us both liveness and the fresh
+            // One reachable status call gives us both liveness and the fresh
             // version; a nil result means the restart outage hasn't cleared yet.
-            guard let settings = try? await client.settings() else {
+            guard let status = try? await client.directStatus() else {
                 continue
             }
 
-            let newVersion = settings.webuiVersion
+            let newVersion = status.version
             let updateState = (try? await client.updatesCheck())?.webuiUpdateState ?? .unavailable
             let restartConfirmed = (newVersion != nil && newVersion != previousVersion)
                 || updateState == .upToDate

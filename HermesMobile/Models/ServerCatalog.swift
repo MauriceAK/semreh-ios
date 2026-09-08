@@ -76,10 +76,6 @@ struct ModelsResponse: Decodable, Equatable {
     let activeProvider: String?
 }
 
-struct CommandsResponse: Decodable, Equatable {
-    let commands: [AgentCommand]?
-}
-
 struct AgentCommand: Decodable, Equatable, Identifiable, Sendable {
     var id: String { name ?? UUID().uuidString }
 
@@ -282,64 +278,6 @@ struct ProviderModel: Decodable, Equatable, Sendable {
         id = container.decodeLossyStringIfPresent(forKey: .id)
         label = container.decodeLossyStringIfPresent(forKey: .label)
     }
-}
-
-/// `GET /api/settings` (the saved-settings body `POST /api/settings` echoes the
-/// same shape back). The server returns ~75 keys; we decode only the ones with
-/// a consumer or near-term use (#19). Every field is optional and lossy-decoded
-/// — servers omit keys freely and we never crash on an unexpected shape.
-struct SettingsResponse: Decodable, Equatable {
-    let botName: String?
-    let webuiVersion: String?
-    let agentVersion: String?
-    let theme: String?
-    let checkForUpdates: Bool?
-    let showCliSessions: Bool?
-    let showClaudeCodeSessions: Bool?
-    let maxTokens: Int?
-    let maxTokensEffective: Int?
-    let authEnabled: Bool?
-    let passwordAuthEnabled: Bool?
-    let passkeysEnabled: Bool?
-    let passwordlessEnabled: Bool?
-
-    private enum CodingKeys: String, CodingKey {
-        case botName
-        case webuiVersion
-        case agentVersion
-        case theme
-        case checkForUpdates
-        case showCliSessions
-        case showClaudeCodeSessions
-        case maxTokens
-        case maxTokensEffective
-        case authEnabled
-        case passwordAuthEnabled
-        case passkeysEnabled
-        case passwordlessEnabled
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        botName = container.decodeLossyStringIfPresent(forKey: .botName)
-        webuiVersion = container.decodeLossyStringIfPresent(forKey: .webuiVersion)
-        agentVersion = container.decodeLossyStringIfPresent(forKey: .agentVersion)
-        theme = container.decodeLossyStringIfPresent(forKey: .theme)
-        checkForUpdates = container.decodeLossyBoolIfPresent(forKey: .checkForUpdates)
-        showCliSessions = container.decodeLossyBoolIfPresent(forKey: .showCliSessions)
-        showClaudeCodeSessions = container.decodeLossyBoolIfPresent(forKey: .showClaudeCodeSessions)
-        maxTokens = container.decodeLossyIntIfPresent(forKey: .maxTokens)
-        maxTokensEffective = container.decodeLossyIntIfPresent(forKey: .maxTokensEffective)
-        authEnabled = container.decodeLossyBoolIfPresent(forKey: .authEnabled)
-        passwordAuthEnabled = container.decodeLossyBoolIfPresent(forKey: .passwordAuthEnabled)
-        passkeysEnabled = container.decodeLossyBoolIfPresent(forKey: .passkeysEnabled)
-        passwordlessEnabled = container.decodeLossyBoolIfPresent(forKey: .passwordlessEnabled)
-    }
-}
-
-struct DefaultModelResponse: Decodable, Equatable {
-    let ok: Bool?
-    let model: String?
 }
 
 /// `GET /api/updates/check`. Every field is optional: older servers, the
@@ -583,12 +521,6 @@ struct ProfilesResponse: Decodable, Equatable {
     }
 }
 
-struct ProfileCreateResponse: Decodable, Equatable {
-    let ok: Bool?
-    let profile: ProfileSummary?
-    let error: String?
-}
-
 /// Mirrors the upstream profile-name rule (`^[a-z0-9][a-z0-9_-]{0,63}$`) so the
 /// create form can validate before hitting the server.
 enum ProfileNameRules {
@@ -607,14 +539,6 @@ enum ProfileNameRules {
     static func isValidBaseURL(_ value: String) -> Bool {
         value.hasPrefix("http://") || value.hasPrefix("https://")
     }
-}
-
-struct ProfileSwitchResponse: Decodable, Equatable {
-    let profiles: [ProfileSummary]?
-    let active: String?
-    let defaultModel: String?
-    let defaultWorkspace: String?
-    let error: String?
 }
 
 struct ProfileSummary: Decodable, Equatable, Hashable, Identifiable, Sendable {

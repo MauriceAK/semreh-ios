@@ -308,45 +308,4 @@ final class APIClientSessionMutationTests: APIClientTestCase {
         XCTAssertEqual(response.session?.messages?.count, 3)
         XCTAssertEqual(response.session?.messagesOffset, 0)
     }
-
-    func testSessionScopedReasoningUsesCanonicalSessionUpdateContract() async throws {
-        var requestPaths: [String] = []
-        let client = makeClient { request in
-            requestPaths.append(request.url?.path ?? "")
-
-            switch request.url?.path {
-            case "/api/session/update":
-                XCTAssertEqual(request.httpMethod, "POST")
-                let body = try XCTUnwrap(apiTestBodyData(from: request))
-                let json = try JSONSerialization.jsonObject(with: body) as? [String: Any]
-                XCTAssertEqual(json?["session_id"] as? String, "session-abc")
-                XCTAssertEqual(json?["reasoning_effort"] as? String, "high")
-                XCTAssertNil(json?["effort"])
-                return apiTestJSONResponse(
-                    #"{"session":{"session_id":"session-abc","model":"gpt-5.4","model_provider":"openai","reasoning_effort":"high"}}"#,
-                    for: request
-                )
-            case "/api/reasoning":
-                XCTAssertEqual(request.httpMethod, "GET")
-                let query = URLComponents(
-                    url: try XCTUnwrap(request.url),
-                    resolvingAgainstBaseURL: false
-                )?.queryItems
-                XCTAssertEqual(query?.first(where: { $0.name == "session_id" })?.value, "session-abc")
-                XCTAssertNil(query?.first(where: { $0.name == "session_effort" }))
-                return apiTestJSONResponse(
-                    #"{"reasoning_effort":"high","session_reasoning_effort":"high","session_scoped_reasoning":true}"#,
-                    for: request
-                )
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
-
-        let response = try await client.saveReasoningEffort("high", sessionID: "session-abc")
-
-        XCTAssertEqual(response.sessionReasoningEffort, "high")
-        XCTAssertEqual(requestPaths, ["/api/session/update", "/api/reasoning"])
-    }
 }

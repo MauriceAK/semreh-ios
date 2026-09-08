@@ -93,7 +93,7 @@ enum ProfileEntityProvider {
     private static func fetchLiveProfiles() async throws -> [ProfileSummary] {
         guard let server = savedServerURL() else { return [] }
         let headers = customHeaders(for: server)
-        let response = try await APIClient(baseURL: server, customHeaderProvider: { headers }).profiles()
+        let response = try await APIClient(baseURL: server, customHeaderProvider: { headers }).directProfiles()
         return response.profiles ?? []
     }
 
