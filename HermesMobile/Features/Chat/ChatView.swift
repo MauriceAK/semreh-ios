@@ -583,6 +583,7 @@ struct ChatView: View {
             selectedWorkspacePath: viewModel.selectedWorkspacePath,
             workspaceSuggestions: viewModel.workspaceSuggestions,
             workspaceManagementServer: server,
+            workspaceManagementProfile: viewModel.workspaceOrganizerProfile,
             personalitySuggestions: viewModel.personalitySuggestions,
             skillSuggestions: viewModel.skillSlashSuggestions,
             agentCommands: viewModel.agentCommands,

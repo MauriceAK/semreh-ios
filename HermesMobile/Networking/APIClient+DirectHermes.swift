@@ -25,6 +25,8 @@ struct DirectHermesModelOptions: Decodable, Sendable {
         let name: String?
         let models: [String]?
         let authenticated: Bool?
+        let totalModels: Int?
+        let warning: String?
         let capabilities: [String: Capability]?
     }
     let model: String?
@@ -74,12 +76,13 @@ private struct DirectHermesPasswordLoginRequest: Encodable {
 }
 
 extension APIClient {
-    func directModelOptions(profile: String, refresh: Bool = false) async throws -> DirectHermesModelOptions {
+    func directModelOptions(profile: String, refresh: Bool = false, includeUnconfigured: Bool = false) async throws -> DirectHermesModelOptions {
         var path = URLComponents()
         path.path = "/api/model/options"
         path.queryItems = [URLQueryItem(name: "profile", value: profile),
                           URLQueryItem(name: "explicit_only", value: "true")]
         if refresh { path.queryItems?.append(URLQueryItem(name: "refresh", value: "true")) }
+        if includeUnconfigured { path.queryItems?.append(URLQueryItem(name: "include_unconfigured", value: "true")) }
         guard let encodedPath = path.string else { throw APIError.invalidServerURL }
         let data = try await sendDirectData(path: encodedPath, method: "GET", classifyStructuredAuthExpiry: true)
         return try decode(DirectHermesModelOptions.self, from: data)

@@ -6,12 +6,9 @@ import XCTest
 /// `api/providers.py::get_providers()` @ `312d3fab`, including a
 /// `custom_providers`-derived entry that omits most fields.
 final class APIClientProvidersTests: APIClientTestCase {
-    func testProvidersRequestDecodesLiveShape() async throws {
-        let client = makeClient { request in
-            XCTAssertEqual(request.httpMethod, "GET")
-            XCTAssertEqual(request.url?.path, "/api/providers")
-
-            return apiTestJSONResponse("""
+    func testLegacyProviderPresentationShapeStillDecodes() throws {
+        // Historical cached presentation decoding, not an executable API path.
+        let data = Data("""
             {
               "active_provider": "openai-codex",
               "providers": [
@@ -58,10 +55,10 @@ final class APIClientProvidersTests: APIClientTestCase {
                 }
               ]
             }
-            """, for: request)
-        }
-
-        let response = try await client.providers()
+            """.utf8)
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let response = try decoder.decode(ProvidersResponse.self, from: data)
 
         XCTAssertEqual(response.activeProvider, "openai-codex")
         let providers = try XCTUnwrap(response.providers)
@@ -98,6 +95,31 @@ final class APIClientProvidersTests: APIClientTestCase {
         XCTAssertEqual(custom.keySource, "config_yaml")
         XCTAssertEqual(custom.models?.first?.id, "glm-4.7")
         XCTAssertEqual(custom.models?.first?.label, "glm-4.7")
+    }
+
+    func testStockProviderInventoryUsesExplicitProfileAndDoesNotInventKeySource() async throws {
+        let client = makeClient { request in
+            XCTAssertEqual(request.httpMethod, "GET")
+            XCTAssertEqual(request.url?.path, "/api/model/options")
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems
+            XCTAssertEqual(query?.first { $0.name == "profile" }?.value, "work")
+            XCTAssertEqual(query?.first { $0.name == "include_unconfigured" }?.value, "true")
+            XCTAssertEqual(query?.first { $0.name == "explicit_only" }?.value, "true")
+            XCTAssertNil(query?.first { $0.name == "refresh" })
+            return apiTestJSONResponse(#"{"provider":"custom-local","providers":[{"slug":"custom-local","name":"Local","authenticated":true,"models":["model-a"],"total_models":9},{"slug":"other","authenticated":false,"warning":"Setup needed","models":[]},{"slug":"unknown"}]}"#, for: request)
+        }
+        let response = try await client.providers(profile: "work")
+        let rows = try XCTUnwrap(response.providers)
+        XCTAssertEqual(response.activeProvider, "custom-local")
+        XCTAssertEqual(rows.count, 3)
+        XCTAssertEqual(rows[0].credentialsAvailable, true)
+        XCTAssertEqual(rows[0].modelsTotal, 9)
+        XCTAssertEqual(rows[0].models?.first?.id, "model-a")
+        XCTAssertNil(rows[0].hasKey)
+        XCTAssertNil(rows[0].keySource)
+        XCTAssertEqual(rows[1].credentialsAvailable, false)
+        XCTAssertEqual(rows[1].authError, "Setup needed")
+        XCTAssertNil(rows[2].credentialsAvailable)
     }
 
     func testProvidersDecodingToleratesAbsentAndUnknownFields() throws {

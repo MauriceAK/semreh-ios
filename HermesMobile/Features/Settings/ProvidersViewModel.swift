@@ -1,20 +1,20 @@
 import Foundation
 import Observation
 
-/// Backs the read-only Providers status screen (#26). Loads `GET /api/providers`
+/// Backs the read-only Providers inventory screen. Loads stock model options
 /// once per appearance and exposes pure, testable presentation helpers — no
 /// write operations by design (key set/delete stays a server-side concern).
 @MainActor
 @Observable
 final class ProvidersViewModel {
-    /// Server order is preserved: upstream already sorts active-first, then
-    /// custom providers, then key-holders, then the rest.
+    /// Preserve the stock inventory's canonical provider order.
     private(set) var providers: [ProviderSummary] = []
     private(set) var activeProviderID: String?
     private(set) var isLoading = false
     private(set) var errorMessage: String?
 
     private let client: APIClient
+    let profile: String
 
     /// Monotonic token identifying the most recent `load()` call. `load()` has
     /// three overlapping entry points (`.task`, `.refreshable`, "Try Again"), so
@@ -22,8 +22,9 @@ final class ProvidersViewModel {
     /// `isLoading` while the newer request is still pending (#42 Codex review).
     private var loadGeneration = 0
 
-    init(server: URL, client: APIClient? = nil) {
+    init(server: URL, client: APIClient? = nil, profile: String = "default") {
         self.client = client ?? APIClient(baseURL: server)
+        self.profile = profile
     }
 
     func load() async {
@@ -34,7 +35,7 @@ final class ProvidersViewModel {
         errorMessage = nil
 
         do {
-            let response = try await client.providers()
+            let response = try await client.providers(profile: profile)
             guard generation == loadGeneration else { return }
             providers = response.providers ?? []
             activeProviderID = Self.normalizedProviderID(response.activeProvider)
@@ -65,7 +66,7 @@ final class ProvidersViewModel {
 
     // MARK: - Presentation helpers (pure, testable)
 
-    /// `active_provider` comes from config (`model.provider`) while entry `id`s are
+    /// The selected provider comes from config while entry IDs are
     /// canonical slugs — trim and lowercase both sides so cosmetic differences
     /// don't hide the active badge.
     static func normalizedProviderID(_ raw: String?) -> String? {

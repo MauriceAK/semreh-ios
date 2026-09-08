@@ -12,15 +12,6 @@ private struct SessionDuplicateWhileRunningError: LocalizedError {
     }
 }
 
-/// The server refuses `/api/session/move` with a 503 while the session is
-/// streaming (it holds the per-session agent lock). Surface that as a specific,
-/// actionable message instead of the generic "server unavailable" copy (issue #25).
-struct SessionMoveWhileStreamingError: LocalizedError, Equatable {
-    var errorDescription: String? {
-        String(localized: "This session is still responding, so it can't be moved yet. Try again when it finishes.")
-    }
-}
-
 struct SessionMutator {
     let client: APIClient
 
@@ -92,22 +83,6 @@ struct SessionMutator {
             throw DirectHermesSessionMutationError.missingReadback(field: "identity")
         }
         return detail
-    }
-
-    func move(sessionID: String, to projectID: String?) async throws {
-        do {
-            _ = try await client.moveSession(id: sessionID, projectID: projectID)
-        } catch let error as APIError {
-            // Only a 503 carrying the server's JSON error payload is the documented
-            // "session is busy (streaming)" refusal; a proxy/tunnel 503 has no JSON
-            // body and keeps the generic connectivity message.
-            guard case .http(let statusCode, _) = error,
-                  statusCode == 503,
-                  error.serverMessage != nil
-            else { throw error }
-
-            throw SessionMoveWhileStreamingError()
-        }
     }
 
     @MainActor

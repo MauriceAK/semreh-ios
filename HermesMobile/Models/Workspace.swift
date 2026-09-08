@@ -14,6 +14,11 @@ struct WorkspaceRoot: Decodable, Equatable, Sendable {
     let path: String?
     let name: String?
 
+    init(path: String?, name: String?) {
+        self.path = path
+        self.name = name
+    }
+
     enum CodingKeys: String, CodingKey {
         case path
         case name

@@ -79,6 +79,17 @@ and independent file/runtime ownership still constrain concurrency; increasing a
 configuration value is not evidence that a running session's capacity changed.
 Personal Hermes/backend/routes, publication, and test-tool boundaries are unchanged.
 
+## Approved organizer decision — September 7, 2026
+
+Maurice approved retaining the basic organizer with Semreh-owned device-local
+groups, workspace bookmarks and chat assignments, scoped by server/profile and
+stored separately from disposable transcript caches. Organization does not sync
+to Desktop/TUI/other phones initially; conversations still use Hermes. This adds
+no backend or database dependency. Preserve existing WebUI data without automatic
+import or deletion. Moving a chat between local groups does not move files or
+change its Hermes working directory. Actual remote folder creation is a separate
+filesystem capability, not something a local bookmark may pretend to perform.
+
 ## Historical Slice 2 reasoning experiment — September 5, 2026
 
 Maurice requires per-session reasoning changes, including selecting the next
@@ -605,6 +616,36 @@ The release candidate is entirely direct Hermes and contains no hidden WebUI dep
 ## 5. Verification model for agent development
 
 Strict verification is required at slice gates, not as ceremony on every trivial change.
+
+### Verification ownership and stopping rules
+
+- Each worker assignment names its risk, changed behavior, exact focused checks,
+  and exclusions. A checklist is not an instruction to run every project gate.
+- Implementers inspect their diff and compile/run the affected tests early through
+  the designated native owner. Native ownership may be handed to a verification
+  worker explicitly; never overlap Simulator or DerivedData writers. A handoff
+  without executed checks is marked authored/pending, not implementation-complete.
+- Use focused reruns while fixing a compilation error or failing test. Run the
+  full suite after focused checks pass for a coherent integrated batch or slice
+  gate; not for each small edit or fixture correction. Broaden sooner only for
+  a concrete shared-code impact, with the reason recorded once.
+- The integrator reviews high-risk diffs and verifies critical behavior. Do not
+  duplicate routine low-risk reviews or rerun unchanged passing evidence merely
+  to reconstruct context. Reuse evidence only when code, contract and environment
+  relevant to its claim remain applicable.
+- Live-backend checks target changed contracts and required acceptance scenarios;
+  physical-device checks are consolidated at the relevant acceptance gate.
+  Dead-code deletions need caller searches, compilation and affected tests, not
+  new live probes unless reachable behavior or a contract changes.
+- For a pre-test runner stall, retain the attempt and permit one same-build retry;
+  a repeated stall gets bounded diagnosis before more attempts. Do not change
+  product code without evidence of a product failure or retry indefinitely.
+- Handoffs list changes, checks actually run, results and remaining gaps briefly.
+  Root maintains the existing checklist and CURRENT.md at meaningful checkpoints;
+  no new competing trackers or repeated historical evidence summaries.
+
+These rules narrow verification frequency, not the slice acceptance requirements
+below. No feature removal or acceptance waiver is implied.
 
 ### Risk-based levels
 

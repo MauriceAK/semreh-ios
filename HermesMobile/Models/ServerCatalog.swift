@@ -167,6 +167,8 @@ struct ProvidersResponse: Decodable, Equatable {
 /// `env_file`, `env_var`, `config_yaml`, `oauth`, `none` — plus `env`, `config`,
 /// and `token` from the live-auth fallback probe. Unknown values are kept verbatim.
 struct ProviderSummary: Decodable, Equatable, Sendable {
+    /// Stock picker inventory hint; never a successful model-request claim.
+    let credentialsAvailable: Bool?
     let id: String?
     let displayName: String?
     let hasKey: Bool?
@@ -184,6 +186,7 @@ struct ProviderSummary: Decodable, Equatable, Sendable {
     let modelsTotal: Int?
 
     enum CodingKeys: String, CodingKey {
+        case credentialsAvailable
         case id
         case displayName
         case hasKey
@@ -212,8 +215,10 @@ struct ProviderSummary: Decodable, Equatable, Sendable {
         keySource: String? = nil,
         authError: String? = nil,
         models: [ProviderModel]? = nil,
-        modelsTotal: Int? = nil
+        modelsTotal: Int? = nil,
+        credentialsAvailable: Bool? = nil
     ) {
+        self.credentialsAvailable = credentialsAvailable
         self.id = id
         self.displayName = displayName
         self.hasKey = hasKey
@@ -231,6 +236,7 @@ struct ProviderSummary: Decodable, Equatable, Sendable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        credentialsAvailable = container.decodeLossyBoolIfPresent(forKey: .credentialsAvailable)
         id = container.decodeLossyStringIfPresent(forKey: .id)
         displayName = container.decodeLossyStringIfPresent(forKey: .displayName)
         hasKey = container.decodeLossyBoolIfPresent(forKey: .hasKey)

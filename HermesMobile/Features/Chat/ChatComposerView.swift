@@ -87,6 +87,7 @@ struct MessageComposerView: View {
     /// Server base URL for the workspace-registry manager; nil hides the
     /// Manage affordance in the workspace picker.
     let workspaceManagementServer: URL?
+    let workspaceManagementProfile: String
     let personalitySuggestions: [String]
     let skillSuggestions: [SkillSlashSuggestion]
     let agentCommands: [AgentCommand]
@@ -484,6 +485,7 @@ struct MessageComposerView: View {
                 selectedWorkspacePath: displayedWorkspacePath,
                 suggestions: workspaceSuggestions,
                 managementServer: isOfflineReadOnly ? nil : workspaceManagementServer,
+                managementProfile: workspaceManagementProfile,
                 onLoadSuggestions: onLoadWorkspaceSuggestions,
                 onSelect: { path in
                     optimisticWorkspacePath = path

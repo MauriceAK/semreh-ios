@@ -416,6 +416,7 @@ struct ComposerWorkspacePickerSheet: View {
     /// Server base URL used to open the registry manager; nil hides the
     /// Manage affordance (e.g. offline cached mode).
     var managementServer: URL?
+    var managementProfile: String = "default"
     let onLoadSuggestions: (String) async -> Void
     let onSelect: (String) async -> Void
     /// Called after the registry manager closes having changed the registry,
@@ -464,7 +465,7 @@ struct ComposerWorkspacePickerSheet: View {
                     ContentUnavailableView {
                         Label("No Workspaces", systemImage: "folder")
                     } description: {
-                        Text("Try typing a path under your home folder or an existing workspace root.")
+                    Text("Add a device-local bookmark, or enter a path to use for this chat.")
                     }
                 }
             }
@@ -494,7 +495,7 @@ struct ComposerWorkspacePickerSheet: View {
             }
             .sheet(isPresented: $showsManagerSheet) {
                 if let managementServer {
-                    WorkspaceManagerView(server: managementServer) {
+                    WorkspaceManagerView(server: managementServer, profile: managementProfile) {
                         await onRegistryChanged()
                     }
                     .adaptiveFormPresentation()

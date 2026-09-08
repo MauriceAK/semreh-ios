@@ -36,6 +36,7 @@ final class OpenChatSessionStore {
     private var gatewayGeneration = 0
     @ObservationIgnored private var foregroundRecoveryTask: Task<Error?, Never>?
     @ObservationIgnored private var foregroundRecoveryGeneration: Int?
+    private let organizerStore: LocalOrganizerStore
 
     /// Authentication owns activation. A stale chat cannot reactivate a server
     /// after sign-out or an account switch. New sockets await the old teardown.
@@ -136,8 +137,12 @@ final class OpenChatSessionStore {
 
     var retainedSessionCountForTesting: Int { viewModels.count }
 
-    init(retentionPolicy: OpenChatSessionStoreRetentionPolicy = .production) {
+    init(
+        retentionPolicy: OpenChatSessionStoreRetentionPolicy = .production,
+        organizerStore: LocalOrganizerStore? = nil
+    ) {
         self.retentionPolicy = retentionPolicy
+        self.organizerStore = organizerStore ?? LocalOrganizerStore()
     }
 
     func viewModel(
@@ -185,6 +190,12 @@ final class OpenChatSessionStore {
             Task { await displaced.disposeDirectConversation() }
         }
         for key in oldKeys where key != target {
+            try? organizerStore.transferSessionAssignment(
+                from: key.sessionID,
+                to: target.sessionID,
+                server: server,
+                profile: target.profile
+            )
             viewModels.removeValue(forKey: key)
             if let git = gitAvailabilityViewModels.removeValue(forKey: key) { gitAvailabilityViewModels[target] = git }
             accessOrder.removeAll { $0 == key }

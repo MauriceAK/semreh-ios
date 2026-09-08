@@ -186,8 +186,23 @@ extension APIClient {
         )
     }
 
-    func providers() async throws -> ProvidersResponse {
-        try await send(endpoint: .providers, method: "GET")
+    /// Stock inventory reports credential availability, not a live inference
+    /// health check or the old WebUI credential-source metadata.
+    func providers(profile: String = "default") async throws -> ProvidersResponse {
+        let options = try await directModelOptions(profile: profile, includeUnconfigured: true)
+        return ProvidersResponse(
+            providers: options.providers?.map { row in
+                ProviderSummary(
+                    id: row.slug,
+                    displayName: row.name,
+                    authError: row.warning,
+                    models: row.models?.map { ProviderModel(id: $0) },
+                    modelsTotal: row.totalModels,
+                    credentialsAvailable: row.authenticated
+                )
+            },
+            activeProvider: options.provider
+        )
     }
 
     func settings() async throws -> SettingsResponse {

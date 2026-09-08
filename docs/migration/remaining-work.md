@@ -5,9 +5,9 @@ details/evidence: `slice3-tasks.md`, `slice3-verification.md`, `slice4-tasks.md`
 This is the current dispatch checklist, not a new architecture or acceptance waiver.
 Preserve completed Luna work. Root owns integration, notes and native execution.
 
-Current checkpoint: sidebar duplicate and unused API retirement verified on
-`32be0ac` plus scoped diff; signed build-v4/full-v3:2372passed/0failed/14intentional
-skips. Sol Low workers, root integration and independent review. The
+Current checkpoint: local organizer and stock provider inventory verified on
+`bc0f02c` plus scoped diff; signed organizer-providers build-v7/full-v1:
+2356passed/0failed/14intentional skips. Sol Low workers, root integration/review. The
 reconciled `secondary-feature-status.md` owns the per-feature current inventory.
 Do not use the historical checkpoints below as the next dispatch instruction.
 
@@ -51,6 +51,25 @@ plus one interrupted-run staging console. Unselected/opaque/OCR/unexported
 contents excluded; no unrelated historical evidence rescan claimed.
 
 ## Implementation batches
+
+- [x] **Local organizer and provider inventory:** device-local persistent
+  server/profile-scoped groups, assignments and workspace bookmarks; no backend
+  mutations or personal-data import. Cache/live/search overlays retain local
+  organization; corrupt metadata warns without blocking conversation reads.
+  Canonical rekey transfers assignment best-effort while retaining ancestor
+  mapping; later independently reassigned ancestor/tip entries can differ.
+  Bookmarks explicitly do not create/verify remote directories. Provider screen
+  now uses stock scoped model options, not WebUI provider status; availability
+  is not a health check and unavailable credential-source metadata is disclosed.
+  Build-v7 passed; focused-v2 SessionList90/0/0 (other focused checks passed v1);
+  full-v1 2356/0/14, strict signing and Simulator launch90683. Targeted audit-v1:
+  5392files/0flags/3exported consoles; unselected/opaque/unexported contents excluded.
+  No new live provider probe, physical organizer/navigation acceptance or complete
+  migration claim. Old unreachable API wrappers remain for the next deletion batch.
+  Retained failures: build-v1 actor defaults, v2 optional profile, v3 missing
+  ProjectSummary initializer, v4 URLComponents exclusivity, v5 obsolete move-test
+  callers; v6 passed. focused-v1 108/6/0 exposed old server-group fixtures and
+  obsolete move reload count; corrected tests only, then build-v7/focused-v2 passed.
 
 - [x] **Branch UI handoff:** signed production UI-v2 passed1/0/0; root inspected
   copied-child, independent-child-turn and unchanged-parent screenshots. Existing
@@ -101,10 +120,13 @@ contents excluded; no unrelated historical evidence rescan claimed.
 
 ## Decisions / limitations that implementation workers must not silently resolve
 
-- [ ] Legacy named workspace/project registry and moving chats between those
-  projects have no equivalent in the pinned serve contracts. Recommend temporary
-  defer-and-hide for the initial direct release, keeping ordinary file browsing
-  and supported cwd behavior. Requires Maurice's approval; not yet accepted.
+- [x] Legacy named workspace/project registry and moving chats between those
+  projects have no equivalent in the pinned serve contracts. Revised proposal:
+  reuse existing UI with Semreh-owned local persistent groups/bookmarks and chat
+  assignments, separate from disposable cache and scoped by server/profile.
+  Maurice approved local-only organization on September 7; implementation and
+  native verification passed in the checkpoint above. Conversation sync remains separate. No private
+  Hermes patch, sync service, automatic personal-data import or deletion.
 - [ ] Memory parity: source audit found builtin MEMORY/USER supported through
   selected profile's returned home plus stock-defined memories paths and managed
   file APIs; SOUL has its dedicated contract. Implemented/native-tested at cd41f5b;

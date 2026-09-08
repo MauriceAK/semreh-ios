@@ -432,6 +432,37 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         await runtime.stop()
     }
 
+    func testDirectComposerLoadsOnlyDeviceLocalBookmarksForItsProfileWithoutWorkspaceREST() async throws {
+        let suite = "ChatViewModelDirectGatewayTests.workspace.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = LocalOrganizerStore(defaults: defaults)
+        try store.addWorkspaceBookmark(path: "/work/scoped", name: "Scoped", server: testServer, profile: "work")
+        try store.addWorkspaceBookmark(path: "/work/default", name: nil, server: testServer, profile: "default")
+
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let requests = ChatDirectRequestRecorder()
+        let client = makeClient { request in
+            requests.append(request.url?.path ?? "nil")
+            if request.url?.path == "/api/model/options" {
+                return apiTestJSONResponse(#"{"model":"model-a","provider":"fixture","providers":[{"slug":"fixture","models":["model-a"]}]}"#, for: request)
+            }
+            XCTAssertEqual(request.url?.path, "/api/profiles")
+            return apiTestJSONResponse(#"{"profiles":[{"name":"work"}]}"#, for: request)
+        }
+        let vm = makeViewModel(client: client, runtime: runtime, sessionID: nil, defaults: defaults)
+
+        await vm.loadComposerConfiguration()
+
+        XCTAssertEqual(vm.workspaceOrganizerProfile, "work")
+        XCTAssertEqual(vm.workspaceRoots, [WorkspaceRoot(path: "/work/scoped", name: "Scoped")])
+        XCTAssertEqual(vm.workspaceSuggestions, ["/work/scoped"])
+        XCTAssertEqual(Set(requests.values()), ["/api/model/options", "/api/profiles"])
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
     func testExistingDirectChatLoadsScopedReasoningAndWritesOnlyThroughGateway() async throws {
         let fake = ChatDirectFakeTransport()
         let runtime = try makeRuntime(fake)

@@ -159,6 +159,7 @@ final class SessionListViewModel {
 
     private let client: APIClient
     private let sessionMutator: SessionMutator
+    private let organizerStore: LocalOrganizerStore
     private let server: URL
     private var loadGeneration = 0
     /// Monotonic generation of the newest successful canonical `/api/sessions`
@@ -196,12 +197,14 @@ final class SessionListViewModel {
     init(
         server: URL,
         client: APIClient? = nil,
-        gatewayRuntimeProvider: GatewayRuntimeProvider? = nil
+        gatewayRuntimeProvider: GatewayRuntimeProvider? = nil,
+        organizerStore: LocalOrganizerStore? = nil
     ) {
         self.server = server
         let resolvedClient = client ?? APIClient(baseURL: server)
         self.client = resolvedClient
         self.sessionMutator = SessionMutator(client: resolvedClient)
+        self.organizerStore = organizerStore ?? LocalOrganizerStore()
         self.gatewayRuntimeProvider = gatewayRuntimeProvider ?? { client in
             try await OpenChatSessionStore.shared.runtime(for: server, client: client)
         }
@@ -431,7 +434,25 @@ final class SessionListViewModel {
                   (Self.nonEmpty(activeProfileName) ?? "default") == requestedProfile
             else { return false }
             let rawSessions = response.sessions
+            let assignments: [String: String]
+            do {
+                let organizer = try organizerStore.snapshot(server: server, profile: requestedProfile)
+                projects = organizer.groups
+                assignments = organizer.sessionAssignments
+            } catch {
+                // Local organizer corruption cannot block the canonical Hermes
+                // session list. Preserve the currently rendered local grouping
+                // and surface that organizer writes are unavailable.
+                assignments = Dictionary(uniqueKeysWithValues: sessions.compactMap { session in
+                    guard (Self.nonEmpty(session.profile) ?? requestedProfile) == requestedProfile,
+                          let id = Self.nonEmpty(session.sessionId),
+                          let group = Self.nonEmpty(session.projectId) else { return nil }
+                    return (id, group)
+                })
+                actionErrorMessage = error.localizedDescription
+            }
             let canonicalVisibleSessions = rawSessions
+                .map { applyingLocalGroup($0, assignments: assignments, profile: requestedProfile) }
                 .map { session -> SessionSummary in
                     guard let sessionID = Self.nonEmpty(session.sessionId),
                           let pending = pendingMetadataMutations[
@@ -497,8 +518,11 @@ final class SessionListViewModel {
             sessionLoadError = error
             if CacheFallbackPolicy.shouldUseCache(for: error), let modelContext {
                 do {
+                    let profile = Self.nonEmpty(activeProfileName) ?? "default"
+                    let assignments = localAssignments(for: profile)
                     let cachedSessions = sessionsAfterOptimisticDeletions(
                         try CacheStore.cachedSessions(serverURL: server, in: modelContext)
+                            .map { applyingLocalGroup($0, assignments: assignments, profile: profile) }
                             .filter(\.shouldAppearInSessionList)
                     )
                     if !cachedSessions.isEmpty {
@@ -612,8 +636,17 @@ final class SessionListViewModel {
         guard sessions.isEmpty, let modelContext else { return false }
 
         do {
+            let profile = Self.nonEmpty(activeProfileName) ?? "default"
+            let assignments: [String: String]
+            do {
+                assignments = try organizerStore.snapshot(server: server, profile: profile).sessionAssignments
+            } catch {
+                assignments = [:]
+                actionErrorMessage = error.localizedDescription
+            }
             let cachedSessions = sessionsAfterOptimisticDeletions(
                 try CacheStore.cachedSessions(serverURL: server, in: modelContext)
+                    .map { applyingLocalGroup($0, assignments: assignments, profile: profile) }
                     .filter(\.shouldAppearInSessionList)
             )
             guard !cachedSessions.isEmpty else { return false }
@@ -856,6 +889,7 @@ final class SessionListViewModel {
                 from: response.results ?? [],
                 content: content
             )
+            let assignments = localAssignments(for: profile)
             var resolvedRows: [String: SessionSummary] = [:]
             var acceptedIDs: [String] = []
             var fatalResolutionError: Error?
@@ -892,7 +926,11 @@ final class SessionListViewModel {
                           (Self.nonEmpty(resolved.profile) ?? profile) == profile,
                           resolved.archived == false
                     else { continue }
-                    resolvedRows[sessionID] = resolved
+                    resolvedRows[sessionID] = applyingLocalGroup(
+                        resolved,
+                        assignments: assignments,
+                        profile: profile
+                    )
                     acceptedIDs.append(sessionID)
                 } catch {
                     if Self.isSearchResolutionAuthFailure(error) {
@@ -1367,8 +1405,10 @@ final class SessionListViewModel {
         defer { isLoadingProjects = false }
 
         do {
-            let response = try await client.projects()
-            projects = response.projects ?? []
+            projects = try organizerStore.groups(
+                server: server,
+                profile: Self.nonEmpty(activeProfileName) ?? "default"
+            )
         } catch {
             guard !isCancellationError(error) else { return }
 
@@ -1393,8 +1433,18 @@ final class SessionListViewModel {
         isMovingSession = true
         defer { isMovingSession = false }
 
-        _ = await mutate(modelContext: modelContext) {
-            try await sessionMutator.move(sessionID: sessionId, to: projectID)
+        do {
+            let profile = Self.nonEmpty(session.profile) ?? Self.nonEmpty(activeProfileName) ?? "default"
+            try organizerStore.assignSession(sessionId, toGroup: projectID, server: server, profile: profile)
+            sessions = sessions.map { candidate in
+                candidate.sessionId == sessionId
+                    && (Self.nonEmpty(candidate.profile) ?? profile) == profile
+                    ? applyingLocalGroup(candidate, groupID: projectID) : candidate
+            }
+            if let modelContext { try? CacheStore.cacheSessions(sessions, serverURL: server, in: modelContext) }
+        } catch {
+            lastError = error
+            actionErrorMessage = error.localizedDescription
         }
     }
 
@@ -1430,20 +1480,22 @@ final class SessionListViewModel {
         }
 
         do {
-            let createResponse = try await client.createProject(name: name, color: color)
-            guard let project = createResponse.project else {
-                actionErrorMessage = createResponse.error ?? String(localized: "The server did not return the new project.")
-                return false
-            }
-
-            guard let projectID = project.projectId, !projectID.isEmpty else {
-                actionErrorMessage = createResponse.error ?? String(localized: "The server did not return the new project ID.")
-                return false
-            }
-
+            let profile = Self.nonEmpty(session.profile) ?? Self.nonEmpty(activeProfileName) ?? "default"
+            let project = try organizerStore.createGroup(name: name, color: color, server: server, profile: profile)
+            guard let projectID = project.projectId else { throw LocalOrganizerStoreError.invalidValue }
             upsertProject(project)
-            try await sessionMutator.move(sessionID: sessionId, to: projectID)
-            await load(modelContext: modelContext)
+            do {
+                try organizerStore.assignSession(sessionId, toGroup: projectID, server: server, profile: profile)
+            } catch {
+                try? organizerStore.deleteGroup(id: projectID, server: server, profile: profile)
+                projects.removeAll { $0.projectId == projectID }
+                throw error
+            }
+            sessions = sessions.map {
+                $0.sessionId == sessionId && (Self.nonEmpty($0.profile) ?? profile) == profile
+                    ? applyingLocalGroup($0, groupID: projectID) : $0
+            }
+            if let modelContext { try? CacheStore.cacheSessions(sessions, serverURL: server, in: modelContext) }
             return true
         } catch {
             guard !isCancellationError(error) else { return false }
@@ -1477,19 +1529,9 @@ final class SessionListViewModel {
         defer { isCreatingProject = false }
 
         do {
-            let createResponse = try await client.createProject(name: name, color: color)
-            guard let project = createResponse.project else {
-                actionErrorMessage = createResponse.error ?? String(localized: "The server did not return the new project.")
-                return false
-            }
-
-            guard let projectID = project.projectId, !projectID.isEmpty else {
-                actionErrorMessage = createResponse.error ?? String(localized: "The server did not return the new project ID.")
-                return false
-            }
-
+            let profile = Self.nonEmpty(activeProfileName) ?? "default"
+            let project = try organizerStore.createGroup(name: name, color: color, server: server, profile: profile)
             upsertProject(project)
-            await load(modelContext: modelContext)
             return true
         } catch {
             guard !isCancellationError(error) else { return false }
@@ -1512,9 +1554,14 @@ final class SessionListViewModel {
         defer { isDeletingProject = false }
 
         do {
-            _ = try await client.deleteProject(id: projectID)
+            let profile = Self.nonEmpty(activeProfileName) ?? "default"
+            try organizerStore.deleteGroup(id: projectID, server: server, profile: profile)
             projects.removeAll { $0.projectId == projectID }
-            await load(modelContext: modelContext)
+            sessions = sessions.map {
+                $0.projectId == projectID && (Self.nonEmpty($0.profile) ?? profile) == profile
+                    ? applyingLocalGroup($0, groupID: nil) : $0
+            }
+            if let modelContext { try? CacheStore.cacheSessions(sessions, serverURL: server, in: modelContext) }
             return true
         } catch {
             guard !isCancellationError(error) else { return false }
@@ -1544,17 +1591,10 @@ final class SessionListViewModel {
         defer { isRenamingProject = false }
 
         do {
-            let response = try await client.renameProject(id: projectID, name: name, color: color)
-            guard let renamedProject = response.project else {
-                actionErrorMessage = response.error ?? String(localized: "The server did not return the renamed project.")
-                return false
-            }
-
-            guard renamedProject.projectId?.isEmpty == false else {
-                actionErrorMessage = response.error ?? String(localized: "The server did not return the renamed project ID.")
-                return false
-            }
-
+            let profile = Self.nonEmpty(activeProfileName) ?? "default"
+            let renamedProject = try organizerStore.renameGroup(
+                id: projectID, name: name, color: color, server: server, profile: profile
+            )
             upsertProject(renamedProject)
             return true
         } catch {
@@ -1608,6 +1648,33 @@ final class SessionListViewModel {
         guard let value else { return nil }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func applyingLocalGroup(
+        _ session: SessionSummary,
+        assignments: [String: String],
+        profile: String
+    ) -> SessionSummary {
+        guard (Self.nonEmpty(session.profile) ?? profile) == profile else {
+            return session.withLocalOrganizerGroupID(nil)
+        }
+        guard let sessionID = Self.nonEmpty(session.sessionId) else {
+            return session.withLocalOrganizerGroupID(nil)
+        }
+        return session.withLocalOrganizerGroupID(assignments[sessionID])
+    }
+
+    private func localAssignments(for profile: String) -> [String: String] {
+        do {
+            return try organizerStore.snapshot(server: server, profile: profile).sessionAssignments
+        } catch {
+            actionErrorMessage = error.localizedDescription
+            return [:]
+        }
+    }
+
+    private func applyingLocalGroup(_ session: SessionSummary, groupID: String?) -> SessionSummary {
+        session.withLocalOrganizerGroupID(groupID)
     }
 
     private static func sortedSessions(_ sessions: [SessionSummary]) -> [SessionSummary] {
@@ -1836,6 +1903,12 @@ final class SessionListViewModel {
             orderedRemoteIDs = []
             remoteResolvedRows = [:]
             isSearchingRemoteSessions = false
+            do {
+                projects = try organizerStore.groups(server: server, profile: Self.nonEmpty(profileName) ?? "default")
+            } catch {
+                projects = []
+                actionErrorMessage = error.localizedDescription
+            }
         }
         activeProfileName = profileName
         activeProfileDisplayName = response.displayName(for: profileName)

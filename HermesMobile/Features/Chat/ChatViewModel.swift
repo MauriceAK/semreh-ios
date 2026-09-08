@@ -382,6 +382,7 @@ final class ChatViewModel {
     private var savedVisibleMessageID: String?
     private let restoreStore: TranscriptRestoreStore
     private let liveRunBookmarkStore: LiveRunBookmarkStore
+    private let localOrganizerStore: LocalOrganizerStore
 
     var transcriptRestoreTarget: ChatTranscriptRestoreTarget {
         ChatTranscriptRestorePolicy.target(
@@ -1064,6 +1065,7 @@ final class ChatViewModel {
         self.userDefaults = userDefaults
         self.restoreStore = TranscriptRestoreStore(defaults: userDefaults)
         self.liveRunBookmarkStore = LiveRunBookmarkStore(defaults: userDefaults)
+        self.localOrganizerStore = LocalOrganizerStore(defaults: userDefaults)
         let restorePoint = restoreStore.load(server: server, sessionID: session.sessionId ?? session.id)
         savedFollowingLatest = restorePoint.followingLatest
         savedVisibleMessageID = restorePoint.visibleMessageID
@@ -1118,6 +1120,7 @@ final class ChatViewModel {
             profileOptions = availableProfiles.profiles ?? []
             isSingleProfileMode = availableProfiles.singleProfileMode ?? false
             selectedProfileName = profile
+            await refreshWorkspaceRoots()
             // The catalog reports profile defaults, not this stored chat's
             // effective configuration. Only a new local draft inherits them.
             if canonicalSessionID == nil, currentModel == nil {
@@ -2248,6 +2251,8 @@ final class ChatViewModel {
         currentWorkspace
     }
 
+    var workspaceOrganizerProfile: String { requestProfileName ?? "default" }
+
     var selectedProfileTitle: String {
         let profileName = selectedProfileName ?? currentProfile
         guard let profileName, !profileName.isEmpty else {
@@ -2677,34 +2682,25 @@ final class ChatViewModel {
         }
     }
 
-    /// Refetches the workspace registry after the manager sheet mutated it
-    /// (issue #22), so the picker reflects adds/removes/renames/reorders.
+    /// Reloads device-local workspace bookmarks after manager changes.
     func refreshWorkspaceRoots() async {
-        guard !usesDirectGateway else { return }
-        guard !isViewingCachedData else { return }
-
+        workspaceRoots = []
+        workspaceSuggestions = []
         do {
-            let response = try await client.workspaces()
-            workspaceRoots = response.workspaces ?? []
+            workspaceRoots = try localOrganizerStore.workspaceBookmarks(
+                server: server, profile: workspaceOrganizerProfile
+            ).map { WorkspaceRoot(path: $0.path, name: $0.name) }
             workspaceSuggestions = workspaceRoots.compactMap(\.path)
         } catch {
             lastError = error
+            composerConfigurationErrorMessage = error.localizedDescription
         }
     }
 
     func loadWorkspaceSuggestions(prefix: String) async {
-        guard !usesDirectGateway else { return }
-        guard !isViewingCachedData else {
-            workspaceSuggestions = workspaceRoots.compactMap(\.path)
-            return
-        }
-
-        do {
-            let response = try await client.workspaceSuggestions(prefix: prefix)
-            workspaceSuggestions = response.suggestions ?? []
-        } catch {
-            lastError = error
-            composerConfigurationErrorMessage = error.localizedDescription
+        let value = prefix.trimmingCharacters(in: .whitespacesAndNewlines)
+        workspaceSuggestions = workspaceRoots.compactMap(\.path).filter {
+            value.isEmpty || $0.localizedCaseInsensitiveContains(value)
         }
     }
 
@@ -2843,6 +2839,7 @@ final class ChatViewModel {
             profileOptions = response.profiles ?? profileOptions
             selectedProfileName = response.active ?? profileName
             currentProfile = selectedProfileName
+            await refreshWorkspaceRoots()
 
             if let defaultWorkspace = response.defaultWorkspace, !defaultWorkspace.isEmpty {
                 currentWorkspace = defaultWorkspace

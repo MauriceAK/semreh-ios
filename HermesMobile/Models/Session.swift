@@ -67,6 +67,13 @@ struct ProjectSummary: Decodable, Equatable, Hashable, Identifiable {
     let color: String?
     let createdAt: Double?
 
+    init(projectId: String?, name: String?, color: String?, createdAt: Double? = nil) {
+        self.projectId = projectId
+        self.name = name
+        self.color = color
+        self.createdAt = createdAt
+    }
+
     enum CodingKeys: String, CodingKey {
         case projectId
         case name
