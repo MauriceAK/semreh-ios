@@ -1,15 +1,34 @@
 # Remaining migration work
 
-September 7 checkpoint. Binding scope: `semreh_tui_gateway_v3_execution_plan.md`;
+September 8 checkpoint. Binding scope: `semreh_tui_gateway_v3_execution_plan.md`;
 details/evidence: `slice3-tasks.md`, `slice3-verification.md`, `slice4-tasks.md`.
 This is the current dispatch checklist, not a new architecture or acceptance waiver.
 Preserve completed Luna work. Root owns integration, notes and native execution.
 
-Current checkpoint: Settings/configuration retirement verified on
-`a758ff6` plus scoped diff; signed settings-config-retirement build-v1/full-v1:
-2265passed/0failed/14intentional skips. Sol Low workers, root integration/review. The
+Current checkpoint: approved website-login retirement verified on `306406c` plus
+the scoped removal diff. Signed login-retirement build-v1, focused-v1:140/0/0,
+full-v2:2197/0/14. Sol Low workers, root integration/review. The
 reconciled `secondary-feature-status.md` owns the per-feature current inventory.
 Do not use the historical checkpoints below as the next dispatch instruction.
+
+- [x] Retire approved proprietary website-login/native credential-form flow:
+  UI/state/coordinator hooks, SSE events, API methods/endpoints, model/encryption
+  implementation, dedicated contracts/fixtures/tests and project entries removed.
+  Ordinary app login and direct approval/clarification/secret/sudo retained.
+  Caller search and signed build passed; affected classes APIClientChatEndpointTests,
+  SSEClientTests, ChatStreamCoordinatorTests, ChatViewModelStreamingPaceTests,
+  ChatStreamingMotionTests, DirectHermesAuthTests, GatewayConversationBlockingTests
+  passed140/0/0; full-v2 passed2197/0/14. Evidence stem `slice4-login-retirement`.
+  Root fixed one orphan preprocessor directive before compilation; workers parsed
+  all changed Swift files. Full-v1 started no test cases after~2.5minutes; exact
+  owned xcodebuild81066 interrupted73 and retained. One same-build retry passed;
+  no runner root cause inferred. Strict signing and ordinary Simulator launch83957
+  passed. Targeted audit-v1 scanned4872files/0flags, including two exported test
+  consoles and the interrupted staging console. Excludes unselected evidence,
+  arbitrary opaque/OCR and unexported compressed contents. No new backend probe
+  for this dead-flow deletion, no physical-device/new production navigation claim.
+  Historical implementation remains recoverable at306406c. Future plugin lead
+  stays in the existing ideas backlog, not a migration dependency.
 
 September 8 destructive/updater batch verified on `13f07e5` plus scoped diff:
 Maurice approved guarded
@@ -263,14 +282,15 @@ contents excluded; no unrelated historical evidence rescan claimed.
 
 ## Decisions / limitations that implementation workers must not silently resolve
 
-- [ ] In-chat website-login/native credential-form overlays have no equivalent
+- [x] Disposition approved: in-chat website-login/native credential-form overlays have no equivalent
   at the stock pin: proprietary `website_login`/`native_component(_state)` SSE
   and `/api/native-auth/*`, `/api/work/login/*` responses cannot be replaced by
-  unrelated MCP OAuth or secret/sudo. Recommend temporary defer/hide with explicit
-  product approval before retirement. Preserve ordinary app login and supported
+  unrelated MCP OAuth or secret/sudo. Maurice approved temporary defer/hide;
+  retirement is implemented/native-tested above. Preserve ordinary app login and supported
   direct blocking prompts. Read-only audit: `tui_gateway/server.py`,
   `methods_prompt.py`, `methods_tools.py`; app `WebsiteLogin.swift`,
-  `APIClient+Chat.swift` and ChatView overlays. No implementation change yet.
+  `APIClient+Chat.swift` and ChatView overlays. Friend's Telegram website-login
+  plugin is a later unreviewed lead in SEMREH_IDEAS.md, not a migration dependency.
 
 - [x] Legacy named workspace/project registry and moving chats between those
   projects have no equivalent in the pinned serve contracts. Revised proposal:

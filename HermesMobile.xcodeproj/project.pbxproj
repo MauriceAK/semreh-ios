@@ -166,10 +166,6 @@
 		C1A042000000000000000001 /* Clarification.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1A042000000000000000002 /* Clarification.swift */; };
 		C1A042000000000000000003 /* ClarificationRequestOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1A042000000000000000004 /* ClarificationRequestOverlay.swift */; };
 		C1A042000000000000000005 /* ClarificationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1A042000000000000000006 /* ClarificationTests.swift */; };
-		D5E000000000000000000001 /* WebsiteLogin.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5E000000000000000000101 /* WebsiteLogin.swift */; };
-		D5E000000000000000000002 /* WebsiteLoginRequestOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5E000000000000000000102 /* WebsiteLoginRequestOverlay.swift */; };
-		D5E000000000000000000003 /* WebsiteLoginTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5E000000000000000000103 /* WebsiteLoginTests.swift */; };
-		D5E000000000000000000004 /* NativeAuthE2EAutoSubmitController.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5E000000000000000000104 /* NativeAuthE2EAutoSubmitController.swift */; };
 		A02400000000000000000001 /* Goal.swift in Sources */ = {isa = PBXBuildFile; fileRef = A02400000000000000000002 /* Goal.swift */; };
 		C04600000000000000000001 /* ChatStreamCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = C04600000000000000000002 /* ChatStreamCoordinator.swift */; };
 		C0DE1E550000000000000001 /* OpenChatSessionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE1E550000000000000002 /* OpenChatSessionStore.swift */; };
@@ -571,10 +567,6 @@
 		C1A042000000000000000002 /* Clarification.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Clarification.swift; sourceTree = "<group>"; };
 		C1A042000000000000000004 /* ClarificationRequestOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClarificationRequestOverlay.swift; sourceTree = "<group>"; };
 		C1A042000000000000000006 /* ClarificationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClarificationTests.swift; sourceTree = "<group>"; };
-		D5E000000000000000000101 /* WebsiteLogin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebsiteLogin.swift; sourceTree = "<group>"; };
-		D5E000000000000000000102 /* WebsiteLoginRequestOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebsiteLoginRequestOverlay.swift; sourceTree = "<group>"; };
-		D5E000000000000000000103 /* WebsiteLoginTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebsiteLoginTests.swift; sourceTree = "<group>"; };
-		D5E000000000000000000104 /* NativeAuthE2EAutoSubmitController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeAuthE2EAutoSubmitController.swift; sourceTree = "<group>"; };
 		A02400000000000000000002 /* Goal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Goal.swift; sourceTree = "<group>"; };
 		C04600000000000000000002 /* ChatStreamCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatStreamCoordinator.swift; sourceTree = "<group>"; };
 		C0DE1E550000000000000002 /* OpenChatSessionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenChatSessionStore.swift; sourceTree = "<group>"; };
@@ -977,7 +969,6 @@
 				C15400000000000000000006 /* KanbanCardDetailStateTests.swift */,
 				C15300000000000000000006 /* KanbanCardEditorStateTests.swift */,
 				C1A042000000000000000006 /* ClarificationTests.swift */,
-				D5E000000000000000000103 /* WebsiteLoginTests.swift */,
 				1A2B3C4D5E6F7000000000F4 /* CacheStoreTests.swift */,
 				C04400000000000000000004 /* CacheFallbackPolicyTests.swift */,
 				1A2B3C4D5E6F700000000103 /* AppThemeTests.swift */,
@@ -1100,7 +1091,6 @@
 				C03190000000000000F001 /* AttachmentAudioDetection.swift */,
 				A04200000000000000000002 /* Approval.swift */,
 				C1A042000000000000000002 /* Clarification.swift */,
-				D5E000000000000000000101 /* WebsiteLogin.swift */,
 				A02400000000000000000002 /* Goal.swift */,
 				3F91D2A54B9A4F66A2C01011 /* Cron.swift */,
 				1A2B3C4D5E6F70000000201 /* Memory.swift */,
@@ -1213,7 +1203,6 @@
 				105050000000000000000002 /* ComposerModelPickerSectionExpansionState.swift */,
 				A04200000000000000000004 /* ApprovalRequestOverlay.swift */,
 				C1A042000000000000000004 /* ClarificationRequestOverlay.swift */,
-				D5E000000000000000000102 /* WebsiteLoginRequestOverlay.swift */,
 				1A2B3C4D5E6F7000000000D9 /* MessageBubbleView.swift */,
 				C03190000000000000F002 /* InlineAudioPlayerView.swift */,
 				BEEF02400000000000000002 /* ChatAttachmentPreviewView.swift */,
@@ -1249,7 +1238,6 @@
 					C0DE1E550000000000000022 /* ComposerDraftStore.swift */,
 					C04800000000000000000002 /* ChatAttachmentCoordinator.swift */,
 					1A2B3C4D5E6F7000000000D5 /* ChatViewModel.swift */,
-					D5E000000000000000000104 /* NativeAuthE2EAutoSubmitController.swift */,
 				A710739233F64F4FA4C2B710 /* ComposerVoiceInputController.swift */,
 				C03250000000000000F104 /* ComposerVoiceNoteRecorder.swift */,
 				1A2B3C4D5E6F70000000121 /* ContextWindowIndicatorView.swift */,
@@ -1836,7 +1824,6 @@
 					C0DE1E550000000000000021 /* ComposerDraftStore.swift in Sources */,
 					C04800000000000000000001 /* ChatAttachmentCoordinator.swift in Sources */,
 					1A2B3C4D5E6F7000000000D4 /* ChatViewModel.swift in Sources */,
-					D5E000000000000000000004 /* NativeAuthE2EAutoSubmitController.swift in Sources */,
 				1A2B3C4D5E6F7000000000D6 /* SSEClient.swift in Sources */,
 				C0FF000000000000000000A1 /* CustomHeader.swift in Sources */,
 				1A2B3C4D5E6F7000000000D0 /* SessionRowView.swift in Sources */,
@@ -1855,8 +1842,6 @@
 				A04200000000000000000003 /* ApprovalRequestOverlay.swift in Sources */,
 				C1A042000000000000000001 /* Clarification.swift in Sources */,
 				C1A042000000000000000003 /* ClarificationRequestOverlay.swift in Sources */,
-				D5E000000000000000000001 /* WebsiteLogin.swift in Sources */,
-				D5E000000000000000000002 /* WebsiteLoginRequestOverlay.swift in Sources */,
 				A02400000000000000000001 /* Goal.swift in Sources */,
 				3F91D2A54B9A4F66A2C01001 /* Cron.swift in Sources */,
 				3F91D2A54B9A4F66A2C01002 /* TasksView.swift in Sources */,
@@ -1981,7 +1966,6 @@
 				C15400000000000000000005 /* KanbanCardDetailStateTests.swift in Sources */,
 				C15300000000000000000005 /* KanbanCardEditorStateTests.swift in Sources */,
 				C1A042000000000000000005 /* ClarificationTests.swift in Sources */,
-				D5E000000000000000000003 /* WebsiteLoginTests.swift in Sources */,
 				1A2B3C4D5E6F7000000000F2 /* CacheStoreTests.swift in Sources */,
 				C04400000000000000000003 /* CacheFallbackPolicyTests.swift in Sources */,
 				1A2B3C4D5E6F700000000102 /* AppThemeTests.swift in Sources */,

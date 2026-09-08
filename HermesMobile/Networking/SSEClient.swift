@@ -180,9 +180,6 @@ enum SSEEvent: Equatable {
     case done(DoneStreamEvent)
     case approvalPending(ApprovalPendingResponse)
     case clarificationPending(ClarificationPendingResponse)
-    case nativeComponent(NativeAuthWireComponent)
-    case nativeComponentState(NativeAuthWireState)
-    case websiteLoginPending(WebsiteLoginRequest)
     case pendingSteerLeftover(String)
     case streamEnd
     case cancelled
@@ -402,30 +399,6 @@ struct SSEEventDecoder {
         case "clarify":
             logInvalidJSONIfNeeded(eventType: eventType, payloadName: "clarification stream payload", data: eventData)
             return .clarificationPending(ClarificationPendingResponse.streamPayload(from: eventData, decoder: decoder))
-        case "native_component":
-            do {
-                return .nativeComponent(try decoder.decode(NativeAuthWireComponent.self, from: eventData))
-            } catch {
-                logger.error("Rejected malformed native component event")
-                return .ignored
-            }
-        case "native_component_state":
-            do {
-                return .nativeComponentState(try decoder.decode(NativeAuthWireState.self, from: eventData))
-            } catch {
-                logger.error("Rejected malformed native component state event")
-                return .ignored
-            }
-        case "website_login":
-            // Do not use decodePayload here: its diagnostics include a
-            // truncated raw payload, which is unsafe if a compromised server
-            // ever sends an unexpected credential-shaped field.
-            do {
-                return .websiteLoginPending(try decoder.decode(WebsiteLoginRequest.self, from: eventData))
-            } catch {
-                logger.error("Rejected malformed website-login event")
-                return .ignored
-            }
         case "pending_steer_leftover":
             let payload = decodePayload(
                 PendingSteerLeftoverPayload.self,

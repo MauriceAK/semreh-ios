@@ -119,6 +119,19 @@ permissions allow it. It grants no new tool access to the disposable fixture,
 no permission to mutate personal repositories, and no private backend dependency.
 Recording this decision does not claim the buttons have already been hidden.
 
+## Approved website-login deferral — September 8, 2026
+
+Maurice approved temporarily hiding/deferring the old in-chat website-login and
+native credential-form overlays so the migration can remove their proprietary
+WebUI SSE/REST dependency. This is not Semreh's ordinary server login. Preserve
+stock direct approval, clarification, secret and sudo prompts. Retire the old
+executable flow and keep its implementation recoverable in Git history.
+
+The existing SEMREH_IDEAS.md backlog records a friend's Hermes Telegram
+website-login plugin as a possible later integration lead. It has not been
+inspected; no compatibility, safety or implementation claim is implied, and no
+plugin installation/backend changes are authorized for the migration.
+
 ## Historical Slice 2 reasoning experiment — September 5, 2026
 
 Maurice requires per-session reasoning changes, including selecting the next

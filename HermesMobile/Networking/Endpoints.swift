@@ -31,11 +31,6 @@ enum Endpoint {
     case chatStreamStatus(streamID: String)
     case chatSteer
     case submitGoal
-    case nativeAuthSubmit
-    case nativeAuthCancel
-    case workLoginStatus(requestID: String, sessionID: String)
-    case workLoginRequest
-    case workLoginResult
     case btw
     case background
     case backgroundStatus(sessionID: String)
@@ -153,16 +148,6 @@ enum Endpoint {
             return "/api/chat/steer"
         case .submitGoal:
             return "/api/goal"
-        case .nativeAuthSubmit:
-            return "/api/native-auth/submit"
-        case .nativeAuthCancel:
-            return "/api/native-auth/cancel"
-        case .workLoginStatus:
-            return "/api/work/login/status"
-        case .workLoginRequest:
-            return "/api/work/login/request"
-        case .workLoginResult:
-            return "/api/work/login/result"
         case .btw:
             return "/api/btw"
         case .background:
@@ -330,11 +315,6 @@ enum Endpoint {
             return [
                 URLQueryItem(name: "session_id", value: sessionID),
                 URLQueryItem(name: "format", value: format.rawValue)
-            ]
-        case let .workLoginStatus(requestID, sessionID):
-            return [
-                URLQueryItem(name: "request_id", value: requestID),
-                URLQueryItem(name: "session_id", value: sessionID)
             ]
         case let .backgroundStatus(sessionID):
             return [URLQueryItem(name: "session_id", value: sessionID)]

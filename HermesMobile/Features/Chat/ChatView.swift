@@ -870,38 +870,6 @@ struct ChatView: View {
                 .zIndex(31)
             }
 
-            if let nativeAuthPrompt = viewModel.nativeAuthPrompt {
-                NativeAuthComponentOverlay(
-                    prompt: nativeAuthPrompt,
-                    errorMessage: viewModel.nativeAuthErrorMessage,
-                    onSubmit: { values, submitComponent in
-                        await viewModel.submitNativeAuth(
-                            values: values,
-                            component: submitComponent,
-                            actionHandle: submitComponent.actionHandle
-                        )
-                    },
-                    onCancel: {
-                        await viewModel.cancelNativeAuth()
-                    }
-                )
-                .zIndex(30)
-            }
-
-            if viewModel.nativeAuthPrompt == nil,
-               let websiteLoginPrompt = viewModel.websiteLoginPrompt {
-                WebsiteLoginRequestOverlay(prompt: websiteLoginPrompt) { result in
-                    switch result {
-                    case .completed:
-                        return await viewModel.completeWebsiteLogin(requestID: websiteLoginPrompt.requestID)
-                    case .cancelled:
-                        return await viewModel.cancelWebsiteLogin(requestID: websiteLoginPrompt.requestID)
-                    case .failed:
-                        return await viewModel.failWebsiteLogin(requestID: websiteLoginPrompt.requestID)
-                    }
-                }
-                .zIndex(20)
-            }
         }
         .background {
             SemrehBackdrop().ignoresSafeArea()
