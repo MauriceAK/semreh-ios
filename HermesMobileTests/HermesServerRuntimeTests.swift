@@ -276,9 +276,39 @@ final class HermesServerRuntimeTests: XCTestCase {
     }
 
     func testOnlyHTTPSRootOriginsAccepted() {
-        for value in ["http://fixture.example", "https://fixture.example/base", "https://u:p@fixture.example", "https://fixture.example?token=x"] {
-            XCTAssertThrowsError(try HermesServerRuntime(origin: URL(string: value)!) { _ in RuntimeFakeTransport() })
+        for value in [
+            "http://fixture.example",
+            "https://fixture.example/base",
+            "https://u:p@fixture.example",
+            "https://fixture.example?token=x",
+            "https://fixture.example#fragment",
+            "https://fixture.example:0",
+            "https://fixture.example:65536"
+        ] {
+            XCTAssertThrowsError(try HermesServerRuntime(origin: URL(string: value)!) { _ in RuntimeFakeTransport() }) {
+                XCTAssertEqual($0 as? DirectSessionError, .invalidOrigin)
+            }
         }
+    }
+
+    func testNonDefaultHTTPSPortPreservesRuntimeAndGatewayIdentity() async throws {
+        let origin = try XCTUnwrap(URL(string: "https://fixture.example:8443"))
+        let fake = RuntimeFakeTransport()
+        let runtime = try HermesServerRuntime(origin: origin) { sink in
+            fake.sinkBox.install(sink)
+            return fake
+        }
+
+        XCTAssertEqual(runtime.origin, origin)
+        XCTAssertEqual(try HermesServerRuntime.gatewayURL(for: origin).absoluteString, "wss://fixture.example:8443/api/ws")
+
+        try await runtime.connect()
+        _ = try await runtime.request("session.resume", params: ["session_id": .string("stored")])
+        let connectionCount = await fake.connectionCount()
+        let methods = await fake.methods()
+        XCTAssertEqual(connectionCount, 1)
+        XCTAssertEqual(methods, ["session.resume"])
+        await runtime.stop()
     }
 
     private func makeRuntime(_ fake: RuntimeFakeTransport) throws -> HermesServerRuntime {

@@ -70,12 +70,18 @@ final class APIClientAuthAndErrorTests: APIClientTestCase {
         )
     }
 
-    func testDirectOriginRequiresHTTPSDistinctRootHost() throws {
+    func testDirectOriginRequiresHTTPSRootOrigin() throws {
         XCTAssertNoThrow(try AuthManager.validateDirectHermesOrigin(URL(string: "https://hermes.example.test")!))
         XCTAssertThrowsError(try AuthManager.validateDirectHermesOrigin(URL(string: "http://100.96.12.34:9119")!))
         XCTAssertThrowsError(try AuthManager.validateDirectHermesOrigin(URL(string: "http://127.0.0.1:18791")!))
         XCTAssertNoThrow(try AuthManager.validateDirectHermesOrigin(URL(string: "http://127.0.0.1:18791")!, allowLoopbackHTTP: true))
-        XCTAssertThrowsError(try AuthManager.validateDirectHermesOrigin(URL(string: "https://hermes.example.test:8443")!))
+        XCTAssertNoThrow(try AuthManager.validateDirectHermesOrigin(URL(string: "https://hermes.example.test:8443")!))
+        XCTAssertThrowsError(try AuthManager.validateDirectHermesOrigin(URL(string: "https://hermes.example.test:0")!))
+        XCTAssertThrowsError(
+            try AuthManager.validateDirectHermesOrigin(
+                XCTUnwrap(URL(string: "https://hermes.example.test:65536"))
+            )
+        )
         XCTAssertThrowsError(try AuthManager.validateDirectHermesOrigin(URL(string: "https://user:pass@hermes.example.test")!))
         XCTAssertThrowsError(try AuthManager.validateDirectHermesInput("https://hermes.example.test/api?profile=default"))
         XCTAssertEqual(

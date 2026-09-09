@@ -267,6 +267,14 @@ For v3:
 - same-hostname/different-port accounts are unsupported;
 - per-server cookie storage is added only if a real required topology cannot satisfy the hostname rule.
 
+September 9 compatibility correction: a single configured origin may use any valid
+HTTPS port (1–65535), including 8443. The earlier client-only 443 restriction was
+unnecessary. Login and gateway runtime share validation. Before network access,
+the client rejects a conflicting saved or in-flight origin for the same hostname;
+removed origins retain ownership until app restart to fence late cookie writes.
+After removing an account, restart before reusing its hostname on another port.
+This does not add simultaneous same-hostname accounts or change server APIs.
+
 Slice 1 must verify cookie persistence, refresh, restart behavior, logout clearing, and proxy attributes through the actual deployment path.
 
 ### 2.5 Session identity

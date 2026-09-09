@@ -72,10 +72,11 @@ final class HermesServerRuntime {
     private static let maximumBufferedEvents = 1024
 
     init(origin: URL, factory: (@Sendable @escaping (HermesGatewayEvent) -> Void) -> any HermesGatewayTransport) throws {
-        guard origin.scheme == "https", origin.host?.isEmpty == false,
-              origin.port == nil || origin.port == 443, origin.user == nil,
-              origin.password == nil, origin.query == nil, origin.fragment == nil,
-              origin.path.isEmpty || origin.path == "/" else { throw DirectSessionError.invalidOrigin }
+        do {
+            try AuthManager.validateDirectHermesOrigin(origin)
+        } catch {
+            throw DirectSessionError.invalidOrigin
+        }
         self.origin = origin
         // One ordered consumer, not an independent Task per incoming frame.
         let (stream, continuation) = AsyncStream<HermesGatewayEvent>.makeStream(bufferingPolicy: .bufferingOldest(1024))
@@ -93,10 +94,7 @@ final class HermesServerRuntime {
     }
 
     convenience init(origin: URL, client: APIClient) throws {
-        var components = URLComponents(url: origin, resolvingAgainstBaseURL: false)
-        components?.scheme = "wss"
-        components?.path = "/api/ws"
-        guard let gatewayURL = components?.url else { throw DirectSessionError.invalidOrigin }
+        let gatewayURL = try Self.gatewayURL(for: origin)
         try self.init(origin: origin) { sink in
             HermesGatewayClient(gatewayURL: gatewayURL, ticketProvider: {
                 guard let ticket = try await client.directWSTicket().ticket, !ticket.isEmpty else {
@@ -105,6 +103,14 @@ final class HermesServerRuntime {
                 return ticket
             }, eventHandler: sink)
         }
+    }
+
+    nonisolated static func gatewayURL(for origin: URL) throws -> URL {
+        var components = URLComponents(url: origin, resolvingAgainstBaseURL: false)
+        components?.scheme = "wss"
+        components?.path = "/api/ws"
+        guard let gatewayURL = components?.url else { throw DirectSessionError.invalidOrigin }
+        return gatewayURL
     }
 
     deinit { eventTask?.cancel(); connectTask?.cancel(); recoveryTask?.cancel() }

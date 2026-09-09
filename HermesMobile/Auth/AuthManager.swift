@@ -2,8 +2,66 @@ import Foundation
 import Observation
 
 @MainActor
+final class DirectHermesCookieOriginLedger {
+    static let shared = DirectHermesCookieOriginLedger()
+
+    struct Reservation {
+        let host: String
+        let origin: String
+        let shouldClearUnownedCookies: Bool
+    }
+
+    private var retainedOrigins: [String: String] = [:]
+    private var reservations: [String: (origin: String, count: Int)] = [:]
+
+    func remember(_ url: URL) {
+        guard let host = url.host?.lowercased() else { return }
+        retainedOrigins[host] = retainedOrigins[host] ?? url.absoluteString
+    }
+
+    func reserve(_ url: URL, knownOrigins: [URL]) throws -> Reservation {
+        guard let host = url.host?.lowercased() else { throw APIError.invalidServerURL }
+        let origin = url.absoluteString
+        let owners = knownOrigins.compactMap { known -> String? in
+            known.host?.lowercased() == host ? known.absoluteString : nil
+        }
+        if owners.contains(where: { $0 != origin }) || retainedOrigins[host].map({ $0 != origin }) == true {
+            throw AuthManager.ServerOriginError.hostnameAlreadyConfigured
+        }
+        if let held = reservations[host] {
+            guard held.origin == origin else { throw AuthManager.ServerOriginError.hostnameAlreadyConfigured }
+            reservations[host] = (origin, held.count + 1)
+            return Reservation(host: host, origin: origin, shouldClearUnownedCookies: false)
+        }
+        reservations[host] = (origin, 1)
+        return Reservation(
+            host: host,
+            origin: origin,
+            shouldClearUnownedCookies: owners.isEmpty && retainedOrigins[host] == nil
+        )
+    }
+
+    func release(_ reservation: Reservation) {
+        guard let held = reservations[reservation.host], held.origin == reservation.origin else { return }
+        if held.count == 1 { reservations.removeValue(forKey: reservation.host) }
+        else { reservations[reservation.host] = (held.origin, held.count - 1) }
+    }
+}
+
+@MainActor
 @Observable
 final class AuthManager {
+    enum ServerOriginError: LocalizedError, Equatable {
+        case hostnameAlreadyConfigured
+
+        var errorDescription: String? {
+            switch self {
+            case .hostnameAlreadyConfigured:
+                String(localized: "A saved server already uses this hostname. Remove it before changing ports; if it was just removed, restart Semreh first.")
+            }
+        }
+    }
+
     enum State: Equatable {
         case unconfigured
         case loggedOut(server: URL)
@@ -50,6 +108,7 @@ final class AuthManager {
     private let headerStore: CustomHeaderStore
     private let logoutTimeout: Duration
     private let serverRegistry: ServerRegistry
+    private let cookieOriginLedger: DirectHermesCookieOriginLedger
     /// Structured expiry can arrive from a request started before a fresh login.
     /// Validate the current cookie first, and bind the result to this auth epoch.
     private var authEpoch = 0
@@ -66,7 +125,8 @@ final class AuthManager {
         },
         headerStore: CustomHeaderStore = .shared,
         logoutTimeout: Duration = .seconds(5),
-        serverRegistry: ServerRegistry = .shared
+        serverRegistry: ServerRegistry = .shared,
+        cookieOriginLedger: DirectHermesCookieOriginLedger = .shared
     ) {
         self.keychain = keychain
         self.clientFactory = clientFactory
@@ -74,6 +134,8 @@ final class AuthManager {
         self.headerStore = headerStore
         self.logoutTimeout = logoutTimeout
         self.serverRegistry = serverRegistry
+        self.cookieOriginLedger = cookieOriginLedger
+        serverRegistry.servers.compactMap { URL(string: $0.urlString) }.forEach { cookieOriginLedger.remember($0) }
         restoreSavedServer()
         refreshServers()
     }
@@ -98,16 +160,18 @@ final class AuthManager {
         serverURLString: String,
         customHeaders: [CustomHeader]? = nil
     ) async throws -> AuthStatusResponse {
-        // Apply the in-progress headers before the very first probe so the health
-        // and auth-status calls already traverse the proxy. Passing nil leaves the
-        // current headers untouched (#255).
-        if let customHeaders {
-            headerStore.replace(with: customHeaders.sanitizedForStorage())
-        }
-
         try Self.validateDirectHermesInput(serverURLString)
         let serverURL = try Self.normalizedServerURL(from: serverURLString)
         try Self.validateDirectHermesOrigin(serverURL)
+        let reservation = try reserveCookieHostname(for: serverURL)
+        defer { cookieOriginLedger.release(reservation) }
+        if reservation.shouldClearUnownedCookies { clearSessionCookies(for: serverURL) }
+
+        // Apply the in-progress headers only after all local origin checks pass,
+        // before the first probe. Passing nil leaves the current headers untouched.
+        if let customHeaders {
+            headerStore.replace(with: customHeaders.sanitizedForStorage())
+        }
         let client = clientFactory(serverURL)
 
         return try await testConnection(client: client)
@@ -140,14 +204,17 @@ final class AuthManager {
         advanceAuthEpoch()
         lastErrorMessage = nil
 
-        if let customHeaders {
-            headerStore.replace(with: customHeaders.sanitizedForStorage())
-        }
-
         do {
             try Self.validateDirectHermesInput(serverURLString)
             let serverURL = try Self.normalizedServerURL(from: serverURLString)
             try Self.validateDirectHermesOrigin(serverURL)
+            let reservation = try reserveCookieHostname(for: serverURL)
+            defer { cookieOriginLedger.release(reservation) }
+            if reservation.shouldClearUnownedCookies { clearSessionCookies(for: serverURL) }
+
+            if let customHeaders {
+                headerStore.replace(with: customHeaders.sanitizedForStorage())
+            }
             let client = clientFactory(serverURL)
             let authStatus = try await testConnection(client: client)
 
@@ -205,6 +272,7 @@ final class AuthManager {
             // shadowing the Keychain `server_url` write above (#15). Dedupes by
             // normalized URL.
             serverRegistry.activate(url: serverURL)
+            cookieOriginLedger.remember(serverURL)
             // Persist the headers that reached this server under its own scoped key
             // so they never apply to a different server (#16).
             persistCustomHeaders(for: serverURL)
@@ -244,14 +312,18 @@ final class AuthManager {
         lastErrorMessage = nil
 
         let serverURL: URL
+        let reservation: DirectHermesCookieOriginLedger.Reservation
         do {
             try Self.validateDirectHermesInput(serverURLString)
             serverURL = try Self.normalizedServerURL(from: serverURLString)
             try Self.validateDirectHermesOrigin(serverURL)
+            reservation = try reserveCookieHostname(for: serverURL)
+            if reservation.shouldClearUnownedCookies { clearSessionCookies(for: serverURL) }
         } catch {
             lastErrorMessage = error.localizedDescription
             return .failed
         }
+        defer { cookieOriginLedger.release(reservation) }
 
         guard !serverRegistry.servers.contains(where: { $0.id == serverURL.absoluteString }) else {
             lastErrorMessage = String(localized: "This server is already configured.")
@@ -312,6 +384,7 @@ final class AuthManager {
             try keychain.save(serverURL.absoluteString, forKey: .serverURL)
             headerStore.replace(with: newHeaders)
             serverRegistry.activate(url: serverURL)
+            cookieOriginLedger.remember(serverURL)
             persistCustomHeaders(for: serverURL)
             refreshServers()
             state = .loggedIn(server: serverURL)
@@ -389,6 +462,15 @@ final class AuthManager {
     func switchActiveServer(to account: ServerAccount) {
         guard account.id != state.server?.absoluteString,
               let serverURL = URL(string: account.urlString) else { return }
+
+        do {
+            try Self.validateDirectHermesOrigin(serverURL)
+            let reservation = try reserveCookieHostname(for: serverURL)
+            cookieOriginLedger.release(reservation)
+        } catch {
+            lastErrorMessage = error.localizedDescription
+            return
+        }
 
         advanceAuthEpoch()
         serverRegistry.setActive(id: account.id)
@@ -697,7 +779,8 @@ final class AuthManager {
         guard
             let savedValue = try? keychain.load(.serverURL),
             let savedURL = URL(string: savedValue),
-            (try? Self.validateDirectHermesOrigin(savedURL)) != nil
+            (try? Self.validateDirectHermesOrigin(savedURL)) != nil,
+            (try? reserveAndReleaseCookieHostname(for: savedURL)) != nil
         else {
             // No saved server: nothing is active, so no scoped headers apply.
             state = .unconfigured
@@ -709,6 +792,7 @@ final class AuthManager {
         // re-activated, and its per-server identity is only seeded on first
         // insert, so #17 edits survive relaunch.
         serverRegistry.activate(url: savedURL)
+        cookieOriginLedger.remember(savedURL)
         // Hydrate this server's headers (migrating the pre-#16 global blob on the
         // first launch after the split) before any client is built, so the first
         // request after launch carries the saved headers (#255/#16).
@@ -717,8 +801,9 @@ final class AuthManager {
     }
 
     /// Direct Hermes auth relies on host-scoped Secure cookies. A configured
-    /// production origin must therefore be HTTPS, root-scoped, and distinguishable
-    /// by hostname; ports cannot isolate cookie jars. Loopback HTTP is available
+    /// production origin must therefore be HTTPS and root-scoped. AuthManager
+    /// separately permits only one configured origin per hostname because ports
+    /// cannot isolate cookie jars. Loopback HTTP is available
     /// only through an explicit test seam and is never used by production calls.
     nonisolated static func validateDirectHermesOrigin(
         _ url: URL,
@@ -745,9 +830,23 @@ final class AuthManager {
         }
 
         guard scheme == "https",
-              url.port == nil || url.port == 443 else {
+              url.port.map({ (1...65_535).contains($0) }) ?? true else {
             throw APIError.invalidServerURL
         }
+    }
+
+    /// Cookies are hostname-scoped, not port-scoped. Refuse a second origin for
+    /// the same hostname before constructing a client so a probe or login cannot
+    /// send one configured account's cookie to another port.
+    private func reserveCookieHostname(for candidate: URL) throws -> DirectHermesCookieOriginLedger.Reservation {
+        var known = serverRegistry.servers.compactMap { try? Self.normalizedServerURL(from: $0.urlString) }
+        if let current = state.server { known.append(current) }
+        return try cookieOriginLedger.reserve(candidate, knownOrigins: known)
+    }
+
+    private func reserveAndReleaseCookieHostname(for candidate: URL) throws {
+        let reservation = try reserveCookieHostname(for: candidate)
+        cookieOriginLedger.release(reservation)
     }
 
     /// Validates the user-entered origin before normalization can erase a

@@ -589,6 +589,181 @@ final class AuthManagerStateTests: XCTestCase {
         XCTAssertEqual(manager.activeServerID, "https://a.test")
     }
 
+    func testNonDefaultHTTPSPortIsAcceptedWhenHostnameIsUnique() async throws {
+        let server = try XCTUnwrap(URL(string: "https://example.test:8443"))
+        XCTAssertNoThrow(try AuthManager.validateDirectHermesOrigin(server))
+        let keychain = InMemoryKeychainStore()
+        let registry = ServerRegistry.inMemory(keychain: keychain)
+        let manager = AuthManager(
+            keychain: keychain,
+            clientFactory: { url in
+                XCTAssertEqual(url, server)
+                return MockAuthAPIClient(authStatus: AuthStatusResponse(authEnabled: false))
+            },
+            serverRegistry: registry,
+            cookieOriginLedger: DirectHermesCookieOriginLedger()
+        )
+
+        await manager.configure(serverURLString: server.absoluteString, password: "")
+
+        XCTAssertEqual(manager.state, .loggedIn(server: server))
+        XCTAssertEqual(registry.servers.map(\.id), [server.absoluteString])
+    }
+
+    func testGenuinelyUnownedHostnamePurgesStaleCookieBeforeClientCreation() async throws {
+        let server = try XCTUnwrap(URL(string: "https://unowned-cookie.test:8443"))
+        let staleCookie = try makeSessionCookie(for: server, value: "must-not-cross-origin")
+        HTTPCookieStorage.shared.setCookie(staleCookie)
+        defer { HTTPCookieStorage.shared.deleteCookie(staleCookie) }
+        let keychain = InMemoryKeychainStore()
+        let registry = ServerRegistry.inMemory(keychain: keychain)
+        var clientCreated = false
+        let manager = AuthManager(
+            keychain: keychain,
+            clientFactory: { url in
+                clientCreated = true
+                XCTAssertEqual(url, server)
+                XCTAssertEqual(HTTPCookieStorage.shared.cookies(for: url)?.isEmpty ?? true, true)
+                return MockAuthAPIClient(authStatus: AuthStatusResponse(authEnabled: false))
+            },
+            serverRegistry: registry,
+            cookieOriginLedger: DirectHermesCookieOriginLedger()
+        )
+
+        _ = try await manager.testConnection(serverURLString: server.absoluteString)
+
+        XCTAssertTrue(clientCreated)
+        XCTAssertEqual(HTTPCookieStorage.shared.cookies(for: server)?.isEmpty ?? true, true)
+    }
+
+    func testSameHostnameDifferentPortIsRefusedBeforeProbeOrHeaderMutation() async throws {
+        let keychain = InMemoryKeychainStore()
+        let registry = ServerRegistry.inMemory(keychain: keychain)
+        registry.activate(url: try XCTUnwrap(URL(string: "https://example.test")))
+        let headers = CustomHeaderStore()
+        headers.replace(with: [CustomHeader(name: "X-Existing", value: "keep")])
+        var clientCreations = 0
+        let manager = AuthManager(
+            keychain: keychain,
+            clientFactory: { _ in
+                clientCreations += 1
+                return MockAuthAPIClient(authStatus: AuthStatusResponse(authEnabled: false))
+            },
+            probeClientFactory: { _, _ in
+                clientCreations += 1
+                return MockAuthAPIClient(authStatus: AuthStatusResponse(authEnabled: false))
+            },
+            headerStore: headers,
+            serverRegistry: registry,
+            cookieOriginLedger: DirectHermesCookieOriginLedger()
+        )
+
+        do {
+            _ = try await manager.testConnection(
+                serverURLString: "https://example.test:8443",
+                customHeaders: [CustomHeader(name: "X-New", value: "must-not-apply")]
+            )
+            XCTFail("Expected the shared-cookie hostname guard to refuse the probe")
+        } catch {
+            XCTAssertEqual(error as? AuthManager.ServerOriginError, .hostnameAlreadyConfigured)
+        }
+        await manager.configure(serverURLString: "https://example.test:8443", password: "")
+        let outcome = await manager.addServer(serverURLString: "https://example.test:8443", password: "")
+
+        XCTAssertEqual(outcome, .failed)
+        XCTAssertEqual(clientCreations, 0)
+        XCTAssertEqual(headers.snapshot(), [CustomHeader(name: "X-Existing", value: "keep")])
+        XCTAssertEqual(registry.servers.map(\.id), ["https://example.test"])
+        XCTAssertEqual(manager.lastErrorMessage, AuthManager.ServerOriginError.hostnameAlreadyConfigured.localizedDescription)
+    }
+
+    func testRestoreAndSwitchRefusePersistedSameHostnameOrigins() throws {
+        let keychain = InMemoryKeychainStore()
+        let registry = ServerRegistry.inMemory(keychain: keychain)
+        let defaultOrigin = try XCTUnwrap(URL(string: "https://example.test"))
+        let alternatePort = try XCTUnwrap(URL(string: "https://example.test:8443"))
+        registry.activate(url: defaultOrigin)
+        registry.activate(url: alternatePort)
+        try keychain.save(alternatePort.absoluteString, forKey: .serverURL)
+        let manager = AuthManager(
+            keychain: keychain,
+            serverRegistry: registry,
+            cookieOriginLedger: DirectHermesCookieOriginLedger()
+        )
+
+        XCTAssertEqual(manager.state, .unconfigured)
+        let defaultAccount = try XCTUnwrap(registry.servers.first { $0.id == defaultOrigin.absoluteString })
+        manager.switchActiveServer(to: defaultAccount)
+        XCTAssertEqual(manager.state, .unconfigured)
+        XCTAssertEqual(manager.lastErrorMessage, AuthManager.ServerOriginError.hostnameAlreadyConfigured.localizedDescription)
+    }
+
+    func testInflightConfigureReservesHostnameAgainstDifferentPortAdd() async throws {
+        let keychain = InMemoryKeychainStore()
+        let registry = ServerRegistry.inMemory(keychain: keychain)
+        let heldClient = ProbeAuthClient(
+            server: try XCTUnwrap(URL(string: "https://race.test")),
+            probes: [.manual]
+        )
+        var alternateClientCreations = 0
+        let manager = AuthManager(
+            keychain: keychain,
+            clientFactory: { _ in heldClient },
+            probeClientFactory: { _, _ in
+                alternateClientCreations += 1
+                return MockAuthAPIClient(authStatus: AuthStatusResponse(authEnabled: false))
+            },
+            serverRegistry: registry,
+            cookieOriginLedger: DirectHermesCookieOriginLedger()
+        )
+        let configure = Task {
+            await manager.configure(
+                serverURLString: "https://race.test",
+                username: "test-user",
+                password: "secret"
+            )
+        }
+        await waitForProbe(heldClient, count: 1)
+
+        let outcome = await manager.addServer(serverURLString: "https://race.test:8443", password: "")
+
+        XCTAssertEqual(outcome, .failed)
+        XCTAssertEqual(alternateClientCreations, 0)
+        heldClient.releaseProbe(1, with: .success(()))
+        await configure.value
+        XCTAssertEqual(manager.state, .loggedIn(server: try XCTUnwrap(URL(string: "https://race.test"))))
+    }
+
+    func testRemovedOriginTombstoneRefusesDifferentPortUntilProcessRestart() async throws {
+        let keychain = InMemoryKeychainStore()
+        let registry = ServerRegistry.inMemory(keychain: keychain)
+        let ledger = DirectHermesCookieOriginLedger()
+        var clientCreations = 0
+        let manager = AuthManager(
+            keychain: keychain,
+            clientFactory: { _ in
+                clientCreations += 1
+                return MockAuthAPIClient(authStatus: AuthStatusResponse(authEnabled: false))
+            },
+            probeClientFactory: { _, _ in
+                clientCreations += 1
+                return MockAuthAPIClient(authStatus: AuthStatusResponse(authEnabled: false))
+            },
+            serverRegistry: registry,
+            cookieOriginLedger: ledger
+        )
+        await manager.configure(serverURLString: "https://retired.test", password: "")
+        let account = try XCTUnwrap(manager.servers.first)
+        await manager.removeServer(account)
+        let creationsAfterRemoval = clientCreations
+
+        let outcome = await manager.addServer(serverURLString: "https://retired.test:8443", password: "")
+
+        XCTAssertEqual(outcome, .failed)
+        XCTAssertEqual(clientCreations, creationsAfterRemoval)
+        XCTAssertEqual(manager.lastErrorMessage, AuthManager.ServerOriginError.hostnameAlreadyConfigured.localizedDescription)
+    }
+
     func testUpdateServerIdentityPersistsAndMirrorsTheActiveServer() async throws {
         let keychain = InMemoryKeychainStore()
         let defaults = UserDefaults.ephemeral()

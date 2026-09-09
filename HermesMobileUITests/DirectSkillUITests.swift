@@ -4,9 +4,51 @@ import UniformTypeIdentifiers
 
 final class DirectSkillUITests: XCTestCase {
     private let origin = "https://semreh-slice1-test.tailda8427.ts.net"
+    private let personalPilotOrigin = "https://maumac.tailda8427.ts.net:8443"
     private let credentialsPath = "/Users/maurice/workspace/semreh-slice1-runtime/credentials.json"
     private let backendSHA = "29112bef099274229cadff79cdff7bf7b99c4b77"
     private let skill = "semreh-fixture-empty-secret"
+
+    @MainActor
+    func testOptInPersonalPilotBootstrapOnly() async throws {
+        continueAfterFailure = false
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("Personal pilot bootstrap verification is simulator-only.")
+        #endif
+        guard ProcessInfo.processInfo.environment["SEMREH_PERSONAL_BOOTSTRAP_UI"] == "1" else {
+            throw XCTSkip("Personal pilot bootstrap verification is opt-in.")
+        }
+
+        let app = XCUIApplication()
+        app.terminate()
+        app.launch()
+        dismissKnownPasswordSavePrompt(app, timeout: 1)
+        let server = app.textFields["onboarding-server-url"]
+        if !(server.waitForExistence(timeout: 4) && server.isHittable) {
+            try signOutIfNeeded(app)
+            let welcome = app.staticTexts["Control Semreh from iPhone or iPad."]
+            XCTAssertTrue(welcome.waitForExistence(timeout: 15) && welcome.isHittable)
+            let existingServer = app.buttons["Already have a server?"]
+            XCTAssertTrue(existingServer.waitForExistence(timeout: 5) && existingServer.isHittable)
+            existingServer.tap()
+            XCTAssertTrue(server.waitForExistence(timeout: 5) && server.isHittable)
+        }
+        replace(server, with: personalPilotOrigin, app: app)
+        let testConnection = app.buttons["Test Connection"]
+        XCTAssertTrue(testConnection.waitForExistence(timeout: 5) && testConnection.isHittable)
+        testConnection.tap()
+
+        let status = app.staticTexts["Connection ok. Password required."]
+        XCTAssertTrue(status.waitForExistence(timeout: 30))
+        for _ in 0..<3 where !status.isHittable { app.scrollViews.firstMatch.swipeUp() }
+        XCTAssertTrue(status.isHittable)
+        XCTAssertTrue(app.textFields["onboarding-username"].exists)
+        XCTAssertTrue(app.secureTextFields["onboarding-password"].exists)
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "Personal pilot bootstrap login form"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+    }
 
     @MainActor
     func testOptInProductionLoginNewChatSkillListAndShortcutDetail() async throws {

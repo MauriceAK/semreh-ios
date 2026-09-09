@@ -5,6 +5,29 @@ details/evidence: `slice3-tasks.md`, `slice3-verification.md`, `slice4-tasks.md`
 This is the current dispatch checklist, not a new architecture or acceptance waiver.
 Preserve completed Luna work. Root owns integration, notes and native execution.
 
+September 9 personal pilot correction: phone build2026090901 rejected the8443
+endpoint root supplied. This was an app validation mistake, not evidence that a
+separate WebUI backend is required. Auth and shared gateway runtime now accept
+valid non-default HTTPS ports with the existing one-origin-per-hostname policy.
+Saved/in-flight/removed-origin guards prevent cross-port cookie confusion; stale
+unowned-host cookies clear before network access. No Hermes source patch.
+Port build-v2 and focused-v1 passed82/0/0; full-v1 passed2063/0/14. Initial build-v1
+failed3missing password arguments in new tests, corrected. Helper suite passed
+51/0 under ownedvenv; systemPython attempt failed one import (websockets missing).
+Production personal8443 bootstrap UI-v2 passed1/0/0; root inspected screenshot:
+exact8443 URL and “Connection ok. Password required.” visible. UI-v1 failed a
+test backbutton assumption on the expired fixture login screen plus runner75;
+bootstrap test now accepts a visible Connect page and scrolls to reveal status.
+No product change for that harness correction. Signed phonebuild2026090902 passed,
+strict signature check passed, installed over existing SemrehDev without uninstall.
+Targeted audit-v2 passed86files/0flags/4exported consoles; includes selected test
+diagnostics/UI screenshot and devicebuildlog plus mandatory fixturelogs/docs.
+Personal private startup log, unselected artifacts, arbitrary opaque secrets and
+unexported compressed contents excluded. Personal credential fields stayed empty.
+Bootstrap checks public discovery only; personal login, first reply and physical
+background acceptance remain unverified. Additive pilot service/private8443route
+were specifically authorized; pre-existing gateways/routes remain unchanged.
+
 Latest continuation (supersedes historical dispatch below): e7f3d5f is committed;
 successor removes all identified legacy skill/personality/upload/raw/export
 execution paths, adds conservative cold-resume content handling, managed local
