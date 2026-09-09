@@ -88,7 +88,6 @@ struct MessageComposerView: View {
     /// Manage affordance in the workspace picker.
     let workspaceManagementServer: URL?
     let workspaceManagementProfile: String
-    let personalitySuggestions: [String]
     let skillSuggestions: [SkillSlashSuggestion]
     let agentCommands: [AgentCommand]
     let profileOptions: [ProfileSummary]
@@ -129,7 +128,6 @@ struct MessageComposerView: View {
     let onModelPickerOpen: () async -> Void
     let onLoadWorkspaceSuggestions: (String) async -> Void
     let onWorkspaceRegistryChanged: () async -> Void
-    let onLoadPersonalitySuggestions: () async -> Void
     let onLoadSkillSuggestions: () async -> Void
     let onSelectWorkspace: (String) async -> Void
     let onSelectProfile: (ProfileSummary) -> Void
@@ -289,7 +287,6 @@ struct MessageComposerView: View {
                             modelGroups: modelGroups,
                             workspaceRoots: workspaceRoots,
                             workspaceSuggestions: workspaceSuggestions,
-                            personalitySuggestions: personalitySuggestions,
                             skillSuggestions: skillSuggestions,
                             agentCommands: agentCommands,
                             selectedReasoningEffort: selectedReasoningEffort,
@@ -616,7 +613,7 @@ struct MessageComposerView: View {
         case .workspaces:
             await onLoadWorkspaceSuggestions(parsedSlashQuery.argQuery)
         case .personalities:
-            await onLoadPersonalitySuggestions()
+            break
         case .skills:
             await onLoadSkillSuggestions()
         case .models, .reasoningLevels, .goalActions, .none:

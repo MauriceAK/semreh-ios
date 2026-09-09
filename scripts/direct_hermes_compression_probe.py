@@ -20,6 +20,7 @@ from websockets.asyncio.client import connect
 
 from direct_hermes_capture import write_fixture
 import direct_hermes_probe as stock_probe
+from direct_hermes_goal_live_probe import _backend_guard
 from direct_hermes_development import (
     COMPRESSION_MODES,
     COMPRESSION_PORT,
@@ -43,6 +44,16 @@ PROFILE = "default"
 TURN_COUNT = 12
 RPC_TIMEOUT = 35.0
 COMPRESSION_TIMEOUT = 150.0
+CURRENT_COMPRESSION = {
+    "in_place": False, "protect_last_n": 2,
+    "min_tail_user_messages": 1, "target_ratio": 0.10,
+}
+CURRENT_COMPRESSION_AUX = {
+    "provider": "custom", "model": "semreh-fixture",
+    "base_url": "http://127.0.0.1:18792/v1", "api_key": "no-key-required",
+    "api_mode": "chat_completions", "timeout": 120,
+    "reasoning_effort": "none", "fallback_chain": [],
+}
 
 
 @dataclass(frozen=True)
@@ -102,6 +113,33 @@ def config_hash(mode: str) -> str:
     if path.is_symlink() or path.resolve() != path or not path.is_file():
         raise RuntimeError("unexpected disposable compression config path")
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def current_config_hash() -> str:
+    path = stock_probe.RUNTIME / "home/config.yaml"
+    if path.is_symlink() or path.resolve() != path or not path.is_file():
+        raise RuntimeError("unexpected current stock config path")
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def validate_current_stock(pid: int, expected_sha: str) -> None:
+    stock_probe.validate(); _backend_guard(pid)
+    stock_probe._validate_runtime_plugins(approval_secret_fixture=True)
+    stock_probe._validate_plugin_config(approval_secret_fixture=True)
+    stock_probe._validate_runtime_skill(approval_secret_fixture=True)
+    if (len(expected_sha) != 64 or any(char not in "0123456789abcdef" for char in expected_sha)
+            or current_config_hash() != expected_sha):
+        raise RuntimeError("current stock config SHA drifted")
+    config = json.loads((stock_probe.RUNTIME / "home/config.yaml").read_text())
+    auxiliary = config.get("auxiliary")
+    if config.get("compression") != CURRENT_COMPRESSION:
+        raise RuntimeError("current stock rotation config drifted")
+    if (not isinstance(auxiliary, dict) or auxiliary.get("transient_retries") != 0
+            or auxiliary.get("compression") != CURRENT_COMPRESSION_AUX):
+        raise RuntimeError("current stock compression route is not exact localhost/no-fallback")
+    if config.get("model") != {"provider": "custom", "default": "semreh-fixture",
+                                "base_url": "http://127.0.0.1:18792/v1"}:
+        raise RuntimeError("current stock main model is not the same localhost fixture")
 
 
 def prompt(index: int) -> str:
@@ -301,7 +339,9 @@ async def authenticated(credentials: dict, evidence: dict):
 
 async def normal_turn(probe: Probe, runtime_id: str, text: str) -> None:
     start = len(probe.frames)
-    await probe.rpc("prompt.submit", {"session_id": runtime_id, "text": text})
+    accepted = await probe.rpc("prompt.submit", {"session_id": runtime_id, "text": text})
+    if not isinstance(accepted, dict) or accepted.get("status") != "streaming":
+        raise AssertionError("fixture prompt was not accepted as streaming")
     terminal = await probe.wait_terminal(runtime_id, start)
     payload = (terminal.get("params") or {}).get("payload") or {}
     if payload.get("status") != "complete":
@@ -309,9 +349,15 @@ async def normal_turn(probe: Probe, runtime_id: str, text: str) -> None:
     await probe.wait_idle(runtime_id)
 
 
-async def exercise(mode: str, credentials: dict, evidence: dict) -> None:
-    tool_cwd = runtime(mode) / "tools"
+async def exercise(mode: str, credentials: dict, evidence: dict, *, runtime_root: Path | None = None) -> None:
+    tool_cwd = (runtime_root or runtime(mode)) / "tools"
     async with authenticated(credentials, evidence) as (client, ticket):
+        if runtime_root is not None:
+            active_response = await client.get("/api/profiles/active")
+            active_response.raise_for_status()
+            active = active_response.json()
+            if active.get("active") != PROFILE or active.get("current") != PROFILE:
+                raise RuntimeError("current gateway profile is not default")
         async with connect(f"{WS_BASE}/api/ws?ticket={ticket}", origin=ORIGIN, proxy=None) as ws:
             ready = _json_frame(await asyncio.wait_for(ws.recv(), RPC_TIMEOUT))
             if ready.get("params", {}).get("type") != "gateway.ready":
@@ -507,15 +553,32 @@ async def run(
     backend_sha: str | None = None,
     *,
     stock_backend: bool = False,
+    current_stock_https: bool = False,
+    expected_backend_pid: int | None = None,
+    expected_config_sha: str | None = None,
 ) -> None:
-    fixture = select_fixture(
-        mode,
-        stock_backend=stock_backend,
-        backend_sha=backend_sha,
-    )
-    validate_fixture(fixture, mode)
+    global BASE, WS_BASE, ORIGIN
+    if current_stock_https:
+        if mode != "rotate" or stock_backend or backend_sha is not None:
+            raise ValueError("current stock HTTPS mode requires rotate and no sibling backend selector")
+        if expected_backend_pid is None or expected_config_sha is None:
+            raise ValueError("current stock HTTPS mode requires backend PID and config SHA")
+        validate_current_stock(expected_backend_pid, expected_config_sha)
+        fixture = CompressionFixture(stock_probe.RUNTIME, STOCK_PIN, True)
+        BASE = stock_probe.HTTPS_ORIGIN
+        WS_BASE = BASE.replace("https://", "wss://")
+        ORIGIN = BASE
+    else:
+        if expected_backend_pid is not None or expected_config_sha is not None:
+            raise ValueError("PID/config SHA are only valid for current stock HTTPS mode")
+        fixture = select_fixture(
+            mode,
+            stock_backend=stock_backend,
+            backend_sha=backend_sha,
+        )
+        validate_fixture(fixture, mode)
     credentials = json.loads((fixture.runtime / "credentials.json").read_text(encoding="utf-8"))
-    before = config_hash(mode)
+    before = current_config_hash() if current_stock_https else config_hash(mode)
     evidence = {
         "sanitized": True, "backend_sha": fixture.backend_sha, "compression_mode": mode,
         "stock_backend": fixture.stock,
@@ -524,10 +587,11 @@ async def run(
         "fallback_note": "empty auxiliary chain retains the guarded localhost main-model safety fallback",
     }
     try:
-        await exercise(mode, credentials, evidence)
+        await exercise(mode, credentials, evidence,
+                       runtime_root=fixture.runtime if current_stock_https else None)
         if evidence["cleanup_errors"]:
             raise AssertionError("fixture cleanup failed")
-        if config_hash(mode) != before:
+        if (current_config_hash() if current_stock_https else config_hash(mode)) != before:
             raise AssertionError("compression fixture config changed")
         evidence["outcome"] = "passed"
     except Exception as error:
@@ -537,7 +601,9 @@ async def run(
             # Probe assertions are fixed local strings. Never persist provider,
             # HTTP, RPC, or other external exception text.
             evidence["assertion_detail"] = str(error)
-        evidence["global_config_unchanged"] = config_hash(mode) == before
+        evidence["global_config_unchanged"] = (
+            current_config_hash() if current_stock_https else config_hash(mode)
+        ) == before
         write_fixture(output, evidence)
         output.chmod(0o600)
         raise RuntimeError(f"Compression probe failed; evidence: {output}") from None
@@ -553,6 +619,9 @@ if __name__ == "__main__":
     backend = parser.add_mutually_exclusive_group(required=True)
     backend.add_argument("--backend-sha")
     backend.add_argument("--stock-backend", action="store_true")
+    backend.add_argument("--current-stock-https", action="store_true")
+    parser.add_argument("--expected-backend-pid", type=int)
+    parser.add_argument("--expected-config-sha")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
     asyncio.run(
@@ -561,5 +630,8 @@ if __name__ == "__main__":
             _output_path(args.output),
             args.backend_sha,
             stock_backend=args.stock_backend,
+            current_stock_https=args.current_stock_https,
+            expected_backend_pid=args.expected_backend_pid,
+            expected_config_sha=args.expected_config_sha,
         )
     )

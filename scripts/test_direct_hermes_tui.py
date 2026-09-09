@@ -45,7 +45,7 @@ class DirectHermesTuiTests(unittest.TestCase):
         self.assertEqual(environment['PYTHONPATH'], str(target.source))
         self.assertEqual(environment['HERMES_CWD'], str(target.runtime / 'tools'))
         self.assertEqual(environment['HERMES_TUI_RESUME'], 'durable.session-1')
-        self.assertNotIn('HOME', environment)
+        self.assertEqual(environment['HOME'], str(target.runtime / 'home' / 'home'))
         self.assertEqual(
             environment['HERMES_TUI_ACTIVE_SESSION_FILE'],
             str(target.active_session_file),
@@ -76,7 +76,7 @@ class DirectHermesTuiTests(unittest.TestCase):
         self.assertEqual(argv[-1], str(target.bundle))
         self.assertEqual(environment['HERMES_PYTHON_SRC_ROOT'], str(target.source))
         self.assertEqual(environment['HERMES_HOME'], str(target.runtime / 'home'))
-        self.assertNotIn('HOME', environment)
+        self.assertEqual(environment['HOME'], str(target.runtime / 'home' / 'home'))
 
 
 if __name__ == '__main__':

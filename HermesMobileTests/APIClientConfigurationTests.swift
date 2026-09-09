@@ -265,46 +265,6 @@ final class APIClientConfigurationTests: APIClientTestCase {
         XCTAssertFalse(transcriptMessages.contains { $0.message.id == "tool-results" })
     }
 
-    func testUpdateSessionModelBuildsExpectedBodyAndDecodesResponse() async throws {
-        let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/session/update")
-            XCTAssertEqual(request.httpMethod, "POST")
-
-            let data = try XCTUnwrap(apiTestBodyData(from: request))
-            let body = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-            XCTAssertEqual(body?["session_id"] as? String, "session-abc")
-            XCTAssertEqual(body?["workspace"] as? String, "/tmp/workspace")
-            XCTAssertEqual(body?["model"] as? String, "@openai:gpt-5.5")
-            XCTAssertEqual(body?["model_provider"] as? String, "openai")
-            XCTAssertNil(body?["sessionId"])
-            XCTAssertNil(body?["modelProvider"])
-
-            return apiTestJSONResponse("""
-            {
-              "session": {
-                "session_id": "session-abc",
-                "workspace": "/tmp/workspace",
-                "model": "@openai:gpt-5.5",
-                "model_provider": "openai",
-                "reasoning_effort": "high"
-              }
-            }
-            """, for: request)
-        }
-
-        let response = try await client.updateSession(
-            id: "session-abc",
-            workspace: "/tmp/workspace",
-            model: "@openai:gpt-5.5",
-            modelProvider: "openai"
-        )
-
-        XCTAssertEqual(response.session?.sessionId, "session-abc")
-        XCTAssertEqual(response.session?.model, "@openai:gpt-5.5")
-        XCTAssertEqual(response.session?.modelProvider, "openai")
-        XCTAssertEqual(response.session?.reasoningEffort, "high")
-    }
-
     func testReasoningStatusNormalizesSupportedEfforts() throws {
         let json = """
         {
@@ -415,32 +375,6 @@ final class APIClientConfigurationTests: APIClientTestCase {
 
         XCTAssertEqual(response.ok, true)
         XCTAssertNil(response.personality)
-    }
-
-    func testRenameSessionBuildsExpectedBodyAndDecodesResponse() async throws {
-        let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/session/rename")
-            XCTAssertEqual(request.httpMethod, "POST")
-
-            let data = try XCTUnwrap(apiTestBodyData(from: request))
-            let body = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-            XCTAssertEqual(body?["session_id"] as? String, "session-abc")
-            XCTAssertEqual(body?["title"] as? String, "New Title")
-
-            return apiTestJSONResponse("""
-            {
-              "session": {
-                "session_id": "session-abc",
-                "title": "New Title"
-              }
-            }
-            """, for: request)
-        }
-
-        let response = try await client.renameSession(id: "session-abc", title: "New Title")
-
-        XCTAssertEqual(response.session?.sessionId, "session-abc")
-        XCTAssertEqual(response.session?.title, "New Title")
     }
 
     func testProfilesResponseToleratesAbsentSingleProfileMode() throws {

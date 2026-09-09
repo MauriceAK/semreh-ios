@@ -97,16 +97,6 @@ extension APIClient {
         try await directWorkspaceFile(sessionID: sessionID, profile: profile,
             path: path, maximumBytes: maximumBytes).data
     }
-    func directoryList(sessionID: String, path: String? = nil) async throws -> DirectoryListResponse {
-        try await send(
-            endpoint: .directoryList(sessionID: sessionID, path: path),
-            method: "GET"
-        )
-    }
-
-    func file(sessionID: String, path: String) async throws -> FileResponse {
-        try await send(endpoint: .file(sessionID: sessionID, path: path), method: "GET")
-    }
 
     func rawFileData(sessionID: String, path: String) async throws -> Data {
         try await sendData(endpoint: .rawFile(sessionID: sessionID, path: path), method: "GET")

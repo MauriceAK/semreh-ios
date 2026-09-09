@@ -29,6 +29,12 @@ BLOCKING_FIXTURE_SKILL_DEPLOYED = RUNTIME / 'home' / 'skills' / 'semreh-fixture-
 BLOCKING_FIXTURE_TOOLSET = 'semreh_blocking_fixture'
 BLOCKING_FIXTURE_PLUGIN_ID = 'semreh-blocking-fixture'
 BLOCKING_FIXTURE_TOOLS_CONFIG = {'tool_search': {'enabled': 'off'}}
+COMPRESSION_FIXTURE_CONFIG = {
+    'in_place': False,
+    'protect_last_n': 2,
+    'min_tail_user_messages': 1,
+    'target_ratio': 0.10,
+}
 AUXILIARY_FIXTURE_CONFIG = {
     'background_review': {'enabled': False},
     'transient_retries': 0,
@@ -40,6 +46,16 @@ AUXILIARY_FIXTURE_CONFIG = {
         'api_mode': 'chat_completions',
         'timeout': 5,
         'max_tokens': 128,
+        'fallback_chain': [],
+    },
+    'compression': {
+        'provider': 'custom',
+        'model': 'semreh-fixture',
+        'base_url': 'http://127.0.0.1:18792/v1',
+        'api_key': 'no-key-required',
+        'api_mode': 'chat_completions',
+        'timeout': 120,
+        'reasoning_effort': 'none',
         'fallback_chain': [],
     },
 }
@@ -90,6 +106,7 @@ def initialize():
         'toolsets': [], 'platform_toolsets': {'cli': [], 'tui': []},
         'terminal': {'backend': 'local', 'cwd': str(RUNTIME / 'tools'), 'home_mode': 'profile'},
         'memory': {'memory_enabled': False, 'user_profile_enabled': False, 'provider': ''},
+        'compression': COMPRESSION_FIXTURE_CONFIG,
         'auxiliary': AUXILIARY_FIXTURE_CONFIG,
         'curator': {'enabled': False},
         'mcp_servers': {},
@@ -126,6 +143,7 @@ def validate():
         'model': {'provider': 'custom', 'default': 'semreh-fixture', 'base_url': 'http://127.0.0.1:18792/v1'},
         'terminal': {'backend': 'local', 'cwd': str(RUNTIME / 'tools'), 'home_mode': 'profile'},
         'memory': {'memory_enabled': False, 'user_profile_enabled': False, 'provider': ''},
+        'compression': COMPRESSION_FIXTURE_CONFIG,
         'auxiliary': AUXILIARY_FIXTURE_CONFIG,
         'curator': {'enabled': False}, 'mcp_servers': {}, 'platforms': {},
         'kanban': {'dispatch_in_gateway': False, 'review_dispatch': False},

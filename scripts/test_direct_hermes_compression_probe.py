@@ -2,9 +2,13 @@
 """False-positive guards for the bounded compression probe."""
 
 import asyncio
+import hashlib
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -143,6 +147,35 @@ class CompressionProbeTests(unittest.TestCase):
     def test_runtime_mode_is_explicit(self):
         with self.assertRaises(RuntimeError):
             probe.runtime("ordinary")
+
+    def test_current_stock_config_requires_exact_local_rotation_route(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve()
+            (root / "home").mkdir()
+            config = {"compression": dict(probe.CURRENT_COMPRESSION),
+                      "model": {"provider": "custom", "default": "semreh-fixture",
+                                "base_url": "http://127.0.0.1:18792/v1"},
+                      "auxiliary": {"transient_retries": 0,
+                                    "compression": dict(probe.CURRENT_COMPRESSION_AUX)}}
+            path = root / "home/config.yaml"; path.write_text(json.dumps(config))
+            sha = hashlib.sha256(path.read_bytes()).hexdigest()
+            with (patch.object(probe.stock_probe, "RUNTIME", root),
+                  patch.object(probe.stock_probe, "validate"),
+                  patch.object(probe.stock_probe, "_validate_runtime_plugins"),
+                  patch.object(probe.stock_probe, "_validate_plugin_config"),
+                  patch.object(probe.stock_probe, "_validate_runtime_skill"),
+                  patch.object(probe, "_backend_guard")):
+                probe.validate_current_stock(123, sha)
+                config["auxiliary"]["compression"]["base_url"] = "https://example.invalid/v1"
+                path.write_text(json.dumps(config))
+                bad_sha = hashlib.sha256(path.read_bytes()).hexdigest()
+                with self.assertRaises(RuntimeError):
+                    probe.validate_current_stock(123, bad_sha)
+
+    def test_current_stock_mode_requires_rotate_pid_and_sha(self):
+        with self.assertRaises(ValueError):
+            asyncio.run(probe.run("in-place", Path("unused"), current_stock_https=True,
+                                  expected_backend_pid=1, expected_config_sha="0" * 64))
 
 
 if __name__ == "__main__":

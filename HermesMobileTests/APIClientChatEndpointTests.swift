@@ -1,5 +1,4 @@
 import XCTest
-import AVFoundation
 import ImageIO
 import SwiftData
 import UIKit
@@ -106,11 +105,9 @@ final class APIClientChatEndpointTests: APIClientTestCase {
             throw URLError(.badURL)
         }
         let viewModel = try ChatAttachmentPreviewViewModel(
-            session: SessionSummary(),
             server: XCTUnwrap(URL(string: "https://example.test")),
             item: item,
-            apiClient: client,
-            usesDirectGateway: true
+            apiClient: client
         )
 
         await viewModel.load()
@@ -144,11 +141,9 @@ final class APIClientChatEndpointTests: APIClientTestCase {
             throw URLError(.badURL)
         }
         let viewModel = try ChatAttachmentPreviewViewModel(
-            session: SessionSummary(),
             server: XCTUnwrap(URL(string: "https://example.test")),
             item: item,
-            apiClient: client,
-            usesDirectGateway: true
+            apiClient: client
         )
 
         await viewModel.load()
@@ -178,11 +173,9 @@ final class APIClientChatEndpointTests: APIClientTestCase {
             throw URLError(.badURL)
         }
         let viewModel = try ChatAttachmentPreviewViewModel(
-            session: SessionSummary(),
             server: XCTUnwrap(URL(string: "https://example.test")),
             item: item,
-            apiClient: client,
-            usesDirectGateway: true
+            apiClient: client
         )
 
         await viewModel.load()
@@ -208,11 +201,9 @@ final class APIClientChatEndpointTests: APIClientTestCase {
             throw URLError(.badURL)
         }
         let viewModel = try ChatAttachmentPreviewViewModel(
-            session: SessionSummary(),
             server: XCTUnwrap(URL(string: "https://example.test")),
             item: item,
-            apiClient: client,
-            usesDirectGateway: true
+            apiClient: client
         )
 
         await viewModel.load()
@@ -244,11 +235,9 @@ final class APIClientChatEndpointTests: APIClientTestCase {
             throw URLError(.badURL)
         }
         let viewModel = try ChatAttachmentPreviewViewModel(
-            session: SessionSummary(),
             server: XCTUnwrap(URL(string: "https://example.test")),
             item: item,
-            apiClient: client,
-            usesDirectGateway: true
+            apiClient: client
         )
 
         await viewModel.load()
@@ -274,11 +263,9 @@ final class APIClientChatEndpointTests: APIClientTestCase {
             throw URLError(.badURL)
         }
         let viewModel = try ChatAttachmentPreviewViewModel(
-            session: SessionSummary(),
             server: XCTUnwrap(URL(string: "https://example.test")),
             item: item,
-            apiClient: client,
-            usesDirectGateway: true
+            apiClient: client
         )
 
         let task = Task { @MainActor in
@@ -324,11 +311,9 @@ final class APIClientChatEndpointTests: APIClientTestCase {
             localData: nil
         )
         let viewModel = try ChatAttachmentPreviewViewModel(
-            session: try makeFilePreviewSession(),
             server: XCTUnwrap(URL(string: "https://example.test")),
             item: item,
-            apiClient: client,
-            usesDirectGateway: true
+            apiClient: client
         )
 
         await viewModel.load()
@@ -366,11 +351,9 @@ final class APIClientChatEndpointTests: APIClientTestCase {
             localData: nil
         )
         let viewModel = try ChatAttachmentPreviewViewModel(
-            session: try makeFilePreviewSession(),
             server: XCTUnwrap(URL(string: "https://example.test")),
             item: item,
-            apiClient: client,
-            usesDirectGateway: true
+            apiClient: client
         )
 
         await viewModel.load()
@@ -405,11 +388,9 @@ final class APIClientChatEndpointTests: APIClientTestCase {
             localData: nil
         )
         let viewModel = try ChatAttachmentPreviewViewModel(
-            session: try makeFilePreviewSession(),
             server: XCTUnwrap(URL(string: "https://example.test")),
             item: item,
-            apiClient: client,
-            usesDirectGateway: true
+            apiClient: client
         )
 
         await viewModel.load()
@@ -443,11 +424,9 @@ final class APIClientChatEndpointTests: APIClientTestCase {
             localData: nil
         )
         let viewModel = try ChatAttachmentPreviewViewModel(
-            session: try makeFilePreviewSession(),
             server: XCTUnwrap(URL(string: "https://example.test")),
             item: item,
-            apiClient: client,
-            usesDirectGateway: true
+            apiClient: client
         )
 
         await viewModel.load()
@@ -476,11 +455,9 @@ final class APIClientChatEndpointTests: APIClientTestCase {
             localData: nil
         )
         let viewModel = try ChatAttachmentPreviewViewModel(
-            session: try makeFilePreviewSession(),
             server: XCTUnwrap(URL(string: "https://example.test")),
             item: item,
-            apiClient: client,
-            usesDirectGateway: true
+            apiClient: client
         )
 
         await viewModel.load()
@@ -508,11 +485,9 @@ final class APIClientChatEndpointTests: APIClientTestCase {
             localData: nil
         )
         let viewModel = try ChatAttachmentPreviewViewModel(
-            session: try makeFilePreviewSession(),
             server: XCTUnwrap(URL(string: "https://example.test")),
             item: item,
-            apiClient: client,
-            usesDirectGateway: true
+            apiClient: client
         )
 
         await viewModel.load()
@@ -521,6 +496,42 @@ final class APIClientChatEndpointTests: APIClientTestCase {
             return XCTFail("Known unsupported direct binaries should remain unavailable.")
         }
         XCTAssertTrue(message.localizedCaseInsensitiveContains("file type"))
+    }
+
+    @MainActor
+    func testChatAttachmentPreviewLoadsDirectAudioFromManagedFile() async throws {
+        let audio = Data([0x00, 0x01, 0x02, 0x03])
+        let dataURL = "data:audio/mp4;base64,\(audio.base64EncodedString())"
+        let client = makeClient { request in
+            XCTAssertEqual(request.url?.path, "/api/files/read")
+            return apiTestJSONResponse(
+                #"{"data_url":"\#(dataURL)","mime_type":"audio/mp4","name":"note.m4a","path":"/home/fixture/attachments/note.m4a","size":\#(audio.count)}"#,
+                for: request
+            )
+        }
+        let item = ChatAttachmentPreviewItem(
+            message: MessageAttachment(
+                name: "note.m4a",
+                path: "/home/fixture/attachments/note.m4a",
+                mime: "audio/mp4",
+                size: audio.count,
+                isImage: false
+            ),
+            localData: nil
+        )
+        let viewModel = try ChatAttachmentPreviewViewModel(
+            server: XCTUnwrap(URL(string: "https://example.test")),
+            item: item,
+            apiClient: client
+        )
+
+        await viewModel.load()
+
+        guard case let .audio(previewData) = viewModel.preview else {
+            return XCTFail("Direct audio attachments should retain the managed-file bytes.")
+        }
+        XCTAssertEqual(previewData, audio)
+        XCTAssertNil(viewModel.errorMessage)
     }
 
     @MainActor
@@ -546,11 +557,9 @@ final class APIClientChatEndpointTests: APIClientTestCase {
             localData: nil
         )
         let viewModel = try ChatAttachmentPreviewViewModel(
-            session: try makeFilePreviewSession(),
             server: XCTUnwrap(URL(string: "https://example.test")),
             item: item,
-            apiClient: client,
-            usesDirectGateway: true
+            apiClient: client
         )
 
         await viewModel.load()
@@ -588,11 +597,9 @@ final class APIClientChatEndpointTests: APIClientTestCase {
             localData: nil
         )
         let viewModel = try ChatAttachmentPreviewViewModel(
-            session: try makeFilePreviewSession(),
             server: XCTUnwrap(URL(string: "https://example.test")),
             item: item,
-            apiClient: client,
-            usesDirectGateway: true
+            apiClient: client
         )
 
         await viewModel.load()
@@ -626,90 +633,6 @@ final class APIClientChatEndpointTests: APIClientTestCase {
 
         XCTAssertEqual(item.documentKind, .markdown)
         XCTAssertFalse(item.isKnownUnsupportedBinary)
-    }
-
-    @MainActor
-    func testChatAttachmentPreviewLoadsPDFBytesFromRawEndpoint() async throws {
-        let pdfData = UIGraphicsPDFRenderer(bounds: CGRect(x: 0, y: 0, width: 320, height: 480)).pdfData { context in
-            context.beginPage()
-            "Attachment PDF".draw(at: CGPoint(x: 24, y: 24), withAttributes: nil)
-        }
-        let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/file/raw")
-            let response = HTTPURLResponse(
-                url: try XCTUnwrap(request.url),
-                statusCode: 200,
-                httpVersion: nil,
-                headerFields: ["Content-Type": "application/pdf"]
-            )
-            return (try XCTUnwrap(response), pdfData)
-        }
-        let item = ChatAttachmentPreviewItem(
-            pending: PendingAttachment(
-                name: "report.pdf",
-                path: "/tmp/workspace/report.pdf",
-                mime: "application/pdf",
-                size: pdfData.count,
-                isImage: false,
-                thumbnailData: nil
-            )
-        )
-        let viewModel = try ChatAttachmentPreviewViewModel(
-            session: makeFilePreviewSession(),
-            server: XCTUnwrap(URL(string: "https://example.test")),
-            item: item,
-            apiClient: client
-        )
-
-        await viewModel.load()
-
-        guard case let .pdf(previewDocument) = viewModel.preview else {
-            return XCTFail("PDF attachments should load into the native PDF preview state.")
-        }
-        XCTAssertEqual(previewDocument.document.pageCount, 1)
-        XCTAssertNil(viewModel.errorMessage)
-    }
-
-    @MainActor
-    func testChatAttachmentPreviewLoadsUploadedMarkdownFromInboxCapableRawEndpoint() async throws {
-        let markdown = "# Notes\n\nRendered markdown."
-        let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/file/raw")
-            let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
-            let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value) })
-            XCTAssertEqual(query["path"], "notes.md")
-            let response = HTTPURLResponse(
-                url: try XCTUnwrap(request.url),
-                statusCode: 200,
-                httpVersion: nil,
-                headerFields: ["Content-Type": "text/markdown; charset=utf-8"]
-            )
-            return (try XCTUnwrap(response), Data(markdown.utf8))
-        }
-        let item = ChatAttachmentPreviewItem(
-            pending: PendingAttachment(
-                name: "notes.md",
-                path: "notes.md",
-                mime: "text/markdown",
-                size: markdown.utf8.count,
-                isImage: false,
-                thumbnailData: nil
-            )
-        )
-        let viewModel = try ChatAttachmentPreviewViewModel(
-            session: makeFilePreviewSession(),
-            server: XCTUnwrap(URL(string: "https://example.test")),
-            item: item,
-            apiClient: client
-        )
-
-        await viewModel.load()
-
-        guard case let .markdown(file) = viewModel.preview else {
-            return XCTFail("Markdown attachments should load into the rendered document state.")
-        }
-        XCTAssertEqual(file.content, "# Notes\n\nRendered markdown.")
-        XCTAssertNil(viewModel.errorMessage)
     }
 
 }

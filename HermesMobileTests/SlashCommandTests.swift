@@ -38,6 +38,11 @@ final class SlashCommandTests: XCTestCase {
         XCTAssertEqual(command?.handler, .clientSide(.help))
     }
 
+    func testDeferredPersonalityCommandIsNotDiscoverable() {
+        XCTAssertNil(SlashCommandCatalog.command(named: "personality"))
+        XCTAssertFalse(SlashCommandCatalog.matching("personality").contains { $0.name == "personality" })
+    }
+
     func testBranchCommandIsMobileSafeAdvancedCommand() {
         let command = SlashCommandCatalog.command(named: "branch")
         XCTAssertEqual(command?.name, "branch")

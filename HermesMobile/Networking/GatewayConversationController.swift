@@ -51,6 +51,35 @@ enum DirectGoalError: LocalizedError, Equatable, Sendable {
     }
 }
 
+enum DirectSkillDispatchError: LocalizedError, Equatable, Sendable {
+    case runningProfileUnavailable
+    case runningProfileMismatch(selected: String, current: String)
+    case alreadyDispatching
+    case reservedCommand
+    case unsupportedResult
+    case invalidResponse
+    case outcomeUnknown
+
+    var errorDescription: String? {
+        switch self {
+        case .runningProfileUnavailable:
+            "Hermes did not report the profile used by this running gateway. The skill was not invoked."
+        case .runningProfileMismatch:
+            "Skills can be invoked only when this chat uses the running gateway profile."
+        case .alreadyDispatching:
+            "Wait for the current skill invocation to finish."
+        case .reservedCommand:
+            "That slash name belongs to a built-in Hermes command, not a skill."
+        case .unsupportedResult:
+            "Hermes resolved that skill name to an unsupported alias."
+        case .invalidResponse:
+            "Hermes returned an invalid skill response."
+        case .outcomeUnknown:
+            "Skill invocation outcome unknown. It was not retried."
+        }
+    }
+}
+
 /// One conversation on the active server's shared socket. The view model owns
 /// rendering/cache; this owner owns identity and RPC delivery, never a socket.
 @MainActor
@@ -77,6 +106,11 @@ final class GatewayConversationController {
         /// The dispatcher has only prepared this prompt. The caller must send
         /// it once through this same controller's normal prompt path.
         case send(notice: String?, message: String, display: String?)
+    }
+    enum SkillDispatchResult: Equatable, Sendable {
+        case invocation(name: String, message: String, display: String)
+        case bundle(message: String, notice: String?, display: String)
+        case output(String)
     }
     static func goalControlIsAllowedWhileRunning(_ arg: String) -> Bool {
         ["status", "pause", "clear"].contains(
@@ -172,6 +206,7 @@ final class GatewayConversationController {
     /// A draft session.create may have reached Hermes without returning its
     /// binding. Goal preparation never repeats that create in this controller.
     private var goalPreparationOutcomeUnknown = false
+    private var skillDispatchInFlight = false
     private var bindingEpoch = 0
     private var turnEpoch = 0
     private var durableRowConfirmed: Bool
@@ -2468,6 +2503,125 @@ final class GatewayConversationController {
         default:
             throw DirectGoalError.outcomeUnknown
         }
+    }
+
+    /// Resolves one generated skill shortcut using the stock gateway. Expanded
+    /// skill content stays opaque/model-facing; callers render only `display`.
+    func dispatchSkill(
+        name rawName: String,
+        arg: String,
+        profileContext: DirectHermesActiveProfile
+    ) async throws -> SkillDispatchResult {
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !name.isEmpty else { throw DirectSkillDispatchError.invalidResponse }
+        let current = profileContext.current?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !current.isEmpty else { throw DirectSkillDispatchError.runningProfileUnavailable }
+        guard current == profile else {
+            throw DirectSkillDispatchError.runningProfileMismatch(selected: profile, current: current)
+        }
+        guard !skillDispatchInFlight else { throw DirectSkillDispatchError.alreadyDispatching }
+        guard !disposed, !branchInFlight, runState == .idle, !promptInFlight,
+              !hasAmbiguousPromptDelivery, let capturedBinding = binding else {
+            throw DirectSessionError.invalidBinding
+        }
+        skillDispatchInFlight = true
+        defer { skillDispatchInFlight = false }
+        let capturedLifecycle = lifecycle
+        let capturedBindingEpoch = bindingEpoch
+        let capturedTurn = turnEpoch
+        let capturedOrigin = runtime.origin
+        let capturedConnection = runtime.connectionGeneration
+
+        func requireCurrentScope() throws {
+            guard !disposed, !branchInFlight, runState == .idle, !promptInFlight,
+                  !hasAmbiguousPromptDelivery, lifecycle == capturedLifecycle, bindingEpoch == capturedBindingEpoch,
+                  turnEpoch == capturedTurn, binding == capturedBinding,
+                  runtime.origin == capturedOrigin,
+                  runtime.connectionGeneration == capturedConnection,
+                  runtime.state == .ready, profile == current, skillDispatchInFlight else {
+                throw DirectSessionError.staleOperation
+            }
+        }
+
+        do {
+            let resolved = try await runtime.request("command.resolve", parameters: {
+                try requireCurrentScope()
+                return ["name": .string(name)]
+            })
+            try requireCurrentScope()
+            if resolved?.gatewayFields["canonical"]?.gatewayString != nil {
+                throw DirectSkillDispatchError.reservedCommand
+            }
+            throw DirectSkillDispatchError.invalidResponse
+        } catch let error as HermesGatewayError {
+            guard case .server(let code, _, _, let method, _, _) = error,
+                  code == 4011, method == "command.resolve" else { throw error }
+            try requireCurrentScope()
+        }
+
+        var dispatched = false
+        let response: JSONValue?
+        do {
+            response = try await runtime.request("command.dispatch", parameters: {
+                try requireCurrentScope()
+                dispatched = true
+                return [
+                    "session_id": .string(capturedBinding.runtimeID),
+                    "name": .string(name),
+                    "arg": .string(arg)
+                ]
+            })
+            do { try requireCurrentScope() }
+            catch { throw DirectSkillDispatchError.outcomeUnknown }
+        } catch {
+            guard dispatched else { throw error }
+            if case HermesGatewayError.server(_, _, _, let method, _, _) = error,
+               method == "command.dispatch" {
+                throw error
+            }
+            throw DirectSkillDispatchError.outcomeUnknown
+        }
+
+        guard let fields = response?.gatewayFields,
+              let type = fields["type"]?.gatewayString else {
+            throw DirectSkillDispatchError.outcomeUnknown
+        }
+        switch type {
+        case "skill":
+            guard let skillName = nonEmptyGatewayString(fields["name"]),
+                  let message = nonEmptyGatewayString(fields["message"]),
+                  let display = nonEmptyGatewayString(fields["display"]) else {
+                throw DirectSkillDispatchError.outcomeUnknown
+            }
+            return .invocation(name: skillName, message: message, display: display)
+        case "send":
+            guard let message = nonEmptyGatewayString(fields["message"]),
+                  let display = nonEmptyGatewayString(fields["display"]) else {
+                throw DirectSkillDispatchError.outcomeUnknown
+            }
+            return .bundle(message: message, notice: rawGatewayString(fields["notice"]), display: display)
+        case "exec", "plugin":
+            guard let output = rawGatewayString(fields["output"]) else {
+                throw DirectSkillDispatchError.outcomeUnknown
+            }
+            return .output(output)
+        case "alias":
+            throw DirectSkillDispatchError.unsupportedResult
+        default:
+            throw DirectSkillDispatchError.outcomeUnknown
+        }
+    }
+
+    private func nonEmptyGatewayString(_ value: JSONValue?) -> String? {
+        guard let result = rawGatewayString(value),
+              !result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return result
+    }
+
+    private func rawGatewayString(_ value: JSONValue?) -> String? {
+        guard case .string(let result) = value else { return nil }
+        return result
     }
 
     /// Starts one stock side-question task without changing canonical history.

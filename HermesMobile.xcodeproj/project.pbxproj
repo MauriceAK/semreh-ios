@@ -8,7 +8,11 @@
 
 /* Begin PBXBuildFile section */
 		D2C820000000000000000005 /* DirectGoalUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2C820000000000000000006 /* DirectGoalUITests.swift */; };
+		D2C821000000000000000005 /* DirectSkillUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2C821000000000000000006 /* DirectSkillUITests.swift */; };
 		D2C820000000000000000001 /* GatewayConversationGoalTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2C820000000000000000002 /* GatewayConversationGoalTests.swift */; };
+		D2C821000000000000000001 /* GatewayConversationSkillTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2C821000000000000000002 /* GatewayConversationSkillTests.swift */; };
+		D2C822000000000000000001 /* GatewayColdMarkerIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2C822000000000000000002 /* GatewayColdMarkerIntegrationTests.swift */; };
+		D2C821000000000000000003 /* ChatViewModelSkillTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2C821000000000000000004 /* ChatViewModelSkillTests.swift */; };
 		D2C820000000000000000003 /* ChatViewModelGoalTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2C820000000000000000004 /* ChatViewModelGoalTests.swift */; };
 		D3A290000000000000000001 /* DirectHermesManagedFileTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3A290000000000000000011 /* DirectHermesManagedFileTests.swift */; };
 		D3A280000000000000000001 /* DirectHermesMessageAttachmentProjection.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3A280000000000000000011 /* DirectHermesMessageAttachmentProjection.swift */; };
@@ -80,8 +84,6 @@
 		1A2B3C4D5E6F7000000000A0 /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F7000000000B0 /* KeychainStore.swift */; };
 		1A2B3C4D5E6F7000000000A1 /* AuthManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F7000000000B1 /* AuthManager.swift */; };
 		1A2B3C4D5E6F7000000000A2 /* APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F7000000000B2 /* APIClient.swift */; };
-		C04000000000000000000001 /* APIClient+Sessions.swift in Sources */ = {isa = PBXBuildFile; fileRef = C04000000000000000000011 /* APIClient+Sessions.swift */; };
-		C04000000000000000000003 /* APIClient+Chat.swift in Sources */ = {isa = PBXBuildFile; fileRef = C04000000000000000000013 /* APIClient+Chat.swift */; };
 		C04000000000000000000004 /* APIClient+Workspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = C04000000000000000000014 /* APIClient+Workspace.swift */; };
 		C04000000000000000000005 /* APIClient+ServerPanels.swift in Sources */ = {isa = PBXBuildFile; fileRef = C04000000000000000000015 /* APIClient+ServerPanels.swift */; };
 		C04000000000000000000006 /* APIClient+Cron.swift in Sources */ = {isa = PBXBuildFile; fileRef = C04000000000000000000016 /* APIClient+Cron.swift */; };
@@ -101,7 +103,6 @@
 		1A2B3C4D5E6F7000000000AB /* Session.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F7000000000BB /* Session.swift */; };
 		1A2B3C4D5E6F7000000000AC /* APIClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F7000000000BC /* APIClientTests.swift */; };
 		C0FF000000000000000000C1 /* CustomHeaderInjectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0FF000000000000000000C2 /* CustomHeaderInjectionTests.swift */; };
-		C03910000000000000000001 /* APIClientSessionListTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C03900000000000000000001 /* APIClientSessionListTests.swift */; };
 		C03910000000000000000002 /* APIClientInsightsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C03900000000000000000002 /* APIClientInsightsTests.swift */; };
 		C03910000000000000000017 /* APIClientUpdatesCheckTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C03900000000000000000017 /* APIClientUpdatesCheckTests.swift */; };
 		C03910000000000000000018 /* APIClientUpdatesApplyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C03900000000000000000018 /* APIClientUpdatesApplyTests.swift */; };
@@ -420,7 +421,11 @@
 
 /* Begin PBXFileReference section */
 		D2C820000000000000000006 /* DirectGoalUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectGoalUITests.swift; sourceTree = "<group>"; };
+		D2C821000000000000000006 /* DirectSkillUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectSkillUITests.swift; sourceTree = "<group>"; };
 		D2C820000000000000000002 /* GatewayConversationGoalTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayConversationGoalTests.swift; sourceTree = "<group>"; };
+		D2C821000000000000000002 /* GatewayConversationSkillTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayConversationSkillTests.swift; sourceTree = "<group>"; };
+		D2C822000000000000000002 /* GatewayColdMarkerIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayColdMarkerIntegrationTests.swift; sourceTree = "<group>"; };
+		D2C821000000000000000004 /* ChatViewModelSkillTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatViewModelSkillTests.swift; sourceTree = "<group>"; };
 		D2C820000000000000000004 /* ChatViewModelGoalTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatViewModelGoalTests.swift; sourceTree = "<group>"; };
 		D3A290000000000000000011 /* DirectHermesManagedFileTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectHermesManagedFileTests.swift; sourceTree = "<group>"; };
 		D3A280000000000000000011 /* DirectHermesMessageAttachmentProjection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectHermesMessageAttachmentProjection.swift; sourceTree = "<group>"; };
@@ -484,8 +489,6 @@
 		1A2B3C4D5E6F7000000000B0 /* KeychainStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainStore.swift; sourceTree = "<group>"; };
 		1A2B3C4D5E6F7000000000B1 /* AuthManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthManager.swift; sourceTree = "<group>"; };
 		1A2B3C4D5E6F7000000000B2 /* APIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClient.swift; sourceTree = "<group>"; };
-		C04000000000000000000011 /* APIClient+Sessions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "APIClient+Sessions.swift"; sourceTree = "<group>"; };
-		C04000000000000000000013 /* APIClient+Chat.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "APIClient+Chat.swift"; sourceTree = "<group>"; };
 		C04000000000000000000014 /* APIClient+Workspace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "APIClient+Workspace.swift"; sourceTree = "<group>"; };
 		C04000000000000000000015 /* APIClient+ServerPanels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "APIClient+ServerPanels.swift"; sourceTree = "<group>"; };
 		C04000000000000000000016 /* APIClient+Cron.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "APIClient+Cron.swift"; sourceTree = "<group>"; };
@@ -505,7 +508,6 @@
 		1A2B3C4D5E6F7000000000BB /* Session.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Session.swift; sourceTree = "<group>"; };
 		1A2B3C4D5E6F7000000000BC /* APIClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClientTests.swift; sourceTree = "<group>"; };
 		C0FF000000000000000000C2 /* CustomHeaderInjectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CustomHeaderInjectionTests.swift; sourceTree = "<group>"; };
-		C03900000000000000000001 /* APIClientSessionListTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClientSessionListTests.swift; sourceTree = "<group>"; };
 		C03900000000000000000002 /* APIClientInsightsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClientInsightsTests.swift; sourceTree = "<group>"; };
 		C03900000000000000000017 /* APIClientUpdatesCheckTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClientUpdatesCheckTests.swift; sourceTree = "<group>"; };
 		C03900000000000000000018 /* APIClientUpdatesApplyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClientUpdatesApplyTests.swift; sourceTree = "<group>"; };
@@ -900,6 +902,9 @@
 				D2B710000000000000000002 /* GatewayConversationBTWTests.swift */,
 				D2B710000000000000000004 /* GatewayConversationBackgroundTests.swift */,
 				D2C820000000000000000002 /* GatewayConversationGoalTests.swift */,
+				D2C821000000000000000002 /* GatewayConversationSkillTests.swift */,
+				D2C822000000000000000002 /* GatewayColdMarkerIntegrationTests.swift */,
+				D2C821000000000000000004 /* ChatViewModelSkillTests.swift */,
 				D2C820000000000000000004 /* ChatViewModelGoalTests.swift */,
 				A5C9E273D4184A71B51C9302 /* GatewayBlockingPromptModelTests.swift */,
 				D3A270000000000000000012 /* DirectGatewayAttachmentTests.swift */,
@@ -918,7 +923,6 @@
 				D1EC70000000000000000013 /* DirectHermesAuthTests.swift */,
 				B5A1000000000000000000A1 /* ServerRegistryTests.swift */,
 				C0FF000000000000000000C2 /* CustomHeaderInjectionTests.swift */,
-				C03900000000000000000001 /* APIClientSessionListTests.swift */,
 				C03900000000000000000002 /* APIClientInsightsTests.swift */,
 				C03900000000000000000017 /* APIClientUpdatesCheckTests.swift */,
 				C03900000000000000000018 /* APIClientUpdatesApplyTests.swift */,
@@ -1020,6 +1024,7 @@
 			children = (
 				F10000000000000000000002 /* LongChatScrollUITests.swift */,
 				D2C820000000000000000006 /* DirectGoalUITests.swift */,
+				D2C821000000000000000006 /* DirectSkillUITests.swift */,
 			);
 			path = HermesMobileUITests;
 			sourceTree = "<group>";
@@ -1051,8 +1056,6 @@
 				D3A280000000000000000011 /* DirectHermesMessageAttachmentProjection.swift */,
 				D3A270000000000000000017 /* DirectGatewayAttachmentReceipt.swift */,
 				D1EC70000000000000000011 /* APIClient+DirectHermes.swift */,
-				C04000000000000000000011 /* APIClient+Sessions.swift */,
-				C04000000000000000000013 /* APIClient+Chat.swift */,
 				C04000000000000000000014 /* APIClient+Workspace.swift */,
 				C03120000000000000F002 /* APIClient+Git.swift */,
 				C04000000000000000000015 /* APIClient+ServerPanels.swift */,
@@ -1687,8 +1690,6 @@
 				D3A270000000000000000007 /* DirectGatewayAttachmentReceipt.swift in Sources */,
 				D3A270000000000000000005 /* ComposerAttachmentDisplayItem.swift in Sources */,
 				D1EC70000000000000000001 /* APIClient+DirectHermes.swift in Sources */,
-				C04000000000000000000001 /* APIClient+Sessions.swift in Sources */,
-				C04000000000000000000003 /* APIClient+Chat.swift in Sources */,
 				C04000000000000000000004 /* APIClient+Workspace.swift in Sources */,
 				C03120000000000000B001 /* GitWorkspace.swift in Sources */,
 				C03120000000000000B002 /* APIClient+Git.swift in Sources */,
@@ -1898,6 +1899,9 @@
 				D2B710000000000000000001 /* GatewayConversationBTWTests.swift in Sources */,
 				D2B710000000000000000003 /* GatewayConversationBackgroundTests.swift in Sources */,
 				D2C820000000000000000001 /* GatewayConversationGoalTests.swift in Sources */,
+				D2C821000000000000000001 /* GatewayConversationSkillTests.swift in Sources */,
+				D2C822000000000000000001 /* GatewayColdMarkerIntegrationTests.swift in Sources */,
+				D2C821000000000000000003 /* ChatViewModelSkillTests.swift in Sources */,
 				D2C820000000000000000003 /* ChatViewModelGoalTests.swift in Sources */,
 				A5C9E273D4184A71B51C9301 /* GatewayBlockingPromptModelTests.swift in Sources */,
 				D3A270000000000000000002 /* DirectGatewayAttachmentTests.swift in Sources */,
@@ -1916,7 +1920,6 @@
 				D1EC70000000000000000003 /* DirectHermesAuthTests.swift in Sources */,
 				B5A1000000000000000000A0 /* ServerRegistryTests.swift in Sources */,
 				C0FF000000000000000000C1 /* CustomHeaderInjectionTests.swift in Sources */,
-				C03910000000000000000001 /* APIClientSessionListTests.swift in Sources */,
 				C03910000000000000000002 /* APIClientInsightsTests.swift in Sources */,
 				C03910000000000000000017 /* APIClientUpdatesCheckTests.swift in Sources */,
 				C03910000000000000000018 /* APIClientUpdatesApplyTests.swift in Sources */,
@@ -2038,6 +2041,7 @@
 			files = (
 				F10000000000000000000001 /* LongChatScrollUITests.swift in Sources */,
 				D2C820000000000000000005 /* DirectGoalUITests.swift in Sources */,
+				D2C821000000000000000005 /* DirectSkillUITests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

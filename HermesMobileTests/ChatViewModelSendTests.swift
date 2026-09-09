@@ -882,16 +882,18 @@ final class ChatViewModelSendTests: XCTestCase {
     }
 
     @MainActor
-    func testSkillShortcutDirectRefusalPrecedesUnknownCommandFallthrough() async throws {
+    func testUnknownDirectSkillShortcutUsesScopedCatalogThenFallsThrough() async throws {
         let transport = SendRetirementDirectTransport()
         let server = URL(string: "https://example.test")!
         let runtime = try HermesServerRuntime(origin: server) { sink in
             transport.installSink(sink)
             return transport
         }
-        MockURLProtocol.requestHandler = { _ in
-            XCTFail("Unsupported direct shortcut must not use a WebUI lookup or send")
-            throw URLError(.badURL)
+        MockURLProtocol.requestHandler = { request in
+            XCTAssertEqual(request.url?.path, "/api/skills")
+            XCTAssertEqual(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?
+                .queryItems?.first { $0.name == "profile" }?.value, "work")
+            return apiTestJSONResponse("[]", for: request)
         }
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [MockURLProtocol.self]
@@ -899,7 +901,7 @@ final class ChatViewModelSendTests: XCTestCase {
         let viewModel = ChatViewModel(session: SessionSummary(profile: "work"), server: server,
             client: client, gatewayRuntimeProvider: { _ in runtime })
         let result = await SlashCommandExecutor.execute(text: "/spotify check songs", viewModel: viewModel)
-        XCTAssertEqual(result, .unsupported(friendlyMessage: "Skills are not available in direct Hermes mode yet."))
+        XCTAssertEqual(result, .sendAsMessage)
         XCTAssertTrue(viewModel.messages.isEmpty)
         XCTAssertNil(viewModel.activeStreamID)
         XCTAssertTrue(transport.methods().isEmpty)
@@ -1665,24 +1667,31 @@ final class ChatViewModelSendTests: XCTestCase {
     }
 
     @MainActor
-    func testSkillShortcutWithArgsDirectRefusalDoesNotStartChat() async throws {
+    func testDirectSkillShortcutWithoutArgsReturnsScopedCatalogDetailWithoutStartingChat() async throws {
         let transport = SendRetirementDirectTransport()
         let server = URL(string: "https://example.test")!
         let runtime = try HermesServerRuntime(origin: server) { sink in
             transport.installSink(sink)
             return transport
         }
-        MockURLProtocol.requestHandler = { _ in
-            XCTFail("Unsupported direct shortcut must not use a WebUI lookup or send")
-            throw URLError(.badURL)
+        MockURLProtocol.requestHandler = { request in
+            XCTAssertEqual(request.url?.path, "/api/skills")
+            XCTAssertEqual(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?
+                .queryItems?.first { $0.name == "profile" }?.value, "work")
+            return apiTestJSONResponse(
+                #"[{"name":"Spotify","category":"media","description":"Control playback.","enabled":true}]"#,
+                for: request
+            )
         }
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [MockURLProtocol.self]
         let client = APIClient(baseURL: server, session: URLSession(configuration: configuration))
         let viewModel = ChatViewModel(session: SessionSummary(profile: "work"), server: server,
             client: client, gatewayRuntimeProvider: { _ in runtime })
-        let result = await viewModel.executeSkillShortcutCommand(name: "spotify", args: "check songs")
-        XCTAssertEqual(result, .unsupported(friendlyMessage: "Skills are not available in direct Hermes mode yet."))
+        let result = await viewModel.executeSkillShortcutCommand(name: "spotify", args: "")
+        guard case .executed(let message) = result else { return XCTFail("Expected local detail") }
+        XCTAssertTrue(message?.contains("### `/spotify`") == true)
+        XCTAssertTrue(message?.contains("Control playback.") == true)
         XCTAssertTrue(viewModel.messages.isEmpty)
         XCTAssertNil(viewModel.activeStreamID)
         XCTAssertTrue(transport.methods().isEmpty)
@@ -1832,69 +1841,18 @@ final class ChatViewModelSendTests: XCTestCase {
     }
 
     @MainActor
-    func testForkFromMessageUsesKeepCountThroughMessageAndHandlesMissingForkID() async throws {
-        var branchBodies: [[String: Any]] = []
+    func testForkFromMessageRemainsUnavailableWithoutLegacyNetworkFallback() async throws {
         let viewModel = try makeViewModel { request in
-            switch request.url?.path {
-            case "/api/session":
-                let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
-                let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
-                if query["session_id"] == "fork-123" {
-                    return apiTestJSONResponse("""
-                    {
-                      "session": {
-                        "session_id": "fork-123",
-                        "title": "Forked thread"
-                      }
-                    }
-                    """, for: request)
-                }
-
-                return apiTestJSONResponse("""
-                {
-                  "session": {
-                    "session_id": "session-abc",
-                    "_messages_offset": 4,
-                    "messages": [
-                      {"role": "user", "content": "Question", "timestamp": 1, "message_id": "u-4"},
-                      {"role": "assistant", "content": "Answer", "timestamp": 2, "message_id": "a-5"}
-                    ]
-                  }
-                }
-                """, for: request)
-            case "/api/session/branch":
-                branchBodies.append(try XCTUnwrap(apiTestJSONBody(from: request)))
-                if branchBodies.count == 1 {
-                    return apiTestJSONResponse("""
-                    {
-                      "session_id": "fork-123",
-                      "parent_session_id": "session-abc"
-                    }
-                    """, for: request)
-                }
-
-                return apiTestJSONResponse("""
-                {
-                  "error": "Could not fork"
-                }
-                """, for: request)
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
-            }
+            XCTFail("Message-level fork must not issue a legacy request: \(request.url?.path ?? "nil")")
+            throw URLError(.badURL)
         }
 
         viewModel.seedTranscriptForTesting([ChatMessage(role: "user", content: "Question", timestamp: 1, messageId: "u-4"), ChatMessage(role: "assistant", content: "Answer", timestamp: 2, messageId: "a-5")], messagesOffset: 4)
         let context = try XCTUnwrap(viewModel.actionContext(for: viewModel.messages[1], visibleIndex: 1))
         let forked = await viewModel.forkFromMessage(context)
-        let missingID = await viewModel.forkFromMessage(context)
 
-        XCTAssertEqual(branchBodies.count, 2)
-        XCTAssertEqual(branchBodies[0]["session_id"] as? String, "session-abc")
-        XCTAssertEqual(branchBodies[0]["keep_count"] as? Int, 6)
-        XCTAssertEqual(forked?.sessionId, "fork-123")
-        XCTAssertNil(missingID)
-        XCTAssertEqual(viewModel.messageActionErrorMessage, "Could not fork")
+        XCTAssertNil(forked)
+        XCTAssertEqual(viewModel.messageActionErrorMessage, "Forking is not available in direct Hermes mode yet.")
     }
 
     @MainActor

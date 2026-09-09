@@ -580,7 +580,6 @@ struct ChatView: View {
             workspaceSuggestions: viewModel.workspaceSuggestions,
             workspaceManagementServer: server,
             workspaceManagementProfile: viewModel.workspaceOrganizerProfile,
-            personalitySuggestions: viewModel.personalitySuggestions,
             skillSuggestions: viewModel.skillSlashSuggestions,
             agentCommands: viewModel.agentCommands,
             profileOptions: viewModel.profileOptions,
@@ -633,9 +632,6 @@ struct ChatView: View {
             },
             onWorkspaceRegistryChanged: {
                 await viewModel.refreshWorkspaceRoots()
-            },
-            onLoadPersonalitySuggestions: {
-                await viewModel.loadPersonalitySuggestions()
             },
             onLoadSkillSuggestions: {
                 await viewModel.loadSkillSlashSuggestions()
@@ -749,20 +745,6 @@ struct ChatView: View {
 
     private var transcriptMediaCacheNamespace: String {
         "\(server.absoluteString)|\(transcriptMediaSessionID ?? "local:\(session.id)")"
-    }
-
-    private var attachmentPreviewSession: SessionSummary {
-        guard viewModel.usesDirectGateway,
-              let sessionID = viewModel.attachmentSessionID?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !sessionID.isEmpty else {
-            return session
-        }
-        return SessionSummary(
-            sessionId: sessionID,
-            title: session.title,
-            workspace: session.workspace,
-            profile: session.profile
-        )
     }
 
     private var chatBaseView: some View {
@@ -1043,10 +1025,8 @@ struct ChatView: View {
             }
             .sheet(item: $attachmentPreviewItem) { item in
                 ChatAttachmentPreviewView(
-                    session: attachmentPreviewSession,
                     server: server,
                     item: item,
-                    usesDirectGateway: viewModel.usesDirectGateway,
                     onAPIError: onAPIError
                 )
             }

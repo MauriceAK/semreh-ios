@@ -5,13 +5,24 @@ details/evidence: `slice3-tasks.md`, `slice3-verification.md`, `slice4-tasks.md`
 This is the current dispatch checklist, not a new architecture or acceptance waiver.
 Preserve completed Luna work. Root owns integration, notes and native execution.
 
-Current checkpoint: `628225f` Kanban/Insights, local and unpushed.
-Signed Kanban unit-build-v5 and UI-build-v1 passed. Focused-v1:134/1/0,
-adapter-v2:11/0/0 and state-v3:68/0/0 after fixture-only corrections. Production UI-v1:1/0/0
-normal login → Control → Kanban → Insights; both screenshots independently
-inspected. Full-v2:2087/0/14; strict signing and ordinary Simulator launch97529
-passed. Targeted audit-v1:9221 files/zero flags, six exported test consoles.
-No physical acceptance. Goal integration and dormant endpoint cleanup follow.
+Current committed checkpoint: `e5cb6d0` direct goals/Cron cleanup, local and unpushed.
+Signed goal build-v7, focused20/0/0, full-v2:2096/0/14 and production goal-status
+UI1/0/0 passed; strict signing and ordinary Simulator launch34982 passed.
+Targeted audit9267files/0flags/9exported consoles. Goal continuation live passed.
+Current uncommitted batch: skill invocation deferral with browsing retained,
+personality/linked-file disposition and dormant endpoint cleanup. Signed build-v2,
+focused131/0/0 and helper70/0 passed. Full-v1 runner failed before tests; same-build
+full-v2 executed2072/3/14. Three stale legacy error-type expectations corrected;
+signed build-v3, focused auth17/0/0 and full-v3:2075/0/14 now passed.
+Production skill browsing UI1/0/0 passed; screenshot inspected. Real stock compression
+rotation/continuation passed (see lineage row). No physical acceptance.
+TUI-created saved chat readback UI1/0/0 passed through production login/navigation;
+literal stock TUI sent SEMREH_TUI_CROSS_CLIENT_1, returned fixture ACK, exited0,
+and Semreh displayed both saved rows from20260908_212121_02962f. This is saved
+history interoperability, not measured sync latency or shared live streaming.
+Strict signing and ordinary Simulator launch25530 passed. Targeted artifact
+audit-v1:104files/0flags/6exported consoles (selected logs/diagnostics/screenshots
+plus mandatory migration docs/runtime logs; unselected/opaque/OCR excluded).
 Sol Low workers, root integration/review. The
 reconciled `secondary-feature-status.md` owns the per-feature current inventory.
 Do not use the historical checkpoints below as the next dispatch instruction.
@@ -305,8 +316,8 @@ contents excluded; no unrelated historical evidence rescan claimed.
   buffering replaces legacy HTTP/BTW SSE. Single active local-only card, explicit
   unknown outcomes and no automatic ambiguous retry. Removed chat SSE implementation,
   stream/BTW API wrappers and obsolete tests; retained direct presentation DTOs and
-  all pacing tests. Kanban alone retains the separate SSE dependency pending its
-  explicit stock-plugin disposition; no silent migration/removal claim.
+  all pacing tests. Subsequent `628225f` migrated Kanban to authenticated WS and
+  removed the remaining SSE package/license dependency.
   Evidence stem `slice4-btw-retirement`: signed build-v3/UI-build-v1; focused-v1
   101/4/0 caught a missing controller open before BTW dispatch plus a setup-read
   test assumption. Fixed; focused-v2 stalled before cases, exact runner21468
@@ -470,6 +481,12 @@ contents excluded; no unrelated historical evidence rescan claimed.
   recovery without losing delivery warnings. Root scopes the remaining core gap.
   Check canonical IDs, scoped markers and conflict handling; real compression
   required before claiming continuation acceptance.
+  September8 current-stock HTTPS rotation proof passed on pin29112bef:24->22rows,
+  14574->14251tokens, exact parent/child metadata, ancestor-to-tip pages,
+  exactly-once continuation through two cold resumes. Evidence:
+  `slice4-compression-current-stock-v1.json`; no cleanup errors/config changes.
+  Explicit localhost main+auxiliary route only. Native identity/delivery-marker
+  integration and physical acceptance remain separate; do not close on RPC alone.
 - [x] **Continuity-sidecar retirement:** remove callers, old auth/config hooks and
   implementation while retaining direct credentials/accounts.
   Check direct login/restore/logout and absence of executable sidecar fallback.
@@ -477,10 +494,13 @@ contents excluded; no unrelated historical evidence rescan claimed.
   integrated focused152/0/0 and successor full suites passed. Source search again
   finds no OfficialHermesContinuity/continuitySidecar implementation or callers.
   Old account metadata/keys preserved. Broader WebUI cutover remains separate.
-- [ ] **Legacy chat/SSE retirement:** remove replaced chat/event/prompt branches,
-  obsolete DTOs/tests/fixtures and unused package references after caller removal.
-  Check direct send/recovery/blocking prompts, build, and repository caller search.
-- [ ] **Older history during an active response:** implementation and deterministic
+- [x] **Legacy chat/SSE transport retirement:** main chat coordinator/status polling,
+  BTW/background SSE and remaining Kanban SSE package removed in verified commits
+  `114609f`, `42c3a48`, `2592ee2`, `628225f`.
+- [ ] **Remaining legacy secondary branches/helpers:** retire specific session,
+  skill/personality and attachment/media fallback callers. Current dead-endpoint
+  cleanup is not proof that every executable WebUI branch has been removed.
+- [x] **Older history during an active response — implementation:** deterministic
   native tests now pass; actual-device acceptance remains. Older-page application
   preserves the live response/tools/reasoning and seeks an exact boundary anchor
   across at most eight overlapping reads. Missing/unproven anchors leave history
@@ -493,15 +513,27 @@ contents excluded; no unrelated historical evidence rescan claimed.
   Check exact stock request/response and visible behavior; do not invent routes.
   Skills list/toggle/SKILL.md and active-profile UI propagation authored. Linked
   files explicitly unavailable pending parity decision; no legacy detail request.
-  Skills screen migration does not include chat skill-shortcut execution:
-  executeSkillShortcutCommand/searchSkills still explicitly refuse direct mode.
-  That pre-existing gap is a separate retained requirement, not accepted removal.
-  Source-backed invocation contract is being mapped; literal slash text alone
-  must not be called verified skill activation.
-- [ ] **Session conveniences:** remaining move and deletion
-  disposition; search, rename, pin, archive and counts already have verified work.
-  Sidebar duplication now direct/native-tested in the latest checkpoint above.
-  Check exact profile/identity, rollback and no ambiguous automatic retry.
+  Scoped discovery and invocation-refusal tests passed in focused131/0/0.
+  Dormant same-running-profile dispatch code is retained but has no UI caller;
+  it is not shipped invocation support. Production browsing UI1/0/0 passed;
+  screenshot shows the explicit invocation deferral and retained skill description.
+  Blocking finding: same-socket live dispatch-v1 timed out. Stock command.dispatch
+  is inline (not server._LONG_HANDLERS), so its required-secret wait blocks the
+  socket reader from consuming secret.respond. Do not ship/count the new invocation
+  path as verified. Two-socket diagnostic remains unrun and would not validate
+  current app architecture. Resolved: temporarily defer invocation, retain scoped
+  browsing/search/detail, no second app socket/private patch. User approved continued
+  work after this documented reasonable decision. No new upstream PR authorized.
+  Personality deferred/hidden to avoid silently changing session-only semantics
+  to a durable profile default plus hidden history pivot. Linked-file UI deferred
+  and removed; first-party SKILL.md reading retained. These are documented bounded
+  migration dispositions, not an implementation of unsupported parity.
+- [x] **Session conveniences — implementation:** direct search/rename/pin/archive,
+  duplication, local organizer move and guarded deletion have recorded native
+  verification. See secondary-feature-status for exact live evidence/limitations.
+- [ ] **Consolidated device acceptance:** older-history interaction, session
+  conveniences and cache/open/send/scroll feel on the physical iPhone; existing
+  Simulator/protocol evidence does not close this gate.
 - [ ] **Feature disposition inventory:** every remaining visible action migrated
   or explicitly approved for removal/deferral. Unsupported items listed below.
 
@@ -535,6 +567,10 @@ contents excluded; no unrelated historical evidence rescan claimed.
   attached-session refusal and exact targeting, without implicitly closing chats.
 - [ ] Corrupt/unresolvable delivery-marker recovery UX; no silent/global reset.
 - [ ] Generic text attachment ingestion limitation; staging is not model receipt.
+  Media provenance correction: stock `/api/media` is an authenticated image-only
+  route with a JSON data_url envelope; preserve the existing image adapter.
+  Reconcile only local non-image audio/video/PDF/Markdown references currently
+  routed there (stock415), using supported managed-file contracts where possible.
 - [ ] Mobile orphan grace / host deployment persistence and physical boundaries.
 
 ## Integration and acceptance
@@ -680,8 +716,14 @@ Newly confirmed recovery gap: stock REST returns durable rows, not live partial
 assistant text. `session.resume.inflight` carries that text without an atomic
 event watermark; blindly appending later deltas can duplicate it. Completed
 durable interim assistant rows must not absorb subsequent stream segments.
-Investigate proven warm cursor replay separately; cold prefix/corrections recovery
-remains unaccepted. No duplicated snapshot UI or unsafe last-row merge approved.
+September8 delegated decision: after session.resume reports a running turn,
+conservatively show canonical saved history plus a reconnect notice and suppress
+unwatermarked content deltas until terminal canonical refresh. Keep tool/status/
+blocking controls active; locally submitted uninterrupted turns retain streaming.
+No proven warm cursor exists in the current client, so do not infer one from a
+cached prefix. This trades partial reconnect updates for accurate saved messages,
+consistent with the user's no-token-by-token cross-client requirement. Implementation
+and focused verification pending; no duplicated snapshot/unsafe last-row merge.
 Skill activation also remains open: raw skill-content REST omits runtime setup,
 configuration, supporting files and optional shell preprocessing. command.dispatch
 is not profile-bound and resolves executable quick commands/plugins before skills.

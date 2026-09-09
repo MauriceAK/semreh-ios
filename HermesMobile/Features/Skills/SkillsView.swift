@@ -288,9 +288,6 @@ struct SkillDetailView: View {
     @State private var detail: SkillDetailResponse?
     @State private var isLoading = false
     @State private var errorMessage: String?
-    @State private var selectedFile: String?
-    @State private var fileContent: String?
-    @State private var isLoadingFile = false
 
     var body: some View {
         content
@@ -312,16 +309,6 @@ struct SkillDetailView: View {
             }
             .task {
                 await loadDetail()
-            }
-            .sheet(item: $selectedFile) { fileName in
-                NavigationStack {
-                    SkillLinkedFileView(
-                        fileName: fileName,
-                        content: fileContent,
-                        isLoading: isLoadingFile
-                    )
-                }
-                .adaptivePagePresentation()
             }
     }
 
@@ -347,10 +334,6 @@ struct SkillDetailView: View {
                             .padding(.horizontal)
                     }
 
-                    Text("Linked skill files are not available from this Hermes server.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal)
                 }
                 .padding(.vertical)
             }
@@ -378,104 +361,4 @@ struct SkillDetailView: View {
         }
     }
 
-    private func loadLinkedFile(named fileName: String) async {
-        guard skill.name != nil else { return }
-        isLoadingFile = true
-        selectedFile = fileName
-        defer { isLoadingFile = false }
-
-        // Retained presentation for future parity; stock has no linked-file route.
-        fileContent = String(localized: "Linked skill files are not available from this Hermes server.")
-    }
-}
-
-private struct SkillLinkedFilesSection: View {
-    let fileNames: [String]
-    let onSelect: (String) -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Linked Files")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 20)
-
-            VStack(spacing: 0) {
-                ForEach(Array(fileNames.enumerated()), id: \.element) { index, fileName in
-                    Button {
-                        onSelect(fileName)
-                    } label: {
-                        HStack(spacing: 12) {
-                            Image(systemName: "doc.text")
-                                .font(.subheadline.weight(.medium))
-                                .foregroundStyle(.primary)
-                                .frame(width: 34, height: 34)
-                                .background(Color(.tertiarySystemFill).opacity(0.7), in: Circle())
-
-                            Text(fileName)
-                                .font(.subheadline)
-                                .foregroundStyle(.primary)
-                                .lineLimit(1)
-
-                            Spacer(minLength: 8)
-
-                            Image(systemName: "chevron.forward")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.tertiary)
-                        }
-                        .padding(.vertical, 9)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-
-                    if index < fileNames.count - 1 {
-                        Divider()
-                            .padding(.leading, 54)
-                    }
-                }
-            }
-            .padding(.horizontal, 20)
-        }
-    }
-}
-
-struct SkillLinkedFileView: View {
-    let fileName: String
-    let content: String?
-    let isLoading: Bool
-
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        Group {
-            if isLoading {
-                ProgressView("Loading file...")
-            } else if let content, !content.isEmpty {
-                ScrollView {
-                    MarkdownRenderer(content: content)
-                        .padding()
-                }
-            } else {
-                ContentUnavailableView {
-                    Label("No Content", systemImage: "doc.text")
-                } description: {
-                    Text("This file appears to be empty.")
-                }
-            }
-        }
-        .background { SemrehBackdrop().ignoresSafeArea() }
-        .navigationTitle(fileName)
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .cancellationAction) {
-                Button("Close") {
-                    dismiss()
-                }
-            }
-        }
-    }
-}
-
-extension String: @retroactive Identifiable {
-    public var id: String { self }
 }

@@ -9,74 +9,6 @@ import UniformTypeIdentifiers
 final class ContractReadinessTests: XCTestCase {
     func testEndpointContractMatrixMatchesPinnedUpstreamPaths() throws {
         let contracts: [EndpointContract] = [
-            .init(name: "sessions", method: "GET", endpoint: .sessions(), path: "/api/sessions"),
-            .init(
-                name: "sessions including archived",
-                method: "GET",
-                endpoint: .sessions(includeArchived: true, archivedLimit: 3),
-                path: "/api/sessions",
-                query: ["include_archived": "1", "archived_limit": "3"]
-            ),
-            .init(
-                name: "sessions including archived without limit",
-                method: "GET",
-                endpoint: .sessions(includeArchived: true),
-                path: "/api/sessions",
-                query: ["include_archived": "1"]
-            ),
-            .init(
-                name: "session search",
-                method: "GET",
-                endpoint: .sessionsSearch(query: "billing plan", content: true, depth: 5),
-                path: "/api/sessions/search",
-                query: ["q": "billing plan", "content": "1", "depth": "5"]
-            ),
-            .init(
-                name: "session detail",
-                method: "GET",
-                endpoint: .session(id: "session-123", includeMessages: true, messageLimit: 50, messageBefore: 100),
-                path: "/api/session",
-                query: ["session_id": "session-123", "messages": "1", "msg_limit": "50", "msg_before": "100"]
-            ),
-            .init(
-                name: "session detail explicit expand_renderable compatibility flag",
-                method: "GET",
-                endpoint: .session(id: "session-123", includeMessages: true, messageLimit: 50, messageBefore: nil, expandRenderable: true),
-                path: "/api/session",
-                query: ["session_id": "session-123", "messages": "1", "msg_limit": "50", "expand_renderable": "1"]
-            ),
-            .init(name: "new session", method: "POST", endpoint: .newSession, path: "/api/session/new"),
-            .init(name: "rename session", method: "POST", endpoint: .renameSession, path: "/api/session/rename"),
-            .init(name: "pin session", method: "POST", endpoint: .pinSession, path: "/api/session/pin"),
-            .init(name: "archive session", method: "POST", endpoint: .archiveSession, path: "/api/session/archive"),
-            .init(name: "branch session", method: "POST", endpoint: .branchSession, path: "/api/session/branch"),
-            .init(name: "compress session", method: "POST", endpoint: .compressSession, path: "/api/session/compress"),
-            .init(name: "undo session", method: "POST", endpoint: .undoSession, path: "/api/session/undo"),
-            .init(name: "retry session", method: "POST", endpoint: .retrySession, path: "/api/session/retry"),
-            .init(name: "truncate session", method: "POST", endpoint: .truncateSession, path: "/api/session/truncate"),
-            .init(name: "update session", method: "POST", endpoint: .updateSession, path: "/api/session/update"),
-            .init(name: "goal", method: "POST", endpoint: .submitGoal, path: "/api/goal"),
-            .init(
-                name: "directory list root",
-                method: "GET",
-                endpoint: .directoryList(sessionID: "session-123", path: nil),
-                path: "/api/list",
-                query: ["session_id": "session-123"]
-            ),
-            .init(
-                name: "directory list nested",
-                method: "GET",
-                endpoint: .directoryList(sessionID: "session-123", path: "Sources/App.swift"),
-                path: "/api/list",
-                query: ["session_id": "session-123", "path": "Sources/App.swift"]
-            ),
-            .init(
-                name: "file",
-                method: "GET",
-                endpoint: .file(sessionID: "session-123", path: "Sources/App.swift"),
-                path: "/api/file",
-                query: ["session_id": "session-123", "path": "Sources/App.swift"]
-            ),
             .init(
                 name: "raw file",
                 method: "GET",
@@ -93,8 +25,6 @@ final class ContractReadinessTests: XCTestCase {
             ),
             .init(name: "personalities", method: "GET", endpoint: .personalities, path: "/api/personalities"),
             .init(name: "set personality", method: "POST", endpoint: .setPersonality, path: "/api/personality/set"),
-            .init(name: "memory", method: "GET", endpoint: .memory, path: "/api/memory"),
-            .init(name: "memory write", method: "POST", endpoint: .memoryWrite, path: "/api/memory/write"),
             .init(name: "skills", method: "GET", endpoint: .skills, path: "/api/skills"),
             .init(
                 name: "skill content",
@@ -123,30 +53,6 @@ final class ContractReadinessTests: XCTestCase {
             XCTAssertEqual(queryDictionary(from: components), contract.query, contract.name)
             XCTAssertTrue(["GET", "POST"].contains(contract.method), contract.name)
         }
-    }
-
-    func testJSONPostRequestsOmitBrowserCSRFHeaders() async throws {
-        let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/session/pin")
-            XCTAssertEqual(request.httpMethod, "POST")
-            XCTAssertNil(request.value(forHTTPHeaderField: "Origin"))
-            XCTAssertNil(request.value(forHTTPHeaderField: "Referer"))
-            XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
-
-            return apiTestJSONResponse("""
-            {
-              "ok": true,
-              "session": {
-                "session_id": "abc123",
-                "pinned": true
-              }
-            }
-            """, for: request)
-        }
-
-        let response = try await client.pinSession(id: "abc123", pinned: true)
-
-        XCTAssertEqual(response.ok, true)
     }
 
     func testMultipartPostRequestsOmitBrowserCSRFHeaders() async throws {

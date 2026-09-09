@@ -155,10 +155,8 @@ def _environment_for_target(
     # ``~`` lookups cannot accidentally treat HERMES_HOME itself as a user's
     # home directory.  Keep Hermes state rooted at the profile home while all
     # generic XDG/user-file lookups stay in the disposable nested directory.
-    # The old development launcher supplied HOME to its child; stock mode
-    # deliberately leaves HOME unset so it cannot be mistaken for an
-    # approved stock-home assignment. Hermes' Python and TUI paths use the
-    # explicit HERMES_HOME below (with XDG paths covering generic state).
+    # Both modes explicitly pin HOME here. Stock wrappers may consult
+    # Path.home(), so leaving it absent would permit a personal-home fallback.
     home = hermes_home / 'home'
     tools = runtime / 'tools'
 
@@ -167,6 +165,7 @@ def _environment_for_target(
     # HERMES_TUI_SIDECAR_URL from the invoking shell.
     environment = {
         'PATH': f'{development.baseline.PYTHON.parent}:/opt/homebrew/bin:/usr/bin:/bin',
+        'HOME': str(home),
         'HERMES_HOME': str(hermes_home),
         'TMPDIR': str(runtime / 'tmp'),
         'XDG_CACHE_HOME': str(runtime / 'cache'),
@@ -187,11 +186,6 @@ def _environment_for_target(
         'LANG': 'C.UTF-8',
         'LC_ALL': 'C.UTF-8',
     }
-    if not target.stock:
-        # Preserve the pre-existing development fixture behavior. Do not add
-        # this assignment for stock mode; HERMES_HOME remains authoritative
-        # for the stock gateway/TUI state.
-        environment['HOME'] = str(home)
     if resume_stored_id is not None:
         environment['HERMES_TUI_RESUME'] = resume_stored_id
     return environment

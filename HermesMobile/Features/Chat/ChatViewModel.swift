@@ -606,8 +606,8 @@ final class ChatViewModel {
     private(set) var agentCommands: [AgentCommand] = []
     private(set) var workspaceRoots: [WorkspaceRoot] = []
     private(set) var workspaceSuggestions: [String] = []
-    private(set) var personalitySuggestions: [String] = ["none"]
     private(set) var skillSlashSuggestions: [SkillSlashSuggestion] = []
+    private var isSubmittingDirectSkill = false
     private(set) var profileOptions: [ProfileSummary] = []
     private(set) var isSingleProfileMode = false
     private(set) var selectedProfileName: String?
@@ -888,8 +888,6 @@ final class ChatViewModel {
     private var hasCompletedCurrentResponse: Bool { directResponseComplete }
     private var isStreamConnectionSuspended: Bool { usesDirectGateway && directRuntime?.state == .disconnected }
     var isActiveStreamConnectionSuspended: Bool { isStreamConnectionSuspended }
-    private var hasLoadedPersonalitySuggestions = false
-    private var isLoadingPersonalitySuggestions = false
     private var hasLoadedSkillSlashSuggestions = false
     private var isLoadingSkillSlashSuggestions = false
     private var queuedSlashMessages: [QueuedSlashMessage] = []
@@ -909,7 +907,6 @@ final class ChatViewModel {
     /// Background result cards, like BTW cards, are history-independent local
     /// presentation owned by one exact canonical conversation and profile.
     private var backgroundLocalRowScopes: [String: (sessionID: String, profile: String)] = [:]
-    private var isRefreshingCompletedResponseTitle = false
     private var isActiveStreamReplayConnection: Bool { false }
     private var activeStreamReplayMatchedPrefixLength = 0
     private var activeStreamReplayMatchedInterimLength = 0
@@ -1670,6 +1667,7 @@ final class ChatViewModel {
         cacheCurrentMessages(sessionID: page.sessionID, modelContext: directModelContext)
     }
 
+
     private func sendDirectMessage(
         _ draft: String,
         modelContext: ModelContext?,
@@ -1777,7 +1775,12 @@ final class ChatViewModel {
             reasoningAnchorMessageID = nil
             toolCallAnchorMessageID = nil
             directResponseComplete = false
-            messages.append(ChatMessage(role: "user", content: text, timestamp: Date().timeIntervalSince1970, messageId: localID))
+            messages.append(ChatMessage(
+                role: "user",
+                content: text,
+                timestamp: Date().timeIntervalSince1970,
+                messageId: localID
+            ))
             let stagedAttachments = directPendingAttachments.filter { attachmentIDs.contains($0.id) }
             guard stagedAttachments.count == attachmentIDs.count else { throw DirectSessionError.staleOperation }
             try await controller.submit(text, stagedAttachments: stagedAttachments, create: creation)
@@ -2482,38 +2485,23 @@ final class ChatViewModel {
         }
     }
 
-    func loadPersonalitySuggestions() async {
-        guard !usesDirectGateway else { return }
-        guard !hasLoadedPersonalitySuggestions else { return }
-        guard !isLoadingPersonalitySuggestions else { return }
-
-        isLoadingPersonalitySuggestions = true
-        defer { isLoadingPersonalitySuggestions = false }
-
-        do {
-            personalitySuggestions = (try await client.personalities()).slashAutocompleteNames
-            hasLoadedPersonalitySuggestions = true
-        } catch {
-            lastError = error
-            composerConfigurationErrorMessage = error.localizedDescription
-            if personalitySuggestions.isEmpty {
-                personalitySuggestions = ["none"]
-            }
-        }
-    }
-
     func loadSkillSlashSuggestions() async {
-        guard !usesDirectGateway else { return }
-        guard !hasLoadedSkillSlashSuggestions else { return }
+        guard usesDirectGateway || !hasLoadedSkillSlashSuggestions else { return }
         guard !isLoadingSkillSlashSuggestions else { return }
 
         isLoadingSkillSlashSuggestions = true
         defer { isLoadingSkillSlashSuggestions = false }
 
         do {
-            let response = try await client.skills()
-            skillSlashSuggestions = SlashSkillFormatter.suggestions(from: response.skills ?? [])
-            hasLoadedSkillSlashSuggestions = true
+            if usesDirectGateway {
+                let controller = try await ensureDirectConversation()
+                _ = try await directSkillSuggestions(controller: controller, profile: controller.profile,
+                    origin: controller.sharedRuntime.origin)
+            } else {
+                let response = try await client.skills()
+                skillSlashSuggestions = SlashSkillFormatter.suggestions(from: response.skills ?? [])
+                hasLoadedSkillSlashSuggestions = true
+            }
         } catch {
             lastError = error
         }
@@ -4077,37 +4065,8 @@ final class ChatViewModel {
     }
 
     private func renameSessionFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
-        guard !usesDirectGateway else {
-            return .unsupported(friendlyMessage: String(localized: "/title is not available in direct Hermes mode yet."))
-        }
-
-        let title = args.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !title.isEmpty else {
-            return .executed(message: String(localized: "Current title: **\(displayTitle)**\n\nUse `/title <text>` to rename this session."))
-        }
-
-        guard let sessionID else {
-            return .unsupported(friendlyMessage: String(localized: "The server did not provide a session ID."))
-        }
-
-        guard activeStreamID == nil else {
-            return .unsupported(friendlyMessage: String(localized: "Wait for the current response to finish before renaming the session."))
-        }
-
-        lastError = nil
-        sendErrorMessage = nil
-
-        do {
-            let response = try await client.renameSession(id: sessionID, title: title)
-            if let error = response.error {
-                return .unsupported(friendlyMessage: error)
-            }
-            displayTitle = Self.displayTitle(from: response.session?.title ?? title)
-            return .executed(message: String(localized: "Title set to **\(displayTitle)**."))
-        } catch {
-            lastError = error
-            return .unsupported(friendlyMessage: error.localizedDescription)
-        }
+        _ = args
+        return .unsupported(friendlyMessage: String(localized: "/title is not available in direct Hermes mode yet."))
     }
 
     private func setPersonalityFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
@@ -4179,18 +4138,35 @@ final class ChatViewModel {
     }
 
     private func searchSkillsFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
-        guard !usesDirectGateway else {
-            return .unsupported(friendlyMessage: String(localized: "Skills are not available in direct Hermes mode yet."))
+        if usesDirectGateway {
+            guard !isSubmittingDirectSkill else {
+                return .unsupported(friendlyMessage: "Wait for the current skill invocation to finish.")
+            }
+            isSubmittingDirectSkill = true
+            defer { isSubmittingDirectSkill = false }
+            do {
+                let controller = try await ensureDirectConversation()
+                let profile = controller.profile
+                let origin = controller.sharedRuntime.origin
+                let suggestions = try await directSkillSuggestions(
+                    controller: controller, profile: profile, origin: origin
+                )
+                if let invocation = SlashSkillFormatter.invocation(from: args, suggestions: suggestions) {
+                    return .unsupported(friendlyMessage: directSkillInvocationUnavailableMessage)
+                }
+                return .executed(message: SlashSkillFormatter.message(for: suggestions,
+                    query: SlashSkillFormatter.skillQuery(from: args)))
+            } catch {
+                lastError = error
+                return .unsupported(friendlyMessage: error.localizedDescription)
+            }
         }
-
         do {
             let suggestions = try await skillSuggestionsForSlashCommand()
             if let invocation = SlashSkillFormatter.invocation(from: args, suggestions: suggestions) {
                 let sent = await sendMessage(SlashSkillFormatter.messageText(for: invocation))
-                if sent {
-                    return .executed(message: nil)
-                }
-                return .unsupported(friendlyMessage: sendErrorMessage ?? String(localized: "Could not send the skill message."))
+                return sent ? .executed(message: nil) : .unsupported(
+                    friendlyMessage: sendErrorMessage ?? String(localized: "Could not send the skill message."))
             }
 
             return .executed(message: SlashSkillFormatter.message(for: suggestions, query: SlashSkillFormatter.skillQuery(from: args)))
@@ -4201,10 +4177,30 @@ final class ChatViewModel {
     }
 
     func executeSkillShortcutCommand(name: String, args: String) async -> SlashCommandExecutionResult? {
-        guard !usesDirectGateway else {
-            return .unsupported(friendlyMessage: String(localized: "Skills are not available in direct Hermes mode yet."))
+        if usesDirectGateway {
+            guard !isSubmittingDirectSkill else {
+                return .unsupported(friendlyMessage: "Wait for the current skill invocation to finish.")
+            }
+            isSubmittingDirectSkill = true
+            defer { isSubmittingDirectSkill = false }
+            do {
+                let controller = try await ensureDirectConversation()
+                let profile = controller.profile
+                let origin = controller.sharedRuntime.origin
+                let suggestions = try await directSkillSuggestions(
+                    controller: controller, profile: profile, origin: origin
+                )
+                guard let skill = SlashSkillFormatter.skill(named: name, in: suggestions) else { return nil }
+                let message = args.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !message.isEmpty else {
+                    return .executed(message: directSkillDetailMessage(for: skill))
+                }
+                return .unsupported(friendlyMessage: directSkillInvocationUnavailableMessage)
+            } catch {
+                lastError = error
+                return .unsupported(friendlyMessage: error.localizedDescription)
+            }
         }
-
         do {
             let suggestions = try await skillSuggestionsForSlashCommand()
             guard let skill = SlashSkillFormatter.skill(named: name, in: suggestions) else {
@@ -4240,96 +4236,46 @@ final class ChatViewModel {
         return suggestions
     }
 
+    private func directSkillSuggestions(
+        controller: GatewayConversationController,
+        profile: String,
+        origin: URL
+    ) async throws -> [SkillSlashSuggestion] {
+        guard !directInvalidated, directConversation === controller,
+              controller.profile == profile,
+              (Self.nonEmpty(currentProfile) ?? "default") == profile,
+              controller.sharedRuntime.origin == origin,
+              origin == server else { throw DirectSessionError.staleOperation }
+        let response = try await client.directSkills(profile: profile)
+        guard !directInvalidated, directConversation === controller,
+              controller.profile == profile,
+              (Self.nonEmpty(currentProfile) ?? "default") == profile,
+              controller.sharedRuntime.origin == origin,
+              origin == server else { throw DirectSessionError.staleOperation }
+        let suggestions = SlashSkillFormatter.suggestions(from: response.skills ?? [])
+        skillSlashSuggestions = suggestions
+        hasLoadedSkillSlashSuggestions = true
+        return suggestions
+    }
+
+    private var directSkillInvocationUnavailableMessage: String {
+        String(localized: "Skill invocation is temporarily unavailable in direct Hermes mode. You can still browse installed skills with `/skills`.")
+    }
+
+    private func directSkillDetailMessage(for skill: SkillSlashSuggestion) -> String {
+        var lines = ["### `/\(skill.slashName)`", "", "**\(skill.name)**"]
+        if let category = skill.category { lines += ["", "Category: \(category)"] }
+        if let description = skill.description { lines += ["", description] }
+        lines += ["", directSkillInvocationUnavailableMessage]
+        return lines.joined(separator: "\n")
+    }
+
     private func branchSessionFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
-        if usesDirectGateway {
-            return await branchDirectConversation(name: args)
-        }
-
-        guard !isViewingCachedData else {
-            return .unsupported(friendlyMessage: String(localized: "Reconnect to the server to fork a conversation."))
-        }
-
-        guard activeStreamID == nil else {
-            return .unsupported(friendlyMessage: String(localized: "Wait for the current response to finish before forking."))
-        }
-
-        guard let sessionID else {
-            return .unsupported(friendlyMessage: String(localized: "The server did not provide a session ID."))
-        }
-
-        let title = args.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        isForkingMessage = true
-        messageActionErrorMessage = nil
-        lastError = nil
-        sendErrorMessage = nil
-        defer { isForkingMessage = false }
-
-        do {
-            let response = try await client.branchSession(
-                id: sessionID,
-                title: title.isEmpty ? nil : title
-            )
-
-            guard let forkedSessionID = response.sessionId else {
-                return .unsupported(
-                    friendlyMessage: response.error ?? String(localized: "The server did not return the forked session ID.")
-                )
-            }
-
-            let forkedResponse = try await client.session(
-                id: forkedSessionID,
-                includeMessages: false,
-                messageLimit: nil
-            )
-
-            guard let forkedSessionDetail = forkedResponse.session else {
-                return .unsupported(friendlyMessage: String(localized: "The server did not return the forked session."))
-            }
-
-            return .openedSession(SessionSummary(from: forkedSessionDetail))
-        } catch {
-            lastError = error
-            return .unsupported(friendlyMessage: error.localizedDescription)
-        }
+        await branchDirectConversation(name: args)
     }
 
     private func createSessionFromSlashCommand() async -> SlashCommandExecutionResult {
-        guard !usesDirectGateway else {
-            return .unsupported(friendlyMessage: String(localized: "Use New Chat; direct Hermes creates sessions on first send."))
-        }
-
-        guard !isViewingCachedData else {
-            return .unsupported(friendlyMessage: String(localized: "Reconnect to the server to start a new session."))
-        }
-
-        guard activeStreamID == nil else {
-            return .unsupported(friendlyMessage: String(localized: "Wait for the current response to finish before starting a new session."))
-        }
-
-        isUpdatingComposerConfiguration = true
-        lastError = nil
-        sendErrorMessage = nil
-        composerConfigurationErrorMessage = nil
-        defer { isUpdatingComposerConfiguration = false }
-
-        do {
-            let response = try await client.createSession(
-                workspace: currentWorkspace,
-                model: currentModel,
-                modelProvider: requestModelProvider,
-                profile: requestProfileName
-            )
-
-            guard let session = response.session else {
-                return .unsupported(friendlyMessage: String(localized: "The server did not return the new session."))
-            }
-
-            return .openedSession(SessionSummary(from: session))
-        } catch {
-            lastError = error
-            return .unsupported(friendlyMessage: error.localizedDescription)
-        }
+        .unsupported(friendlyMessage: String(localized: "Use New Chat; direct Hermes creates sessions on first send."))
     }
 
     private func compressDirectSessionFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
@@ -4365,140 +4311,11 @@ final class ChatViewModel {
     }
 
     private func compressSessionFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
-        if usesDirectGateway { return await compressDirectSessionFromSlashCommand(args) }
-
-        guard !isViewingCachedData else {
-            return .unsupported(friendlyMessage: String(localized: "Reconnect to the server to compress context."))
-        }
-
-        guard activeStreamID == nil else {
-            return .unsupported(friendlyMessage: String(localized: "Wait for the current response to finish before compressing context."))
-        }
-
-        guard let sessionID else {
-            return .unsupported(friendlyMessage: String(localized: "The server did not provide a session ID."))
-        }
-
-        let focusTopic = args.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        isCompressingSession = true
-        lastError = nil
-        sendErrorMessage = nil
-        messageActionErrorMessage = nil
-        defer { isCompressingSession = false }
-
-        do {
-            let response = try await client.compressSession(
-                id: sessionID,
-                focusTopic: focusTopic.isEmpty ? nil : focusTopic
-            )
-
-            if let error = response.error {
-                return .unsupported(friendlyMessage: error)
-            }
-
-            guard let session = response.session else {
-                return .unsupported(friendlyMessage: String(localized: "The server did not return the compressed session."))
-            }
-
-            applyCompressionAnchorMetadata(from: session)
-            withBatchedTranscriptDerivedState {
-                messages = session.messages ?? []
-                updateOlderMessagePagination(from: session, loadedMessageCount: messages.count)
-            }
-            isViewingCachedData = false
-            let snapshot = ContextWindowSnapshot(
-                contextLength: session.contextLength,
-                thresholdTokens: session.thresholdTokens,
-                lastPromptTokens: session.lastPromptTokens,
-                inputTokens: session.inputTokens,
-                outputTokens: session.outputTokens,
-                estimatedCost: session.estimatedCost
-            )
-            contextWindowSnapshot = snapshot.replacingTokensUsed(response.summary?.compressedTokenEstimate)
-            if let title = session.title {
-                displayTitle = Self.displayTitle(from: title)
-            }
-            currentWorkspace = session.workspace ?? currentWorkspace
-            currentModel = session.model ?? currentModel
-            currentModelProvider = session.modelProvider ?? currentModelProvider
-            currentProfile = session.profile ?? currentProfile
-            setCompletedToolCallGroups(ToolCallGroup.groups(
-                persistedToolCalls: session.toolCalls ?? [],
-                messages: messages,
-                messageOffset: messagesOffset
-            ))
-            completedReasoningGroups = []
-            liveToolCalls = []
-            liveReasoningText = ""
-            streamingAssistantMessageID = nil
-            toolCallAnchorMessageID = nil
-            reasoningAnchorMessageID = nil
-            prepareForNewResponse()
-            responseCompletionNeedsTranscriptRefresh = false
-            attachmentCoordinator.removeAllLocalPreviews()
-
-            let headline = response.summary?.headline?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let tokenLine = response.summary?.tokenLine?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let focus = response.focusTopic?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let details = [headline, tokenLine, focus.map { String(localized: "Focus: \($0)") }]
-                .compactMap { value -> String? in
-                    guard let value, !value.isEmpty else { return nil }
-                    return value
-                }
-                .joined(separator: "\n")
-
-            if details.isEmpty {
-                return .executed(message: String(localized: "Context compressed."))
-            }
-
-            return .executed(message: String(localized: "Context compressed.\n\n\(details)"))
-        } catch {
-            lastError = error
-            return .unsupported(friendlyMessage: error.localizedDescription)
-        }
+        await compressDirectSessionFromSlashCommand(args)
     }
 
     private func undoLastExchangeFromSlashCommand() async -> SlashCommandExecutionResult {
-        guard !usesDirectGateway else {
-            return .unsupported(friendlyMessage: String(localized: "Undo is not available in direct Hermes mode yet."))
-        }
-
-        guard !isViewingCachedData else {
-            return .unsupported(friendlyMessage: String(localized: "Reconnect to the server to undo messages."))
-        }
-
-        guard !isCLISession else {
-            return .unsupported(friendlyMessage: String(localized: "Undo is available for WebUI sessions only."))
-        }
-
-        guard activeStreamID == nil else {
-            return .unsupported(friendlyMessage: String(localized: "Wait for the current response to finish before undoing messages."))
-        }
-
-        guard let sessionID else {
-            return .unsupported(friendlyMessage: String(localized: "The server did not provide a session ID."))
-        }
-
-        lastError = nil
-        sendErrorMessage = nil
-
-        do {
-            let response = try await client.undoSession(id: sessionID)
-            if let error = response.error {
-                return .unsupported(friendlyMessage: error)
-            }
-
-            await loadMessages()
-            if let lastError {
-                return .unsupported(friendlyMessage: lastError.localizedDescription)
-            }
-
-            return .executed(message: nil)
-        } catch {
-            lastError = error
-            return .unsupported(friendlyMessage: error.localizedDescription)
-        }
+        .unsupported(friendlyMessage: String(localized: "Undo is not available in direct Hermes mode yet."))
     }
 
     private func retryLastTurnFromSlashCommand() async -> SlashCommandExecutionResult {
@@ -4568,67 +4385,10 @@ final class ChatViewModel {
     }
 
     func forkFromMessage(_ context: MessageActionContext, modelContext: ModelContext? = nil) async -> SessionSummary? {
-        guard !usesDirectGateway else {
-            messageActionErrorMessage = String(localized: "Forking is not available in direct Hermes mode yet.")
-            return nil
-        }
-
-        guard !isViewingCachedData else {
-            messageActionErrorMessage = String(localized: "Reconnect to the server to fork a conversation.")
-            return nil
-        }
-
-        guard activeStreamID == nil else {
-            messageActionErrorMessage = String(localized: "Wait for the current response to finish before forking.")
-            return nil
-        }
-
-        guard let sessionID else {
-            messageActionErrorMessage = String(localized: "The server did not provide a session ID.")
-            return nil
-        }
-
-        isForkingMessage = true
-        messageActionErrorMessage = nil
-        lastError = nil
-        defer { isForkingMessage = false }
-
-        do {
-            let response = try await client.branchSession(
-                id: sessionID,
-                keepCount: context.keepCountThroughMessage
-            )
-
-            guard let forkedSessionID = response.sessionId else {
-                messageActionErrorMessage = response.error ?? String(localized: "The server did not return the forked session ID.")
-                return nil
-            }
-
-            let forkedResponse = try await client.session(
-                id: forkedSessionID,
-                includeMessages: false,
-                messageLimit: nil
-            )
-
-            guard let forkedSessionDetail = forkedResponse.session else {
-                messageActionErrorMessage = String(localized: "The server did not return the forked session.")
-                return nil
-            }
-
-            let forkedSession = SessionSummary(from: forkedSessionDetail)
-            if let modelContext {
-                do {
-                    try CacheStore.cacheSession(forkedSession, serverURL: server, in: modelContext)
-                } catch {
-                    cacheErrorMessage = error.localizedDescription
-                }
-            }
-            return forkedSession
-        } catch {
-            lastError = error
-            messageActionErrorMessage = error.localizedDescription
-            return nil
-        }
+        _ = context
+        _ = modelContext
+        messageActionErrorMessage = String(localized: "Forking is not available in direct Hermes mode yet.")
+        return nil
     }
 
     func editMessage(_ context: MessageActionContext, newText: String, modelContext: ModelContext? = nil) async -> Bool {
@@ -5969,26 +5729,6 @@ final class ChatViewModel {
         return true
     }
 
-    private func refreshCompletedResponseTitleIfNeeded() {
-        guard !isRefreshingCompletedResponseTitle else { return }
-        guard let sessionID else { return }
-
-        isRefreshingCompletedResponseTitle = true
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            defer { isRefreshingCompletedResponseTitle = false }
-
-            do {
-                let response = try await client.session(id: sessionID, includeMessages: false, messageLimit: nil)
-                if let title = response.session?.title {
-                    applyLiveActivitySessionTitle(title)
-                }
-            } catch {
-                // Title refresh is opportunistic; the transcript has already completed successfully.
-            }
-        }
-    }
-
     private func applyLiveActivitySessionTitle(_ title: String) {
         displayTitle = Self.displayTitle(from: title)
         liveActivityManager.update(.sessionTitle(displayTitle))
@@ -6280,7 +6020,6 @@ final class ChatViewModel {
     `/workspace <path>` - Switch this session's workspace.
     `/reasoning <level>` - Set reasoning display or effort.
     `/title <text>` - Rename this session.
-    `/personality <name>` - Set or clear this session's personality.
     `/skills [query]` - Search available skills.
     `/queue <message>` - Queue a message for the next turn.
     `/steer <message>` - Steer the active response.

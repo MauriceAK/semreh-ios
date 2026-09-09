@@ -168,7 +168,7 @@ final class CustomHeaderAPIClientInjectionTests: APIClientTestCase {
             return try self.ok(request)
         }
 
-        _ = try? await client.sessions()
+        _ = try? await client.directStatus()
     }
 
     func testEmptyHeaderListIsANoOp() async throws {
@@ -178,7 +178,7 @@ final class CustomHeaderAPIClientInjectionTests: APIClientTestCase {
             return try self.ok(request)
         }
 
-        _ = try? await client.sessions()
+        _ = try? await client.directStatus()
     }
 
     func testWhitespaceOnlyHeaderNameIsSkipped() async throws {
@@ -192,7 +192,7 @@ final class CustomHeaderAPIClientInjectionTests: APIClientTestCase {
             return try self.ok(request)
         }
 
-        _ = try? await client.sessions()
+        _ = try? await client.directStatus()
     }
 
     func testUploadRequestCarriesCustomHeadersAndMultipartContentTypeWins() async throws {

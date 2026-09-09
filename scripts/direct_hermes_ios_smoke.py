@@ -44,6 +44,7 @@ def main():
     parser.add_argument('--slice4-background-ui', action='store_true')
     parser.add_argument('--slice4-kanban-ui', action='store_true')
     parser.add_argument('--slice4-goal-ui', action='store_true')
+    parser.add_argument('--slice4-skill-ui', action='store_true')
     parser.add_argument('--slice4-git-ui-session-id')
     parser.add_argument('--gateway-restart-nonce')
     parser.add_argument('--tui-created-session-id')
@@ -58,6 +59,12 @@ def main():
                if name not in {'slice4_goal_ui', 'slice2_ui', 'https', 'stock_backend'})
     ):
         parser.error('--slice4-goal-ui requires --slice2-ui --https --stock-backend and no other test phase')
+    if args.slice4_skill_ui and (
+        not args.slice2_ui or not args.https or not args.stock_backend
+        or any(value for name, value in vars(args).items()
+               if name not in {'slice4_skill_ui', 'slice2_ui', 'https', 'stock_backend'})
+    ):
+        parser.error('--slice4-skill-ui requires --slice2-ui --https --stock-backend and no other test phase')
     if args.slice4_btw_ui and (
         not args.slice2_ui or not args.https or not args.stock_backend
         or any(value for name, value in vars(args).items()
@@ -428,6 +435,10 @@ def main():
             target['EnvironmentVariables']['SEMREH_SLICE4_GOAL_UI'] = '1'
             method = 'testOptInProductionLoginNewChatGoalStatus'
             test_class = 'DirectGoalUITests'
+        if args.slice4_skill_ui:
+            target['EnvironmentVariables']['SEMREH_SLICE4_SKILL_UI'] = '1'
+            method = 'testOptInProductionLoginNewChatSkillListAndShortcutDetail'
+            test_class = 'DirectSkillUITests'
     target['OnlyTestIdentifiers'] = [test_class + '/' + method]
     # Generated build artifact only; no project/scheme or personal configuration changes.
     output.write_bytes(plistlib.dumps(plan))

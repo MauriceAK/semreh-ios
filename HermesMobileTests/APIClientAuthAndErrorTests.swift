@@ -204,7 +204,7 @@ final class APIClientAuthAndErrorTests: APIClientTestCase {
         XCTAssertNil(manager.lastErrorMessage)
     }
 
-    func testUnauthorizedResponseThrowsUnauthorized() async {
+    func testUnauthorizedDirectResponseUsesTypedHTTPError() async {
         let client = makeClient { request in
             let response = HTTPURLResponse(
                 url: try XCTUnwrap(request.url),
@@ -216,17 +216,20 @@ final class APIClientAuthAndErrorTests: APIClientTestCase {
         }
 
         do {
-            _ = try await client.sessions()
+            _ = try await client.directStatus()
             XCTFail("Expected unauthorized error")
-        } catch APIError.unauthorized {
-            // Expected path.
+        } catch let DirectHermesRequestError.http(statusCode, reason) {
+            XCTAssertEqual(statusCode, 401)
+            XCTAssertEqual(reason, .unauthorized)
         } catch {
             XCTFail("Expected unauthorized error, got \(error)")
         }
     }
 
-    func testVanishedSessionResponseUsesRecoveryMessage() async throws {
+    func testVanishedDirectSessionResponseUsesTypedHTTPError() async throws {
         let client = makeClient { request in
+            XCTAssertEqual(request.url?.path, "/api/sessions/missing-session")
+            XCTAssertEqual(request.url?.query, "profile=default")
             let response = HTTPURLResponse(
                 url: try XCTUnwrap(request.url),
                 statusCode: 404,
@@ -238,17 +241,13 @@ final class APIClientAuthAndErrorTests: APIClientTestCase {
         }
 
         do {
-            _ = try await client.session(id: "missing-session")
+            _ = try await client.directSessionDetail(sessionID: "missing-session")
             XCTFail("Expected vanished-session HTTP error")
-        } catch let APIError.http(statusCode, body) {
+        } catch let DirectHermesRequestError.http(statusCode, reason) {
             XCTAssertEqual(statusCode, 404)
-            XCTAssertEqual(body, #"{"error":"Session not found"}"#)
-            XCTAssertEqual(
-                APIError.http(statusCode: statusCode, body: body).localizedDescription,
-                "That session no longer exists on the server. Reopen another session or create a new one."
-            )
+            XCTAssertEqual(reason, .other)
         } catch {
-            XCTFail("Expected vanished-session HTTP error, got \(error)")
+            XCTFail("Expected DirectHermesRequestError.http, got \(error)")
         }
     }
 
@@ -265,18 +264,16 @@ final class APIClientAuthAndErrorTests: APIClientTestCase {
         }
 
         do {
-            _ = try await client.sessions()
+            _ = try await client.directStatus()
             XCTFail("Expected HTTP error")
-        } catch let APIError.http(statusCode, body) {
-            let message = APIError.http(statusCode: statusCode, body: body).localizedDescription
-            XCTAssertEqual(
-                message,
-                "The server or Cloudflare tunnel is unavailable. Check that the Mac is awake, hermes-webui is running, and the tunnel is connected."
-            )
+        } catch let error as DirectHermesRequestError {
+            XCTAssertEqual(error, .http(statusCode: 502, reason: .other))
+            let message = error.localizedDescription
+            XCTAssertEqual(message, "Hermes returned HTTP 502.")
             XCTAssertFalse(message.contains("<html>"))
             XCTAssertFalse(message.localizedCaseInsensitiveContains("bad gateway"))
         } catch {
-            XCTFail("Expected HTTP error, got \(error)")
+            XCTFail("Expected DirectHermesRequestError.http, got \(error)")
         }
     }
 
