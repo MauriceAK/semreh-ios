@@ -4,6 +4,7 @@ struct GoalControlsMenu: View {
     let currentGoal: SubmittedGoal?
     let isViewingCachedData: Bool
     let isActionDisabled: Bool
+    let isRunning: Bool
     let onSetGoal: () -> Void
     let onSubmitCommand: (String) -> Void
 
@@ -14,7 +15,7 @@ struct GoalControlsMenu: View {
             } label: {
                 Label("Set Goal", systemImage: "target")
             }
-            .disabled(isActionDisabled)
+            .disabled(isActionDisabled || isRunning)
 
             Divider()
 
@@ -32,7 +33,7 @@ struct GoalControlsMenu: View {
             } label: {
                 Label("Stop", systemImage: "stop.circle")
             }
-            .disabled(isActionDisabled)
+            .disabled(isActionDisabled || isRunning)
         } label: {
             Label("Goal", systemImage: goalIconName)
         }
@@ -61,7 +62,8 @@ struct GoalControlsMenu: View {
         } label: {
             Label(title, systemImage: systemImage)
         }
-        .disabled(isActionDisabled)
+        .disabled(isActionDisabled || (isRunning
+            && !GatewayConversationController.goalControlIsAllowedWhileRunning(command)))
     }
 }
 

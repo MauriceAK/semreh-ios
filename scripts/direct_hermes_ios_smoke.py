@@ -43,6 +43,7 @@ def main():
     parser.add_argument('--slice4-btw-ui', action='store_true')
     parser.add_argument('--slice4-background-ui', action='store_true')
     parser.add_argument('--slice4-kanban-ui', action='store_true')
+    parser.add_argument('--slice4-goal-ui', action='store_true')
     parser.add_argument('--slice4-git-ui-session-id')
     parser.add_argument('--gateway-restart-nonce')
     parser.add_argument('--tui-created-session-id')
@@ -51,6 +52,12 @@ def main():
     parser.add_argument('--stock-backend', action='store_true')
     parser.add_argument('--cookie-phase', choices=['login', 'restore', 'logout'])
     args = parser.parse_args()
+    if args.slice4_goal_ui and (
+        not args.slice2_ui or not args.https or not args.stock_backend
+        or any(value for name, value in vars(args).items()
+               if name not in {'slice4_goal_ui', 'slice2_ui', 'https', 'stock_backend'})
+    ):
+        parser.error('--slice4-goal-ui requires --slice2-ui --https --stock-backend and no other test phase')
     if args.slice4_btw_ui and (
         not args.slice2_ui or not args.https or not args.stock_backend
         or any(value for name, value in vars(args).items()
@@ -417,6 +424,10 @@ def main():
             target['EnvironmentVariables']['SEMREH_SLICE3_RELAUNCH_SEED_TEXT'] = args.slice3_relaunch_seed_text
         method = 'testOptInLiveProductionLoginNewChatSend'
         test_class = 'LongChatScrollUITests'
+        if args.slice4_goal_ui:
+            target['EnvironmentVariables']['SEMREH_SLICE4_GOAL_UI'] = '1'
+            method = 'testOptInProductionLoginNewChatGoalStatus'
+            test_class = 'DirectGoalUITests'
     target['OnlyTestIdentifiers'] = [test_class + '/' + method]
     # Generated build artifact only; no project/scheme or personal configuration changes.
     output.write_bytes(plistlib.dumps(plan))

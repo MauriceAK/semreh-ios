@@ -1725,6 +1725,7 @@ struct ChatView: View {
             currentGoal: viewModel.currentGoal,
             isViewingCachedData: viewModel.isViewingCachedData,
             isActionDisabled: isGoalActionDisabled,
+            isRunning: viewModel.activeStreamID != nil,
             onSetGoal: {
                 showsGoalSheet = true
             },
@@ -1735,7 +1736,7 @@ struct ChatView: View {
     }
 
     private var isGoalActionDisabled: Bool {
-        viewModel.isViewingCachedData || viewModel.activeStreamID != nil || viewModel.isSubmittingGoal
+        viewModel.isViewingCachedData || viewModel.isSubmittingGoal
     }
 
     private func loadMessages(appliesInitialFocus: Bool = true, reconnectsAfterLoad: Bool = true) async {

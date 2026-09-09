@@ -28,6 +28,29 @@ enum DirectBackgroundError: Error, Equatable, Sendable {
     case invalidResponse
 }
 
+enum DirectGoalError: LocalizedError, Equatable, Sendable {
+    case runningProfileUnavailable
+    case runningProfileMismatch(selected: String, current: String)
+    case unsupportedResult
+    case invalidResponse
+    case outcomeUnknown
+
+    var errorDescription: String? {
+        switch self {
+        case .runningProfileUnavailable:
+            "Hermes did not report the profile used by this running gateway. Goal state was not changed."
+        case .runningProfileMismatch:
+            "Goals are available only when this chat uses the running gateway profile. Goal state was not changed."
+        case .unsupportedResult:
+            "Hermes resolved /goal to an unsupported command result. Goal state was not changed by the app."
+        case .invalidResponse:
+            "Hermes returned an invalid goal response."
+        case .outcomeUnknown:
+            "Goal outcome unknown. Check /goal status before trying again."
+        }
+    }
+}
+
 /// One conversation on the active server's shared socket. The view model owns
 /// rendering/cache; this owner owns identity and RPC delivery, never a socket.
 @MainActor
@@ -48,6 +71,17 @@ final class GatewayConversationController {
     enum BackgroundOutcome: Equatable, Sendable {
         case completed(attemptID: UUID, taskID: String, prompt: String, text: String)
         case unknown(attemptID: UUID)
+    }
+    enum GoalDispatchResult: Equatable, Sendable {
+        case output(String)
+        /// The dispatcher has only prepared this prompt. The caller must send
+        /// it once through this same controller's normal prompt path.
+        case send(notice: String?, message: String, display: String?)
+    }
+    static func goalControlIsAllowedWhileRunning(_ arg: String) -> Bool {
+        ["status", "pause", "clear"].contains(
+            arg.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        )
     }
     struct ReasoningConfiguration: Equatable, Sendable {
         let effort: String
@@ -135,6 +169,9 @@ final class GatewayConversationController {
     private var transcriptDirty = false
     private var terminalReceipt: String?
     private var promptInFlight = false
+    /// A draft session.create may have reached Hermes without returning its
+    /// binding. Goal preparation never repeats that create in this controller.
+    private var goalPreparationOutcomeUnknown = false
     private var bindingEpoch = 0
     private var turnEpoch = 0
     private var durableRowConfirmed: Bool
@@ -807,6 +844,44 @@ final class GatewayConversationController {
         guard !branchInFlight else { throw DirectSessionError.ambiguousPrompt }
         guard storedID != nil, hasSubmittedPrompt else { return }
         try await ensureBinding(create: [:])
+    }
+
+    /// Gives `/goal` a canonical runtime binding without submitting a prompt.
+    /// This remains separate from `open()`, whose draft behavior is unchanged.
+    func prepareGoalSession(create: [String: JSONValue]) async throws -> GatewaySessionBinding {
+        guard !goalPreparationOutcomeUnknown else { throw DirectGoalError.outcomeUnknown }
+        guard !disposed, !branchInFlight, runState == .idle, !promptInFlight,
+              !attachmentStageInFlight, !attachmentRemovalInFlight,
+              !hasAmbiguousPromptDelivery else {
+            throw DirectSessionError.invalidBinding
+        }
+        let wasDraftCreate = storedID == nil && !hasSubmittedPrompt
+        let capturedLifecycle = lifecycle
+        let capturedTurn = turnEpoch
+        let capturedOrigin = runtime.origin
+        do {
+            try await ensureBinding(create: create)
+        } catch {
+            if wasDraftCreate, binding == nil {
+                let definiteCreateRefusal: Bool
+                if case HermesGatewayError.server(_, _, _, let method, _, _) = error {
+                    definiteCreateRefusal = method == "session.create"
+                } else {
+                    definiteCreateRefusal = false
+                }
+                if !definiteCreateRefusal { goalPreparationOutcomeUnknown = true }
+            }
+            throw goalPreparationOutcomeUnknown ? DirectGoalError.outcomeUnknown : error
+        }
+        guard !disposed, lifecycle == capturedLifecycle, turnEpoch == capturedTurn,
+              runtime.origin == capturedOrigin, runtime.state == .ready,
+              runState == .idle, !promptInFlight, !attachmentStageInFlight,
+              !attachmentRemovalInFlight, let binding, binding.profile == profile,
+              storedID == binding.storedID else {
+            if wasDraftCreate { goalPreparationOutcomeUnknown = true }
+            throw wasDraftCreate ? DirectGoalError.outcomeUnknown : DirectSessionError.staleOperation
+        }
+        return binding
     }
 
     /// Creates a full-session child on the already-owned gateway socket.
@@ -2300,6 +2375,99 @@ final class GatewayConversationController {
               let outcome = SteerOutcome(rawValue: status) else { throw DirectSessionError.invalidResponse }
         // Rejected steer never becomes interrupt + prompt.submit.
         return outcome
+    }
+
+    /// Dispatches only stock `/goal` through the bound runtime. Goal storage is
+    /// process-profile scoped upstream, so a selected chat may use it only when
+    /// `/api/profiles/active.current` matches this controller's profile.
+    func dispatchGoal(_ arg: String, profileContext: DirectHermesActiveProfile) async throws -> GoalDispatchResult {
+        let current = profileContext.current?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !current.isEmpty else { throw DirectGoalError.runningProfileUnavailable }
+        guard current == profile else {
+            throw DirectGoalError.runningProfileMismatch(selected: profile, current: current)
+        }
+        let capturedRunState = runState
+        let permitsRunning = Self.goalControlIsAllowedWhileRunning(arg)
+        guard !disposed, !branchInFlight,
+              capturedRunState == .idle || (capturedRunState == .running && permitsRunning), !promptInFlight,
+              !hasAmbiguousPromptDelivery, let capturedBinding = binding else {
+            throw DirectSessionError.invalidBinding
+        }
+        let capturedLifecycle = lifecycle
+        let capturedBindingEpoch = bindingEpoch
+        let capturedTurn = turnEpoch
+        let capturedOrigin = runtime.origin
+        let capturedConnection = runtime.connectionGeneration
+
+        func requireCurrentScope() throws {
+            guard !disposed, !branchInFlight, runState == capturedRunState, !promptInFlight,
+                  !hasAmbiguousPromptDelivery, lifecycle == capturedLifecycle,
+                  bindingEpoch == capturedBindingEpoch, turnEpoch == capturedTurn,
+                  binding == capturedBinding, runtime.origin == capturedOrigin,
+                  runtime.connectionGeneration == capturedConnection,
+                  runtime.state == .ready, profile == current else {
+                throw DirectSessionError.staleOperation
+            }
+        }
+
+        let resolved = try await runtime.request("command.resolve", parameters: {
+            try requireCurrentScope()
+            return ["name": .string("goal")]
+        })
+        try requireCurrentScope()
+        guard resolved?.gatewayFields["canonical"]?.gatewayString == "goal" else {
+            throw DirectGoalError.invalidResponse
+        }
+
+        var dispatched = false
+        let response: JSONValue?
+        do {
+            response = try await runtime.request("command.dispatch", parameters: {
+                try requireCurrentScope()
+                dispatched = true
+                return [
+                    "session_id": .string(capturedBinding.runtimeID),
+                    "name": .string("goal"),
+                    "arg": .string(arg)
+                ]
+            })
+            do { try requireCurrentScope() }
+            catch { throw DirectGoalError.outcomeUnknown }
+        } catch {
+            guard dispatched else { throw error }
+            if case HermesGatewayError.server(_, _, _, let method, _, _) = error,
+               method == "command.dispatch" {
+                throw error
+            }
+            throw DirectGoalError.outcomeUnknown
+        }
+
+        guard let fields = response?.gatewayFields,
+              let type = fields["type"]?.gatewayString else {
+            throw DirectGoalError.outcomeUnknown
+        }
+        switch type {
+        case "exec", "plugin":
+            guard let output = fields["output"]?.gatewayString else {
+                throw DirectGoalError.outcomeUnknown
+            }
+            return .output(output)
+        case "send":
+            guard capturedRunState == .idle else { throw DirectGoalError.unsupportedResult }
+            guard let message = fields["message"]?.gatewayString?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !message.isEmpty else {
+                throw DirectGoalError.outcomeUnknown
+            }
+            return .send(
+                notice: fields["notice"]?.gatewayString,
+                message: message,
+                display: fields["display"]?.gatewayString
+            )
+        case "alias", "skill":
+            throw DirectGoalError.unsupportedResult
+        default:
+            throw DirectGoalError.outcomeUnknown
+        }
     }
 
     /// Starts one stock side-question task without changing canonical history.

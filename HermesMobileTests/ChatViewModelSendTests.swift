@@ -788,14 +788,24 @@ final class ChatViewModelSendTests: XCTestCase {
     }
 
     @MainActor
-    func testDirectGoalRefusalDoesNotStartLegacyKickoffOrLoad() async throws {
-        let viewModel = try makeViewModel(directLoad: true) { _ in
-            XCTFail("Unsupported direct goal must not issue legacy requests")
-            throw URLError(.badURL)
+    func testDirectGoalMissingRunningProfileDoesNotStartLegacyKickoffOrPrompt() async throws {
+        var requestedPaths: [String] = []
+        let viewModel = try makeViewModel(directLoad: true) { request in
+            requestedPaths.append(request.url?.path ?? "nil")
+            XCTAssertEqual(request.httpMethod, "GET")
+            if request.url?.path == "/api/sessions/session-abc/messages" {
+                return apiTestJSONResponse(#"{"session_id":"session-abc","messages":[],"pagination":{"limit":120,"offset":0,"order":"latest","returned":0}}"#, for: request)
+            }
+            guard request.url?.path == "/api/profiles/active" else {
+                XCTFail("Profile-gated direct goal must not issue legacy requests")
+                throw URLError(.badURL)
+            }
+            return apiTestJSONResponse(#"{"active":"default","current":null}"#, for: request)
         }
         let accepted = await viewModel.submitGoal(args: "Ship the TestFlight build")
         XCTAssertFalse(accepted)
-        XCTAssertEqual(viewModel.goalErrorMessage, "Goals are not available in direct Hermes mode yet.")
+        XCTAssertEqual(requestedPaths, ["/api/sessions/session-abc/messages", "/api/profiles/active"])
+        XCTAssertEqual(viewModel.goalErrorMessage, "The chat or running Hermes profile changed, so the goal command was not sent.")
         XCTAssertNil(viewModel.currentGoal)
         XCTAssertNil(viewModel.activeStreamID)
         XCTAssertTrue(viewModel.messages.isEmpty)

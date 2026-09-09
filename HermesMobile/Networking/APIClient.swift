@@ -84,10 +84,6 @@ actor APIClient {
         }
     }
 
-    func health() async throws -> HealthResponse {
-        try await send(endpoint: .health, method: "GET")
-    }
-
     func send<Response: Decodable>(
         endpoint: Endpoint,
         method: String

@@ -791,6 +791,7 @@ final class ChatViewModel {
     private(set) var isSubmittingGoal = false
     private(set) var goalErrorMessage: String?
     private(set) var hasActivatedGoalCommand = false
+    private var directGoalStatusEventKeys: Set<String> = []
 
     private var sessionID: String?
     var usesDirectGateway: Bool { gatewayRuntimeProvider != nil }
@@ -1673,7 +1674,12 @@ final class ChatViewModel {
         _ draft: String,
         modelContext: ModelContext?,
         selectedAttachmentIDs: Set<UUID>? = nil,
-        removeSelectedAttachmentsOnAmbiguousDelivery: Bool = true
+        removeSelectedAttachmentsOnAmbiguousDelivery: Bool = true,
+        requiredController: GatewayConversationController? = nil,
+        requiredSessionID: String? = nil,
+        requiredProfile: String? = nil,
+        requiredOrigin: URL? = nil,
+        requiredConnectionGeneration: Int? = nil
     ) async -> Bool {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !directInvalidated, !isStartingChat,
@@ -1710,10 +1716,28 @@ final class ChatViewModel {
         let selectionGeneration = directAttachmentSelectionGeneration
         do {
             let controller = try await ensureDirectConversation()
+            guard requiredController == nil || directConversation === requiredController,
+                  requiredController == nil || controller === requiredController,
+                  requiredSessionID == nil || controller.storedID == requiredSessionID,
+                  requiredProfile == nil || controller.profile == requiredProfile,
+                  requiredOrigin == nil || controller.sharedRuntime.origin == requiredOrigin,
+                  requiredConnectionGeneration == nil
+                    || controller.sharedRuntime.connectionGeneration == requiredConnectionGeneration else {
+                throw DirectSessionError.staleOperation
+            }
             // Resume first so its canonical transcript cannot erase this new
             // optimistic row. Draft open remains completely local.
             try await controller.open()
-            guard !directInvalidated, controller.runState == .idle else { throw DirectSessionError.ambiguousPrompt }
+            guard !directInvalidated, controller.runState == .idle,
+                  requiredController == nil || controller === requiredController,
+                  requiredSessionID == nil || controller.storedID == requiredSessionID,
+                  requiredProfile == nil || controller.profile == requiredProfile,
+                  requiredOrigin == nil || controller.sharedRuntime.origin == requiredOrigin,
+                  requiredConnectionGeneration == nil
+                    || controller.sharedRuntime.connectionGeneration == requiredConnectionGeneration,
+                  requiredConnectionGeneration == nil || controller.sharedRuntime.state == .ready else {
+                throw DirectSessionError.ambiguousPrompt
+            }
             var creation: [String: JSONValue] = [:]
             if let value = Self.nonEmpty(currentWorkspace) { creation["cwd"] = .string(value) }
             if let value = Self.nonEmpty(currentModel) { creation["model"] = .string(value) }
@@ -1732,7 +1756,14 @@ final class ChatViewModel {
                   selectionGeneration == directAttachmentSelectionGeneration,
                   (hasExplicitAttachmentSelection
                     ? attachmentIDs.isSubset(of: currentAttachmentIDs)
-                    : attachmentIDs == currentAttachmentIDs) else {
+                    : attachmentIDs == currentAttachmentIDs),
+                  requiredController == nil || controller === requiredController,
+                  requiredSessionID == nil || controller.storedID == requiredSessionID,
+                  requiredProfile == nil || controller.profile == requiredProfile,
+                  requiredOrigin == nil || controller.sharedRuntime.origin == requiredOrigin,
+                  requiredConnectionGeneration == nil
+                    || controller.sharedRuntime.connectionGeneration == requiredConnectionGeneration,
+                  requiredConnectionGeneration == nil || controller.sharedRuntime.state == .ready else {
                 throw DirectSessionError.staleOperation
             }
 
@@ -1883,6 +1914,16 @@ final class ChatViewModel {
     }
 
     private func applyDirectEvent(_ event: HermesGatewayEvent) {
+        if event.type == "status.update",
+           event.payload?.gatewayFields["kind"]?.gatewayString == "goal",
+           let text = event.payload?.gatewayFields["text"]?.gatewayString,
+           !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let key = "\(event.connectionGeneration.map { String($0) } ?? "none"):\(event.sequence.map { String($0) } ?? "none"):"
+                + "\(event.sessionID ?? "none"):goal:\(text)"
+            if directGoalStatusEventKeys.insert(key).inserted {
+                appendLocalNoticeMessage(text)
+            }
+        }
         if !["message.delta", "thinking.delta", "reasoning.delta"].contains(event.type) {
             flushPendingStreamingContent()
         }
@@ -3543,11 +3584,120 @@ final class ChatViewModel {
     #endif
 
     func submitGoal(args rawArgs: String, modelContext: ModelContext? = nil) async -> Bool {
-        _ = rawArgs
-        _ = modelContext
-        goalErrorMessage = String(localized: "Goals are not available in direct Hermes mode yet.")
-        sendErrorMessage = goalErrorMessage
-        return false
+        let args = rawArgs.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard usesDirectGateway, !args.isEmpty, !isSubmittingGoal, !directInvalidated else { return false }
+        isSubmittingGoal = true
+        goalErrorMessage = nil
+        defer { isSubmittingGoal = false }
+        do {
+            let controller = try await ensureDirectConversation()
+            let expectedOrigin = controller.sharedRuntime.origin
+            guard expectedOrigin == server else { throw DirectSessionError.staleOperation }
+            try await controller.open()
+            var creation: [String: JSONValue] = [:]
+            if let value = Self.nonEmpty(currentWorkspace) { creation["cwd"] = .string(value) }
+            if let value = Self.nonEmpty(currentModel) { creation["model"] = .string(value) }
+            if let value = Self.nonEmpty(currentModelProvider) { creation["provider"] = .string(value) }
+            if let value = Self.nonEmpty(sessionReasoningEffort) { creation["reasoning_effort"] = .string(value) }
+            let runningControl = controller.runState == .running
+                && GatewayConversationController.goalControlIsAllowedWhileRunning(args)
+            let goalBinding: GatewaySessionBinding
+            if runningControl, let binding = controller.binding,
+               controller.storedID == binding.storedID, canonicalSessionID == binding.storedID {
+                goalBinding = binding
+            } else {
+                goalBinding = try await controller.prepareGoalSession(create: creation)
+            }
+            let expectedRunState: GatewayConversationController.RunState = runningControl ? .running : .idle
+            // Draft preparation may establish the first connection. Attest the
+            // running profile only after that binding is ready, then keep this
+            // generation fixed through lookup, dispatch and prompt delivery.
+            let connectionGeneration = controller.sharedRuntime.connectionGeneration
+            guard !directInvalidated, directConversation === controller,
+                  controller.sharedRuntime.origin == expectedOrigin,
+                  controller.sharedRuntime.state == .ready,
+                  controller.sharedRuntime.connectionGeneration == connectionGeneration,
+                  goalBinding == controller.binding,
+                  let sessionID = controller.storedID,
+                  sessionID == goalBinding.storedID,
+                  sessionID == canonicalSessionID,
+                  controller.runState == expectedRunState,
+                  !controller.hasAmbiguousPromptDelivery else {
+                throw DirectSessionError.staleOperation
+            }
+            let profile = controller.profile
+            let activeProfile = try await client.directActiveProfile()
+            guard let runningProfile = Self.nonEmpty(activeProfile.current) else {
+                throw DirectGoalError.runningProfileUnavailable
+            }
+            guard runningProfile == profile else {
+                throw DirectGoalError.runningProfileMismatch(selected: profile, current: runningProfile)
+            }
+            guard !directInvalidated, directConversation === controller,
+                  controller.sharedRuntime.origin == expectedOrigin,
+                  controller.sharedRuntime.state == .ready,
+                  controller.sharedRuntime.connectionGeneration == connectionGeneration,
+                  controller.storedID == sessionID, canonicalSessionID == sessionID,
+                  controller.profile == profile, controller.runState == expectedRunState,
+                  !controller.hasAmbiguousPromptDelivery else {
+                throw DirectSessionError.staleOperation
+            }
+
+            let result = try await controller.dispatchGoal(args, profileContext: activeProfile)
+            guard !directInvalidated, directConversation === controller,
+                  controller.sharedRuntime.origin == expectedOrigin,
+                  controller.sharedRuntime.state == .ready,
+                  controller.sharedRuntime.connectionGeneration == connectionGeneration,
+                  controller.storedID == sessionID, canonicalSessionID == sessionID,
+                  controller.profile == profile else {
+                throw DirectGoalError.outcomeUnknown
+            }
+            switch result {
+            case .output(let text):
+                appendLocalAssistantMessage(text)
+                hasActivatedGoalCommand = true
+                return true
+            case .send(let notice, let message, let display):
+                let sent = await sendDirectMessage(
+                    message,
+                    modelContext: modelContext,
+                    selectedAttachmentIDs: [],
+                    requiredController: controller,
+                    requiredSessionID: sessionID,
+                    requiredProfile: profile,
+                    requiredOrigin: expectedOrigin,
+                    requiredConnectionGeneration: connectionGeneration
+                )
+                guard sent, !controller.hasAmbiguousPromptDelivery,
+                      controller.runState != .deliveryUnknown else {
+                    goalErrorMessage = String(localized: "The goal command outcome is unknown. It was not retried; review Hermes before trying again.")
+                    sendErrorMessage = goalErrorMessage
+                    return false
+                }
+                for text in [notice, display].compactMap({ Self.nonEmpty($0) }) {
+                    appendLocalNoticeMessage(text)
+                }
+                hasActivatedGoalCommand = true
+                return true
+            }
+        } catch {
+            lastError = error
+            let message: String
+            if (error as? DirectSessionError) == .staleOperation
+                || (error as? DirectGoalError) == .runningProfileUnavailable {
+                message = String(localized: "The chat or running Hermes profile changed, so the goal command was not sent.")
+            } else if let goalError = error as? DirectGoalError,
+                      case .runningProfileMismatch(_, _) = goalError {
+                message = String(localized: "The selected chat profile is not the profile running Hermes, so the goal command was not sent.")
+            } else if (error as? DirectGoalError) == .outcomeUnknown {
+                message = String(localized: "The goal command outcome is unknown. It was not retried; review Hermes before trying again.")
+            } else {
+                message = error.localizedDescription
+            }
+            goalErrorMessage = message
+            sendErrorMessage = message
+            return false
+        }
     }
 
     private func rollbackOptimisticMessage(id: String) {

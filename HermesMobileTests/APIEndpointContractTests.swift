@@ -9,10 +9,6 @@ import UniformTypeIdentifiers
 final class ContractReadinessTests: XCTestCase {
     func testEndpointContractMatrixMatchesPinnedUpstreamPaths() throws {
         let contracts: [EndpointContract] = [
-            .init(name: "health", method: "GET", endpoint: .health, path: "/health"),
-            .init(name: "auth status", method: "GET", endpoint: .authStatus, path: "/api/auth/status"),
-            .init(name: "login", method: "POST", endpoint: .login, path: "/api/auth/login"),
-            .init(name: "logout", method: "POST", endpoint: .logout, path: "/api/auth/logout"),
             .init(name: "sessions", method: "GET", endpoint: .sessions(), path: "/api/sessions"),
             .init(
                 name: "sessions including archived",
@@ -48,13 +44,6 @@ final class ContractReadinessTests: XCTestCase {
                 endpoint: .session(id: "session-123", includeMessages: true, messageLimit: 50, messageBefore: nil, expandRenderable: true),
                 path: "/api/session",
                 query: ["session_id": "session-123", "messages": "1", "msg_limit": "50", "expand_renderable": "1"]
-            ),
-            .init(
-                name: "session status",
-                method: "GET",
-                endpoint: .sessionStatus(id: "session-123"),
-                path: "/api/session/status",
-                query: ["session_id": "session-123"]
             ),
             .init(name: "new session", method: "POST", endpoint: .newSession, path: "/api/session/new"),
             .init(name: "rename session", method: "POST", endpoint: .renameSession, path: "/api/session/rename"),
@@ -104,34 +93,6 @@ final class ContractReadinessTests: XCTestCase {
             ),
             .init(name: "personalities", method: "GET", endpoint: .personalities, path: "/api/personalities"),
             .init(name: "set personality", method: "POST", endpoint: .setPersonality, path: "/api/personality/set"),
-            .init(name: "crons", method: "GET", endpoint: .crons, path: "/api/crons"),
-            .init(name: "cron create", method: "POST", endpoint: .cronCreate, path: "/api/crons/create"),
-            .init(name: "cron update", method: "POST", endpoint: .cronUpdate, path: "/api/crons/update"),
-            .init(name: "cron delete", method: "POST", endpoint: .cronDelete, path: "/api/crons/delete"),
-            .init(name: "cron run", method: "POST", endpoint: .cronRun, path: "/api/crons/run"),
-            .init(name: "cron pause", method: "POST", endpoint: .cronPause, path: "/api/crons/pause"),
-            .init(name: "cron resume", method: "POST", endpoint: .cronResume, path: "/api/crons/resume"),
-            .init(name: "cron status all", method: "GET", endpoint: .cronStatus(jobID: nil), path: "/api/crons/status"),
-            .init(
-                name: "cron status job",
-                method: "GET",
-                endpoint: .cronStatus(jobID: "job-123"),
-                path: "/api/crons/status",
-                query: ["job_id": "job-123"]
-            ),
-            .init(
-                name: "cron output",
-                method: "GET",
-                endpoint: .cronOutput(jobID: "job-123", limit: 5),
-                path: "/api/crons/output",
-                query: ["job_id": "job-123", "limit": "5"]
-            ),
-            .init(
-                name: "cron delivery options",
-                method: "GET",
-                endpoint: .cronDeliveryOptions,
-                path: "/api/crons/delivery-options"
-            ),
             .init(name: "memory", method: "GET", endpoint: .memory, path: "/api/memory"),
             .init(name: "memory write", method: "POST", endpoint: .memoryWrite, path: "/api/memory/write"),
             .init(name: "skills", method: "GET", endpoint: .skills, path: "/api/skills"),

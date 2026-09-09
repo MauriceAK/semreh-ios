@@ -45,10 +45,6 @@ extension APIClient {
         )
     }
 
-    func sessionStatus(id: String) async throws -> SessionStatusResponse {
-        try await send(endpoint: .sessionStatus(id: id), method: "GET")
-    }
-
     func createSession(workspace: String?, model: String?, modelProvider: String?, profile: String?) async throws -> SessionResponse {
         return try await send(
             endpoint: .newSession,

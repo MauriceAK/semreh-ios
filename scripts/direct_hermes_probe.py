@@ -29,6 +29,20 @@ BLOCKING_FIXTURE_SKILL_DEPLOYED = RUNTIME / 'home' / 'skills' / 'semreh-fixture-
 BLOCKING_FIXTURE_TOOLSET = 'semreh_blocking_fixture'
 BLOCKING_FIXTURE_PLUGIN_ID = 'semreh-blocking-fixture'
 BLOCKING_FIXTURE_TOOLS_CONFIG = {'tool_search': {'enabled': 'off'}}
+AUXILIARY_FIXTURE_CONFIG = {
+    'background_review': {'enabled': False},
+    'transient_retries': 0,
+    'goal_judge': {
+        'provider': 'custom',
+        'model': 'semreh-fixture',
+        'base_url': 'http://127.0.0.1:18792/v1',
+        'api_key': 'no-key-required',
+        'api_mode': 'chat_completions',
+        'timeout': 5,
+        'max_tokens': 128,
+        'fallback_chain': [],
+    },
+}
 BLOCKING_FIXTURE_SHA256 = {
     'semreh-blocking-fixture/plugin.yaml':
         'd3b40257401e2155498486ed5bc9d947240e30a8ab38d4d1a9e63373c726d2f4',
@@ -76,7 +90,7 @@ def initialize():
         'toolsets': [], 'platform_toolsets': {'cli': [], 'tui': []},
         'terminal': {'backend': 'local', 'cwd': str(RUNTIME / 'tools'), 'home_mode': 'profile'},
         'memory': {'memory_enabled': False, 'user_profile_enabled': False, 'provider': ''},
-        'auxiliary': {'background_review': {'enabled': False}},
+        'auxiliary': AUXILIARY_FIXTURE_CONFIG,
         'curator': {'enabled': False},
         'mcp_servers': {},
         'platforms': {},
@@ -112,7 +126,7 @@ def validate():
         'model': {'provider': 'custom', 'default': 'semreh-fixture', 'base_url': 'http://127.0.0.1:18792/v1'},
         'terminal': {'backend': 'local', 'cwd': str(RUNTIME / 'tools'), 'home_mode': 'profile'},
         'memory': {'memory_enabled': False, 'user_profile_enabled': False, 'provider': ''},
-        'auxiliary': {'background_review': {'enabled': False}},
+        'auxiliary': AUXILIARY_FIXTURE_CONFIG,
         'curator': {'enabled': False}, 'mcp_servers': {}, 'platforms': {},
         'kanban': {'dispatch_in_gateway': False, 'review_dispatch': False},
         'security': {'allow_lazy_installs': False}, 'cron': {'allow_agent_scheduling': False},

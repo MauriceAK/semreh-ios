@@ -5,13 +5,13 @@ details/evidence: `slice3-tasks.md`, `slice3-verification.md`, `slice4-tasks.md`
 This is the current dispatch checklist, not a new architecture or acceptance waiver.
 Preserve completed Luna work. Root owns integration, notes and native execution.
 
-Current checkpoint: `2592ee2` audio/background plus Kanban/Insights scoped diff.
+Current checkpoint: `628225f` Kanban/Insights, local and unpushed.
 Signed Kanban unit-build-v5 and UI-build-v1 passed. Focused-v1:134/1/0,
 adapter-v2:11/0/0 and state-v3:68/0/0 after fixture-only corrections. Production UI-v1:1/0/0
 normal login → Control → Kanban → Insights; both screenshots independently
 inspected. Full-v2:2087/0/14; strict signing and ordinary Simulator launch97529
 passed. Targeted audit-v1:9221 files/zero flags, six exported test consoles.
-Local checkpoint commit follows; no physical acceptance.
+No physical acceptance. Goal integration and dormant endpoint cleanup follow.
 Sol Low workers, root integration/review. The
 reconciled `secondary-feature-status.md` owns the per-feature current inventory.
 Do not use the historical checkpoints below as the next dispatch instruction.
@@ -48,14 +48,70 @@ Do not use the historical checkpoints below as the next dispatch instruction.
   reads; a legitimate third tick raced the assertion. A controlled first polling
   tick and suspended subsequent delay preserve exact count/snapshot assertions.
   Product code unchanged; build-v5/state-v3/full-v2 passed afterward.
-- [ ] **Goal profile check:** Maurice retained goals and approved bounded
+- [x] **Goal profile check:** Maurice retained goals and approved bounded
   reproduction before restrictions, not blanket deferral. Original offline import
   probe failed and touched personal configuration backup during shutdown; original
   config/backup bytes compared equal in authorized impact check, DB impact not
   proved. Do not rerun it or claim it proved a goal bug. Replacement zero-Hermes
-  sandbox checks abort before receipt; no new stock imports. A bounded alternative
-  using the existing fixed-home owned gateway is under review, not yet executed.
-  Personal inspection remains outside ongoing scope. No private Hermes patch.
+  sandbox checks abort before receipt; no new stock imports. Existing-gateway
+  live-v2 passed after HOME containment below: named-profile goal persisted in the
+  default owned DB, absent selected DB; status/pause confirmed. Cleared audit row
+  and runtime close verified; no prompt.submit/model turn. V1 stopped before WS
+  because stock config migration adds only agent:{} and _config_version:39;
+  strict semantic clone check fixed, all other settings still exactly equal.
+  Two owned profiles/wrappers retained: suffixes9ce6a4c3d101 (v1),8f059a8ae784 (v2).
+  They are exclusively under runtime/home/profiles and runtime/home/home/.local/bin;
+  no profile DELETE/process scan. Personal inspection remains outside ongoing scope.
+- [x] **Goal client integration:** root reasonable decision after valid reproduction:
+  allow only session profile == running gateway `current` (never sticky `active`).
+  Refuse mismatch/missing identity before dispatch with specific explanation.
+  Follow stock typed output/send behavior and server-owned continuation; never
+  duplicate auto-loops or retry ambiguous dispatch/kickoff. Render goal status
+  notices, not invented structured state from prose. Sol Low controller/VM lanes;
+  no private Hermes patch or full cross-profile support claim.
+- [x] **Goal/Cron integration checkpoint:** signed build-v7, focused-v3 goal20/0/0,
+  prior directCron/contract/goal focused-v2:31/0/0; production UI-v1:1/0/0 through
+  normal login/new chat/goal status, screenshot independently inspected.
+  Full-v2:2096/0/14, strict signing and ordinary Simulator launch34982 passed.
+  Goal can be the first draft action without a placeholder prompt. Status/pause/
+  clear work during the current turn; set/resume remain idle-only. Menu follows
+  those rules. Profile attestation and subsequent dispatch/kickoff stay bound to
+  one ready connection; uncertain dispatch/create/send is not retried. Server
+  goal notices are local projections, not a fabricated structured status badge.
+  Returned resume display is currently an additive notice alongside the exact
+  model-facing text; presentation polish remains separate.
+  Removed unused health/auth/session-status and legacy Cron endpoint helpers and
+  transport-only tests; direct Cron behavior/tests and presentation DTOs retained.
+  No additional live probe was needed for dead endpoint deletion.
+  Failure history: focused-v1:8/5/0 found status projection and mock ACK issues;
+  its malformed ACK persisted an exact mock uncertainty marker, causing later
+  early refusals/a60s test timeout. Marker moved recoverably to evidence; fresh
+  in-memory stores now reach controller and VM, and the gate is bounded/released.
+  Build-v4 failed a missing test emit helper; corrected. Full-v1:2095/1/14 had an
+  obsolete blanket-goals-unavailable test. Its first adaptation focused-v4:8/1/0
+  omitted a legitimate canonical GET; exact two first-party GETs now asserted.
+  Focused-v5:1/0/0 and final full passed. No unexplained runner retry/stall here.
+  Offline root goal fixture20/0, UI helper47/0. Failed offline-confinement scripts
+  moved out of active scripts into the external evidence folder, recoverable;
+  original incident log remains unshareable and reconstruction is a design marker
+  only, not byte-verified source recovery. No physical acceptance or push/install.
+  Targeted artifact audit-v1:9267 files/zero flags/nine exported test consoles.
+  Selected goal batch artifacts plus mandatory docs/runtime logs only; original
+  incident log, abandoned sandbox artifacts, opaque/OCR and unexported compressed
+  contents are excluded. Goal scope helper now pins the reviewed new config;
+  its offline checks3/0 passed, original live scope receipt remains historical.
+- [x] **Goal server-owned continuation:** `slice4-goal-e2e-v1.json` passed on
+  stock29112bef and exact localhost-only judge configuration. One prompt.submit,
+  two canonical user/assistant pairs, done state with turns_used2, no third turn,
+  exact-owned-goal clear and runtime close; config unchanged after cleanup.
+  Root independently checked local model log order: main1/judge1/main2/judge2,
+  no tool calls. This is live protocol evidence, not app/device acceptance.
+  Owned fixture auxiliary configuration now explicitly custom localhost18792,
+  retries0 and empty fallback; same main-model identity prevents stock main
+  fallback escalation. ConfigSHA d0a13a4e266aaa416e3b025e5fa6029377a1c964f0275712710eb1ab7afba9a8.
+  Backend18939/model18817 replace only validated old fixture PIDs; personal routes
+  and services unchanged. Prior SHA-pinned probes refuse this changed fixture
+  until reviewed; do not relabel historical evidence as this environment.
 - [x] **Owned launcher home containment:** source review found HOME absent despite
   fixed HERMES_HOME; stock profile creation writes wrappers via Path.home.
   Added HOME=owned runtime/home/home, AST regression1/0. Root gracefully stopped

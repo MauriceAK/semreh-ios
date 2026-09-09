@@ -7,6 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		D2C820000000000000000005 /* DirectGoalUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2C820000000000000000006 /* DirectGoalUITests.swift */; };
+		D2C820000000000000000001 /* GatewayConversationGoalTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2C820000000000000000002 /* GatewayConversationGoalTests.swift */; };
+		D2C820000000000000000003 /* ChatViewModelGoalTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2C820000000000000000004 /* ChatViewModelGoalTests.swift */; };
 		D3A290000000000000000001 /* DirectHermesManagedFileTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3A290000000000000000011 /* DirectHermesManagedFileTests.swift */; };
 		D3A280000000000000000001 /* DirectHermesMessageAttachmentProjection.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3A280000000000000000011 /* DirectHermesMessageAttachmentProjection.swift */; };
 		D3A280000000000000000002 /* DirectHermesMessageAttachmentProjectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3A280000000000000000012 /* DirectHermesMessageAttachmentProjectionTests.swift */; };
@@ -416,6 +419,9 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		D2C820000000000000000006 /* DirectGoalUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectGoalUITests.swift; sourceTree = "<group>"; };
+		D2C820000000000000000002 /* GatewayConversationGoalTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayConversationGoalTests.swift; sourceTree = "<group>"; };
+		D2C820000000000000000004 /* ChatViewModelGoalTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatViewModelGoalTests.swift; sourceTree = "<group>"; };
 		D3A290000000000000000011 /* DirectHermesManagedFileTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectHermesManagedFileTests.swift; sourceTree = "<group>"; };
 		D3A280000000000000000011 /* DirectHermesMessageAttachmentProjection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectHermesMessageAttachmentProjection.swift; sourceTree = "<group>"; };
 		D3A280000000000000000012 /* DirectHermesMessageAttachmentProjectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectHermesMessageAttachmentProjectionTests.swift; sourceTree = "<group>"; };
@@ -893,6 +899,8 @@
 				D2EC7000000000000000001D /* GatewayConversationBlockingTests.swift */,
 				D2B710000000000000000002 /* GatewayConversationBTWTests.swift */,
 				D2B710000000000000000004 /* GatewayConversationBackgroundTests.swift */,
+				D2C820000000000000000002 /* GatewayConversationGoalTests.swift */,
+				D2C820000000000000000004 /* ChatViewModelGoalTests.swift */,
 				A5C9E273D4184A71B51C9302 /* GatewayBlockingPromptModelTests.swift */,
 				D3A270000000000000000012 /* DirectGatewayAttachmentTests.swift */,
 				D3A270000000000000000014 /* DirectPendingAttachmentTests.swift */,
@@ -1011,6 +1019,7 @@
 			isa = PBXGroup;
 			children = (
 				F10000000000000000000002 /* LongChatScrollUITests.swift */,
+				D2C820000000000000000006 /* DirectGoalUITests.swift */,
 			);
 			path = HermesMobileUITests;
 			sourceTree = "<group>";
@@ -1888,6 +1897,8 @@
 				D2EC7000000000000000000D /* GatewayConversationBlockingTests.swift in Sources */,
 				D2B710000000000000000001 /* GatewayConversationBTWTests.swift in Sources */,
 				D2B710000000000000000003 /* GatewayConversationBackgroundTests.swift in Sources */,
+				D2C820000000000000000001 /* GatewayConversationGoalTests.swift in Sources */,
+				D2C820000000000000000003 /* ChatViewModelGoalTests.swift in Sources */,
 				A5C9E273D4184A71B51C9301 /* GatewayBlockingPromptModelTests.swift in Sources */,
 				D3A270000000000000000002 /* DirectGatewayAttachmentTests.swift in Sources */,
 				D3A270000000000000000004 /* DirectPendingAttachmentTests.swift in Sources */,
@@ -2026,6 +2037,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				F10000000000000000000001 /* LongChatScrollUITests.swift in Sources */,
+				D2C820000000000000000005 /* DirectGoalUITests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

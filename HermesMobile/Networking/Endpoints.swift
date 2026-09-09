@@ -7,14 +7,9 @@ enum Endpoint {
     case officialSessionMessages(id: String, limit: Int?, offset: Int?, order: String?)
     case officialCreateSession
     case officialSessionChatStream(id: String)
-    case health
-    case authStatus
-    case login
-    case logout
     case sessions(includeArchived: Bool = false, archivedLimit: Int? = nil)
     case sessionsSearch(query: String, content: Bool, depth: Int)
     case session(id: String, includeMessages: Bool, messageLimit: Int?, messageBefore: Int?, expandRenderable: Bool = false)
-    case sessionStatus(id: String)
     case newSession
     case renameSession
     case pinSession
@@ -33,16 +28,6 @@ enum Endpoint {
     case media(sessionID: String, path: String)
     case personalities
     case setPersonality
-    case crons
-    case cronCreate
-    case cronUpdate
-    case cronDelete
-    case cronRun
-    case cronPause
-    case cronResume
-    case cronStatus(jobID: String?)
-    case cronOutput(jobID: String, limit: Int?)
-    case cronDeliveryOptions
     case memory
     case memoryWrite
     case skills
@@ -69,22 +54,12 @@ enum Endpoint {
             default:
                 return "/api/sessions/\(encodedID)"
             }
-        case .health:
-            return "/health"
-        case .authStatus:
-            return "/api/auth/status"
-        case .login:
-            return "/api/auth/login"
-        case .logout:
-            return "/api/auth/logout"
         case .sessions:
             return "/api/sessions"
         case .sessionsSearch:
             return "/api/sessions/search"
         case .session:
             return "/api/session"
-        case .sessionStatus:
-            return "/api/session/status"
         case .newSession:
             return "/api/session/new"
         case .renameSession:
@@ -121,26 +96,6 @@ enum Endpoint {
             return "/api/personalities"
         case .setPersonality:
             return "/api/personality/set"
-        case .crons:
-            return "/api/crons"
-        case .cronCreate:
-            return "/api/crons/create"
-        case .cronUpdate:
-            return "/api/crons/update"
-        case .cronDelete:
-            return "/api/crons/delete"
-        case .cronRun:
-            return "/api/crons/run"
-        case .cronPause:
-            return "/api/crons/pause"
-        case .cronResume:
-            return "/api/crons/resume"
-        case .cronStatus:
-            return "/api/crons/status"
-        case .cronOutput:
-            return "/api/crons/output"
-        case .cronDeliveryOptions:
-            return "/api/crons/delivery-options"
         case .memory:
             return "/api/memory"
         case .memoryWrite:
@@ -214,8 +169,6 @@ enum Endpoint {
             }
 
             return items
-        case let .sessionStatus(id):
-            return [URLQueryItem(name: "session_id", value: id)]
         case let .exportSession(sessionID, format):
             return [
                 URLQueryItem(name: "session_id", value: sessionID),
@@ -238,15 +191,6 @@ enum Endpoint {
                 URLQueryItem(name: "session_id", value: sessionID),
                 URLQueryItem(name: "path", value: path)
             ]
-        case let .cronStatus(jobID):
-            guard let jobID else { return [] }
-            return [URLQueryItem(name: "job_id", value: jobID)]
-        case let .cronOutput(jobID, limit):
-            var items = [URLQueryItem(name: "job_id", value: jobID)]
-            if let limit {
-                items.append(URLQueryItem(name: "limit", value: "\(limit)"))
-            }
-            return items
         case let .skillContent(name, file):
             var items = [URLQueryItem(name: "name", value: name)]
             if let file {

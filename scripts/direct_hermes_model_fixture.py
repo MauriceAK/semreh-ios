@@ -5,6 +5,7 @@ Not an external model smoke: no real credentials, no tool calls. Delays let test
 interrupt a genuinely pending provider request. HTTP request bodies are not logged.
 """
 import argparse
+import hashlib
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import re
@@ -13,6 +14,11 @@ import time
 from typing import Optional
 
 REASONING_PROBE = False
+GOAL_E2E_PREFIX = 'SEMREH_GOAL_E2E_TWO_TURN_'
+GOAL_E2E_STEP_1 = 'SEMREH_GOAL_E2E_STEP_1'
+GOAL_E2E_STEP_2 = 'SEMREH_GOAL_E2E_STEP_2'
+GOAL_JUDGE_SYSTEM_SHA256 = '61f08b77510ae3492018c03ea51029102d958a27910206c10023b0c058c29d5c'
+GOAL_CONTINUATION_PREFIX = '[Continuing toward your standing goal]\nGoal: '
 COMPRESSION_BULKY_MARKER_PREFIX = 'SEMREH_COMPRESSION_BULKY_MAIN_'
 COMPRESSION_BULKY_MAIN_RE = re.compile(
     rf'^{re.escape(COMPRESSION_BULKY_MARKER_PREFIX)}(\d{{2}})$'
@@ -227,11 +233,44 @@ def safe_request_diagnostics(body: dict, last_user: object,
         'advertised_tools': advertised,
         'selected_tool_call': selected_tool_call is not None,
         'selected_tool_name': selected_name,
+        'fixture_kind': goal_e2e_kind(body, last_user),
     }
+
+
+def goal_e2e_kind(body: dict, last_user: object) -> Optional[str]:
+    if not isinstance(last_user, str) or GOAL_E2E_PREFIX not in last_user:
+        return None
+    messages = body.get('messages')
+    system = next((message.get('content') for message in (messages or [])
+                   if isinstance(message, dict) and message.get('role') == 'system'), None)
+    if (isinstance(system, str)
+            and hashlib.sha256(system.encode()).hexdigest() == GOAL_JUDGE_SYSTEM_SHA256):
+        # The second judge prompt contains both prior step strings. Priority is
+        # therefore deliberately newest-step-first.
+        if GOAL_E2E_STEP_2 in last_user:
+            return 'goal_judge_2'
+        if GOAL_E2E_STEP_1 in last_user:
+            return 'goal_judge_1'
+        return None
+    if body.get('stream') is True:
+        if last_user.startswith(GOAL_CONTINUATION_PREFIX):
+            return 'goal_main_2'
+        if last_user.startswith(GOAL_E2E_PREFIX):
+            return 'goal_main_1'
+    return None
 
 
 def response_text(body: dict, last_user: object) -> str:
     """Select the fixture response while keeping non-bulky behavior unchanged."""
+    goal_kind = goal_e2e_kind(body, last_user)
+    if goal_kind == 'goal_judge_2':
+        return '{"verdict":"done","reason":"fixture goal complete"}'
+    if goal_kind == 'goal_judge_1':
+        return '{"verdict":"continue","reason":"fixture step one complete"}'
+    if goal_kind == 'goal_main_2':
+        return GOAL_E2E_STEP_2
+    if goal_kind == 'goal_main_1':
+        return GOAL_E2E_STEP_1
     if body.get('stream') is True and isinstance(last_user, str):
         if COMPRESSION_BULKY_MAIN_RE.fullmatch(last_user):
             return bulky_main_content(last_user)

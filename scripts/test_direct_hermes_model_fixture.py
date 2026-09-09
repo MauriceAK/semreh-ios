@@ -3,12 +3,37 @@
 from __future__ import annotations
 
 import unittest
+import hashlib
 import json
 
 import direct_hermes_model_fixture as fixture
 
 
 class ModelFixtureTests(unittest.TestCase):
+    def test_goal_e2e_is_stateless_exact_and_step_two_wins(self) -> None:
+        marker = fixture.GOAL_E2E_PREFIX + "abc"
+        judge_system = "You are a strict judge evaluating whether an autonomous agent has achieved a user's stated goal."
+        # The production prompt is hash-pinned; tests patch only the constant
+        # to keep this unit independent of stock imports.
+        old = fixture.GOAL_JUDGE_SYSTEM_SHA256
+        fixture.GOAL_JUDGE_SYSTEM_SHA256 = hashlib.sha256(judge_system.encode()).hexdigest()
+        try:
+            main1 = {'stream': True, 'messages': [{'role': 'user', 'content': marker}]}
+            main2_user = fixture.GOAL_CONTINUATION_PREFIX + marker + "\ncontinue"
+            main2 = {'stream': True, 'messages': [{'role': 'user', 'content': main2_user}]}
+            judge1_user = marker + "\n" + fixture.GOAL_E2E_STEP_1
+            judge2_user = judge1_user + "\n" + fixture.GOAL_E2E_STEP_2
+            judge = lambda user: {'stream': False, 'messages': [
+                {'role': 'system', 'content': judge_system}, {'role': 'user', 'content': user}]}
+            self.assertEqual(fixture.response_text(main1, marker), fixture.GOAL_E2E_STEP_1)
+            self.assertEqual(fixture.response_text(main2, main2_user), fixture.GOAL_E2E_STEP_2)
+            self.assertIn('"continue"', fixture.response_text(judge(judge1_user), judge1_user))
+            self.assertIn('"done"', fixture.response_text(judge(judge2_user), judge2_user))
+            self.assertEqual(fixture.goal_e2e_kind(judge(judge2_user), judge2_user), 'goal_judge_2')
+            self.assertEqual(fixture.response_text({'stream': True}, 'prefix ' + marker), 'SEMREH_SLICE1_ACK')
+        finally:
+            fixture.GOAL_JUDGE_SYSTEM_SHA256 = old
+
     def test_multimodal_user_content_does_not_emit_clarification(self) -> None:
         body = {'tools': [{'type': 'function', 'function': {'name': 'clarify'}}]}
         self.assertIsNone(fixture.clarify_tool_call(body, [{'type': 'text', 'text': 'ordinary'}]))

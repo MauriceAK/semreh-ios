@@ -108,14 +108,6 @@ struct SessionRetryResponse: Decodable, Equatable {
     let error: String?
 }
 
-struct SessionStatusResponse: Decodable, Equatable {
-    let sessionId: String?
-    let activeStreamId: String?
-    let isStreaming: Bool?
-    let pendingUserMessage: String?
-    let error: String?
-}
-
 struct SessionSummary: Decodable, Equatable, Hashable, Identifiable {
     var id: String {
         if let sessionId, !sessionId.isEmpty {
