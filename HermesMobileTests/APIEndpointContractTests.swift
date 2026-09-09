@@ -104,13 +104,6 @@ final class ContractReadinessTests: XCTestCase {
             ),
             .init(name: "personalities", method: "GET", endpoint: .personalities, path: "/api/personalities"),
             .init(name: "set personality", method: "POST", endpoint: .setPersonality, path: "/api/personality/set"),
-            .init(
-                name: "insights",
-                method: "GET",
-                endpoint: .insights(days: 30),
-                path: "/api/insights",
-                query: ["days": "30"]
-            ),
             .init(name: "crons", method: "GET", endpoint: .crons, path: "/api/crons"),
             .init(name: "cron create", method: "POST", endpoint: .cronCreate, path: "/api/crons/create"),
             .init(name: "cron update", method: "POST", endpoint: .cronUpdate, path: "/api/crons/update"),

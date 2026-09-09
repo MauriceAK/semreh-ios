@@ -6,10 +6,10 @@ struct InsightsView: View {
 
     @State private var viewModel: InsightsViewModel
 
-    init(server: URL, onAPIError: @escaping (Error) -> Void) {
+    init(server: URL, profile: String = "default", onAPIError: @escaping (Error) -> Void) {
         self.server = server
         self.onAPIError = onAPIError
-        _viewModel = State(initialValue: InsightsViewModel(server: server))
+        _viewModel = State(initialValue: InsightsViewModel(server: server, profile: profile))
     }
 
     var body: some View {

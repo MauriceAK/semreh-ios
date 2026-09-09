@@ -412,6 +412,54 @@ final class LongChatScrollUITests: XCTestCase {
         // navigation control before asserting the shell tabs.
         waitForPostLoginDestination(app: app)
 
+        if environment["SEMREH_SLICE4_KANBAN_UI"] == "1" {
+            guard stockBackend else {
+                XCTFail("Slice 4 Kanban UI requires the pinned stock backend.")
+                return
+            }
+            let control = app.buttons["Control"]
+            assertHittable(control, timeout: 15,
+                          message: "The authenticated production shell must expose Control.")
+            control.tap()
+            let kanban = app.buttons["Kanban"]
+            assertHittable(kanban, timeout: 15,
+                          message: "The production Control menu must expose the retained Kanban plugin.")
+            kanban.tap()
+
+            XCTAssertTrue(app.navigationBars["Kanban"].waitForExistence(timeout: 20))
+            XCTAssertTrue(app.scrollViews["KanbanStatusSelector"].waitForExistence(timeout: 30),
+                          "The authenticated stock Board must reach compatible read-only content.")
+            XCTAssertTrue(app.buttons["Switch Board"].exists,
+                          "A live stock Board response must populate the Board selector.")
+            XCTAssertFalse(app.staticTexts["The Kanban server is unavailable."].exists)
+            XCTAssertFalse(app.staticTexts["This server's Kanban response is incompatible with Semreh."].exists)
+            XCTAssertFalse(app.staticTexts["Loading Kanban"].exists)
+            attachScreenshot(named: "slice4-kanban-stock-board-read-only")
+
+            let backToControl = app.navigationBars["Kanban"].buttons["Back"]
+            assertHittable(backToControl, timeout: 10,
+                          message: "Kanban must preserve production back-navigation to Control.")
+            backToControl.tap()
+            let reopenedControl = app.buttons["Control"]
+            assertHittable(reopenedControl, timeout: 10,
+                          message: "Back-navigation must restore the production Control entrypoint.")
+            reopenedControl.tap()
+            let insights = app.buttons["Insights"]
+            assertHittable(insights, timeout: 15,
+                          message: "The production Control menu must expose retained Insights.")
+            insights.tap()
+            XCTAssertTrue(app.navigationBars["Usage Analytics"].waitForExistence(timeout: 20))
+            XCTAssertTrue(app.staticTexts["Total Tokens"].waitForExistence(timeout: 30),
+                          "The authenticated stock analytics response must render its summary cards.")
+            XCTAssertTrue(app.staticTexts["Sessions"].exists)
+            XCTAssertFalse(app.staticTexts["Could Not Load Analytics"].exists)
+            XCTAssertFalse(app.staticTexts["Loading analytics..."].exists)
+            attachScreenshot(named: "slice4-insights-stock-read-only")
+            // Read-only production navigation check: do not select Cards, run
+            // Dispatcher, create a Card, switch Boards, refresh, or mutate data.
+            return
+        }
+
         if let storedID = environment["SEMREH_SLICE4_GIT_UI_SESSION_ID"] {
             guard stockBackend,
                   storedID.range(of: "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$", options: .regularExpression) != nil else {

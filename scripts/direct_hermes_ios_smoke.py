@@ -42,6 +42,7 @@ def main():
     parser.add_argument('--slice4-branch-ui', action='store_true')
     parser.add_argument('--slice4-btw-ui', action='store_true')
     parser.add_argument('--slice4-background-ui', action='store_true')
+    parser.add_argument('--slice4-kanban-ui', action='store_true')
     parser.add_argument('--slice4-git-ui-session-id')
     parser.add_argument('--gateway-restart-nonce')
     parser.add_argument('--tui-created-session-id')
@@ -62,6 +63,12 @@ def main():
                if name not in {'slice4_background_ui', 'slice2_ui', 'https', 'stock_backend'})
     ):
         parser.error('--slice4-background-ui requires --slice2-ui --https --stock-backend and no other test phase')
+    if args.slice4_kanban_ui and (
+        not args.slice2_ui or not args.https or not args.stock_backend
+        or any(value for name, value in vars(args).items()
+               if name not in {'slice4_kanban_ui', 'slice2_ui', 'https', 'stock_backend'})
+    ):
+        parser.error('--slice4-kanban-ui requires --slice2-ui --https --stock-backend and no other test phase')
     if args.slice4_git_ui_session_id is not None and (
         not args.slice2_ui or not args.https or not args.stock_backend
         or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', args.slice4_git_ui_session_id)
@@ -400,6 +407,8 @@ def main():
             target['EnvironmentVariables']['SEMREH_SLICE4_BTW_UI'] = '1'
         if args.slice4_background_ui:
             target['EnvironmentVariables']['SEMREH_SLICE4_BACKGROUND_UI'] = '1'
+        if args.slice4_kanban_ui:
+            target['EnvironmentVariables']['SEMREH_SLICE4_KANBAN_UI'] = '1'
         if args.slice4_git_ui_session_id:
             target['EnvironmentVariables']['SEMREH_SLICE4_GIT_UI_SESSION_ID'] = args.slice4_git_ui_session_id
         if args.tui_created_session_id:

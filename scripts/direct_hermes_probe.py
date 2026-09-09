@@ -235,6 +235,7 @@ def serve(*, with_pdf_renderer=False, approval_secret_fixture=False):
     # profile selection, SSH agent, or shell initialization environment.
     environment = {
         'PATH': str(PYTHON.parent) + ':/usr/bin:/bin',
+        'HOME': str(RUNTIME / 'home' / 'home'),
         'HERMES_HOME': str(RUNTIME / 'home'),
         'TMPDIR': str(RUNTIME / 'tmp'),
         'XDG_CACHE_HOME': str(RUNTIME / 'cache'),

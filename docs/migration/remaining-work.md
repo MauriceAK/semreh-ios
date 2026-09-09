@@ -5,13 +5,64 @@ details/evidence: `slice3-tasks.md`, `slice3-verification.md`, `slice4-tasks.md`
 This is the current dispatch checklist, not a new architecture or acceptance waiver.
 Preserve completed Luna work. Root owns integration, notes and native execution.
 
-Current checkpoint: direct BTW/chat-SSE retirement on `114609f` plus scoped diff.
-Signed build-v5/UI-build-v3 passed; production BTW UI-v3:1/0/0.
-Final full-v3:2070/0/14 after the UI-discovered refresh fix; signed launch41961.
-Stock live BTW proves exact correlated answer and unchanged canonical history.
+Current checkpoint: `2592ee2` audio/background plus Kanban/Insights scoped diff.
+Signed Kanban unit-build-v5 and UI-build-v1 passed. Focused-v1:134/1/0,
+adapter-v2:11/0/0 and state-v3:68/0/0 after fixture-only corrections. Production UI-v1:1/0/0
+normal login → Control → Kanban → Insights; both screenshots independently
+inspected. Full-v2:2087/0/14; strict signing and ordinary Simulator launch97529
+passed. Targeted audit-v1:9221 files/zero flags, six exported test consoles.
+Local checkpoint commit follows; no physical acceptance.
 Sol Low workers, root integration/review. The
 reconciled `secondary-feature-status.md` owns the per-feature current inventory.
 Do not use the historical checkpoints below as the next dispatch instruction.
+
+- [x] **Kanban direct implementation:** stock `/api/plugins/kanban` REST and
+  ticket-authenticated WebSocket replace old endpoints/SSE. Shared auth/custom
+  headers, redirect refusal, exact board generations and bounded snapshot polling
+  retained. Stock columns/write capability are supplied only when absent; explicit
+  server restrictions remain authoritative. HTTP errors reach retained UI,
+  unrepresentable create status/tenant changes refuse before writes, uncertain
+  created status reconciles without retry. Exact stock response shapes, nested
+  statistics and task ages mapped. Old Kanban HTTP tests/endpoints and unused
+  LDSwiftEventSource package/license removed; retained interaction tests remain.
+- [x] **Kanban owned live contract:** mutation-v1 passed two new unassigned triage
+  tasks, exact body/comment/dependency readback, five authenticated WS events.
+  No dispatch/reassign/specify/decompose; exact temporary board removed and logout
+  confirmed, config hash unchanged. This is not real worker-dispatch acceptance.
+- [x] **Insights direct implementation:** selected-profile direct inventory,
+  newest500 nonarchived rows; existing local message/token/cost/top-session math.
+  Date filtering stays local. Partial/unknown totals labeled; profile read errors
+  cannot publish misleading empty results. No `/api/insights` or legacy fallback.
+  Server-only cache/model/daily/hour breakdowns remain absent as on former local
+  fallback; complete/unlimited historical analytics are not claimed.
+- [x] **Kanban/Insights integrated gate:** full suite2087/0/14 and signing/ordinary
+  launch passed; targeted audit-v1:9221 files/zero flags/six exported test consoles.
+  Covers this batch's selected artifacts plus mandatory docs/runtime logs, not
+  arbitrary opaque/OCR, unselected evidence or unexported compressed contents.
+  Retained failures: build-v1 new async-XCTest and nested-closure compile errors;
+  build-v2 missing explicit return in editor test helper; both corrected.
+  Focused-v1 unconditionally called the asserting JSON-body helper on five valid
+  bodyless requests. Corrected fixture checks required bodies only where defined
+  and explicitly asserts body absence elsewhere; no product assertion weakened.
+  Full-v1:2086/1/14 exposed a test polling every5ms while asserting exactly two
+  reads; a legitimate third tick raced the assertion. A controlled first polling
+  tick and suspended subsequent delay preserve exact count/snapshot assertions.
+  Product code unchanged; build-v5/state-v3/full-v2 passed afterward.
+- [ ] **Goal profile check:** Maurice retained goals and approved bounded
+  reproduction before restrictions, not blanket deferral. Original offline import
+  probe failed and touched personal configuration backup during shutdown; original
+  config/backup bytes compared equal in authorized impact check, DB impact not
+  proved. Do not rerun it or claim it proved a goal bug. Replacement zero-Hermes
+  sandbox checks abort before receipt; no new stock imports. A bounded alternative
+  using the existing fixed-home owned gateway is under review, not yet executed.
+  Personal inspection remains outside ongoing scope. No private Hermes patch.
+- [x] **Owned launcher home containment:** source review found HOME absent despite
+  fixed HERMES_HOME; stock profile creation writes wrappers via Path.home.
+  Added HOME=owned runtime/home/home, AST regression1/0. Root gracefully stopped
+  only validated owned PID70052 and launched the same fixture asPID96233.
+  Actual HOME/HERMES_HOME/TMPDIR verified as owned; model70034/routes unchanged.
+  No profile creation occurred before fixing this. This is configuration
+  separation, not an OS sandbox; no personal service/configuration was changed.
 
 - [x] Retire approved proprietary website-login/native credential-form flow:
   UI/state/coordinator hooks, SSE events, API methods/endpoints, model/encryption

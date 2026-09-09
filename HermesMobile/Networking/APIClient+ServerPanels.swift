@@ -113,9 +113,6 @@ extension APIClient {
         ))
     }
 
-    func insights(days: Int) async throws -> InsightsResponse {
-        try await send(endpoint: .insights(days: days), method: "GET")
-    }
 }
 
 private struct PersonalitySetRequest: Encodable {

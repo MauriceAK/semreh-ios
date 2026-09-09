@@ -2,11 +2,25 @@ import Foundation
 import Observation
 
 protocol InsightsDataClient {
-    func sessions() async throws -> SessionsResponse
-    func insights(days: Int) async throws -> InsightsResponse
+    func insightSessions(profile: String, limit: Int, offset: Int) async throws -> DirectHermesSessionPage
 }
 
-extension APIClient: InsightsDataClient {}
+private enum DirectInsightsInventoryError: LocalizedError {
+    case profileReadFailed
+    var errorDescription: String? { "Hermes could not read the selected profile's session metadata." }
+}
+
+extension APIClient: InsightsDataClient {
+    func insightSessions(profile: String, limit: Int, offset: Int) async throws -> DirectHermesSessionPage {
+        try await directSessions(
+            profile: profile,
+            limit: limit,
+            offset: offset,
+            order: .recent,
+            archived: .exclude
+        )
+    }
+}
 
 enum AnalyticsTimeframe: String, CaseIterable, Identifiable {
     case today
@@ -120,16 +134,22 @@ final class InsightsViewModel {
     private(set) var lastError: Error?
     private(set) var dataSource: InsightsDataSource = .local
     private(set) var fallbackReason: String?
+    private(set) var inventoryTotal: Int?
+    private(set) var inventoryMayHaveMore = false
     private var activeLoadID: UUID?
 
     private let client: any InsightsDataClient
+    private let profile: String
+    private static let inventoryLimit = 500
 
-    init(server: URL) {
+    init(server: URL, profile: String = "default") {
         client = APIClient(baseURL: server)
+        self.profile = profile
     }
 
-    init(client: any InsightsDataClient) {
+    init(client: any InsightsDataClient, profile: String = "default") {
         self.client = client
+        self.profile = profile
     }
 
     func load() async {
@@ -148,39 +168,34 @@ final class InsightsViewModel {
         }
 
         do {
-            let response = try await client.insights(days: timeframe.serverDays)
+            let response = try await client.insightSessions(
+                profile: profile,
+                limit: Self.inventoryLimit,
+                offset: 0
+            )
             guard activeLoadID == loadID, !Task.isCancelled else { return }
+            guard response.errors?.isEmpty != false else {
+                throw DirectInsightsInventoryError.profileReadFailed
+            }
 
-            serverInsights = response
-            sessions = []
+            serverInsights = nil
+            sessions = response.sessions
+            inventoryTotal = response.total
+            inventoryMayHaveMore = response.total == nil
+                && response.sessions.count >= (response.limit ?? Self.inventoryLimit)
             loadedTimeframe = timeframe
-            dataSource = .server
+            dataSource = .localFallback
         } catch is CancellationError {
             return
         } catch {
             guard activeLoadID == loadID, !Task.isCancelled else { return }
             lastError = error
             fallbackReason = error.localizedDescription
-
-            do {
-                let response = try await client.sessions()
-                guard activeLoadID == loadID, !Task.isCancelled else { return }
-
-                serverInsights = nil
-                sessions = response.sessions ?? []
-                loadedTimeframe = timeframe
-                dataSource = .localFallback
-            } catch is CancellationError {
-                return
-            } catch {
-                guard activeLoadID == loadID, !Task.isCancelled else { return }
-                lastError = error
-                if hadLoadedAnalytics {
-                    fallbackReason = error.localizedDescription
-                } else {
-                    errorMessage = error.localizedDescription
-                    dataSource = .local
-                }
+            if hadLoadedAnalytics {
+                fallbackReason = error.localizedDescription
+            } else {
+                errorMessage = error.localizedDescription
+                dataSource = .local
             }
         }
     }
@@ -238,10 +253,16 @@ final class InsightsViewModel {
         case .server:
             return String(localized: "Source: server insights from the last \(periodDays) days.")
         case .localFallback:
-            if let fallbackReason, !fallbackReason.isEmpty {
-                return String(localized: "Source: local session metadata fallback. Server insights failed: \(fallbackReason)")
+            if let inventoryTotal, inventoryTotal > sessions.count {
+                return String(localized: "Source: newest \(sessions.count) of \(inventoryTotal) direct session metadata rows in the selected profile.")
             }
-            return String(localized: "Source: local session metadata fallback.")
+            if inventoryMayHaveMore {
+                return String(localized: "Source: newest \(sessions.count) direct session metadata rows in the selected profile; more may exist.")
+            }
+            if let fallbackReason, !fallbackReason.isEmpty {
+                return String(localized: "Source: direct session metadata. Refresh failed: \(fallbackReason)")
+            }
+            return String(localized: "Source: direct session metadata for the selected profile.")
         case .local:
             return String(localized: "Source: local session metadata.")
         }

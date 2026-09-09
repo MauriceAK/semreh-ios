@@ -3,6 +3,108 @@ import XCTest
 
 @MainActor
 final class KanbanFeatureStateTests: XCTestCase {
+    func testStockStreamURLAndConnectedSignalResetFailuresWithoutInventingCursorProgress() async throws {
+        let client = KanbanStateLiveClient(boardResults: [KanbanFixtures.richSnapshot])
+        let stream = KanbanStateStreamSpy()
+        let state = KanbanFeatureState(
+            server: URL(string: "https://example.test/base")!,
+            client: client,
+            streamClient: stream,
+            timing: KanbanLiveUpdateTiming(
+                coalescingDelay: .milliseconds(5),
+                reconnectDelays: [.milliseconds(5)],
+                pollingInterval: .seconds(60),
+                failuresBeforePolling: 2
+            )
+        )
+
+        await state.load()
+        XCTAssertEqual(state.liveCursor, 11)
+        state.setVisible(true)
+
+        let url = stream.startURLs.first
+        XCTAssertEqual(url?.scheme, "https")
+        XCTAssertEqual(url?.path, "/api/plugins/kanban/events")
+        let streamURL = try XCTUnwrap(url)
+        let query = URLComponents(url: streamURL, resolvingAgainstBaseURL: false)?.queryItems
+        XCTAssertEqual(query?.first { $0.name == "board" }?.value, "main")
+        XCTAssertEqual(query?.first { $0.name == "since" }?.value, "11")
+        stream.failCurrent()
+        var deadline = Date().addingTimeInterval(2)
+        while stream.startURLs.count < 2 && Date() < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(stream.startURLs.count, 2)
+        stream.emit(.connected)
+        XCTAssertEqual(state.liveCursor, 11)
+        XCTAssertFalse(state.liveUpdatesDelayed)
+        stream.failCurrent()
+        deadline = Date().addingTimeInterval(2)
+        while stream.startURLs.count < 3 && Date() < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(stream.startURLs.count, 3,
+                       "A connected socket must reset failures instead of entering polling fallback.")
+        XCTAssertFalse(state.liveUpdatesDelayed)
+        state.setVisible(false)
+    }
+
+    func testStreamFailureFallbackPollsFullBoardSnapshotWithoutHTTPEventsRoute() async throws {
+        let client = KanbanStateLiveClient(boardResults: [
+            KanbanFixtures.richSnapshot,
+            KanbanFixtures.newSnapshot,
+        ])
+        let stream = KanbanStateStreamSpy()
+        let pollingSleep = KanbanOneShotPollingSleep()
+        let state = KanbanFeatureState(
+            server: URL(string: "https://example.test")!,
+            client: client,
+            streamClient: stream,
+            timing: KanbanLiveUpdateTiming(
+                coalescingDelay: .milliseconds(5),
+                reconnectDelays: [.zero],
+                pollingInterval: .seconds(30),
+                failuresBeforePolling: 1
+            ),
+            sleep: { duration in try await pollingSleep.sleep(duration) }
+        )
+
+        await state.load()
+        state.setVisible(true)
+        stream.failCurrent()
+        let deadline = Date().addingTimeInterval(2)
+        while await client.boardCallCount < 2 && Date() < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+
+        let boardCallCount = await client.boardCallCount
+        let eventsCallCount = await client.eventsCallCount
+        XCTAssertEqual(boardCallCount, 2)
+        XCTAssertEqual(eventsCallCount, 0)
+        XCTAssertEqual(state.snapshot?.latestEventID, 13)
+        XCTAssertEqual(state.allCards.map(\.cardID), ["NEW"])
+        XCTAssertTrue(state.liveUpdatesDelayed)
+        let requests = await client.boardRequests
+        XCTAssertNil(requests.last?.since, "Fallback must reconcile a full board snapshot.")
+        state.setVisible(false)
+    }
+
+    func testPluginUnavailableIsDistinctFromMalformedMissingBoardCollection() async {
+        let unavailable = KanbanFeatureState(
+            server: URL(string: "https://example.test")!,
+            client: KanbanClientStub(configurationResult: .failure(DirectKanbanError.pluginUnavailable))
+        )
+        await unavailable.load()
+        XCTAssertEqual(unavailable.state, .serverUnavailable)
+
+        let missingBoard = KanbanFeatureState(
+            server: URL(string: "https://example.test")!,
+            client: KanbanClientStub(boardsResult: .success(mutationDecode(#"{"boards":[],"read_only":false}"#)))
+        )
+        await missingBoard.load()
+        XCTAssertEqual(missingBoard.state, .incompatibleContract)
+    }
+
     func testCompatibleHandshakeIsOrderedAndBoundToItsServer() async {
         let client = KanbanClientStub()
         let firstServer = URL(string: "https://first.example.test")!
@@ -1956,6 +2058,64 @@ final class KanbanFeatureStateTests: XCTestCase {
 }
 
 private enum KanbanEventsNotStubbed: Error { case unexpectedCall }
+
+private actor KanbanStateLiveClient: KanbanDataClient {
+    private var boardResults: [KanbanBoardSnapshot]
+    private(set) var boardRequests: [KanbanBoardRequest] = []
+    private(set) var eventsCallCount = 0
+
+    init(boardResults: [KanbanBoardSnapshot]) {
+        self.boardResults = boardResults
+    }
+
+    var boardCallCount: Int { boardRequests.count }
+
+    func kanbanConfiguration() -> KanbanConfiguration { KanbanFixtures.configuration }
+    func kanbanBoards() -> KanbanBoardsResponse { KanbanFixtures.boards }
+    func kanbanBoard(_ request: KanbanBoardRequest) -> KanbanBoardSnapshot {
+        boardRequests.append(request)
+        if boardResults.count > 1 { return boardResults.removeFirst() }
+        return boardResults[0]
+    }
+    func kanbanStats(board: String) -> KanbanStats { KanbanFixtures.stats }
+    func kanbanAssignees(board: String) -> KanbanAssigneeHistory { KanbanFixtures.history }
+    func kanbanEvents(_ request: KanbanEventsRequest) throws -> KanbanEventsEnvelope {
+        eventsCallCount += 1
+        throw KanbanEventsNotStubbed.unexpectedCall
+    }
+}
+
+@MainActor
+private final class KanbanOneShotPollingSleep {
+    private var callCount = 0
+
+    func sleep(_ duration: Duration) async throws {
+        callCount += 1
+        if callCount == 1 { return }
+        try await Task.sleep(for: duration)
+    }
+}
+
+@MainActor
+private final class KanbanStateStreamSpy: KanbanEventStreamingClient {
+    private(set) var startURLs: [URL] = []
+    private var onFrame: (@MainActor (KanbanStreamFrame) -> Void)?
+    private var onFailure: (@MainActor () -> Void)?
+
+    func start(
+        url: URL,
+        onFrame: @escaping @MainActor (KanbanStreamFrame) -> Void,
+        onFailure: @escaping @MainActor () -> Void
+    ) {
+        startURLs.append(url)
+        self.onFrame = onFrame
+        self.onFailure = onFailure
+    }
+
+    func stop() {}
+    func emit(_ frame: KanbanStreamFrame) { onFrame?(frame) }
+    func failCurrent() { onFailure?() }
+}
 
 private extension KanbanDataClient {
     func kanbanEvents(_ request: KanbanEventsRequest) async throws -> KanbanEventsEnvelope {

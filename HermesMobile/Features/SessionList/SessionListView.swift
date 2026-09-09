@@ -460,7 +460,8 @@ struct SessionListView: View {
                 MemoryView(server: server, profile: viewModel.activeProfileName ?? "default", onAPIError: authManager.handleAPIError)
                     .id(viewModel.activeProfileName ?? "default")
             case .insights:
-                InsightsView(server: server, onAPIError: authManager.handleAPIError)
+                InsightsView(server: server, profile: viewModel.activeProfileName ?? "default", onAPIError: authManager.handleAPIError)
+                    .id(viewModel.activeProfileName ?? "default")
             case .archived:
                 let archiveProfile = viewModel.activeProfileName ?? "default"
                 ArchivedSessionsView(

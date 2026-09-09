@@ -7,77 +7,30 @@ import UniformTypeIdentifiers
 @testable import HermesMobile
 
 final class APIClientInsightsTests: APIClientTestCase {
-    func testInsightsRequestBuildsDaysQueryAndDecodesServerAnalytics() async throws {
+    func testInsightSessionsUsesExactScopedDirectInventory() async throws {
         let client = makeClient { request in
             XCTAssertEqual(request.httpMethod, "GET")
-            XCTAssertEqual(request.url?.path, "/api/insights")
+            XCTAssertEqual(request.url?.path, "/api/profiles/sessions")
 
             let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
             let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
-            XCTAssertEqual(query["days"], "30")
+            XCTAssertEqual(query, ["profile": "work", "limit": "500", "offset": "0", "order": "recent", "archived": "exclude"])
 
             return apiTestJSONResponse("""
             {
-              "period_days": 30,
-              "total_sessions": 3,
-              "total_messages": 12,
-              "total_input_tokens": 1200,
-              "total_output_tokens": 450,
-              "total_tokens": 1650,
-              "total_cost": 0.0323,
-              "total_cache_read_tokens": 900,
-              "total_cache_hit_percent": 87.5,
-              "models": [
-                {
-                  "model": "gpt-5.5",
-                  "sessions": 3,
-                  "input_tokens": 1200,
-                  "output_tokens": 450,
-                  "total_tokens": 1650,
-                  "cost": 0.0323,
-                  "cache_hit_percent": 87.5,
-                  "cache_read_tokens": 900,
-                  "session_share": 100,
-                  "token_share": 100,
-                  "cost_share": 100
-                }
-              ],
-              "daily_tokens": [
-                {
-                  "date": "2026-05-21",
-                  "input_tokens": 1200,
-                  "output_tokens": 450,
-                  "sessions": 3,
-                  "cost": 0.0323
-                }
-              ],
-              "activity_by_day": [
-                { "day": "Thu", "sessions": 3 }
-              ],
-              "activity_by_hour": [
-                { "hour": 14, "sessions": 3 }
-              ]
+              "sessions": [{"id":"s1","title":"Scoped","profile":"work","message_count":12,"input_tokens":1200,"output_tokens":450,"estimated_cost":0.0323}],
+              "total": 501,
+              "limit": 500,
+              "offset": 0,
+              "profile_totals": {"work":501},
+              "errors": []
             }
             """, for: request)
         }
 
-        let response = try await client.insights(days: 30)
-
-        XCTAssertEqual(response.periodDays, 30)
-        XCTAssertEqual(response.totalSessions, 3)
-        XCTAssertEqual(response.totalMessages, 12)
-        XCTAssertEqual(response.totalInputTokens, 1_200)
-        XCTAssertEqual(response.totalOutputTokens, 450)
-        XCTAssertEqual(response.totalTokens, 1_650)
-        XCTAssertEqual(try XCTUnwrap(response.totalCost), 0.0323, accuracy: 0.0001)
-        XCTAssertEqual(response.totalCacheReadTokens, 900)
-        XCTAssertEqual(try XCTUnwrap(response.totalCacheHitPercent), 87.5, accuracy: 0.0001)
-        XCTAssertEqual(response.models?.first?.model, "gpt-5.5")
-        XCTAssertEqual(try XCTUnwrap(response.models?.first?.cacheHitPercent), 87.5, accuracy: 0.0001)
-        XCTAssertEqual(response.models?.first?.costShare, 100)
-        XCTAssertEqual(response.dailyTokens?.first?.date, "2026-05-21")
-        XCTAssertEqual(response.activityByDay?.first?.day, "Thu")
-        XCTAssertEqual(response.activityByHour?.first?.hour, 14)
+        let response = try await client.insightSessions(profile: "work", limit: 500, offset: 0)
+        XCTAssertEqual(response.sessions.first?.title, "Scoped")
+        XCTAssertEqual(response.total, 501)
     }
 
     func testInsightsResponseToleratesMissingArraysAndLossyCounts() throws {

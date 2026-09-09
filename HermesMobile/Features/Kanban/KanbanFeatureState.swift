@@ -390,7 +390,7 @@ final class KanbanFeatureState {
         onAPIError: @escaping (Error) -> Void = { _ in }
     ) {
         self.server = server
-        self.client = client ?? APIClient(baseURL: server)
+        self.client = client ?? DirectKanbanDataClient(apiClient: APIClient(baseURL: server))
         self.streamClient = streamClient ?? KanbanEventStreamClient()
         self.timing = timing
         self.archiveUndoLifetime = archiveUndoLifetime
@@ -2356,9 +2356,7 @@ final class KanbanFeatureState {
         streamAttemptID += 1
         let attemptID = streamAttemptID
         let generation = liveGeneration
-        let url = Endpoint.kanbanEventsStream(
-            KanbanEventsStreamRequest(board: board, since: liveCursor)
-        ).url(relativeTo: server)
+        let url = directKanbanEventsURL(board: board, since: liveCursor)
         streamClient.start(
             url: url,
             onFrame: { [weak self] frame in
@@ -2387,12 +2385,9 @@ final class KanbanFeatureState {
     ) {
         guard isCurrentLiveWork(board: board, generation: generation), streamAttemptID == attemptID else { return }
         switch frame {
-        case let .hello(cursor, frameBoard):
-            guard frameBoard == board else {
-                handleStreamFailure(board: board, generation: generation, attemptID: attemptID)
-                return
-            }
-            liveCursor = max(liveCursor, cursor)
+        case .connected:
+            // Stock WebSocket sends no synthetic hello/cursor. Connection
+            // readiness resets retry state without inventing board progress.
             streamFailureCount = 0
             liveUpdatesDelayed = false
         case let .events(events, cursor, frameID):
@@ -2409,6 +2404,10 @@ final class KanbanFeatureState {
             scheduleCoalescedReconciliation(board: board, generation: generation)
         case .malformed:
             handleStreamFailure(board: board, generation: generation, attemptID: attemptID)
+        case .hello:
+            // Compatibility-only frame for the local lab/older fixtures.
+            // Stock WebSocket health is established exclusively by .connected.
+            break
         case .ignored:
             break
         }
@@ -2462,43 +2461,32 @@ final class KanbanFeatureState {
             while !Task.isCancelled {
                 do { try await sleep(interval) } catch { return }
                 guard let self, self.isCurrentLiveWork(board: board, generation: generation) else { return }
-                await self.pollEvents(board: board, generation: generation)
+                await self.pollBoardSnapshot(board: board, generation: generation)
             }
         }
     }
 
-    private func pollEvents(board: String, generation: Int) async {
-        do {
-            let envelope = try await client.kanbanEvents(
-                KanbanEventsRequest(board: board, since: liveCursor)
-            )
-            guard isCurrentLiveWork(board: board, generation: generation),
-                  let cursor = envelope.cursor,
-                  cursor >= liveCursor,
-                  let events = envelope.events,
-                  events.allSatisfy({ event in
-                      guard let eventID = event.eventID else { return false }
-                      return eventID <= cursor
-                  }) else { return }
-            let wasOffline = isOffline
-            if wasOffline {
-                liveCursor = max(liveCursor, cursor)
-                let succeeded = await refreshBoard(usingCursor: false, refreshSupplementary: true)
-                if succeeded {
-                    loadedDetailIsStale = false
-                    retryLiveStream()
-                }
-            } else if cursor > liveCursor {
-                liveCursor = cursor
-                scheduleCoalescedReconciliation(board: board, generation: generation)
-            }
-        } catch is CancellationError {
-            return
-        } catch {
-            guard isCurrentLiveWork(board: board, generation: generation) else { return }
-            markOfflineIfNeeded(error)
-            forwardAuthentication(error)
+    private func pollBoardSnapshot(board: String, generation: Int) async {
+        guard isCurrentLiveWork(board: board, generation: generation) else { return }
+        let wasOffline = isOffline
+        let succeeded = await refreshBoard(usingCursor: false, refreshSupplementary: true)
+        guard isCurrentLiveWork(board: board, generation: generation) else { return }
+        if succeeded {
+            loadedDetailIsStale = false
+            if wasOffline { retryLiveStream() }
         }
+    }
+
+    private func directKanbanEventsURL(board: String, since: Int) -> URL {
+        guard var components = URLComponents(url: server, resolvingAgainstBaseURL: false) else {
+            return server
+        }
+        components.path = "/api/plugins/kanban/events"
+        components.queryItems = [
+            URLQueryItem(name: "board", value: board),
+            URLQueryItem(name: "since", value: String(since)),
+        ]
+        return components.url ?? server
     }
 
     private func retryLiveStream() {
@@ -2651,6 +2639,9 @@ final class KanbanFeatureState {
     }
 
     private static func classify(_ error: Error) -> KanbanCompatibilityState {
+        if error as? DirectKanbanError == .pluginUnavailable {
+            return .serverUnavailable
+        }
         if error is KanbanContractViolation || error is KanbanResponseError {
             return .incompatibleContract
         }
