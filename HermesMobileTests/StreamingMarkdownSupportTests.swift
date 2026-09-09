@@ -1,6 +1,33 @@
 import XCTest
 @testable import HermesMobile
 
+final class ReasoningDisplayTextTests: XCTestCase {
+    func testSummaryPreservesPlainText() {
+        XCTAssertEqual(ReasoningDisplayText.summary("Checking the available sources."), "Checking the available sources.")
+    }
+
+    func testSummaryRendersMarkdownInsteadOfShowingSourceMarkers() {
+        XCTAssertEqual(
+            ReasoningDisplayText.summary("# Searching Reddit\n\nFound **compensation sources** and [interviews](https://example.test)."),
+            "Searching Reddit Found compensation sources and interviews."
+        )
+    }
+
+    func testSummaryCollapsesWhitespaceAndBoundsRenderedCharacters() {
+        let summary = ReasoningDisplayText.summary("**12345**\n\n67890", maximumCharacters: 8)
+
+        XCTAssertEqual(summary, "12345 67...")
+    }
+
+    func testSummaryHidesIncompleteStreamingMarkdownDelimiter() {
+        XCTAssertEqual(ReasoningDisplayText.summary("**Searching the latest sources"), "Searching the latest sources")
+    }
+
+    func testSummaryNeverBecomesEmptyForMarkerOnlyInput() {
+        XCTAssertEqual(ReasoningDisplayText.summary("`"), "Thinking…")
+    }
+}
+
 final class StreamingMarkdownBlockSplitterTests: XCTestCase {
     func testShortTextStaysInActiveMarkdown() {
         let text = "Hello from Hermes."

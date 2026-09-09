@@ -27,6 +27,52 @@ remain actionable immediately; cosmetic work waits until after migration.
 - [ ] **PF-6 — Thinking/tool lifecycle review.** Recheck long real conversations
   for stale/misplaced cards; never hide a blocking request as a cosmetic fix.
 
+September9 personal pilot observations (original reports; progress below):
+- [ ] Large blank gap between collapsed activity and thinking/final response;
+  raw Markdown markers visible in thinking preview. Reproduce mixed-tool layout.
+- [ ] User reports a large Markdown block appearing then disappearing across
+  background work. Supplied screenshots show only the later state, so content
+  loss is not proven. Compare live rows with saved history on return; distinguish
+  intentional cold-resume reconciliation from missing durable content.
+- [ ] Guardrail response visible while Stop button/dot and later sidebar
+  "Streaming response..." remain. Verify actual server terminal state versus
+  stale client running state before attributing blame or hiding indicators.
+  Follow-up screenshot confirms failed Stop with "Hermes has not confirmed that
+  the response stopped." Current UI uses that generic copy for every interrupt
+  error. Controller requires interrupt ACK, status Agent Running: No AND a
+  terminalReceipt, polling40x250ms plus RPC time. Missing terminal event can
+  therefore leave Stop unconfirmed even if server is idle; not yet reproduced.
+  Earlier screenshot now supplied: large rendered heading "Searching Reddit Ads
+  interviews and compensation sources" before the final guardrail response.
+  Establish whether it was interim content absent from durable history, terminal
+  replacement, or client loss. Do not label it injected instructions or proven
+  background recovery failure based on appearance alone.
+- [ ] "Scheduled sessions" groups cron-marked history, not future jobs. Consider
+  clearer "Scheduled task history" wording; inspect row markers if classification
+  seems wrong. This disclosure existed in the pre-migration product base.
+
+The exact loop_web_search_cap response originates in stock Hermes run_agent.py;
+agent/tool_guardrails.py counts per-turn web_search calls. Its generic wording
+does not prove every counted search failed or repeated identical arguments.
+Investigate tool results separately; do not increase/disable guardrails as UI fix.
+
+September9 stabilization progress (uncommitted successor to18f8c78):
+- Missing-terminal cancellation reproduced failing before the fix. Controller
+  now reconciles canonical history and confirms scoped idle, including rotated
+  tip/rebind retries, without submitting again. Focused controller82/0/0;
+  signed production fixture UI Stop->send->reply->idle1/0/0, screenshot inspected.
+- Collapsed reasoning previews render bounded Markdown as plain text; expanded
+  typography unchanged.5preview regressions pass. Whole-document parse initially
+  joined paragraphs, caught by2tests and corrected with bounded linewise parsing.
+-68-tool regression proves67 content-free/accessory-free assistant rows created
+  phantom LazyVStack spacing. Presentation-only filter removes those children,
+  preserves all canonical rows and visible accessory/compression anchors, and
+  keeps scrolling targets consistent. TranscriptMessageTests28/0/0 pass.
+- Mounted streaming Markdown shrink regression passed without a renderer change;
+  persistent renderer height was not reproduced. Interim text is currently
+  replaced by message.complete terminal text; that is not proof of durable loss.
+  Exact phone guardrail run/history and physical smoothness remain unverified.
+
 Verified checkpoint: ad3ddbc fixes competing explicit scroll/restore work and a
 reproduced saved-reading-position race. Native2018pass/0fail/7intentional skips;
 long-chat UI4pass/0skip. Owner confirms mid-scroll arrow works on build8, but

@@ -10,6 +10,96 @@ final class DirectSkillUITests: XCTestCase {
     private let skill = "semreh-fixture-empty-secret"
 
     @MainActor
+    func testOptInProductionStopThenResend() async throws {
+        continueAfterFailure = false
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("Production Stop/re-send verification is simulator-only.")
+        #endif
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SEMREH_STABILIZATION_UI"] == "1" else {
+            throw XCTSkip("Production Stop/re-send verification is opt-in.")
+        }
+        guard environment["SEMREH_SLICE2_UI_LIVE"] == "1",
+              environment["SEMREH_SLICE1_HTTPS"] == "1",
+              environment["SEMREH_SLICE2_UI_BACKEND_MODE"] == "stock",
+              environment["SEMREH_SLICE2_UI_BACKEND_SHA"] == backendSHA,
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == credentialsPath else {
+            return XCTFail("Stop/re-send verification requires the contained pinned stock fixture.")
+        }
+
+        let credentials = try readCredentials()
+        let app = XCUIApplication()
+        app.terminate()
+        app.launch()
+        defer { UIPasteboard.general.items = [] }
+        dismissKnownPasswordSavePrompt(app, timeout: 1)
+
+        let server = app.textFields["onboarding-server-url"]
+        if !(server.waitForExistence(timeout: 4) && server.isHittable) {
+            let welcome = app.staticTexts["Control Semreh from iPhone or iPad."]
+            guard welcome.waitForExistence(timeout: 5) && welcome.isHittable else {
+                return XCTFail("Refusing to sign out or navigate an authenticated non-fixture account.")
+            }
+            let existingServer = app.buttons["Already have a server?"]
+            XCTAssertTrue(existingServer.waitForExistence(timeout: 5) && existingServer.isHittable)
+            existingServer.tap()
+            XCTAssertTrue(server.waitForExistence(timeout: 5) && server.isHittable)
+        }
+        replace(server, with: origin, app: app)
+        let testConnection = app.buttons["Test Connection"]
+        XCTAssertTrue(testConnection.waitForExistence(timeout: 5) && testConnection.isHittable)
+        testConnection.tap()
+        let username = app.textFields["onboarding-username"]
+        let password = app.secureTextFields["onboarding-password"]
+        XCTAssertTrue(username.waitForExistence(timeout: 30))
+        replace(username, with: credentials.username, app: app)
+        paste(credentials.password, into: password, app: app)
+        app.buttons["Connect"].tap()
+
+        let sessions = app.buttons["Sessions"]
+        let restoredChat = app.otherElements.matching(
+            NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
+        ).firstMatch
+        let destinationDeadline = Date().addingTimeInterval(45)
+        while !sessions.exists && !restoredChat.exists && Date() < destinationDeadline {
+            dismissKnownPasswordSavePrompt(app, timeout: 0)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        }
+        dismissKnownPasswordSavePrompt(app, timeout: 3)
+        if restoredChat.exists {
+            let back = app.navigationBars.buttons["BackButton"]
+            XCTAssertTrue(back.waitForExistence(timeout: 5) && back.isHittable)
+            back.tap()
+        }
+        XCTAssertTrue(sessions.waitForExistence(timeout: 30) && sessions.isHittable)
+        sessions.tap()
+        let newSession = app.buttons["New session"]
+        XCTAssertTrue(newSession.waitForExistence(timeout: 15) && newSession.isHittable)
+        newSession.tap()
+
+        let composer = app.textViews.matching(
+            NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
+        ).firstMatch
+        XCTAssertTrue(composer.waitForExistence(timeout: 20) && composer.isHittable)
+        send("SEMREH_INTERRUPT_FIXTURE", through: composer, app: app)
+        let stop = app.buttons["Stop response"]
+        XCTAssertTrue(stop.waitForExistence(timeout: 10) && stop.isHittable)
+        stop.tap()
+        waitForIdle(app: app)
+
+        let benignMarker = "SEMREH_STABILIZATION_AFTER_STOP_\(UUID().uuidString)"
+        send(benignMarker, through: composer, app: app)
+        let acknowledgement = containing("SEMREH_SLICE1_ACK", app: app)
+        XCTAssertTrue(acknowledgement.waitForExistence(timeout: 45) && acknowledgement.isHittable)
+        waitForIdle(app: app)
+        XCTAssertTrue(composer.exists && composer.isHittable)
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "Production Stop then re-send final state"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+    }
+
+    @MainActor
     func testOptInPersonalPilotBootstrapOnly() async throws {
         continueAfterFailure = false
         #if !targetEnvironment(simulator)
@@ -169,6 +259,17 @@ final class DirectSkillUITests: XCTestCase {
         let send = app.buttons["Send"]
         XCTAssertTrue(send.waitForExistence(timeout: 5))
         send.tap()
+    }
+
+    @MainActor
+    private func waitForIdle(app: XCUIApplication) {
+        let deadline = Date().addingTimeInterval(45)
+        while Date() < deadline {
+            if !app.buttons["Stop response"].exists && app.buttons["Send"].exists { return }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        }
+        XCTAssertFalse(app.buttons["Stop response"].exists)
+        XCTAssertTrue(app.buttons["Send"].exists)
     }
 
     private func signOutIfNeeded(_ app: XCUIApplication) throws {

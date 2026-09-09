@@ -1688,6 +1688,157 @@ final class GatewayConversationControllerTests: XCTestCase {
         await runtime.stop()
     }
 
+    func testInterruptRecoversMissingTerminalAfterIdleCanonicalReconciliation() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setInterruptResponse(.object(["status": .string("interrupted")]))
+        let runtime = try makeRuntime(fake)
+        var canonicalLoads: [String] = []
+        let controller = makeController(runtime: runtime, storedID: nil) { id, _, _, _ in
+            canonicalLoads.append(id)
+            return self.page(id)
+        }
+        var recoveredIdleIDs: [String] = []
+        controller.onRecoveredIdle = { recoveredIdleIDs.append($0) }
+        try await controller.submit("running")
+
+        try await controller.interrupt()
+
+        XCTAssertEqual(controller.runState, .idle)
+        XCTAssertEqual(canonicalLoads, ["durable-1"])
+        XCTAssertEqual(recoveredIdleIDs, ["durable-1"])
+        let methods = fake.calls().map(\.method)
+        XCTAssertEqual(methods.filter { $0 == "session.interrupt" }.count, 1)
+        XCTAssertEqual(methods.filter { $0 == "prompt.submit" }.count, 1)
+        XCTAssertTrue(methods.contains("session.status"))
+        await runtime.stop()
+    }
+
+    func testMissingTerminalCanonicalRotationRebindsAndConfirmsCurrentTipIdle() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setInterruptResponse(.object(["status": .string("interrupted")]))
+        fake.setResumeResponse(.object([
+            "session_id": .string("runtime-tip"),
+            "session_key": .string("canonical-tip"),
+            "running": .bool(false)
+        ]))
+        let runtime = try makeRuntime(fake)
+        var loads: [String] = []
+        var recoveredIdleIDs: [String] = []
+        let controller = makeController(runtime: runtime, storedID: nil) { id, _, _, _ in
+            loads.append(id)
+            return self.page(id == "durable-1" ? "canonical-tip" : id)
+        }
+        controller.onRecoveredIdle = { recoveredIdleIDs.append($0) }
+        try await controller.submit("running")
+
+        try await controller.interrupt()
+
+        XCTAssertEqual(controller.runState, .idle)
+        XCTAssertEqual(controller.storedID, "canonical-tip")
+        XCTAssertEqual(controller.binding?.runtimeID, "runtime-tip")
+        XCTAssertEqual(recoveredIdleIDs, ["canonical-tip"])
+        XCTAssertEqual(loads, ["durable-1", "canonical-tip"])
+        let calls = fake.calls()
+        XCTAssertEqual(calls.filter { $0.method == "prompt.submit" }.count, 1)
+        XCTAssertEqual(calls.filter { $0.method == "session.resume" }.count, 1)
+        XCTAssertEqual(calls.filter { $0.method == "session.status" }.count, 2)
+        let finalStatusSession = calls.last { $0.method == "session.status" }?.params?.gatewayFields["session_id"]?.gatewayString
+        XCTAssertEqual(finalStatusSession, "runtime-tip")
+        await runtime.stop()
+    }
+
+    func testMissingTerminalRotationResumeFailureCanRetryStopWithoutResubmit() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setInterruptResponse(.object(["status": .string("interrupted")]))
+        fake.setResumeResponse(.object([
+            "session_id": .string("runtime-tip"),
+            "session_key": .string("canonical-tip"),
+            "running": .bool(false)
+        ]))
+        fake.setResumeError(.timeout(method: "session.resume", requestID: "resume-1"))
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime, storedID: nil) { id, _, _, _ in
+            self.page(id == "durable-1" ? "canonical-tip" : id)
+        }
+        try await controller.submit("running")
+
+        do {
+            try await controller.interrupt()
+            XCTFail("The failed tip resume must leave Stop retryable")
+        } catch {
+            XCTAssertEqual(controller.runState, .stopping)
+            XCTAssertNil(controller.binding)
+            XCTAssertEqual(controller.storedID, "canonical-tip")
+        }
+        try await controller.interrupt()
+
+        XCTAssertEqual(controller.runState, .idle)
+        XCTAssertEqual(controller.storedID, "canonical-tip")
+        XCTAssertEqual(controller.binding?.runtimeID, "runtime-tip")
+        let methods = fake.calls().map(\.method)
+        XCTAssertEqual(methods.filter { $0 == "prompt.submit" }.count, 1)
+        XCTAssertEqual(methods.filter { $0 == "session.resume" }.count, 2)
+        XCTAssertEqual(methods.filter { $0 == "session.interrupt" }.count, 2)
+        await runtime.stop()
+    }
+
+    func testMissingTerminalReconciliationFailureRemainsRetryableWithoutResubmit() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setInterruptResponse(.object(["status": .string("interrupted")]))
+        let runtime = try makeRuntime(fake)
+        var shouldFail = true
+        let controller = makeController(runtime: runtime, storedID: nil) { id, _, _, _ in
+            if shouldFail {
+                shouldFail = false
+                throw URLError(.cannotConnectToHost)
+            }
+            return self.page(id)
+        }
+        try await controller.submit("running")
+
+        do {
+            try await controller.interrupt()
+            XCTFail("A failed canonical reconciliation must not report stopped")
+        } catch {
+            XCTAssertEqual(controller.runState, .stopping)
+        }
+        try await controller.interrupt()
+
+        XCTAssertEqual(controller.runState, .idle)
+        let methods = fake.calls().map(\.method)
+        XCTAssertEqual(methods.filter { $0 == "session.interrupt" }.count, 2)
+        XCTAssertEqual(methods.filter { $0 == "prompt.submit" }.count, 1)
+        await runtime.stop()
+    }
+
+    func testMissingTerminalReconciliationCannotStopAReplacementTurn() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setInterruptResponse(.object(["status": .string("interrupted")]))
+        let runtime = try makeRuntime(fake)
+        let loaderStarted = AsyncGate()
+        let releaseLoader = AsyncGate()
+        let controller = makeController(runtime: runtime, storedID: nil) { id, _, _, _ in
+            await loaderStarted.release()
+            await releaseLoader.wait()
+            return self.page(id)
+        }
+        try await controller.submit("running")
+        let stopping = Task { try await controller.interrupt() }
+        await loaderStarted.wait()
+        fake.emit(event(sessionID: "runtime-1", type: "message.start", sequence: 4))
+        await yieldUntil { controller.runState == .running }
+        await releaseLoader.release()
+
+        do {
+            try await stopping.value
+            XCTFail("A replacement turn must invalidate the stopped-turn reconciliation")
+        } catch DirectSessionError.staleOperation { }
+
+        XCTAssertEqual(controller.runState, .running)
+        XCTAssertEqual(fake.calls().filter { $0.method == "prompt.submit" }.count, 1)
+        await runtime.stop()
+    }
+
     func testUnconfirmedInterruptCanBeRetriedWithoutResubmittingPrompt() async throws {
         let fake = ControllerFakeTransport()
         fake.setInterruptResponse(.object(["status": .string("unconfirmed")]))
@@ -2075,6 +2226,7 @@ private final class ControllerFakeTransport: HermesGatewayTransport, @unchecked 
     private var connected = false
     private var createCount = 0
     private var resumeResponse: JSONValue?
+    private var resumeError: HermesGatewayError?
     private var resumeEventsBeforeResponse: [HermesGatewayEvent] = []
     private var resumeResponseGate: AsyncGate?
     private var sinkConsumedGate: AsyncGate?
@@ -2119,6 +2271,10 @@ private final class ControllerFakeTransport: HermesGatewayTransport, @unchecked 
 
     func setResumeResponse(_ response: JSONValue) {
         withLock { resumeResponse = response }
+    }
+
+    func setResumeError(_ error: HermesGatewayError?) {
+        withLock { resumeError = error }
     }
 
     func setCompressResponse(_ response: JSONValue, gate: AsyncGate? = nil, error: HermesGatewayError? = nil) {
@@ -2247,6 +2403,10 @@ private final class ControllerFakeTransport: HermesGatewayTransport, @unchecked 
                 "session_key": .string("durable-\(number)")
             ])
         case "session.resume":
+            if let error = withLock({ () -> HermesGatewayError? in
+                defer { resumeError = nil }
+                return resumeError
+            }) { throw error }
             for event in behavior.1 { emit(event) }
             if let gate = behavior.2 {
                 await gate.wait()

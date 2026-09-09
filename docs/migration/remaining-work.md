@@ -5,6 +5,66 @@ details/evidence: `slice3-tasks.md`, `slice3-verification.md`, `slice4-tasks.md`
 This is the current dispatch checklist, not a new architecture or acceptance waiver.
 Preserve completed Luna work. Root owns integration, notes and native execution.
 
+## September 9 stabilization queue (current priority)
+
+No redesign/features/private backend patches in this batch. Preserve personal
+pilot and old services. Existing development-helper port18793 now belongs to the
+personal pilot: do not run that helper or evict its listener.
+
+- [x] S0 — Fixture readiness: validate owned source/home/credentials/tool/model
+  routes and baseline startup. Public discovery200 alone is not readiness.
+  Identify compatibility gaps against personal pilot revision before choosing
+  an additional matching-version fixture. No personal state copies.
+- [x] S1 — Stop/terminal state: reproduce and fix missed-terminal
+  cancellation. Verify actual idle, Stop retries and subsequent send without
+  duplicate prompts or weakening delivery-unknown protections.
+- [ ] S2 — Transcript: reproduce interim heading/tools/final response and
+  background catch-up. Compare saved/live content, diagnose blank spacing and
+  thinking preview Markdown. Preserve durable content and blocking controls.
+- [x] S3 — Targeted cleanup report: identify duplicated ownership/state and dead
+  migration paths with exact callers; no broad refactor without demonstrated gain.
+- [ ] S4 — Integrated signed-app fixture run and phone acceptance handoff.
+
+Batch gate: signed integrated build-v4 passed; gap-focused28/0/0 and full-v1
+2076/0/14 passed (opt-in skips, not a live-feature claim). Updated app also passed
+10,000-row scroll-to-bottom UI-v1,1/0/0; final screenshot inspected. This is static
+Simulator navigation, not measured physical-device smoothness. S2's exact personal
+guardrail/background history remains a follow-up, not claimed reproduced; its
+app-side gap/preview fixes are covered. S4 automated checks pass; new phone install
+and user acceptance are not performed in this batch. No personal service changes.
+Final targeted artifact audit-v2 passed104files/0flags/5exported consoles with
+the same private/unselected/opaque exclusions. Repro commands: signed build and
+test-without-building use existing DD/Simulator, parallelNO/jobs2/diagnosticsnever;
+focused identifiers GatewayConversationControllerTests and TranscriptMessageTests.
+Live: ownedvenv python scripts/semreh_stabilization_smoke.py --run --output
+EVIDENCE/<fresh-name>.json. Production UI plan: scripts/direct_hermes_ios_smoke.py
+--slice2-ui --https --stock-backend --stabilization-ui. Exact artifacts named above.
+
+Stabilization evidence checkpoint (uncommitted successor to18f8c78): owned fixture
+validator and live `stabilization-smoke-v1.json` passed send/interrupt/idle/durable
+readback/send-again/owned-close. Baseline pin retains old20s orphan policy; not a
+proof of personal-host background behavior or actual50-search guardrail execution.
+S1 final build-v3 + focused-v3 passed82/0/0, independent review accepted missing
+terminal and canonical-tip rebind/retry with no prompt replay. S2 preview fixes
+and mounted renderer shrink regression passed focused-v2 (87total/0fail); earlier
+v1 had2 genuine preview newline failures, fixed. Gap diagnosis found67 empty
+tool-call rows in68-tool fixture; shared render predicate now integrated, preserving
+tool/reasoning/compression anchors and valid latest-scroll targets; native pending.
+Production Stop/resend UI build-v1/UI-v1 passed1/0/0; root inspected final ACK and
+idle composer screenshot. UI binary predates gap fix. Targeted audit-v1 passed
+84files/0flags/2exported consoles; private personal logs, unselected artifacts and
+unexported compressed/opaque contents excluded. S3 review found no active WebUI
+fallback or worthwhile cleanup expansion; no speculative refactor added.
+
+Worker rubric: named failing case/evidence; explicit files/worktree ownership;
+small fix; focused regression commands with results; changed-flow live evidence
+where relevant; exact revision and remaining gaps. No "done" on authored tests
+alone. One native/fixture owner at a time; ownership may be delegated rather than
+requiring root to drive every check. Full suite once per integrated coherent batch.
+Implementation lanes use separate worktrees; read-only triage may share checkout.
+Feature-driving instructions should map UI entry -> fixture scenario -> observable
+pass condition, reusing existing scripts, not building a new orchestration system.
+
 September 9 personal pilot correction: phone build2026090901 rejected the8443
 endpoint root supplied. This was an app validation mistake, not evidence that a
 separate WebUI backend is required. Auth and shared gateway runtime now accept

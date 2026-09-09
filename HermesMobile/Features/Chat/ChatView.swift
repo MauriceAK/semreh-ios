@@ -1617,12 +1617,37 @@ struct ChatView: View {
         transcriptMessages
     }
 
+    private var latestRenderedTranscriptMessage: TranscriptMessage? {
+        var liveAnchorIDs = Set<String>()
+        if showsThinkingAndToolCards, viewModel.activeStreamID != nil {
+            if !viewModel.liveReasoningText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               let anchorID = viewModel.reasoningAnchorMessageID {
+                liveAnchorIDs.insert(anchorID)
+            }
+            if !viewModel.liveToolCalls.isEmpty, let anchorID = viewModel.toolCallAnchorMessageID {
+                liveAnchorIDs.insert(anchorID)
+            }
+        }
+
+        return transcriptMessages.last {
+            ChatTranscriptRenderSequence.includes(
+                $0,
+                showsThinkingAndToolCards: showsThinkingAndToolCards,
+                compressionAfterRenderID: viewModel.compressionReferenceCard?.afterRenderID,
+                reasoningGroupsForAnchor: viewModel.displayedReasoningGroupsForAnchor,
+                toolCallGroupsForAnchor: viewModel.completedToolCallGroupsForAnchor,
+                liveAccessoryAnchorIDs: liveAnchorIDs,
+                shouldRenderMessage: shouldRenderMessageRow
+            )
+        }
+    }
+
     private var latestTranscriptMessageID: String? {
-        transcriptMessages.last?.id
+        latestRenderedTranscriptMessage?.id
     }
 
     private var latestTranscriptMessageRole: String? {
-        transcriptMessages.last?.message.role
+        latestRenderedTranscriptMessage?.message.role
     }
 
     private func prepareInitialAppearance() {

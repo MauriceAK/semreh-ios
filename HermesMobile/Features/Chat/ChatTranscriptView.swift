@@ -9,6 +9,47 @@ private struct VisibleTranscriptRowFramesKey: PreferenceKey {
     }
 }
 
+enum ChatTranscriptRenderSequence {
+    static func includes(
+        _ transcriptMessage: TranscriptMessage,
+        showsThinkingAndToolCards: Bool,
+        compressionAfterRenderID: String?,
+        reasoningGroupsForAnchor: (String?) -> [ReasoningGroup],
+        toolCallGroupsForAnchor: (String?) -> [ToolCallGroup],
+        liveAccessoryAnchorIDs: Set<String>,
+        shouldRenderMessage: (ChatMessage) -> Bool
+    ) -> Bool {
+        shouldRenderMessage(transcriptMessage.message)
+            || compressionAfterRenderID == transcriptMessage.renderID
+            || (showsThinkingAndToolCards
+                && (!reasoningGroupsForAnchor(transcriptMessage.anchorID).isEmpty
+                    || !toolCallGroupsForAnchor(transcriptMessage.anchorID).isEmpty
+                    || liveAccessoryAnchorIDs.contains(transcriptMessage.anchorID)))
+    }
+
+    static func filtering(
+        _ messages: [TranscriptMessage],
+        showsThinkingAndToolCards: Bool,
+        compressionAfterRenderID: String?,
+        reasoningGroupsForAnchor: (String?) -> [ReasoningGroup],
+        toolCallGroupsForAnchor: (String?) -> [ToolCallGroup],
+        liveAccessoryAnchorIDs: Set<String>,
+        shouldRenderMessage: (ChatMessage) -> Bool
+    ) -> [TranscriptMessage] {
+        messages.filter {
+            includes(
+                $0,
+                showsThinkingAndToolCards: showsThinkingAndToolCards,
+                compressionAfterRenderID: compressionAfterRenderID,
+                reasoningGroupsForAnchor: reasoningGroupsForAnchor,
+                toolCallGroupsForAnchor: toolCallGroupsForAnchor,
+                liveAccessoryAnchorIDs: liveAccessoryAnchorIDs,
+                shouldRenderMessage: shouldRenderMessage
+            )
+        }
+    }
+}
+
 struct ChatTranscriptView: View, Equatable {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -101,6 +142,30 @@ struct ChatTranscriptView: View, Equatable {
     @State private var restoreSettlementState = ChatTranscriptRestoreState()
     private static let transcriptCoordinateSpaceName = "chatTranscript"
 
+    private var renderedTranscriptMessages: [TranscriptMessage] {
+        return ChatTranscriptRenderSequence.filtering(
+            displayedTranscriptMessages,
+            showsThinkingAndToolCards: showsThinkingAndToolCards,
+            compressionAfterRenderID: compressionReferenceCard?.afterRenderID,
+            reasoningGroupsForAnchor: reasoningGroupsForAnchor,
+            toolCallGroupsForAnchor: completedToolCallGroupsForAnchor,
+            liveAccessoryAnchorIDs: liveAccessoryAnchorIDs,
+            shouldRenderMessage: shouldRenderMessageRow
+        )
+    }
+
+    private var liveAccessoryAnchorIDs: Set<String> {
+        guard showsThinkingAndToolCards, activeStreamID != nil else { return [] }
+        var anchorIDs = Set<String>()
+        if hasLiveReasoningText, let reasoningAnchorMessageID {
+            anchorIDs.insert(reasoningAnchorMessageID)
+        }
+        if !liveToolCalls.isEmpty, let toolCallAnchorMessageID {
+            anchorIDs.insert(toolCallAnchorMessageID)
+        }
+        return anchorIDs
+    }
+
     var body: some View {
         if isLoading && messages.isEmpty && clarificationPrompt == nil {
             ChatTranscriptLoadingSkeletonView()
@@ -135,13 +200,16 @@ struct ChatTranscriptView: View, Equatable {
             GeometryReader { viewport in
                 let viewportWidth = max(0, viewport.size.width)
                 let contentWidth = transcriptContentWidth(for: viewportWidth)
+                let renderedMessages = renderedTranscriptMessages
+                let latestRenderedID = renderedMessages.last?.renderID
 
                 ZStack(alignment: .bottom) {
                     ScrollView {
                         transcriptScrollContent(
                             proxy: proxy,
                             viewportWidth: viewportWidth,
-                            contentWidth: contentWidth
+                            contentWidth: contentWidth,
+                            renderedMessages: renderedMessages
                         )
                     }
                     .defaultScrollAnchor(
@@ -240,7 +308,7 @@ struct ChatTranscriptView: View, Equatable {
                     onScrollToLatestContent(proxy, false)
                 }
                 .onPreferenceChange(VisibleTranscriptRowFramesKey.self) { frames in
-                    let latestFrame = displayedTranscriptMessages.last.flatMap { frames[$0.renderID] }
+                    let latestFrame = latestRenderedID.flatMap { frames[$0] }
                     func isVisible(_ frame: CGRect?) -> Bool {
                         ChatTranscriptVisibilityPolicy.isVisible(
                             frame: frame,
@@ -264,7 +332,8 @@ struct ChatTranscriptView: View, Equatable {
     private func transcriptScrollContent(
         proxy: ScrollViewProxy,
         viewportWidth: CGFloat,
-        contentWidth: CGFloat
+        contentWidth: CGFloat,
+        renderedMessages: [TranscriptMessage]
     ) -> some View {
         LazyVStack(spacing: transcriptMessageSpacing) {
             olderMessagesButton(proxy: proxy)
@@ -273,7 +342,7 @@ struct ChatTranscriptView: View, Equatable {
                 compressionReferenceCardView(compressionReferenceCard)
             }
 
-            ForEach(displayedTranscriptMessages) { transcriptMessage in
+            ForEach(renderedMessages) { transcriptMessage in
                 // Scope live-streaming state to the row that actually displays it.
                 // Non-anchor / non-streaming rows receive stable empty/nil values so
                 // their inputs don't change on every ~16ms flush; combined with the
@@ -345,7 +414,7 @@ struct ChatTranscriptView: View, Equatable {
             }
 
             transcriptLooseBlocks
-            liveResponseBlocks
+            liveResponseBlocks(renderedMessages: renderedMessages)
             inlineClarificationCard
             typingIndicator
             turnChangesCard
@@ -478,7 +547,7 @@ struct ChatTranscriptView: View, Equatable {
     }
 
     private func loadOlderMessagesPreservingPosition(proxy: ScrollViewProxy) async {
-        let renderID = displayedTranscriptMessages.first?.renderID
+        let renderID = renderedTranscriptMessages.first?.renderID
         let didLoad = await onLoadOlderMessages()
         guard didLoad, let renderID else { return }
 
@@ -492,16 +561,22 @@ struct ChatTranscriptView: View, Equatable {
     }
 
     @ViewBuilder
-    private var liveResponseBlocks: some View {
+    private func liveResponseBlocks(renderedMessages: [TranscriptMessage]) -> some View {
         if activeStreamID != nil {
             if showsThinkingAndToolCards {
                 if hasLiveReasoningText,
-                   !hasDisplayedTranscriptMessage(anchorID: reasoningAnchorMessageID) {
+                   !hasDisplayedTranscriptMessage(
+                    anchorID: reasoningAnchorMessageID,
+                    in: renderedMessages
+                   ) {
                     ReasoningBlockView(text: liveReasoningText)
                 }
 
                 if !liveToolCalls.isEmpty,
-                   !hasDisplayedTranscriptMessage(anchorID: toolCallAnchorMessageID) {
+                   !hasDisplayedTranscriptMessage(
+                    anchorID: toolCallAnchorMessageID,
+                    in: renderedMessages
+                   ) {
                     ToolActivityGroupView(
                         group: ToolCallGroup.live(
                             anchorMessageID: toolCallAnchorMessageID,
@@ -574,10 +649,13 @@ struct ChatTranscriptView: View, Equatable {
         !liveReasoningText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    private func hasDisplayedTranscriptMessage(anchorID: String?) -> Bool {
+    private func hasDisplayedTranscriptMessage(
+        anchorID: String?,
+        in renderedMessages: [TranscriptMessage]
+    ) -> Bool {
         guard let anchorID else { return false }
 
-        return displayedTranscriptMessages.contains { $0.anchorID == anchorID }
+        return renderedMessages.contains { $0.anchorID == anchorID }
     }
 
     @ViewBuilder

@@ -68,6 +68,103 @@ final class TranscriptMessageTests: XCTestCase {
         XCTAssertEqual(transcriptMessages.map(\.message.id), ["u1", "a1", "a2"])
     }
 
+    func testToolHeavyTurnRenderSequenceDropsEmptyRowsWithoutAccessories() {
+        var messages = [
+            ChatMessage(role: "user", content: "Research this", timestamp: 1, messageId: "u1")
+        ]
+        for index in 0..<68 {
+            let toolID = "tool-\(index)"
+            messages.append(ChatMessage(
+                role: "assistant",
+                content: "",
+                timestamp: Double(index * 2 + 2),
+                messageId: "a-\(index)",
+                toolCalls: [
+                    .object([
+                        "id": .string(toolID),
+                        "type": .string("function"),
+                        "function": .object([
+                            "name": .string("web_search"),
+                            "arguments": .string("{}")
+                        ])
+                    ])
+                ]
+            ))
+            messages.append(ChatMessage(
+                role: "tool",
+                content: "result \(index)",
+                timestamp: Double(index * 2 + 3),
+                messageId: "result-\(index)",
+                toolCallId: toolID
+            ))
+        }
+        messages.append(ChatMessage(
+            role: "assistant",
+            content: "Search stopped after reaching the tool-use limit.",
+            timestamp: 200,
+            messageId: "final"
+        ))
+
+        let transcript = ChatViewModel.transcriptMessages(from: messages)
+        let groups = ToolCallGroup.groups(
+            persistedToolCalls: [],
+            messages: messages,
+            messageOffset: 0
+        )
+        let rendered = ChatTranscriptRenderSequence.filtering(
+            transcript,
+            showsThinkingAndToolCards: true,
+            compressionAfterRenderID: nil,
+            reasoningGroupsForAnchor: { _ in [] },
+            toolCallGroupsForAnchor: { anchorID in
+                groups.filter { $0.anchorMessageID == anchorID }
+            },
+            liveAccessoryAnchorIDs: []
+        ) { message in
+            message.content?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        }
+
+        XCTAssertEqual(groups.count, 1)
+        XCTAssertEqual(groups.first?.anchorMessageID, "a-0")
+        XCTAssertEqual(groups.first?.toolCalls.count, 68)
+        XCTAssertEqual(transcript.count, 70, "Tool result rows are filtered, but every empty assistant row remains.")
+        XCTAssertEqual(rendered.map(\.anchorID), ["u1", "a-0", "final"])
+        XCTAssertEqual(
+            transcript.count - rendered.count,
+            67,
+            "Accessory-free empty assistants must not become LazyVStack children that contribute outer spacing."
+        )
+    }
+
+    func testRenderSequencePreservesEmptyAccessoryAndCompressionAnchors() throws {
+        let messages = [
+            ChatMessage(role: "assistant", content: "", timestamp: 1, messageId: "reasoning-anchor"),
+            ChatMessage(role: "assistant", content: "", timestamp: 2, messageId: "compression-anchor"),
+            ChatMessage(role: "assistant", content: "", timestamp: 3, messageId: "empty")
+        ]
+        let transcript = ChatViewModel.transcriptMessages(from: messages)
+        let compressionRenderID = try XCTUnwrap(
+            transcript.first { $0.anchorID == "compression-anchor" }?.renderID
+        )
+
+        let rendered = ChatTranscriptRenderSequence.filtering(
+            transcript,
+            showsThinkingAndToolCards: true,
+            compressionAfterRenderID: compressionRenderID,
+            reasoningGroupsForAnchor: { _ in [] },
+            toolCallGroupsForAnchor: { _ in [] },
+            liveAccessoryAnchorIDs: ["reasoning-anchor"],
+            shouldRenderMessage: { _ in false }
+        )
+
+        XCTAssertEqual(rendered.map(\.anchorID), ["reasoning-anchor", "compression-anchor"])
+        XCTAssertEqual(
+            rendered.last?.anchorID,
+            "compression-anchor",
+            "An empty filtered tail must not become the latest scroll target."
+        )
+    }
+
     func testDirectTranscriptProjectsAttachmentRefsWithoutMutatingRawMessage() {
         let rawContent = "Inspect these\n@image:/home/images/upload.jpg\n@file:notes.txt"
         let message = ChatMessage(role: "user", content: rawContent, timestamp: 1, messageId: "u1")

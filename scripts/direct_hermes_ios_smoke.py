@@ -46,6 +46,7 @@ def main():
     parser.add_argument('--slice4-goal-ui', action='store_true')
     parser.add_argument('--slice4-skill-ui', action='store_true')
     parser.add_argument('--personal-bootstrap-ui', action='store_true')
+    parser.add_argument('--stabilization-ui', action='store_true')
     parser.add_argument('--slice4-git-ui-session-id')
     parser.add_argument('--gateway-restart-nonce')
     parser.add_argument('--tui-created-session-id')
@@ -54,6 +55,12 @@ def main():
     parser.add_argument('--stock-backend', action='store_true')
     parser.add_argument('--cookie-phase', choices=['login', 'restore', 'logout'])
     args = parser.parse_args()
+    if args.stabilization_ui and (
+        not args.slice2_ui or not args.https or not args.stock_backend
+        or any(value for name, value in vars(args).items()
+               if name not in {'stabilization_ui', 'slice2_ui', 'https', 'stock_backend'})
+    ):
+        parser.error('--stabilization-ui requires --slice2-ui --https --stock-backend and no other test phase')
     if args.slice4_goal_ui and (
         not args.slice2_ui or not args.https or not args.stock_backend
         or any(value for name, value in vars(args).items()
@@ -449,6 +456,10 @@ def main():
         if args.personal_bootstrap_ui:
             target['EnvironmentVariables']['SEMREH_PERSONAL_BOOTSTRAP_UI'] = '1'
             method = 'testOptInPersonalPilotBootstrapOnly'
+            test_class = 'DirectSkillUITests'
+        if args.stabilization_ui:
+            target['EnvironmentVariables']['SEMREH_STABILIZATION_UI'] = '1'
+            method = 'testOptInProductionStopThenResend'
             test_class = 'DirectSkillUITests'
     target['OnlyTestIdentifiers'] = [test_class + '/' + method]
     # Generated build artifact only; no project/scheme or personal configuration changes.

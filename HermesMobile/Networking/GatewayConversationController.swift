@@ -2778,9 +2778,36 @@ final class GatewayConversationController {
     func interrupt() async throws {
         // An unconfirmed interrupt must remain retryable, without reopening
         // ordinary send/steer or treating a lost acknowledgement as success.
+        if runState == .stopping, binding == nil {
+            guard !disposed, !branchInFlight, hasSubmittedPrompt,
+                  let retryStoredID = storedID else { throw DirectSessionError.invalidResponse }
+            let retryLifecycle = lifecycle
+            let retryTurn = turnEpoch
+            let retryOrigin = runtime.origin
+            runState = .deliveryUnknown
+            do {
+                try await ensureBinding(create: [:])
+            } catch {
+                if !disposed, lifecycle == retryLifecycle, turnEpoch == retryTurn,
+                   storedID == retryStoredID, runtime.origin == retryOrigin,
+                   runState == .deliveryUnknown { runState = .stopping }
+                throw error
+            }
+            guard !disposed, lifecycle == retryLifecycle, turnEpoch == retryTurn,
+                  storedID == retryStoredID, runtime.origin == retryOrigin,
+                  let rebound = binding, rebound.storedID == retryStoredID,
+                  rebound.profile == profile,
+                  runState == .deliveryUnknown || runState == .running else {
+                throw DirectSessionError.staleOperation
+            }
+            if runState == .deliveryUnknown { runState = .stopping }
+        }
         guard !disposed, !branchInFlight,
               let binding, runState == .running || runState == .stopping else { throw DirectSessionError.invalidResponse }
         let generation = lifecycle
+        let interruptedTurn = turnEpoch
+        let interruptedConnection = runtime.connectionGeneration
+        let interruptedStoredID = binding.storedID
         runState = .stopping
         let result = try await runtime.request("session.interrupt", parameters: {
             guard self.binding == binding, !self.disposed, !self.branchInFlight else { throw DirectSessionError.stopUnconfirmed }
@@ -2795,9 +2822,92 @@ final class GatewayConversationController {
             })
             let stopped = status?.gatewayFields["output"]?.gatewayString?
                 .components(separatedBy: .newlines).contains("Agent Running: No") == true
-            if stopped, terminalReceipt != nil {
+            if stopped {
+                if terminalReceipt == nil {
+                    // A reconnect can lose the terminal event even though stock
+                    // status authoritatively reports the turn idle. Reconcile the
+                    // durable transcript, then prove the same scoped turn is still
+                    // idle before releasing local streaming state.
+                    do {
+                        try await refresh()
+                    } catch {
+                        if !disposed, lifecycle == generation, turnEpoch == interruptedTurn,
+                           runtime.connectionGeneration == interruptedConnection,
+                           terminalReceipt != nil, runState == .idle {
+                            schedulePendingReasoningDrain()
+                            return
+                        }
+                        throw error
+                    }
+                    if !disposed, lifecycle == generation, turnEpoch == interruptedTurn,
+                       runtime.connectionGeneration == interruptedConnection,
+                       terminalReceipt != nil, runState == .idle {
+                        schedulePendingReasoningDrain()
+                        return
+                    }
+                    var confirmationBinding = binding
+                    if self.binding == nil, storedID != interruptedStoredID {
+                        // A canonical continuation rotated while the ancestor was
+                        // being reconciled. Rebind without submitting, but do not
+                        // trust the ancestor's idle status for the new tip.
+                        guard !disposed, lifecycle == generation, turnEpoch == interruptedTurn,
+                              runtime.connectionGeneration == interruptedConnection,
+                              runState == .stopping else { throw DirectSessionError.staleOperation }
+                        runState = .deliveryUnknown
+                        do {
+                            try await ensureBinding(create: [:])
+                        } catch {
+                            if !disposed, lifecycle == generation, turnEpoch == interruptedTurn,
+                               runState == .deliveryUnknown { runState = .stopping }
+                            throw error
+                        }
+                        guard !disposed, lifecycle == generation, turnEpoch == interruptedTurn,
+                              runtime.connectionGeneration == interruptedConnection,
+                              let rebound = self.binding, rebound.storedID == storedID,
+                              rebound.profile == profile, runState == .deliveryUnknown else {
+                            throw DirectSessionError.staleOperation
+                        }
+                        confirmationBinding = rebound
+                        runState = .stopping
+                    }
+                    guard !disposed, lifecycle == generation, turnEpoch == interruptedTurn,
+                          self.binding == confirmationBinding,
+                          storedID == confirmationBinding.storedID,
+                          runtime.connectionGeneration == interruptedConnection,
+                          runState == .stopping else { throw DirectSessionError.staleOperation }
+                    let confirmed = try await runtime.request("session.status", parameters: {
+                        guard !self.disposed, self.lifecycle == generation,
+                              self.turnEpoch == interruptedTurn, self.binding == confirmationBinding,
+                              self.storedID == confirmationBinding.storedID,
+                              self.runtime.connectionGeneration == interruptedConnection,
+                              self.runState == .stopping else { throw DirectSessionError.staleOperation }
+                        return self.rpcParams(confirmationBinding)
+                    })
+                    if !disposed, lifecycle == generation, turnEpoch == interruptedTurn,
+                       runtime.connectionGeneration == interruptedConnection,
+                       terminalReceipt != nil, runState == .idle {
+                        schedulePendingReasoningDrain()
+                        return
+                    }
+                    guard !disposed, lifecycle == generation, turnEpoch == interruptedTurn,
+                          self.binding == confirmationBinding,
+                          storedID == confirmationBinding.storedID,
+                          runtime.connectionGeneration == interruptedConnection,
+                          runState == .stopping,
+                          confirmed?.gatewayFields["output"]?.gatewayString?
+                            .components(separatedBy: .newlines).contains("Agent Running: No") == true else {
+                        throw DirectSessionError.stopUnconfirmed
+                    }
+                    clearBlockingPromptForConfirmedIdle(runtimeID: binding.runtimeID)
+                    clearDirectBlockingForConfirmedIdle(runtimeID: binding.runtimeID)
+                    if confirmationBinding.runtimeID != binding.runtimeID {
+                        clearBlockingPromptForConfirmedIdle(runtimeID: confirmationBinding.runtimeID)
+                        clearDirectBlockingForConfirmedIdle(runtimeID: confirmationBinding.runtimeID)
+                    }
+                }
                 runState = .idle
                 schedulePendingReasoningDrain()
+                if terminalReceipt == nil, let recoveredID = storedID { onRecoveredIdle?(recoveredID) }
                 return
             }
             try await Task.sleep(for: .milliseconds(250))
@@ -3663,8 +3773,13 @@ final class GatewayConversationController {
     }
 
     private func clearBlockingPromptForTerminal(_ event: HermesGatewayEvent) {
+        guard let runtimeID = event.sessionID else { return }
+        clearBlockingPromptForConfirmedIdle(runtimeID: runtimeID)
+    }
+
+    private func clearBlockingPromptForConfirmedIdle(runtimeID: String) {
         guard let pending = pendingBlockingPrompt,
-              pending.identity.runtimeID == (event.sessionID ?? "") else {
+              pending.identity.runtimeID == runtimeID else {
             return
         }
         blockingClear = (pending.identity, .terminal)
@@ -3741,6 +3856,10 @@ final class GatewayConversationController {
 
     private func clearDirectBlockingForTerminal(_ event: HermesGatewayEvent) {
         guard let runtimeID = event.sessionID else { return }
+        clearDirectBlockingForConfirmedIdle(runtimeID: runtimeID)
+    }
+
+    private func clearDirectBlockingForConfirmedIdle(runtimeID: String) {
         let inFlight = blockingInteractionInFlightIdentity
         let inFlightCategory = inFlight.flatMap { self.inFlightKind($0) }
         approvalPromptQueue.removeAll { $0.identity.runtimeID == runtimeID }

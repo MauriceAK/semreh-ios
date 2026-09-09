@@ -1,5 +1,45 @@
 import SwiftUI
 
+enum ReasoningDisplayText {
+    /// Collapsed cards need only a short preview. Bounding the parsed source
+    /// keeps a long live reasoning stream from reparsing its full history on
+    /// every token while still giving Markdown enough context for the header.
+    private static let maximumParsedCharacters = 512
+
+    static func summary(_ source: String, maximumCharacters: Int = 80) -> String {
+        let maximumCharacters = max(0, maximumCharacters)
+        let boundedSource = String(source.prefix(maximumParsedCharacters))
+        // Full-document AttributedString conversion drops paragraph separators
+        // from `.characters` ("heading" + "body" becomes "headingbody").
+        // Parse bounded lines independently, then restore one visible boundary.
+        let oneLine = boundedSource
+            .components(separatedBy: .newlines)
+            .map { line in
+                (try? AttributedString(
+                    markdown: line,
+                    options: .init(interpretedSyntax: .full)
+                )).map { String($0.characters) } ?? line
+            }
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+            // Foundation preserves unmatched delimiters in an incomplete live
+            // token tail. They are presentation syntax, not useful summary text.
+            .replacingOccurrences(of: "**", with: "")
+            .replacingOccurrences(of: "__", with: "")
+            .replacingOccurrences(of: "~~", with: "")
+            .replacingOccurrences(of: "`", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !oneLine.isEmpty else { return String(localized: "Thinking…") }
+
+        if oneLine.count <= maximumCharacters {
+            return oneLine
+        }
+        return "\(oneLine.prefix(maximumCharacters))..."
+    }
+}
+
 struct ReasoningBlockView: View {
     let text: String
 
@@ -103,14 +143,6 @@ struct ReasoningBlockView: View {
     }
 
     private func summary(for value: String) -> String {
-        let oneLine = value
-            .replacingOccurrences(of: "\n", with: " ")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-
-        if oneLine.count <= 80 {
-            return oneLine
-        }
-
-        return "\(oneLine.prefix(80))..."
+        ReasoningDisplayText.summary(value)
     }
 }
