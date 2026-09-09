@@ -2,33 +2,6 @@ import XCTest
 @testable import HermesMobile
 
 final class APIClientSessionExportTests: APIClientTestCase {
-    // MARK: - Endpoint construction
-
-    func testExportEndpointBuildsPathAndQuery() {
-        let url = Endpoint.exportSession(sessionID: "abc-123", format: .html)
-            .url(relativeTo: URL(string: "https://example.test")!)
-
-        XCTAssertEqual(url.path, "/api/session/export")
-        let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
-        XCTAssertEqual(
-            components?.queryItems,
-            [
-                URLQueryItem(name: "session_id", value: "abc-123"),
-                URLQueryItem(name: "format", value: "html")
-            ]
-        )
-    }
-
-    func testExportEndpointEncodesJSONFormat() {
-        let url = Endpoint.exportSession(sessionID: "abc 123", format: .json)
-            .url(relativeTo: URL(string: "https://example.test")!)
-
-        let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
-        XCTAssertEqual(components?.queryItems?.last, URLQueryItem(name: "format", value: "json"))
-        // Session IDs with spaces must be percent-encoded, not dropped.
-        XCTAssertEqual(components?.queryItems?.first?.value, "abc 123")
-    }
-
     // MARK: - Download
 
     func testExportSessionRendersStockTranscriptWithEscapedMetadataAndTools() async throws {

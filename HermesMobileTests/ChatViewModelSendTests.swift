@@ -615,160 +615,6 @@ final class ChatViewModelSendTests: XCTestCase {
     }
 
     @MainActor
-    func testUploadAttachmentDefersSizePolicyToServer() async throws {
-        var didRequestUpload = false
-        let viewModel = try makeViewModel { request in
-            didRequestUpload = true
-            XCTAssertEqual(request.url?.path, "/api/upload")
-            return apiTestJSONResponse(
-                #"{"error":"File too large (server policy)"}"#,
-                for: request
-            )
-        }
-
-        await viewModel.uploadAttachment(
-            data: Data("large payload".utf8),
-            filename: "large.mov"
-        )
-
-        XCTAssertTrue(didRequestUpload)
-        XCTAssertTrue(viewModel.pendingAttachments.isEmpty)
-        XCTAssertEqual(viewModel.uploadAttachmentErrorMessage, "File too large (server policy)")
-    }
-
-    @MainActor
-    func testUploadAttachmentDownsamplesImagePreviewButUploadsOriginalData() async throws {
-        let originalData = try makeJPEGData(size: CGSize(width: 1_600, height: 1_200))
-        var uploadedBody: Data?
-        let viewModel = try makeViewModel { request in
-            XCTAssertEqual(request.url?.path, "/api/upload")
-
-            let body = try XCTUnwrap(apiTestBodyData(from: request))
-            uploadedBody = body
-            XCTAssertNotNil(body.range(of: originalData))
-
-            return apiTestJSONResponse("""
-            {
-              "filename": "large.jpg",
-              "path": "/tmp/workspace/large.jpg",
-              "size": \(originalData.count),
-              "mime": "image/jpeg",
-              "is_image": true
-            }
-            """, for: request)
-        }
-
-        await viewModel.uploadAttachment(data: originalData, filename: "large.jpg", previewData: originalData)
-
-        let attachment = try XCTUnwrap(viewModel.pendingAttachments.first)
-        let thumbnailData = try XCTUnwrap(attachment.thumbnailData)
-        XCTAssertNotNil(uploadedBody)
-        XCTAssertNotEqual(thumbnailData, originalData)
-        XCTAssertGreaterThan(try maxPixelDimension(in: originalData), ImagePreviewDownsampler.attachmentMaxPixelSize)
-        XCTAssertLessThanOrEqual(
-            try maxPixelDimension(in: thumbnailData),
-            ImagePreviewDownsampler.attachmentMaxPixelSize
-        )
-    }
-
-    func testImagePreviewDownsamplerSkipsWorkWhenCallerIsCancelled() async throws {
-        let originalData = try makeJPEGData(size: CGSize(width: 1_600, height: 1_200))
-        let task = Task<Data?, Never> {
-            while !Task.isCancelled {
-                await Task.yield()
-            }
-
-            return await ImagePreviewDownsampler.previewDataAsync(
-                from: originalData,
-                maxPixelSize: ImagePreviewDownsampler.attachmentMaxPixelSize
-            )
-        }
-
-        task.cancel()
-
-        let thumbnailData = await task.value
-
-        XCTAssertNil(thumbnailData)
-    }
-
-    @MainActor
-    func testUploadAttachmentFailurePreservesExistingPendingAttachment() async throws {
-        var uploadCount = 0
-        let viewModel = try makeViewModel { request in
-            XCTAssertEqual(request.url?.path, "/api/upload")
-            uploadCount += 1
-
-            if uploadCount == 1 {
-                return apiTestJSONResponse("""
-                {
-                  "filename": "notes.txt",
-                  "path": "/tmp/workspace/notes.txt",
-                  "size": 5,
-                  "mime": "text/plain",
-                  "is_image": false
-                }
-                """, for: request)
-            }
-
-            let response = HTTPURLResponse(
-                url: try XCTUnwrap(request.url),
-                statusCode: 413,
-                httpVersion: nil,
-                headerFields: ["Content-Type": "text/plain"]
-            )
-            return (try XCTUnwrap(response), Data("too large".utf8))
-        }
-
-        await viewModel.uploadAttachment(data: Data("hello".utf8), filename: "notes.txt")
-        XCTAssertEqual(viewModel.pendingAttachments.count, 1)
-
-        await viewModel.uploadAttachment(data: Data("large".utf8), filename: "large.bin")
-
-        XCTAssertEqual(viewModel.pendingAttachments.count, 1)
-        XCTAssertEqual(viewModel.pendingAttachments.first?.name, "notes.txt")
-        XCTAssertNotNil(viewModel.uploadAttachmentErrorMessage)
-        XCTAssertNotNil(viewModel.lastError)
-    }
-
-    @MainActor
-    func testDuplicateUploadFilenamesUseDistinctServerPathsAndLocalPreviews() async throws {
-        let imageA = try makeJPEGData(size: CGSize(width: 12, height: 12))
-        let imageB = try makeJPEGData(size: CGSize(width: 16, height: 12))
-        var uploadedFilenames: [String] = []
-        let viewModel = try makeViewModel { request in
-            switch request.url?.path {
-            case "/api/upload":
-                let filename = try apiTestMultipartFilename(from: request)
-                uploadedFilenames.append(filename)
-                return apiTestJSONResponse("""
-                {
-                  "filename": "\(filename)",
-                  "path": "/tmp/workspace/\(filename)",
-                  "size": 4,
-                  "mime": "image/jpeg",
-                  "is_image": true
-                }
-                """, for: request)
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
-
-        await viewModel.uploadAttachment(data: Data("image-a".utf8), filename: "shared-image.jpg", previewData: imageA)
-        await viewModel.uploadAttachment(data: Data("image-b".utf8), filename: "shared-image.jpg", previewData: imageB)
-
-        XCTAssertEqual(uploadedFilenames.count, 2)
-        XCTAssertEqual(uploadedFilenames[0], "shared-image.jpg")
-        XCTAssertTrue(uploadedFilenames[1].hasPrefix("shared-image-"))
-        XCTAssertTrue(uploadedFilenames[1].hasSuffix(".jpg"))
-        XCTAssertNotEqual(uploadedFilenames[0], uploadedFilenames[1])
-        XCTAssertEqual(viewModel.pendingAttachments.map(\.name), ["shared-image.jpg", "shared-image.jpg"])
-        XCTAssertEqual(Set(viewModel.pendingAttachments.map(\.path)).count, 2)
-
-        XCTAssertEqual(viewModel.pendingAttachments.compactMap(\.thumbnailData), [imageA, imageB])
-    }
-
     func testChatMessageTextStillAppendsAttachedFilesSuffixForFileUploads() {
         // Guard: the voice-note path deliberately bypasses chatMessageText to send
         // the bare transcript (#330), but real file uploads from the text composer
@@ -832,8 +678,8 @@ final class ChatViewModelSendTests: XCTestCase {
 
         let result = await SlashCommandExecutor.execute(text: "/resume", viewModel: viewModel)
 
-        XCTAssertEqual(result, .sendAsMessage)
-        XCTAssertEqual(requestedPaths, ["/api/skills"])
+        XCTAssertEqual(result, .unsupported(friendlyMessage: "Skills require a direct Hermes connection."))
+        XCTAssertEqual(requestedPaths, [])
         XCTAssertNil(viewModel.sendErrorMessage)
         XCTAssertNil(viewModel.activeStreamID)
     }
@@ -859,8 +705,8 @@ final class ChatViewModelSendTests: XCTestCase {
 
         let result = await SlashCommandExecutor.execute(text: "/unknown-slash keep going", viewModel: viewModel)
 
-        XCTAssertEqual(result, .sendAsMessage)
-        XCTAssertEqual(requestedPaths, ["/api/skills"])
+        XCTAssertEqual(result, .unsupported(friendlyMessage: "Skills require a direct Hermes connection."))
+        XCTAssertEqual(requestedPaths, [])
         XCTAssertNil(viewModel.sendErrorMessage)
         XCTAssertNil(viewModel.activeStreamID)
     }
@@ -1626,42 +1472,15 @@ final class ChatViewModelSendTests: XCTestCase {
     }
 
     @MainActor
-    func testSkillShortcutWithoutArgsReturnsLocalSkillInfoWithoutStartingChat() async throws {
-        var didRequestSkills = false
+    func testSkillShortcutWithoutDirectProviderRefusesWithoutNetwork() async throws {
         let viewModel = try makeViewModel { request in
-            switch request.url?.path {
-            case "/api/skills":
-                didRequestSkills = true
-                return apiTestJSONResponse("""
-                {
-                  "skills": [
-                    {
-                      "name": "Spotify",
-                      "category": "media",
-                      "description": "Control Spotify playback."
-                    }
-                  ]
-                }
-                """, for: request)
-            case "/api/chat/start":
-                XCTFail("Skill shortcut without args should not start chat.")
-                throw URLError(.badURL)
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
-            }
+            XCTFail("Nil-provider skill shortcut must not use legacy HTTP: \(request.url?.path ?? "nil")")
+            throw URLError(.badURL)
         }
 
         let result = await viewModel.executeSkillShortcutCommand(name: "spotify", args: "")
 
-        XCTAssertTrue(didRequestSkills)
-        guard case .executed(let message) = result else {
-            XCTFail("Expected local skill detail response.")
-            return
-        }
-        let unwrappedMessage = try XCTUnwrap(message)
-        XCTAssertTrue(unwrappedMessage.contains("### `/spotify`"))
-        XCTAssertTrue(unwrappedMessage.contains("Control Spotify playback."))
+        XCTAssertEqual(result, .unsupported(friendlyMessage: "Skills require a direct Hermes connection."))
         XCTAssertTrue(viewModel.messages.isEmpty)
         XCTAssertNil(viewModel.activeStreamID)
     }

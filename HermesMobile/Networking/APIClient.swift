@@ -143,7 +143,7 @@ actor APIClient {
 
     /// Same request/error contract as `sendData`, but also returns the
     /// `HTTPURLResponse` so callers can read response headers (e.g. the
-    /// `Content-Disposition` filename on `GET /api/session/export`).
+    /// `Content-Disposition` filename on `GET /api/sessions/{id}/export`).
     ///
     /// `accept` overrides the default `application/json` Accept header for
     /// endpoints whose 2xx response is a file download rather than JSON.

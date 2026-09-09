@@ -142,6 +142,9 @@ final class GatewayConversationController {
     private(set) var binding: GatewaySessionBinding?
     private(set) var storedID: String?
     private(set) var runState: RunState = .idle
+    /// Stock running resume has no event watermark. Presentation must retain
+    /// canonical saved rows and ignore unproven response text until terminal refresh.
+    private(set) var suppressesColdResumedContent = false
     /// A dispatched prompt whose outcome is not proven must remain a hard
     /// barrier even if a concurrent/queued terminal event temporarily makes
     /// `runState` idle. Canonical recovery or controller replacement owns the
@@ -2211,6 +2214,10 @@ final class GatewayConversationController {
                 }
             }
             guard result?.gatewayFields["status"]?.gatewayString == "streaming" else { throw DirectSessionError.invalidResponse }
+            // This exact ACK proves the new turn belongs to this controller.
+            // Events buffered before it remain conservatively suppressed; all
+            // subsequent locally owned streaming may render normally.
+            suppressesColdResumedContent = false
             // A very short turn can complete before the RPC continuation runs.
             if runState == .submitting { runState = .running }
             if let promptMarkerForSubmit {
@@ -2889,6 +2896,7 @@ final class GatewayConversationController {
         }
         abandonBackgroundAttemptsAsUnknown()
         disposed = true
+        suppressesColdResumedContent = false
         lifecycle &+= 1
         reasoningRevision &+= 1
         pendingReasoningEffort = nil
@@ -3011,9 +3019,13 @@ final class GatewayConversationController {
         restoreBlockingPrompt(from: result)
         try await refresh()
         guard binding != nil else { throw DirectSessionError.staleOperation }
-        if result?.gatewayFields["running"] == .bool(true) { runState = .running }
+        if result?.gatewayFields["running"] == .bool(true) {
+            runState = .running
+            suppressesColdResumedContent = true
+        }
         else if runState != .deliveryUnknown, !promptInFlight {
             runState = .idle
+            suppressesColdResumedContent = false
             schedulePendingReasoningDrain()
         }
         onResume?(result)
@@ -3400,6 +3412,7 @@ final class GatewayConversationController {
         abandonBackgroundAttemptsAsUnknown()
         bindingEpoch &+= 1
         binding = nil
+        suppressesColdResumedContent = false
     }
 
     private func abandonBackgroundAttemptsAsUnknown() {
@@ -4043,6 +4056,7 @@ final class GatewayConversationController {
         if let sequence = event.sequence {
             latestEventSequence = max(latestEventSequence, sequence)
         }
+        var clearColdResumeSuppressionAfterDelivery = false
         switch event.type {
         case "background.complete":
             if let taskID = event.payload?.gatewayFields["task_id"]?.gatewayString,
@@ -4105,6 +4119,7 @@ final class GatewayConversationController {
                     schedulePendingReasoningDrain()
                 }
                 scheduleRecoveryCleanupIfReady()
+                clearColdResumeSuppressionAfterDelivery = true
             }
         case "message.complete":
             clearBlockingPromptForTerminal(event)
@@ -4119,6 +4134,7 @@ final class GatewayConversationController {
             }
             scheduleRecoveryCleanupIfReady()
             onEvent?(event)
+            suppressesColdResumedContent = false
             reconciliationTask?.cancel()
             reconciliationTask = Task { [weak self] in
                 do { try await self?.refresh() }
@@ -4129,6 +4145,9 @@ final class GatewayConversationController {
         default: break
         }
         onEvent?(event)
+        if clearColdResumeSuppressionAfterDelivery {
+            suppressesColdResumedContent = false
+        }
     }
 
     private func scheduleIdleRefresh() {

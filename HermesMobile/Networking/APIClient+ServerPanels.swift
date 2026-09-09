@@ -56,18 +56,6 @@ extension APIClient {
         return .confirmed(model: acknowledgedModel, provider: provider)
     }
 
-    func personalities() async throws -> PersonalitiesResponse {
-        try await send(endpoint: .personalities, method: "GET")
-    }
-
-    func setPersonality(sessionID: String, name: String) async throws -> PersonalitySetResponse {
-        try await send(
-            endpoint: .setPersonality,
-            method: "POST",
-            body: PersonalitySetRequest(sessionId: sessionID, name: name)
-        )
-    }
-
     /// Stock inventory reports credential availability, not a live inference
     /// health check or the old WebUI credential-source metadata.
     func providers(profile: String = "default") async throws -> ProvidersResponse {
@@ -113,9 +101,4 @@ extension APIClient {
         ))
     }
 
-}
-
-private struct PersonalitySetRequest: Encodable {
-    let sessionId: String
-    let name: String
 }

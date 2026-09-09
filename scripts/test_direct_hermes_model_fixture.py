@@ -162,21 +162,32 @@ class ModelFixtureTests(unittest.TestCase):
 
     def test_provider_diagnostics_redact_unknown_tools_and_prompt_content(self) -> None:
         diagnostics = fixture.safe_request_diagnostics({
+            'messages': [{'role': 'system', 'content':
+                          'Memory:\n' + fixture.MEMORY_ADOPTION_MARKER}],
             'tools': [
                 {'type': 'function', 'function': {'name': fixture.APPROVAL_TOOL_NAME}},
                 {'type': 'function', 'function': {'name': 'private_tool'}},
             ],
-        }, fixture.APPROVAL_MARKER, {
+        }, fixture.MEMORY_ADOPTION_REQUEST + " request", {
             'function': {'name': fixture.APPROVAL_TOOL_NAME},
         })
-        self.assertTrue(diagnostics['exact_approval_marker'])
-        self.assertTrue(diagnostics['contains_approval_marker'])
+        self.assertFalse(diagnostics['exact_approval_marker'])
+        self.assertFalse(diagnostics['contains_approval_marker'])
         self.assertEqual(diagnostics['advertised_tools'], [
             fixture.APPROVAL_TOOL_NAME, '<unexpected>'
         ])
         self.assertTrue(diagnostics['selected_tool_call'])
         self.assertEqual(diagnostics['selected_tool_name'], fixture.APPROVAL_TOOL_NAME)
+        self.assertTrue(diagnostics['memory_adoption_request'])
+        self.assertTrue(diagnostics['exact_memory_marker_in_system'])
         self.assertNotIn(fixture.APPROVAL_MARKER, json.dumps(diagnostics))
+        self.assertNotIn(fixture.MEMORY_ADOPTION_MARKER, json.dumps(diagnostics))
+
+        absent = fixture.safe_request_diagnostics({
+            'messages': [{'role': 'system', 'content': 'No fixture memory.'}],
+        }, 'ordinary prompt', None)
+        self.assertFalse(absent['memory_adoption_request'])
+        self.assertFalse(absent['exact_memory_marker_in_system'])
 
     def test_streaming_exact_bulky_marker_is_varied_and_exactly_4096_bytes(self) -> None:
         first = fixture.response_text(

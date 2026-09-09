@@ -330,6 +330,15 @@ struct MessageComposerView: View {
                         }
                     )
 
+                    if attachmentDisplayItems.contains(where: \.isGenericFileReference) {
+                        Text("Will be sent as a file reference. Ask Hermes to inspect it.")
+                            .font(.footnote)
+                            .foregroundStyle(Color(.secondaryLabel))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 16)
+                            .padding(.bottom, 4)
+                    }
+
                     ComposerTextInputView(
                         text: $draftMessage,
                         isFocused: $isFocused,

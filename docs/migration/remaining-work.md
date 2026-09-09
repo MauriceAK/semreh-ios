@@ -5,11 +5,38 @@ details/evidence: `slice3-tasks.md`, `slice3-verification.md`, `slice4-tasks.md`
 This is the current dispatch checklist, not a new architecture or acceptance waiver.
 Preserve completed Luna work. Root owns integration, notes and native execution.
 
-Current committed checkpoint: `e5cb6d0` direct goals/Cron cleanup, local and unpushed.
+Latest continuation (supersedes historical dispatch below): e7f3d5f is committed;
+successor removes all identified legacy skill/personality/upload/raw/export
+execution paths, adds conservative cold-resume content handling, managed local
+non-image media, generic-file reference guidance and corrupt-marker explanation.
+Focused retirement142/0/0 and corrected recovery1/0/0 passed. Prior full2054/2/14
+found two obsolete reconnect expectations, now updated without removing identity/
+duplicate-send protections. New guidance build-v2 and focused65/0/0 passed;
+current full gate passed2056/0/14. Later isolated wording/comment changes passed
+signed copy-build-v1 and APIError focused18/0/0; no redundant full rerun.
+Signed UI-build-v3 and production UI-v2 passed1/0/0; root inspected both first-run
+guidance and skill screenshots. Strict signing and ordinary launch75260 passed.
+UI-v1 failed a Sessions navigation assertion and runner exit75: screenshot showed
+delayed Save Password over restored prior chat, and the walkthrough was skipped
+by an offscreen-field.exists check. Test now requires visible onboarding, handles
+the exact known password sheet, and returns from restored chat before Sessions.
+UI-build-v2 overlapped three tiny copy/comment writes; final stable UI-build-v3 is
+the authoritative snapshot. No product logic changed for the UI-test correction.
+No physical acceptance or complete host-lifecycle claim yet.
+Final targeted artifact audit-v1:270files/0flags/10exported consoles, selected
+logs/diagnostics/screenshots/receipts plus mandatory migration docs/runtime logs.
+Unselected evidence, arbitrary opaque/OCR and unexported compressed contents are
+not covered. Memory helper/model/validator focused checks22/0 also passed.
+Onboarding decision: preserve five-page/direct-login flow, replace obsolete
+WebUI installer prompt and forced-copy gate with honest existing first-party
+Hermes server guidance. Tailscale recommended, not exclusive authenticated HTTPS.
+No setup execution, new dependency, personal service/route changes or redesign.
+
+Prior checkpoint: `e5cb6d0` direct goals/Cron cleanup, local and unpushed.
 Signed goal build-v7, focused20/0/0, full-v2:2096/0/14 and production goal-status
 UI1/0/0 passed; strict signing and ordinary Simulator launch34982 passed.
 Targeted audit9267files/0flags/9exported consoles. Goal continuation live passed.
-Current uncommitted batch: skill invocation deferral with browsing retained,
+Verified committed batch `e7f3d5f`: skill invocation deferral with browsing retained,
 personality/linked-file disposition and dormant endpoint cleanup. Signed build-v2,
 focused131/0/0 and helper70/0 passed. Full-v1 runner failed before tests; same-build
 full-v2 executed2072/3/14. Three stale legacy error-type expectations corrected;
@@ -497,9 +524,12 @@ contents excluded; no unrelated historical evidence rescan claimed.
 - [x] **Legacy chat/SSE transport retirement:** main chat coordinator/status polling,
   BTW/background SSE and remaining Kanban SSE package removed in verified commits
   `114609f`, `42c3a48`, `2592ee2`, `628225f`.
-- [ ] **Remaining legacy secondary branches/helpers:** retire specific session,
-  skill/personality and attachment/media fallback callers. Current dead-endpoint
-  cleanup is not proof that every executable WebUI branch has been removed.
+- [x] **Remaining legacy secondary branches/helpers:** identified session,
+  skill/personality and attachment/media fallback callers retired; active-caller
+  audit found no additional separate-WebUI network path. Signed current full
+  suite2056/0/14 passed. Stock image `/api/media` retained; absolute non-image
+  media use managed reads. This closes the identified code cleanup, not physical
+  acceptance or every supported feature's live execution gate.
 - [x] **Older history during an active response — implementation:** deterministic
   native tests now pass; actual-device acceptance remains. Older-page application
   preserves the live response/tools/reasoning and seeks an exact boundary anchor
@@ -559,19 +589,47 @@ contents excluded; no unrelated historical evidence rescan claimed.
 - [ ] Memory parity: source audit found builtin MEMORY/USER supported through
   selected profile's returned home plus stock-defined memories paths and managed
   file APIs; SOUL has its dedicated contract. Implemented/native-tested at cd41f5b;
-  actual editor/model adoption remains unverified. These are not removal candidates.
+  owned default-profile MEMORY model adoption now passed in
+  `slice4-memory-adoption-live-v2.json`: exact managed upload/readback, one fresh
+  main-model request containing the benign memory marker, one separate stock
+  title-generation request, and owned session/file cleanup. Root restored exact
+  original config SHA5142fb8c... and disabled-memory validator passed afterward.
+  V1 failed a probe assumption counting title generation as another main request;
+  no product change was needed. Native editor navigation and USER/SOUL adoption
+  are not proved by this MEMORY protocol check. These are not removal candidates.
   Effective project-context discovery remains open (current UI is read-only).
 - [x] Edit/regenerate release treatment: Maurice accepted guarded stock operations
   with the residual cross-client race on September 8; native batch still pending.
 - [x] Deletion treatment: same approved stock concurrency limitation; preserve
   attached-session refusal and exact targeting, without implicitly closing chats.
-- [ ] Corrupt/unresolvable delivery-marker recovery UX; no silent/global reset.
-- [ ] Generic text attachment ingestion limitation; staging is not model receipt.
+- [x] Corrupt/unresolvable delivery-marker recovery UX: exact nil-token ambiguity
+  explains that saved history is readable but this chat cannot safely send,
+  directs to Chats/New Chat. Valid-token canonical-idle recovery remains scoped;
+  no silent/global reset, blind resend or history mutation. Native tests pass.
+- [x] Generic text attachment disposition and media-route correctness; staging
+  is not model receipt. Current native full2056/0/14 covers the exact generic
+  attachment hint and absolute non-image managed-file routing.
+  September8 disposition: retain stock file.attach as a tool-readable file
+  reference, not guaranteed automatic model-context expansion. Pinned stock stages
+  into profile attachments (container-mounted); automatic @file expansion may
+  reject paths outside cwd. Do not infer unusability from our disabled-tool fixture
+  or remove supported attachment transport. Concise generic-file UI guidance added;
+  cross-backend tool-path portability and actual provider ingestion remain unverified.
   Media provenance correction: stock `/api/media` is an authenticated image-only
   route with a JSON data_url envelope; preserve the existing image adapter.
-  Reconcile only local non-image audio/video/PDF/Markdown references currently
-  routed there (stock415), using supported managed-file contracts where possible.
+  Local absolute non-image audio/video/PDF/Markdown references now use supported
+  managed-file reads; relative non-image references fail explicitly before network.
 - [ ] Mobile orphan grace / host deployment persistence and physical boundaries.
+  Final read-only review: app cleanup, current-stock compression, literal TUI
+  saved-message readback and MEMORY adoption have scoped evidence; do not repeat
+  them as new gates. Stock default20s remains unacceptable for ordinary iPhone
+  suspension. Select/test a finite grace covering the agreed background interval;
+  do not disable reaping without idle-cleanup/session-cap proof. Personal host
+  service-manager/reboot/crash/awake and persistent route checks require separate
+  deployment authority. Consolidate actual iPhone background/kill/relaunch/socket
+  interruption/canonical catch-up and core cache/open/send/scroll acceptance.
+  Desktop duplication, real remote Git push, cron/provider execution and APNs
+  are not newly invented blockers; their unverified scope stays explicit.
 
 ## Integration and acceptance
 

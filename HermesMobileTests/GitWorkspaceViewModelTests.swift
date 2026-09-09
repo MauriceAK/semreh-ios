@@ -751,6 +751,18 @@ final class GitWorkspaceViewModelTests: APIClientTestCase {
         XCTAssertTrue(GitWriteAvailability(isStreaming: false, isViewingCachedData: true).fetchDisabled)
     }
 
+    func testDisabledGitWriteUsesCurrentServerGuidance() {
+        let error = APIError.http(
+            statusCode: 403,
+            body: #"{"error":"Destructive git writes are disabled","code":"destructive_git_disabled"}"#
+        )
+
+        XCTAssertEqual(
+            gitWriteFriendlyMessage(for: error),
+            "This Hermes server does not allow this Git operation."
+        )
+    }
+
     // MARK: - Diff parsing
 
     func testDiffParserDropsPreambleAndClassifiesLines() {

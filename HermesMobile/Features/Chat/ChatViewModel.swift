@@ -651,16 +651,15 @@ final class ChatViewModel {
     private(set) var isPreparingDirectAttachment = false
     private(set) var directAttachmentPreparationErrorMessage: String?
     var isUploadingAttachment: Bool {
-        usesDirectGateway ? isPreparingDirectAttachment : attachmentCoordinator.isUploadingAttachment
+        isPreparingDirectAttachment
     }
     var attachmentUploadCount: Int {
-        usesDirectGateway ? directAttachmentPreparationCount : attachmentCoordinator.uploadInFlightCount
+        directAttachmentPreparationCount
     }
     var attachmentUploadGeneration: Int {
-        usesDirectGateway ? directAttachmentPreparationStartGeneration : attachmentCoordinator.uploadStartGeneration
+        directAttachmentPreparationStartGeneration
     }
     var uploadAttachmentErrorMessage: String? {
-        guard usesDirectGateway else { return attachmentCoordinator.uploadAttachmentErrorMessage }
         if let attachmentRecoveryErrorMessage { return attachmentRecoveryErrorMessage }
         if attachmentRecoveryNeedsReset {
             return attachmentRecoveryIsBusy
@@ -677,6 +676,11 @@ final class ChatViewModel {
     }
     var directConversationHasPromptDeliveryUncertainty: Bool {
         usesDirectGateway && directConversation?.hasAmbiguousPromptDelivery == true
+    }
+    var directPromptDeliverySafetyRecordUnavailable: Bool {
+        usesDirectGateway && !directInvalidated
+            && directConversation?.hasAmbiguousPromptDelivery == true
+            && directConversation?.promptDeliveryUncertaintyToken == nil
     }
     var directBranchIdentity: (origin: URL, profile: String, sessionID: String)? {
         guard usesDirectGateway,
@@ -792,6 +796,7 @@ final class ChatViewModel {
     private(set) var goalErrorMessage: String?
     private(set) var hasActivatedGoalCommand = false
     private var directGoalStatusEventKeys: Set<String> = []
+    private var directColdResumeNoticeKeys: Set<String> = []
 
     private var sessionID: String?
     var usesDirectGateway: Bool { gatewayRuntimeProvider != nil }
@@ -1208,6 +1213,13 @@ final class ChatViewModel {
             if controller.hasAmbiguousPromptDelivery {
                 self.sendErrorMessage = self.promptDeliveryWarning(for: controller)
             }
+            if controller.suppressesColdResumedContent,
+               let storedID = controller.storedID {
+                let key = "\(controller.sharedRuntime.connectionGeneration):\(controller.profile):\(storedID)"
+                if self.directColdResumeNoticeKeys.insert(key).inserted {
+                    self.appendLocalNoticeMessage("Reconnected to a running response. Showing saved messages until Hermes confirms completion.")
+                }
+            }
         }
         controller.onReasoningConfiguration = { [weak self, weak controller] configuration in
             guard let self, let controller,
@@ -1227,7 +1239,8 @@ final class ChatViewModel {
                   !self.directInvalidated,
                   self.directConversation === controller else { return }
             let previousPrompt = self.directClarificationPrompt
-            self.applyDirectEvent(event)
+            self.applyDirectEvent(event,
+                suppressUnwatermarkedContent: controller.suppressesColdResumedContent)
             if event.type == "clarify.request",
                let currentPrompt = controller.pendingBlockingPrompt,
                previousPrompt?.gatewayIdentity != currentPrompt.identity {
@@ -1916,7 +1929,10 @@ final class ChatViewModel {
         }
     }
 
-    private func applyDirectEvent(_ event: HermesGatewayEvent) {
+    private func applyDirectEvent(
+        _ event: HermesGatewayEvent,
+        suppressUnwatermarkedContent: Bool = false
+    ) {
         if event.type == "status.update",
            event.payload?.gatewayFields["kind"]?.gatewayString == "goal",
            let text = event.payload?.gatewayFields["text"]?.gatewayString,
@@ -1939,12 +1955,15 @@ final class ChatViewModel {
         }
         switch GatewayConversationController.presentationEvent(for: event) {
         case .textDelta(let text):
+            guard !suppressUnwatermarkedContent else { break }
             _ = appendAssistantToken(text)
             if showsLiveActivityResponseExcerpts { liveActivityManager.update(.token(text)) }
         case .interim(let text, let alreadyStreamed):
+            guard !suppressUnwatermarkedContent else { break }
             _ = appendInterimAssistant(InterimAssistantStreamEvent(text: text, alreadyStreamed: alreadyStreamed))
             if showsLiveActivityResponseExcerpts { liveActivityManager.update(.interimAssistant(text)) }
         case .thinkingDelta(let text), .reasoningDelta(let text):
+            guard !suppressUnwatermarkedContent else { break }
             _ = appendReasoning(text)
             liveActivityManager.update(.reasoning(text))
         case .toolStart(let tool):
@@ -1957,8 +1976,10 @@ final class ChatViewModel {
         case .usage(let usage): contextWindowSnapshot = usage
         case .terminal(let terminal):
             flushPendingStreamingContent()
-            if let text = terminal.text, !text.isEmpty { _ = ensureStreamingAssistantMessage() }
-            if let text = terminal.text, !text.isEmpty,
+            if !suppressUnwatermarkedContent, let text = terminal.text, !text.isEmpty {
+                _ = ensureStreamingAssistantMessage()
+            }
+            if !suppressUnwatermarkedContent, let text = terminal.text, !text.isEmpty,
                let index = messages.indices.last, messages[index].role == "assistant" {
                 let current = messages[index]
                 messages[index] = ChatMessage(role: current.role, content: text,
@@ -2486,23 +2507,19 @@ final class ChatViewModel {
     }
 
     func loadSkillSlashSuggestions() async {
-        guard usesDirectGateway || !hasLoadedSkillSlashSuggestions else { return }
+        guard usesDirectGateway else { return }
         guard !isLoadingSkillSlashSuggestions else { return }
 
         isLoadingSkillSlashSuggestions = true
         defer { isLoadingSkillSlashSuggestions = false }
 
         do {
-            if usesDirectGateway {
-                let controller = try await ensureDirectConversation()
-                _ = try await directSkillSuggestions(controller: controller, profile: controller.profile,
-                    origin: controller.sharedRuntime.origin)
-            } else {
-                let response = try await client.skills()
-                skillSlashSuggestions = SlashSkillFormatter.suggestions(from: response.skills ?? [])
-                hasLoadedSkillSlashSuggestions = true
-            }
+            let controller = try await ensureDirectConversation()
+            _ = try await directSkillSuggestions(controller: controller, profile: controller.profile,
+                origin: controller.sharedRuntime.origin)
         } catch {
+            guard !Task.isCancelled, !directInvalidated,
+                  (error as? DirectSessionError) != .staleOperation else { return }
             lastError = error
         }
     }
@@ -2557,7 +2574,7 @@ final class ChatViewModel {
 
     func uploadAttachment(data: Data, filename: String, previewData: Data? = nil) async {
         guard usesDirectGateway else {
-            await attachmentCoordinator.uploadAttachment(data: data, filename: filename, previewData: previewData)
+            directAttachmentPreparationErrorMessage = "Direct Hermes connection is unavailable. The attachment was not uploaded."
             return
         }
         guard !directInvalidated, !isStartingChat else {
@@ -2813,11 +2830,7 @@ final class ChatViewModel {
     }
 
     func setUploadAttachmentError(_ message: String?) {
-        if usesDirectGateway {
-            directAttachmentPreparationErrorMessage = message
-        } else {
-            attachmentCoordinator.setUploadAttachmentError(message)
-        }
+        directAttachmentPreparationErrorMessage = message
     }
 
     func attachmentImageData(path: String) async -> Data? {
@@ -2836,7 +2849,7 @@ final class ChatViewModel {
                 return nil
             }
         }
-        return await attachmentCoordinator.attachmentImageData(path: path)
+        return nil
     }
 
     func attachmentRawData(path: String) async -> Data? {
@@ -2862,7 +2875,7 @@ final class ChatViewModel {
                 return nil
             }
         }
-        return await attachmentCoordinator.attachmentRawData(path: path)
+        return nil
     }
 
     func transcriptMediaThumbnailData(for reference: TranscriptMediaReference) async -> Data? {
@@ -4070,71 +4083,8 @@ final class ChatViewModel {
     }
 
     private func setPersonalityFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
-        guard !usesDirectGateway else {
-            return .unsupported(friendlyMessage: String(localized: "/personality is not available in direct Hermes mode yet."))
-        }
-
-        let requestedPersonality = args.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !requestedPersonality.isEmpty else {
-            return await personalityListMessage()
-        }
-
-        guard let sessionID else {
-            return .unsupported(friendlyMessage: String(localized: "The server did not provide a session ID."))
-        }
-
-        guard activeStreamID == nil else {
-            return .unsupported(friendlyMessage: String(localized: "Wait for the current response to finish before changing personality."))
-        }
-
-        let normalized = requestedPersonality.lowercased()
-        let name = Self.personalityClearArgs.contains(normalized) ? "" : requestedPersonality
-
-        lastError = nil
-        sendErrorMessage = nil
-
-        do {
-            let response = try await client.setPersonality(sessionID: sessionID, name: name)
-            if let error = response.error {
-                return .unsupported(friendlyMessage: error)
-            }
-
-            if name.isEmpty || response.personality == nil {
-                return .executed(message: String(localized: "Personality cleared."))
-            }
-
-            return .executed(message: String(localized: "Personality set to **\(response.personality ?? name)**."))
-        } catch {
-            lastError = error
-            return .unsupported(friendlyMessage: error.localizedDescription)
-        }
-    }
-
-    private func personalityListMessage() async -> SlashCommandExecutionResult {
-        guard !usesDirectGateway else {
-            return .unsupported(friendlyMessage: String(localized: "/personality is not available in direct Hermes mode yet."))
-        }
-
-        do {
-            let personalities = (try await client.personalities()).personalities ?? []
-            guard !personalities.isEmpty else {
-                return .executed(message: String(localized: "No personalities are configured on the server."))
-            }
-
-            let list = personalities.compactMap { personality -> String? in
-                guard let name = personality.name, !name.isEmpty else { return nil }
-                if let description = personality.description, !description.isEmpty {
-                    return "- **\(name)** - \(description)"
-                }
-                return "- **\(name)**"
-            }
-            .joined(separator: "\n")
-
-            return .executed(message: String(localized: "Available personalities:\n\n\(list)\n\nUse `/personality <name>` or `/personality none`."))
-        } catch {
-            lastError = error
-            return .unsupported(friendlyMessage: error.localizedDescription)
-        }
+        _ = args
+        return .unsupported(friendlyMessage: String(localized: "/personality is temporarily unavailable."))
     }
 
     private func searchSkillsFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
@@ -4157,23 +4107,15 @@ final class ChatViewModel {
                 return .executed(message: SlashSkillFormatter.message(for: suggestions,
                     query: SlashSkillFormatter.skillQuery(from: args)))
             } catch {
+                if Task.isCancelled || directInvalidated
+                    || (error as? DirectSessionError) == .staleOperation {
+                    return .executed(message: nil)
+                }
                 lastError = error
                 return .unsupported(friendlyMessage: error.localizedDescription)
             }
         }
-        do {
-            let suggestions = try await skillSuggestionsForSlashCommand()
-            if let invocation = SlashSkillFormatter.invocation(from: args, suggestions: suggestions) {
-                let sent = await sendMessage(SlashSkillFormatter.messageText(for: invocation))
-                return sent ? .executed(message: nil) : .unsupported(
-                    friendlyMessage: sendErrorMessage ?? String(localized: "Could not send the skill message."))
-            }
-
-            return .executed(message: SlashSkillFormatter.message(for: suggestions, query: SlashSkillFormatter.skillQuery(from: args)))
-        } catch {
-            lastError = error
-            return .unsupported(friendlyMessage: error.localizedDescription)
-        }
+        return .unsupported(friendlyMessage: "Skills require a direct Hermes connection.")
     }
 
     func executeSkillShortcutCommand(name: String, args: String) async -> SlashCommandExecutionResult? {
@@ -4197,43 +4139,17 @@ final class ChatViewModel {
                 }
                 return .unsupported(friendlyMessage: directSkillInvocationUnavailableMessage)
             } catch {
+                if Task.isCancelled || directInvalidated
+                    || (error as? DirectSessionError) == .staleOperation {
+                    return .executed(message: nil)
+                }
                 lastError = error
                 return .unsupported(friendlyMessage: error.localizedDescription)
             }
         }
-        do {
-            let suggestions = try await skillSuggestionsForSlashCommand()
-            guard let skill = SlashSkillFormatter.skill(named: name, in: suggestions) else {
-                return nil
-            }
-
-            let message = args.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !message.isEmpty else {
-                return .executed(message: SlashSkillFormatter.detailMessage(for: skill))
-            }
-
-            let commandText = "/\(skill.slashName) \(message)"
-            let sent = await sendMessage(commandText)
-            if sent {
-                return .executed(message: nil)
-            }
-            return .unsupported(friendlyMessage: sendErrorMessage ?? String(localized: "Could not send the skill message."))
-        } catch {
-            lastError = error
-            return .unsupported(friendlyMessage: error.localizedDescription)
-        }
-    }
-
-    private func skillSuggestionsForSlashCommand() async throws -> [SkillSlashSuggestion] {
-        if hasLoadedSkillSlashSuggestions {
-            return skillSlashSuggestions
-        }
-
-        let response = try await client.skills()
-        let suggestions = SlashSkillFormatter.suggestions(from: response.skills ?? [])
-        skillSlashSuggestions = suggestions
-        hasLoadedSkillSlashSuggestions = true
-        return suggestions
+        _ = name
+        _ = args
+        return .unsupported(friendlyMessage: "Skills require a direct Hermes connection.")
     }
 
     private func directSkillSuggestions(
@@ -4241,17 +4157,22 @@ final class ChatViewModel {
         profile: String,
         origin: URL
     ) async throws -> [SkillSlashSuggestion] {
-        guard !directInvalidated, directConversation === controller,
-              controller.profile == profile,
-              (Self.nonEmpty(currentProfile) ?? "default") == profile,
-              controller.sharedRuntime.origin == origin,
-              origin == server else { throw DirectSessionError.staleOperation }
-        let response = try await client.directSkills(profile: profile)
-        guard !directInvalidated, directConversation === controller,
-              controller.profile == profile,
-              (Self.nonEmpty(currentProfile) ?? "default") == profile,
-              controller.sharedRuntime.origin == origin,
-              origin == server else { throw DirectSessionError.staleOperation }
+        func requireCurrentScope() throws {
+            try Task.checkCancellation()
+            guard !directInvalidated, directConversation === controller,
+                  controller.profile == profile,
+                  (Self.nonEmpty(currentProfile) ?? "default") == profile,
+                  controller.sharedRuntime.origin == origin,
+                  origin == server else { throw DirectSessionError.staleOperation }
+        }
+        try requireCurrentScope()
+        let response: SkillsResponse
+        do { response = try await client.directSkills(profile: profile) }
+        catch {
+            try requireCurrentScope()
+            throw error
+        }
+        try requireCurrentScope()
         let suggestions = SlashSkillFormatter.suggestions(from: response.skills ?? [])
         skillSlashSuggestions = suggestions
         hasLoadedSkillSlashSuggestions = true
@@ -5979,7 +5900,6 @@ final class ChatViewModel {
         return suffix.replacingOccurrences(of: "gpt-", with: "GPT-", options: [.caseInsensitive])
     }
 
-    private static let personalityClearArgs: Set<String> = ["none", "default", "clear"]
 
     private static func btwMessageText(question: String, answer: String?, isLoading: Bool) -> String {
         let trimmedAnswer = answer?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -6039,17 +5959,7 @@ final class ChatViewModel {
 
 extension ChatViewModel: ChatAttachmentCoordinatorDelegate {
     var attachmentSessionID: String? { sessionID }
-    var attachmentIsViewingCachedData: Bool { isViewingCachedData }
-
-    func attachmentCoordinatorWillUpload() {
-        lastError = nil
-    }
-
-    func attachmentCoordinatorDidFail(_ error: Error) {
-        lastError = error
-    }
 }
-
 
 private struct ActiveChatStreamSnapshot: Equatable {
     let messages: [ChatMessage]

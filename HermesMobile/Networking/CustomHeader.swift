@@ -129,8 +129,8 @@ extension Array where Element == CustomHeader {
 
 /// Process-wide, thread-safe snapshot of the user's custom headers.
 ///
-/// The app has no dependency-injection container — `APIClient`/`SSEClient` are
-/// built ad hoc in ~20 places — so each reads the current headers from here when
+/// The app has no dependency-injection container — `APIClient` instances are
+/// built ad hoc in multiple places — so each reads the current headers from here when
 /// building a request (at request time, so even long-lived clients pick up an
 /// edit immediately). `AuthManager` owns all writes: it loads from the Keychain
 /// on launch and replaces the snapshot whenever the user edits headers.

@@ -302,7 +302,22 @@ final class APIClientAuthAndErrorTests: APIClientTestCase {
 
         XCTAssertEqual(
             error.localizedDescription,
-            "The server did not respond in time. Check that the Mac is awake, hermes-webui is running, and the tunnel is connected."
+            "The server did not respond in time. Check that the Mac is awake, Hermes is running, and the tunnel is connected."
+        )
+    }
+
+    func testInvalidUnreadableAndMissingEndpointGuidanceUsesAuthenticatedHermesServerTerminology() {
+        XCTAssertEqual(
+            APIError.invalidServerURL.localizedDescription,
+            "Enter a valid authenticated HTTPS server URL, for example https://hermes.yourdomain.com."
+        )
+        XCTAssertEqual(
+            APIError.http(statusCode: -1, body: nil).localizedDescription,
+            "The server response could not be read. Check that the URL points to a Hermes server."
+        )
+        XCTAssertEqual(
+            APIError.http(statusCode: 404, body: nil).localizedDescription,
+            "The server endpoint was not found. Check that the URL points to a Hermes server."
         )
     }
 

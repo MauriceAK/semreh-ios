@@ -116,33 +116,44 @@ final class StreamReconnectContractTests: APIClientTestCase {
         }
         // Stock REST exposes durable segments, not the current inflight buffer.
         // A completed assistant segment in a running turn must not absorb a later delta.
-        let rows = hasCompletedCurrentTurnSegment
+        let savedRows = hasCompletedCurrentTurnSegment
             ? #"[{"id":1,"role":"user","content":"Already accepted"},{"id":2,"role":"assistant","content":"Completed interim answer"}]"#
             : #"[{"id":1,"role":"assistant","content":"Previous response"},{"id":2,"role":"user","content":"Already accepted"}]"#
+        let completedRows = hasCompletedCurrentTurnSegment
+            ? #"[{"id":1,"role":"user","content":"Already accepted"},{"id":2,"role":"assistant","content":"Completed interim answer"},{"id":3,"role":"assistant","content":"Canonical current answer"}]"#
+            : #"[{"id":1,"role":"assistant","content":"Previous response"},{"id":2,"role":"user","content":"Already accepted"},{"id":3,"role":"assistant","content":"Canonical current answer"}]"#
+        var terminalPhase = false
         let client = makeClient { request in
             XCTAssertEqual(request.httpMethod, "GET")
             XCTAssertEqual(request.url?.path, "/api/sessions/durable-1/messages")
             XCTAssertEqual(self.queryDictionary(of: request.url!)["profile"], "work")
-            return apiTestJSONResponse("{\"session_id\":\"durable-1\",\"messages\":\(rows),\"pagination\":{\"limit\":120,\"offset\":0,\"order\":\"latest\",\"returned\":2}}", for: request)
+            let rows = terminalPhase ? completedRows : savedRows
+            let returned = terminalPhase ? 3 : 2
+            return apiTestJSONResponse("{\"session_id\":\"durable-1\",\"messages\":\(rows),\"pagination\":{\"limit\":120,\"offset\":0,\"order\":\"latest\",\"returned\":\(returned)}}", for: request)
         }
         let vm = ChatViewModel(session: SessionSummary(sessionId: "durable-1", profile: "work"),
             server: server, client: client, gatewayRuntimeProvider: { _ in runtime })
         let accepted = await vm.sendMessage("Duplicate request")
         XCTAssertFalse(accepted)
         XCTAssertEqual(fake.methods(), ["session.resume"])
-        XCTAssertEqual(vm.messages.compactMap(\.content), hasCompletedCurrentTurnSegment
+        XCTAssertEqual(vm.messages.filter { $0.role != "local_notice" }.compactMap(\.content), hasCompletedCurrentTurnSegment
             ? ["Already accepted", "Completed interim answer"] : ["Previous response", "Already accepted"])
+        XCTAssertTrue(vm.messages.contains { $0.role == "local_notice" && $0.content?.contains("Showing saved messages") == true })
         XCTAssertFalse(vm.messages.contains { $0.content == "Duplicate request" })
         let durableIDs = vm.messages.map(\.id)
         fake.emitDelta("new response")
-        try await waitUntil {
-            vm.flushPendingStreamingContent()
-            return self.assistantContents(of: vm).last == "new response"
-        }
+        for _ in 0..<40 { await Task.yield() }
+        vm.flushPendingStreamingContent()
+        XCTAssertFalse(vm.messages.contains { $0.content == "new response" })
+        XCTAssertEqual(vm.messages.map(\.id), durableIDs)
+
+        terminalPhase = true
+        fake.emitComplete(text: "unwatermarked terminal")
+        try await waitUntil { vm.messages.contains { $0.messageId == "3" } }
         XCTAssertEqual(assistantContents(of: vm), hasCompletedCurrentTurnSegment
-            ? ["Completed interim answer", "new response"] : ["Previous response", "new response"])
-        XCTAssertEqual(Array(vm.messages.prefix(2)).map(\.id), durableIDs)
-        XCTAssertFalse(durableIDs.contains(try XCTUnwrap(vm.messages.last?.id)))
+            ? ["Completed interim answer", "Canonical current answer"]
+            : ["Previous response", "Canonical current answer"])
+        XCTAssertFalse(vm.messages.contains { $0.content == "unwatermarked terminal" })
         XCTAssertFalse(fake.methods().contains("prompt.submit"))
         await vm.disposeDirectConversation()
         await runtime.stop()
@@ -198,6 +209,12 @@ final class SendRetirementDirectTransport: HermesGatewayTransport, @unchecked Se
         lock.lock(); let target = sink; lock.unlock()
         target?(HermesGatewayEvent(method: "event", type: "message.delta", sessionID: "runtime-existing",
             sequence: 1, payload: .object(["text": .string(text)]), params: nil, connectionGeneration: 1))
+    }
+    func emitComplete(text: String) {
+        lock.lock(); let target = sink; lock.unlock()
+        target?(HermesGatewayEvent(method: "event", type: "message.complete", sessionID: "runtime-existing",
+            sequence: 2, payload: .object(["status": .string("complete"), "text": .string(text)]),
+            params: nil, connectionGeneration: 1))
     }
 }
 

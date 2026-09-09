@@ -4,9 +4,6 @@ struct OnboardingView: View {
     @Bindable var authManager: AuthManager
     @State private var viewModel: OnboardingViewModel
     @State private var currentPage: Int
-    @State private var hasCopiedAgentPrompt = false
-    @State private var hasBypassedCopyReminder = false
-    @State private var isShowingCopyReminder = false
     @FocusState private var focusedField: OnboardingConnectField?
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.appColorPalette) private var palette
@@ -50,7 +47,7 @@ struct OnboardingView: View {
                     OnboardingFeaturesPage()
                         .tag(1)
 
-                    OnboardingAgentPromptPage(hasCopiedAgentPrompt: $hasCopiedAgentPrompt)
+                    OnboardingAgentPromptPage()
                         .tag(2)
 
                     OnboardingTailscalePage()
@@ -77,15 +74,6 @@ struct OnboardingView: View {
         .animation(.easeInOut(duration: 0.18), value: isEditingConnectionField)
         .onChange(of: currentPage) { oldPage, newPage in
             handlePageChange(from: oldPage, to: newPage)
-        }
-        .alert("Copy the setup prompt first", isPresented: $isShowingCopyReminder) {
-            Button("Stay Here", role: .cancel) {}
-            Button("Continue Anyway") {
-                hasBypassedCopyReminder = true
-                advanceToNextPage()
-            }
-        } message: {
-            Text("Copy the agent setup prompt on your desktop before continuing so Hermes Web UI and Tailscale are configured correctly.")
         }
     }
 
@@ -186,36 +174,15 @@ struct OnboardingView: View {
     }
 
     private func handlePrimaryAction() {
-        if OnboardingFlowPolicy.shouldShowCopyReminder(
-            page: currentPage,
-            hasCopiedAgentPrompt: hasCopiedAgentPrompt,
-            hasBypassedCopyReminder: hasBypassedCopyReminder
-        ) {
-            isShowingCopyReminder = true
-            return
-        }
-
         if currentPage < OnboardingFlowPolicy.connectPageIndex {
             advanceToNextPage()
         }
     }
 
-    private func handlePageChange(from oldPage: Int, to newPage: Int) {
+    private func handlePageChange(from _: Int, to newPage: Int) {
         if OnboardingFlowPolicy.shouldClearConnectFocusWhenLeavingPage(newPage) {
             focusedField = nil
         }
-
-        guard OnboardingFlowPolicy.shouldInterceptForwardNavigationFromAgentPrompt(
-            from: oldPage,
-            to: newPage,
-            hasCopiedAgentPrompt: hasCopiedAgentPrompt,
-            hasBypassedCopyReminder: hasBypassedCopyReminder
-        ) else {
-            return
-        }
-
-        isShowingCopyReminder = true
-        currentPage = oldPage
     }
 
     private func advanceToNextPage() {

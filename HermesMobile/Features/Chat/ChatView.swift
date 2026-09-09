@@ -100,6 +100,7 @@ private struct DirectAttachmentRecoveryBanner: View {
 private struct DirectPromptDeliveryRecoveryBanner: View {
     let isBusy: Bool
     let isActionAvailable: Bool
+    let isSafetyRecordUnavailable: Bool
     let hasConfirmedAcceptance: Bool
     let onAllow: () -> Void
 
@@ -112,10 +113,9 @@ private struct DirectPromptDeliveryRecoveryBanner: View {
                 Text(hasConfirmedAcceptance ? "Message accepted; cleanup needed" : "Message delivery needs attention")
                     .font(.subheadline.weight(.semibold))
                     .accessibilityIdentifier("direct-prompt-uncertainty-banner")
-                Text(hasConfirmedAcceptance
-                    ? "Hermes accepted the message, but Semreh could not clear its local safety record. It will not resend it."
-                    : "Semreh cannot confirm the previous send. It may still appear, and Semreh will not resend it.")
+                Text(recoveryExplanation)
                     .font(.caption)
+                    .accessibilityIdentifier("direct-prompt-uncertainty-explanation")
             }
             Spacer(minLength: 8)
             if isBusy {
@@ -135,6 +135,16 @@ private struct DirectPromptDeliveryRecoveryBanner: View {
                 .stroke(Color.orange.opacity(0.35), lineWidth: 0.5)
         }
         .accessibilityElement(children: .contain)
+    }
+
+    private var recoveryExplanation: String {
+        if hasConfirmedAcceptance {
+            return "Hermes accepted the message, but Semreh could not clear its local safety record. It will not resend it."
+        }
+        if isSafetyRecordUnavailable {
+            return "Semreh cannot verify this chat’s delivery safety record. Saved history remains readable, but this chat cannot safely send. Return to Chats and start a New Chat to continue."
+        }
+        return "Semreh cannot confirm the previous send. It may still appear, and Semreh will not resend it."
     }
 }
 
@@ -782,6 +792,7 @@ struct ChatView: View {
                         DirectPromptDeliveryRecoveryBanner(
                             isBusy: viewModel.promptDeliveryRecoveryIsBusy,
                             isActionAvailable: viewModel.directPromptDeliveryRecoveryTarget != nil,
+                            isSafetyRecordUnavailable: viewModel.directPromptDeliverySafetyRecordUnavailable,
                             hasConfirmedAcceptance: viewModel.directPromptDeliveryHasConfirmedAcceptance,
                             onAllow: {
                                 promptDeliveryRecoveryConfirmationTarget = viewModel.directPromptDeliveryRecoveryTarget

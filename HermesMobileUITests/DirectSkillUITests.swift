@@ -31,13 +31,38 @@ final class DirectSkillUITests: XCTestCase {
         app.terminate()
         app.launch()
         defer { UIPasteboard.general.items = [] }
+        dismissKnownPasswordSavePrompt(app, timeout: 1)
         try signOutIfNeeded(app)
-        if !app.textFields["onboarding-server-url"].exists {
-            XCTAssertTrue(app.staticTexts["Control Semreh from iPhone or iPad."].waitForExistence(timeout: 15))
-            app.buttons["Already have a server?"].tap()
+        let welcome = app.staticTexts["Control Semreh from iPhone or iPad."]
+        if welcome.waitForExistence(timeout: 15) && welcome.isHittable {
+            let getStarted = app.buttons["Get Started"]
+            XCTAssertTrue(getStarted.waitForExistence(timeout: 5) && getStarted.isHittable); getStarted.tap()
+            XCTAssertTrue(app.staticTexts["What you get"].waitForExistence(timeout: 5))
+            let setUp = app.buttons["Set Up"]
+            XCTAssertTrue(setUp.waitForExistence(timeout: 5) && setUp.isHittable); setUp.tap()
+
+            let guidance = app.staticTexts["Prepare your Hermes server"]
+            XCTAssertTrue(guidance.waitForExistence(timeout: 5) && guidance.isHittable)
+            XCTAssertTrue(containing("Use first-party Hermes", app: app).exists)
+            XCTAssertTrue(containing("dedicated authenticated HTTPS", app: app).exists)
+            XCTAssertFalse(app.alerts["Copy the setup prompt first"].exists)
+            let guidanceScreenshot = XCTAttachment(screenshot: app.screenshot())
+            guidanceScreenshot.name = "First-party Hermes server guidance"
+            guidanceScreenshot.lifetime = .keepAlways
+            add(guidanceScreenshot)
+
+            let guidanceContinue = app.buttons["Continue"]
+            XCTAssertTrue(guidanceContinue.waitForExistence(timeout: 5) && guidanceContinue.isHittable); guidanceContinue.tap()
+            let tailscale = app.staticTexts["Install Tailscale on iPhone"]
+            XCTAssertTrue(tailscale.waitForExistence(timeout: 5) && tailscale.isHittable)
+            XCTAssertFalse(app.alerts["Copy the setup prompt first"].exists)
+            let tailscaleContinue = app.buttons["Continue"]
+            XCTAssertTrue(tailscaleContinue.waitForExistence(timeout: 5) && tailscaleContinue.isHittable); tailscaleContinue.tap()
+        } else {
+            return XCTFail("Sign-out did not return to the visible onboarding welcome page.")
         }
         let server = app.textFields["onboarding-server-url"]
-        XCTAssertTrue(server.waitForExistence(timeout: 5))
+        XCTAssertTrue(server.waitForExistence(timeout: 5) && server.isHittable)
         replace(server, with: origin, app: app)
         app.buttons["Test Connection"].tap()
         let username = app.textFields["onboarding-username"]
@@ -46,10 +71,26 @@ final class DirectSkillUITests: XCTestCase {
         replace(username, with: credentials.username, app: app)
         paste(credentials.password, into: password, app: app)
         app.buttons["Connect"].tap()
-        dismissPasswordPrompt(app)
-
-        XCTAssertTrue(app.buttons["Sessions"].waitForExistence(timeout: 30))
-        app.buttons["Sessions"].tap()
+        let sessions = app.buttons["Sessions"]
+        let restoredChat = app.otherElements.matching(
+            NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
+        ).firstMatch
+        let destinationDeadline = Date().addingTimeInterval(45)
+        while !sessions.exists && !restoredChat.exists && Date() < destinationDeadline {
+            dismissKnownPasswordSavePrompt(app, timeout: 0)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        }
+        // The system prompt can arrive after the destination enters the hierarchy.
+        dismissKnownPasswordSavePrompt(app, timeout: 3)
+        if restoredChat.exists {
+            let back = app.navigationBars.buttons["BackButton"]
+            XCTAssertTrue(back.waitForExistence(timeout: 5) && back.isHittable)
+            dismissKnownPasswordSavePrompt(app, timeout: 1)
+            back.tap()
+        }
+        dismissKnownPasswordSavePrompt(app, timeout: 1)
+        XCTAssertTrue(sessions.waitForExistence(timeout: 30) && sessions.isHittable)
+        sessions.tap()
         XCTAssertTrue(app.buttons["New session"].waitForExistence(timeout: 15))
         app.buttons["New session"].tap()
         let composer = app.textViews.matching(
@@ -90,10 +131,11 @@ final class DirectSkillUITests: XCTestCase {
 
     private func signOutIfNeeded(_ app: XCUIApplication) throws {
         let welcome = app.staticTexts["Control Semreh from iPhone or iPad."]
-        if welcome.waitForExistence(timeout: 4) || app.textFields["onboarding-server-url"].exists { return }
+        if welcome.waitForExistence(timeout: 4) && welcome.isHittable { return }
         let you = app.buttons["You"]
         if !you.waitForExistence(timeout: 5) {
-            let back = app.navigationBars.buttons.firstMatch
+            let knownBack = app.navigationBars.buttons["BackButton"]
+            let back = knownBack.exists ? knownBack : app.navigationBars.buttons.firstMatch
             XCTAssertTrue(back.waitForExistence(timeout: 5)); back.tap()
         }
         XCTAssertTrue(you.waitForExistence(timeout: 10)); you.tap()
@@ -127,13 +169,25 @@ final class DirectSkillUITests: XCTestCase {
         if allow.waitForExistence(timeout: 2) { allow.tap() }
     }
 
-    private func dismissPasswordPrompt(_ app: XCUIApplication) {
-        for title in ["Save Password?", "Save This Password?"] {
-            for prompt in [app.sheets[title], app.alerts[title]] where prompt.exists {
-                let notNow = prompt.buttons["Not Now"]
-                if notNow.waitForExistence(timeout: 3) { notNow.tap() }
+    private func dismissKnownPasswordSavePrompt(_ app: XCUIApplication, timeout: TimeInterval) {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            for title in ["Save Password?", "Save This Password?"] {
+                for prompt in [app.sheets[title], app.alerts[title]] where prompt.exists {
+                    let notNow = prompt.buttons["Not Now"]
+                    XCTAssertTrue(notNow.waitForExistence(timeout: 5) && notNow.isHittable)
+                    guard notNow.exists && notNow.isHittable else { return }
+                    notNow.tap()
+                    let dismissed = XCTNSPredicateExpectation(
+                        predicate: NSPredicate(format: "exists == false"), object: prompt
+                    )
+                    XCTAssertEqual(XCTWaiter.wait(for: [dismissed], timeout: 5), .completed)
+                    return
+                }
             }
-        }
+            guard Date() < deadline else { return }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        } while Date() < deadline
     }
 
     private func readCredentials() throws -> Credentials {

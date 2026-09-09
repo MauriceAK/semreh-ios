@@ -245,7 +245,7 @@ final class SessionListMutationTests: XCTestCase {
         XCTAssertFalse(viewModel.isViewingCachedData)
         XCTAssertEqual(
             viewModel.errorMessage,
-            "The server did not respond in time. Check that the Mac is awake, hermes-webui is running, and the tunnel is connected."
+            "The server did not respond in time. Check that the Mac is awake, Hermes is running, and the tunnel is connected."
         )
         XCTAssertNotNil(viewModel.lastError)
     }
@@ -276,7 +276,7 @@ final class SessionListMutationTests: XCTestCase {
         XCTAssertTrue(CacheFallbackPolicy.shouldUseCache(for: sessionLoadError))
         XCTAssertEqual(
             viewModel.errorMessage,
-            "The server did not respond in time. Check that the Mac is awake, hermes-webui is running, and the tunnel is connected."
+            "The server did not respond in time. Check that the Mac is awake, Hermes is running, and the tunnel is connected."
         )
 
         await viewModel.searchSessions(query: "later", debounceNanoseconds: 0)
@@ -285,7 +285,7 @@ final class SessionListMutationTests: XCTestCase {
         XCTAssertTrue(CacheFallbackPolicy.shouldUseCache(for: try XCTUnwrap(viewModel.sessionLoadError)))
         XCTAssertEqual(
             viewModel.errorMessage,
-            "The server did not respond in time. Check that the Mac is awake, hermes-webui is running, and the tunnel is connected."
+            "The server did not respond in time. Check that the Mac is awake, Hermes is running, and the tunnel is connected."
         )
     }
 

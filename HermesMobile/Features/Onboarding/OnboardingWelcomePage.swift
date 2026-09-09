@@ -26,7 +26,7 @@ struct OnboardingWelcomePage: View {
                     .minimumScaleFactor(0.86)
                     .fixedSize(horizontal: false, vertical: true)
 
-                Text("Connect to your self-hosted Web UI over Tailscale.")
+                Text("Connect to your self-hosted Hermes server over private HTTPS.")
                     .font(.subheadline)
                     .foregroundStyle(OnboardingTheme.secondaryText(for: colorScheme, palette: palette))
                     .multilineTextAlignment(.center)

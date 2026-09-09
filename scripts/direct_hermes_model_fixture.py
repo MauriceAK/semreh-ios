@@ -14,6 +14,8 @@ import time
 from typing import Optional
 
 REASONING_PROBE = False
+MEMORY_ADOPTION_MARKER = 'SEMREH_MEMORY_ADOPTION_BENIGN_V1'
+MEMORY_ADOPTION_REQUEST = 'SEMREH_MEMORY_ADOPTION_REQUEST_V1'
 GOAL_E2E_PREFIX = 'SEMREH_GOAL_E2E_TWO_TURN_'
 GOAL_E2E_STEP_1 = 'SEMREH_GOAL_E2E_STEP_1'
 GOAL_E2E_STEP_2 = 'SEMREH_GOAL_E2E_STEP_2'
@@ -211,6 +213,9 @@ def _contains_marker(value: object, marker: str) -> bool:
 def safe_request_diagnostics(body: dict, last_user: object,
                              selected_tool_call: Optional[dict]) -> dict:
     """Return bounded provider diagnostics without retaining prompt content."""
+    messages = body.get('messages')
+    system = next((message.get('content') for message in (messages or [])
+                   if isinstance(message, dict) and message.get('role') == 'system'), None)
     advertised = []
     tools = body.get('tools')
     if isinstance(tools, list):
@@ -233,6 +238,12 @@ def safe_request_diagnostics(body: dict, last_user: object,
         'advertised_tools': advertised,
         'selected_tool_call': selected_tool_call is not None,
         'selected_tool_name': selected_name,
+        'memory_adoption_request': (
+            isinstance(last_user, str) and last_user.startswith(MEMORY_ADOPTION_REQUEST)
+        ),
+        'exact_memory_marker_in_system': (
+            isinstance(system, str) and MEMORY_ADOPTION_MARKER in system
+        ),
         'fixture_kind': goal_e2e_kind(body, last_user),
     }
 

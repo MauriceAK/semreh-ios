@@ -98,21 +98,6 @@ extension APIClient {
             path: path, maximumBytes: maximumBytes).data
     }
 
-    func rawFileData(sessionID: String, path: String) async throws -> Data {
-        try await sendData(endpoint: .rawFile(sessionID: sessionID, path: path), method: "GET")
-    }
-
-    func rawFilePreviewData(
-        sessionID: String,
-        path: String,
-        maximumBytes: Int
-    ) async throws -> Data {
-        try await boundedData(
-            endpoint: .rawFile(sessionID: sessionID, path: path),
-            maximumBytes: maximumBytes
-        ).0
-    }
-
     func mediaData(sessionID: String, path: String) async throws -> Data {
         try await mediaResponseData(
             endpoint: .media(sessionID: sessionID, path: path),

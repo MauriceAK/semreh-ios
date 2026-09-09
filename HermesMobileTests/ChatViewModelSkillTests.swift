@@ -76,8 +76,27 @@ final class ChatViewModelSkillTests: APIClientTestCase {
         await fixture.runtime.stop()
     }
 
+    func testDelayedFailedCatalogAfterInvalidationDoesNotPublishOldError() async throws {
+        let gate = VMSkillCatalogGate()
+        let fixture = try await makeFixture(mode: .invocation, currentProfile: "work",
+            catalogGate: gate, catalogError: URLError(.cannotConnectToHost))
+        let request = Task {
+            await fixture.viewModel.executeSkillShortcutCommand(name: "review-code", args: "this patch")
+        }
+        defer { gate.release() }
+        guard await gate.waitUntilEntered() else { return XCTFail("Catalog request did not reach gate") }
+        fixture.viewModel.invalidateDirectConversation()
+        gate.release()
+        _ = await request.value
+
+        XCTAssertNil(fixture.viewModel.lastError)
+        XCTAssertTrue(fixture.viewModel.skillSlashSuggestions.isEmpty)
+        XCTAssertFalse(fixture.transport.methods.contains { $0 == "session.create" || $0.hasPrefix("command.") || $0 == "prompt.submit" })
+        await fixture.runtime.stop()
+    }
+
     private func makeFixture(mode: VMSkillTransport.Mode, currentProfile: String,
-        catalogGate: VMSkillCatalogGate? = nil) async throws -> (
+        catalogGate: VMSkillCatalogGate? = nil, catalogError: Error? = nil) async throws -> (
         viewModel: ChatViewModel, runtime: HermesServerRuntime, transport: VMSkillTransport,
         requests: VMSkillRequestRecorder, controller: GatewayConversationController
     ) {
@@ -91,6 +110,7 @@ final class ChatViewModelSkillTests: APIClientTestCase {
             requests.paths.append(path)
             if request.url?.path == "/api/skills" {
                 catalogGate?.enterAndWait()
+                if let catalogError { throw catalogError }
                 return apiTestJSONResponse(#"[{"name":"Review Code","category":"development","description":"Review a patch","enabled":true}]"#, for: request)
             }
             if request.url?.path == "/api/sessions/stored-session/messages" {

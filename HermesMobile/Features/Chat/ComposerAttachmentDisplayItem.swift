@@ -10,6 +10,7 @@ struct ComposerAttachmentDisplayItem: Identifiable, Equatable {
     let mime: String?
     let size: Int?
     let isImage: Bool
+    let isGenericFileReference: Bool
     let thumbnailData: Data?
     /// Direct images and PDFs provide original bytes for a local preview.
     /// Generic files intentionally use the existing no-server-path fallback.
@@ -24,6 +25,7 @@ struct ComposerAttachmentDisplayItem: Identifiable, Equatable {
         mime = attachment.mime
         size = attachment.size
         isImage = attachment.isImage
+        isGenericFileReference = false
         thumbnailData = attachment.thumbnailData
         localPreviewData = nil
         legacyPending = attachment
@@ -36,6 +38,7 @@ struct ComposerAttachmentDisplayItem: Identifiable, Equatable {
         mime = attachment.mimeType
         size = attachment.byteCount
         isImage = attachment.isImage
+        isGenericFileReference = attachment.isGenericFile
         thumbnailData = attachment.thumbnailData
         localPreviewData = (attachment.isImage || attachment.isPDF) ? attachment.originalBytes : nil
         legacyPending = nil
@@ -50,7 +53,8 @@ struct ComposerAttachmentDisplayItem: Identifiable, Equatable {
         lhs.serverPath == rhs.serverPath &&
         lhs.mime == rhs.mime &&
         lhs.size == rhs.size &&
-        lhs.isImage == rhs.isImage
+        lhs.isImage == rhs.isImage &&
+        lhs.isGenericFileReference == rhs.isGenericFileReference
     }
 
     func legacyPendingAttachment() -> PendingAttachment? {

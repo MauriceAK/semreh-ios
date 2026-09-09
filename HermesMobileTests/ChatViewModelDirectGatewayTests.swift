@@ -1182,10 +1182,12 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
                 XCTFail("External-run discovery must use direct canonical history")
                 throw URLError(.badURL)
             }
-            return apiTestJSONResponse(
-                #"{"session_id":"durable-1","messages":[{"id":1,"role":"user","content":"Work externally","timestamp":1},{"id":2,"role":"assistant","content":"Latest external progress","timestamp":2}],"pagination":{"limit":120,"offset":0,"order":"latest","returned":2}}"#,
-                for: request
-            )
+            let rows = requests.isTerminalPhase
+                ? #"[{"id":1,"role":"user","content":"Work externally","timestamp":1},{"id":3,"role":"assistant","content":"Canonical completed answer","timestamp":3}]"#
+                : #"[{"id":1,"role":"user","content":"Work externally","timestamp":1},{"id":2,"role":"assistant","content":"Latest external progress","timestamp":2}]"#
+            let body = #"{"session_id":"durable-1","messages":\#(rows),"pagination":{"limit":120,"offset":0,"order":"latest","returned":2}}"#
+            _ = try JSONSerialization.jsonObject(with: Data(body.utf8))
+            return apiTestJSONResponse(body, for: request)
         }
         let viewModel = makeViewModel(client: client, runtime: runtime, sessionID: "durable-1")
 
@@ -1194,7 +1196,9 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         XCTAssertEqual(requests.values(), ["/api/sessions/durable-1/messages"])
         XCTAssertEqual(fake.calls().filter { $0.method == "session.resume" }.count, 1)
         XCTAssertFalse(fake.calls().contains { $0.method == "session.create" || $0.method == "prompt.submit" })
-        XCTAssertEqual(viewModel.messages.compactMap(\.content), ["Work externally", "Latest external progress"])
+        XCTAssertEqual(viewModel.messages.filter { ["user", "assistant"].contains($0.role ?? "") }.compactMap(\.content),
+            ["Work externally", "Latest external progress"])
+        XCTAssertTrue(viewModel.messages.contains { $0.role == "local_notice" && $0.content?.contains("Showing saved messages") == true })
         XCTAssertEqual(viewModel.activeStreamID, "direct-run:durable-1")
         XCTAssertFalse(viewModel.isActiveStreamConnectionSuspended)
 
@@ -1206,11 +1210,23 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
             sessionID: "runtime-1", type: "message.delta", sequence: 2,
             payload: ["text": .string("External stream continues")]
         ))
-        await waitUntil { viewModel.messages.contains { $0.content?.contains("External stream continues") == true } }
+        for _ in 0..<40 { await Task.yield() }
 
         XCTAssertTrue(viewModel.messages.contains { $0.content == "Work externally" })
         XCTAssertFalse(viewModel.messages.contains { $0.content?.contains("Sibling-only token") == true })
+        XCTAssertFalse(viewModel.messages.contains { $0.content?.contains("External stream continues") == true })
         XCTAssertEqual(requests.values(), ["/api/sessions/durable-1/messages"])
+
+        fake.emit(ChatDirectEventFactory.event(sessionID: "runtime-1", type: "tool.start", sequence: 3,
+            payload: ["tool_id": .string("cold-tool"), "name": .string("read_file")]))
+        await waitUntil { viewModel.liveToolCalls.map(\.id).contains("cold-tool") }
+        requests.beginTerminalPhase()
+        fake.emit(ChatDirectEventFactory.event(sessionID: "runtime-1", type: "message.complete", sequence: 4,
+            payload: ["status": .string("complete"), "text": .string("Unwatermarked terminal text")]))
+        await waitUntil { viewModel.messages.contains { $0.messageId == "3" } }
+        XCTAssertTrue(viewModel.messages.contains { $0.content == "Canonical completed answer" })
+        XCTAssertFalse(viewModel.messages.contains { $0.content?.contains("Unwatermarked terminal text") == true })
+        XCTAssertEqual(requests.values(), ["/api/sessions/durable-1/messages", "/api/sessions/durable-1/messages"])
         await viewModel.disposeDirectConversation()
         await runtime.stop()
     }
@@ -3391,6 +3407,15 @@ private enum ChatDirectEventFactory {
 private final class ChatDirectRequestRecorder: @unchecked Sendable {
     private let lock = NSLock()
     private var paths: [String] = []
+    private var terminalPhase = false
+
+    var isTerminalPhase: Bool {
+        lock.withLock { terminalPhase }
+    }
+
+    func beginTerminalPhase() {
+        lock.withLock { terminalPhase = true }
+    }
 
     func append(_ path: String) {
         lock.lock()

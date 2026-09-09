@@ -123,7 +123,7 @@ def initialize():
     print('Created disposable runtime; credentials are private and were not printed.')
 
 
-def validate():
+def validate(*, allow_memory_adoption=False):
     checked_paths()
     for name in ('marker.json', 'credentials.json', 'home/config.yaml'):
         path = RUNTIME / name
@@ -142,7 +142,8 @@ def validate():
     expected = {
         'model': {'provider': 'custom', 'default': 'semreh-fixture', 'base_url': 'http://127.0.0.1:18792/v1'},
         'terminal': {'backend': 'local', 'cwd': str(RUNTIME / 'tools'), 'home_mode': 'profile'},
-        'memory': {'memory_enabled': False, 'user_profile_enabled': False, 'provider': ''},
+        'memory': {'memory_enabled': allow_memory_adoption,
+                   'user_profile_enabled': False, 'provider': ''},
         'compression': COMPRESSION_FIXTURE_CONFIG,
         'auxiliary': AUXILIARY_FIXTURE_CONFIG,
         'curator': {'enabled': False}, 'mcp_servers': {}, 'platforms': {},

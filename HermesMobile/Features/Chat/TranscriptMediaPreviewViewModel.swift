@@ -70,6 +70,7 @@ final class TranscriptMediaPreviewViewModel {
         removeTemporaryVideoFile()
 
         guard reference.isRasterImageCandidate
+                || reference.isAudioCandidate
                 || reference.isVideoCandidate
                 || reference.isPDFCandidate
                 || reference.isMarkdownCandidate
@@ -118,6 +119,8 @@ final class TranscriptMediaPreviewViewModel {
                 }
                 temporaryVideoURL = fileURL
                 videoFileURL = fileURL
+            } else if reference.isAudioCandidate {
+                audioData = data
             } else {
                 if let downsampled = await ImagePreviewDownsampler.previewDataAsync(
                     from: data,
@@ -178,12 +181,22 @@ final class TranscriptMediaPreviewViewModel {
 
     private func transcriptMediaResource() async throws -> TranscriptMediaLoadedResource {
         switch reference.source {
-        case .localPath:
-            guard let sessionID = resolvedSessionID else {
-                throw TranscriptMediaPreviewError.missingSessionID
+        case let .localPath(path):
+            if reference.isRasterImageCandidate {
+                guard let sessionID = resolvedSessionID else {
+                    throw TranscriptMediaPreviewError.missingSessionID
+                }
+                let data = try await apiClient.transcriptMediaData(for: reference, sessionID: sessionID)
+                return TranscriptMediaLoadedResource(data: data, mimeType: nil)
             }
-            let data = try await apiClient.transcriptMediaData(for: reference, sessionID: sessionID)
-            return TranscriptMediaLoadedResource(data: data, mimeType: nil)
+            guard path.hasPrefix("/"), !path.contains("\0") else {
+                throw TranscriptMediaDataError.absoluteLocalPathRequired
+            }
+            let maximumBytes = reference.isPDFCandidate || reference.isMarkdownCandidate
+                ? DocumentPreviewLimits.maximumBytes
+                : 25 * 1_024 * 1_024
+            let file = try await apiClient.directReadManagedFile(path: path, maximumBytes: maximumBytes)
+            return TranscriptMediaLoadedResource(data: file.data, mimeType: file.mimeType)
         case let .remoteURL(url):
             let response = try await apiClient.remoteTranscriptMediaPreviewResource(
                 from: url,

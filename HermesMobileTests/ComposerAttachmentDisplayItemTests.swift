@@ -18,6 +18,7 @@ final class ComposerAttachmentDisplayItemTests: XCTestCase {
         XCTAssertEqual(item.serverPath, "/server/photo.png")
         XCTAssertEqual(item.thumbnailData, Data([0x01]))
         XCTAssertNil(item.localPreviewData)
+        XCTAssertFalse(item.isGenericFileReference)
         XCTAssertEqual(item.legacyPendingAttachment(), pending)
     }
 
@@ -28,12 +29,18 @@ final class ComposerAttachmentDisplayItemTests: XCTestCase {
         )
         XCTAssertNil(imageItem.serverPath)
         XCTAssertEqual(imageItem.localPreviewData, pngData)
+        XCTAssertFalse(imageItem.isGenericFileReference)
         XCTAssertNil(imageItem.legacyPendingAttachment())
 
         let pdf = try DirectGatewayAttachment.pdf(data: Data("%PDF-1.4\n".utf8), filename: "report.pdf")
         let pdfItem = ComposerAttachmentDisplayItem(direct: DirectPendingAttachment(source: pdf))
         XCTAssertNil(pdfItem.serverPath)
         XCTAssertEqual(pdfItem.localPreviewData, pdf.originalBytes)
+        XCTAssertFalse(pdfItem.isGenericFileReference)
+
+        let generic = try DirectGatewayAttachment.file(data: Data("notes".utf8), filename: "notes.md")
+        let genericItem = ComposerAttachmentDisplayItem(direct: DirectPendingAttachment(source: generic))
+        XCTAssertTrue(genericItem.isGenericFileReference)
     }
 
     func testEqualityExcludesPreviewBytesFromMetadataComparison() throws {

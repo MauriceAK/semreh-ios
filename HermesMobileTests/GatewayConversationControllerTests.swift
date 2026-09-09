@@ -762,6 +762,71 @@ final class GatewayConversationControllerTests: XCTestCase {
         await runtime.stop()
     }
 
+    func testColdRunningResumeScopesContentSuppressionThroughTerminalCallback() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setResumeResponse(.object([
+            "session_id": .string("runtime-resumed"),
+            "session_key": .string("stored-chat"),
+            "running": .bool(true)
+        ]))
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime, storedID: "stored-chat")
+        try await controller.open()
+        XCTAssertTrue(controller.suppressesColdResumedContent)
+
+        var suppressionDuringTerminal: Bool?
+        controller.onEvent = { event in
+            if event.type == "message.complete" {
+                suppressionDuringTerminal = controller.suppressesColdResumedContent
+            }
+        }
+        fake.emit(event(sessionID: "runtime-resumed", type: "message.complete", sequence: 2,
+            payload: .object(["status": .string("complete"), "text": .string("unwatermarked")])) )
+        await yieldUntil { suppressionDuringTerminal != nil }
+
+        XCTAssertEqual(suppressionDuringTerminal, true)
+        XCTAssertFalse(controller.suppressesColdResumedContent)
+        XCTAssertEqual(controller.runState, .idle)
+        await runtime.stop()
+    }
+
+    func testColdResumePreAgentCancellationClearsSuppressionAndNextAcceptedTurnStreams() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setResumeResponse(.object([
+            "session_id": .string("runtime-resumed"),
+            "session_key": .string("stored-chat"),
+            "running": .bool(true)
+        ]))
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime, storedID: "stored-chat")
+        try await controller.open()
+
+        var terminalObservedSuppression: Bool?
+        var visibleDeltas: [String] = []
+        controller.onEvent = { event in
+            if event.type == "error" {
+                terminalObservedSuppression = controller.suppressesColdResumedContent
+            } else if event.type == "message.delta", !controller.suppressesColdResumedContent,
+                      let text = event.payload?.gatewayFields["text"]?.gatewayString {
+                visibleDeltas.append(text)
+            }
+        }
+        fake.emit(event(sessionID: "runtime-resumed", type: "error", sequence: 2,
+            payload: .object(["message": .string("Turn cancelled before the agent was ready")])) )
+        await yieldUntil { terminalObservedSuppression != nil }
+        XCTAssertEqual(terminalObservedSuppression, true)
+        XCTAssertFalse(controller.suppressesColdResumedContent)
+        XCTAssertEqual(controller.runState, .idle)
+
+        try await controller.submit("try again")
+        XCTAssertFalse(controller.suppressesColdResumedContent)
+        fake.emit(event(sessionID: "runtime-resumed", type: "message.delta", sequence: 4,
+            payload: .object(["text": .string("fresh owned token")])) )
+        await yieldUntil { visibleDeltas == ["fresh owned token"] }
+        XCTAssertEqual(visibleDeltas, ["fresh owned token"])
+        await runtime.stop()
+    }
+
     func testLocalDraftOpenDoesNotCreateOrAttach() async throws {
         let fake = ControllerFakeTransport()
         let runtime = try makeRuntime(fake)

@@ -383,7 +383,7 @@ func gitWriteFriendlyMessage(for error: Error) -> String {
     guard let apiError = error as? APIError else { return error.localizedDescription }
     switch apiError.serverCode {
     case "destructive_git_disabled":
-        return String(localized: "Writes disabled on server. Enable HERMES_WEBUI_WORKSPACE_GIT_DESTRUCTIVE=1 on the server to use this.")
+        return String(localized: "This Hermes server does not allow this Git operation.")
     case "active_stream":
         return String(localized: "Wait for the active response to finish before changing this repository.")
     default:

@@ -106,6 +106,16 @@ class DirectHermesProbeEnvironmentTests(unittest.TestCase):
             self.assertIsInstance(compression_values[0], ast.Name, function_name)
             self.assertEqual(compression_values[0].id, "COMPRESSION_FIXTURE_CONFIG", function_name)
 
+    def test_memory_adoption_validation_is_keyword_only_and_defaults_off(self):
+        validate = next(
+            node for node in self.parsed_tree().body
+            if isinstance(node, ast.FunctionDef) and node.name == "validate"
+        )
+        self.assertEqual([arg.arg for arg in validate.args.kwonlyargs],
+                         ["allow_memory_adoption"])
+        self.assertEqual([ast.literal_eval(value) for value in validate.args.kw_defaults],
+                         [False])
+
 
 if __name__ == "__main__":
     unittest.main()

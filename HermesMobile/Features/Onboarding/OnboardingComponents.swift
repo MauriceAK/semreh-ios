@@ -157,8 +157,8 @@ struct OnboardingCommandPill: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel(
                     didCopy
-                        ? String(localized: "Copied Web UI repository link")
-                        : String(localized: "Copy Web UI repository link")
+                        ? String(localized: "Copied setup value")
+                        : String(localized: "Copy setup value")
                 )
             }
         }
@@ -317,59 +317,6 @@ struct OnboardingStepHeader: View {
 private extension OnboardingTheme {
     static func brandAccent(for colorScheme: ColorScheme, palette: AppColorPalette = .semreh) -> Color {
         SemrehVisualTheme.brandAccent(for: colorScheme, palette: palette)
-    }
-}
-
-struct OnboardingAgentPromptCard: View {
-    let prompt: String
-    @Binding var hasCopied: Bool
-    @State private var didCopyRecently = false
-    @AppStorage(AppHaptics.isEnabledKey) private var isHapticsEnabled = true
-    @Environment(\.colorScheme) private var colorScheme
-    @Environment(\.appColorPalette) private var palette
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            ScrollView(.vertical, showsIndicators: true) {
-                Text(prompt)
-                    .font(.system(.footnote, design: .monospaced))
-                    .foregroundStyle(OnboardingTheme.primaryText(for: colorScheme, palette: palette).opacity(0.86))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-            }
-            .frame(maxHeight: 220)
-
-            Button {
-                UIPasteboard.general.string = prompt
-                hasCopied = true
-                HapticButtonHaptics.tap(style: .light, isEnabled: isHapticsEnabled)
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    didCopyRecently = true
-                }
-            } label: {
-                Label(
-                    didCopyRecently ? String(localized: "Copied") : String(localized: "Copy prompt"),
-                    systemImage: didCopyRecently ? "checkmark" : "doc.on.doc"
-                )
-                .font(.subheadline.weight(.semibold))
-                .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(OnboardingPrimaryButtonStyle())
-            .accessibilityLabel(
-                didCopyRecently
-                    ? String(localized: "Agent setup prompt copied")
-                    : String(localized: "Copy agent setup prompt")
-            )
-        }
-        .padding(16)
-        .background(
-            OnboardingTheme.panel(for: colorScheme, palette: palette).opacity(colorScheme == .dark ? 0.76 : 0.94),
-            in: RoundedRectangle(cornerRadius: 18, style: .continuous)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(OnboardingTheme.border(for: colorScheme, palette: palette).opacity(0.78), lineWidth: 1)
-        )
     }
 }
 

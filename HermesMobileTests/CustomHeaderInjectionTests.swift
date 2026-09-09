@@ -196,21 +196,27 @@ final class CustomHeaderAPIClientInjectionTests: APIClientTestCase {
     }
 
     func testUploadRequestCarriesCustomHeadersAndMultipartContentTypeWins() async throws {
+        let fixture = DirectMemoryTestServer()
         let (client, _) = makeHeaderClient([
             CustomHeader(name: "Authorization", value: "Bearer upload"),
             CustomHeader(name: "Content-Type", value: "application/evil")
         ]) { request in
             XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer upload")
-            // The built-in multipart Content-Type is set after the custom
-            // headers, so it wins its key.
-            XCTAssertEqual(
-                request.value(forHTTPHeaderField: "Content-Type")?.hasPrefix("multipart/form-data; boundary="),
-                true
-            )
-            return try self.ok(request)
+            if request.url?.path == "/api/files/upload-stream" {
+                // The direct managed upload's multipart type must override a
+                // conflicting custom value.
+                XCTAssertEqual(request.httpMethod, "POST")
+                XCTAssertEqual(
+                    request.value(forHTTPHeaderField: "Content-Type")?.hasPrefix("multipart/form-data; boundary="),
+                    true
+                )
+            }
+            return try fixture.respond(request)
         }
 
-        _ = try? await client.uploadFile(sessionID: "s1", data: Data("bytes".utf8), filename: "a.png")
+        let scope = try await client.directMemoryScope(profile: "work")
+        let baseline = try await client.directMemoryDocument(section: .memory, scope: scope)
+        _ = try await client.directSaveMemory("updated", baseline: baseline, scope: scope)
     }
 
     func testTranscribeRequestCarriesCustomHeaders() async throws {

@@ -89,7 +89,6 @@
 		C04000000000000000000006 /* APIClient+Cron.swift in Sources */ = {isa = PBXBuildFile; fileRef = C04000000000000000000016 /* APIClient+Cron.swift */; };
 		C04000000000000000000007 /* APIClient+Memory.swift in Sources */ = {isa = PBXBuildFile; fileRef = C04000000000000000000017 /* APIClient+Memory.swift */; };
 		C04000000000000000000008 /* APIClient+Skills.swift in Sources */ = {isa = PBXBuildFile; fileRef = C04000000000000000000018 /* APIClient+Skills.swift */; };
-		C04000000000000000000009 /* APIClient+Upload.swift in Sources */ = {isa = PBXBuildFile; fileRef = C04000000000000000000019 /* APIClient+Upload.swift */; };
 		1A2B3C4D5E6F7000000000A3 /* APIError.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F7000000000B3 /* APIError.swift */; };
 		C04400000000000000000001 /* CacheFallbackPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = C04400000000000000000002 /* CacheFallbackPolicy.swift */; };
 		1A2B3C4D5E6F7000000000A4 /* ServerInfo.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F7000000000B4 /* ServerInfo.swift */; };
@@ -117,7 +116,6 @@
 		C0391000000000000000000A /* APIClientCronEndpointTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0390000000000000000000A /* APIClientCronEndpointTests.swift */; };
 		C0391000000000000000000B /* APIClientMemoryEndpointTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0390000000000000000000B /* APIClientMemoryEndpointTests.swift */; };
 		C0391000000000000000000C /* APIClientSkillEndpointTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0390000000000000000000C /* APIClientSkillEndpointTests.swift */; };
-		C0391000000000000000000D /* APIClientUploadTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0390000000000000000000D /* APIClientUploadTests.swift */; };
 		C0391000000000000000000E /* ChatViewModelSendTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0390000000000000000000E /* ChatViewModelSendTests.swift */; };
 		C0DED00000000000000DE001 /* ChatViewModelMergeDedupTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DED00000000000000DE000 /* ChatViewModelMergeDedupTests.swift */; };
 		C14600000000000000000002 /* ChatToolbarHeaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C14600000000000000000001 /* ChatToolbarHeaderTests.swift */; };
@@ -494,7 +492,6 @@
 		C04000000000000000000016 /* APIClient+Cron.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "APIClient+Cron.swift"; sourceTree = "<group>"; };
 		C04000000000000000000017 /* APIClient+Memory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "APIClient+Memory.swift"; sourceTree = "<group>"; };
 		C04000000000000000000018 /* APIClient+Skills.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "APIClient+Skills.swift"; sourceTree = "<group>"; };
-		C04000000000000000000019 /* APIClient+Upload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "APIClient+Upload.swift"; sourceTree = "<group>"; };
 		1A2B3C4D5E6F7000000000B3 /* APIError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIError.swift; sourceTree = "<group>"; };
 		C04400000000000000000002 /* CacheFallbackPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CacheFallbackPolicy.swift; sourceTree = "<group>"; };
 		1A2B3C4D5E6F7000000000B4 /* ServerInfo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerInfo.swift; sourceTree = "<group>"; };
@@ -522,7 +519,6 @@
 		C0390000000000000000000A /* APIClientCronEndpointTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClientCronEndpointTests.swift; sourceTree = "<group>"; };
 		C0390000000000000000000B /* APIClientMemoryEndpointTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClientMemoryEndpointTests.swift; sourceTree = "<group>"; };
 		C0390000000000000000000C /* APIClientSkillEndpointTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClientSkillEndpointTests.swift; sourceTree = "<group>"; };
-		C0390000000000000000000D /* APIClientUploadTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClientUploadTests.swift; sourceTree = "<group>"; };
 		C0390000000000000000000E /* ChatViewModelSendTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatViewModelSendTests.swift; sourceTree = "<group>"; };
 		C0DED00000000000000DE000 /* ChatViewModelMergeDedupTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatViewModelMergeDedupTests.swift; sourceTree = "<group>"; };
 		C14600000000000000000001 /* ChatToolbarHeaderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatToolbarHeaderTests.swift; sourceTree = "<group>"; };
@@ -937,7 +933,6 @@
 				C0390000000000000000000A /* APIClientCronEndpointTests.swift */,
 				C0390000000000000000000B /* APIClientMemoryEndpointTests.swift */,
 				C0390000000000000000000C /* APIClientSkillEndpointTests.swift */,
-				C0390000000000000000000D /* APIClientUploadTests.swift */,
 				C03250000000000000F105 /* APIClientTranscribeTests.swift */,
 				C03260000000000000F102 /* APIClientTTSTests.swift */,
 				C03270000000000000F102 /* APIClientSessionExportTests.swift */,
@@ -1062,7 +1057,6 @@
 				C04000000000000000000016 /* APIClient+Cron.swift */,
 				C04000000000000000000017 /* APIClient+Memory.swift */,
 				C04000000000000000000018 /* APIClient+Skills.swift */,
-				C04000000000000000000019 /* APIClient+Upload.swift */,
 				C14900000000000000000004 /* APIClient+Kanban.swift */,
 				D2C810000000000000000002 /* DirectKanbanDataClient.swift */,
 				C15100000000000000000002 /* KanbanEventStreamClient.swift */,
@@ -1709,7 +1703,6 @@
 				C04000000000000000000006 /* APIClient+Cron.swift in Sources */,
 				C04000000000000000000007 /* APIClient+Memory.swift in Sources */,
 				C04000000000000000000008 /* APIClient+Skills.swift in Sources */,
-				C04000000000000000000009 /* APIClient+Upload.swift in Sources */,
 				C14900000000000000000001 /* Kanban.swift in Sources */,
 				C14900000000000000000003 /* APIClient+Kanban.swift in Sources */,
 				D2C810000000000000000001 /* DirectKanbanDataClient.swift in Sources */,
@@ -1934,7 +1927,6 @@
 				C0391000000000000000000A /* APIClientCronEndpointTests.swift in Sources */,
 				C0391000000000000000000B /* APIClientMemoryEndpointTests.swift in Sources */,
 				C0391000000000000000000C /* APIClientSkillEndpointTests.swift in Sources */,
-				C0391000000000000000000D /* APIClientUploadTests.swift in Sources */,
 				C03250000000000000B105 /* APIClientTranscribeTests.swift in Sources */,
 				C03260000000000000B102 /* APIClientTTSTests.swift in Sources */,
 				C03270000000000000B102 /* APIClientSessionExportTests.swift in Sources */,
