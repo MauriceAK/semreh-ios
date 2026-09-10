@@ -1641,6 +1641,39 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         await runtime.stop()
     }
 
+    func testInterimAndDifferentFinalSurviveCanonicalTerminalReadback() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let client = makeClient { request in
+            XCTAssertEqual(request.url?.path, "/api/sessions/durable-1/messages")
+            return apiTestJSONResponse(
+                "{\"session_id\":\"durable-1\",\"messages\":[{\"id\":1,\"role\":\"user\",\"content\":\"hello\",\"timestamp\":1},{\"id\":2,\"role\":\"assistant\",\"content\":\"## Interim heading\",\"timestamp\":2},{\"id\":3,\"role\":\"assistant\",\"content\":\"Canonical final\",\"timestamp\":3}],\"pagination\":{\"limit\":120,\"offset\":0,\"order\":\"latest\",\"returned\":3}}",
+                for: request
+            )
+        }
+        let viewModel = makeViewModel(client: client, runtime: runtime, sessionID: nil)
+
+        let didSend = await viewModel.sendMessage("hello")
+        XCTAssertTrue(didSend)
+        await waitUntil { viewModel.messages.contains { $0.content == "streamed answer" } }
+        fake.emit(ChatDirectEventFactory.event(sessionID: "runtime-1", type: "message.interim", sequence: 3,
+            payload: ["text": .string("streamed answer"), "already_streamed": .bool(true)]))
+        fake.emit(ChatDirectEventFactory.event(sessionID: "runtime-1", type: "message.complete", sequence: 4,
+            payload: ["text": .string("Live final")]))
+
+        await waitUntil {
+            viewModel.messages.contains { $0.messageId == "2" && $0.content == "## Interim heading" }
+                && viewModel.messages.contains { $0.messageId == "3" && $0.content == "Canonical final" }
+        }
+        XCTAssertEqual(
+            viewModel.messages.filter { $0.role == "assistant" }.compactMap(\.content),
+            ["## Interim heading", "Canonical final"]
+        )
+
+        await viewModel.disposeDirectConversation()
+        await runtime.stop()
+    }
+
     func testDirectTerminalRefreshRaceKeepsOldCardsOutOfNewTurn() async throws {
         let fake = ChatDirectFakeTransport()
         let runtime = try makeRuntime(fake)

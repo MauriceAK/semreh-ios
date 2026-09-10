@@ -47,6 +47,7 @@ def main():
     parser.add_argument('--slice4-skill-ui', action='store_true')
     parser.add_argument('--personal-bootstrap-ui', action='store_true')
     parser.add_argument('--stabilization-ui', action='store_true')
+    parser.add_argument('--interim-heading-ui', action='store_true')
     parser.add_argument('--slice4-git-ui-session-id')
     parser.add_argument('--gateway-restart-nonce')
     parser.add_argument('--tui-created-session-id')
@@ -61,6 +62,12 @@ def main():
                if name not in {'stabilization_ui', 'slice2_ui', 'https', 'stock_backend'})
     ):
         parser.error('--stabilization-ui requires --slice2-ui --https --stock-backend and no other test phase')
+    if args.interim_heading_ui and (
+        not args.slice2_ui or not args.https or not args.stock_backend
+        or any(value for name, value in vars(args).items()
+               if name not in {'interim_heading_ui', 'slice2_ui', 'https', 'stock_backend'})
+    ):
+        parser.error('--interim-heading-ui requires --slice2-ui --https --stock-backend and no other test phase')
     if args.slice4_goal_ui and (
         not args.slice2_ui or not args.https or not args.stock_backend
         or any(value for name, value in vars(args).items()
@@ -460,6 +467,12 @@ def main():
         if args.stabilization_ui:
             target['EnvironmentVariables']['SEMREH_STABILIZATION_UI'] = '1'
             method = 'testOptInProductionStopThenResend'
+            test_class = 'DirectSkillUITests'
+        if args.interim_heading_ui:
+            # The dedicated selector reuses the production test's established
+            # contained-fixture guard while selecting only the interim probe.
+            target['EnvironmentVariables']['SEMREH_STABILIZATION_UI'] = '1'
+            method = 'testOptInProductionInterimHeadingSurvivesFinalAndCanonicalReopen'
             test_class = 'DirectSkillUITests'
     target['OnlyTestIdentifiers'] = [test_class + '/' + method]
     # Generated build artifact only; no project/scheme or personal configuration changes.

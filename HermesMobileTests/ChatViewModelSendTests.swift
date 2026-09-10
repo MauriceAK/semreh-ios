@@ -1868,19 +1868,132 @@ final class ChatViewModelSendTests: XCTestCase {
             type: "message.interim", sequence: 5,
             payload: ["text": .string("Draft answer.")]
         ))
+        let sealedAnchor = viewModel.reasoningAnchorMessageID
         viewModel.handleDirectEventForTesting(directEvent(
             type: "message.delta", sequence: 6,
             payload: ["text": .string(" Final answer.")]
         ))
         viewModel.flushPendingStreamingContent()
 
-        XCTAssertEqual(viewModel.messages.map(\.role), ["user", "assistant"])
-        XCTAssertEqual(viewModel.messages.last?.content, "Draft answer. Final answer.")
+        XCTAssertEqual(viewModel.messages.map(\.role), ["user", "assistant", "assistant"])
+        XCTAssertEqual(assistantContents(in: viewModel), ["Draft answer.", " Final answer."])
         XCTAssertEqual(viewModel.liveReasoningText, "Check the workspace.")
         XCTAssertEqual(viewModel.liveToolCalls.map(\.name), ["read_file"])
         XCTAssertEqual(viewModel.liveToolCalls.first?.isCompleted, true)
-        XCTAssertEqual(viewModel.reasoningAnchorMessageID, viewModel.streamingAssistantMessageID)
-        XCTAssertEqual(viewModel.toolCallAnchorMessageID, viewModel.streamingAssistantMessageID)
+        XCTAssertEqual(viewModel.reasoningAnchorMessageID, sealedAnchor)
+        XCTAssertEqual(viewModel.toolCallAnchorMessageID, sealedAnchor)
+    }
+
+    @MainActor
+    func testAlreadyStreamedInterimSealsBeforeDifferentFinal() throws {
+        let viewModel = try makeDirectRendererViewModel()
+        viewModel.seedTranscriptForTesting([
+            ChatMessage(role: "user", content: "Inspect", timestamp: 1, messageId: "user-1")
+        ])
+
+        viewModel.handleDirectEventForTesting(directEvent(type: "message.start", sequence: 1))
+        viewModel.handleDirectEventForTesting(directEvent(type: "message.delta", sequence: 2,
+            payload: ["text": .string("## Interim heading")]))
+        viewModel.handleDirectEventForTesting(directEvent(type: "message.interim", sequence: 3,
+            payload: ["text": .string("## Interim heading"), "already_streamed": .bool(true)]))
+        viewModel.handleDirectEventForTesting(directEvent(type: "message.complete", sequence: 4,
+            payload: ["text": .string("Final answer")]))
+
+        XCTAssertEqual(assistantContents(in: viewModel), ["## Interim heading", "Final answer"])
+    }
+
+    @MainActor
+    func testUnstreamedInterimIsAddedAndSealedBeforeDifferentFinal() throws {
+        let viewModel = try makeDirectRendererViewModel()
+        viewModel.handleDirectEventForTesting(directEvent(type: "message.start", sequence: 1))
+        viewModel.handleDirectEventForTesting(directEvent(type: "message.interim", sequence: 2,
+            payload: ["text": .string("Tool commentary"), "already_streamed": .bool(false)]))
+        viewModel.handleDirectEventForTesting(directEvent(type: "message.complete", sequence: 3,
+            payload: ["text": .string("Final answer")]))
+
+        XCTAssertEqual(assistantContents(in: viewModel), ["Tool commentary", "Final answer"])
+    }
+
+    @MainActor
+    func testMatchingAndPrefixFinalsReconcileOntoSealedInterim() throws {
+        for finalText in ["Partial answer", "Partial answer continued"] {
+            let viewModel = try makeDirectRendererViewModel()
+            viewModel.handleDirectEventForTesting(directEvent(type: "message.start", sequence: 1))
+            viewModel.handleDirectEventForTesting(directEvent(type: "message.interim", sequence: 2,
+                payload: ["text": .string("Partial answer"), "already_streamed": .bool(false)]))
+            viewModel.handleDirectEventForTesting(directEvent(type: "message.complete", sequence: 3,
+                payload: ["text": .string(finalText)]))
+
+            XCTAssertEqual(assistantContents(in: viewModel), [finalText])
+        }
+    }
+
+    @MainActor
+    func testMatchingTerminalUpdatesSealedInterimAcrossTrailingNotice() throws {
+        let viewModel = try makeDirectRendererViewModel()
+        viewModel.handleDirectEventForTesting(directEvent(type: "message.start", sequence: 1))
+        viewModel.handleDirectEventForTesting(directEvent(type: "message.interim", sequence: 2,
+            payload: ["text": .string("Partial answer"), "already_streamed": .bool(false)]))
+        viewModel.handleDirectEventForTesting(directEvent(type: "status.update", sequence: 3,
+            payload: ["kind": .string("goal"), "text": .string("Continuing the task")]))
+        viewModel.handleDirectEventForTesting(directEvent(type: "message.complete", sequence: 4,
+            payload: ["text": .string("Partial answer continued")]))
+
+        XCTAssertEqual(assistantContents(in: viewModel), ["Partial answer continued"])
+        XCTAssertTrue(viewModel.messages.contains {
+            $0.role == "local_notice" && $0.content == "Continuing the task"
+        })
+    }
+
+    @MainActor
+    func testPrefixTerminalAfterRepeatedStartStillReconcilesPinnedDesktopContinuity() throws {
+        let viewModel = try makeDirectRendererViewModel()
+        viewModel.handleDirectEventForTesting(directEvent(type: "message.start", sequence: 1))
+        viewModel.handleDirectEventForTesting(directEvent(type: "message.interim", sequence: 2,
+            payload: ["text": .string("Partial answer"), "already_streamed": .bool(false)]))
+        viewModel.handleDirectEventForTesting(directEvent(type: "message.start", sequence: 3))
+        viewModel.handleDirectEventForTesting(directEvent(type: "message.complete", sequence: 4,
+            payload: ["text": .string("Partial answer continued")]))
+
+        XCTAssertEqual(assistantContents(in: viewModel), ["Partial answer continued"])
+    }
+
+    @MainActor
+    func testMultipleInterimsKeepDistinctSegmentsAndToolAnchor() throws {
+        let viewModel = try makeDirectRendererViewModel()
+        viewModel.handleDirectEventForTesting(directEvent(type: "message.start", sequence: 1))
+        viewModel.handleDirectEventForTesting(directEvent(type: "message.interim", sequence: 2,
+            payload: ["text": .string("First check"), "already_streamed": .bool(false)]))
+        viewModel.handleDirectEventForTesting(directEvent(type: "tool.start", sequence: 3,
+            payload: ["tool_id": .string("tool-1"), "name": .string("read_file")]))
+        viewModel.handleDirectEventForTesting(directEvent(type: "tool.complete", sequence: 4,
+            payload: ["tool_id": .string("tool-1"), "name": .string("read_file")]))
+        viewModel.handleDirectEventForTesting(directEvent(type: "message.interim", sequence: 5,
+            payload: ["text": .string("Second check"), "already_streamed": .bool(false)]))
+        let toolAnchor = viewModel.toolCallAnchorMessageID
+        viewModel.handleDirectEventForTesting(directEvent(type: "message.complete", sequence: 6,
+            payload: ["text": .string("Done")]))
+
+        XCTAssertEqual(assistantContents(in: viewModel), ["First check", "Second check", "Done"])
+        XCTAssertNotNil(toolAnchor)
+        XCTAssertEqual(viewModel.liveToolCalls.map(\.id), ["tool-1"])
+    }
+
+    @MainActor
+    private func makeDirectRendererViewModel() throws -> ChatViewModel {
+        try makeViewModel { request in
+            XCTFail("Direct renderer setup must not issue an HTTP request: \(request)")
+            throw URLError(.badURL)
+        }
+    }
+
+    @MainActor
+    private func assistantContents(in viewModel: ChatViewModel) -> [String] {
+        viewModel.flushPendingStreamingContent()
+        return viewModel.messages
+            .filter { $0.role == "assistant" }
+            .compactMap(\.content)
+            .filter { !$0.isEmpty }
     }
 
     @MainActor

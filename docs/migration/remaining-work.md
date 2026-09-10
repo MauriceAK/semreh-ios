@@ -5,7 +5,62 @@ details/evidence: `slice3-tasks.md`, `slice3-verification.md`, `slice4-tasks.md`
 This is the current dispatch checklist, not a new architecture or acceptance waiver.
 Preserve completed Luna work. Root owns integration, notes and native execution.
 
-## September 9 stabilization queue (current priority)
+## September 9 post-audit queue (latest checkpoint)
+
+User authorized finishing the interim-sealing and cached-liveness patches, native
+and isolated-Hermes verification, then scoped local commits. No push/merge or
+personal-Hermes changes. Existing stabilization build f081956 is installed on the
+phone; these successor patches are not installed or accepted yet.
+
+- [x] A0 — Integrate and verify interim segment sealing and cached legacy-liveness
+  neutralization. Prove the focused regressions fail on the old implementation;
+  run affected native tests, coherent-batch suite and signed real-fixture UI flow.
+  Cache half committed8418bd5; native suite2085/0/14. Heading production UI-v5
+  passed1/0/0 against pinned real Hermes with deterministic model/tool fixture:
+  interim heading, approval, distinct final, idle, unique subsequent user marker,
+  cold relaunch via Sessions, and both messages plus exact marker retained.
+  Earlier UI-v1/v2 fixture/assertion failures and v3 navigation failure retained;
+  v4 hit animation-idle timeout before send; owned Simulator restart and same-build
+  v5 retry passed. No physical-device acceptance or external provider claim.
+  Fixture17tests/helper55tests pass; artifact audit-v2 scanned70files/0flags with
+  explicit private/unselected/unexported exclusions. Signed build-v3 passed.
+- [ ] A1 — Preserve the exact configured hostname; retire only the obsolete
+  `www.webui.` rewrite in AuthManager, with auth/registry/credential-origin checks.
+- [ ] A2 — Resolve active profile before sidebar session loading in Sessions and
+  Control. Verify non-default startup and stale-response protection.
+- [ ] A3 — Restore approved local organizer production entrypoints after A2;
+  verify local CRUD, profile/server scoping and no retired project network route.
+- [ ] C1 — Remove proven-dead migration snapshots/bookmarks/polling/no-op state,
+  then unreachable replay paths; preserve active recovery and compatibility.
+- [ ] C2 — Remove unused legacy APIClient request stack and obsolete transcribe
+  endpoint; preserve active direct transport/media behavior.
+- [ ] C3 — Consolidate duplicated bounded direct REST transport policy without
+  changing redirect/auth/size limits or endpoint-specific error semantics.
+- [ ] C4 — Replace repeated full SessionSummary copies with narrow value updates
+  after A0 establishes cached/live field ownership.
+- [ ] C5 — Share marker-file mechanics only; retain separate attachment and
+  prompt-uncertainty identity/recovery policies.
+- [ ] C6 — Consider cohesive playback extraction after dead-path cleanup; do not
+  decompose the conversation controller merely to reduce file size.
+
+A1–A3 and C1–C6 are Sol High source-audit findings/proposals at f081956, not runtime
+verified fixes or an approved blanket rewrite. Root must triage before dispatch.
+Audit covered production composition, auth, transports, persistence and feature
+callers; excluded profiling, native execution and phone acceptance. Cleanup should
+preserve behavior and use focused tests; no performance claim from line counts.
+September10 overnight authority: finish A0, then test the bounded Night Shift
+controller with fake workers and a real dummy handoff before piloting A1–A3.
+C1–C6 may proceed only after those gates pass confidently. Hard end13:45:17UTC;
+two implementation lanes, SolLow default, at most two unsuccessful repair cycles
+per task. No /goal, push, release merge, deployment or personal-Hermes changes.
+Elapsed-time/attempt limits are enforceable; no account-wide token-cap claim.
+September10 overnight run stopped at A0's two-repair-cycle limit. User subsequently
+authorized finishing A0 and wiring the native lane ONLY, then stopping before
+audit pilot. A0 is now verified as above. Standalone controller fake23tests and
+real disposable four-stage calibration passed; no Semreh audit pilot or cleanup
+was launched. All unchecked items remain unverified/deferred.
+
+## September 9 stabilization queue (prior batch)
 
 No redesign/features/private backend patches in this batch. Preserve personal
 pilot and old services. Existing development-helper port18793 now belongs to the

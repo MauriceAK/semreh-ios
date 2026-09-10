@@ -578,6 +578,10 @@ final class ChatViewModel {
             transcriptRenderRevision &+= 1
         }
     }
+    /// Assistant rows finalized by `message.interim` during the active turn.
+    /// Hermes may later complete with either the same reply (which should
+    /// reconcile in place) or a distinct post-tool reply (which must append).
+    @ObservationIgnored private var sealedInterimAssistantMessageIDs: Set<String> = []
     private(set) var toolCallAnchorMessageID: String? {
         didSet { transcriptRenderRevision &+= 1 }
     }
@@ -1669,6 +1673,7 @@ final class ChatViewModel {
         completedReasoningGroups = []
         streamingAssistantMessageID = nil
         streamingAssistantMessageIndex = nil
+        sealedInterimAssistantMessageIDs.removeAll()
         liveToolCalls = []
         liveReasoningText = ""
         reasoningAnchorMessageID = nil
@@ -1977,10 +1982,12 @@ final class ChatViewModel {
         case .terminal(let terminal):
             flushPendingStreamingContent()
             if !suppressUnwatermarkedContent, let text = terminal.text, !text.isEmpty {
-                _ = ensureStreamingAssistantMessage()
+                prepareStreamingAssistantForTerminal(text)
             }
             if !suppressUnwatermarkedContent, let text = terminal.text, !text.isEmpty,
-               let index = messages.indices.last, messages[index].role == "assistant" {
+               let messageID = streamingAssistantMessageID,
+               let index = streamingAssistantMessagePosition(for: messageID),
+               messages[index].role == "assistant" {
                 let current = messages[index]
                 messages[index] = ChatMessage(role: current.role, content: text,
                     timestamp: current.timestamp, messageId: current.messageId,
@@ -1991,6 +1998,7 @@ final class ChatViewModel {
             }
             if let usage = terminal.usage { contextWindowSnapshot = usage }
             directResponseComplete = true
+            sealedInterimAssistantMessageIDs.removeAll()
             responseCompletionHapticTrigger += 1
             if let terminalError = terminal.error {
                 sendErrorMessage = terminalError
@@ -3565,6 +3573,7 @@ final class ChatViewModel {
         hasOlderMessages = offset > 0
         streamingAssistantMessageID = nil
         streamingAssistantMessageIndex = nil
+        sealedInterimAssistantMessageIDs.removeAll()
     }
 
     /// Transport-neutral renderer seam for pacing tests. This follows the same
@@ -5036,12 +5045,36 @@ final class ChatViewModel {
 
     @discardableResult
     private func appendInterimAssistant(_ payload: InterimAssistantStreamEvent) -> Bool {
-        guard payload.alreadyStreamed != true else { return false }
-
         let text = payload.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !text.isEmpty else { return false }
 
         flushPendingStreamingContent()
+
+        var didAppend = false
+        if payload.alreadyStreamed != true {
+            didAppend = appendInterimTextIfNeeded(text)
+            flushPendingStreamingContent()
+        } else if streamingAssistantMessageID == nil {
+            // A reconnect can deliver the seal without replaying its deltas.
+            // The interim payload is still the authoritative visible segment.
+            didAppend = appendAssistantToken(text)
+            flushPendingStreamingContent()
+        }
+
+        guard let messageID = streamingAssistantMessageID,
+              let index = streamingAssistantMessagePosition(for: messageID),
+              !(messages[index].content ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return didAppend }
+
+        sealedInterimAssistantMessageIDs.insert(messageID)
+        streamingAssistantMessageID = nil
+        streamingAssistantMessageIndex = nil
+        activeStreamReplayMatchedInterimLength = 0
+        return true
+    }
+
+    @discardableResult
+    private func appendInterimTextIfNeeded(_ text: String) -> Bool {
 
         if let streamingAssistantMessageID,
            let index = streamingAssistantMessagePosition(for: streamingAssistantMessageID) {
@@ -5076,6 +5109,37 @@ final class ChatViewModel {
         }
 
         return appendAssistantToken(text)
+    }
+
+    private func prepareStreamingAssistantForTerminal(_ terminalText: String) {
+        guard streamingAssistantMessageID == nil,
+              let index = messages.lastIndex(where: { message in
+                  guard let messageID = message.messageId else { return false }
+                  return message.role == "assistant"
+                      && sealedInterimAssistantMessageIDs.contains(messageID)
+              })
+        else {
+            _ = ensureStreamingAssistantMessage()
+            return
+        }
+
+        let interimText = (messages[index].content ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalText = terminalText.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Match pinned Desktop behavior: exact/prefix continuity is a
+        // compatibility heuristic for a terminal that completes the last
+        // sealed segment, not a protocol-level message identity guarantee.
+        let isSameAssistantSegment = !interimText.isEmpty && !finalText.isEmpty
+            && (finalText == interimText
+                || finalText.hasPrefix(interimText)
+                || interimText.hasPrefix(finalText))
+
+        if isSameAssistantSegment {
+            streamingAssistantMessageID = messages[index].messageId
+            streamingAssistantMessageIndex = index
+        } else {
+            _ = ensureStreamingAssistantMessage()
+        }
     }
 
     private func applyCompletedStreamSession(_ completedSession: SessionDetail) {

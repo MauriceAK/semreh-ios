@@ -251,8 +251,9 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
         XCTAssertEqual(
             viewModel.transcriptFullRecomputeCountForTesting,
             recomputesAfterPrepend,
-            "an interim event after pagination must replace the shifted live row incrementally"
+            "sealing an interim after pagination must update the shifted live row incrementally"
         )
+        XCTAssertNil(viewModel.streamingAssistantMessageID)
     }
 
     // MARK: - Helpers
@@ -380,6 +381,7 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
             historyMessageCount: historyMessageCount
         )
         // Benchmark renderer state only; history is explicitly seeded above.
+        let historicalContents = viewModel.messages.compactMap(\.content)
         streamClient.startResponse(on: viewModel)
         let startedAt = CFAbsoluteTimeGetCurrent()
         streamClient.emit(.token("seed"))
@@ -397,25 +399,25 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
         XCTAssertEqual(positiveLookups, 2_000)
 
         let recomputesBeforeBurst = viewModel.transcriptFullRecomputeCountForTesting
-        var expectedContent = "seed"
+        var expectedSegments: [String] = []
         let interimStartedAt = CFAbsoluteTimeGetCurrent()
         for index in 0..<400 {
             let interimText = "interim-\(index)"
             streamClient.emit(.interimAssistant(text: interimText, alreadyStreamed: false))
-            expectedContent += "\n\n\(interimText)"
+            expectedSegments.append(index == 0 ? "seed\n\n\(interimText)" : interimText)
         }
         let interimIngestion = CFAbsoluteTimeGetCurrent() - interimStartedAt
 
-        XCTAssertEqual(assistantContent(of: viewModel), expectedContent)
         XCTAssertEqual(
-            viewModel.displayedTranscriptMessages.last?.message.content,
-            expectedContent,
-            "the incrementally replaced live row must display every interim event"
+            viewModel.messages.compactMap(\.content),
+            historicalContents + expectedSegments,
+            "Sealed segments append without changing the seeded history."
         )
+        XCTAssertEqual(viewModel.displayedTranscriptMessages.last?.message.content, expectedSegments.last)
         XCTAssertEqual(
             viewModel.transcriptFullRecomputeCountForTesting,
             recomputesBeforeBurst,
-            "interim_assistant must replace only the live row, not remap the full transcript"
+            "interim_assistant segment sealing must stay on the incremental transcript path"
         )
 
         let chunks = (0..<400).map { "t\($0) " }
@@ -430,10 +432,10 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
             "SEMREH_HISTORY_PHASE rows=\(historyMessageCount) interim=\(interimIngestion)s completion=\(completionElapsed)s total=\(elapsed)s"
         )
 
-        XCTAssertEqual(assistantContent(of: viewModel), expectedContent + chunks.joined())
+        XCTAssertEqual(assistantContent(of: viewModel), chunks.joined())
         XCTAssertEqual(
             viewModel.displayedTranscriptMessages.last?.message.content,
-            expectedContent + chunks.joined(),
+            chunks.joined(),
             "the incrementally appended live row must paint the complete assistant content"
         )
         return StreamingHotPathBenchmark(

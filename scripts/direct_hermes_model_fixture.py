@@ -78,6 +78,10 @@ SECRET_MARKER = 'SEMREH_BLOCKING_SECRET'
 SECRET_TOOL_CALL_ID = 'call_semreh_secret'
 SECRET_TOOL_NAME = 'semreh_fixture_secret'
 SECRET_ARGUMENTS = {}
+INTERIM_HEADING_MARKER = 'SEMREH_INTERIM_HEADING_TOOL_V1'
+INTERIM_HEADING_TOOL_CALL_ID = 'call_semreh_interim_heading'
+INTERIM_HEADING_TEXT = '## SEMREH_INTERIM_HEADING_VISIBLE_V1'
+INTERIM_FINAL_TEXT = 'SEMREH_INTERIM_FINAL_VISIBLE_V1'
 BLOCKING_FOLLOWUP_RESPONSES = {
     'SEMREH_SLICE3_BLOCKING_AFTER_APPROVAL_DENY':
         'SEMREH_SLICE3_BLOCKING_ACK_APPROVAL_DENY',
@@ -99,6 +103,9 @@ CLARIFY_FIXTURES = {
 BLOCKING_FIXTURES = {
     APPROVAL_MARKER: (APPROVAL_TOOL_CALL_ID, APPROVAL_TOOL_NAME, APPROVAL_ARGUMENTS),
     SECRET_MARKER: (SECRET_TOOL_CALL_ID, SECRET_TOOL_NAME, SECRET_ARGUMENTS),
+    INTERIM_HEADING_MARKER: (
+        INTERIM_HEADING_TOOL_CALL_ID, APPROVAL_TOOL_NAME, APPROVAL_ARGUMENTS,
+    ),
 }
 _DIAGNOSTIC_TOOL_NAMES = {
     'clarify', APPROVAL_TOOL_NAME, SECRET_TOOL_NAME,
@@ -210,6 +217,42 @@ def _contains_marker(value: object, marker: str) -> bool:
     return False
 
 
+def has_tool_result_after_latest_user(body: dict) -> bool:
+    """Return whether the current provider request follows a tool execution."""
+    messages = body.get('messages', [])
+    latest_user = max(
+        (index for index, message in enumerate(messages)
+         if isinstance(message, dict) and message.get('role') == 'user'),
+        default=-1,
+    )
+    return any(
+        isinstance(message, dict) and message.get('role') == 'tool'
+        for message in messages[latest_user + 1:]
+    )
+
+
+def interim_text(body: dict, last_user: object,
+                 selected_tool_call: Optional[dict]) -> str:
+    """Return visible content that must accompany an exact fixture tool call."""
+    if (last_user == INTERIM_HEADING_MARKER
+            and selected_tool_call is not None
+            and not has_tool_result_after_latest_user(body)):
+        return INTERIM_HEADING_TEXT
+    return ''
+
+
+def stream_chunks(text: str, selected_tool_call: Optional[dict],
+                  interim: str = '') -> list:
+    """Build the ordered OpenAI-compatible deltas for one streamed response."""
+    if selected_tool_call is not None:
+        return [
+            ({'role': 'assistant', 'content': interim}, None),
+            ({'tool_calls': [{'index': 0, **selected_tool_call}]}, None),
+            ({}, 'tool_calls'),
+        ]
+    return [({'role': 'assistant', 'content': text}, None), ({}, 'stop')]
+
+
 def safe_request_diagnostics(body: dict, last_user: object,
                              selected_tool_call: Optional[dict]) -> dict:
     """Return bounded provider diagnostics without retaining prompt content."""
@@ -232,6 +275,7 @@ def safe_request_diagnostics(body: dict, last_user: object,
         'last_user_type': type(last_user).__name__,
         'exact_approval_marker': last_user == APPROVAL_MARKER,
         'exact_secret_marker': last_user == SECRET_MARKER,
+        'exact_interim_heading_marker': last_user == INTERIM_HEADING_MARKER,
         'contains_approval_marker': _contains_marker(last_user, APPROVAL_MARKER),
         'contains_secret_marker': _contains_marker(last_user, SECRET_MARKER),
         'advertised_tool_count': len(advertised),
@@ -285,6 +329,10 @@ def response_text(body: dict, last_user: object) -> str:
     if body.get('stream') is True and isinstance(last_user, str):
         if COMPRESSION_BULKY_MAIN_RE.fullmatch(last_user):
             return bulky_main_content(last_user)
+
+    if (last_user == INTERIM_HEADING_MARKER
+            and has_tool_result_after_latest_user(body)):
+        return INTERIM_FINAL_TEXT
 
     text = 'SEMREH_SLICE1_ACK'
     if isinstance(last_user, str):
@@ -353,6 +401,7 @@ class Handler(BaseHTTPRequestHandler):
         tool_call = clarify_tool_call(body, last_user)
         if tool_call is None:
             tool_call = blocking_tool_call(body, last_user)
+        interim = interim_text(body, last_user, tool_call)
         print(
             'SEMREH_FIXTURE_DIAGNOSTIC ' + json.dumps(
                 safe_request_diagnostics(body, last_user, tool_call),
@@ -367,21 +416,17 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/event-stream')
                 self.end_headers()
-                if tool_call is not None:
-                    chunks = [
-                        ({'role': 'assistant', 'content': ''}, None),
-                        ({'tool_calls': [{'index': 0, **tool_call}]}, None),
-                        ({}, 'tool_calls'),
-                    ]
-                else:
-                    chunks = [({'role': 'assistant', 'content': text}, None), ({}, 'stop')]
+                chunks = stream_chunks(text, tool_call, interim)
                 for delta, reason in chunks:
                     chunk = {**base, 'object': 'chat.completion.chunk', 'choices': [{'index': 0, 'delta': delta, 'finish_reason': reason}]}
                     self.wfile.write(('data: ' + json.dumps(chunk) + '\n\n').encode())
                     self.wfile.flush()
                 self.wfile.write(b'data: [DONE]\n\n')
             else:
-                message = {'role': 'assistant', 'content': ''}
+                # Match the streaming contract: narration accompanying a tool
+                # call is still assistant content and must reach stock Hermes'
+                # interim callback before the tool executes.
+                message = {'role': 'assistant', 'content': interim}
                 finish_reason = 'stop'
                 if tool_call is not None:
                     message['tool_calls'] = [tool_call]

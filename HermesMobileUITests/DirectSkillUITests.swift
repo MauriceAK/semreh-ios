@@ -8,6 +8,9 @@ final class DirectSkillUITests: XCTestCase {
     private let credentialsPath = "/Users/maurice/workspace/semreh-slice1-runtime/credentials.json"
     private let backendSHA = "29112bef099274229cadff79cdff7bf7b99c4b77"
     private let skill = "semreh-fixture-empty-secret"
+    private let interimHeadingMarker = "SEMREH_INTERIM_HEADING_TOOL_V1"
+    private let interimHeadingText = "SEMREH_INTERIM_HEADING_VISIBLE_V1"
+    private let interimFinalText = "SEMREH_INTERIM_FINAL_VISIBLE_V1"
 
     @MainActor
     func testOptInProductionStopThenResend() async throws {
@@ -95,6 +98,138 @@ final class DirectSkillUITests: XCTestCase {
         XCTAssertTrue(composer.exists && composer.isHittable)
         let screenshot = XCTAttachment(screenshot: app.screenshot())
         screenshot.name = "Production Stop then re-send final state"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+    }
+
+    @MainActor
+    func testOptInProductionInterimHeadingSurvivesFinalAndCanonicalReopen() async throws {
+        continueAfterFailure = false
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("Production interim-heading verification is simulator-only.")
+        #endif
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SEMREH_STABILIZATION_UI"] == "1" else {
+            throw XCTSkip("Production interim-heading verification is opt-in.")
+        }
+        guard environment["SEMREH_SLICE2_UI_LIVE"] == "1",
+              environment["SEMREH_SLICE1_HTTPS"] == "1",
+              environment["SEMREH_SLICE2_UI_BACKEND_MODE"] == "stock",
+              environment["SEMREH_SLICE2_UI_BACKEND_SHA"] == backendSHA,
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == credentialsPath else {
+            return XCTFail("Interim-heading verification requires the contained pinned stock fixture.")
+        }
+
+        let credentials = try readCredentials()
+        let app = XCUIApplication()
+        app.terminate()
+        app.launch()
+        defer { UIPasteboard.general.items = [] }
+        dismissKnownPasswordSavePrompt(app, timeout: 1)
+
+        let server = app.textFields["onboarding-server-url"]
+        if !(server.waitForExistence(timeout: 4) && server.isHittable) {
+            let welcome = app.staticTexts["Control Semreh from iPhone or iPad."]
+            guard welcome.waitForExistence(timeout: 5) && welcome.isHittable else {
+                return XCTFail("Refusing to sign out or navigate an authenticated non-fixture account.")
+            }
+            let existingServer = app.buttons["Already have a server?"]
+            XCTAssertTrue(existingServer.waitForExistence(timeout: 5) && existingServer.isHittable)
+            existingServer.tap()
+            XCTAssertTrue(server.waitForExistence(timeout: 5) && server.isHittable)
+        }
+        replace(server, with: origin, app: app)
+        let testConnection = app.buttons["Test Connection"]
+        XCTAssertTrue(testConnection.waitForExistence(timeout: 5) && testConnection.isHittable)
+        testConnection.tap()
+        let username = app.textFields["onboarding-username"]
+        let password = app.secureTextFields["onboarding-password"]
+        XCTAssertTrue(username.waitForExistence(timeout: 30))
+        replace(username, with: credentials.username, app: app)
+        paste(credentials.password, into: password, app: app)
+        app.buttons["Connect"].tap()
+
+        let sessions = app.buttons["Sessions"]
+        let restoredChat = app.otherElements.matching(
+            NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
+        ).firstMatch
+        let destinationDeadline = Date().addingTimeInterval(45)
+        while !sessions.exists && !restoredChat.exists && Date() < destinationDeadline {
+            dismissKnownPasswordSavePrompt(app, timeout: 0)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        }
+        dismissKnownPasswordSavePrompt(app, timeout: 3)
+        if restoredChat.exists {
+            let back = app.navigationBars.buttons["BackButton"]
+            XCTAssertTrue(back.waitForExistence(timeout: 5) && back.isHittable)
+            back.tap()
+        }
+        XCTAssertTrue(sessions.waitForExistence(timeout: 30) && sessions.isHittable)
+        sessions.tap()
+        let newSession = app.buttons["New session"]
+        XCTAssertTrue(newSession.waitForExistence(timeout: 15) && newSession.isHittable)
+        newSession.tap()
+
+        let composer = app.textViews.matching(
+            NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
+        ).firstMatch
+        XCTAssertTrue(composer.waitForExistence(timeout: 20) && composer.isHittable)
+        send(interimHeadingMarker, through: composer, app: app)
+
+        let interimHeading = containing(interimHeadingText, app: app)
+        // The blocking approval overlay deliberately intercepts background
+        // touches. The transcript must remain rendered, not tappable through it.
+        XCTAssertTrue(
+            interimHeading.waitForExistence(timeout: 30)
+                && !interimHeading.frame.isEmpty
+                && app.frame.intersects(interimHeading.frame),
+            "The Markdown heading must be visible while the tool is still awaiting approval."
+        )
+        let beforeApproval = XCTAttachment(screenshot: app.screenshot())
+        beforeApproval.name = "Interim heading while approval blocks transcript touches"
+        beforeApproval.lifetime = .keepAlways
+        add(beforeApproval)
+        let approveOnce = app.buttons["approval-request-choice-once"]
+        XCTAssertTrue(approveOnce.waitForExistence(timeout: 15) && approveOnce.isHittable)
+        approveOnce.tap()
+
+        let final = containing(interimFinalText, app: app)
+        XCTAssertTrue(final.waitForExistence(timeout: 45) && final.isHittable)
+        waitForIdle(app: app)
+        XCTAssertTrue(interimHeading.exists && interimHeading.isHittable)
+        XCTAssertTrue(final.exists && final.isHittable)
+
+        // Give this specific conversation a unique durable identity assertion.
+        // Older fixture chats have the same heading/final text, so those alone
+        // could falsely pass if navigation selected an older session.
+        let reopenMarker = "SEMREH_INTERIM_REOPEN_\(UUID().uuidString)"
+        send(reopenMarker, through: composer, app: app)
+        XCTAssertTrue(containing("SEMREH_SLICE1_ACK", app: app).waitForExistence(timeout: 30))
+        waitForIdle(app: app)
+
+        app.terminate()
+        app.launch()
+        dismissKnownPasswordSavePrompt(app, timeout: 3)
+        // Cold launch legitimately returns to Sessions. This fixture is the
+        // only writer, and its title is the deterministic ACK; open the newest
+        // row, then prove identity using the unique marker rather than its title.
+        XCTAssertTrue(sessions.waitForExistence(timeout: 30))
+        sessions.tap()
+        let latestFixtureSession = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "SEMREH_SLICE1_ACK")
+        ).firstMatch
+        XCTAssertTrue(latestFixtureSession.waitForExistence(timeout: 15) && latestFixtureSession.isHittable)
+        latestFixtureSession.tap()
+        let reopenedChat = app.otherElements.matching(
+            NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
+        ).firstMatch
+        XCTAssertTrue(reopenedChat.waitForExistence(timeout: 30))
+        XCTAssertTrue(containing(reopenMarker, app: app).waitForExistence(timeout: 30))
+        XCTAssertTrue(containing(interimHeadingText, app: app).waitForExistence(timeout: 30))
+        XCTAssertTrue(containing(interimFinalText, app: app).waitForExistence(timeout: 30))
+
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "Production interim heading and distinct final after canonical reopen"
         screenshot.lifetime = .keepAlways
         add(screenshot)
     }

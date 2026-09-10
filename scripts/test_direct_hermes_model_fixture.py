@@ -5,11 +5,83 @@ from __future__ import annotations
 import unittest
 import hashlib
 import json
+from contextlib import redirect_stderr
+from http.server import ThreadingHTTPServer
+from io import StringIO
+from threading import Thread
+from urllib.request import Request, urlopen
 
 import direct_hermes_model_fixture as fixture
 
 
 class ModelFixtureTests(unittest.TestCase):
+    def test_actual_nonstreaming_handler_preserves_interim_heading_and_followup(self) -> None:
+        server = ThreadingHTTPServer(('127.0.0.1', 0), fixture.Handler)
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        def post(body: dict) -> dict:
+            request = Request(
+                f'http://127.0.0.1:{server.server_port}/v1/chat/completions',
+                data=json.dumps(body).encode(),
+                headers={'Content-Type': 'application/json'},
+                method='POST',
+            )
+            with urlopen(request, timeout=2) as response:
+                return json.loads(response.read())
+
+        advertised_tool = {
+            'type': 'function',
+            'function': {'name': fixture.APPROVAL_TOOL_NAME},
+        }
+        try:
+            with redirect_stderr(StringIO()):
+                interim = post({
+                    'stream': False,
+                    'messages': [{
+                        'role': 'user', 'content': fixture.INTERIM_HEADING_MARKER,
+                    }],
+                    'tools': [advertised_tool],
+                })
+                ordinary = post({
+                    'stream': False,
+                    'messages': [{'role': 'user', 'content': 'ordinary'}],
+                    'tools': [advertised_tool],
+                })
+                final = post({
+                    'stream': False,
+                    'messages': [
+                        {'role': 'user', 'content': fixture.INTERIM_HEADING_MARKER},
+                        {'role': 'assistant', 'content': fixture.INTERIM_HEADING_TEXT,
+                         'tool_calls': [{'id': fixture.INTERIM_HEADING_TOOL_CALL_ID}]},
+                        {'role': 'tool', 'content':
+                         '{"fixture":"approval","approved":true}'},
+                    ],
+                    'tools': [advertised_tool],
+                })
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+        interim_choice = interim['choices'][0]
+        self.assertEqual(interim_choice['finish_reason'], 'tool_calls')
+        self.assertEqual(
+            interim_choice['message']['content'], fixture.INTERIM_HEADING_TEXT
+        )
+        self.assertEqual(
+            interim_choice['message']['tool_calls'][0]['function']['name'],
+            fixture.APPROVAL_TOOL_NAME,
+        )
+        ordinary_choice = ordinary['choices'][0]
+        self.assertEqual(ordinary_choice['finish_reason'], 'stop')
+        self.assertEqual(ordinary_choice['message']['content'], 'SEMREH_SLICE1_ACK')
+        self.assertNotIn('tool_calls', ordinary_choice['message'])
+        final_choice = final['choices'][0]
+        self.assertEqual(final_choice['finish_reason'], 'stop')
+        self.assertEqual(final_choice['message']['content'], fixture.INTERIM_FINAL_TEXT)
+        self.assertNotIn('tool_calls', final_choice['message'])
+
     def test_goal_e2e_is_stateless_exact_and_step_two_wins(self) -> None:
         marker = fixture.GOAL_E2E_PREFIX + "abc"
         judge_system = "You are a strict judge evaluating whether an autonomous agent has achieved a user's stated goal."
@@ -160,6 +232,80 @@ class ModelFixtureTests(unittest.TestCase):
             'SEMREH_SLICE1_ACK',
         )
 
+    def test_exact_interim_heading_marker_uses_existing_approval_tool(self) -> None:
+        body = {
+            'stream': True,
+            'messages': [
+                {'role': 'user', 'content': fixture.INTERIM_HEADING_MARKER},
+            ],
+            'tools': [{
+                'type': 'function',
+                'function': {'name': fixture.APPROVAL_TOOL_NAME},
+            }],
+        }
+        call = fixture.blocking_tool_call(body, fixture.INTERIM_HEADING_MARKER)
+        self.assertEqual(call['id'], fixture.INTERIM_HEADING_TOOL_CALL_ID)
+        self.assertEqual(call['function']['name'], fixture.APPROVAL_TOOL_NAME)
+        self.assertEqual(
+            fixture.interim_text(body, fixture.INTERIM_HEADING_MARKER, call),
+            fixture.INTERIM_HEADING_TEXT,
+        )
+        chunks = fixture.stream_chunks(
+            fixture.response_text(body, fixture.INTERIM_HEADING_MARKER),
+            call,
+            fixture.interim_text(body, fixture.INTERIM_HEADING_MARKER, call),
+        )
+        self.assertEqual(chunks[0], ({
+            'role': 'assistant', 'content': fixture.INTERIM_HEADING_TEXT,
+        }, None))
+        self.assertEqual(
+            chunks[1][0]['tool_calls'][0]['function']['name'],
+            fixture.APPROVAL_TOOL_NAME,
+        )
+        self.assertEqual(chunks[-1], ({}, 'tool_calls'))
+        diagnostics = fixture.safe_request_diagnostics(
+            body, fixture.INTERIM_HEADING_MARKER, call
+        )
+        self.assertTrue(diagnostics['exact_interim_heading_marker'])
+        self.assertEqual(
+            diagnostics['selected_tool_name'], fixture.APPROVAL_TOOL_NAME
+        )
+        self.assertNotEqual(fixture.INTERIM_HEADING_TEXT, fixture.INTERIM_FINAL_TEXT)
+        self.assertIsNone(fixture.blocking_tool_call(
+            body, 'prefix ' + fixture.INTERIM_HEADING_MARKER
+        ))
+        self.assertEqual(
+            fixture.interim_text(
+                body, 'prefix ' + fixture.INTERIM_HEADING_MARKER, call
+            ),
+            '',
+        )
+
+    def test_interim_heading_followup_returns_different_final_without_new_tool(self) -> None:
+        body = {
+            'stream': True,
+            'messages': [
+                {'role': 'user', 'content': fixture.INTERIM_HEADING_MARKER},
+                {'role': 'assistant', 'content': fixture.INTERIM_HEADING_TEXT,
+                 'tool_calls': [{'id': fixture.INTERIM_HEADING_TOOL_CALL_ID}]},
+                {'role': 'tool', 'content': '{"fixture":"approval","approved":true}'},
+            ],
+            'tools': [{
+                'type': 'function',
+                'function': {'name': fixture.APPROVAL_TOOL_NAME},
+            }],
+        }
+        self.assertIsNone(
+            fixture.blocking_tool_call(body, fixture.INTERIM_HEADING_MARKER)
+        )
+        self.assertEqual(
+            fixture.interim_text(body, fixture.INTERIM_HEADING_MARKER, None), ''
+        )
+        self.assertEqual(
+            fixture.response_text(body, fixture.INTERIM_HEADING_MARKER),
+            fixture.INTERIM_FINAL_TEXT,
+        )
+
     def test_provider_diagnostics_redact_unknown_tools_and_prompt_content(self) -> None:
         diagnostics = fixture.safe_request_diagnostics({
             'messages': [{'role': 'system', 'content':
@@ -173,6 +319,7 @@ class ModelFixtureTests(unittest.TestCase):
         })
         self.assertFalse(diagnostics['exact_approval_marker'])
         self.assertFalse(diagnostics['contains_approval_marker'])
+        self.assertFalse(diagnostics['exact_interim_heading_marker'])
         self.assertEqual(diagnostics['advertised_tools'], [
             fixture.APPROVAL_TOOL_NAME, '<unexpected>'
         ])
