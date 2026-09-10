@@ -24,10 +24,16 @@ phone; these successor patches are not installed or accepted yet.
   v5 retry passed. No physical-device acceptance or external provider claim.
   Fixture17tests/helper55tests pass; artifact audit-v2 scanned70files/0flags with
   explicit private/unselected/unexported exclusions. Signed build-v3 passed.
-- [ ] A1 — Preserve the exact configured hostname; retire only the obsolete
+- [x] A1 — Preserve the exact configured hostname; retire only the obsolete
   `www.webui.` rewrite in AuthManager, with auth/registry/credential-origin checks.
+  Integrated 8b0a820: old-code regression fails as expected; 54 focused native
+  tests and one real isolated-Hermes signed Simulator smoke pass. Independent
+  review passed; selected artifact audit 69 files/0 flags (private outputs excluded).
 - [ ] A2 — Resolve active profile before sidebar session loading in Sessions and
   Control. Verify non-default startup and stale-response protection.
+  Pilot candidate 215cec6: 145 focused tests pass, but production Simulator
+  acceptance fails on the Control profile assertion. Not integrated; repair cap
+  reached. A3 remains blocked, not completed. Preserve v1–v3 pilot evidence.
 - [ ] A3 — Restore approved local organizer production entrypoints after A2;
   verify local CRUD, profile/server scoping and no retired project network route.
 - [ ] C1 — Remove proven-dead migration snapshots/bookmarks/polling/no-op state,
