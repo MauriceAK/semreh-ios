@@ -2,6 +2,23 @@ import XCTest
 @testable import HermesMobile
 
 final class SessionNavigationStateTests: XCTestCase {
+    @MainActor
+    func testSidebarLoadResolvesProfileBeforeSessionsAndProjects() async {
+        var events: [String] = []
+
+        await SidebarLoadOrdering.run(
+            resolveActiveProfile: {
+                events.append("profile-started")
+                try? await Task.sleep(nanoseconds: 20_000_000)
+                events.append("profile-finished")
+            },
+            loadSessions: { events.append("sessions") },
+            loadProjects: { events.append("projects") }
+        )
+
+        XCTAssertEqual(events, ["profile-started", "profile-finished", "sessions", "projects"])
+    }
+
     func testSelectingSessionUpdatesDestinationAndRestorationID() {
         let session = SessionSummary(sessionId: "session-1", title: "One")
         var state = SessionNavigationState()

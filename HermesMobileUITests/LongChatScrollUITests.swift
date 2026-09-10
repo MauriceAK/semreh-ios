@@ -39,6 +39,74 @@ final class LongChatScrollUITests: XCTestCase {
     private let uncertaintyBannerIdentifier = "direct-prompt-uncertainty-banner"
     private let uncertaintyAllowIdentifier = "direct-prompt-uncertainty-allow-new-message"
 
+    @MainActor
+    func testOptInProductionNonDefaultProfileOwnsFirstControlAndSessionsSidebarLoad() throws {
+        continueAfterFailure = false
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("A2 production UI smoke is simulator-only.")
+        #endif
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SEMREH_A2_PROFILE_UI"] == "1" else {
+            throw XCTSkip("A2 production UI smoke is opt-in.")
+        }
+        guard environment["SEMREH_SLICE2_UI_LIVE"] == "1",
+              environment["SEMREH_SLICE1_HTTPS"] == "1",
+              environment["SEMREH_SLICE2_UI_BACKEND_MODE"] == "stock",
+              environment["SEMREH_SLICE2_UI_BACKEND_SHA"] == stockBackendSHA,
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == stockCredentialsPath,
+              environment["SEMREH_SLICE2_TOOL_CWD"] == stockToolCwd,
+              let profile = environment["SEMREH_A2_PROFILE_NAME"], !profile.isEmpty,
+              profile != "default",
+              let selectedSentinel = environment["SEMREH_A2_SELECTED_SENTINEL"], !selectedSentinel.isEmpty,
+              let defaultSentinel = environment["SEMREH_A2_DEFAULT_SENTINEL"], !defaultSentinel.isEmpty
+        else {
+            XCTFail("A2 opt-in fixture data must identify the exact stock HTTPS fixture, profile, and sentinels.")
+            return
+        }
+
+        let credentials = try readCredentials(at: stockCredentialsPath)
+        let app = XCUIApplication()
+        app.terminate()
+        app.launchArguments = []
+        app.launch()
+        defer { clearPasteboard() }
+
+        prepareNormalSignIn(app: app)
+        let welcome = app.staticTexts["Control Semreh from iPhone or iPad."]
+        if !app.textFields["onboarding-server-url"].exists {
+            XCTAssertTrue(welcome.waitForExistence(timeout: 15), "Normal sign-out must return to Welcome.")
+            let existingServer = app.buttons["Already have a server?"]
+            XCTAssertTrue(existingServer.waitForExistence(timeout: 5))
+            existingServer.tap()
+        }
+        let serverURL = app.textFields["onboarding-server-url"]
+        XCTAssertTrue(serverURL.waitForExistence(timeout: 5))
+        replacePublicText(serverURL, with: approvedLiveOrigin, app: app)
+        app.buttons["Test Connection"].tap()
+        let username = app.textFields["onboarding-username"]
+        let password = app.secureTextFields["onboarding-password"]
+        XCTAssertTrue(username.waitForExistence(timeout: 30), "The approved HTTPS origin must advertise username auth.")
+        XCTAssertTrue(password.waitForExistence(timeout: 5))
+        replacePublicText(username, with: credentials.username, app: app)
+        pasteSecret(credentials.password, into: password, app: app)
+        app.buttons["Connect"].tap()
+        dismissKnownPasswordSavePrompt(app: app)
+        waitForPostLoginDestination(app: app)
+
+        for tabName in ["Control", "Sessions"] {
+            let tab = app.buttons[tabName]
+            assertHittable(tab, timeout: 15, message: "The production shell must expose \(tabName).")
+            tab.tap()
+            XCTAssertTrue(app.staticTexts[profile].waitForExistence(timeout: 15),
+                          "\(tabName) must display the fixture's active non-default profile.")
+            XCTAssertTrue(app.staticTexts[selectedSentinel].waitForExistence(timeout: 20),
+                          "\(tabName) must publish the selected-profile-only row on its first load.")
+            XCTAssertFalse(app.staticTexts[defaultSentinel].exists,
+                           "\(tabName) must never publish the default-profile sentinel.")
+            attachScreenshot(named: "a2-\(tabName.lowercased())-owned-profile-first-load")
+        }
+    }
+
     func testTenThousandRowChatScrollsAndScrollToLatestReachesEndMarker() {
         continueAfterFailure = false
         let app = XCUIApplication()

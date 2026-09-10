@@ -8,6 +8,66 @@ import UniformTypeIdentifiers
 
 final class SessionListMutationTests: XCTestCase {
     @MainActor
+    func testOldProfileSidebarFailureCannotReplaceNewProfileRowsOrErrorState() async throws {
+        let oldLoadStarted = expectation(description: "old profile sidebar load started")
+        let releaseOldLoad = DispatchSemaphore(value: 0)
+        let server = try XCTUnwrap(URL(string: "https://example.test"))
+        let organizer = LocalOrganizerStore(
+            defaults: UserDefaults(suiteName: "SessionListMutationTests.\(UUID().uuidString)")!
+        )
+        _ = try organizer.createGroup(name: "Default project", color: nil, server: server, profile: "default")
+        _ = try organizer.createGroup(name: "Work project", color: nil, server: server, profile: "work")
+        let viewModel = try makeViewModel(organizerStore: organizer) { request in
+            switch request.url?.path {
+            case "/api/profiles":
+                return apiTestJSONResponse(
+                    #"{"profiles":[{"name":"default","is_active":true},{"name":"work"}],"active":"default","single_profile_mode":false}"#,
+                    for: request
+                )
+            case "/api/profiles/sessions":
+                let profile = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?
+                    .queryItems?.first(where: { $0.name == "profile" })?.value
+                if profile == "default" {
+                    oldLoadStarted.fulfill()
+                    _ = releaseOldLoad.wait(timeout: .now() + 2)
+                    let response = try XCTUnwrap(HTTPURLResponse(
+                        url: try XCTUnwrap(request.url), statusCode: 500,
+                        httpVersion: nil, headerFields: ["Content-Type": "application/json"]
+                    ))
+                    return (response, Data(#"{"error":"stale default failure"}"#.utf8))
+                }
+                XCTAssertEqual(profile, "work")
+                return apiTestJSONResponse(
+                    #"{"sessions":[{"id":"work-row","title":"Work only","profile":"work","archived":false}]}"#,
+                    for: request
+                )
+            default:
+                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+        }
+
+        await viewModel.loadActiveProfile()
+        let oldLoad = Task { @MainActor in await viewModel.load() }
+        await fulfillment(of: [oldLoadStarted], timeout: 1)
+        let work = try XCTUnwrap(viewModel.profileOptions.first(where: { $0.name == "work" }))
+        let switched = await viewModel.switchActiveProfile(work)
+        let workLoaded = await viewModel.load()
+        releaseOldLoad.signal()
+        let oldLoaded = await oldLoad.value
+
+        XCTAssertTrue(switched)
+        XCTAssertTrue(workLoaded)
+        XCTAssertFalse(oldLoaded)
+        XCTAssertEqual(viewModel.activeProfileName, "work")
+        XCTAssertEqual(viewModel.sessions.compactMap(\.sessionId), ["work-row"])
+        XCTAssertEqual(viewModel.projects.compactMap(\.name), ["Work project"])
+        XCTAssertNil(viewModel.errorMessage)
+        XCTAssertNil(viewModel.sessionLoadError)
+        XCTAssertNil(viewModel.lastError)
+    }
+
+    @MainActor
     func testExportCleansOwnedWrittenFileWhenCancelledOrProfileChangesDuringWrite() async throws {
         for cancel in [false, true] {
             let written = expectation(description: "owned file written")

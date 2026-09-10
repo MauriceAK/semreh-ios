@@ -1119,9 +1119,10 @@ struct SessionListView: View {
     }
 
     private func refreshSessionsAndActiveProfile(reconcileOpenTranscripts: Bool = false) async {
-        await loadSessions()
-        guard !Task.isCancelled else { return }
-        await viewModel.loadActiveProfile()
+        await SidebarLoadOrdering.run(
+            resolveActiveProfile: { await viewModel.loadActiveProfile() },
+            loadSessions: { await loadSessions() }
+        )
         guard !Task.isCancelled, reconcileOpenTranscripts else { return }
         _ = await OpenChatSessionStore.shared.refreshOpenSessions(
             for: server,
@@ -1539,6 +1540,21 @@ enum SessionListInitialLoad {
         // instantly from cache; this second pass restores an empty/expired cache
         // and evicts a cache-restored session that disappeared on the server.
         await restoreLastSelectedSession(true)
+    }
+}
+
+enum SidebarLoadOrdering {
+    @MainActor
+    static func run(
+        resolveActiveProfile: @escaping @MainActor () async -> Void,
+        loadSessions: @escaping @MainActor () async -> Void,
+        loadProjects: (@MainActor () async -> Void)? = nil
+    ) async {
+        await resolveActiveProfile()
+        guard !Task.isCancelled else { return }
+        await loadSessions()
+        guard !Task.isCancelled else { return }
+        await loadProjects?()
     }
 }
 

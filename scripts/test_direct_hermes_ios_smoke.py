@@ -35,6 +35,59 @@ def load_seed_module():
 
 
 class IOSSmokeGuardTests(unittest.TestCase):
+    def test_a2_profile_ui_rejects_missing_or_unowned_fixture_data(self):
+        message = ('--a2-profile-ui requires the stock HTTPS UI phase plus bounded '
+                   'non-default profile and sentinel values')
+        self.assertRejected(['--a2-profile-ui'], message)
+
+        smoke = load_smoke_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary).resolve()
+            with patch.object(smoke, 'RUNTIME', runtime), \
+                    patch.object(sys, 'argv', [str(SCRIPT), '--https', '--stock-backend',
+                                               '--slice2-ui', '--a2-profile-ui',
+                                               '--a2-profile-name', 'missing-profile',
+                                               '--a2-selected-sentinel', 'owned row',
+                                               '--a2-default-sentinel', 'default row']):
+                with self.assertRaisesRegex(SystemExit, '2'):
+                    smoke.main()
+
+    def test_a2_profile_ui_exports_exact_owned_profile_target(self):
+        smoke = load_smoke_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            products = root / 'products'
+            products.mkdir()
+            source = products / 'HermesMobileUIVerification_HermesMobileUIVerification_iphonesimulator.xctestrun'
+            source.write_bytes(plistlib.dumps({'TestConfigurations': [{
+                'TestTargets': [{'BlueprintName': 'HermesMobileUITests'}],
+            }]}))
+            runtime = root / 'runtime'
+            (runtime / 'home' / 'profiles' / 'owned-profile').mkdir(parents=True)
+            with patch.object(smoke, 'PRODUCTS', products), \
+                    patch.object(smoke, 'RUNTIME', runtime), \
+                    patch.object(smoke, 'validate') as validate, \
+                    patch.object(sys, 'argv', [str(SCRIPT), '--https', '--stock-backend',
+                                               '--slice2-ui', '--a2-profile-ui',
+                                               '--a2-profile-name', 'owned-profile',
+                                               '--a2-selected-sentinel', 'owned row',
+                                               '--a2-default-sentinel', 'default row']):
+                with redirect_stdout(StringIO()):
+                    smoke.main()
+
+            validate.assert_called_once_with()
+            target = plistlib.loads(
+                (products / 'SemrehSlice2LiveUI.xctestrun').read_bytes()
+            )['TestConfigurations'][0]['TestTargets'][0]
+            self.assertEqual(target['OnlyTestIdentifiers'], [
+                'LongChatScrollUITests/'
+                'testOptInProductionNonDefaultProfileOwnsFirstControlAndSessionsSidebarLoad',
+            ])
+            environment = target['EnvironmentVariables']
+            self.assertEqual(environment['SEMREH_A2_PROFILE_NAME'], 'owned-profile')
+            self.assertEqual(environment['SEMREH_A2_SELECTED_SENTINEL'], 'owned row')
+            self.assertEqual(environment['SEMREH_A2_DEFAULT_SENTINEL'], 'default row')
+
     def test_interim_heading_ui_requires_standalone_stock_ui_https(self):
         message = '--interim-heading-ui requires --slice2-ui --https --stock-backend and no other test phase'
         for arguments in (

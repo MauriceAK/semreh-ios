@@ -3,6 +3,56 @@ import XCTest
 
 final class SessionListDirectTests: APIClientTestCase {
     @MainActor
+    func testSidebarLoadWaitsForNonDefaultActiveProfileBeforeFirstSessionRequest() async throws {
+        var requestedPaths: [String] = []
+        var requestedSessionProfiles: [String] = []
+        let client = makeClient { request in
+            requestedPaths.append(request.url?.path ?? "")
+            switch request.url?.path {
+            case "/api/profiles":
+                Thread.sleep(forTimeInterval: 0.05)
+                return apiTestJSONResponse(
+                    #"{"profiles":[{"name":"default","is_default":true},{"name":"owned-profile","is_default":false}],"single_profile_mode":false}"#,
+                    for: request
+                )
+            case "/api/profiles/active":
+                return apiTestJSONResponse(
+                    #"{"active":"default","current":"owned-profile"}"#,
+                    for: request
+                )
+            case "/api/profiles/sessions":
+                let profile = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?
+                    .queryItems?.first(where: { $0.name == "profile" })?.value
+                requestedSessionProfiles.append(try XCTUnwrap(profile))
+                return apiTestJSONResponse(
+                    #"{"sessions":[{"id":"owned-row","title":"Owned row","profile":"owned-profile","archived":false}]}"#,
+                    for: request
+                )
+            case "/api/sessions":
+                return apiTestJSONResponse(#"{"sessions":[],"total":0,"limit":0,"offset":0}"#, for: request)
+            default:
+                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+        }
+        let viewModel = SessionListViewModel(
+            server: try XCTUnwrap(URL(string: "https://example.test")),
+            client: client
+        )
+
+        await SidebarLoadOrdering.run(
+            resolveActiveProfile: { await viewModel.loadActiveProfile() },
+            loadSessions: { _ = await viewModel.load() }
+        )
+
+        XCTAssertEqual(requestedPaths.first, "/api/profiles")
+        XCTAssertEqual(Array(requestedPaths.prefix(2)), ["/api/profiles", "/api/profiles/active"])
+        XCTAssertEqual(requestedSessionProfiles, ["owned-profile"])
+        XCTAssertFalse(requestedSessionProfiles.contains("default"))
+        XCTAssertEqual(viewModel.sessions.compactMap(\.sessionId), ["owned-row"])
+    }
+
+    @MainActor
     func testDeepLinkCacheMissUsesExactDirectDetailAndKeepsArchivedSessionOpenable() async throws {
         var detailRequests = 0
         let client = makeClient { request in

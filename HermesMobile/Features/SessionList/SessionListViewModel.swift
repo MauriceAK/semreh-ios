@@ -172,6 +172,7 @@ final class SessionListViewModel {
     /// repeat for the same durable session/profile in this view-model lifetime.
     private var deleteOutcomeUnknownKeys: Set<PendingMetadataKey> = []
     private var activeProfileEpoch = 0
+    private var activeProfileLoadWaiters: [CheckedContinuation<Void, Never>] = []
     private var metadataConfirmationRevision = 0
     private var archivedCountRequestGeneration = 0
     /// Confirmed deletes remain hidden until a later process/session lifecycle;
@@ -761,19 +762,46 @@ final class SessionListViewModel {
     }
 
     func loadActiveProfile() async {
-        guard !isLoadingActiveProfile else { return }
+        if isLoadingActiveProfile {
+            await withCheckedContinuation { continuation in
+                activeProfileLoadWaiters.append(continuation)
+            }
+            return
+        }
 
         isLoadingActiveProfile = true
         activeProfileErrorMessage = nil
-        defer { isLoadingActiveProfile = false }
+        defer {
+            isLoadingActiveProfile = false
+            let waiters = activeProfileLoadWaiters
+            activeProfileLoadWaiters.removeAll()
+            waiters.forEach { $0.resume() }
+        }
 
         do {
             let response = try await client.directProfiles()
-            // Resolve the local selection after the await: a user may have
-            // switched profiles while this inventory request was pending.
+            let inventorySelection = response.active
+                ?? response.profiles?.first(where: { $0.isActive == true })?.normalizedName
+            let runningSelection: String?
+            if locallySelectedProfileName != nil || inventorySelection != nil {
+                // Older compatible servers may still include an authoritative
+                // selection in the inventory response.
+                runningSelection = nil
+            } else {
+                // Stock inventory is only metadata. The running dashboard
+                // identity is `current`, not the sticky future-CLI `active`.
+                runningSelection = try await client.directActiveProfile().current
+            }
+            // Resolve the local selection after every await: a user may have
+            // switched profiles while either request was pending.
             let scoped = ProfilesResponse(profiles: response.profiles,
-                                          active: locallySelectedProfileName ?? response.active,
+                                          active: locallySelectedProfileName
+                                              ?? inventorySelection
+                                              ?? Self.nonEmpty(runningSelection),
                                           singleProfileMode: response.singleProfileMode)
+            guard scoped.active != nil else {
+                throw APIError.http(statusCode: -1, body: nil)
+            }
             applyActiveProfile(scoped)
         } catch {
             guard !isCancellationError(error) else { return }

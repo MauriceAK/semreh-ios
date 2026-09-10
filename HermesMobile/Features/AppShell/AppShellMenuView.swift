@@ -277,14 +277,10 @@ struct ControlView: View {
     }
 
     private func loadSidebarData() async {
-        async let sessions: Bool = viewModel.load(modelContext: modelContext)
-        async let profile: Void = viewModel.loadActiveProfile()
-        if projectsEnabled {
-            async let projects: Void = viewModel.loadProjects()
-            _ = await (sessions, profile, projects)
-        } else {
-            _ = await (sessions, profile)
-        }
+        await SidebarLoadOrdering.run(
+            resolveActiveProfile: { await viewModel.loadActiveProfile() },
+            loadSessions: { _ = await viewModel.load(modelContext: modelContext) }
+        )
     }
 
 }
