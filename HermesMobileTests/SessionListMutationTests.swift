@@ -148,13 +148,20 @@ final class SessionListMutationTests: XCTestCase {
     func testStockProfileRefreshPreservesExplicitLocalSelectionAndRefreshesMetadata() async throws {
         var readCount = 0
         let viewModel = try makeViewModel { request in
-            XCTAssertEqual(request.url?.path, "/api/profiles")
             XCTAssertEqual(request.httpMethod, "GET")
-            readCount += 1
-            return apiTestJSONResponse("""
-            {"profiles":[{"name":"default","is_default":true},
-                         {"name":"work","is_default":false,"model":"fixture-\(readCount)","provider":"custom"}]}
-            """, for: request)
+            switch request.url?.path {
+            case "/api/profiles/active":
+                return apiTestJSONResponse(#"{"current":"default","active":"default"}"#, for: request)
+            case "/api/profiles":
+                readCount += 1
+                return apiTestJSONResponse("""
+                {"profiles":[{"name":"default","is_default":true},
+                             {"name":"work","is_default":false,"model":"fixture-\(readCount)","provider":"custom"}]}
+                """, for: request)
+            default:
+                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
         }
         await viewModel.loadActiveProfile()
         let work = try XCTUnwrap(viewModel.profileOptions.first { $0.name == "work" })
@@ -172,10 +179,19 @@ final class SessionListMutationTests: XCTestCase {
     func testStockProfileMissingSelectionDoesNotSilentlyRetargetLocalConversation() async throws {
         var reads = 0
         let viewModel = try makeViewModel { request in
-            reads += 1
-            return apiTestJSONResponse(reads == 1
-                ? "{\"profiles\":[{\"name\":\"default\",\"is_default\":true},{\"name\":\"work\"}]}"
-                : "{\"profiles\":[{\"name\":\"default\",\"is_default\":true}]}", for: request)
+            XCTAssertEqual(request.httpMethod, "GET")
+            switch request.url?.path {
+            case "/api/profiles/active":
+                return apiTestJSONResponse(#"{"current":"default","active":"default"}"#, for: request)
+            case "/api/profiles":
+                reads += 1
+                return apiTestJSONResponse(reads == 1
+                    ? "{\"profiles\":[{\"name\":\"default\",\"is_default\":true},{\"name\":\"work\"}]}"
+                    : "{\"profiles\":[{\"name\":\"default\",\"is_default\":true}]}", for: request)
+            default:
+                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
         }
         await viewModel.loadActiveProfile()
         let work = try XCTUnwrap(viewModel.profileOptions.first { $0.name == "work" })
