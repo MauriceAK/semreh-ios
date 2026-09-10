@@ -48,14 +48,28 @@ final class ServerRegistryTests: XCTestCase {
 
     func testActivateDeduplicatesURLsThatNormalizeToTheSameServer() throws {
         let registry = makeRegistry()
-        // Two raw inputs the onboarding normalizer collapses to one server.
-        let first = try AuthManager.normalizedServerURL(from: "https://www.webui.example.test")
-        let second = try AuthManager.normalizedServerURL(from: "www.webui.example.test/some/path")
+        let first = try AuthManager.normalizedServerURL(from: "https://WWW.WEBUI.example.test.:443")
+        let second = try AuthManager.normalizedServerURL(from: "www.webui.example.test")
 
         registry.activate(url: first)
         registry.activate(url: second)
 
         XCTAssertEqual(registry.servers.count, 1)
+        XCTAssertEqual(registry.activeServer?.id, "https://www.webui.example.test")
+    }
+
+    func testActivateKeepsWebUIAndWWWWebUIAsDistinctOrigins() throws {
+        let registry = makeRegistry()
+        let wwwWebUI = try AuthManager.normalizedServerURL(from: "https://www.webui.example.test")
+        let webUI = try AuthManager.normalizedServerURL(from: "https://webui.example.test")
+
+        registry.activate(url: wwwWebUI)
+        registry.activate(url: webUI)
+
+        XCTAssertEqual(
+            Set(registry.servers.map(\.id)),
+            Set(["https://www.webui.example.test", "https://webui.example.test"])
+        )
         XCTAssertEqual(registry.activeServer?.id, "https://webui.example.test")
     }
 
@@ -364,6 +378,23 @@ final class ServerRegistryTests: XCTestCase {
         XCTAssertEqual(registry.activeServer?.id, "https://legacy.test")
         XCTAssertEqual(registry.activeServer?.displayName, "Casey")
         XCTAssertEqual(registry.activeServer?.headerLogoColorHex, "#34C759")
+    }
+
+    func testStoredWWWWebUIOriginMigratesWithoutGuessingAlternativeHost() throws {
+        let keychain = InMemoryKeychainStore()
+        try keychain.save("https://www.webui.example.test", forKey: .serverURL)
+        let registry = ServerRegistry(keychain: keychain, identityDefaults: .ephemeral())
+
+        _ = AuthManager(
+            keychain: keychain,
+            clientFactory: { _ in MockAuthAPIClient(authStatus: AuthStatusResponse(authEnabled: false)) },
+            serverRegistry: registry,
+            cookieOriginLedger: DirectHermesCookieOriginLedger()
+        )
+
+        XCTAssertEqual(keychain.savedValues[.serverURL], "https://www.webui.example.test")
+        XCTAssertEqual(registry.servers.map(\.id), ["https://www.webui.example.test"])
+        XCTAssertEqual(registry.activeServer?.urlString, "https://www.webui.example.test")
     }
 
     func testNoSavedServerLeavesRegistryEmptyOnLaunch() {

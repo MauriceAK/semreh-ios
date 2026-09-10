@@ -55,19 +55,64 @@ final class APIClientAuthAndErrorTests: APIClientTestCase {
         XCTAssertNil(manager.lastErrorMessage)
     }
 
-    func testServerURLNormalizationDropsAccidentalWWWBeforeWebUISubdomain() throws {
+    func testServerURLNormalizationPreservesConfiguredWebUIHostname() throws {
         XCTAssertEqual(
             try AuthManager.normalizedServerURL(from: "https://www.webui.example.test"),
-            URL(string: "https://webui.example.test")
+            URL(string: "https://www.webui.example.test")
         )
         XCTAssertEqual(
             try AuthManager.normalizedServerURL(from: "www.webui.example.test"),
-            URL(string: "https://webui.example.test")
+            URL(string: "https://www.webui.example.test")
         )
         XCTAssertEqual(
             try AuthManager.normalizedServerURL(from: "https://www.example.com"),
             URL(string: "https://www.example.com")
         )
+    }
+
+    @MainActor
+    func testAuthManagerTestsAndConfiguresExactWebUIOriginAndHeaderScope() async throws {
+        let keychain = InMemoryKeychainStore()
+        let registry = ServerRegistry.inMemory(keychain: keychain)
+        let headerStore = CustomHeaderStore()
+        let client = MockAuthAPIClient(authStatus: AuthStatusResponse(authEnabled: false, loggedIn: false))
+        let expectedURL = try XCTUnwrap(URL(string: "https://www.webui.example.test"))
+        let alternativeURL = try XCTUnwrap(URL(string: "https://webui.example.test"))
+        let headers = [CustomHeader(name: "X-Origin", value: "www-webui")]
+        var requestedURLs: [URL] = []
+        let manager = AuthManager(
+            keychain: keychain,
+            clientFactory: { url in
+                requestedURLs.append(url)
+                return client
+            },
+            headerStore: headerStore,
+            serverRegistry: registry,
+            cookieOriginLedger: DirectHermesCookieOriginLedger()
+        )
+
+        _ = try await manager.testConnection(
+            serverURLString: "https://WWW.WEBUI.example.test.:443",
+            customHeaders: headers
+        )
+        await manager.configure(
+            serverURLString: "https://WWW.WEBUI.example.test.:443",
+            password: "",
+            customHeaders: headers
+        )
+
+        XCTAssertEqual(requestedURLs, [expectedURL, expectedURL])
+        XCTAssertEqual(keychain.savedValues[.serverURL], expectedURL.absoluteString)
+        XCTAssertEqual(registry.servers.map(\.id), [expectedURL.absoluteString])
+        XCTAssertEqual(registry.activeServer?.customHeadersRef, expectedURL.absoluteString)
+        XCTAssertEqual(
+            [CustomHeader].decodeFromStorage(
+                keychain.scopedValue(.customHeaders, scope: expectedURL.absoluteString)
+            ),
+            headers
+        )
+        XCTAssertNil(keychain.scopedValue(.customHeaders, scope: alternativeURL.absoluteString))
+        XCTAssertEqual(manager.state, .loggedIn(server: expectedURL))
     }
 
     func testDirectOriginRequiresHTTPSRootOrigin() throws {

@@ -899,9 +899,6 @@ final class AuthManager {
         if canonicalHost.hasSuffix(".") {
             canonicalHost.removeLast()
         }
-        if canonicalHost.hasPrefix("www.webui.") {
-            canonicalHost = String(canonicalHost.dropFirst(4))
-        }
         return canonicalHost
     }
 
