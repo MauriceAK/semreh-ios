@@ -150,6 +150,54 @@ final class CacheStoreTests: XCTestCase {
         XCTAssertEqual(cached.filter(hidden.shows).compactMap(\.sessionId), ["ordinary-cli"])
     }
 
+    func testCachedSessionsDiscardLegacyLivenessButCurrentLiveOwnerStillWins() throws {
+        let context = try makeContext()
+        let serverURL = URL(string: "https://example.test")!
+        let cachedAt = Date(timeIntervalSince1970: 1_770_000_000)
+        let legacyLive = SessionSummary(
+            sessionId: "legacy-live",
+            title: "Cached conversation",
+            messageCount: 2,
+            activeStreamId: "removed-webui-stream",
+            isStreaming: true,
+            hasPendingUserMessage: true,
+            pendingStartedAt: 1_770_000_001
+        )
+
+        try CacheStore.cacheSession(
+            legacyLive,
+            serverURL: serverURL,
+            in: context,
+            cachedAt: cachedAt
+        )
+
+        let restored = try XCTUnwrap(
+            CacheStore.cachedSessions(
+                serverURL: serverURL,
+                in: context,
+                now: cachedAt.addingTimeInterval(60)
+            ).first
+        )
+
+        XCTAssertNil(restored.activeStreamId)
+        XCTAssertNil(restored.isStreaming)
+        XCTAssertNil(restored.hasPendingUserMessage)
+        XCTAssertNil(restored.pendingStartedAt)
+        XCTAssertFalse(SessionRowView.isActiveStreaming(restored))
+        XCTAssertEqual(MessagesSessionRowFormatter.rowState(for: restored), .idle)
+        XCTAssertNotEqual(MessagesSessionRowFormatter.previewText(for: restored), "Streaming response…")
+        XCTAssertNotEqual(MessagesSessionRowFormatter.previewText(for: restored), "Waiting for your message…")
+
+        XCTAssertTrue(
+            SessionRowView.isActiveStreaming(restored, liveOwnerSessionIDs: ["legacy-live"]),
+            "A genuine current direct owner, rather than stale cache metadata, remains authoritative."
+        )
+        XCTAssertEqual(
+            MessagesSessionRowFormatter.rowState(for: restored, liveOwnerSessionIDs: ["legacy-live"]),
+            .live
+        )
+    }
+
     func testCacheMessagesWritesLoadedWindowAndRemovesStaleMessages() throws {
         let context = try makeContext()
         let serverURL = URL(string: "https://example.test")!

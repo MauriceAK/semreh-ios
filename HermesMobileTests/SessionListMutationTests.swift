@@ -1536,6 +1536,50 @@ final class SessionListMutationTests: XCTestCase {
     }
 
     @MainActor
+    func testOfflineFallbackDropsLegacyLivenessAndEmptyPlaceholderRetention() async throws {
+        let context = try makeContext()
+        let server = try XCTUnwrap(URL(string: "https://example.test"))
+        try CacheStore.cacheSessions(
+            [
+                SessionSummary(
+                    sessionId: "cached-conversation",
+                    title: "Cached conversation",
+                    messageCount: 2,
+                    activeStreamId: "removed-webui-stream",
+                    isStreaming: true,
+                    hasPendingUserMessage: true,
+                    pendingStartedAt: 1_770_000_001
+                ),
+                SessionSummary(
+                    sessionId: "empty-placeholder",
+                    title: "Untitled",
+                    messageCount: 0,
+                    isStreaming: true,
+                    hasPendingUserMessage: true,
+                    pendingStartedAt: 1_770_000_002
+                )
+            ],
+            serverURL: server,
+            in: context,
+            cachedAt: Date()
+        )
+        let viewModel = try makeViewModel { request in
+            XCTAssertEqual(request.url?.path, "/api/profiles/sessions")
+            throw URLError(.notConnectedToInternet)
+        }
+
+        await viewModel.load(modelContext: context)
+
+        XCTAssertTrue(viewModel.isViewingCachedData)
+        XCTAssertEqual(viewModel.sessions.compactMap(\.sessionId), ["cached-conversation"])
+        let restored = try XCTUnwrap(viewModel.sessions.first)
+        XCTAssertFalse(SessionRowView.isActiveStreaming(restored))
+        XCTAssertEqual(MessagesSessionRowFormatter.rowState(for: restored), .idle)
+        XCTAssertNotEqual(MessagesSessionRowFormatter.previewText(for: restored), "Streaming response…")
+        XCTAssertNotEqual(MessagesSessionRowFormatter.previewText(for: restored), "Waiting for your message…")
+    }
+
+    @MainActor
     func testDirectPinAndArchiveAreBlockedForCachedOfflineData() async throws {
         let context = try makeContext()
         let server = try XCTUnwrap(URL(string: "https://example.test"))

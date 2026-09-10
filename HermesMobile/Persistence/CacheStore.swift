@@ -312,12 +312,16 @@ private extension SessionSummary {
         inputTokens = cachedSession.inputTokens
         outputTokens = cachedSession.outputTokens
         estimatedCost = cachedSession.estimatedCost
-        activeStreamId = cachedSession.activeStreamId
-        isStreaming = cachedSession.isStreaming
+        // These fields came from the removed WebUI list projection and describe
+        // process-local state that cannot still be authoritative after a cache
+        // restore. Direct Hermes list responses intentionally omit them; current
+        // activity is supplied by OpenChatSessionStore's live owner instead.
+        activeStreamId = nil
+        isStreaming = nil
         isCliSession = cachedSession.isCliSession
         userMessageCount = cachedSession.userMessageCount
-        hasPendingUserMessage = cachedSession.hasPendingUserMessage
-        pendingStartedAt = cachedSession.pendingStartedAt
+        hasPendingUserMessage = nil
+        pendingStartedAt = nil
         worktreePath = cachedSession.worktreePath
         sourceTag = cachedSession.sourceTag
         rawSource = cachedSession.rawSource
