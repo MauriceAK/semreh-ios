@@ -29,6 +29,7 @@ BLOCKING_FIXTURE_SKILL_DEPLOYED = RUNTIME / 'home' / 'skills' / 'semreh-fixture-
 BLOCKING_FIXTURE_TOOLSET = 'semreh_blocking_fixture'
 BLOCKING_FIXTURE_PLUGIN_ID = 'semreh-blocking-fixture'
 BLOCKING_FIXTURE_TOOLS_CONFIG = {'tool_search': {'enabled': 'off'}}
+NAMED_FIXTURE_PROFILES = frozenset({'semreh-goal-scope-8f059a8ae784'})
 COMPRESSION_FIXTURE_CONFIG = {
     'in_place': False,
     'protect_last_n': 2,
@@ -123,7 +124,20 @@ def initialize():
     print('Created disposable runtime; credentials are private and were not printed.')
 
 
-def validate(*, allow_memory_adoption=False):
+def _fixture_home(profile=None):
+    if profile is None:
+        return RUNTIME / 'home'
+    if profile not in NAMED_FIXTURE_PROFILES:
+        raise RuntimeError('Named fixture profile is not allowlisted')
+    home = RUNTIME / 'home' / 'profiles' / profile
+    if home.is_symlink() or home.resolve() != home or not home.is_dir():
+        raise RuntimeError('Named fixture profile escaped or is unavailable')
+    if home.stat().st_mode & 0o077:
+        raise RuntimeError('Named fixture profile is accessible to other users')
+    return home
+
+
+def validate(*, allow_memory_adoption=False, profile=None):
     checked_paths()
     for name in ('marker.json', 'credentials.json', 'home/config.yaml'):
         path = RUNTIME / name
@@ -138,7 +152,12 @@ def validate(*, allow_memory_adoption=False):
         path = RUNTIME / name
         if path.is_symlink() or path.resolve() != path:
             raise RuntimeError('Runtime child escaped its expected path')
-    config = json.loads((RUNTIME / 'home' / 'config.yaml').read_text())
+    hermes_home = _fixture_home(profile)
+    config_path = hermes_home / 'config.yaml'
+    if (config_path.is_symlink() or config_path.resolve() != config_path
+            or not config_path.is_file() or config_path.stat().st_mode & 0o077):
+        raise RuntimeError('Unexpected named fixture configuration')
+    config = json.loads(config_path.read_text())
     expected = {
         'model': {'provider': 'custom', 'default': 'semreh-fixture', 'base_url': 'http://127.0.0.1:18792/v1'},
         'terminal': {'backend': 'local', 'cwd': str(RUNTIME / 'tools'), 'home_mode': 'profile'},
@@ -166,7 +185,7 @@ def validate(*, allow_memory_adoption=False):
             raise RuntimeError('Unexpected HTTPS endpoint path')
         if json.loads(endpoint.read_text()) != {'origin': HTTPS_ORIGIN, 'upstream': 'http://127.0.0.1:18791'}:
             raise RuntimeError('HTTPS endpoint does not match the enrolled test node')
-    print(json.dumps({'source_sha': PIN, 'hermes_home': str(RUNTIME / 'home'),
+    print(json.dumps({'source_sha': PIN, 'hermes_home': str(hermes_home),
                       'tool_cwd': str(RUNTIME / 'tools'), 'port': PORT,
                       'os_isolation': False, 'personal_credentials_inherited': False}))
 
@@ -194,8 +213,8 @@ def _validate_fixture_tree(root: Path, *, label: str) -> None:
             raise RuntimeError(f'{label} fixture content digest mismatch')
 
 
-def _validate_runtime_plugins(*, approval_secret_fixture: bool) -> None:
-    plugins_root = BLOCKING_FIXTURE_DEPLOYED
+def _validate_runtime_plugins(*, approval_secret_fixture: bool, hermes_home=None) -> None:
+    plugins_root = (hermes_home or RUNTIME / 'home') / 'plugins'
     if not plugins_root.exists():
         if approval_secret_fixture:
             raise RuntimeError('Opt-in blocking fixture is not installed in disposable runtime')
@@ -208,15 +227,15 @@ def _validate_runtime_plugins(*, approval_secret_fixture: bool) -> None:
         raise RuntimeError('Default disposable runtime must not contain plugins')
 
 
-def _validate_runtime_skill(*, approval_secret_fixture: bool) -> None:
-    skills_root = BLOCKING_FIXTURE_SKILL_DEPLOYED.parent
+def _validate_runtime_skill(*, approval_secret_fixture: bool, hermes_home=None) -> None:
+    fixture_root = (hermes_home or RUNTIME / 'home') / 'skills' / 'semreh-fixture-empty-secret'
+    skills_root = fixture_root.parent
     if not skills_root.exists():
         if approval_secret_fixture:
             raise RuntimeError('Opt-in blocking skill is not installed in disposable runtime')
         return
     if skills_root.is_symlink() or skills_root.resolve() != skills_root or not skills_root.is_dir():
         raise RuntimeError('Unexpected disposable runtime skills path')
-    fixture_root = BLOCKING_FIXTURE_SKILL_DEPLOYED
     if approval_secret_fixture:
         if fixture_root.is_symlink() or fixture_root.resolve() != fixture_root or not fixture_root.is_dir():
             raise RuntimeError('Opt-in blocking skill is unavailable or escaped')
@@ -231,8 +250,8 @@ def _validate_runtime_skill(*, approval_secret_fixture: bool) -> None:
         raise RuntimeError('Default disposable runtime must not contain blocking fixture skill')
 
 
-def _validate_plugin_config(*, approval_secret_fixture: bool) -> None:
-    config_path = RUNTIME / 'home' / 'config.yaml'
+def _validate_plugin_config(*, approval_secret_fixture: bool, hermes_home=None) -> None:
+    config_path = (hermes_home or RUNTIME / 'home') / 'config.yaml'
     if config_path.is_symlink() or config_path.resolve() != config_path:
         raise RuntimeError('Unexpected disposable config path')
     config = json.loads(config_path.read_text())
@@ -255,10 +274,13 @@ def _validate_plugin_config(*, approval_secret_fixture: bool) -> None:
         raise RuntimeError('Default disposable config must not enable plugins')
 
 
-def serve(*, with_pdf_renderer=False, approval_secret_fixture=False):
-    validate()
-    _validate_plugin_config(approval_secret_fixture=approval_secret_fixture)
-    _validate_runtime_skill(approval_secret_fixture=approval_secret_fixture)
+def serve(*, with_pdf_renderer=False, approval_secret_fixture=False, profile=None):
+    validate(profile=profile)
+    hermes_home = _fixture_home(profile)
+    _validate_plugin_config(approval_secret_fixture=approval_secret_fixture,
+                            hermes_home=hermes_home)
+    _validate_runtime_skill(approval_secret_fixture=approval_secret_fixture,
+                            hermes_home=hermes_home)
     with socket.socket() as probe:
         # Match the HTTP server's reuse behavior so a just-stopped test server's
         # TIME_WAIT sockets do not prevent restart. A live listener still fails.
@@ -269,7 +291,7 @@ def serve(*, with_pdf_renderer=False, approval_secret_fixture=False):
     environment = {
         'PATH': str(PYTHON.parent) + ':/usr/bin:/bin',
         'HOME': str(RUNTIME / 'home' / 'home'),
-        'HERMES_HOME': str(RUNTIME / 'home'),
+        'HERMES_HOME': str(hermes_home),
         'TMPDIR': str(RUNTIME / 'tmp'),
         'XDG_CACHE_HOME': str(RUNTIME / 'cache'),
         'PYTHONPATH': str(SOURCE), 'PYTHONUNBUFFERED': '1',
@@ -281,7 +303,8 @@ def serve(*, with_pdf_renderer=False, approval_secret_fixture=False):
     }
     if approval_secret_fixture:
         _validate_fixture_tree(BLOCKING_FIXTURE_PLUGINS, label='Repository')
-    _validate_runtime_plugins(approval_secret_fixture=approval_secret_fixture)
+    _validate_runtime_plugins(approval_secret_fixture=approval_secret_fixture,
+                              hermes_home=hermes_home)
     if approval_secret_fixture:
         # The fixture is installed under this disposable profile only; stock
         # bundled plugins (including dashboard auth) remain visible.
@@ -299,8 +322,13 @@ def serve(*, with_pdf_renderer=False, approval_secret_fixture=False):
     # Use the complete first-party serve startup: it bridges terminal settings
     # and discovers the basic-auth plugin before start_server. Explicit custom
     # HERMES_HOME roots profile lookup here; --isolated prevents server rerouting.
-    os.execve(str(PYTHON), [str(PYTHON), '-m', 'hermes_cli.main',
-        'serve', '--isolated', '--host', '127.0.0.1', '--port', str(PORT)], environment)
+    argv = [str(PYTHON), '-m', 'hermes_cli.main']
+    if profile is not None:
+        # Belt-and-suspenders with HERMES_HOME: the pinned stock parser resolves
+        # this against the custom root, then strips -p before normal argparse.
+        argv.extend(['-p', profile])
+    argv.extend(['serve', '--isolated', '--host', '127.0.0.1', '--port', str(PORT)])
+    os.execve(str(PYTHON), argv, environment)
 
 
 if __name__ == '__main__':
@@ -310,11 +338,19 @@ if __name__ == '__main__':
                         help='Expose the approved Poppler renderer to this disposable gateway only')
     parser.add_argument('--approval-secret-fixture', action='store_true',
                         help='Explicitly enable the repository-owned no-op approval/empty-secret fixture')
+    parser.add_argument('--profile', choices=sorted(NAMED_FIXTURE_PROFILES),
+                        help='Opt in to the allowlisted owned nondefault fixture profile')
     args = parser.parse_args()
+    if args.profile and args.action == 'init':
+        parser.error('--profile is only valid with validate or serve')
     if (args.with_pdf_renderer or args.approval_secret_fixture) and args.action != 'serve':
         parser.error('fixture serve flags are only valid with serve')
     if args.action == 'serve':
         serve(with_pdf_renderer=args.with_pdf_renderer,
-              approval_secret_fixture=args.approval_secret_fixture)
+              approval_secret_fixture=args.approval_secret_fixture,
+              profile=args.profile)
     else:
-        {'init': initialize, 'validate': validate}[args.action]()
+        if args.action == 'validate':
+            validate(profile=args.profile)
+        else:
+            initialize()
