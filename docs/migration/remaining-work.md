@@ -29,13 +29,28 @@ phone; these successor patches are not installed or accepted yet.
   Integrated 8b0a820: old-code regression fails as expected; 54 focused native
   tests and one real isolated-Hermes signed Simulator smoke pass. Independent
   review passed; selected artifact audit 69 files/0 flags (private outputs excluded).
-- [ ] A2 — Resolve active profile before sidebar session loading in Sessions and
+- [x] A2 — Resolve active profile before sidebar session loading in Sessions and
   Control. Verify non-default startup and stale-response protection.
-  Pilot candidate 215cec6: 145 focused tests pass, but production Simulator
-  acceptance fails on the Control profile assertion. Not integrated; repair cap
-  reached. A3 remains blocked, not completed. Preserve v1–v3 pilot evidence.
-- [ ] A3 — Restore approved local organizer production entrypoints after A2;
+  Integrated 0a59ed0: 145 focused tests and real isolated-Hermes signed UI pass;
+  independent review accepted. Old-method negative control fails3 expected
+  assertions. Corrected UI checks Control profile and Sessions row ownership
+  separately; prior recipe failures remain recorded in pilot v1–v4 evidence.
+- [x] A3 — Restore approved local organizer production entrypoints after A2;
   verify local CRUD, profile/server scoping and no retired project network route.
+  Integrated 824af8a: 31 focused tests and signed stock-Hermes UI pass, independent
+  review accepted. UI creates in Sessions, renames in Control, verifies persistence
+  after relaunch, then confirms deletion. Focused tests cover server/profile
+  isolation and absence of project-network routes. Initial live test exposed the
+  shell hiding the organizer despite the enabled flag; repaired projects-only
+  visibility preserves other utilities in Control and search/user preferences.
+  Coherent batch: 2095 native tests pass/0fail/0skip, explicitly excluding the14
+  opt-in hosted live tests (A2/A3 relevant live gates executed separately).
+  Helper57tests pass. Selected A3/batch artifact audit74files/0flags; private
+  failed recordings/unselected/compressed outputs excluded. No device install.
+  Pilot v5 timed out waiting for root recipe, without native execution; v6 reused
+  the clean committed patch mechanically, verified and integrated. No duplicate
+  implementation worker. Timings and limitations are in the local Night Shift
+  pilot report; no automatic ended-chat wake-up or unattended-readiness claim.
 - [ ] C1 — Remove proven-dead migration snapshots/bookmarks/polling/no-op state,
   then unreachable replay paths; preserve active recovery and compatibility.
 - [ ] C2 — Remove unused legacy APIClient request stack and obsolete transcribe
