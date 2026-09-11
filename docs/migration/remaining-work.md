@@ -1,5 +1,38 @@
 # Remaining migration work
 
+## September 11 — foreground lifecycle stabilization
+
+Night Shift remains paused; bounded native workers and one root-owned Simulator
+lane. Accepted-turn socket loss could leave `.deliveryUnknown` after an explicit
+idle resume. Recovery now permits idle only after canonical refresh, explicit
+`running:false`, and clear prompt ambiguity/in-flight barriers; Stop's internal
+rebind still requires its separate status confirmation.
+
+- [x] Regression reproduced on old controller: 1 expected failure.
+- [x] Controller suite plus view-model explicit-next-send regression: 87 passed,
+  0 failed/skipped. Initial candidate exposed two Stop rebind regressions; both
+  corrected without weakening their assertions.
+- [x] Signed production Simulator against stock Hermes `29112bef`: five isolated
+  phases passed (finish/resend, stop/resend, queued steer/resend, Home/background
+  completion/reopen/resend, process termination/completion/reopen/resend).
+  Away cases prove accepted-but-incomplete state after leaving, durable completion
+  while away, visible recovered answer, and a unique subsequent send.
+- [x] Selector helpers: 61 passed. Separate real protocol stabilization smoke
+  passed interrupt/idle/canonical history/next send.
+- [ ] Physical iPhone acceptance of this new patch; no phone installation yet.
+
+Reproduce UI phases with signed `HermesMobileUIVerification` build-for-testing,
+then `scripts/direct_hermes_ios_smoke.py --slice2-ui --https --stock-backend
+--lifecycle-ui <finish|stop|steer|background|terminate>` and the generated
+`SemrehSlice2LiveUI.xctestrun`, owned Simulator, parallel testing disabled and
+`-collect-test-diagnostics never`. Evidence under the approved evidence root:
+`lifecycle-20260911-fixed-unit-v2.xcresult`, `finish-ui-v3`, and each other
+`lifecycle-20260911-<phase>-ui.xcresult`; all filenames have lifecycle prefix.
+Earlier UI identifier and compilation recipe failures are retained, not product
+failures. Selected exported logs passed known-credential audit. Deterministic
+model responses, not external-provider or long-duration/device performance proof.
+Existing F1 and V1/N1 polish candidates remain separate and unmerged.
+
 September 8 checkpoint. Binding scope: `semreh_tui_gateway_v3_execution_plan.md`;
 details/evidence: `slice3-tasks.md`, `slice3-verification.md`, `slice4-tasks.md`.
 This is the current dispatch checklist, not a new architecture or acceptance waiver.

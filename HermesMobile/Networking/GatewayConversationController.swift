@@ -206,6 +206,10 @@ final class GatewayConversationController {
     private var transcriptDirty = false
     private var terminalReceipt: String?
     private var promptInFlight = false
+    /// Interrupt recovery temporarily uses `.deliveryUnknown` while rebinding a
+    /// rotated/missing runtime. That path still requires its separate status
+    /// confirmation before idle may be published.
+    private var interruptRebindInProgress = false
     /// A draft session.create may have reached Hermes without returning its
     /// binding. Goal preparation never repeats that create in this controller.
     private var goalPreparationOutcomeUnknown = false
@@ -2786,6 +2790,8 @@ final class GatewayConversationController {
             let retryOrigin = runtime.origin
             runState = .deliveryUnknown
             do {
+                interruptRebindInProgress = true
+                defer { interruptRebindInProgress = false }
                 try await ensureBinding(create: [:])
             } catch {
                 if !disposed, lifecycle == retryLifecycle, turnEpoch == retryTurn,
@@ -2855,6 +2861,8 @@ final class GatewayConversationController {
                               runState == .stopping else { throw DirectSessionError.staleOperation }
                         runState = .deliveryUnknown
                         do {
+                            interruptRebindInProgress = true
+                            defer { interruptRebindInProgress = false }
                             try await ensureBinding(create: [:])
                         } catch {
                             if !disposed, lifecycle == generation, turnEpoch == interruptedTurn,
@@ -3132,6 +3140,19 @@ final class GatewayConversationController {
         if result?.gatewayFields["running"] == .bool(true) {
             runState = .running
             suppressesColdResumedContent = true
+        }
+        else if runState == .deliveryUnknown,
+                result?.gatewayFields["running"] == .bool(false),
+                !hasAmbiguousPromptDelivery,
+                !interruptRebindInProgress,
+                !promptInFlight {
+            // A known-accepted turn can lose its terminal event with the socket.
+            // Only an explicit idle resume after canonical reconciliation proves
+            // that turn finished. Missing/malformed status and a prompt whose
+            // acknowledgement is still ambiguous remain quarantined.
+            runState = .idle
+            suppressesColdResumedContent = false
+            schedulePendingReasoningDrain()
         }
         else if runState != .deliveryUnknown, !promptInFlight {
             runState = .idle

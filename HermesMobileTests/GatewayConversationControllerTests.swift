@@ -827,6 +827,114 @@ final class GatewayConversationControllerTests: XCTestCase {
         await runtime.stop()
     }
 
+    func testAcceptedTurnDisconnectedBeforeTerminalResumesIdleAndPermitsExplicitNextSend() async throws {
+        let fake = ControllerFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime, storedID: nil)
+        try await controller.submit("accepted before disconnect")
+        XCTAssertEqual(controller.runState, .running)
+
+        fake.emit(event(sessionID: "runtime-1", type: "transport.closed", sequence: 2, method: "local"))
+        await yieldUntil { controller.runState == .deliveryUnknown }
+        fake.setResumeResponse(.object([
+            "session_id": .string("runtime-1"),
+            "session_key": .string("durable-1"),
+            "running": .bool(false)
+        ]))
+
+        var recoveredIdleIDs: [String] = []
+        controller.onRecoveredIdle = { recoveredIdleIDs.append($0) }
+        try await runtime.reconnect()
+
+        XCTAssertEqual(controller.runState, .idle)
+        XCTAssertEqual(recoveredIdleIDs, ["durable-1"])
+        try await controller.submit("explicit next turn")
+        XCTAssertEqual(controller.runState, .running)
+        let submits = fake.calls().filter { $0.method == "prompt.submit" }
+        XCTAssertEqual(submits.count, 2)
+        XCTAssertEqual(objectFields(submits.last?.params)?["text"], .string("explicit next turn"))
+        await runtime.stop()
+    }
+
+    func testAcceptedTurnDisconnectedBeforeTerminalDoesNotTreatMissingOrMalformedRunningAsIdle() async throws {
+        for running in [nil, .string("false")] as [JSONValue?] {
+            let fake = ControllerFakeTransport()
+            let runtime = try makeRuntime(fake)
+            let controller = makeController(runtime: runtime, storedID: nil)
+            try await controller.submit("accepted before disconnect")
+            fake.emit(event(sessionID: "runtime-1", type: "transport.closed", sequence: 2, method: "local"))
+            await yieldUntil { controller.runState == .deliveryUnknown }
+            var fields: [String: JSONValue] = [
+                "session_id": .string("runtime-1"),
+                "session_key": .string("durable-1")
+            ]
+            fields["running"] = running
+            fake.setResumeResponse(.object(fields))
+            var recoveredIdleIDs: [String] = []
+            controller.onRecoveredIdle = { recoveredIdleIDs.append($0) }
+
+            try await runtime.reconnect()
+
+            XCTAssertEqual(controller.runState, .deliveryUnknown)
+            XCTAssertTrue(recoveredIdleIDs.isEmpty)
+            XCTAssertEqual(fake.calls().filter { $0.method == "prompt.submit" }.count, 1)
+            await runtime.stop()
+        }
+    }
+
+    func testAcceptedTurnDisconnectedBeforeTerminalStillRunningResumeRemainsBusy() async throws {
+        let fake = ControllerFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime, storedID: nil)
+        try await controller.submit("accepted before disconnect")
+        fake.emit(event(sessionID: "runtime-1", type: "transport.closed", sequence: 2, method: "local"))
+        await yieldUntil { controller.runState == .deliveryUnknown }
+        fake.setResumeResponse(.object([
+            "session_id": .string("runtime-1"),
+            "session_key": .string("durable-1"),
+            "running": .bool(true)
+        ]))
+
+        try await runtime.reconnect()
+
+        XCTAssertEqual(controller.runState, .running)
+        do {
+            try await controller.submit("must remain blocked")
+            XCTFail("A still-running resumed turn must reject a second prompt")
+        } catch DirectSessionError.ambiguousPrompt { }
+        XCTAssertEqual(fake.calls().filter { $0.method == "prompt.submit" }.count, 1)
+        await runtime.stop()
+    }
+
+    func testAmbiguousPromptDisconnectedBeforeAcknowledgementRemainsProtectedWhenResumeIsIdle() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setPromptTimeout(true)
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime, storedID: nil)
+        do {
+            try await controller.submit("acknowledgement lost")
+            XCTFail("The fixture must lose prompt acknowledgement")
+        } catch HermesGatewayError.timeout { }
+        XCTAssertTrue(controller.hasAmbiguousPromptDelivery)
+        XCTAssertEqual(controller.runState, .deliveryUnknown)
+        fake.setResumeResponse(.object([
+            "session_id": .string("runtime-1"),
+            "session_key": .string("durable-1"),
+            "running": .bool(false)
+        ]))
+
+        try await runtime.reconnect()
+
+        XCTAssertEqual(controller.runState, .deliveryUnknown)
+        XCTAssertTrue(controller.hasAmbiguousPromptDelivery)
+        do {
+            try await controller.submit("must not replay or replace")
+            XCTFail("An ambiguous prompt must remain protected after idle resume")
+        } catch DirectSessionError.ambiguousPrompt { }
+        XCTAssertEqual(fake.calls().filter { $0.method == "prompt.submit" }.count, 1)
+        await runtime.stop()
+    }
+
     func testLocalDraftOpenDoesNotCreateOrAttach() async throws {
         let fake = ControllerFakeTransport()
         let runtime = try makeRuntime(fake)

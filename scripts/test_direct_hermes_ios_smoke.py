@@ -35,6 +35,39 @@ def load_seed_module():
 
 
 class IOSSmokeGuardTests(unittest.TestCase):
+    def test_lifecycle_phases_require_standalone_stock_ui(self):
+        # Either selected phase may reject the conflicting combination first.
+        message = 'requires --slice2-ui --https --stock-backend and no other test phase'
+        for arguments in (
+            ['--lifecycle-ui', 'finish'],
+            ['--https', '--stock-backend', '--slice2-ui', '--lifecycle-ui', 'stop', '--stabilization-ui'],
+        ):
+            with self.subTest(arguments=arguments):
+                self.assertRejected(arguments, message)
+
+    def test_lifecycle_phases_export_exact_target_and_phase(self):
+        for phase in ('finish', 'stop', 'steer', 'background', 'terminate'):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as temporary:
+                smoke = load_smoke_module()
+                products = Path(temporary).resolve()
+                source = products / 'HermesMobileUIVerification_HermesMobileUIVerification_iphonesimulator.xctestrun'
+                source.write_bytes(plistlib.dumps({'TestConfigurations': [{
+                    'TestTargets': [{'BlueprintName': 'HermesMobileUITests'}],
+                }]}))
+                with patch.object(smoke, 'PRODUCTS', products), \
+                        patch.object(smoke, 'RUNTIME', products / 'runtime'), \
+                        patch.object(smoke, 'validate') as validate, \
+                        patch.object(sys, 'argv', [str(SCRIPT), '--https', '--stock-backend',
+                                                   '--slice2-ui', '--lifecycle-ui', phase]):
+                    with redirect_stdout(StringIO()): smoke.main()
+                validate.assert_called_once_with()
+                target = plistlib.loads((products / 'SemrehSlice2LiveUI.xctestrun').read_bytes()
+                    )['TestConfigurations'][0]['TestTargets'][0]
+                self.assertEqual(target['OnlyTestIdentifiers'],
+                    ['DirectSkillUITests/testOptInProductionLifecyclePhase'])
+                self.assertEqual(target['EnvironmentVariables']['SEMREH_LIFECYCLE_UI_PHASE'], phase)
+                self.assertEqual(target['EnvironmentVariables']['SEMREH_SLICE2_UI_BACKEND_MODE'], 'stock')
+
     def test_polish_ui_phases_require_exactly_one_standalone_stock_phase(self):
         message = 'polish UI phase requires exactly one fixed polish selector and the stock HTTPS UI phase'
         for arguments in (

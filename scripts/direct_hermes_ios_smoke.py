@@ -47,6 +47,7 @@ def main():
     parser.add_argument('--slice4-skill-ui', action='store_true')
     parser.add_argument('--personal-bootstrap-ui', action='store_true')
     parser.add_argument('--stabilization-ui', action='store_true')
+    parser.add_argument('--lifecycle-ui', choices=['finish', 'stop', 'steer', 'background', 'terminate'])
     parser.add_argument('--interim-heading-ui', action='store_true')
     parser.add_argument('--a2-profile-ui', action='store_true')
     parser.add_argument('--a3-organizer-ui', action='store_true')
@@ -244,6 +245,12 @@ def main():
         not args.https or args.cookie_phase or args.slice2_foundation or args.slice2_native or args.slice2_reasoning
     ):
         parser.error('Slice 2 UI requires --https and no other test phase')
+    if args.lifecycle_ui and (
+        not args.slice2_ui or not args.https or not args.stock_backend
+        or any(value for name, value in vars(args).items()
+               if name not in {'lifecycle_ui', 'slice2_ui', 'https', 'stock_backend'})
+    ):
+        parser.error('--lifecycle-ui requires --slice2-ui --https --stock-backend and no other test phase')
     if args.slice3_clarification and (
         not args.slice2_ui or not args.https or args.cookie_phase
         or not args.stock_backend or args.development_backend_sha
@@ -504,6 +511,10 @@ def main():
         if args.stabilization_ui:
             target['EnvironmentVariables']['SEMREH_STABILIZATION_UI'] = '1'
             method = 'testOptInProductionStopThenResend'
+            test_class = 'DirectSkillUITests'
+        if args.lifecycle_ui:
+            target['EnvironmentVariables']['SEMREH_LIFECYCLE_UI_PHASE'] = args.lifecycle_ui
+            method = 'testOptInProductionLifecyclePhase'
             test_class = 'DirectSkillUITests'
         if args.interim_heading_ui:
             # The dedicated selector reuses the production test's established

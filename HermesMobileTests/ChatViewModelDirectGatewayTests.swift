@@ -3232,6 +3232,57 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         await runtime.stop()
     }
 
+    func testAcceptedSendDisconnectThenCompletedCanonicalResumeAllowsExplicitNextSendOnce() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let requests = ChatDirectRequestRecorder()
+        let client = makeClient { request in
+            let path = request.url?.path ?? "nil"
+            requests.append(path)
+            guard path == "/api/sessions/durable-1/messages" else {
+                XCTFail("Unexpected lifecycle reconciliation path: \(path)")
+                throw URLError(.badURL)
+            }
+            let rows = requests.isTerminalPhase
+                ? #"[{"id":1,"role":"user","content":"accepted question","timestamp":1},{"id":2,"role":"assistant","content":"canonical completed answer","timestamp":2}]"#
+                : "[]"
+            let returned = requests.isTerminalPhase ? 2 : 0
+            return apiTestJSONResponse(
+                #"{"session_id":"durable-1","messages":\#(rows),"pagination":{"limit":120,"offset":0,"order":"latest","returned":\#(returned)}}"#,
+                for: request
+            )
+        }
+        let viewModel = makeViewModel(client: client, runtime: runtime, sessionID: "durable-1")
+
+        let firstAccepted = await viewModel.sendMessage("accepted question")
+        XCTAssertTrue(firstAccepted)
+        await waitUntil { viewModel.activeStreamID != nil }
+        XCTAssertEqual(fake.calls().filter { $0.method == "prompt.submit" }.count, 1)
+
+        fake.emitClosed()
+        requests.beginTerminalPhase()
+        fake.setResumeResponse(.object([
+            "session_id": .string("runtime-1"),
+            "session_key": .string("durable-1"),
+            "running": .bool(false)
+        ]))
+
+        try await runtime.reconnect()
+        await viewModel.refreshAfterSceneActivation()
+        await waitUntil {
+            viewModel.activeStreamID == nil
+                && viewModel.messages.contains { $0.content == "canonical completed answer" }
+        }
+
+        let nextAccepted = await viewModel.sendMessage("explicit next question")
+        XCTAssertTrue(nextAccepted)
+        XCTAssertEqual(fake.calls().filter { $0.method == "prompt.submit" }.count, 2,
+            "Foreground recovery must not submit; the explicit next send submits exactly once")
+
+        await viewModel.disposeDirectConversation()
+        await runtime.stop()
+    }
+
     private let testServer = URL(string: "https://fixture.example")!
 
     private var directPNGData: Data {
