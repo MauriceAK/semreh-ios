@@ -35,6 +35,18 @@ Existing F1 and V1/N1 polish candidates remain separate and unmerged.
 
 ### First post-stabilization cleanup
 
+Follow-up September11: removed 247 net production lines of permanently disabled
+active-stream replay machinery from ChatViewModel. The guard was constant false;
+received chunks now enter the same buffers directly, without constructing unused
+effective-content strings. Ordinary tool completion matching, interim sealing,
+and active gateway recovery remain unchanged. Two source-test range delimiters
+were updated; their assertions were preserved. Root-reviewed diff and signed
+focused Simulator unit run: `replay-cleanup-20260911-unit.xcresult`, 294 passed,
+0 failed, 0 skipped (streaming pace, transcript, send, direct gateway, controller,
+event mapping). No repeated real-backend/UI matrix for dead-branch deletion;
+no measured physical performance improvement claimed. Phone build2026091101 is
+the preceding e1176cf baseline, installed/launched successfully, not this cleanup.
+
 Lifecycle fix is committed as `d846514`. The following cleanup removes 387 net
 production lines without changing reachable behavior: 252 lines of zero-caller
 private snapshot/replay helpers and their exclusively owned bookmark state;

@@ -529,7 +529,7 @@ final class TranscriptMessageTests: XCTestCase {
         let source = try String(contentsOf: sourceURL, encoding: .utf8)
         let flushStart = try XCTUnwrap(source.range(of: "private func flushAssistantTokens"))
         let flushEnd = try XCTUnwrap(
-            source.range(of: "private func deduplicatedReplayToken", range: flushStart.upperBound..<source.endIndex)
+            source.range(of: "private func flushPinnedLocalNoticesToTranscript", range: flushStart.upperBound..<source.endIndex)
         )
         let flushSource = String(source[flushStart.lowerBound..<flushEnd.lowerBound])
 
@@ -606,7 +606,7 @@ final class TranscriptMessageTests: XCTestCase {
         let source = try String(contentsOf: sourceURL, encoding: .utf8)
         let appendStart = try XCTUnwrap(source.range(of: "private func appendAssistantToken"))
         let appendEnd = try XCTUnwrap(
-            source.range(of: "private func deduplicatedReplayToken", range: appendStart.upperBound..<source.endIndex)
+            source.range(of: "private func flushPinnedLocalNoticesToTranscript", range: appendStart.upperBound..<source.endIndex)
         )
         let hotPath = String(source[appendStart.lowerBound..<appendEnd.lowerBound])
 
