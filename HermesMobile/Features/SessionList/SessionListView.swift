@@ -523,12 +523,17 @@ struct SessionListView: View {
                 }
             }
 
-            if !usesShellChrome, !isSearchingSessions {
+            if let utilityRowsVisibility = SessionListUtilityRowsVisibilityPolicy.visibleSections(
+                usesShellChrome: usesShellChrome,
+                projectsEnabled: projectsEnabled,
+                isSearchingSessions: isSearchingSessions,
+                userVisibility: sidebarSectionVisibility
+            ) {
                 SessionSidebarUtilityRows(
                     viewModel: viewModel,
                     topPadding: 10,
                     automatedVisibility: automatedSessionVisibility,
-                    sectionVisibility: sidebarSectionVisibility,
+                    sectionVisibility: utilityRowsVisibility,
                     profilesAreExpanded: $profilesAreExpanded,
                     projectsAreExpanded: $projectsAreExpanded,
                     selectedProjectID: $selectedProjectID,
@@ -907,7 +912,7 @@ struct SessionListView: View {
             memory: showsMemorySection,
             insights: showsInsightsSection,
             activeProfile: showsActiveProfileSection,
-            projects: showsProjectsSection && projectsEnabled
+            projects: showsProjectsSection
         )
     }
 

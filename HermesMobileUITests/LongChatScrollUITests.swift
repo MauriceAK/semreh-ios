@@ -96,9 +96,10 @@ final class LongChatScrollUITests: XCTestCase {
         dismissKnownPasswordSavePrompt(app: app)
         waitForPostLoginDestination(app: app)
 
-        defer {
-            attachScreenshot(named: "a3-organizer-final")
-            attachAccessibilitySnapshot(named: "a3-organizer-final-accessibility", app: app)
+        addTeardownBlock { @MainActor in
+            guard !app.secureTextFields["onboarding-password"].exists else { return }
+            self.attachScreenshot(named: "a3-organizer-final")
+            self.attachAccessibilitySnapshot(named: "a3-organizer-final-accessibility", app: app)
         }
 
         app.buttons["Sessions"].tap()

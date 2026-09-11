@@ -25,6 +25,103 @@ final class AppShellNavigationTests: XCTestCase {
         XCTAssertTrue(AppShellOrganizerPolicy.projectsEnabled)
     }
 
+    func testShellSessionsShowsOnlyOrganizerWhenEnabledAndVisible() throws {
+        let visibility = try XCTUnwrap(
+            SessionListUtilityRowsVisibilityPolicy.visibleSections(
+                usesShellChrome: true,
+                projectsEnabled: true,
+                isSearchingSessions: false,
+                userVisibility: .showAll
+            )
+        )
+
+        XCTAssertEqual(
+            visibility,
+            SidebarSectionVisibility(
+                tasks: false,
+                kanban: false,
+                skills: false,
+                memory: false,
+                insights: false,
+                activeProfile: false,
+                projects: true
+            )
+        )
+    }
+
+    func testShellSessionsHidesOrganizerWhenDisabledHiddenOrSearching() {
+        var projectsHidden = SidebarSectionVisibility.showAll
+        projectsHidden.projects = false
+
+        XCTAssertNil(
+            SessionListUtilityRowsVisibilityPolicy.visibleSections(
+                usesShellChrome: true,
+                projectsEnabled: false,
+                isSearchingSessions: false,
+                userVisibility: .showAll
+            )
+        )
+        XCTAssertNil(
+            SessionListUtilityRowsVisibilityPolicy.visibleSections(
+                usesShellChrome: true,
+                projectsEnabled: true,
+                isSearchingSessions: false,
+                userVisibility: projectsHidden
+            )
+        )
+        XCTAssertNil(
+            SessionListUtilityRowsVisibilityPolicy.visibleSections(
+                usesShellChrome: true,
+                projectsEnabled: true,
+                isSearchingSessions: true,
+                userVisibility: .showAll
+            )
+        )
+    }
+
+    func testNonShellUtilityRowsPreserveUserVisibilityUnlessSearching() {
+        let userVisibility = SidebarSectionVisibility(
+            tasks: true,
+            kanban: false,
+            skills: true,
+            memory: false,
+            insights: true,
+            activeProfile: true,
+            projects: false
+        )
+
+        XCTAssertEqual(
+            SessionListUtilityRowsVisibilityPolicy.visibleSections(
+                usesShellChrome: false,
+                projectsEnabled: true,
+                isSearchingSessions: false,
+                userVisibility: userVisibility
+            ),
+            userVisibility
+        )
+        var organizerDisabledVisibility = userVisibility
+        organizerDisabledVisibility.projects = false
+        var projectsVisible = userVisibility
+        projectsVisible.projects = true
+        XCTAssertEqual(
+            SessionListUtilityRowsVisibilityPolicy.visibleSections(
+                usesShellChrome: false,
+                projectsEnabled: false,
+                isSearchingSessions: false,
+                userVisibility: projectsVisible
+            ),
+            organizerDisabledVisibility
+        )
+        XCTAssertNil(
+            SessionListUtilityRowsVisibilityPolicy.visibleSections(
+                usesShellChrome: false,
+                projectsEnabled: true,
+                isSearchingSessions: true,
+                userVisibility: userVisibility
+            )
+        )
+    }
+
     func testNestedControlDestinationHidesBothShellBarsAndResetsOnReentry() {
         var navigationState = ControlNavigationState()
 

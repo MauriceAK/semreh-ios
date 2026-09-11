@@ -226,6 +226,31 @@ struct SidebarSectionVisibility: Equatable {
     }
 }
 
+enum SessionListUtilityRowsVisibilityPolicy {
+    static func visibleSections(
+        usesShellChrome: Bool,
+        projectsEnabled: Bool,
+        isSearchingSessions: Bool,
+        userVisibility: SidebarSectionVisibility
+    ) -> SidebarSectionVisibility? {
+        guard !isSearchingSessions else { return nil }
+        var effectiveVisibility = userVisibility
+        effectiveVisibility.projects = projectsEnabled && userVisibility.projects
+        guard usesShellChrome else { return effectiveVisibility }
+        guard effectiveVisibility.projects else { return nil }
+
+        return SidebarSectionVisibility(
+            tasks: false,
+            kanban: false,
+            skills: false,
+            memory: false,
+            insights: false,
+            activeProfile: false,
+            projects: true
+        )
+    }
+}
+
 struct SessionSidebarUtilityRows: View {
     // Vertical gap between every utility row, matching the navigation rows so the
     // headers and subrows share one consistent rhythm now that each is its own row.
