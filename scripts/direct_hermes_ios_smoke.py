@@ -49,6 +49,7 @@ def main():
     parser.add_argument('--stabilization-ui', action='store_true')
     parser.add_argument('--interim-heading-ui', action='store_true')
     parser.add_argument('--a2-profile-ui', action='store_true')
+    parser.add_argument('--a3-organizer-ui', action='store_true')
     parser.add_argument('--a2-profile-name')
     parser.add_argument('--a2-selected-sentinel')
     parser.add_argument('--a2-default-sentinel')
@@ -60,16 +61,18 @@ def main():
     parser.add_argument('--stock-backend', action='store_true')
     parser.add_argument('--cookie-phase', choices=['login', 'restore', 'logout'])
     args = parser.parse_args()
-    if args.a2_profile_ui:
-        allowed = {'a2_profile_ui', 'a2_profile_name', 'a2_selected_sentinel',
+    if args.a2_profile_ui or args.a3_organizer_ui:
+        allowed = {'a2_profile_ui', 'a3_organizer_ui', 'a2_profile_name', 'a2_selected_sentinel',
                    'a2_default_sentinel', 'slice2_ui', 'https', 'stock_backend'}
         if (not args.slice2_ui or not args.https or not args.stock_backend
+                or args.a2_profile_ui == args.a3_organizer_ui
                 or any(value for name, value in vars(args).items() if name not in allowed)
                 or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', args.a2_profile_name or '')
                 or args.a2_profile_name == 'default'
                 or not args.a2_selected_sentinel or not args.a2_default_sentinel
                 or len(args.a2_selected_sentinel) > 200 or len(args.a2_default_sentinel) > 200):
-            parser.error('--a2-profile-ui requires the stock HTTPS UI phase plus bounded non-default profile and sentinel values')
+            option = '--a3-organizer-ui' if args.a3_organizer_ui else '--a2-profile-ui'
+            parser.error(f'{option} requires the stock HTTPS UI phase plus bounded non-default profile and sentinel values')
         fixture_profiles = (RUNTIME / 'home' / 'profiles').resolve()
         profile_path = fixture_profiles / args.a2_profile_name
         if (profile_path.is_symlink() or not profile_path.is_dir()
@@ -501,6 +504,15 @@ def main():
                 'SEMREH_A2_DEFAULT_SENTINEL': args.a2_default_sentinel,
             })
             method = 'testOptInProductionNonDefaultProfileOwnsFirstControlAndSessionsSidebarLoad'
+            test_class = 'LongChatScrollUITests'
+        if args.a3_organizer_ui:
+            target['EnvironmentVariables'].update({
+                'SEMREH_A3_ORGANIZER_UI': '1',
+                'SEMREH_A2_PROFILE_NAME': args.a2_profile_name,
+                'SEMREH_A2_SELECTED_SENTINEL': args.a2_selected_sentinel,
+                'SEMREH_A2_DEFAULT_SENTINEL': args.a2_default_sentinel,
+            })
+            method = 'testOptInProductionLocalOrganizerCRUDInSessionsAndControl'
             test_class = 'LongChatScrollUITests'
     target['OnlyTestIdentifiers'] = [test_class + '/' + method]
     # Generated build artifact only; no project/scheme or personal configuration changes.

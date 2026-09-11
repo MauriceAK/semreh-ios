@@ -21,6 +21,10 @@ final class AppShellNavigationTests: XCTestCase {
         XCTAssertNotEqual(AppShellSurface.control.title, "Control Center")
     }
 
+    func testProductionSessionsAndControlEnableTheLocalOrganizer() {
+        XCTAssertTrue(AppShellOrganizerPolicy.projectsEnabled)
+    }
+
     func testNestedControlDestinationHidesBothShellBarsAndResetsOnReentry() {
         var navigationState = ControlNavigationState()
 

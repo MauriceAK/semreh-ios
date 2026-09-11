@@ -40,6 +40,121 @@ final class LongChatScrollUITests: XCTestCase {
     private let uncertaintyAllowIdentifier = "direct-prompt-uncertainty-allow-new-message"
 
     @MainActor
+    func testOptInProductionLocalOrganizerCRUDInSessionsAndControl() throws {
+        continueAfterFailure = false
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("A3 production organizer UI smoke is simulator-only.")
+        #endif
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SEMREH_A3_ORGANIZER_UI"] == "1" else {
+            throw XCTSkip("A3 production organizer UI smoke is opt-in.")
+        }
+        guard environment["SEMREH_SLICE2_UI_LIVE"] == "1",
+              environment["SEMREH_SLICE1_HTTPS"] == "1",
+              environment["SEMREH_SLICE2_UI_BACKEND_MODE"] == "stock",
+              environment["SEMREH_SLICE2_UI_BACKEND_SHA"] == stockBackendSHA,
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == stockCredentialsPath,
+              environment["SEMREH_SLICE2_TOOL_CWD"] == stockToolCwd,
+              let profile = environment["SEMREH_A2_PROFILE_NAME"], !profile.isEmpty,
+              profile != "default",
+              let selectedSentinel = environment["SEMREH_A2_SELECTED_SENTINEL"], !selectedSentinel.isEmpty,
+              let defaultSentinel = environment["SEMREH_A2_DEFAULT_SENTINEL"], !defaultSentinel.isEmpty
+        else {
+            XCTFail("A3 opt-in fixture data must identify the exact stock HTTPS fixture, non-default profile, and sentinels.")
+            return
+        }
+
+        let credentials = try readCredentials(at: stockCredentialsPath)
+        let suffix = UUID().uuidString.prefix(8)
+        let createdName = "A3 Group \(suffix)"
+        let renamedName = "A3 Renamed \(suffix)"
+        let app = XCUIApplication()
+        app.terminate()
+        app.launchArguments = []
+        app.launch()
+        defer { clearPasteboard() }
+
+        prepareNormalSignIn(app: app)
+        let welcome = app.staticTexts["Control Semreh from iPhone or iPad."]
+        if !app.textFields["onboarding-server-url"].exists {
+            XCTAssertTrue(welcome.waitForExistence(timeout: 15), "Normal sign-out must return to Welcome.")
+            let existingServer = app.buttons["Already have a server?"]
+            XCTAssertTrue(existingServer.waitForExistence(timeout: 5))
+            existingServer.tap()
+        }
+        let serverURL = app.textFields["onboarding-server-url"]
+        XCTAssertTrue(serverURL.waitForExistence(timeout: 5))
+        replacePublicText(serverURL, with: approvedLiveOrigin, app: app)
+        app.buttons["Test Connection"].tap()
+        let username = app.textFields["onboarding-username"]
+        let password = app.secureTextFields["onboarding-password"]
+        XCTAssertTrue(username.waitForExistence(timeout: 30))
+        XCTAssertTrue(password.waitForExistence(timeout: 5))
+        replacePublicText(username, with: credentials.username, app: app)
+        pasteSecret(credentials.password, into: password, app: app)
+        app.buttons["Connect"].tap()
+        dismissKnownPasswordSavePrompt(app: app)
+        waitForPostLoginDestination(app: app)
+
+        defer {
+            attachScreenshot(named: "a3-organizer-final")
+            attachAccessibilitySnapshot(named: "a3-organizer-final-accessibility", app: app)
+        }
+
+        app.buttons["Sessions"].tap()
+        XCTAssertTrue(app.staticTexts[selectedSentinel].waitForExistence(timeout: 20),
+                      "Sessions must show the selected-profile sentinel before organizer interaction.")
+        XCTAssertFalse(app.staticTexts[defaultSentinel].exists,
+                       "Sessions must not show the default-profile sentinel.")
+        let expandSessions = app.buttons["Expand projects"]
+        XCTAssertTrue(expandSessions.waitForExistence(timeout: 10))
+        expandSessions.tap()
+        XCTAssertTrue(app.buttons["Collapse projects"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons[createdName].exists, "The synthetic group must be absent before creation.")
+        XCTAssertFalse(app.buttons[renamedName].exists, "The synthetic renamed group must be absent before creation.")
+
+        app.buttons["Add project"].tap()
+        XCTAssertTrue(app.navigationBars["New Project"].waitForExistence(timeout: 5))
+        let newName = app.textFields["Project name"]
+        XCTAssertTrue(newName.waitForExistence(timeout: 5))
+        newName.tap()
+        newName.typeText(createdName)
+        app.buttons["Save"].tap()
+        XCTAssertTrue(app.buttons[createdName].waitForExistence(timeout: 10))
+
+        app.buttons["Control"].tap()
+        let controlExpand = app.buttons["Expand projects"]
+        if controlExpand.waitForExistence(timeout: 3) { controlExpand.tap() }
+        XCTAssertTrue(app.buttons[createdName].waitForExistence(timeout: 10))
+        app.buttons["Project actions for \(createdName)"].tap()
+        XCTAssertTrue(app.buttons["Rename Project"].waitForExistence(timeout: 5))
+        app.buttons["Rename Project"].tap()
+        XCTAssertTrue(app.navigationBars["Rename Project"].waitForExistence(timeout: 5))
+        replacePublicText(app.textFields["Project name"], with: renamedName, app: app)
+        app.buttons["Save"].tap()
+        XCTAssertTrue(app.buttons[renamedName].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.buttons[createdName].exists)
+
+        app.terminate()
+        app.launch()
+        waitForPostLoginDestination(app: app)
+        app.buttons["Control"].tap()
+        let relaunchExpand = app.buttons["Expand projects"]
+        if relaunchExpand.waitForExistence(timeout: 3) { relaunchExpand.tap() }
+        XCTAssertTrue(app.buttons[renamedName].waitForExistence(timeout: 10),
+                      "The renamed local group must persist across one process relaunch.")
+
+        app.buttons["Project actions for \(renamedName)"].tap()
+        XCTAssertTrue(app.buttons["Delete Project"].waitForExistence(timeout: 5))
+        app.buttons["Delete Project"].tap()
+        let deleteDialog = app.sheets["Delete project?"]
+        XCTAssertTrue(deleteDialog.waitForExistence(timeout: 5))
+        deleteDialog.buttons["Delete"].tap()
+        XCTAssertFalse(app.buttons[renamedName].waitForExistence(timeout: 3),
+                       "UI cleanup must remove the synthetic local group.")
+    }
+
+    @MainActor
     func testOptInProductionNonDefaultProfileOwnsFirstControlAndSessionsSidebarLoad() throws {
         continueAfterFailure = false
         #if !targetEnvironment(simulator)
@@ -633,8 +748,8 @@ final class LongChatScrollUITests: XCTestCase {
         app.buttons["Control"].tap()
         XCTAssertTrue(app.staticTexts["Control"].firstMatch.waitForExistence(timeout: 15))
         XCTAssertFalse(app.alerts["Session Action Failed"].exists)
-        XCTAssertFalse(app.staticTexts["Projects"].waitForExistence(timeout: 2),
-                       "The normal startup path must not expose a failed Projects section.")
+        XCTAssertTrue(app.buttons["Expand projects"].waitForExistence(timeout: 10),
+                      "The normal Control path must expose the local Projects organizer.")
         app.buttons["Sessions"].tap()
         XCTAssertTrue(newSession.waitForExistence(timeout: 15))
         newSession.tap()
