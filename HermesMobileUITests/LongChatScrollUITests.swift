@@ -97,13 +97,29 @@ final class LongChatScrollUITests: XCTestCase {
             let tab = app.buttons[tabName]
             assertHittable(tab, timeout: 15, message: "The production shell must expose \(tabName).")
             tab.tap()
-            XCTAssertTrue(app.staticTexts[profile].waitForExistence(timeout: 15),
-                          "\(tabName) must display the fixture's active non-default profile.")
-            XCTAssertTrue(app.staticTexts[selectedSentinel].waitForExistence(timeout: 20),
-                          "\(tabName) must publish the selected-profile-only row on its first load.")
-            XCTAssertFalse(app.staticTexts[defaultSentinel].exists,
-                           "\(tabName) must never publish the default-profile sentinel.")
-            attachScreenshot(named: "a2-\(tabName.lowercased())-owned-profile-first-load")
+            do {
+                let evidenceName = "a2-\(tabName.lowercased())-owned-profile-first-load"
+                defer {
+                    attachScreenshot(named: evidenceName)
+                    attachAccessibilitySnapshot(named: "\(evidenceName)-accessibility", app: app)
+                }
+
+                XCTAssertTrue(app.staticTexts[selectedSentinel].waitForExistence(timeout: 20),
+                              "\(tabName) must publish the selected-profile-only row on its first load.")
+                XCTAssertFalse(app.staticTexts[defaultSentinel].exists,
+                               "\(tabName) must never publish the default-profile sentinel.")
+
+                let profileDisclosure = app.buttons["Expand active profile picker"]
+                XCTAssertTrue(profileDisclosure.waitForExistence(timeout: 15),
+                              "\(tabName) must expose the collapsed active-profile disclosure.")
+                profileDisclosure.tap()
+
+                let activeProfile = app.buttons.matching(
+                    NSPredicate(format: "label BEGINSWITH %@", "Active profile, \(profile),")
+                ).firstMatch
+                XCTAssertTrue(activeProfile.waitForExistence(timeout: 15),
+                              "\(tabName) must identify the fixture profile as active without changing it.")
+            }
         }
     }
 
