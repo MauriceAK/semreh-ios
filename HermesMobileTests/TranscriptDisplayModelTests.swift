@@ -476,7 +476,13 @@ final class TranscriptMessageTests: XCTestCase {
             encoding: .utf8
         )
 
-        XCTAssertTrue(source.contains("liveReasoningText: liveReasoningText"))
+        XCTAssertTrue(source.contains(
+            "let groups = Self.reasoningDisplayGroups(\n" +
+            "            messages: messages,\n" +
+            "            messageOffset: messagesOffset,\n" +
+            "            archivedGroups: completedReasoningGroups\n" +
+            "        )"
+        ))
         XCTAssertTrue(source.contains("archivedGroups: completedReasoningGroups"))
         XCTAssertFalse(source.contains("reasoningDisplayGroups(messages: messages, liveReasoningText:"))
     }

@@ -27,7 +27,6 @@ actor APIClient {
     /// `APIClient`s are created ad hoc and discarded (#277).
     private let ownedSessions: [URLSession]
     private let decoder: JSONDecoder
-    private let encoder: JSONEncoder
     /// Read when building each request so live edits apply without rebuilding the
     /// client. Defaults to the process-wide store; tests inject a fixed list (#255).
     /// Internal, not private, because the upload and transcribe extensions build
@@ -68,10 +67,6 @@ actor APIClient {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         self.decoder = decoder
-
-        let encoder = JSONEncoder()
-        encoder.keyEncodingStrategy = .convertToSnakeCase
-        self.encoder = encoder
     }
 
     deinit {
@@ -84,25 +79,6 @@ actor APIClient {
         }
     }
 
-    func send<Response: Decodable>(
-        endpoint: Endpoint,
-        method: String
-    ) async throws -> Response {
-        let data = try await sendData(endpoint: endpoint, method: method, encodedBody: nil)
-        return try decode(Response.self, from: data)
-    }
-
-    func send<Response: Decodable, Body: Encodable>(
-        endpoint: Endpoint,
-        method: String,
-        body: Body?,
-        timeout: TimeInterval? = nil
-    ) async throws -> Response {
-        let encodedBody = try body.map { try encoder.encode($0) }
-        let data = try await sendData(endpoint: endpoint, method: method, encodedBody: encodedBody, timeout: timeout)
-        return try decode(Response.self, from: data)
-    }
-
     func decode<Response: Decodable>(_ type: Response.Type, from data: Data) throws -> Response {
         do {
             return try decoder.decode(Response.self, from: data)
@@ -111,97 +87,9 @@ actor APIClient {
         }
     }
 
-    func sendData(
-        endpoint: Endpoint,
-        method: String
-    ) async throws -> Data {
-        try await sendData(endpoint: endpoint, method: method, encodedBody: nil)
-    }
-
-    func sendData<Body: Encodable>(
-        endpoint: Endpoint,
-        method: String,
-        body: Body?
-    ) async throws -> Data {
-        let encodedBody = try body.map { try encoder.encode($0) }
-        return try await sendData(endpoint: endpoint, method: method, encodedBody: encodedBody)
-    }
-
-    func sendData(
-        endpoint: Endpoint,
-        method: String,
-        encodedBody: Data?,
-        timeout: TimeInterval? = nil
-    ) async throws -> Data {
-        try await sendDataReturningResponse(
-            endpoint: endpoint,
-            method: method,
-            encodedBody: encodedBody,
-            timeout: timeout
-        ).0
-    }
-
-    /// Same request/error contract as `sendData`, but also returns the
-    /// `HTTPURLResponse` so callers can read response headers (e.g. the
-    /// `Content-Disposition` filename on `GET /api/sessions/{id}/export`).
-    ///
-    /// `accept` overrides the default `application/json` Accept header for
-    /// endpoints whose 2xx response is a file download rather than JSON.
-    func sendDataReturningResponse(
-        endpoint: Endpoint,
-        method: String,
-        encodedBody: Data?,
-        timeout: TimeInterval? = nil,
-        accept: String = "application/json"
-    ) async throws -> (Data, HTTPURLResponse) {
-        var request = URLRequest(url: endpoint.url(relativeTo: baseURL))
-        request.httpMethod = method
-        request.cachePolicy = .reloadIgnoringLocalCacheData
-        // Slow server work (e.g. LLM commit-message generation) needs more than the
-        // 60s session default, so callers can widen the per-request timeout.
-        if let timeout { request.timeoutInterval = timeout }
-        // Custom headers first, then built-ins so Accept/Content-Type always win.
-        customHeaderProvider().apply(to: &request)
-        request.setValue(accept, forHTTPHeaderField: "Accept")
-
-        if let encodedBody {
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = encodedBody
-        }
-
-        let data: Data
-        let response: URLResponse
-        do {
-            (data, response) = try await session.data(for: request)
-        } catch {
-            throw APIError.network(underlying: error)
-        }
-
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw APIError.http(statusCode: -1, body: nil)
-        }
-
-        if httpResponse.statusCode == 401 {
-            throw APIError.unauthorized
-        }
-
-        guard (200..<300).contains(httpResponse.statusCode) else {
-            throw APIError.http(
-                statusCode: httpResponse.statusCode,
-                body: String(data: data, encoding: .utf8)
-            )
-        }
-
-        return (data, httpResponse)
-    }
-
-    /// Direct-Hermes transport kept separate from the legacy endpoint transport.
-    ///
-    /// The legacy path maps every HTTP 401 to `APIError.unauthorized`, which is
-    /// intentionally not suitable for the direct auth contract: password-login
-    /// uses 401 for invalid credentials, while protected routes use structured
-    /// 401 bodies for an expired session. Direct callers opt into that narrower
-    /// classification explicitly.
+    /// Direct-Hermes request boundary. Password login uses HTTP 401 for invalid
+    /// credentials, while protected routes use structured 401 bodies for an
+    /// expired session, so callers opt into that narrower classification.
     func sendDirectData(
         path: String,
         method: String,
@@ -253,24 +141,6 @@ actor APIClient {
         }
 
         return data
-    }
-
-    func boundedData(
-        endpoint: Endpoint,
-        maximumBytes: Int,
-        accept: String = "*/*"
-    ) async throws -> (Data, HTTPURLResponse) {
-        var request = URLRequest(url: endpoint.url(relativeTo: baseURL))
-        request.httpMethod = "GET"
-        request.cachePolicy = .reloadIgnoringLocalCacheData
-        customHeaderProvider().apply(to: &request)
-        request.setValue(accept, forHTTPHeaderField: "Accept")
-        return try await boundedData(
-            for: request,
-            using: session,
-            mapsUnauthorized: true,
-            maximumBytes: maximumBytes
-        )
     }
 
     func boundedData(

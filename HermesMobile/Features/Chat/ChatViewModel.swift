@@ -349,7 +349,6 @@ final class ChatViewModel {
     private(set) var savedFollowingLatest = true
     private var savedVisibleMessageID: String?
     private let restoreStore: TranscriptRestoreStore
-    private let liveRunBookmarkStore: LiveRunBookmarkStore
     private let localOrganizerStore: LocalOrganizerStore
 
     var transcriptRestoreTarget: ChatTranscriptRestoreTarget {
@@ -975,7 +974,6 @@ final class ChatViewModel {
         self.listenRemoteControlCenter = listenRemoteControlCenter ?? ListenRemoteControlController()
         self.userDefaults = userDefaults
         self.restoreStore = TranscriptRestoreStore(defaults: userDefaults)
-        self.liveRunBookmarkStore = LiveRunBookmarkStore(defaults: userDefaults)
         self.localOrganizerStore = LocalOrganizerStore(defaults: userDefaults)
         let restorePoint = restoreStore.load(server: server, sessionID: session.sessionId ?? session.id)
         savedFollowingLatest = restorePoint.followingLatest
@@ -2257,12 +2255,6 @@ final class ChatViewModel {
         await pendingStreamingScrollTriggerTask?.value
     }
 
-    private struct ActiveStreamMessageMerge {
-        let messages: [ChatMessage]
-        let streamingAssistantMessageID: String?
-        let usedSnapshotMessagesOffset: Bool
-    }
-
     var selectedModelID: String? {
         currentModel
     }
@@ -3129,134 +3121,6 @@ final class ChatViewModel {
         return max(0, messageCount - loadedMessageCount)
     }
 
-    nonisolated private static func mergingLoadedMessages(
-        _ loadedMessages: [ChatMessage],
-        withActiveStreamSnapshot snapshot: ActiveChatStreamSnapshot
-    ) -> ActiveStreamMessageMerge {
-        guard !snapshot.messages.isEmpty else {
-            return ActiveStreamMessageMerge(
-                messages: loadedMessages,
-                streamingAssistantMessageID: latestAssistantMessageID(in: loadedMessages),
-                usedSnapshotMessagesOffset: false
-            )
-        }
-
-        guard let snapshotAssistantMessageID = snapshot.streamingAssistantMessageID,
-              let snapshotAssistant = snapshot.messages.first(where: { $0.messageId == snapshotAssistantMessageID })
-        else {
-            if loadedMessages.isEmpty {
-                return ActiveStreamMessageMerge(
-                    messages: snapshot.messages,
-                    streamingAssistantMessageID: latestAssistantMessageID(in: snapshot.messages),
-                    usedSnapshotMessagesOffset: true
-                )
-            }
-
-            return ActiveStreamMessageMerge(
-                messages: loadedMessages,
-                streamingAssistantMessageID: latestAssistantMessageID(in: loadedMessages),
-                usedSnapshotMessagesOffset: false
-            )
-        }
-
-        guard !loadedMessages.isEmpty else {
-            return ActiveStreamMessageMerge(
-                messages: snapshot.messages,
-                streamingAssistantMessageID: snapshotAssistant.messageId,
-                usedSnapshotMessagesOffset: true
-            )
-        }
-
-        var mergedMessages = loadedMessages
-        let latestUserIndex = mergedMessages.lastIndex { $0.role == "user" }
-        let assistantSearchRange: Range<Int>
-        if let latestUserIndex {
-            assistantSearchRange = mergedMessages.index(after: latestUserIndex)..<mergedMessages.endIndex
-        } else {
-            assistantSearchRange = mergedMessages.startIndex..<mergedMessages.endIndex
-        }
-
-        if let assistantIndex = assistantSearchRange.reversed().first(where: { mergedMessages[$0].role == "assistant" }) {
-            let loadedAssistant = mergedMessages[assistantIndex]
-            mergedMessages[assistantIndex] = ChatMessage(
-                role: loadedAssistant.role,
-                content: reconciledActiveStreamContent(
-                    loadedContent: loadedAssistant.content,
-                    snapshotContent: snapshotAssistant.content
-                ),
-                timestamp: loadedAssistant.timestamp ?? snapshotAssistant.timestamp,
-                messageId: loadedAssistant.messageId ?? snapshotAssistant.messageId,
-                name: loadedAssistant.name ?? snapshotAssistant.name,
-                toolCallId: loadedAssistant.toolCallId ?? snapshotAssistant.toolCallId,
-                toolUseId: loadedAssistant.toolUseId ?? snapshotAssistant.toolUseId,
-                toolCalls: loadedAssistant.toolCalls ?? snapshotAssistant.toolCalls,
-                contentParts: loadedAssistant.contentParts ?? snapshotAssistant.contentParts,
-                reasoning: loadedAssistant.reasoning ?? snapshotAssistant.reasoning,
-                attachments: loadedAssistant.attachments ?? snapshotAssistant.attachments,
-                turnTps: loadedAssistant.turnTps ?? snapshotAssistant.turnTps
-            )
-            return ActiveStreamMessageMerge(
-                messages: mergedMessages,
-                streamingAssistantMessageID: mergedMessages[assistantIndex].messageId,
-                usedSnapshotMessagesOffset: false
-            )
-        }
-
-        if !messagesContainEquivalentMessage(mergedMessages, candidate: snapshotAssistant) {
-            mergedMessages.append(snapshotAssistant)
-        }
-
-        return ActiveStreamMessageMerge(
-            messages: mergedMessages,
-            streamingAssistantMessageID: snapshotAssistant.messageId,
-            usedSnapshotMessagesOffset: false
-        )
-    }
-
-    nonisolated private static func reconciledActiveStreamContent(
-        loadedContent: String?,
-        snapshotContent: String?
-    ) -> String? {
-        let loaded = loadedContent ?? ""
-        let snapshot = snapshotContent ?? ""
-
-        if loaded.isEmpty {
-            return snapshotContent
-        }
-
-        if snapshot.isEmpty {
-            return loadedContent
-        }
-
-        if loaded.hasPrefix(snapshot) {
-            return loadedContent
-        }
-
-        if snapshot.hasPrefix(loaded) {
-            return snapshotContent
-        }
-
-        return loadedContent
-    }
-
-    nonisolated private static func messagesContainEquivalentMessage(
-        _ messages: [ChatMessage],
-        candidate: ChatMessage
-    ) -> Bool {
-        if let candidateID = candidate.messageId,
-           messages.contains(where: { $0.messageId == candidateID }) {
-            return true
-        }
-
-        let candidateContent = candidate.content?.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard candidateContent?.isEmpty == false else { return false }
-
-        return messages.contains { message in
-            message.role == candidate.role &&
-                message.content?.trimmingCharacters(in: .whitespacesAndNewlines) == candidateContent
-        }
-    }
-
     nonisolated private static func hasAssistantResponseAfterLatestUser(in messages: [ChatMessage]) -> Bool {
         guard !messages.isEmpty else { return false }
 
@@ -3315,21 +3179,6 @@ final class ChatViewModel {
                 return false
             }
         }
-    }
-
-    nonisolated private static func remappedAnchorMessageID(
-        _ anchorMessageID: String?,
-        from snapshotStreamingAssistantMessageID: String?,
-        to restoredStreamingAssistantMessageID: String?
-    ) -> String? {
-        guard let anchorMessageID,
-              anchorMessageID == snapshotStreamingAssistantMessageID,
-              snapshotStreamingAssistantMessageID != restoredStreamingAssistantMessageID
-        else {
-            return anchorMessageID
-        }
-
-        return restoredStreamingAssistantMessageID ?? anchorMessageID
     }
 
     nonisolated private static func isLocalOptimisticUserMessage(_ message: ChatMessage) -> Bool {
@@ -3394,10 +3243,6 @@ final class ChatViewModel {
         }
 
         messages.insert(localMessage, at: insertionIndex)
-    }
-
-    nonisolated private static func latestAssistantMessageID(in messages: [ChatMessage]) -> String? {
-        messages.last(where: { $0.role == "assistant" })?.messageId
     }
 
     nonisolated private static func latestAssistantAnchorID(in messages: [ChatMessage], messageOffset: Int?) -> String? {
@@ -4640,103 +4485,6 @@ final class ChatViewModel {
 
     private var hasRunningLiveToolCall: Bool {
         liveToolCalls.contains { !$0.isCompleted }
-    }
-
-    private func saveActiveStreamSnapshotIfNeeded() {
-        guard !usesDirectGateway else { return }
-        guard let sessionID,
-              let activeStreamID,
-              !hasCompletedCurrentResponse
-        else { return }
-
-        ActiveChatStreamSnapshotStore.shared.save(
-            ActiveChatStreamSnapshot(
-                messages: messages,
-                messagesOffset: messagesOffset,
-                displayTitle: displayTitle,
-                completedToolCallGroups: completedToolCallGroups,
-                completedReasoningGroups: completedReasoningGroups,
-                liveToolCalls: liveToolCalls,
-                liveReasoningText: liveReasoningText,
-                activeStreamLastEventID: nil,
-                streamingAssistantMessageID: streamingAssistantMessageID,
-                toolCallAnchorMessageID: toolCallAnchorMessageID,
-                reasoningAnchorMessageID: reasoningAnchorMessageID,
-                contextWindowSnapshot: contextWindowSnapshot,
-                localAttachmentPreviews: attachmentCoordinator.localAttachmentPreviews,
-                pinnedLocalNotices: pinnedLocalNotices
-            ),
-            server: server,
-            sessionID: sessionID,
-            streamID: activeStreamID
-        )
-        liveRunBookmarkStore.save(
-            LiveRunBookmark(
-                streamID: activeStreamID,
-                lastEventID: nil,
-                liveReasoningText: liveReasoningText,
-                streamingAssistantMessageID: streamingAssistantMessageID,
-                liveToolCalls: liveToolCalls
-            ),
-            server: server,
-            sessionID: sessionID
-        )
-    }
-
-    @discardableResult
-    private func restoreActiveStreamSnapshotIfAvailable(streamID: String) -> String? {
-        guard let sessionID,
-              let snapshot = ActiveChatStreamSnapshotStore.shared.snapshot(
-                server: server,
-                sessionID: sessionID,
-                streamID: streamID
-              )
-        else { return nil }
-
-        let merge = Self.mergingLoadedMessages(messages, withActiveStreamSnapshot: snapshot)
-        withBatchedTranscriptDerivedState {
-            messages = merge.messages
-            if merge.usedSnapshotMessagesOffset {
-                messagesOffset = snapshot.messagesOffset
-            }
-        }
-        if merge.usedSnapshotMessagesOffset {
-            hasOlderMessages = snapshot.messagesOffset > 0
-        }
-        displayTitle = displayTitle.isEmpty ? snapshot.displayTitle : displayTitle
-        setCompletedToolCallGroups(snapshot.completedToolCallGroups)
-        completedReasoningGroups = snapshot.completedReasoningGroups
-        liveToolCalls = snapshot.liveToolCalls
-        liveReasoningText = snapshot.liveReasoningText
-        streamingAssistantMessageID = merge.streamingAssistantMessageID ?? snapshot.streamingAssistantMessageID
-        toolCallAnchorMessageID = Self.remappedAnchorMessageID(
-            snapshot.toolCallAnchorMessageID,
-            from: snapshot.streamingAssistantMessageID,
-            to: streamingAssistantMessageID
-        )
-        reasoningAnchorMessageID = Self.remappedAnchorMessageID(
-            snapshot.reasoningAnchorMessageID,
-            from: snapshot.streamingAssistantMessageID,
-            to: streamingAssistantMessageID
-        )
-        contextWindowSnapshot = contextWindowSnapshot ?? snapshot.contextWindowSnapshot
-        attachmentCoordinator.mergeLocalAttachmentPreviews(snapshot.localAttachmentPreviews)
-        pinnedLocalNotices = snapshot.pinnedLocalNotices
-        scheduleStreamingScrollTrigger()
-        return snapshot.activeStreamLastEventID
-    }
-
-    private func removeActiveStreamSnapshot(streamID: String?) {
-        guard let sessionID,
-              let streamID
-        else { return }
-
-        ActiveChatStreamSnapshotStore.shared.remove(
-            server: server,
-            sessionID: sessionID,
-            streamID: streamID
-        )
-        liveRunBookmarkStore.remove(server: server, sessionID: sessionID)
     }
 
     /// Sends a direct approval only for the identity captured from the

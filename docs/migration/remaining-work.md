@@ -33,6 +33,23 @@ failures. Selected exported logs passed known-credential audit. Deterministic
 model responses, not external-provider or long-duration/device performance proof.
 Existing F1 and V1/N1 polish candidates remain separate and unmerged.
 
+### First post-stabilization cleanup
+
+Lifecycle fix is committed as `d846514`. The following cleanup removes 387 net
+production lines without changing reachable behavior: 252 lines of zero-caller
+private snapshot/replay helpers and their exclusively owned bookmark state;
+135 lines of unused Endpoint request wrappers, orphan encoder, and obsolete
+`/api/transcribe` representation. Active `/api/audio/transcribe`, media compatibility,
+direct auth/redirect/size policies, and snapshot test-isolation hooks remain.
+One obsolete source-string assertion now checks the actual historical-reasoning
+recompute call instead of the removed snapshot constructor.
+
+Root coherent native batch: `lifecycle-20260911-cleanup-unit-v2.xcresult`,
+2100 passed/0 failed/14 intentional opt-in skips. The first cleanup run's obsolete
+assertion failure remains recorded. Live UI evidence above is from `d846514`;
+deleted paths have no callers, so no redundant full UI matrix was rerun for
+cleanup. No physical-device performance claim, feature removal, or blanket rewrite.
+
 September 8 checkpoint. Binding scope: `semreh_tui_gateway_v3_execution_plan.md`;
 details/evidence: `slice3-tasks.md`, `slice3-verification.md`, `slice4-tasks.md`.
 This is the current dispatch checklist, not a new architecture or acceptance waiver.
@@ -86,7 +103,9 @@ phone; these successor patches are not installed or accepted yet.
   pilot report; no automatic ended-chat wake-up or unattended-readiness claim.
 - [ ] C1 — Remove proven-dead migration snapshots/bookmarks/polling/no-op state,
   then unreachable replay paths; preserve active recovery and compatibility.
-- [ ] C2 — Remove unused legacy APIClient request stack and obsolete transcribe
+  September11 subset complete: zero-caller private snapshot chain removed;
+  shared compatibility types/test helpers and other proposals retained.
+- [x] C2 — Remove unused legacy APIClient request stack and obsolete transcribe
   endpoint; preserve active direct transport/media behavior.
 - [ ] C3 — Consolidate duplicated bounded direct REST transport policy without
   changing redirect/auth/size limits or endpoint-specific error semantics.

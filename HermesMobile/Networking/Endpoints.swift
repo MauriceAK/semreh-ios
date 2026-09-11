@@ -2,14 +2,11 @@ import Foundation
 
 enum Endpoint {
     case media(sessionID: String, path: String)
-    case transcribe
 
     var path: String {
         switch self {
         case .media:
             return "/api/media"
-        case .transcribe:
-            return "/api/transcribe"
         }
     }
 
@@ -20,8 +17,6 @@ enum Endpoint {
                 URLQueryItem(name: "session_id", value: sessionID),
                 URLQueryItem(name: "path", value: path)
             ]
-        default:
-            return []
         }
     }
 
