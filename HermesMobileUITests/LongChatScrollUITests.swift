@@ -104,10 +104,16 @@ final class LongChatScrollUITests: XCTestCase {
                     attachAccessibilitySnapshot(named: "\(evidenceName)-accessibility", app: app)
                 }
 
-                XCTAssertTrue(app.staticTexts[selectedSentinel].waitForExistence(timeout: 20),
-                              "\(tabName) must publish the selected-profile-only row on its first load.")
-                XCTAssertFalse(app.staticTexts[defaultSentinel].exists,
-                               "\(tabName) must never publish the default-profile sentinel.")
+                // Control exposes utility/profile rows, not chat history.
+                // Check first-load session ownership only on the Sessions surface,
+                // before interacting with any profile picker.
+                if tabName == "Sessions" {
+                    XCTAssertTrue(app.staticTexts[selectedSentinel].waitForExistence(timeout: 20),
+                                  "Sessions must publish the selected-profile-only row on its first load.")
+                    XCTAssertFalse(app.staticTexts[defaultSentinel].exists,
+                                   "Sessions must not publish the default-profile sentinel.")
+                    continue
+                }
 
                 let profileDisclosure = app.buttons["Expand active profile picker"]
                 XCTAssertTrue(profileDisclosure.waitForExistence(timeout: 15),
