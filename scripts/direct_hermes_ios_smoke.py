@@ -50,6 +50,9 @@ def main():
     parser.add_argument('--interim-heading-ui', action='store_true')
     parser.add_argument('--a2-profile-ui', action='store_true')
     parser.add_argument('--a3-organizer-ui', action='store_true')
+    parser.add_argument('--polish-restore-ui', action='store_true')
+    parser.add_argument('--polish-thinking-ui', action='store_true')
+    parser.add_argument('--polish-send-jump-ui', action='store_true')
     parser.add_argument('--a2-profile-name')
     parser.add_argument('--a2-selected-sentinel')
     parser.add_argument('--a2-default-sentinel')
@@ -61,6 +64,18 @@ def main():
     parser.add_argument('--stock-backend', action='store_true')
     parser.add_argument('--cookie-phase', choices=['login', 'restore', 'logout'])
     args = parser.parse_args()
+    polish_phases = {
+        'polish_restore_ui': '--polish-restore-ui',
+        'polish_thinking_ui': '--polish-thinking-ui',
+        'polish_send_jump_ui': '--polish-send-jump-ui',
+    }
+    selected_polish = [name for name in polish_phases if getattr(args, name)]
+    if selected_polish:
+        allowed = {*polish_phases, 'slice2_ui', 'https', 'stock_backend'}
+        if (len(selected_polish) != 1 or not args.slice2_ui or not args.https
+                or not args.stock_backend
+                or any(value for name, value in vars(args).items() if name not in allowed)):
+            parser.error('polish UI phase requires exactly one fixed polish selector and the stock HTTPS UI phase')
     if args.a2_profile_ui or args.a3_organizer_ui:
         allowed = {'a2_profile_ui', 'a3_organizer_ui', 'a2_profile_name', 'a2_selected_sentinel',
                    'a2_default_sentinel', 'slice2_ui', 'https', 'stock_backend'}
@@ -513,6 +528,18 @@ def main():
                 'SEMREH_A2_DEFAULT_SENTINEL': args.a2_default_sentinel,
             })
             method = 'testOptInProductionLocalOrganizerCRUDInSessionsAndControl'
+            test_class = 'LongChatScrollUITests'
+        if args.polish_restore_ui:
+            target['EnvironmentVariables']['SEMREH_POLISH_RESTORE_UI'] = '1'
+            method = 'testOptInProductionColdRestoreNeverShowsBlankAndReopensKnownChat'
+            test_class = 'LongChatScrollUITests'
+        if args.polish_thinking_ui:
+            target['EnvironmentVariables']['SEMREH_POLISH_THINKING_UI'] = '1'
+            method = 'testOptInProductionThinkingPlacementSurvivesStopResendAndReopen'
+            test_class = 'DirectSkillUITests'
+        if args.polish_send_jump_ui:
+            target['EnvironmentVariables']['SEMREH_POLISH_SEND_JUMP_UI'] = '1'
+            method = 'testOptInProductionSendKeepsNewPromptAndStreamingResponseVisible'
             test_class = 'LongChatScrollUITests'
     target['OnlyTestIdentifiers'] = [test_class + '/' + method]
     # Generated build artifact only; no project/scheme or personal configuration changes.

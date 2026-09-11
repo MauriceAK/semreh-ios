@@ -35,6 +35,47 @@ def load_seed_module():
 
 
 class IOSSmokeGuardTests(unittest.TestCase):
+    def test_polish_ui_phases_require_exactly_one_standalone_stock_phase(self):
+        message = 'polish UI phase requires exactly one fixed polish selector and the stock HTTPS UI phase'
+        for arguments in (
+            ['--polish-restore-ui'],
+            ['--https', '--stock-backend', '--slice2-ui', '--polish-restore-ui', '--polish-thinking-ui'],
+            ['--https', '--stock-backend', '--slice2-ui', '--polish-send-jump-ui', '--interim-heading-ui'],
+        ):
+            with self.subTest(arguments=arguments):
+                self.assertRejected(arguments, message)
+
+    def test_polish_ui_phases_export_exact_targets_and_environment_guards(self):
+        cases = (
+            ('--polish-restore-ui', 'SEMREH_POLISH_RESTORE_UI',
+             'LongChatScrollUITests/testOptInProductionColdRestoreNeverShowsBlankAndReopensKnownChat'),
+            ('--polish-thinking-ui', 'SEMREH_POLISH_THINKING_UI',
+             'DirectSkillUITests/testOptInProductionThinkingPlacementSurvivesStopResendAndReopen'),
+            ('--polish-send-jump-ui', 'SEMREH_POLISH_SEND_JUMP_UI',
+             'LongChatScrollUITests/testOptInProductionSendKeepsNewPromptAndStreamingResponseVisible'),
+        )
+        for flag, environment_key, selector in cases:
+            with self.subTest(flag=flag), tempfile.TemporaryDirectory() as temporary:
+                smoke = load_smoke_module()
+                products = Path(temporary).resolve()
+                source = products / 'HermesMobileUIVerification_HermesMobileUIVerification_iphonesimulator.xctestrun'
+                source.write_bytes(plistlib.dumps({'TestConfigurations': [{
+                    'TestTargets': [{'BlueprintName': 'HermesMobileUITests'}],
+                }]}))
+                with patch.object(smoke, 'PRODUCTS', products), \
+                        patch.object(smoke, 'RUNTIME', products / 'runtime'), \
+                        patch.object(smoke, 'validate') as validate, \
+                        patch.object(sys, 'argv', [str(SCRIPT), '--https', '--stock-backend',
+                                                   '--slice2-ui', flag]):
+                    with redirect_stdout(StringIO()): smoke.main()
+                validate.assert_called_once_with()
+                target = plistlib.loads(
+                    (products / 'SemrehSlice2LiveUI.xctestrun').read_bytes()
+                )['TestConfigurations'][0]['TestTargets'][0]
+                self.assertEqual(target['OnlyTestIdentifiers'], [selector])
+                self.assertEqual(target['EnvironmentVariables'][environment_key], '1')
+                self.assertEqual(target['EnvironmentVariables']['SEMREH_SLICE2_UI_BACKEND_MODE'], 'stock')
+
     def test_a2_profile_ui_rejects_missing_or_unowned_fixture_data(self):
         message = ('--a2-profile-ui requires the stock HTTPS UI phase plus bounded '
                    'non-default profile and sentinel values')
