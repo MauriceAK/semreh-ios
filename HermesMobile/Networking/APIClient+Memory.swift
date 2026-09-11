@@ -138,21 +138,11 @@ extension APIClient {
             request.httpBody = body
             request.setValue(contentType, forHTTPHeaderField: "Content-Type")
         }
-        let protectedSession = URLSession(configuration: session.configuration,
-            delegate: DirectHermesRedirectGuard(origin: baseURL), delegateQueue: nil)
-        defer { protectedSession.invalidateAndCancel() }
-        do {
-            let (data, response) = try await boundedData(for: request, using: protectedSession,
-                mapsUnauthorized: false, maximumBytes: 4 * 1024 * 1024)
-            guard response.mimeType?.lowercased() == "application/json" else { throw DirectMemoryError.invalidDocument }
-            return data
-        } catch let APIError.http(statusCode, body) {
-            let data = Data((body ?? "").utf8)
-            if DirectHermesAuthFailureClassifier.isSessionExpired(statusCode: statusCode, body: data) {
-                throw DirectHermesAuthError.sessionExpired
-            }
-            throw DirectHermesRequestError.from(statusCode: statusCode, body: data)
-        }
+        let (data, response) = try await boundedSameOriginDirectData(
+            for: request, maximumBytes: 4 * 1024 * 1024
+        )
+        guard response.mimeType?.lowercased() == "application/json" else { throw DirectMemoryError.invalidDocument }
+        return data
     }
 }
 

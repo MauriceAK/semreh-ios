@@ -149,20 +149,10 @@ extension APIClient {
         let maximumEncodedBytes = GatewayMediaResponseAdapter.encodedEnvelopeMaximumBytes(
             for: maximumDecodedBytes
         )
-        let protectedSession = URLSession(configuration: session.configuration,
-            delegate: DirectHermesRedirectGuard(origin: baseURL), delegateQueue: nil)
-        defer { protectedSession.invalidateAndCancel() }
         let data: Data
-        do {
-            (data, _) = try await boundedData(for: request, using: protectedSession,
-                mapsUnauthorized: false, maximumBytes: maximumEncodedBytes)
-        } catch let APIError.http(statusCode, body) {
-            let bytes = Data((body ?? "").utf8)
-            if DirectHermesAuthFailureClassifier.isSessionExpired(statusCode: statusCode, body: bytes) {
-                throw DirectHermesAuthError.sessionExpired
-            }
-            throw DirectHermesRequestError.from(statusCode: statusCode, body: bytes)
-        }
+        (data, _) = try await boundedSameOriginDirectData(
+            for: request, maximumBytes: maximumEncodedBytes
+        )
         let envelope = try decode(DirectHermesManagedFileEnvelope.self, from: data)
         guard let dataURL = envelope.dataURL?.trimmingCharacters(in: .whitespacesAndNewlines),
               !dataURL.isEmpty

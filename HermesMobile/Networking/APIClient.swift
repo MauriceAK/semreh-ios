@@ -215,6 +215,50 @@ actor APIClient {
         return (data, httpResponse)
     }
 
+    /// Executes a prepared same-origin request with the caller's cookie/session
+    /// configuration while refusing every off-origin redirect. Callers retain
+    /// their endpoint-specific response caps, MIME checks, and error mapping.
+    func boundedSameOriginData(
+        for request: URLRequest,
+        maximumBytes: Int,
+        maximumBytesForResponse: ((HTTPURLResponse) -> Int)? = nil
+    ) async throws -> (Data, HTTPURLResponse) {
+        let protectedSession = URLSession(
+            configuration: session.configuration,
+            delegate: DirectHermesRedirectGuard(origin: baseURL),
+            delegateQueue: nil
+        )
+        defer { protectedSession.invalidateAndCancel() }
+        return try await boundedData(
+            for: request,
+            using: protectedSession,
+            mapsUnauthorized: false,
+            maximumBytes: maximumBytes,
+            maximumBytesForResponse: maximumBytesForResponse
+        )
+    }
+
+    /// Applies the standard direct-Hermes auth and endpoint error translation.
+    /// Callers with additional status semantics (such as cron's partial-save
+    /// receipt) use `boundedSameOriginData` and keep their local handling.
+    func boundedSameOriginDirectData(
+        for request: URLRequest,
+        maximumBytes: Int
+    ) async throws -> (Data, HTTPURLResponse) {
+        do {
+            return try await boundedSameOriginData(for: request, maximumBytes: maximumBytes)
+        } catch let APIError.http(statusCode, body) {
+            let data = Data((body ?? "").utf8)
+            if DirectHermesAuthFailureClassifier.isSessionExpired(
+                statusCode: statusCode,
+                body: data
+            ) {
+                throw DirectHermesAuthError.sessionExpired
+            }
+            throw DirectHermesRequestError.from(statusCode: statusCode, body: data)
+        }
+    }
+
     func downloadData(
         from url: URL,
         using session: URLSession,

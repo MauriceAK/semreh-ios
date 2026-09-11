@@ -1,15 +1,6 @@
 import Foundation
 import ImageIO
 
-struct UploadResponse: Codable {
-    let filename: String?
-    let path: String?
-    let size: Int?
-    let mime: String?
-    let isImage: Bool?
-    let error: String?
-}
-
 struct PendingAttachment: Identifiable, Equatable {
     let id = UUID()
     let name: String

@@ -49,19 +49,9 @@ extension APIClient {
         request.cachePolicy = .reloadIgnoringLocalCacheData
         customHeaderProvider().apply(to: &request)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        let protected = URLSession(configuration: session.configuration,
-            delegate: DirectHermesRedirectGuard(origin: baseURL), delegateQueue: nil)
-        defer { protected.invalidateAndCancel() }
-        do {
-            return try await boundedData(for: request, using: protected, mapsUnauthorized: false,
-                maximumBytes: 8 * 1_024 * 1_024).0
-        } catch let APIError.http(statusCode, body) {
-            let bytes = Data((body ?? "").utf8)
-            if DirectHermesAuthFailureClassifier.isSessionExpired(statusCode: statusCode, body: bytes) {
-                throw DirectHermesAuthError.sessionExpired
-            }
-            throw DirectHermesRequestError.from(statusCode: statusCode, body: bytes)
-        }
+        return try await boundedSameOriginDirectData(
+            for: request, maximumBytes: 8 * 1_024 * 1_024
+        ).0
     }
 
     private func directGitRoot(sessionID: String, profile: String) async throws -> String? {

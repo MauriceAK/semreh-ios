@@ -68,21 +68,11 @@ extension APIClient {
 
         // Retain injected session configuration and cookies while refusing
         // redirects that could forward spoken text or credentials off-origin.
-        let protectedSession = URLSession(configuration: session.configuration,
-            delegate: DirectHermesRedirectGuard(origin: baseURL), delegateQueue: nil)
-        defer { protectedSession.invalidateAndCancel() }
         let data: Data
         let response: HTTPURLResponse
-        do {
-            (data, response) = try await boundedData(for: request, using: protectedSession,
-                mapsUnauthorized: false, maximumBytes: DirectTTSAudioResponse.maximumEnvelopeBytes)
-        } catch let APIError.http(statusCode, body) {
-            let errorData = Data((body ?? "").utf8)
-            if DirectHermesAuthFailureClassifier.isSessionExpired(statusCode: statusCode, body: errorData) {
-                throw DirectHermesAuthError.sessionExpired
-            }
-            throw DirectHermesRequestError.from(statusCode: statusCode, body: errorData)
-        }
+        (data, response) = try await boundedSameOriginDirectData(
+            for: request, maximumBytes: DirectTTSAudioResponse.maximumEnvelopeBytes
+        )
         guard response.mimeType?.lowercased() == "application/json" else {
             throw APIError.decoding(underlying: DirectTTSAudioResponse.DecodeError.invalidEnvelope)
         }

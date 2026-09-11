@@ -38,20 +38,10 @@ extension APIClient {
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         customHeaderProvider().apply(to: &request)
-        let protected = URLSession(configuration: session.configuration,
-            delegate: DirectHermesRedirectGuard(origin: baseURL), delegateQueue: nil)
-        defer { protected.invalidateAndCancel() }
         let data: Data
-        do {
-            data = try await boundedData(for: request, using: protected, mapsUnauthorized: false,
-                maximumBytes: maximumBytes).0
-        } catch let APIError.http(statusCode, body) {
-            let bytes = Data((body ?? "").utf8)
-            if DirectHermesAuthFailureClassifier.isSessionExpired(statusCode: statusCode, body: bytes) {
-                throw DirectHermesAuthError.sessionExpired
-            }
-            throw DirectHermesRequestError.from(statusCode: statusCode, body: bytes)
-        }
+        data = try await boundedSameOriginDirectData(
+            for: request, maximumBytes: maximumBytes
+        ).0
         try Task.checkCancellation()
         let rendering = Task.detached {
             guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],

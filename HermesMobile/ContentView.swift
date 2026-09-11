@@ -3,7 +3,6 @@ import SwiftUI
 struct ContentView: View {
     @Bindable var authManager: AuthManager
     @Environment(\.scenePhase) private var scenePhase
-    @AppStorage(ResponseCompletionNotifications.isEnabledKey) private var isResponseCompletionNotificationsEnabled = false
     @State private var pendingSharedImport: SharedImport?
     @State private var pendingDeepLinkedSessionID: String?
     @State private var pendingNewChatRequest: NewChatRequest?
@@ -27,13 +26,6 @@ struct ContentView: View {
                 // Warm launch: the intent set the deep link after the view appeared.
                 drainPendingIntentDeepLink()
             }
-            .task {
-                // #246: on cold launch, end any Live Activity left "running" by a
-                // run that finished while the app was terminated. #248: this is also
-                // the one pass allowed to fire a recent run's "response complete"
-                // notification, since a relaunch means it finished while not active.
-                await reconcileOrphanedLiveActivities(notifiesOnCompletion: true)
-            }
             .onChange(of: scenePhase) {
                 if scenePhase == .background {
                     needsGatewayForegroundRecovery = true
@@ -41,9 +33,6 @@ struct ContentView: View {
                 }
                 guard scenePhase == .active else { return }
                 importPendingSharedDraftIfAvailable()
-                // #248: the foreground pass stays silent — the in-session completion
-                // paths own notifications while the app is alive.
-                Task { await reconcileOrphanedLiveActivities(notifiesOnCompletion: false) }
                 guard needsGatewayForegroundRecovery else { return }
                 needsGatewayForegroundRecovery = false
                 Task { await recoverActiveGatewayOnForeground() }
@@ -53,12 +42,6 @@ struct ContentView: View {
     private func recoverActiveGatewayOnForeground() async {
         guard case .loggedIn(let server) = authManager.state else { return }
         _ = await OpenChatSessionStore.shared.recoverGatewayOnForeground(for: server)
-    }
-
-    private func reconcileOrphanedLiveActivities(notifiesOnCompletion: Bool) async {
-        // The WebUI reconciler queries process-local stream IDs. Direct Hermes
-        // recovery is owned by the active runtime; mobile orphan reconciliation
-        // is integrated with durable identities in Slice 3, never via this route.
     }
 
     @ViewBuilder

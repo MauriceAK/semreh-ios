@@ -72,12 +72,10 @@ extension APIClient {
         customHeaderProvider().apply(to: &request)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         if let body { request.httpBody = body; request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
-        let protectedSession = URLSession(configuration: session.configuration,
-            delegate: DirectHermesRedirectGuard(origin: baseURL), delegateQueue: nil)
-        defer { protectedSession.invalidateAndCancel() }
         do {
-            return try await boundedData(for: request, using: protectedSession,
-                mapsUnauthorized: false, maximumBytes: 2 * 1024 * 1024).0
+            return try await boundedSameOriginData(
+                for: request, maximumBytes: 2 * 1024 * 1024
+            ).0
         } catch let APIError.http(statusCode, body) {
             let bytes = Data((body ?? "").utf8)
             if statusCode == 424,

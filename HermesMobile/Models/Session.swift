@@ -263,45 +263,6 @@ struct SessionSummary: Decodable, Equatable, Hashable, Identifiable {
         matchType = nil
     }
 
-    /// Mirrors all stored fields so local title patches preserve session-list metadata.
-    /// Update this when `SessionSummary` gains a new stored property.
-    func replacingTitle(with title: String) -> SessionSummary {
-        SessionSummary(
-            sessionId: sessionId,
-            title: title,
-            workspace: workspace,
-            model: model,
-            modelProvider: modelProvider,
-            reasoningEffort: reasoningEffort,
-            messageCount: messageCount,
-            createdAt: createdAt,
-            updatedAt: updatedAt,
-            lastMessageAt: lastMessageAt,
-            pinned: pinned,
-            archived: archived,
-            projectId: projectId,
-            profile: profile,
-            inputTokens: inputTokens,
-            outputTokens: outputTokens,
-            estimatedCost: estimatedCost,
-            activeStreamId: activeStreamId,
-            isStreaming: isStreaming,
-            isCliSession: isCliSession,
-            userMessageCount: userMessageCount,
-            hasPendingUserMessage: hasPendingUserMessage,
-            pendingStartedAt: pendingStartedAt,
-            worktreePath: worktreePath,
-            sourceTag: sourceTag,
-            rawSource: rawSource,
-            sessionSource: sessionSource,
-            sourceLabel: sourceLabel,
-            parentSessionId: parentSessionId,
-            relationshipType: relationshipType,
-            readOnly: readOnly,
-            isReadOnly: isReadOnly,
-            matchType: matchType
-        )
-    }
 }
 
 extension SessionSummary {
