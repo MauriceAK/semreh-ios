@@ -206,23 +206,3 @@ struct LocalOrganizerStore {
         return trimmed.isEmpty ? nil : trimmed
     }
 }
-
-extension SessionSummary {
-    func withLocalOrganizerGroupID(_ groupID: String?) -> SessionSummary {
-        SessionSummary(
-            sessionId: sessionId, title: title, workspace: workspace, model: model,
-            modelProvider: modelProvider, reasoningEffort: reasoningEffort,
-            messageCount: messageCount, createdAt: createdAt, updatedAt: updatedAt,
-            lastMessageAt: lastMessageAt, pinned: pinned, archived: archived,
-            projectId: groupID, profile: profile, inputTokens: inputTokens,
-            outputTokens: outputTokens, estimatedCost: estimatedCost,
-            activeStreamId: activeStreamId, isStreaming: isStreaming,
-            isCliSession: isCliSession, userMessageCount: userMessageCount,
-            hasPendingUserMessage: hasPendingUserMessage, pendingStartedAt: pendingStartedAt,
-            worktreePath: worktreePath, sourceTag: sourceTag, rawSource: rawSource,
-            sessionSource: sessionSource, sourceLabel: sourceLabel,
-            parentSessionId: parentSessionId, relationshipType: relationshipType,
-            readOnly: readOnly, isReadOnly: isReadOnly, matchType: matchType
-        )
-    }
-}

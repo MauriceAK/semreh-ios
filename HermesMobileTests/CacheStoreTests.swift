@@ -597,44 +597,72 @@ final class CacheStoreTests: XCTestCase {
         XCTAssertNotNil(cachedMessages.first { $0.messageId == "message-\(CachePolicy.maxMessages)" })
     }
 
-    func testClearAllDeletesCachedSessionsAndMessages() throws {
+    func testMaintenanceExpiresExactTTLBoundaryIncludingPendingRowsAcrossServers() throws {
         let context = try makeContext()
-        let serverURL = URL(string: "https://example.test")!
-        let cachedAt = Date(timeIntervalSince1970: 1_770_000_000)
-        let response = try decodeSessions("""
-        {
-          "sessions": [
-            {"session_id": "abc123", "title": "Cached", "last_message_at": 1770000000, "archived": false}
-          ]
+        let now = Date(timeIntervalSince1970: 1_770_000_000)
+        for (index, offset) in [-1.0, 0.0, 1.0].enumerated() {
+            let server = "https://server-\(index).example.test"
+            let cachedAt = now.addingTimeInterval(-CachePolicy.ttl + offset)
+            context.insert(CachedSession(
+                serverURLString: server,
+                session: SessionSummary(sessionId: "session-\(index)", title: "Boundary"),
+                cachedAt: cachedAt
+            ))
+            context.insert(CachedMessage(
+                serverURLString: server,
+                sessionID: "session-\(index)",
+                message: ChatMessage(role: "user", content: "Boundary", timestamp: nil, messageId: "message-\(index)"),
+                sortIndex: 0,
+                cachedAt: cachedAt
+            ))
         }
-        """)
-
-        try CacheStore.cacheSessions(
-            try XCTUnwrap(response.sessions),
-            serverURL: serverURL,
-            in: context,
-            cachedAt: cachedAt
-        )
-
+        // Exercise maintenance without first saving the inserted rows.
         try CacheStore.cacheMessages(
-            [
-                ChatMessage(
-                    role: "user",
-                    content: "Cached message",
-                    timestamp: 1_770_000_000,
-                    messageId: "m1"
-                )
-            ],
-            serverURL: serverURL,
-            sessionID: "abc123",
+            [],
+            serverURL: URL(string: "https://trigger.example.test")!,
+            sessionID: "trigger",
             in: context,
-            cachedAt: cachedAt
+            cachedAt: now
         )
 
-        try CacheStore.clearAll(in: context)
+        XCTAssertEqual(try fetchCachedSessions(in: context).map(\.sessionID), ["session-2"])
+        XCTAssertEqual(try fetchCachedMessages(in: context).map(\.messageId), ["message-2"])
+    }
 
-        XCTAssertTrue(try fetchCachedSessions(in: context).isEmpty)
-        XCTAssertTrue(try fetchCachedMessages(in: context).isEmpty)
+    func testMaintenanceGlobalCapCountsPendingChangesAndExpiresBeforeEviction() throws {
+        let context = try makeContext()
+        let now = Date(timeIntervalSince1970: 1_770_000_000)
+        let trigger = URL(string: "https://trigger.example.test")!
+        for index in 0..<CachePolicy.maxMessages {
+            context.insert(CachedMessage(
+                serverURLString: "https://server-\(index % 2).example.test",
+                sessionID: "shared",
+                message: ChatMessage(role: "user", content: "Fresh", timestamp: Double(index), messageId: "fresh-\(index)"),
+                sortIndex: index,
+                cachedAt: now
+            ))
+        }
+        context.insert(CachedMessage(
+            serverURLString: trigger.absoluteString,
+            sessionID: "expired",
+            message: ChatMessage(role: "user", content: "Expired", timestamp: nil, messageId: "expired"),
+            sortIndex: 0,
+            cachedAt: now.addingTimeInterval(-CachePolicy.ttl)
+        ))
+        try CacheStore.cacheMessages([], serverURL: trigger, sessionID: "trigger", in: context, cachedAt: now)
+        XCTAssertEqual(try fetchCachedMessages(in: context).count, CachePolicy.maxMessages)
+        XCTAssertNotNil(try fetchCachedMessages(in: context).first { $0.messageId == "fresh-0" })
+
+        // An unsaved insertion on a third server must count toward the global cap.
+        try CacheStore.cacheMessages(
+            [ChatMessage(role: "user", content: "New", timestamp: Double(CachePolicy.maxMessages), messageId: "new")],
+            serverURL: trigger, sessionID: "trigger", in: context, cachedAt: now
+        )
+        let messages = try fetchCachedMessages(in: context)
+        XCTAssertEqual(messages.count, CachePolicy.maxMessages)
+        XCTAssertNil(messages.first { $0.messageId == "fresh-0" })
+        XCTAssertNotNil(messages.first { $0.messageId == "fresh-1" })
+        XCTAssertNotNil(messages.first { $0.messageId == "new" })
     }
 
     func testCacheMessagesRoundTripsAttachments() throws {

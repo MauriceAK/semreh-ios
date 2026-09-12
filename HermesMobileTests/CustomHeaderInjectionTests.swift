@@ -239,7 +239,7 @@ final class CustomHeaderAPIClientInjectionTests: APIClientTestCase {
             return try self.ok(request, body: "binary")
         }
 
-        _ = try? await client.downloadData(
+        _ = try await client.downloadDataReturningResponse(
             from: URL(string: "https://example.test/api/media?path=/x.png")!,
             using: session,
             mapsUnauthorized: false
@@ -256,7 +256,7 @@ final class CustomHeaderAPIClientInjectionTests: APIClientTestCase {
             return try self.ok(request, body: "img")
         }
 
-        _ = try? await client.downloadData(
+        _ = try await client.downloadDataReturningResponse(
             from: URL(string: "https://third-party.example/image.png")!,
             using: session,
             mapsUnauthorized: false
@@ -566,7 +566,7 @@ final class CrossOriginRedirectHeaderTests: XCTestCase {
     // AC4: end-to-end via a redirect-emitting URLProtocol — the production guard,
     // wired into the client's session, strips the custom header so the actual
     // second hop on the wire (cross-origin) never carries it. Exercises the real
-    // `downloadData` path: the header is applied on the same-origin first hop and
+    // `downloadDataReturningResponse` path: the header is applied on the same-origin first hop and
     // removed when the server redirects off-origin.
     func testStripsCustomHeaderEndToEndOnURLProtocolRedirect() async throws {
         RedirectingMockURLProtocol.redirect = .init(
@@ -584,7 +584,7 @@ final class CrossOriginRedirectHeaderTests: XCTestCase {
             delegateQueue: nil
         )
 
-        _ = try? await client.downloadData(
+        _ = try await client.downloadDataReturningResponse(
             from: try XCTUnwrap(URL(string: "https://example.test/api/media?path=/x.png")),
             using: session,
             mapsUnauthorized: false

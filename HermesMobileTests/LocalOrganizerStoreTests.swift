@@ -59,4 +59,50 @@ final class LocalOrganizerStoreTests: XCTestCase {
             XCTAssertEqual(defaults.data(forKey: "localOrganizer.v1"), bytes)
         }
     }
+
+    func testGroupReplacementAndRemovalPreserveEveryOtherSummaryField() {
+        let original = metadataSummary()
+        XCTAssertEqual(original.withLocalOrganizerGroupID("new-group"), metadataSummary(groupID: "new-group"))
+        XCTAssertEqual(original.withLocalOrganizerGroupID(nil), metadataSummary(groupID: nil))
+        XCTAssertEqual(original, metadataSummary(), "Copying must not mutate the source value")
+    }
+
+    func testListMetadataReplacementPreservesEveryOtherSummaryField() {
+        let original = metadataSummary()
+        XCTAssertEqual(
+            original.replacingListMetadata(title: "Renamed", pinned: false, archived: true),
+            metadataSummary(title: "Renamed", pinned: false, archived: true)
+        )
+        XCTAssertEqual(original, metadataSummary())
+    }
+
+    func testListMetadataNilExplicitlyClearsOnlyRequestedFields() {
+        XCTAssertEqual(
+            metadataSummary().replacingListMetadata(title: nil, pinned: nil, archived: nil),
+            metadataSummary(title: nil, pinned: nil, archived: nil)
+        )
+        let empty = SessionSummary()
+        XCTAssertEqual(empty.withLocalOrganizerGroupID(nil), empty)
+        XCTAssertEqual(empty.replacingListMetadata(title: nil, pinned: nil, archived: nil), empty)
+    }
+
+    private func metadataSummary(
+        title: String? = "Original",
+        pinned: Bool? = true,
+        archived: Bool? = false,
+        groupID: String? = "local-group"
+    ) -> SessionSummary {
+        SessionSummary(
+            sessionId: "session", title: title, workspace: "/workspace", model: "model",
+            modelProvider: "provider", reasoningEffort: "high", messageCount: 7,
+            createdAt: 101, updatedAt: 102, lastMessageAt: 103,
+            pinned: pinned, archived: archived, projectId: groupID, profile: "work",
+            inputTokens: 104, outputTokens: 105, estimatedCost: 0.106,
+            activeStreamId: "stream", isStreaming: true, isCliSession: false,
+            userMessageCount: 3, hasPendingUserMessage: true, pendingStartedAt: 107,
+            worktreePath: "/worktree", sourceTag: "tag", rawSource: "raw",
+            sessionSource: "source", sourceLabel: "label", parentSessionId: "parent",
+            relationshipType: "fork", readOnly: false, isReadOnly: true, matchType: "content"
+        )
+    }
 }

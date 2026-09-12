@@ -187,19 +187,6 @@ enum CacheStore {
         try context.save()
     }
 
-    @MainActor
-    static func clearAll(in context: ModelContext) throws {
-        for cachedSession in try context.fetch(FetchDescriptor<CachedSession>()) {
-            context.delete(cachedSession)
-        }
-
-        for cachedMessage in try context.fetch(FetchDescriptor<CachedMessage>()) {
-            context.delete(cachedMessage)
-        }
-
-        try context.save()
-    }
-
     /// Deletes only the cached sessions and messages belonging to `serverURL`,
     /// leaving every other configured server's offline data intact (#18). Backs
     /// the Settings "Clear Offline Cache" action (active server) and the purge
@@ -239,18 +226,20 @@ enum CacheStore {
 
     @MainActor
     private static func deleteExpiredSessions(in context: ModelContext, now: Date) throws {
-        let descriptor = FetchDescriptor<CachedSession>()
-        let expiredSessions = try context.fetch(descriptor).filter { $0.expiresAt <= now }
-        for session in expiredSessions {
+        let descriptor = FetchDescriptor<CachedSession>(
+            predicate: #Predicate { $0.expiresAt <= now }
+        )
+        for session in try context.fetch(descriptor) {
             context.delete(session)
         }
     }
 
     @MainActor
     private static func deleteExpiredMessages(in context: ModelContext, now: Date) throws {
-        let descriptor = FetchDescriptor<CachedMessage>()
-        let expiredMessages = try context.fetch(descriptor).filter { $0.expiresAt <= now }
-        for message in expiredMessages {
+        let descriptor = FetchDescriptor<CachedMessage>(
+            predicate: #Predicate { $0.expiresAt <= now }
+        )
+        for message in try context.fetch(descriptor) {
             context.delete(message)
         }
     }
@@ -258,6 +247,9 @@ enum CacheStore {
     @MainActor
     private static func evictOldestMessagesIfNeeded(in context: ModelContext) throws {
         let descriptor = FetchDescriptor<CachedMessage>()
+        // Include pending inserts/deletes from reconciliation and expiration.
+        // Most writes fit within the cap and need no full message fetch or sort.
+        guard try context.fetchCount(descriptor) > CachePolicy.maxMessages else { return }
         let messages = try context.fetch(descriptor)
         let overflowCount = messages.count - CachePolicy.maxMessages
         guard overflowCount > 0 else { return }
@@ -295,43 +287,39 @@ enum CacheStore {
 
 private extension SessionSummary {
     init(cachedSession: CachedSession) {
-        sessionId = cachedSession.sessionID
-        title = cachedSession.title
-        workspace = cachedSession.workspace
-        model = cachedSession.model
-        modelProvider = cachedSession.modelProvider
-        reasoningEffort = nil
-        messageCount = cachedSession.messageCount
-        createdAt = cachedSession.createdAt
-        updatedAt = cachedSession.updatedAt
-        lastMessageAt = cachedSession.lastMessageAt
-        pinned = cachedSession.pinned
-        archived = cachedSession.archived
-        projectId = cachedSession.projectId
-        profile = cachedSession.profile
-        inputTokens = cachedSession.inputTokens
-        outputTokens = cachedSession.outputTokens
-        estimatedCost = cachedSession.estimatedCost
         // These fields came from the removed WebUI list projection and describe
         // process-local state that cannot still be authoritative after a cache
         // restore. Direct Hermes list responses intentionally omit them; current
         // activity is supplied by OpenChatSessionStore's live owner instead.
-        activeStreamId = nil
-        isStreaming = nil
-        isCliSession = cachedSession.isCliSession
-        userMessageCount = cachedSession.userMessageCount
-        hasPendingUserMessage = nil
-        pendingStartedAt = nil
-        worktreePath = cachedSession.worktreePath
-        sourceTag = cachedSession.sourceTag
-        rawSource = cachedSession.rawSource
-        sessionSource = cachedSession.sessionSource
-        sourceLabel = cachedSession.sourceLabel
-        parentSessionId = cachedSession.parentSessionId
-        relationshipType = cachedSession.relationshipType
-        readOnly = cachedSession.readOnly
-        isReadOnly = cachedSession.isReadOnly
-        matchType = nil
+        self.init(
+            sessionId: cachedSession.sessionID,
+            title: cachedSession.title,
+            workspace: cachedSession.workspace,
+            model: cachedSession.model,
+            modelProvider: cachedSession.modelProvider,
+            messageCount: cachedSession.messageCount,
+            createdAt: cachedSession.createdAt,
+            updatedAt: cachedSession.updatedAt,
+            lastMessageAt: cachedSession.lastMessageAt,
+            pinned: cachedSession.pinned,
+            archived: cachedSession.archived,
+            projectId: cachedSession.projectId,
+            profile: cachedSession.profile,
+            inputTokens: cachedSession.inputTokens,
+            outputTokens: cachedSession.outputTokens,
+            estimatedCost: cachedSession.estimatedCost,
+            isCliSession: cachedSession.isCliSession,
+            userMessageCount: cachedSession.userMessageCount,
+            worktreePath: cachedSession.worktreePath,
+            sourceTag: cachedSession.sourceTag,
+            rawSource: cachedSession.rawSource,
+            sessionSource: cachedSession.sessionSource,
+            sourceLabel: cachedSession.sourceLabel,
+            parentSessionId: cachedSession.parentSessionId,
+            relationshipType: cachedSession.relationshipType,
+            readOnly: cachedSession.readOnly,
+            isReadOnly: cachedSession.isReadOnly
+        )
     }
 }
 

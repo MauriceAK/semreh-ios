@@ -120,7 +120,7 @@ struct SessionSummary: Decodable, Equatable, Hashable, Identifiable {
     }
 
     let sessionId: String?
-    let title: String?
+    private(set) var title: String?
     let workspace: String?
     let model: String?
     let modelProvider: String?
@@ -129,9 +129,9 @@ struct SessionSummary: Decodable, Equatable, Hashable, Identifiable {
     let createdAt: Double?
     let updatedAt: Double?
     let lastMessageAt: Double?
-    let pinned: Bool?
-    let archived: Bool?
-    let projectId: String?
+    private(set) var pinned: Bool?
+    private(set) var archived: Bool?
+    private(set) var projectId: String?
     let profile: String?
     let inputTokens: Int?
     let outputTokens: Int?
@@ -266,6 +266,23 @@ struct SessionSummary: Decodable, Equatable, Hashable, Identifiable {
 }
 
 extension SessionSummary {
+    /// Replaces exactly these fields, including nil. Callers resolve any
+    /// revision or fallback policy before constructing the new value.
+    func replacingListMetadata(title: String?, pinned: Bool?, archived: Bool?) -> SessionSummary {
+        var copy = self
+        copy.title = title
+        copy.pinned = pinned
+        copy.archived = archived
+        return copy
+    }
+
+    /// Nil explicitly removes the local group assignment.
+    func withLocalOrganizerGroupID(_ groupID: String?) -> SessionSummary {
+        var copy = self
+        copy.projectId = groupID
+        return copy
+    }
+
     /// Delegated children are identified only by an explicit source marker.
     /// Parent linkage is shared by ordinary forks and compression continuations,
     /// so it must never classify a row as a subagent on its own.

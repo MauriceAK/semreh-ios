@@ -2153,40 +2153,10 @@ final class SessionListViewModel {
         pending: PendingMetadataMutation,
         newerThan revision: Int
     ) -> SessionSummary {
-        SessionSummary(
-            sessionId: session.sessionId,
+        session.replacingListMetadata(
             title: pending.title.flatMap { $0.revision > revision ? $0.value : nil } ?? session.title,
-            workspace: session.workspace,
-            model: session.model,
-            modelProvider: session.modelProvider,
-            reasoningEffort: session.reasoningEffort,
-            messageCount: session.messageCount,
-            createdAt: session.createdAt,
-            updatedAt: session.updatedAt,
-            lastMessageAt: session.lastMessageAt,
             pinned: pending.pinned.flatMap { $0.revision > revision ? $0.value : nil } ?? session.pinned,
-            archived: pending.archived.flatMap { $0.revision > revision ? $0.value : nil } ?? session.archived,
-            projectId: session.projectId,
-            profile: session.profile,
-            inputTokens: session.inputTokens,
-            outputTokens: session.outputTokens,
-            estimatedCost: session.estimatedCost,
-            activeStreamId: session.activeStreamId,
-            isStreaming: session.isStreaming,
-            isCliSession: session.isCliSession,
-            userMessageCount: session.userMessageCount,
-            hasPendingUserMessage: session.hasPendingUserMessage,
-            pendingStartedAt: session.pendingStartedAt,
-            worktreePath: session.worktreePath,
-            sourceTag: session.sourceTag,
-            rawSource: session.rawSource,
-            sessionSource: session.sessionSource,
-            sourceLabel: session.sourceLabel,
-            parentSessionId: session.parentSessionId,
-            relationshipType: session.relationshipType,
-            readOnly: session.readOnly,
-            isReadOnly: session.isReadOnly,
-            matchType: session.matchType
+            archived: pending.archived.flatMap { $0.revision > revision ? $0.value : nil } ?? session.archived
         )
     }
 

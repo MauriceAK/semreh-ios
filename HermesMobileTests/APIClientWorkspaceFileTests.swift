@@ -357,39 +357,48 @@ final class APIClientWorkspaceFileTests: APIClientTestCase {
         }
     }
 
-    func testMediaPreviewRejectsDecodedImageAboveLimit() async throws {
-        let imageData = Data([0x89, 0x50, 0x4E, 0x47])
+    func testMediaDataRejectsDecodedImageAboveProductionLimit() async throws {
+        // Exercise the active API's fixed limit; the encoded envelope still
+        // fits its allowance, so only the decoded-byte check can reject it.
+        let maximumDecodedBytes = 25 * 1_024 * 1_024
+        let imageData = Data(repeating: 0x41, count: maximumDecodedBytes + 1)
         let body = #"{"data_url":"data:image/png;base64,\#(imageData.base64EncodedString())"}"#
         let client = makeClient { request in
             apiTestJSONResponse(body, for: request)
         }
 
         do {
-            _ = try await client.mediaPreviewData(
+            _ = try await client.mediaData(
                 sessionID: "abc123",
-                path: "images/result.png",
-                maximumBytes: imageData.count - 1
+                path: "images/result.png"
             )
             XCTFail("Expected decoded image limit to be enforced.")
         } catch let PreviewDownloadError.responseTooLarge(maximumBytes) {
-            XCTAssertEqual(maximumBytes, imageData.count - 1)
+            XCTAssertEqual(maximumBytes, maximumDecodedBytes)
         }
     }
 
-    func testMediaPreviewBoundsEncodedJSONEnvelopeBeforeDecoding() async throws {
-        let payload = Data(repeating: 0x41, count: 600).base64EncodedString()
-        let body = #"{"data_url":"data:image/png;base64,\#(payload)"}"#
+    func testMediaDataBoundsDeclaredJSONEnvelopeBeforeDecoding() async throws {
+        let maximumDecodedBytes = 25 * 1_024 * 1_024
+        let expectedEnvelopeLimit = ((maximumDecodedBytes + 2) / 3) * 4 + 512
         let client = makeClient { request in
-            apiTestJSONResponse(body, for: request)
+            let response = HTTPURLResponse(
+                url: try XCTUnwrap(request.url),
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: [
+                    "Content-Type": "application/json",
+                    "Content-Length": String(expectedEnvelopeLimit + 1)
+                ]
+            )
+            // Invalid JSON makes a decoding-first implementation fail this test.
+            return (try XCTUnwrap(response), Data("{not-json".utf8))
         }
-        // ceil(1 / 3) * 4 plus the adapter's fixed 512-byte envelope allowance.
-        let expectedEnvelopeLimit = 516
 
         do {
-            _ = try await client.mediaPreviewData(
+            _ = try await client.mediaData(
                 sessionID: "abc123",
-                path: "images/result.png",
-                maximumBytes: 1
+                path: "images/result.png"
             )
             XCTFail("Expected encoded media envelope limit to be enforced.")
         } catch let PreviewDownloadError.responseTooLarge(maximumBytes) {
@@ -397,7 +406,30 @@ final class APIClientWorkspaceFileTests: APIClientTestCase {
         }
     }
 
-    func testMediaPreviewPreservesRawByteLimitForLegacyResponse() async throws {
+    func testMediaDataBoundsStreamedJSONEnvelopeBeforeDecoding() async throws {
+        let maximumDecodedBytes = 25 * 1_024 * 1_024
+        let expectedEnvelopeLimit = ((maximumDecodedBytes + 2) / 3) * 4 + 512
+        let client = makeClient { request in
+            let response = HTTPURLResponse(
+                url: try XCTUnwrap(request.url),
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )
+            // No Content-Length: the incremental body cap must reject this
+            // oversized invalid envelope before JSON decoding is attempted.
+            return (try XCTUnwrap(response), Data(repeating: 0x41, count: expectedEnvelopeLimit + 1))
+        }
+
+        do {
+            _ = try await client.mediaData(sessionID: "abc123", path: "images/result.png")
+            XCTFail("Expected streamed media envelope limit to be enforced.")
+        } catch let PreviewDownloadError.responseTooLarge(maximumBytes) {
+            XCTAssertEqual(maximumBytes, expectedEnvelopeLimit)
+        }
+    }
+
+    func testRemoteTranscriptMediaPreviewBoundsRawBytesWithoutContentLength() async throws {
         let rawData = Data(repeating: 0x41, count: 5)
         let client = makeClient { request in
             let response = HTTPURLResponse(
@@ -410,12 +442,11 @@ final class APIClientWorkspaceFileTests: APIClientTestCase {
         }
 
         do {
-            _ = try await client.mediaPreviewData(
-                sessionID: "abc123",
-                path: "images/result.png",
+            _ = try await client.remoteTranscriptMediaPreviewData(
+                from: try XCTUnwrap(URL(string: "https://example.test/images/result.png")),
                 maximumBytes: 4
             )
-            XCTFail("Expected legacy raw media preview limit to be enforced.")
+            XCTFail("Expected remote raw media preview limit to be enforced.")
         } catch let PreviewDownloadError.responseTooLarge(maximumBytes) {
             XCTAssertEqual(maximumBytes, 4)
         }

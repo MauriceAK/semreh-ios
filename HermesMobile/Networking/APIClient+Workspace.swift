@@ -106,18 +106,6 @@ extension APIClient {
         )
     }
 
-    func mediaPreviewData(
-        sessionID: String,
-        path: String,
-        maximumBytes: Int
-    ) async throws -> Data {
-        try await mediaResponseData(
-            endpoint: .media(sessionID: sessionID, path: path),
-            maximumDecodedBytes: maximumBytes,
-            rawMaximumBytes: maximumBytes
-        )
-    }
-
     /// Reads one absolute path through the authenticated stock managed-files
     /// route. The server owns root/sensitive-file policy; the client only
     /// rejects empty/relative inputs so it never guesses a host path.

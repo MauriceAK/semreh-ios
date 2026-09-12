@@ -259,18 +259,6 @@ actor APIClient {
         }
     }
 
-    func downloadData(
-        from url: URL,
-        using session: URLSession,
-        mapsUnauthorized: Bool
-    ) async throws -> Data {
-        try await downloadDataReturningResponse(
-            from: url,
-            using: session,
-            mapsUnauthorized: mapsUnauthorized
-        ).0
-    }
-
     func downloadDataReturningResponse(
         from url: URL,
         using session: URLSession,
@@ -281,7 +269,7 @@ actor APIClient {
         request.cachePolicy = .reloadIgnoringLocalCacheData
         // Same-origin media (incl. the user's own server via the cookie-less
         // publicMediaSession) traverses the proxy, so it carries the custom
-        // headers. But downloadData also fetches *external* transcript media
+        // headers. This also fetches *external* transcript media
         // (third-party image URLs); those must NOT receive the headers, which may
         // be secrets — that would leak them off-origin. Built-in Accept set after
         // so it wins (#255).
