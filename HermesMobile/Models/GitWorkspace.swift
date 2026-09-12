@@ -280,32 +280,6 @@ struct GitMutationResponse: Decodable, Equatable {
     var resolvedStatus: GitStatus? { git }
 }
 
-/// Response for `commit` (`{ok,commit,status}`) and `commit-selected`
-/// (`{ok,commit,paths,status}`). Tolerant: `status` is decoded from either key.
-struct GitCommitResponse: Decodable, Equatable {
-    let ok: Bool?
-    let commit: String?
-    let paths: [String]?
-    let status: GitStatus?
-    let git: GitStatus?
-
-    var resolvedStatus: GitStatus? { status ?? git }
-    /// Short SHA produced by the commit, trimmed for display.
-    var shortSHA: String? {
-        let trimmed = commit?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return (trimmed?.isEmpty == false) ? trimmed : nil
-    }
-}
-
-/// Response for the (ungated) `commit-message` / `commit-message-selected` endpoints.
-struct GitCommitMessageResponse: Decodable, Equatable {
-    let ok: Bool?
-    let message: String?
-    /// `true` when the diff exceeded the server's 64 KiB prompt limit, so the
-    /// generated message may be partial.
-    let truncated: Bool?
-}
-
 // MARK: - git/diff (per-file unified diff)
 
 struct GitDiffResponse: Decodable, Equatable {

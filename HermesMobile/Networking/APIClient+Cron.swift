@@ -216,33 +216,3 @@ private struct DirectCronDeliveryTargets: Decodable {
     struct Target: Decodable { let id: String?; let name: String? }
     let targets: [Target]?
 }
-
-private struct CronCreateRequest: Encodable {
-    let prompt: String
-    let schedule: String
-    let name: String?
-    let deliver: String?
-    let skills: [String]
-    let model: String?
-    let provider: String?
-    let profile: String?
-    let toastNotifications: Bool
-}
-
-private struct CronUpdateRequest: Encodable {
-    let jobId: String
-    let prompt: String?
-    let schedule: String?
-    let name: String?
-    let deliver: String?
-    let skills: [String]?
-    let model: String?
-    let provider: String?
-    let profile: String?
-    let toastNotifications: Bool?
-}
-
-private struct CronJobIDRequest: Encodable {
-    let jobId: String
-    let reason: String?
-}

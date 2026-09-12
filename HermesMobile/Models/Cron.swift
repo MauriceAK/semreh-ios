@@ -1,38 +1,9 @@
 import Foundation
 
-struct CronJobsResponse: Decodable, Equatable {
-    let jobs: [CronJob]?
-}
-
 struct CronMutationResponse: Decodable, Equatable {
     let ok: Bool?
     let job: CronJob?
     let error: String?
-}
-
-struct CronStatusResponse: Decodable, Equatable {
-    let jobId: String?
-    let running: Bool?
-    let elapsed: Double?
-    let runningJobs: [String: Double]?
-    let error: String?
-
-    enum CodingKeys: String, CodingKey {
-        case jobId
-        case running
-        case elapsed
-        case error
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        jobId = try container.decodeIfPresent(String.self, forKey: .jobId)
-        elapsed = try container.decodeFlexibleDoubleIfPresent(forKey: .elapsed)
-        error = try container.decodeIfPresent(String.self, forKey: .error)
-
-        running = (try? container.decodeIfPresent(Bool.self, forKey: .running)) ?? nil
-        runningJobs = (try? container.decodeIfPresent([String: Double].self, forKey: .running)) ?? nil
-    }
 }
 
 struct CronJob: Decodable, Equatable, Identifiable {
@@ -228,22 +199,6 @@ struct CronRepeat: Decodable, Equatable {
     let completed: Int?
 }
 
-struct CronOutputResponse: Decodable, Equatable {
-    let jobId: String?
-    let outputs: [CronOutputItem]?
-
-    enum CodingKeys: String, CodingKey {
-        case jobId
-        case outputs
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        jobId = try container.decodeIfPresent(String.self, forKey: .jobId)
-        outputs = (try? container.decodeIfPresent([CronOutputItem].self, forKey: .outputs)) ?? nil
-    }
-}
-
 struct CronOutputItem: Decodable, Equatable, Identifiable {
     var id: String { filename ?? UUID().uuidString }
 
@@ -259,23 +214,6 @@ struct CronOutputItem: Decodable, Equatable, Identifiable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         filename = try container.decodeIfPresent(String.self, forKey: .filename)
         content = try container.decodeIfPresent(String.self, forKey: .content)
-    }
-}
-
-struct CronDeliveryOptionsResponse: Decodable, Equatable {
-    let platforms: [CronDeliveryOption]?
-
-    enum CodingKeys: String, CodingKey {
-        case platforms
-    }
-
-    init(platforms: [CronDeliveryOption]?) {
-        self.platforms = platforms
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        platforms = (try? container.decodeIfPresent([CronDeliveryOption].self, forKey: .platforms)) ?? nil
     }
 }
 

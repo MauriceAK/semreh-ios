@@ -26,7 +26,6 @@ final class OpenChatSessionStoreTests: XCTestCase {
 
     override func tearDown() {
         OpenChatSessionStore.shared.resetForTesting()
-        ChatViewModel.resetActiveStreamSnapshotsForTesting()
         MockURLProtocol.requestHandler = nil
         super.tearDown()
     }

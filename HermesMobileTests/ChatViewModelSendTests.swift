@@ -41,7 +41,6 @@ private final class DirectDestructiveTransport: HermesGatewayTransport, @uncheck
 
 final class ChatViewModelSendTests: XCTestCase {
     override func tearDown() {
-        ChatViewModel.resetActiveStreamSnapshotsForTesting()
         MockURLProtocol.requestHandler = nil
         super.tearDown()
     }

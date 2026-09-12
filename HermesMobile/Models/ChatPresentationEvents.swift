@@ -2,16 +2,6 @@ import Foundation
 
 /// Presentation-only payloads shared by direct gateway rendering and any
 /// transport-specific adapters. They deliberately contain no SSE behavior.
-struct TitleStreamEvent: Decodable, Equatable {
-    let sessionId: String?
-    let title: String?
-
-    enum CodingKeys: String, CodingKey {
-        case sessionId = "session_id"
-        case title
-    }
-}
-
 struct ToolStreamEvent: Decodable, Equatable {
     let eventType: String?
     let name: String?

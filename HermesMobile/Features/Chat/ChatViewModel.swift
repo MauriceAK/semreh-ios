@@ -893,7 +893,6 @@ final class ChatViewModel {
     private(set) var listenPlaybackSpeed: ListenPlaybackSpeed
     @ObservationIgnored private var listenPlaybackTicker: Timer?
     private var showsLiveActivityResponseExcerpts: Bool
-    private var hasCompletedCurrentResponse: Bool { directResponseComplete }
     private var isStreamConnectionSuspended: Bool { usesDirectGateway && directRuntime?.state == .disconnected }
     var isActiveStreamConnectionSuspended: Bool { isStreamConnectionSuspended }
     private var hasLoadedSkillSlashSuggestions = false
@@ -915,8 +914,6 @@ final class ChatViewModel {
     /// Background result cards, like BTW cards, are history-independent local
     /// presentation owned by one exact canonical conversation and profile.
     private var backgroundLocalRowScopes: [String: (sessionID: String, profile: String)] = [:]
-    private var latestServerLoadHadAssistantResponseAfterLatestUser = false
-    private var pendingExplicitModelPick = false
 
     init(
         session: SessionSummary,
@@ -2175,10 +2172,6 @@ final class ChatViewModel {
         listenPlaybackScrubTime ?? listenPlaybackElapsedTime
     }
 
-    nonisolated static func resetActiveStreamSnapshotsForTesting() {
-        ActiveChatStreamSnapshotStore.shared.removeAll()
-    }
-
     /// Chat visibility controls reconciliation on the shared direct gateway.
     /// Merely becoming visible does not create a runtime or open a second stream.
     func startSessionEventSync() {
@@ -2240,13 +2233,6 @@ final class ChatViewModel {
         connectionVisibilityTask = nil
         isConnectionVisiblySlow = false
         isLoading = false
-    }
-
-    // Test seam: deterministically await the in-flight coalesced scroll-trigger task
-    // so streaming assertions never depend on the real coalescing window elapsing.
-    // No-op when no trigger is pending.
-    func awaitPendingStreamingScrollTriggerForTesting() async {
-        await pendingStreamingScrollTriggerTask?.value
     }
 
     var selectedModelID: String? {
@@ -2429,20 +2415,6 @@ final class ChatViewModel {
         Self.nonEmpty(sessionID)
     }
 
-    private var requestModelProvider: String? {
-        Self.nonEmpty(currentModelProvider)
-    }
-
-    private func explicitModelPickForChatStart() -> Bool {
-        pendingExplicitModelPick && Self.nonEmpty(currentModel) != nil
-    }
-
-    private func completeExplicitModelPickForChatStart(_ explicitModelPick: Bool) {
-        if explicitModelPick {
-            pendingExplicitModelPick = false
-        }
-    }
-
     func loadComposerConfiguration() async {
         await loadDirectComposerConfiguration()
     }
@@ -2465,11 +2437,6 @@ final class ChatViewModel {
         selectedReasoningEffort = nil
         applyDirectReasoningGating()
         return true
-    }
-
-    /// Reapplies the capability gating from the current direct inventory.
-    func refreshReasoningEffortGating() async {
-        applyDirectReasoningGating()
     }
 
     /// Reloads device-local workspace bookmarks after manager changes.
@@ -3279,16 +3246,6 @@ final class ChatViewModel {
         // matching is the only reliable way to dedupe an optimistic bubble
         // against its reloaded copy. See `identityKey` for the full rationale.
         Set((message.attachments ?? []).compactMap(\.identityKey))
-    }
-
-    private func prepareForNewResponse() {
-        // A response started locally supersedes any transcript refresh that began
-        // while the chat was idle. Invalidate before the start request awaits so a
-        // delayed `/api/session` response cannot replace optimistic/live rows or
-        // clear the new stream ID.
-        messageLoadGeneration &+= 1
-        endConnectionWait()
-        clearCacheFirstMessagePlaceholder()
     }
 
     func sendMessage(_ draft: String, modelContext: ModelContext? = nil) async -> Bool {
@@ -4471,10 +4428,6 @@ final class ChatViewModel {
         } catch { lastError = error; return false }
     }
 
-    private var hasRunningLiveToolCall: Bool {
-        liveToolCalls.contains { !$0.isCompleted }
-    }
-
     /// Sends a direct approval only for the identity captured from the
     /// rendered prompt.
     func respondToApproval(
@@ -5243,17 +5196,6 @@ final class ChatViewModel {
         }
     }
 
-    @discardableResult
-    private func updateTitle(_ payload: TitleStreamEvent) -> Bool {
-        if let payloadSessionID = payload.sessionId, payloadSessionID != sessionID {
-            return false
-        }
-
-        guard let title = payload.title else { return false }
-        applyLiveActivitySessionTitle(title)
-        return true
-    }
-
     private func applyLiveActivitySessionTitle(_ title: String) {
         displayTitle = Self.displayTitle(from: title)
         liveActivityManager.update(.sessionTitle(displayTitle))
@@ -5563,75 +5505,6 @@ final class ChatViewModel {
 
 extension ChatViewModel: ChatAttachmentCoordinatorDelegate {
     var attachmentSessionID: String? { sessionID }
-}
-
-private struct ActiveChatStreamSnapshot: Equatable {
-    let messages: [ChatMessage]
-    let messagesOffset: Int
-    let displayTitle: String
-    let completedToolCallGroups: [ToolCallGroup]
-    let completedReasoningGroups: [ReasoningGroup]
-    let liveToolCalls: [ToolCall]
-    let liveReasoningText: String
-    let activeStreamLastEventID: String?
-    let streamingAssistantMessageID: String?
-    let toolCallAnchorMessageID: String?
-    let reasoningAnchorMessageID: String?
-    let contextWindowSnapshot: ContextWindowSnapshot?
-    let localAttachmentPreviews: [String: [String: Data]]
-    let pinnedLocalNotices: [String]
-}
-
-private struct ActiveChatStreamSnapshotKey: Hashable {
-    let server: String
-    let sessionID: String
-    let streamID: String
-}
-
-private final class ActiveChatStreamSnapshotStore {
-    static let shared = ActiveChatStreamSnapshotStore()
-
-    private let lock = NSLock()
-    private var snapshots: [ActiveChatStreamSnapshotKey: ActiveChatStreamSnapshot] = [:]
-
-    private init() {}
-
-    func save(
-        _ snapshot: ActiveChatStreamSnapshot,
-        server: URL,
-        sessionID: String,
-        streamID: String
-    ) {
-        lock.lock()
-        defer { lock.unlock() }
-        snapshots[key(server: server, sessionID: sessionID, streamID: streamID)] = snapshot
-    }
-
-    func snapshot(server: URL, sessionID: String, streamID: String) -> ActiveChatStreamSnapshot? {
-        lock.lock()
-        defer { lock.unlock() }
-        return snapshots[key(server: server, sessionID: sessionID, streamID: streamID)]
-    }
-
-    func remove(server: URL, sessionID: String, streamID: String) {
-        lock.lock()
-        defer { lock.unlock() }
-        snapshots.removeValue(forKey: key(server: server, sessionID: sessionID, streamID: streamID))
-    }
-
-    func removeAll() {
-        lock.lock()
-        defer { lock.unlock() }
-        snapshots.removeAll()
-    }
-
-    private func key(server: URL, sessionID: String, streamID: String) -> ActiveChatStreamSnapshotKey {
-        ActiveChatStreamSnapshotKey(
-            server: server.absoluteString,
-            sessionID: sessionID,
-            streamID: streamID
-        )
-    }
 }
 
 private struct QueuedSlashMessage {

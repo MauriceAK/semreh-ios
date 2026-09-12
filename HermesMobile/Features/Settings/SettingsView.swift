@@ -1514,30 +1514,6 @@ private struct SettingsFootnote: View {
     }
 }
 
-/// A footnote for inline failures (e.g. the CLI-sessions server write): same
-/// footprint as `SettingsFootnote`, plus a warning icon so it reads as an error.
-private struct SettingsErrorFootnote: View {
-    let text: String
-
-    init(_ text: String) {
-        self.text = text
-    }
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 6) {
-            Image(systemName: "exclamationmark.triangle")
-                .font(AppFont.caption())
-                .foregroundStyle(.orange)
-
-            Text(text)
-                .font(AppFont.caption())
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .accessibilityElement(children: .combine)
-    }
-}
-
 private struct SettingsValueRow<Trailing: View>: View {
     let title: String
     @ViewBuilder let trailing: Trailing

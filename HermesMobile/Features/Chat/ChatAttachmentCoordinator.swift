@@ -120,8 +120,4 @@ final class ChatAttachmentCoordinator {
         localAttachmentPreviews.removeAll()
     }
 
-    func mergeLocalAttachmentPreviews(_ previews: [String: [String: Data]]) {
-        localAttachmentPreviews.merge(previews) { current, _ in current }
-    }
-
 }

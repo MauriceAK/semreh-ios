@@ -3,15 +3,6 @@ import XCTest
 
 /// Contract coverage for presentation payloads shared by direct gateway rendering.
 final class ChatPresentationEventsTests: XCTestCase {
-    func testTitlePayloadPreservesStockSnakeCaseIdentity() throws {
-        let payload = try JSONDecoder().decode(
-            TitleStreamEvent.self,
-            from: Data(#"{"session_id":"abc123","title":"SwiftUI Chat Polish"}"#.utf8)
-        )
-        XCTAssertEqual(payload.sessionId, "abc123")
-        XCTAssertEqual(payload.title, "SwiftUI Chat Polish")
-    }
-
     func testToolPayloadDecodesLossyFieldsAndPreferredStableIdentity() throws {
         let payload = try JSONDecoder().decode(
             ToolStreamEvent.self,
