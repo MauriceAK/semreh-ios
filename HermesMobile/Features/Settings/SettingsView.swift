@@ -34,6 +34,10 @@ struct SettingsView: View {
     @ScaledMetric(relativeTo: .body) private var settingsCardSpacing: CGFloat = 18
     @State private var isConfirmingReconfigure = false
     @State private var didScrollToInitialTarget = false
+    @State private var showsPersonalSettings = false
+    @State private var showsConversationSettings = false
+    @State private var showsServerSettings = false
+    @State private var showsAppSettings = false
     @State private var isPresentingAddServer = false
     @State private var isConfirmingClearCache = false
     @State private var isClearingCache = false
@@ -103,8 +107,15 @@ struct SettingsView: View {
             VStack(spacing: settingsCardSpacing) {
                 if let header {
                     header
+                } else {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Make Semreh yours.").font(.title2.bold())
+                        Text("Your preferences, conversations, and connected servers.")
+                            .font(.subheadline).foregroundStyle(.secondary)
+                    }.frame(maxWidth: .infinity, alignment: .leading)
                 }
 
+                SettingsCategory(title: "Profile & appearance", subtitle: "Identity, theme, and accent", systemImage: "person.crop.circle", isExpanded: $showsPersonalSettings) {
                 SettingsCard(title: String(localized: "Identity")) {
                     SessionIdentitySettingsEditor(
                         displayName: $identityDisplayName,
@@ -113,15 +124,6 @@ struct SettingsView: View {
                         previewColor: SemrehVisualTheme.brandActionColor(for: palette),
                         previewForeground: SemrehVisualTheme.energyForeground(for: palette)
                     )
-                }
-
-                SettingsCard(title: String(localized: "Archived Sessions")) {
-                    NavigationLink {
-                        ArchivedSessionsView(server: server, onAPIError: authManager.handleAPIError)
-                    } label: {
-                        SettingsAccessoryRow(title: String(localized: "Archived Sessions"), systemImage: "archivebox")
-                    }
-                    .buttonStyle(.plain)
                 }
 
                 SettingsCard(title: String(localized: "Appearance")) {
@@ -147,7 +149,9 @@ struct SettingsView: View {
 
                     SettingsFootnote(String(localized: "Apply the active theme accent to these primary buttons."))
                 }
+                }
 
+                SettingsCategory(title: "Chat & sessions", subtitle: "Responses, dictation, alerts, and history", systemImage: "bubble.left.and.bubble.right", isExpanded: $showsConversationSettings) {
                 SettingsCard(title: String(localized: "Interaction")) {
                     SettingsToggleRow(
                         title: String(localized: "Haptic Feedback"),
@@ -421,24 +425,18 @@ struct SettingsView: View {
                     SettingsFootnote(String(localized: "Session visibility is saved on this device for this server."))
                 }
 
-                SettingsCard(title: String(localized: "Siri & Shortcuts")) {
-                    if let settingsURL = URL(string: UIApplication.openSettingsURLString) {
-                        Link(destination: settingsURL) {
-                            SettingsAccessoryRow(
-                                title: String(localized: "Open Semreh Settings"),
-                                systemImage: "gearshape",
-                                accessorySystemImage: "arrow.up.forward"
-                            )
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Open Semreh Settings")
+                SettingsCard(title: String(localized: "Archived Sessions")) {
+                    NavigationLink {
+                        ArchivedSessionsView(server: server, onAPIError: authManager.handleAPIError)
+                    } label: {
+                        SettingsAccessoryRow(title: String(localized: "Archived Sessions"), systemImage: "archivebox")
                     }
-
-                    SettingsFootnote(String(localized: "Run Semreh actions like New Chat from Siri, Spotlight, the Lock Screen, or the iPhone Action button. Open Semreh Settings to manage its Siri & Search options. To assign an action to the Action button, open the iOS Settings app, choose Action Button, then Shortcut, and pick a Semreh action."))
+                    .buttonStyle(.plain)
+                }
                 }
 
+                SettingsCategory(title: "Servers & models", subtitle: "Connections, profiles, providers, and updates", systemImage: "server.rack", isExpanded: $showsServerSettings) {
                 serversCard
-                    .id(SettingsScrollAnchor.servers)
 
                 SettingsCard(title: String(localized: "Active Server")) {
                     HapticButton {
@@ -507,6 +505,25 @@ struct SettingsView: View {
                     serverUpdateNote
                     serverUpdateAction
                 }
+                }
+                .id(SettingsScrollAnchor.servers)
+
+                SettingsCategory(title: "App & maintenance", subtitle: "Shortcuts, support, offline data, and sign out", systemImage: "gearshape", isExpanded: $showsAppSettings) {
+                SettingsCard(title: String(localized: "Siri & Shortcuts")) {
+                    if let settingsURL = URL(string: UIApplication.openSettingsURLString) {
+                        Link(destination: settingsURL) {
+                            SettingsAccessoryRow(
+                                title: String(localized: "Open Semreh Settings"),
+                                systemImage: "gearshape",
+                                accessorySystemImage: "arrow.up.forward"
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Open Semreh Settings")
+                    }
+
+                    SettingsFootnote(String(localized: "Run Semreh actions like New Chat from Siri, Spotlight, the Lock Screen, or the iPhone Action button. Open Semreh Settings to manage its Siri & Search options. To assign an action to the Action button, open the iOS Settings app, choose Action Button, then Shortcut, and pick a Semreh action."))
+                }
 
                 SettingsCard(title: String(localized: "App")) {
                     SettingsInfoRow(title: String(localized: "Version"), value: appVersion)
@@ -566,13 +583,14 @@ struct SettingsView: View {
                         isConfirmingReconfigure = true
                     }
                 }
+                }
             }
             .padding(.horizontal, 16)
             .padding(.top, 18)
             .padding(.bottom, 36)
             .adaptiveReadableContent(maxWidth: AdaptiveReadableContentWidth.secondaryDestination)
         }
-        .background { SemrehBackdrop().ignoresSafeArea() }
+        .background { SemrehVisualTheme.canvas(for: colorScheme, palette: .sand).ignoresSafeArea() }
         .navigationTitle("Settings")
         .task {
             await loadServerSettings()
@@ -680,6 +698,7 @@ struct SettingsView: View {
             // (the avatar's "Manage Servers" → Servers card), not on every
             // re-appear after popping back from a sub-screen (#283).
             guard let initialScrollTarget, !didScrollToInitialTarget else { return }
+            showsServerSettings = true
             didScrollToInitialTarget = true
             DispatchQueue.main.async {
                 proxy.scrollTo(initialScrollTarget, anchor: .top)
@@ -1295,6 +1314,48 @@ private extension UNAuthorizationStatus {
     }
 }
 
+private struct SettingsCategory<Content: View>: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let title: LocalizedStringKey
+    let subtitle: LocalizedStringKey
+    let systemImage: String
+    @Binding var isExpanded: Bool
+    @ViewBuilder let content: Content
+
+    init(title: LocalizedStringKey, subtitle: LocalizedStringKey, systemImage: String, isExpanded: Binding<Bool>, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.subtitle = subtitle
+        self.systemImage = systemImage
+        _isExpanded = isExpanded
+        self.content = content()
+    }
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $isExpanded) {
+            VStack(spacing: 20) { content }
+                .padding(.top, 18)
+                .padding(.bottom, 4)
+        } label: {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: systemImage)
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(SemrehVisualTheme.action(for: colorScheme, palette: .sand))
+                    .frame(width: 34, height: 34)
+                    .background(SemrehVisualTheme.canvas(for: colorScheme, palette: .sand), in: RoundedRectangle(cornerRadius: 10))
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(title).font(.headline).foregroundStyle(.primary)
+                    Text(subtitle).font(.subheadline).foregroundStyle(.secondary)
+                }.fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+            }.padding(.vertical, 4)
+        }
+        .tint(SemrehVisualTheme.action(for: colorScheme, palette: .sand))
+        .padding(16)
+        .background(SemrehVisualTheme.raisedPanel(for: colorScheme, palette: .sand), in: RoundedRectangle(cornerRadius: 22))
+    }
+}
+
 private struct SessionIdentitySettingsEditor: View {
     @ScaledMetric(relativeTo: .caption) private var avatarPreviewSize: CGFloat = 36
 
@@ -1394,7 +1455,6 @@ private struct SettingsTextFieldRow: View {
 
 private struct SettingsCard<Content: View>: View {
     @Environment(\.colorScheme) private var colorScheme
-    @Environment(\.appColorPalette) private var palette
     @ScaledMetric(relativeTo: .body) private var contentSpacing: CGFloat = 12
 
     let title: String
@@ -1410,7 +1470,7 @@ private struct SettingsCard<Content: View>: View {
             Text(title)
                 .textCase(.uppercase)
                 .font(AppFont.caption(weight: .semibold))
-                .foregroundStyle(SemrehVisualTheme.brandAccent(for: colorScheme, palette: palette))
+                .foregroundStyle(SemrehVisualTheme.brandAccent(for: colorScheme, palette: .sand))
                 .padding(.horizontal, 4)
                 .padding(.bottom, 8)
 
@@ -1420,7 +1480,7 @@ private struct SettingsCard<Content: View>: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 14)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .semrehPanel(cornerRadius: 18)
+            .background(SemrehVisualTheme.panel(for: colorScheme, palette: .sand), in: RoundedRectangle(cornerRadius: 18))
         }
     }
 }
