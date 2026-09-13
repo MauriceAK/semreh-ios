@@ -104,15 +104,16 @@ enum SemrehVisualTheme {
         Color(hexRGB: tokens(for: palette).brandActionHex)!
     }
 
-    /// User/prompt bubbles are intentionally a separate semantic role from the
-    /// app chrome: a restrained blue surface with a high-contrast accent label.
+    /// Prompt surfaces coordinate with the accent without saturating the transcript.
     static func promptBubbleBackgroundHex(
         for colorScheme: ColorScheme,
         palette: AppColorPalette = .semreh
     ) -> String {
         switch palette {
-        case .goku, .semreh:
+        case .goku:
             colorScheme == .dark ? "#2FE099" : "#39E89A"
+        case .semreh:
+            colorScheme == .dark ? "#D4B992" : "#E7D3B3"
         case .chatgpt:
             colorScheme == .dark ? "#2DD4A0" : "#43D39E"
         case .midnight:
@@ -131,7 +132,7 @@ enum SemrehVisualTheme {
         case .goku:
             gokuDeepNavyHex
         case .semreh:
-            logoNavyHex
+            "#30251D"
         case .chatgpt:
             "#06281F"
         case .midnight:
@@ -151,7 +152,7 @@ enum SemrehVisualTheme {
         case .goku:
             colorScheme == .dark ? gokuBlueDarkHex : "#5F8FE8"
         case .semreh:
-            logoAquaHex
+            colorScheme == .dark ? "#AC8C63" : "#C6AB83"
         case .chatgpt:
             colorScheme == .dark ? "#62D9B4" : "#19C37D"
         case .midnight:
@@ -259,7 +260,7 @@ enum SemrehVisualTheme {
         increasedContrast: Bool = false,
         palette: AppColorPalette = .semreh
     ) -> Color {
-        action(for: colorScheme, palette: palette).opacity(panelStrokeOpacity(
+        (palette == .semreh ? Color.primary : action(for: colorScheme, palette: palette)).opacity(panelStrokeOpacity(
             for: colorScheme,
             increasedContrast: increasedContrast
         ))
@@ -333,24 +334,24 @@ enum SemrehVisualTheme {
             )
         case .semreh:
             VisualThemeTokens(
-                brandActionHex: logoTealHex,
-                energyHex: logoTealHex,
-                energyForegroundHex: logoNavyHex,
-                actionLightHex: "#006A72",
-                actionDarkHex: logoAquaHex,
-                canvasLightHex: "#F5F8FC",
-                canvasDarkHex: "#0B1B2E",
-                panelLightHex: "#FFFFFF",
-                panelDarkHex: "#122B45",
-                raisedLightHex: "#FBFDFF",
-                raisedDarkHex: "#193A5A",
-                brandAccentLightHex: "#005E64",
-                brandAccentDarkHex: logoAquaHex,
-                accentForegroundLightHex: "#FFFFFF",
-                accentForegroundDarkHex: logoNavyHex,
-                backdropMidLightHex: "#E9F4F5",
-                backdropMidDarkHex: "#0E253B",
-                gradientMidHex: logoAquaHex,
+                brandActionHex: "#D4B992",
+                energyHex: "#D4B992",
+                energyForegroundHex: "#30251D",
+                actionLightHex: "#795334",
+                actionDarkHex: "#D9B98C",
+                canvasLightHex: "#F3E8D5",
+                canvasDarkHex: "#211E1A",
+                panelLightHex: "#FBF2E3",
+                panelDarkHex: "#2C2721",
+                raisedLightHex: "#EADCC5",
+                raisedDarkHex: "#393127",
+                brandAccentLightHex: "#795334",
+                brandAccentDarkHex: "#D9B98C",
+                accentForegroundLightHex: "#FFF9EF",
+                accentForegroundDarkHex: "#30251D",
+                backdropMidLightHex: "#F3E8D5",
+                backdropMidDarkHex: "#211E1A",
+                gradientMidHex: "#B68E60",
             )
         case .chatgpt:
             VisualThemeTokens(
@@ -513,7 +514,9 @@ struct SemrehBackdrop: View {
         ZStack {
             SemrehVisualTheme.canvas(for: colorScheme, palette: palette)
 
-            if !reduceTransparency {
+            // The warm default is a quiet, flat reading surface. Keep the older
+            // decorative backgrounds only for explicitly selected legacy themes.
+            if !reduceTransparency && palette != .semreh {
                 LinearGradient(
                     colors: colorScheme == .dark
                         ? [
@@ -615,11 +618,11 @@ private struct SemrehPanelModifier: ViewModifier {
                     .allowsHitTesting(false)
             }
             .shadow(
-                color: colorScheme == .dark
+                color: palette == .semreh ? .black.opacity(colorScheme == .dark ? 0 : 0.035) : colorScheme == .dark
                     ? SemrehVisualTheme.action(for: .dark, palette: palette).opacity(0.10)
                     : SemrehVisualTheme.brandActionColor(for: palette).opacity(0.07),
-                radius: 16,
-                y: 7
+                radius: palette == .semreh ? 6 : 16,
+                y: palette == .semreh ? 2 : 7
             )
     }
 }

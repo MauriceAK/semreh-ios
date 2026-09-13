@@ -1,9 +1,8 @@
 import Foundation
 
 enum OnboardingFlowPolicy {
-    static let pageCount = 5
-    static let connectPageIndex = 4
-    static let serverGuidancePageIndex = 2
+    static let pageCount = 2
+    static let connectPageIndex = 1
     static let serverGuidanceSteps: [(title: String, detail: String)] = [
         (
             String(localized: "Use first-party Hermes"),
@@ -27,8 +26,6 @@ enum OnboardingFlowPolicy {
         switch page {
         case 0:
             return String(localized: "Get Started")
-        case 1:
-            return String(localized: "Set Up")
         case connectPageIndex:
             return String(localized: "Connect")
         default:
@@ -40,7 +37,7 @@ enum OnboardingFlowPolicy {
         page != connectPageIndex
     }
 
-    static func showsServerShortcut(for page: Int) -> Bool {
-        page < connectPageIndex
+    static func initialPage(hasSavedServer: Bool) -> Int {
+        hasSavedServer ? connectPageIndex : 0
     }
 }

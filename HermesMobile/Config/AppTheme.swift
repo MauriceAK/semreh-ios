@@ -5,6 +5,16 @@ import UserNotifications
 import UIKit
 #endif
 
+/// One rounded type hierarchy for the shell and conversation UI. AppFont owns
+/// font availability, semantic scaling and the separate monospaced code role.
+enum SemrehTypography {
+    static let title = AppFont.largeTitle(weight: .bold)
+    static let heading = AppFont.title2(weight: .semibold)
+    static let body = AppFont.body()
+    static let label = AppFont.subheadline(weight: .semibold)
+    static let caption = AppFont.caption()
+}
+
 enum AppColorPalette: String, CaseIterable, Sendable {
     /// Legacy Goku palette retained for users who explicitly chose Goku Light/Dark.
     case goku

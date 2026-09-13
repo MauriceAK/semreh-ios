@@ -13,6 +13,241 @@ final class DirectSkillUITests: XCTestCase {
     private let interimFinalText = "SEMREH_INTERIM_FINAL_VISIBLE_V1"
 
     @MainActor
+    func testOptInPreviewShellVisualSurfaces() throws {
+        continueAfterFailure = false
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("Preview shell visual verification is simulator-only.")
+        #endif
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SEMREH_PREVIEW_SHELL_UI"] == "1",
+              environment["SEMREH_SLICE2_UI_LIVE"] == "1",
+              environment["SEMREH_SLICE1_HTTPS"] == "1",
+              environment["SEMREH_SLICE2_UI_BACKEND_MODE"] == "stock",
+              environment["SEMREH_SLICE2_UI_BACKEND_SHA"] == backendSHA,
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == credentialsPath else {
+            throw XCTSkip("Preview shell verification requires opt-in and the contained pinned stock fixture.")
+        }
+
+        let app = XCUIApplication()
+        app.launch()
+        let back = app.buttons["BackButton"]
+        let sessions = app.buttons["Sessions"]
+        if !sessions.waitForExistence(timeout: 5) {
+            _ = try openContainedNewChat(app: app)
+        }
+        if back.waitForExistence(timeout: 8), back.isHittable {
+            back.tap()
+        }
+
+        XCTAssertTrue(sessions.waitForExistence(timeout: 15) && sessions.isHittable)
+        sessions.tap()
+        XCTAssertTrue(app.navigationBars["Sessions"].waitForExistence(timeout: 10))
+        let botFilter = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Filter by bot:")).firstMatch
+        XCTAssertTrue(botFilter.isHittable)
+        XCTAssertTrue(app.buttons["Pinned"].isHittable)
+        XCTAssertTrue(app.buttons["Expand projects"].isHittable)
+        retainPreviewScreenshot("Preview shell Sessions", app: app)
+
+        let pinned = app.buttons["Pinned"]
+        pinned.tap()
+        XCTAssertTrue(pinned.isSelected || pinned.value as? String == "1")
+        pinned.tap()
+
+        botFilter.tap()
+        let fixtureProfile = app.buttons["default"]
+        XCTAssertTrue(fixtureProfile.waitForExistence(timeout: 5) && fixtureProfile.isHittable)
+        fixtureProfile.tap()
+        XCTAssertTrue(app.buttons["Filter by bot: default"].waitForExistence(timeout: 5))
+        pinned.tap()
+        XCTAssertTrue(pinned.isSelected || pinned.value as? String == "1")
+        XCTAssertTrue(app.buttons["Filter by bot: default"].exists)
+        pinned.tap()
+        app.buttons["Filter by bot: default"].tap()
+        let allBots = app.buttons["All bots"]
+        XCTAssertTrue(allBots.waitForExistence(timeout: 5) && allBots.isHittable); allBots.tap()
+        XCTAssertTrue(app.buttons["Filter by bot: All bots"].waitForExistence(timeout: 5))
+
+        let bots = app.buttons["Bots"]
+        XCTAssertTrue(bots.isHittable); bots.tap()
+        XCTAssertTrue(app.buttons["Default bot"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "bot-profile:")).count > 0)
+        retainPreviewScreenshot("Preview shell Bots", app: app)
+
+        let activity = app.buttons["Activity"]
+        XCTAssertTrue(activity.isHittable); activity.tap()
+        XCTAssertTrue(app.navigationBars["Tasks"].waitForExistence(timeout: 10))
+        retainPreviewScreenshot("Preview shell Activity", app: app)
+    }
+
+    @MainActor
+    func testPublicPreviewProductionSurfaces() async throws {
+        continueAfterFailure = false
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("Public preview verification is simulator-only.")
+        #endif
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SEMREH_LIFECYCLE_UI_PHASE"] == "automatic-restore",
+              environment["SEMREH_SLICE2_UI_LIVE"] == "1",
+              environment["SEMREH_SLICE1_HTTPS"] == "1",
+              environment["SEMREH_SLICE2_UI_BACKEND_MODE"] == "stock",
+              environment["SEMREH_SLICE2_UI_BACKEND_SHA"] == backendSHA,
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == credentialsPath else {
+            throw XCTSkip("Public preview verification requires the contained pinned stock fixture.")
+        }
+        let credentials = try readCredentials()
+        let observer = try await LifecycleCanonicalObserver(
+            origin: try XCTUnwrap(URL(string: origin)), credentials: credentials
+        )
+        defer { observer.invalidate() }
+        let activeProfileBefore = try await observer.activeProfile()
+        let defaultProfileBefore = try await observer.defaultProfile()
+        let app = XCUIApplication()
+        app.launch()
+        defer { UIPasteboard.general.items = [] }
+        _ = try openContainedNewChat(app: app)
+        let back = app.navigationBars.buttons["BackButton"]
+        XCTAssertTrue(back.waitForExistence(timeout: 10) && back.isHittable); back.tap()
+        XCTAssertTrue(app.buttons["Chats"].waitForExistence(timeout: 10))
+        retainPreviewScreenshot("Public preview Chats light", app: app)
+        let search = app.otherElements["Search sessions"]
+        XCTAssertTrue(search.waitForExistence(timeout: 5) && search.isHittable); search.tap()
+        let searchField = app.textFields["Search sessions"]
+        XCTAssertTrue(searchField.waitForExistence(timeout: 5)); searchField.tap(); searchField.typeText("fixture")
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        let closeSearch = app.buttons["Close search"]
+        XCTAssertTrue(closeSearch.waitForExistence(timeout: 5) && closeSearch.isHittable); closeSearch.tap()
+        XCTAssertFalse(app.keyboards.firstMatch.waitForExistence(timeout: 2))
+        app.swipeUp()
+        XCTAssertTrue(app.cells.allElementsBoundByIndex.contains(where: \.isHittable),
+                      "A visible chat row must remain interactive after scrolling.")
+        RunLoop.main.run(until: Date().addingTimeInterval(1.5))
+
+        let bots = app.buttons["New chat"]
+        XCTAssertTrue(bots.waitForExistence(timeout: 10) && bots.isHittable); bots.tap()
+        XCTAssertTrue(app.staticTexts["Your bots"].waitForExistence(timeout: 20))
+        let profileButton = app.buttons.matching(NSPredicate(
+            format: "identifier BEGINSWITH %@ AND identifier != %@",
+            "bot-profile:", "bot-profile:default"
+        )).firstMatch
+        XCTAssertTrue(profileButton.waitForExistence(timeout: 20) && profileButton.isHittable)
+        let profileName = String(profileButton.identifier.dropFirst("bot-profile:".count))
+        XCTAssertFalse(profileName.isEmpty)
+        XCTAssertNotEqual(profileName, "default", "Preview routing must exercise a non-default fixture profile.")
+        retainPreviewScreenshot("Public preview new chat bot picker", app: app)
+        profileButton.tap()
+        let composer = app.textViews.matching(NSPredicate(format: "identifier BEGINSWITH %@", "chat-detail:")).firstMatch
+        XCTAssertTrue(composer.waitForExistence(timeout: 15) && composer.isHittable)
+        let marker = "SEMREH_PREVIEW_PROFILE_\(UUID().uuidString)"
+        send(marker, through: composer, app: app); waitForIdle(app: app)
+        let storedID = try await observer.discoverStoredID(uniquePrompt: marker, profile: profileName)
+        _ = try await waitForCanonical(observer: observer, storedID: storedID, profile: profileName) {
+            self.exactCanonicalPairs($0, users: [marker])
+        }
+        retainPreviewScreenshot("Public preview compact composer keyboard off", app: app)
+        let intelligence = app.buttons["Model, reasoning and usage"]
+        XCTAssertTrue(intelligence.waitForExistence(timeout: 10) && intelligence.isHittable); intelligence.tap()
+        XCTAssertTrue(app.scrollViews.firstMatch.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Model"].exists)
+        XCTAssertTrue(app.staticTexts["Reasoning"].exists)
+        XCTAssertTrue(app.staticTexts["Context usage"].exists)
+        retainPreviewScreenshot("Public preview intelligence controls", app: app)
+        app.tap()
+        let chatOptions = app.buttons["Chat options"]
+        XCTAssertTrue(chatOptions.waitForExistence(timeout: 10) && chatOptions.isHittable)
+        XCTAssertFalse(app.buttons["Choose workspace path"].exists,
+                       "Workspace controls must not remain in a bottom composer strip.")
+        XCTAssertFalse(app.buttons["Choose profile"].exists,
+                       "Profile controls must not remain in a bottom composer strip.")
+        chatOptions.tap()
+        let chooseWorkspace = app.buttons["Choose workspace path"]
+        XCTAssertTrue(chooseWorkspace.waitForExistence(timeout: 5) && chooseWorkspace.isHittable); chooseWorkspace.tap()
+        XCTAssertTrue(app.navigationBars["Choose Workspace"].waitForExistence(timeout: 10))
+        app.buttons["Done"].tap()
+
+        XCTAssertTrue(chatOptions.waitForExistence(timeout: 5) && chatOptions.isHittable); chatOptions.tap()
+        let chooseProfile = app.buttons["Choose profile"]
+        XCTAssertTrue(chooseProfile.waitForExistence(timeout: 5) && chooseProfile.isHittable); chooseProfile.tap()
+        let defaultProfile = app.buttons["Default"]
+        XCTAssertTrue(defaultProfile.waitForExistence(timeout: 5) && defaultProfile.isHittable); defaultProfile.tap()
+        XCTAssertTrue(app.alerts["Start New Session?"].waitForExistence(timeout: 5))
+        XCTAssertTrue(containing("keeps the current transcript", app: app).exists)
+        app.alerts["Start New Session?"].buttons["Cancel"].tap()
+        retainPreviewScreenshot("Public preview chat header and composer", app: app)
+        let activeProfileAfter = try await observer.activeProfile()
+        let defaultProfileAfter = try await observer.defaultProfile()
+        XCTAssertEqual(activeProfileAfter, activeProfileBefore,
+                       "Selecting a bot must not mutate the server active profile.")
+        XCTAssertEqual(defaultProfileAfter, defaultProfileBefore,
+                       "Selecting a bot must not mutate the server startup-default profile.")
+
+        XCTAssertTrue(back.waitForExistence(timeout: 10) && back.isHittable); back.tap()
+        let activity = app.buttons["Activity"]
+        XCTAssertTrue(activity.waitForExistence(timeout: 10) && activity.isHittable); activity.tap()
+        XCTAssertTrue(app.navigationBars["Tasks"].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Scheduled work · Profile:")).firstMatch.exists)
+        retainPreviewScreenshot("Public preview Activity light", app: app)
+        let account = app.buttons["Account and settings"]
+        XCTAssertTrue(account.waitForExistence(timeout: 10) && account.isHittable); account.tap()
+        XCTAssertTrue(app.staticTexts["Settings"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["Tools"].exists)
+        retainPreviewScreenshot("Public preview Settings light", app: app)
+        app.buttons["Done"].tap()
+
+        app.terminate()
+        app.launchArguments = ["-AppleInterfaceStyle", "Dark"]
+        app.launch()
+        let restoredDetailBack = app.buttons["BackButton"]
+        if restoredDetailBack.waitForExistence(timeout: 10) && restoredDetailBack.isHittable {
+            restoredDetailBack.tap()
+        }
+        XCTAssertTrue(app.buttons["Chats"].waitForExistence(timeout: 15))
+        retainPreviewScreenshot("Public preview Chats dark", app: app)
+        let darkAccount = app.buttons["Account and settings"]
+        XCTAssertTrue(darkAccount.waitForExistence(timeout: 10) && darkAccount.isHittable); darkAccount.tap()
+        XCTAssertTrue(app.staticTexts["Settings"].waitForExistence(timeout: 10))
+        retainPreviewScreenshot("Public preview Settings dark", app: app)
+        let tools = app.buttons["Tools"]
+        XCTAssertTrue(tools.isHittable); tools.tap()
+        let manageServers = app.buttons["Manage Servers"]
+        XCTAssertTrue(manageServers.waitForExistence(timeout: 10) && manageServers.isHittable); manageServers.tap()
+        XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 10))
+        let nestedBack = app.navigationBars["Settings"].buttons.firstMatch
+        XCTAssertTrue(nestedBack.isHittable); nestedBack.tap()
+        XCTAssertTrue(app.staticTexts["Tools"].waitForExistence(timeout: 10))
+        app.buttons["Done"].tap()
+        XCTAssertTrue(app.staticTexts["Settings"].waitForExistence(timeout: 10))
+        app.buttons["Done"].tap()
+
+        app.terminate()
+        app.launchArguments = []
+        app.launch()
+
+        try signOutIfNeeded(app)
+        let welcome = app.staticTexts["Your conversations.\nYour agents."]
+        XCTAssertTrue(welcome.waitForExistence(timeout: 10))
+        retainPreviewScreenshot("Public preview onboarding light", app: app)
+        app.buttons["Need help connecting?"].tap()
+        XCTAssertTrue(app.navigationBars["Connection help"].waitForExistence(timeout: 10))
+        retainPreviewScreenshot("Public preview connection help light", app: app)
+        app.buttons["Done"].tap()
+        app.terminate()
+        app.launchArguments = ["-AppleInterfaceStyle", "Dark"]
+        app.launch()
+        XCTAssertTrue(welcome.waitForExistence(timeout: 10))
+        retainPreviewScreenshot("Public preview onboarding dark", app: app)
+        app.buttons["Need help connecting?"].tap()
+        XCTAssertTrue(app.navigationBars["Connection help"].waitForExistence(timeout: 10))
+        retainPreviewScreenshot("Public preview connection help dark", app: app)
+    }
+
+    private func retainPreviewScreenshot(_ name: String, app: XCUIApplication) {
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    @MainActor
     func testOptInProductionLifecyclePhase() async throws {
         continueAfterFailure = false
         #if !targetEnvironment(simulator)
@@ -189,7 +424,7 @@ final class DirectSkillUITests: XCTestCase {
             }) { self.exactCanonicalPairs($0, users: [warmup, marker]) }
             app.launch()
             dismissKnownPasswordSavePrompt(app, timeout: 3)
-            let sessions = app.buttons["Sessions"]
+            let sessions = app.buttons["Chats"]
             let restoredChat = app.otherElements.matching(
                 NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
             ).firstMatch
@@ -249,11 +484,11 @@ final class DirectSkillUITests: XCTestCase {
 
         let server = app.textFields["onboarding-server-url"]
         if !(server.waitForExistence(timeout: 4) && server.isHittable) {
-            let welcome = app.staticTexts["Control Semreh from iPhone or iPad."]
+            let welcome = app.staticTexts["Your conversations.\nYour agents."]
             guard welcome.waitForExistence(timeout: 5) && welcome.isHittable else {
                 return XCTFail("Refusing to sign out or navigate an authenticated non-fixture account.")
             }
-            let existingServer = app.buttons["Already have a server?"]
+            let existingServer = app.buttons["Get Started"]
             XCTAssertTrue(existingServer.waitForExistence(timeout: 5) && existingServer.isHittable)
             existingServer.tap()
             XCTAssertTrue(server.waitForExistence(timeout: 5) && server.isHittable)
@@ -286,7 +521,7 @@ final class DirectSkillUITests: XCTestCase {
         }
         XCTAssertTrue(sessions.waitForExistence(timeout: 30) && sessions.isHittable)
         sessions.tap()
-        let newSession = app.buttons["New session"]
+        let newSession = app.buttons["New chat"]
         XCTAssertTrue(newSession.waitForExistence(timeout: 15) && newSession.isHittable)
         newSession.tap()
 
@@ -339,11 +574,11 @@ final class DirectSkillUITests: XCTestCase {
 
         let server = app.textFields["onboarding-server-url"]
         if !(server.waitForExistence(timeout: 4) && server.isHittable) {
-            let welcome = app.staticTexts["Control Semreh from iPhone or iPad."]
+            let welcome = app.staticTexts["Your conversations.\nYour agents."]
             guard welcome.waitForExistence(timeout: 5) && welcome.isHittable else {
                 return XCTFail("Refusing to sign out or navigate an authenticated non-fixture account.")
             }
-            let existingServer = app.buttons["Already have a server?"]
+            let existingServer = app.buttons["Get Started"]
             XCTAssertTrue(existingServer.waitForExistence(timeout: 5) && existingServer.isHittable)
             existingServer.tap()
             XCTAssertTrue(server.waitForExistence(timeout: 5) && server.isHittable)
@@ -359,7 +594,7 @@ final class DirectSkillUITests: XCTestCase {
         paste(credentials.password, into: password, app: app)
         app.buttons["Connect"].tap()
 
-        let sessions = app.buttons["Sessions"]
+        let sessions = app.buttons["Chats"]
         let restoredChat = app.otherElements.matching(
             NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
         ).firstMatch
@@ -376,7 +611,7 @@ final class DirectSkillUITests: XCTestCase {
         }
         XCTAssertTrue(sessions.waitForExistence(timeout: 30) && sessions.isHittable)
         sessions.tap()
-        let newSession = app.buttons["New session"]
+        let newSession = app.buttons["New chat"]
         XCTAssertTrue(newSession.waitForExistence(timeout: 15) && newSession.isHittable)
         newSession.tap()
 
@@ -461,9 +696,9 @@ final class DirectSkillUITests: XCTestCase {
         let server = app.textFields["onboarding-server-url"]
         if !(server.waitForExistence(timeout: 4) && server.isHittable) {
             try signOutIfNeeded(app)
-            let welcome = app.staticTexts["Control Semreh from iPhone or iPad."]
+            let welcome = app.staticTexts["Your conversations.\nYour agents."]
             XCTAssertTrue(welcome.waitForExistence(timeout: 15) && welcome.isHittable)
-            let existingServer = app.buttons["Already have a server?"]
+            let existingServer = app.buttons["Get Started"]
             XCTAssertTrue(existingServer.waitForExistence(timeout: 5) && existingServer.isHittable)
             existingServer.tap()
             XCTAssertTrue(server.waitForExistence(timeout: 5) && server.isHittable)
@@ -510,31 +745,21 @@ final class DirectSkillUITests: XCTestCase {
         defer { UIPasteboard.general.items = [] }
         dismissKnownPasswordSavePrompt(app, timeout: 1)
         try signOutIfNeeded(app)
-        let welcome = app.staticTexts["Control Semreh from iPhone or iPad."]
+        let welcome = app.staticTexts["Your conversations.\nYour agents."]
         if welcome.waitForExistence(timeout: 15) && welcome.isHittable {
-            let getStarted = app.buttons["Get Started"]
-            XCTAssertTrue(getStarted.waitForExistence(timeout: 5) && getStarted.isHittable); getStarted.tap()
-            XCTAssertTrue(app.staticTexts["What you get"].waitForExistence(timeout: 5))
-            let setUp = app.buttons["Set Up"]
-            XCTAssertTrue(setUp.waitForExistence(timeout: 5) && setUp.isHittable); setUp.tap()
-
-            let guidance = app.staticTexts["Prepare your Hermes server"]
-            XCTAssertTrue(guidance.waitForExistence(timeout: 5) && guidance.isHittable)
+            let help = app.buttons["Need help connecting?"]
+            XCTAssertTrue(help.waitForExistence(timeout: 5) && help.isHittable); help.tap()
+            XCTAssertTrue(app.navigationBars["Connection help"].waitForExistence(timeout: 5))
             XCTAssertTrue(containing("Use first-party Hermes", app: app).exists)
             XCTAssertTrue(containing("dedicated authenticated HTTPS", app: app).exists)
-            XCTAssertFalse(app.alerts["Copy the setup prompt first"].exists)
             let guidanceScreenshot = XCTAttachment(screenshot: app.screenshot())
             guidanceScreenshot.name = "First-party Hermes server guidance"
             guidanceScreenshot.lifetime = .keepAlways
             add(guidanceScreenshot)
+            app.buttons["Done"].tap()
 
-            let guidanceContinue = app.buttons["Continue"]
-            XCTAssertTrue(guidanceContinue.waitForExistence(timeout: 5) && guidanceContinue.isHittable); guidanceContinue.tap()
-            let tailscale = app.staticTexts["Install Tailscale on iPhone"]
-            XCTAssertTrue(tailscale.waitForExistence(timeout: 5) && tailscale.isHittable)
-            XCTAssertFalse(app.alerts["Copy the setup prompt first"].exists)
-            let tailscaleContinue = app.buttons["Continue"]
-            XCTAssertTrue(tailscaleContinue.waitForExistence(timeout: 5) && tailscaleContinue.isHittable); tailscaleContinue.tap()
+            let getStarted = app.buttons["Get Started"]
+            XCTAssertTrue(getStarted.waitForExistence(timeout: 5) && getStarted.isHittable); getStarted.tap()
         } else {
             return XCTFail("Sign-out did not return to the visible onboarding welcome page.")
         }
@@ -548,7 +773,7 @@ final class DirectSkillUITests: XCTestCase {
         replace(username, with: credentials.username, app: app)
         paste(credentials.password, into: password, app: app)
         app.buttons["Connect"].tap()
-        let sessions = app.buttons["Sessions"]
+        let sessions = app.buttons["Chats"]
         let restoredChat = app.otherElements.matching(
             NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
         ).firstMatch
@@ -568,8 +793,8 @@ final class DirectSkillUITests: XCTestCase {
         dismissKnownPasswordSavePrompt(app, timeout: 1)
         XCTAssertTrue(sessions.waitForExistence(timeout: 30) && sessions.isHittable)
         sessions.tap()
-        XCTAssertTrue(app.buttons["New session"].waitForExistence(timeout: 15))
-        app.buttons["New session"].tap()
+        XCTAssertTrue(app.buttons["New chat"].waitForExistence(timeout: 15))
+        app.buttons["New chat"].tap()
         let composer = app.textViews.matching(
             NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
         ).firstMatch
@@ -605,12 +830,12 @@ final class DirectSkillUITests: XCTestCase {
         try prepareContainedSignIn(app: app)
         let server = app.textFields["onboarding-server-url"]
         if !(server.waitForExistence(timeout: 4) && server.isHittable) {
-            let welcome = app.staticTexts["Control Semreh from iPhone or iPad."]
+            let welcome = app.staticTexts["Your conversations.\nYour agents."]
             guard welcome.waitForExistence(timeout: 5) && welcome.isHittable else {
                 XCTFail("Refusing to sign out or navigate an authenticated non-fixture account.")
                 throw NSError(domain: "DirectSkillUITests", code: 3)
             }
-            let existingServer = app.buttons["Already have a server?"]
+            let existingServer = app.buttons["Get Started"]
             XCTAssertTrue(existingServer.waitForExistence(timeout: 5) && existingServer.isHittable)
             existingServer.tap()
             XCTAssertTrue(server.waitForExistence(timeout: 5) && server.isHittable)
@@ -626,7 +851,7 @@ final class DirectSkillUITests: XCTestCase {
         paste(credentials.password, into: password, app: app)
         app.buttons["Connect"].tap()
 
-        let sessions = app.buttons["Sessions"]
+        let sessions = app.buttons["Chats"]
         let restoredChat = app.otherElements.matching(
             NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
         ).firstMatch
@@ -643,9 +868,14 @@ final class DirectSkillUITests: XCTestCase {
         }
         XCTAssertTrue(sessions.waitForExistence(timeout: 30) && sessions.isHittable)
         sessions.tap()
-        let newSession = app.buttons["New session"]
+        let newSession = app.buttons["New chat"]
         XCTAssertTrue(newSession.waitForExistence(timeout: 15) && newSession.isHittable)
         newSession.tap()
+        let defaultBot = app.buttons["bot-profile:default"]
+        if defaultBot.waitForExistence(timeout: 5) {
+            XCTAssertTrue(defaultBot.isHittable)
+            defaultBot.tap()
+        }
         let composer = app.textViews.matching(
             NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
         ).firstMatch
@@ -655,7 +885,7 @@ final class DirectSkillUITests: XCTestCase {
 
     @MainActor
     private func prepareContainedSignIn(app: XCUIApplication) throws {
-        let welcome = app.staticTexts["Control Semreh from iPhone or iPad."]
+        let welcome = app.staticTexts["Your conversations.\nYour agents."]
         if welcome.waitForExistence(timeout: 5) || app.textFields["onboarding-server-url"].exists { return }
         let chat = app.otherElements.matching(
             NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
@@ -665,20 +895,14 @@ final class DirectSkillUITests: XCTestCase {
             XCTAssertTrue(back.waitForExistence(timeout: 5) && back.isHittable)
             back.tap()
         }
-        let you = app.buttons["You"]
-        XCTAssertTrue(you.waitForExistence(timeout: 10) && you.isHittable)
-        you.tap()
+        if !app.staticTexts["Settings"].exists {
+            let you = app.buttons["Account and settings"]
+            XCTAssertTrue(you.waitForExistence(timeout: 10) && you.isHittable)
+            you.tap()
+        }
         XCTAssertTrue(app.staticTexts["semreh-slice1-test.tailda8427.ts.net"].waitForExistence(timeout: 15),
                       "Refusing to sign out an authenticated server other than the contained fixture.")
-        let signOut = app.buttons["Sign Out of This Server"]
-        if !signOut.exists {
-            let appSettings = app.staticTexts["App & maintenance"]
-            for _ in 0..<8 where !appSettings.isHittable { app.scrollViews.firstMatch.swipeUp() }
-            XCTAssertTrue(appSettings.waitForExistence(timeout: 5) && appSettings.isHittable)
-            appSettings.tap()
-        }
-        for _ in 0..<8 where !signOut.isHittable { app.scrollViews.firstMatch.swipeUp() }
-        XCTAssertTrue(signOut.waitForExistence(timeout: 5) && signOut.isHittable)
+        let signOut = containedSignOutButton(app)
         signOut.tap()
         let confirmation = app.alerts["Sign out of this server?"]
         XCTAssertTrue(confirmation.waitForExistence(timeout: 5))
@@ -709,6 +933,7 @@ final class DirectSkillUITests: XCTestCase {
     private func waitForCanonical(
         observer: LifecycleCanonicalObserver,
         storedID: String,
+        profile: String = "default",
         timeout: TimeInterval = 45,
         beforeRead: () -> Void = {},
         matches: ([[String: Any]]) -> Bool
@@ -716,7 +941,7 @@ final class DirectSkillUITests: XCTestCase {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             beforeRead()
-            let page = try await observer.transcript(storedID: storedID)
+            let page = try await observer.transcript(storedID: storedID, profile: profile)
             if matches(page) { return page }
             try await Task.sleep(for: .milliseconds(100))
         }
@@ -815,22 +1040,38 @@ final class DirectSkillUITests: XCTestCase {
     }
 
     private func signOutIfNeeded(_ app: XCUIApplication) throws {
-        let welcome = app.staticTexts["Control Semreh from iPhone or iPad."]
+        let welcome = app.staticTexts["Your conversations.\nYour agents."]
         if welcome.waitForExistence(timeout: 4) && welcome.isHittable { return }
-        let you = app.buttons["You"]
-        if !you.waitForExistence(timeout: 5) {
+        let you = app.buttons["Account and settings"]
+        if !app.staticTexts["Settings"].exists && !you.waitForExistence(timeout: 5) {
             let knownBack = app.navigationBars.buttons["BackButton"]
             let back = knownBack.exists ? knownBack : app.navigationBars.buttons.firstMatch
             XCTAssertTrue(back.waitForExistence(timeout: 5)); back.tap()
         }
-        XCTAssertTrue(you.waitForExistence(timeout: 10)); you.tap()
-        let signOut = app.buttons["Sign Out of This Server"]
-        for _ in 0..<8 where !signOut.isHittable { app.scrollViews.firstMatch.swipeUp() }
-        XCTAssertTrue(signOut.isHittable); signOut.tap()
+        if !app.staticTexts["Settings"].exists {
+            XCTAssertTrue(you.waitForExistence(timeout: 10)); you.tap()
+        }
+        let signOut = containedSignOutButton(app)
+        signOut.tap()
         let confirmation = app.alerts["Sign out of this server?"]
         XCTAssertTrue(confirmation.waitForExistence(timeout: 5))
         confirmation.buttons["Sign Out"].tap()
         XCTAssertTrue(welcome.waitForExistence(timeout: 20))
+    }
+
+    private func containedSignOutButton(_ app: XCUIApplication) -> XCUIElement {
+        XCTAssertTrue(app.staticTexts["semreh-slice1-test.tailda8427.ts.net"].waitForExistence(timeout: 15),
+                      "Refusing to sign out an authenticated server other than the contained fixture.")
+        let signOut = app.buttons["Sign Out of This Server"]
+        if !signOut.exists {
+            let appSettings = app.staticTexts["App & maintenance"]
+            for _ in 0..<8 where !appSettings.isHittable { app.scrollViews.firstMatch.swipeUp() }
+            XCTAssertTrue(appSettings.waitForExistence(timeout: 5) && appSettings.isHittable)
+            appSettings.tap()
+        }
+        for _ in 0..<8 where !signOut.isHittable { app.scrollViews.firstMatch.swipeUp() }
+        XCTAssertTrue(signOut.waitForExistence(timeout: 5) && signOut.isHittable)
+        return signOut
     }
 
     private func replace(_ field: XCUIElement, with value: String, app: XCUIApplication) {
@@ -918,14 +1159,33 @@ final class DirectSkillUITests: XCTestCase {
 
         func invalidate() { session.invalidateAndCancel() }
 
-        func discoverStoredID(uniquePrompt: String) async throws -> String {
+        func activeProfile() async throws -> String? {
+            let (data, response) = try await request(path: "/api/profiles/active", method: "GET")
+            guard (200..<300).contains(response.statusCode),
+                  let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                throw NSError(domain: "DirectSkillUITests", code: 15)
+            }
+            return payload["current"] as? String
+        }
+
+        func defaultProfile() async throws -> String? {
+            let (data, response) = try await request(path: "/api/profiles", method: "GET")
+            guard (200..<300).contains(response.statusCode),
+                  let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let profiles = payload["profiles"] as? [[String: Any]] else {
+                throw NSError(domain: "DirectSkillUITests", code: 16)
+            }
+            return profiles.first(where: { $0["is_default"] as? Bool == true })?["name"] as? String
+        }
+
+        func discoverStoredID(uniquePrompt: String, profile: String = "default") async throws -> String {
             let deadline = Date().addingTimeInterval(45)
             var lastCandidateCount = 0
             while Date() < deadline {
                 var components = URLComponents()
                 components.path = "/api/sessions"
                 components.queryItems = [
-                    URLQueryItem(name: "profile", value: "default"),
+                    URLQueryItem(name: "profile", value: profile),
                     URLQueryItem(name: "limit", value: "20"),
                     URLQueryItem(name: "offset", value: "0"),
                     URLQueryItem(name: "order", value: "recent"),
@@ -948,7 +1208,7 @@ final class DirectSkillUITests: XCTestCase {
                         throw NSError(domain: "DirectSkillUITests", code: 12,
                                       userInfo: [NSLocalizedDescriptionKey: "Session discovery returned an invalid identity shape."])
                     }
-                    let rows = try await transcript(storedID: storedID)
+                    let rows = try await transcript(storedID: storedID, profile: profile)
                     if Self.isExactWarmup(rows, prompt: uniquePrompt) { matches.append(storedID) }
                 }
                 if matches.count == 1 { return matches[0] }
@@ -962,11 +1222,11 @@ final class DirectSkillUITests: XCTestCase {
                           userInfo: [NSLocalizedDescriptionKey: "No exact warmup match in \(lastCandidateCount) bounded candidates."])
         }
 
-        func transcript(storedID: String) async throws -> [[String: Any]] {
+        func transcript(storedID: String, profile: String = "default") async throws -> [[String: Any]] {
             var components = URLComponents()
             components.path = "/api/sessions/\(storedID)/messages"
             components.queryItems = [
-                URLQueryItem(name: "profile", value: "default"),
+                URLQueryItem(name: "profile", value: profile),
                 URLQueryItem(name: "include_compacted", value: "true"),
                 URLQueryItem(name: "order", value: "oldest"),
                 URLQueryItem(name: "limit", value: "20"),

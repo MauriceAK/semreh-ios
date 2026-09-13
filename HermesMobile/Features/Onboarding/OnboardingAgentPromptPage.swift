@@ -1,15 +1,23 @@
 import SwiftUI
 
 struct OnboardingAgentPromptPage: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.appColorPalette) private var palette
+
     var body: some View {
         ScrollView(.vertical, showsIndicators: false) {
             VStack(spacing: 28) {
-                OnboardingStepHeader(
-                    stepNumber: 1,
-                    icon: "terminal",
-                    title: String(localized: "Prepare your Hermes server"),
-                    description: String(localized: "Semreh connects to an existing first-party Hermes server. Follow your installed Hermes version's documentation or ask your server administrator for help.")
-                )
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Connect to your Hermes")
+                        .font(SemrehTypography.heading)
+                        .foregroundStyle(OnboardingTheme.primaryText(for: colorScheme, palette: palette))
+                    Text("Already have a server address? Close this guide and enter it, or scan its QR code. Use your existing server sign-in when asked.")
+                        .font(SemrehTypography.body)
+                        .foregroundStyle(OnboardingTheme.secondaryText(for: colorScheme, palette: palette))
+                    Text("If someone manages your server, ask them for the address and connection details. The notes below are for people setting up their own server.")
+                        .font(SemrehTypography.body)
+                        .foregroundStyle(OnboardingTheme.secondaryText(for: colorScheme, palette: palette))
+                }
 
                 VStack(alignment: .leading, spacing: 18) {
                     ForEach(Array(OnboardingFlowPolicy.serverGuidanceSteps.enumerated()), id: \.offset) { index, step in

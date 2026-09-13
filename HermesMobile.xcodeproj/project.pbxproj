@@ -7,6 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		E91300000000000000000002 /* BirdAvatarIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = E91300000000000000000001 /* BirdAvatarIdentity.swift */; };
+		E91300000000000000000004 /* BirdAvatarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E91300000000000000000003 /* BirdAvatarView.swift */; };
+		E91300000000000000000006 /* BirdAvatarIdentityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E91300000000000000000005 /* BirdAvatarIdentityTests.swift */; };
 		D2C820000000000000000005 /* DirectGoalUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2C820000000000000000006 /* DirectGoalUITests.swift */; };
 		D2C821000000000000000005 /* DirectSkillUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2C821000000000000000006 /* DirectSkillUITests.swift */; };
 		D2C820000000000000000001 /* GatewayConversationGoalTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2C820000000000000000002 /* GatewayConversationGoalTests.swift */; };
@@ -422,6 +425,9 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		E91300000000000000000001 /* BirdAvatarIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BirdAvatarIdentity.swift; sourceTree = "<group>"; };
+		E91300000000000000000003 /* BirdAvatarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BirdAvatarView.swift; sourceTree = "<group>"; };
+		E91300000000000000000005 /* BirdAvatarIdentityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BirdAvatarIdentityTests.swift; sourceTree = "<group>"; };
 		D2C820000000000000000006 /* DirectGoalUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectGoalUITests.swift; sourceTree = "<group>"; };
 		D2C821000000000000000006 /* DirectSkillUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectSkillUITests.swift; sourceTree = "<group>"; };
 		D2C820000000000000000002 /* GatewayConversationGoalTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayConversationGoalTests.swift; sourceTree = "<group>"; };
@@ -986,6 +992,7 @@
 				1A2B3C4D5E6F7000000000F4 /* CacheStoreTests.swift */,
 				C04400000000000000000004 /* CacheFallbackPolicyTests.swift */,
 				1A2B3C4D5E6F700000000103 /* AppThemeTests.swift */,
+				E91300000000000000000005 /* BirdAvatarIdentityTests.swift */,
 				C012400000000000000005 /* AppIconChoiceTests.swift */,
 				C03120000000000000F006 /* APIClientGitTests.swift */,
 				C03120000000000000F007 /* GitWorkspaceViewModelTests.swift */,
@@ -1201,6 +1208,8 @@
 				A040C0DE0000000000000002 /* ProjectCreationSheet.swift */,
 				A048C0DE0000000000000002 /* SessionRenameSheet.swift */,
 				D51300000000000000000001 /* MessagesSessionRowView.swift */,
+				E91300000000000000000001 /* BirdAvatarIdentity.swift */,
+				E91300000000000000000003 /* BirdAvatarView.swift */,
 			);
 			path = SessionList;
 			sourceTree = "<group>";
@@ -1895,6 +1904,8 @@
 				D51100000000000000000002 /* AppShellMenuView.swift in Sources */,
 				D51200000000000000000002 /* YouView.swift in Sources */,
 				D51300000000000000000002 /* MessagesSessionRowView.swift in Sources */,
+				E91300000000000000000002 /* BirdAvatarIdentity.swift in Sources */,
+				E91300000000000000000004 /* BirdAvatarView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1995,6 +2006,7 @@
 				1A2B3C4D5E6F7000000000F2 /* CacheStoreTests.swift in Sources */,
 				C04400000000000000000003 /* CacheFallbackPolicyTests.swift in Sources */,
 				1A2B3C4D5E6F700000000102 /* AppThemeTests.swift in Sources */,
+				E91300000000000000000006 /* BirdAvatarIdentityTests.swift in Sources */,
 				C012400000000000000006 /* AppIconChoiceTests.swift in Sources */,
 				C03120000000000000B006 /* APIClientGitTests.swift in Sources */,
 				C03120000000000000B007 /* GitWorkspaceViewModelTests.swift in Sources */,

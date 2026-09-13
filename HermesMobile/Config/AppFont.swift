@@ -1,6 +1,10 @@
 import SwiftUI
 
 enum AppFont {
+    static func largeTitle(weight: Font.Weight? = nil) -> Font {
+        system(.largeTitle, weight: weight)
+    }
+
     static func body(weight: Font.Weight? = nil) -> Font {
         system(.body, weight: weight)
     }
@@ -47,7 +51,7 @@ enum AppFont {
 
     private static func system(
         _ style: Font.TextStyle,
-        design: Font.Design = .default,
+        design: Font.Design = .rounded,
         weight: Font.Weight? = nil
     ) -> Font {
         .system(style, design: design, weight: weight)

@@ -109,9 +109,9 @@ struct SettingsView: View {
                     header
                 } else {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("Make Semreh yours.").font(.title2.bold())
+                        Text("Make Semreh yours.").font(SemrehTypography.heading)
                         Text("Your preferences, conversations, and connected servers.")
-                            .font(.subheadline).foregroundStyle(.secondary)
+                            .font(SemrehTypography.body).foregroundStyle(.secondary)
                     }.frame(maxWidth: .infinity, alignment: .leading)
                 }
 
@@ -310,7 +310,8 @@ struct SettingsView: View {
                     SettingsFootnote(String(localized: "Covers both the git menu in the chat toolbar and the branch picker in the composer."))
                 }
 
-                SettingsCard(title: String(localized: "Main Page")) {
+
+                SettingsCard(title: String(localized: "Tools")) {
                     SettingsToggleRow(
                         title: String(localized: "Tasks"),
                         systemImage: "calendar.badge.clock",
@@ -365,7 +366,7 @@ struct SettingsView: View {
                         isOn: $showsProjectsSection
                     )
 
-                    SettingsFootnote(String(localized: "Turn off the entries you never use to shorten the top of the session list. Each one is the only way into its screen, so turn it back on here when you need it again."))
+                    SettingsFootnote(String(localized: "Choose which entries appear in Settings → Tools. Turn an entry back on here whenever you need it."))
                 }
 
                 SettingsCard(title: String(localized: "Sessions")) {
@@ -590,7 +591,7 @@ struct SettingsView: View {
             .padding(.bottom, 36)
             .adaptiveReadableContent(maxWidth: AdaptiveReadableContentWidth.secondaryDestination)
         }
-        .background { SemrehVisualTheme.canvas(for: colorScheme, palette: .sand).ignoresSafeArea() }
+        .background { SemrehVisualTheme.canvas(for: colorScheme, palette: palette).ignoresSafeArea() }
         .navigationTitle("Settings")
         .task {
             await loadServerSettings()
@@ -1315,6 +1316,7 @@ private extension UNAuthorizationStatus {
 }
 
 private struct SettingsCategory<Content: View>: View {
+    @Environment(\.appColorPalette) private var palette
     @Environment(\.colorScheme) private var colorScheme
     let title: LocalizedStringKey
     let subtitle: LocalizedStringKey
@@ -1339,20 +1341,20 @@ private struct SettingsCategory<Content: View>: View {
             HStack(alignment: .top, spacing: 12) {
                 Image(systemName: systemImage)
                     .font(.body.weight(.semibold))
-                    .foregroundStyle(SemrehVisualTheme.action(for: colorScheme, palette: .sand))
+                    .foregroundStyle(SemrehVisualTheme.action(for: colorScheme, palette: palette))
                     .frame(width: 34, height: 34)
-                    .background(SemrehVisualTheme.canvas(for: colorScheme, palette: .sand), in: RoundedRectangle(cornerRadius: 10))
+                    .background(SemrehVisualTheme.canvas(for: colorScheme, palette: palette), in: RoundedRectangle(cornerRadius: 10))
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 5) {
-                    Text(title).font(.headline).foregroundStyle(.primary)
-                    Text(subtitle).font(.subheadline).foregroundStyle(.secondary)
+                    Text(title).font(SemrehTypography.label).foregroundStyle(.primary)
+                    Text(subtitle).font(SemrehTypography.caption).foregroundStyle(.secondary)
                 }.fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 0)
             }.padding(.vertical, 4)
         }
-        .tint(SemrehVisualTheme.action(for: colorScheme, palette: .sand))
+        .tint(SemrehVisualTheme.action(for: colorScheme, palette: palette))
         .padding(16)
-        .background(SemrehVisualTheme.raisedPanel(for: colorScheme, palette: .sand), in: RoundedRectangle(cornerRadius: 22))
+        .background(SemrehVisualTheme.raisedPanel(for: colorScheme, palette: palette), in: RoundedRectangle(cornerRadius: 22))
     }
 }
 
@@ -1454,6 +1456,7 @@ private struct SettingsTextFieldRow: View {
 }
 
 private struct SettingsCard<Content: View>: View {
+    @Environment(\.appColorPalette) private var palette
     @Environment(\.colorScheme) private var colorScheme
     @ScaledMetric(relativeTo: .body) private var contentSpacing: CGFloat = 12
 
@@ -1470,7 +1473,7 @@ private struct SettingsCard<Content: View>: View {
             Text(title)
                 .textCase(.uppercase)
                 .font(AppFont.caption(weight: .semibold))
-                .foregroundStyle(SemrehVisualTheme.brandAccent(for: colorScheme, palette: .sand))
+                .foregroundStyle(SemrehVisualTheme.brandAccent(for: colorScheme, palette: palette))
                 .padding(.horizontal, 4)
                 .padding(.bottom, 8)
 
@@ -1480,7 +1483,7 @@ private struct SettingsCard<Content: View>: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 14)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(SemrehVisualTheme.panel(for: colorScheme, palette: .sand), in: RoundedRectangle(cornerRadius: 18))
+            .background(SemrehVisualTheme.panel(for: colorScheme, palette: palette), in: RoundedRectangle(cornerRadius: 18))
         }
     }
 }

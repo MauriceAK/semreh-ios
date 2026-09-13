@@ -97,8 +97,8 @@ final class AppThemeTests: XCTestCase {
         XCTAssertEqual(SemrehVisualTheme.deepNavyHex, SemrehVisualTheme.logoNavyHex)
         XCTAssertEqual(SemrehVisualTheme.brandAction, SemrehVisualTheme.logoTeal)
         XCTAssertEqual(SemrehVisualTheme.energy, SemrehVisualTheme.logoTeal)
-        XCTAssertEqual(SemrehVisualTheme.promptBubbleBackgroundHex(for: .dark), "#2FE099")
-        XCTAssertEqual(SemrehVisualTheme.promptBubbleForegroundHex(), "#032357")
+        XCTAssertEqual(SemrehVisualTheme.promptBubbleBackgroundHex(for: .dark), "#D4B992")
+        XCTAssertEqual(SemrehVisualTheme.promptBubbleForegroundHex(), "#30251D")
     }
 
     func testGokuPaletteRetainsLegacyVisualTokens() {
@@ -125,12 +125,12 @@ final class AppThemeTests: XCTestCase {
     }
 
     func testSemrehDarkCanvasStaysSeparateFromLogoNavy() {
-        XCTAssertEqual(SemrehVisualTheme.canvasHex(for: .dark), "#0B1B2E")
+        XCTAssertEqual(SemrehVisualTheme.canvasHex(for: .dark), "#211E1A")
         XCTAssertNotEqual(SemrehVisualTheme.canvasHex(for: .dark), SemrehVisualTheme.logoNavyHex)
     }
     func testSemrehVisualThemeActionAdaptsForDarkModeContrast() {
-        XCTAssertEqual(SemrehVisualTheme.actionHex(for: .light), "#006A72")
-        XCTAssertEqual(SemrehVisualTheme.actionHex(for: .dark), "#31D8CA")
+        XCTAssertEqual(SemrehVisualTheme.actionHex(for: .light), "#795334")
+        XCTAssertEqual(SemrehVisualTheme.actionHex(for: .dark), "#D9B98C")
 
         for scheme in [ColorScheme.light, .dark] {
             XCTAssertGreaterThanOrEqual(
@@ -144,8 +144,8 @@ final class AppThemeTests: XCTestCase {
     }
 
     func testSemrehVisualThemeUsesReadableAccentForegrounds() {
-        XCTAssertEqual(SemrehVisualTheme.accentForegroundHex(for: .light), "#FFFFFF")
-        XCTAssertEqual(SemrehVisualTheme.accentForegroundHex(for: .dark), SemrehVisualTheme.logoNavyHex)
+        XCTAssertEqual(SemrehVisualTheme.accentForegroundHex(for: .light), "#FFF9EF")
+        XCTAssertEqual(SemrehVisualTheme.accentForegroundHex(for: .dark), "#30251D")
 
         for scheme in [ColorScheme.light, .dark] {
             XCTAssertGreaterThanOrEqual(
@@ -192,9 +192,10 @@ final class AppThemeTests: XCTestCase {
     }
 
     func testSemrehVisualThemeCanvasAdaptsToColorScheme() {
-        XCTAssertEqual(SemrehVisualTheme.canvasHex(for: .light), "#F5F8FC")
-        XCTAssertEqual(SemrehVisualTheme.canvasHex(for: .dark), "#0B1B2E")
-        XCTAssertNotEqual(SemrehVisualTheme.panelHex(for: .light), SemrehVisualTheme.panelHex(for: .dark))
+        XCTAssertEqual(SemrehVisualTheme.canvasHex(for: .light), "#F3E8D5")
+        XCTAssertEqual(SemrehVisualTheme.canvasHex(for: .dark), "#211E1A")
+        XCTAssertEqual(SemrehVisualTheme.panelHex(for: .light), "#FBF2E3")
+        XCTAssertEqual(SemrehVisualTheme.panelHex(for: .dark), "#2C2721")
     }
 
     func testAdaptiveBrandAccentMeetsTextContrastInBothAppearances() {

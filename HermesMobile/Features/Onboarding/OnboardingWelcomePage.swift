@@ -10,6 +10,7 @@ struct OnboardingWelcomePage: View {
     }
 
     var body: some View {
+        ScrollView {
         VStack(spacing: 0) {
             Spacer(minLength: 30)
 
@@ -18,31 +19,24 @@ struct OnboardingWelcomePage: View {
             Spacer(minLength: 34)
 
             VStack(spacing: 12) {
-                Text("Control Semreh from iPhone or iPad.")
-                    .font(.system(size: dynamicTypeSize.isAccessibilitySize ? 27 : 31, weight: .bold))
+                Text("Your conversations.\nYour agents.")
+                    .font(SemrehTypography.title)
                     .foregroundStyle(OnboardingTheme.primaryText(for: colorScheme, palette: palette))
                     .multilineTextAlignment(.center)
-                    .lineLimit(3)
-                    .minimumScaleFactor(0.86)
                     .fixedSize(horizontal: false, vertical: true)
 
-                Text("Connect to your self-hosted Hermes server over private HTTPS.")
-                    .font(.subheadline)
+                Text("Connect to your Hermes server to pick up a conversation or start something new.")
+                    .font(SemrehTypography.body)
                     .foregroundStyle(OnboardingTheme.secondaryText(for: colorScheme, palette: palette))
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
 
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 8) {
-                        HeroBadge(systemImage: "lock.shield.fill", title: String(localized: "Password protected"))
-                        HeroBadge(systemImage: "network", title: String(localized: "Tailscale ready"))
-                    }
-
-                    VStack(spacing: 8) {
-                        HeroBadge(systemImage: "lock.shield.fill", title: String(localized: "Password protected"))
-                        HeroBadge(systemImage: "network", title: String(localized: "Tailscale ready"))
-                    }
-                }
+                Text("Use your existing server address and sign-in, or scan a server QR code.")
+                    .font(SemrehTypography.caption)
+                    .foregroundStyle(OnboardingTheme.secondaryText(for: colorScheme, palette: palette))
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 12)
             }
             .frame(maxWidth: 420)
 
@@ -51,5 +45,8 @@ struct OnboardingWelcomePage: View {
         .padding(.horizontal, 24)
         .padding(.top, 28)
         .padding(.bottom, 22)
+        .frame(maxWidth: .infinity)
+        }
+        .scrollBounceBehavior(.basedOnSize)
     }
 }

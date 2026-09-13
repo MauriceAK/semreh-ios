@@ -4,6 +4,7 @@ struct OnboardingView: View {
     @Bindable var authManager: AuthManager
     @State private var viewModel: OnboardingViewModel
     @State private var currentPage: Int
+    @State private var showsSetupHelp = false
     @FocusState private var focusedField: OnboardingConnectField?
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.appColorPalette) private var palette
@@ -22,7 +23,7 @@ struct OnboardingView: View {
             )
         )
         _currentPage = State(
-            initialValue: savedServer == nil ? 0 : OnboardingFlowPolicy.connectPageIndex
+            initialValue: OnboardingFlowPolicy.initialPage(hasSavedServer: savedServer != nil)
         )
     }
 
@@ -44,21 +45,12 @@ struct OnboardingView: View {
                     OnboardingWelcomePage()
                         .tag(0)
 
-                    OnboardingFeaturesPage()
-                        .tag(1)
-
-                    OnboardingAgentPromptPage()
-                        .tag(2)
-
-                    OnboardingTailscalePage()
-                        .tag(3)
-
                     OnboardingConnectPage(
                         viewModel: viewModel,
                         authManager: authManager,
                         focusedField: $focusedField
                     )
-                    .tag(4)
+                    .tag(OnboardingFlowPolicy.connectPageIndex)
                 }
                 .tabViewStyle(.page(indexDisplayMode: .never))
 
@@ -74,6 +66,19 @@ struct OnboardingView: View {
         .animation(.easeInOut(duration: 0.18), value: isEditingConnectionField)
         .onChange(of: currentPage) { oldPage, newPage in
             handlePageChange(from: oldPage, to: newPage)
+        }
+        .sheet(isPresented: $showsSetupHelp) {
+            NavigationStack {
+                OnboardingAgentPromptPage()
+                    .background(SemrehBackdrop())
+                    .navigationTitle("Connection help")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") { showsSetupHelp = false }
+                        }
+                    }
+            }
         }
     }
 
@@ -96,15 +101,18 @@ struct OnboardingView: View {
                 .buttonStyle(OnboardingPrimaryButtonStyle())
                 .accessibilityLabel(OnboardingFlowPolicy.primaryButtonTitle(for: currentPage))
 
-                if OnboardingFlowPolicy.showsServerShortcut(for: currentPage) {
-                    Button("Already have a server?") {
-                        jumpToConnectPage()
-                    }
-                    .font(.footnote.weight(.medium))
-                    .foregroundStyle(OnboardingTheme.secondaryText(for: colorScheme, palette: palette))
-                    .buttonStyle(.plain)
-                    .accessibilityHint("Skips setup and opens the connect screen.")
+            }
+
+            if !isEditingConnectionField {
+                Button("Need help connecting?") {
+                    focusedField = nil
+                    showsSetupHelp = true
                 }
+                .font(SemrehTypography.label)
+                .foregroundStyle(OnboardingTheme.secondaryText(for: colorScheme, palette: palette))
+                .buttonStyle(.plain)
+                .padding(.vertical, 8)
+                .accessibilityHint("Opens optional guidance for your existing Hermes server.")
             }
         }
         .padding(.horizontal, 24)
@@ -192,11 +200,6 @@ struct OnboardingView: View {
         }
     }
 
-    private func jumpToConnectPage() {
-        withAnimation(.easeInOut(duration: 0.3)) {
-            currentPage = OnboardingFlowPolicy.connectPageIndex
-        }
-    }
 }
 
 #Preview {

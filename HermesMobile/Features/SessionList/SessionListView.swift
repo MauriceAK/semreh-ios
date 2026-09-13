@@ -13,6 +13,8 @@ struct SessionListView: View {
     let usesShellChrome: Bool
     let shellSurfaceVisitID: Int
     let onConversationVisibilityChanged: (Bool) -> Void
+    let onNewChat: () -> Void
+    let onAccount: () -> Void
     @Binding private var pendingSharedImport: SharedImport?
     @Binding private var pendingDeepLinkedSessionID: String?
     @Binding private var requestedNewChat: NewChatRequest?
@@ -39,6 +41,8 @@ struct SessionListView: View {
     @State private var isSearchFocused = false
     @State private var searchChromeIsExpanded = false
     @State private var selectedProjectID: String?
+    @State private var selectedBot: String?
+    @State private var pinnedOnly = false
     @State private var sidebarScrollPosition: String?
     @State private var didCompleteInitialLoad = false
     @State private var returnRefreshID: UUID?
@@ -84,7 +88,9 @@ struct SessionListView: View {
         requestedNewChat: Binding<NewChatRequest?> = .constant(nil),
         usesShellChrome: Bool = false,
         shellSurfaceVisitID: Int = 0,
-        onConversationVisibilityChanged: @escaping (Bool) -> Void = { _ in }
+        onConversationVisibilityChanged: @escaping (Bool) -> Void = { _ in },
+        onNewChat: @escaping () -> Void = {},
+        onAccount: @escaping () -> Void = {}
     ) {
         self.authManager = authManager
         self.server = server
@@ -92,6 +98,8 @@ struct SessionListView: View {
         self.usesShellChrome = usesShellChrome
         self.shellSurfaceVisitID = shellSurfaceVisitID
         self.onConversationVisibilityChanged = onConversationVisibilityChanged
+        self.onNewChat = onNewChat
+        self.onAccount = onAccount
         _pendingSharedImport = pendingSharedImport
         _pendingDeepLinkedSessionID = pendingDeepLinkedSessionID
         _requestedNewChat = requestedNewChat
@@ -382,6 +390,13 @@ struct SessionListView: View {
                 .ignoresSafeArea()
 
             content
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    if usesShellChrome {
+                        shellSearchBar
+                            .padding(.horizontal, 18)
+                            .padding(.bottom, 10)
+                    }
+                }
 
             if !usesShellChrome, !isSearchingSessions {
                 newSessionButton
@@ -391,12 +406,19 @@ struct SessionListView: View {
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
+        }
+        .navigationTitle(usesShellChrome ? "Sessions" : "")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
             if usesShellChrome {
-                shellSearchBar
-                    .padding(.horizontal, 18)
-                    .padding(.bottom, 92)
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    Button("New chat", systemImage: "square.and.pencil", action: onNewChat)
+                    Button("Account and settings", systemImage: "person.crop.circle", action: onAccount)
+                }
             }
         }
+        .toolbarBackground(SemrehVisualTheme.canvas(for: colorScheme, palette: palette), for: .navigationBar)
+        .toolbarBackground(.visible, for: .navigationBar)
     }
 
     @ViewBuilder
@@ -504,9 +526,8 @@ struct SessionListView: View {
 
         return List {
             if usesShellChrome {
-                Color.clear
-                    .frame(height: 112)
-                    .sessionsTopChromeListRow()
+                sessionFilters
+                    .sessionsScreenListRow()
             } else {
                 header
                     .sessionsTopChromeListRow()
@@ -591,10 +612,12 @@ struct SessionListView: View {
                     .sessionsScreenListRow()
             }
 
-            Color.clear
-                .frame(height: usesShellChrome ? 82 : 104)
-                .sessionsScreenListRow()
-                .accessibilityHidden(true)
+            if !usesShellChrome {
+                Color.clear
+                    .frame(height: 104)
+                    .sessionsScreenListRow()
+                    .accessibilityHidden(true)
+            }
         }
         .listStyle(.plain)
         // Let rows hug their content instead of the 44pt default minimum, so the
@@ -694,7 +717,7 @@ struct SessionListView: View {
     private var shellSearchBar: some View {
         HStack(spacing: 10) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 20, weight: .semibold))
+                .font(.system(size: 16, weight: .regular))
                 .foregroundStyle(.secondary)
 
             if searchChromeIsExpanded {
@@ -726,15 +749,10 @@ struct SessionListView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Close search")
-            } else {
-                Image(systemName: "mic.fill")
-                    .font(.system(size: 18, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .accessibilityHidden(true)
             }
         }
         .padding(.horizontal, 18)
-        .frame(height: 52)
+        .frame(height: 44)
         .adaptiveGlass(
             .regular,
             isInteractive: true,
@@ -888,11 +906,49 @@ struct SessionListView: View {
     }
 
     private var scheduledSessionGroups: ScheduledSessionGroups {
-        viewModel.scheduledSessionGroups(
+        let groups = viewModel.scheduledSessionGroups(
             searchText: searchText,
             selectedProjectID: selectedProjectID,
             automatedVisibility: automatedSessionVisibility
         )
+        guard usesShellChrome else { return groups }
+        let ordinary = groups.ordinary.filter(matchesShellFilters)
+        let scheduled = groups.scheduled.filter(matchesShellFilters)
+        return ScheduledSessionGroups(
+            ordinary: ordinary,
+            scheduled: scheduled,
+            totalScheduledCount: selectedBot == nil && !pinnedOnly ? groups.totalScheduledCount : scheduled.count
+        )
+    }
+
+    private func matchesShellFilters(_ session: SessionSummary) -> Bool {
+        SessionShellFilter.matches(session, bot: selectedBot, pinnedOnly: pinnedOnly)
+    }
+
+    private var sessionFilters: some View {
+        HStack(spacing: 16) {
+            Menu {
+                Button("All bots") { selectedBot = nil }
+                ForEach(Array(Set(viewModel.sessions.compactMap(\.profile))).sorted(), id: \.self) { name in
+                    Button(name) { selectedBot = name }
+                }
+            } label: {
+                Label(selectedBot ?? "All bots", systemImage: "line.3.horizontal.decrease")
+                    .lineLimit(1)
+            }
+            .accessibilityLabel("Filter by bot: \(selectedBot ?? "All bots")")
+            Button {
+                pinnedOnly.toggle()
+            } label: {
+                Label("Pinned", systemImage: pinnedOnly ? "pin.fill" : "pin")
+            }
+            .accessibilityAddTraits(pinnedOnly ? .isSelected : [])
+            Spacer(minLength: 0)
+        }
+        .font(AppFont.subheadline(weight: .medium))
+        .buttonStyle(.plain)
+        .padding(.horizontal, 18)
+        .frame(minHeight: 44)
     }
 
     private var automatedSessionVisibility: AutomatedSessionVisibility {

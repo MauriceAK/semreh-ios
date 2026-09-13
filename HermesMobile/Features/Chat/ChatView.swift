@@ -757,9 +757,57 @@ struct ChatView: View {
         "\(server.absoluteString)|\(transcriptMediaSessionID ?? "local:\(session.id)")"
     }
 
+    private var chatBotHeader: some View {
+        VStack(spacing: 0) {
+            if let identity = BirdAvatarIdentity(server: server, profile: viewModel.selectedProfileName ?? session.profile) {
+                BirdAvatarView(identity: identity)
+                    .frame(width: 54, height: 54)
+            }
+            Menu {
+                Text(displayTitle)
+                Section("Profile") {
+                    Text(viewModel.selectedProfileTitle)
+                    if !viewModel.isSingleProfileMode {
+                        ForEach(viewModel.profileOptions, id: \.self) { profile in
+                            Button {
+                                handleProfileSelection(profile)
+                            } label: {
+                                if viewModel.isSelectedProfile(profile) {
+                                    Label(profile.displayName, systemImage: "checkmark")
+                                } else {
+                                    Text(profile.displayName)
+                                }
+                            }
+                            .disabled(viewModel.isViewingCachedData || viewModel.isStartingChat
+                                || viewModel.isSendingVoiceNote || viewModel.isCompressingSession
+                                || viewModel.activeStreamID != nil || viewModel.isUpdatingComposerConfiguration)
+                        }
+                    }
+                }
+            } label: {
+                HStack(spacing: 5) {
+                    Text(viewModel.selectedProfileTitle)
+                        .font(.system(.subheadline, design: .rounded).weight(.medium))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Image(systemName: "chevron.down").font(.caption2)
+                }
+                .padding(.horizontal, 14)
+                .frame(minHeight: 32)
+                .adaptiveGlass(.regular, isInteractive: true, fallbackMaterial: .thinMaterial, in: Capsule())
+            }
+            .accessibilityLabel("Choose bot profile")
+            .accessibilityValue(viewModel.selectedProfileTitle)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.bottom, 8)
+    }
+
     private var chatBaseView: some View {
         ZStack(alignment: .bottom) {
             VStack(spacing: 0) {
+                chatBotHeader
+
                 if viewModel.isViewingCachedData {
                     ChatOfflineCacheBanner()
                 }
@@ -772,8 +820,6 @@ struct ChatView: View {
                     .environment(\.layoutDirection, chatLayoutDirection)
             }
             .animation(ChatMotion.quickState(reduceMotion: reduceMotion), value: viewModel.showsListenPlaybackBar)
-
-            BottomComposerMaterialFade(composerHeight: composerHeight)
 
             composerAccessoryStack
 
@@ -903,7 +949,7 @@ struct ChatView: View {
         .overlay(alignment: .top) {
             GitActionToastOverlay(state: gitToastState)
         }
-        .navigationTitle(displayTitle)
+        .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .accessibilityIdentifier("chat-detail:\(viewModel.displayTitle)")
         .task(id: didCompleteInitialAppearance) {
@@ -976,13 +1022,6 @@ struct ChatView: View {
                 handleResponseCompletionSideEffects()
             }
             .toolbar {
-                ToolbarItem(placement: .principal) {
-                    ChatToolbarTitleLabel(
-                        title: displayTitle,
-                        subtitle: headerSubtitle
-                    )
-                }
-
                 ToolbarItem(placement: .topBarTrailing) {
                     ChatToolbarActionCluster {
                         if viewModel.hasActivatedGoalCommand {
@@ -2890,14 +2929,14 @@ struct ChatToolbarTitleLabel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
             Text(title)
-                .font(.subheadline.weight(.semibold))
+                .font(AppFont.subheadline(weight: .semibold))
                 .foregroundStyle(.primary)
                 .lineLimit(1)
                 .truncationMode(.tail)
 
             if showsSubtitle, let subtitle {
                 Text(subtitle)
-                    .font(.caption2)
+                    .font(AppFont.caption2())
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)

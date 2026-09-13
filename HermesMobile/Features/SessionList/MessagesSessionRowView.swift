@@ -44,7 +44,7 @@ struct MessagesSessionRowView: View {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text(SessionRowView.displayTitle(for: session))
-                        .font(.system(size: 17, weight: .semibold, design: .rounded))
+                        .font(AppFont.body(weight: .medium))
                         .foregroundStyle(.primary)
                         .lineLimit(1)
                         .truncationMode(.tail)
@@ -52,7 +52,7 @@ struct MessagesSessionRowView: View {
                     Spacer(minLength: 0)
 
                     Text(relativeDate)
-                        .font(.system(size: 14, weight: .regular, design: .rounded))
+                        .font(AppFont.footnote())
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .fixedSize(horizontal: true, vertical: false)
@@ -60,7 +60,7 @@ struct MessagesSessionRowView: View {
 
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(previewText)
-                        .font(.system(size: 15, weight: .regular, design: .rounded))
+                        .font(AppFont.subheadline())
                         .foregroundStyle(.secondary)
                         .lineLimit(dynamicTypeSize.isAccessibilitySize ? 3 : 2)
                         .truncationMode(.tail)
@@ -95,7 +95,7 @@ struct MessagesSessionRowView: View {
 
     private var avatarWithStatusIndicator: some View {
         ZStack(alignment: .bottomTrailing) {
-            SessionAvatarView(session: session)
+            SessionAvatarView(session: session, server: server)
 
             switch rowState {
             case .live:
@@ -143,8 +143,20 @@ struct MessagesSessionRowView: View {
 
 private struct SessionAvatarView: View {
     let session: SessionSummary
+    let server: URL?
 
+    @ViewBuilder
     var body: some View {
+        if let identity = BirdAvatarIdentity(server: server, profile: session.profile) {
+            BirdAvatarView(identity: identity)
+                .frame(width: 44, height: 44)
+                .accessibilityHidden(true)
+        } else {
+            fallbackAvatar
+        }
+    }
+
+    private var fallbackAvatar: some View {
         ZStack {
             Circle()
                 .fill(

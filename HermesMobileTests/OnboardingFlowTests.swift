@@ -29,25 +29,21 @@ final class OnboardingFlowTests: XCTestCase {
 
     func testPrimaryButtonTitlesFollowPagerFlow() {
         XCTAssertEqual(OnboardingFlowPolicy.primaryButtonTitle(for: 0), "Get Started")
-        XCTAssertEqual(OnboardingFlowPolicy.primaryButtonTitle(for: 1), "Set Up")
-        XCTAssertEqual(OnboardingFlowPolicy.primaryButtonTitle(for: 2), "Continue")
-        XCTAssertEqual(OnboardingFlowPolicy.primaryButtonTitle(for: 3), "Continue")
-        XCTAssertEqual(OnboardingFlowPolicy.primaryButtonTitle(for: 4), "Connect")
+        XCTAssertEqual(OnboardingFlowPolicy.primaryButtonTitle(for: 1), "Connect")
+        XCTAssertEqual(OnboardingFlowPolicy.pageCount, 2)
     }
 
     func testConnectFocusClearsWhenLeavingConnectPage() {
-        XCTAssertTrue(OnboardingFlowPolicy.shouldClearConnectFocusWhenLeavingPage(3))
+        XCTAssertTrue(OnboardingFlowPolicy.shouldClearConnectFocusWhenLeavingPage(0))
         XCTAssertFalse(OnboardingFlowPolicy.shouldClearConnectFocusWhenLeavingPage(OnboardingFlowPolicy.connectPageIndex))
     }
 
-    func testServerShortcutShowsBeforeConnectPageOnly() {
-        XCTAssertTrue(OnboardingFlowPolicy.showsServerShortcut(for: 0))
-        XCTAssertTrue(OnboardingFlowPolicy.showsServerShortcut(for: 3))
-        XCTAssertFalse(OnboardingFlowPolicy.showsServerShortcut(for: OnboardingFlowPolicy.connectPageIndex))
+    func testFreshSetupStartsAtWelcomeAndSavedServerSkipsToConnect() {
+        XCTAssertEqual(OnboardingFlowPolicy.initialPage(hasSavedServer: false), 0)
+        XCTAssertEqual(OnboardingFlowPolicy.initialPage(hasSavedServer: true), OnboardingFlowPolicy.connectPageIndex)
     }
 
     func testServerGuidanceUsesFirstPartyExistingServerContract() {
-        XCTAssertEqual(OnboardingFlowPolicy.serverGuidancePageIndex, 2)
         let guidance = OnboardingFlowPolicy.serverGuidanceSteps
             .flatMap { [$0.title, $0.detail] }.joined(separator: " ")
         XCTAssertEqual(OnboardingFlowPolicy.serverGuidanceSteps.count, 3)

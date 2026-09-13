@@ -9,6 +9,7 @@ struct YouView: View {
     @AppStorage(HeaderLogoColor.storageKey) private var headerLogoColorHex = HeaderLogoColor.defaultHex
     @State private var navigationPath = NavigationPath()
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.appColorPalette) private var palette
     @ScaledMetric(relativeTo: .title2) private var avatarSize: CGFloat = 64
 
     var body: some View {
@@ -23,16 +24,16 @@ struct YouView: View {
                 for: .navigationBar
             )
         }
-        .background(SemrehVisualTheme.canvas(for: colorScheme, palette: .sand).ignoresSafeArea())
+        .background(SemrehVisualTheme.canvas(for: colorScheme, palette: palette).ignoresSafeArea())
     }
 
     private var youHeader: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text("You")
-                .font(.largeTitle.bold())
+            Text("Settings")
+                .font(SemrehTypography.title)
                 .foregroundStyle(.primary)
             Text("Preferences and your Hermes setup.")
-                .font(.body).foregroundStyle(.secondary)
+                .font(SemrehTypography.body).foregroundStyle(.secondary)
             profileCard
         }
         .padding(.top, 16)
@@ -53,7 +54,7 @@ struct YouView: View {
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(displayName)
-                        .font(.title2.weight(.bold))
+                        .font(SemrehTypography.heading)
                     Text("Your Semreh profile")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
@@ -65,19 +66,19 @@ struct YouView: View {
             connectionCard
         }
         .padding(20)
-        .background(SemrehVisualTheme.raisedPanel(for: colorScheme, palette: .sand), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .background(SemrehVisualTheme.raisedPanel(for: colorScheme, palette: palette), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
     }
 
     private var connectionCard: some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: "server.rack")
-                .foregroundStyle(SemrehVisualTheme.action(for: colorScheme, palette: .sand))
+                .foregroundStyle(SemrehVisualTheme.action(for: colorScheme, palette: palette))
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text("Current server")
-                    .font(.subheadline.weight(.semibold))
+                    .font(SemrehTypography.label)
                 Text(serverDisplayName)
-                    .font(.caption)
+                    .font(SemrehTypography.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -88,7 +89,7 @@ struct YouView: View {
 
     private var displayName: String {
         let trimmed = identityDisplayName.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? "Maurice" : trimmed
+        return trimmed.isEmpty ? String(localized: "Your profile") : trimmed
     }
 
     private var displayInitials: String {

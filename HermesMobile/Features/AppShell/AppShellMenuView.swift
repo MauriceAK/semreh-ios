@@ -120,7 +120,7 @@ struct ControlView: View {
                 }
             }
             .listStyle(.insetGrouped)
-            .contentMargins(.top, 108, for: .scrollContent)
+            .contentMargins(.top, 8, for: .scrollContent)
             .scrollContentBackground(.hidden)
             .background(SemrehBackdrop().ignoresSafeArea())
             .navigationDestination(item: $navigationState.destination) { destination in

@@ -63,7 +63,7 @@ struct MessageComposerView: View {
     @ScaledMetric(relativeTo: .footnote) private var actionIconSize: CGFloat = 13
     @ScaledMetric(relativeTo: .footnote) private var actionButtonSize: CGFloat = 30
     @ScaledMetric(relativeTo: .title3) private var plusIconSize: CGFloat = 24
-    @ScaledMetric(relativeTo: .title3) private var plusButtonSize: CGFloat = 28
+    @ScaledMetric(relativeTo: .title3) private var plusButtonSize: CGFloat = 50
 
     @Binding var draftMessage: String
     @Binding var isFocused: Bool
@@ -153,6 +153,8 @@ struct MessageComposerView: View {
     @State private var textInputHeight: CGFloat = 22
     @State private var noticeMessage: String?
     @State private var showsAllModelsSheet = false
+    @State private var showsIntelligenceOptions = false
+    @State private var opensAllModelsAfterIntelligence = false
     @State private var showsWorkspaceSheet = false
     @State private var optimisticWorkspacePath: String?
     @State private var favoriteModelKeys = ModelFavoritesStore.shared.favoriteKeys
@@ -317,106 +319,96 @@ struct MessageComposerView: View {
                 }
                 .animation(ChatMotion.quickState(reduceMotion: reduceMotion), value: showsSlashAutocomplete)
 
-                VStack(spacing: 0) {
-                    ComposerAttachmentStripView(
-                        attachments: attachmentDisplayItems,
-                        onRemove: onRemoveAttachment,
-                        onPreview: { item in
-                            if let onPreviewDisplayAttachment {
-                                onPreviewDisplayAttachment(item)
-                            } else if let pending = item.legacyPendingAttachment() {
-                                onPreviewAttachment(pending)
-                            }
-                        }
-                    )
+                HStack(alignment: .center, spacing: 8) {
+                    composerPlusMenu
+                        .adaptiveGlass(.regular, isInteractive: true,
+                                       fallbackMaterial: .ultraThinMaterial, in: Circle())
 
-                    if attachmentDisplayItems.contains(where: \.isGenericFileReference) {
-                        Text("Will be sent as a file reference. Ask Hermes to inspect it.")
-                            .font(.footnote)
-                            .foregroundStyle(Color(.secondaryLabel))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 16)
-                            .padding(.bottom, 4)
-                    }
-
-                    ComposerTextInputView(
-                        text: $draftMessage,
-                        isFocused: $isFocused,
-                        inputHeight: $textInputHeight,
-                        measuredHeight: $textFieldHeight,
-                        isDisabled: isOfflineReadOnly,
-                        isKeyboardSendEnabled: !showsStopButton && !isActionButtonDisabled,
-                        verticalPadding: textFieldVerticalPadding,
-                        onKeyboardSend: actionButtonTapped,
-                        onPasteFileProviders: onPasteFileProviders,
-                        onPasteFileURLs: onPasteFileURLs,
-                        onPasteImageProviders: onPasteImageProviders,
-                        onPasteImages: onPasteImages
-                    )
-
-                    HStack(alignment: .center, spacing: 12) {
-                        composerPlusMenu
-
-                        modelMenu
-
-                        if showsReasoningControl {
-                            reasoningMenu
-                        }
-
-                        Spacer(minLength: 0)
-
-                        ComposerVoiceControlButton(
-                            isListening: voiceInput.isListening,
-                            isDisabled: isVoiceInputDisabled,
-                            color: metaControlColor,
-                            isRecordingVoiceNote: voiceNoteRecorder.isRecording,
-                            onTap: toggleVoiceInput,
-                            onRecordingStart: startVoiceNoteRecording,
-                            onRecordingDragChanged: { height in
-                                voiceNoteCancelArmed = ComposerVoiceNoteGesture.isCancelArmed(dragTranslationHeight: height)
-                            },
-                            onRecordingEnd: { height in
-                                finishVoiceNote(translationHeight: height)
+                    VStack(spacing: 0) {
+                        ComposerAttachmentStripView(
+                            attachments: attachmentDisplayItems,
+                            onRemove: onRemoveAttachment,
+                            onPreview: { item in
+                                if let onPreviewDisplayAttachment {
+                                    onPreviewDisplayAttachment(item)
+                                } else if let pending = item.legacyPendingAttachment() {
+                                    onPreviewAttachment(pending)
+                                }
                             }
                         )
 
-                        Button(action: actionButtonTapped) {
-                            actionButtonLabel
-                                .frame(width: actionButtonSize, height: actionButtonSize)
-                                .background(actionButtonBackground)
-                                .foregroundStyle(actionButtonForeground)
-                                .clipShape(Circle())
-                                .chatMinimumHitTarget(in: Circle())
+                        if attachmentDisplayItems.contains(where: \.isGenericFileReference) {
+                            Text("Will be sent as a file reference. Ask Hermes to inspect it.")
+                                .font(.footnote)
+                                .foregroundStyle(Color(.secondaryLabel))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 16)
+                                .padding(.bottom, 4)
                         }
-                        .buttonStyle(.chatTactile(.icon))
-                        .disabled(isActionButtonDisabled)
-                        .accessibilityLabel(showsStopButton ? "Stop response" : "Send")
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.top, 2)
-                    .padding(.bottom, 8)
-                }
-                .adaptiveGlass(
-                    .regular,
-                    isInteractive: true,
-                    tint: SemrehVisualTheme.action(for: colorScheme, palette: palette)
-                        .opacity(colorScheme == .dark ? 0.22 : 0.10),
-                    fallbackMaterial: .ultraThinMaterial,
-                    in: RoundedRectangle(cornerRadius: composerCornerRadius, style: .continuous)
-                )
-                .overlay {
-                    RoundedRectangle(cornerRadius: composerCornerRadius, style: .continuous)
-                        .stroke(SemrehVisualTheme.subtleStroke(for: colorScheme, palette: palette), lineWidth: 0.8)
-                        .allowsHitTesting(false)
-                }
-                .clipShape(RoundedRectangle(cornerRadius: composerCornerRadius, style: .continuous))
-                .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.28 : 0.12), radius: 14, y: 6)
-                .padding(.horizontal)
 
-                secondaryBar
-                    .padding(.horizontal)
-                    .padding(.bottom, 7)
-                    .animation(ChatMotion.composerChrome(reduceMotion: reduceMotion), value: showsSecondaryChrome)
+                        HStack(alignment: .bottom, spacing: 2) {
+                            ComposerTextInputView(
+                                text: $draftMessage,
+                                isFocused: $isFocused,
+                                inputHeight: $textInputHeight,
+                                measuredHeight: $textFieldHeight,
+                                isDisabled: isOfflineReadOnly,
+                                isKeyboardSendEnabled: !showsStopButton && !isActionButtonDisabled,
+                                verticalPadding: textFieldVerticalPadding,
+                                onKeyboardSend: actionButtonTapped,
+                                onPasteFileProviders: onPasteFileProviders,
+                                onPasteFileURLs: onPasteFileURLs,
+                                onPasteImageProviders: onPasteImageProviders,
+                                onPasteImages: onPasteImages
+                            )
+
+                            ComposerVoiceControlButton(
+                                isListening: voiceInput.isListening,
+                                isDisabled: isVoiceInputDisabled,
+                                color: metaControlColor,
+                                isRecordingVoiceNote: voiceNoteRecorder.isRecording,
+                                onTap: toggleVoiceInput,
+                                onRecordingStart: startVoiceNoteRecording,
+                                onRecordingDragChanged: { height in
+                                    voiceNoteCancelArmed = ComposerVoiceNoteGesture.isCancelArmed(dragTranslationHeight: height)
+                                },
+                                onRecordingEnd: { height in
+                                    finishVoiceNote(translationHeight: height)
+                                }
+                            )
+
+                            if showsStopButton || !trimmedDraftMessage.isEmpty || !attachmentDisplayItems.isEmpty || isSending {
+                                Button(action: actionButtonTapped) {
+                                    actionButtonLabel
+                                        .frame(width: actionButtonSize, height: actionButtonSize)
+                                        .background(actionButtonBackground)
+                                        .foregroundStyle(actionButtonForeground)
+                                        .clipShape(Circle())
+                                        .chatMinimumHitTarget(in: Circle())
+                                }
+                                .buttonStyle(.chatTactile(.icon))
+                                .disabled(isActionButtonDisabled)
+                                .accessibilityLabel(showsStopButton ? "Stop response" : "Send")
+                            }
+                        }
+                        .padding(.trailing, 8)
+                        .padding(.vertical, 4)
+                    }
+                    .adaptiveGlass(
+                        .regular,
+                        isInteractive: true,
+                        fallbackMaterial: .ultraThinMaterial,
+                        in: RoundedRectangle(cornerRadius: composerCornerRadius, style: .continuous)
+                    )
+                    .overlay {
+                        RoundedRectangle(cornerRadius: composerCornerRadius, style: .continuous)
+                            .stroke(SemrehVisualTheme.subtleStroke(for: colorScheme, palette: palette), lineWidth: 0.8)
+                            .allowsHitTesting(false)
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: composerCornerRadius, style: .continuous))
+                }
+                .padding(.horizontal, 12)
+                .padding(.bottom, 4)
             }
         }
         .background(
@@ -483,6 +475,13 @@ struct MessageComposerView: View {
             .presentationDragIndicator(.visible)
             .task {
                 await onModelPickerOpen()
+            }
+        }
+        .toolbar {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                gitBranchPicker
+                intelligenceOptionsButton
+                chatOptionsMenu
             }
         }
         .sheet(isPresented: $showsWorkspaceSheet, onDismiss: restoreFocusAfterPresentationIfNeeded) {
@@ -631,7 +630,7 @@ struct MessageComposerView: View {
     }
 
     private var composerPlusMenu: some View {
-        ChatUIKitMenuButton(horizontalPadding: 8, verticalPadding: 8) {
+        ChatUIKitMenuButton(horizontalPadding: 0, verticalPadding: 0) {
             Image(systemName: "plus")
                 .font(.system(size: plusIconSize, weight: .regular))
                 .foregroundStyle(metaControlColor)
@@ -706,46 +705,96 @@ struct MessageComposerView: View {
         ])
     }
 
-    @ViewBuilder
-    private var secondaryBar: some View {
-        if showsSecondaryChrome {
-            if usesAccessibilityLayout {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack(spacing: 8) {
-                        workspaceSelector
-
-                        // Single-profile mode: the server rejects profile switches,
-                        // so the selector could only no-op or error (#24).
-                        if !isSingleProfileMode {
-                            profileSelector
+    private var intelligenceOptionsButton: some View {
+        Button {
+            prepareForComposerPresentation()
+            showsIntelligenceOptions = true
+        } label: {
+            Label("Model, reasoning and usage", systemImage: "brain")
+        }
+        .accessibilityLabel("Model, reasoning and usage")
+        .popover(isPresented: $showsIntelligenceOptions) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Model").font(.headline)
+                    modelMenu
+                    if showsReasoningControl {
+                        Divider()
+                        Text("Reasoning").font(.headline)
+                        reasoningMenu
+                        if isReasoningChangeDeferred {
+                            Text("Changes apply to the next turn.")
+                                .font(.caption).foregroundStyle(.secondary)
                         }
-
-                        gitBranchPicker
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-
-                    ContextWindowIndicatorView(snapshot: contextWindowSnapshot)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .transition(ChatMotion.bottomOverlayTransition(reduceMotion: reduceMotion))
-            } else {
-                HStack(spacing: 8) {
-                    workspaceSelector
-
-                    if !isSingleProfileMode {
-                        profileSelector
+                    Divider()
+                    Text("Context usage").font(.headline)
+                    if let snapshot = contextWindowSnapshot {
+                        Text(ContextWindowFormatter.tokensLabel(from: snapshot))
+                        Text("Input: \(ContextWindowFormatter.inputTokensLabel(from: snapshot))")
+                        Text("Output: \(ContextWindowFormatter.outputTokensLabel(from: snapshot))")
+                        Text("Threshold: \(ContextWindowFormatter.thresholdLabel(from: snapshot))")
+                        Text("Cost: \(ContextWindowFormatter.costLabel(from: snapshot))")
+                    } else {
+                        Text("Context usage unavailable").foregroundStyle(.secondary)
                     }
-
-                    gitBranchPicker
-
-                    Spacer(minLength: 0)
-
-                    ContextWindowIndicatorView(snapshot: contextWindowSnapshot)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .transition(ChatMotion.bottomOverlayTransition(reduceMotion: reduceMotion))
+                .font(.subheadline)
+                .padding(20)
+            }
+            .frame(idealWidth: 320, maxHeight: 460)
+            .presentationCompactAdaptation(.popover)
+            .onDisappear {
+                if opensAllModelsAfterIntelligence {
+                    opensAllModelsAfterIntelligence = false
+                    showsAllModelsSheet = true
+                } else {
+                    restoreFocusAfterPresentationIfNeeded()
+                }
             }
         }
+    }
+
+    private var chatOptionsMenu: some View {
+        Menu {
+            Section("Workspace") {
+                Text(workspaceTitle)
+                Button("Choose workspace path", systemImage: "folder") {
+                    prepareForComposerPresentation()
+                    showsWorkspaceSheet = true
+                }
+                .disabled(isConfigurationControlDisabled)
+            }
+
+            Section("Profile") {
+                Text(selectedProfileTitle)
+                if !isSingleProfileMode {
+                    Menu("Choose profile") {
+                        if profileOptions.isEmpty {
+                            Text("No profiles available")
+                        } else {
+                            ForEach(profileOptions, id: \.self) { profile in
+                                Button {
+                                    onSelectProfile(profile)
+                                } label: {
+                                    if profile.name == selectedProfileName {
+                                        Label(profile.displayName, systemImage: "checkmark")
+                                    } else {
+                                        Text(profile.displayName)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .disabled(isConfigurationControlDisabled)
+                }
+            }
+
+
+        } label: {
+            Label("Chat options", systemImage: "ellipsis")
+        }
+        .accessibilityLabel("Chat options")
     }
 
     @ViewBuilder
@@ -764,10 +813,6 @@ struct MessageComposerView: View {
                 onRefresh: onRefreshGitBranches
             )
         }
-    }
-
-    private var showsSecondaryChrome: Bool {
-        !keyboardIsVisible && !isChromeCompact
     }
 
     private var usesAccessibilityLayout: Bool {
@@ -790,50 +835,6 @@ struct MessageComposerView: View {
         usesAccessibilityLayout ? 126 : 104
     }
 
-    private var secondaryBarLineLimit: Int {
-        usesAccessibilityLayout ? 2 : 1
-    }
-
-    private var secondaryBarVerticalPadding: CGFloat {
-        usesAccessibilityLayout ? 10 : 8
-    }
-
-    private var secondaryBarHorizontalPadding: CGFloat {
-        usesAccessibilityLayout ? 16 : 14
-    }
-
-    private var workspaceSelector: some View {
-        ComposerWorkspaceSelectorButton(
-            title: workspaceTitle,
-            isDisabled: isConfigurationControlDisabled,
-            lineLimit: secondaryBarLineLimit,
-            verticalPadding: secondaryBarVerticalPadding,
-            horizontalPadding: secondaryBarHorizontalPadding,
-            color: metaControlColor,
-            controlFont: metaControlFont,
-            chevronFont: metaChevronFont
-        ) {
-            prepareForComposerPresentation()
-            showsWorkspaceSheet = true
-        }
-    }
-
-    private var profileSelector: some View {
-        ComposerProfileSelectorMenu(
-            profileOptions: profileOptions,
-            selectedProfileName: selectedProfileName,
-            selectedProfileTitle: selectedProfileTitle,
-            isDisabled: isConfigurationControlDisabled,
-            lineLimit: secondaryBarLineLimit,
-            verticalPadding: secondaryBarVerticalPadding,
-            horizontalPadding: secondaryBarHorizontalPadding,
-            color: metaControlColor,
-            controlFont: metaControlFont,
-            chevronFont: metaChevronFont,
-            onSelectProfile: onSelectProfile
-        )
-    }
-
     private var modelMenu: some View {
         ComposerModelMenu(
             modelGroups: modelGroups,
@@ -850,8 +851,13 @@ struct MessageComposerView: View {
             chevronFont: metaChevronFont,
             onSelectModel: selectModel
         ) {
-            prepareForComposerPresentation()
-            showsAllModelsSheet = true
+            if showsIntelligenceOptions {
+                opensAllModelsAfterIntelligence = true
+                showsIntelligenceOptions = false
+            } else {
+                prepareForComposerPresentation()
+                showsAllModelsSheet = true
+            }
         }
     }
 
@@ -1051,7 +1057,7 @@ struct MessageComposerView: View {
     }
 
     private var textFieldVerticalPadding: CGFloat {
-        isComposerExpanded ? 12 : 14
+        isComposerExpanded ? 8 : 7
     }
 
     private var reasoningTitle: String {
