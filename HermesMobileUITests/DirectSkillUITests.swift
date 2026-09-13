@@ -22,7 +22,7 @@ final class DirectSkillUITests: XCTestCase {
         guard let phase = environment["SEMREH_LIFECYCLE_UI_PHASE"] else {
             throw XCTSkip("Production lifecycle verification is opt-in.")
         }
-        guard ["finish", "stop", "steer", "background", "terminate"].contains(phase),
+        guard ["finish", "stop", "steer", "background", "terminate", "automatic-restore"].contains(phase),
               environment["SEMREH_SLICE2_UI_LIVE"] == "1",
               environment["SEMREH_SLICE1_HTTPS"] == "1",
               environment["SEMREH_SLICE2_UI_BACKEND_MODE"] == "stock",
@@ -58,6 +58,50 @@ final class DirectSkillUITests: XCTestCase {
         }
         let baseline = try await waitForCanonical(observer: observer, storedID: storedID) {
             self.exactCanonicalPairs($0, users: [warmup])
+        }
+        if phase == "automatic-restore" {
+            // Select the durable existing conversation before termination. A new
+            // draft's navigation identity is separate from first-send adoption.
+            var link = URLComponents()
+            link.scheme = "semreh"
+            link.host = "session"
+            link.queryItems = [URLQueryItem(name: "id", value: storedID)]
+            app.open(try XCTUnwrap(link.url))
+            let selectedComposer = app.textViews.matching(
+                NSPredicate(format: "identifier BEGINSWITH %@", "chat-detail:")
+            ).firstMatch
+            XCTAssertTrue(selectedComposer.waitForExistence(timeout: 30))
+            XCTAssertTrue(containing(warmup, app: app).waitForExistence(timeout: 20))
+            waitForVisibleACKCount(1, app: app)
+            let selectedDetail = app.descendants(matching: .any).matching(
+                NSPredicate(format: "identifier BEGINSWITH %@", "chat-detail:")
+            ).firstMatch
+            XCTAssertTrue(selectedDetail.waitForExistence(timeout: 10))
+            let selectedDetailID = selectedDetail.identifier
+            // This gate isolates existing-chat viewport restoration. Completion
+            // while away and explicit send-next remain separate lifecycle gates.
+            app.terminate()
+            XCTAssertEqual(app.state, .notRunning)
+            app.launch()
+            let restoredComposer = app.textViews.matching(
+                NSPredicate(format: "identifier BEGINSWITH %@", "chat-detail:")
+            ).firstMatch
+            XCTAssertTrue(restoredComposer.waitForExistence(timeout: 30),
+                          "Plain launch must restore the selected existing conversation.")
+            XCTAssertTrue(app.descendants(matching: .any).matching(identifier: selectedDetailID)
+                .firstMatch.waitForExistence(timeout: 10),
+                "Plain launch must preserve the pre-termination chat detail identity.")
+            XCTAssertTrue(containing(warmup, app: app).waitForExistence(timeout: 20))
+            let screenshot = XCTAttachment(screenshot: app.screenshot())
+            screenshot.name = "Automatically restored existing chat before interaction"
+            screenshot.lifetime = .keepAlways
+            add(screenshot)
+            waitForVisibleACKCount(1, app: app)
+            XCTAssertTrue(containing(warmup, app: app).isHittable)
+            _ = try await waitForCanonical(observer: observer, storedID: storedID) {
+                self.exactCanonicalPairs($0, users: [warmup])
+            }
+            return
         }
 
         switch phase {
@@ -627,6 +671,12 @@ final class DirectSkillUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["semreh-slice1-test.tailda8427.ts.net"].waitForExistence(timeout: 15),
                       "Refusing to sign out an authenticated server other than the contained fixture.")
         let signOut = app.buttons["Sign Out of This Server"]
+        if !signOut.exists {
+            let appSettings = app.staticTexts["App & maintenance"]
+            for _ in 0..<8 where !appSettings.isHittable { app.scrollViews.firstMatch.swipeUp() }
+            XCTAssertTrue(appSettings.waitForExistence(timeout: 5) && appSettings.isHittable)
+            appSettings.tap()
+        }
         for _ in 0..<8 where !signOut.isHittable { app.scrollViews.firstMatch.swipeUp() }
         XCTAssertTrue(signOut.waitForExistence(timeout: 5) && signOut.isHittable)
         signOut.tap()

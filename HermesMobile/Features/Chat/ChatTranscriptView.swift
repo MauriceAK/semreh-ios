@@ -278,7 +278,10 @@ struct ChatTranscriptView: View, Equatable {
                     ) else { return }
                     onScrollToLatestContent(proxy, true)
                 }
-                .onChange(of: restoreScrollToken) {
+                .onChange(of: restoreScrollToken, initial: true) {
+                    // The loaded branch may first mount with a pending request.
+                    // Observing only later changes misses that initial restore.
+                    guard restoreScrollToken > 0 else { return }
                     applyTranscriptRestore(proxy)
                 }
                 .onChange(of: transcriptRestoreCancellationToken) {
