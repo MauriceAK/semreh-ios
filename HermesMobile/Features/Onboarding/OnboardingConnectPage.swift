@@ -15,6 +15,10 @@ struct OnboardingConnectPage: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.appColorPalette) private var palette
     @State private var isShowingAdvanced = false
+    @State private var isShowingPairingScanner = false
+    @State private var pairingPendingScannerDismissal: PairingImport?
+    @State private var pairingToReview: PairingImport?
+    @State private var focusesServerAfterScannerDismissal = false
 
     private var canSubmit: Bool {
         !viewModel.serverURLString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -60,6 +64,17 @@ struct OnboardingConnectPage: View {
                                 .onSubmit(submitConnection)
                         }
                     }
+
+                    Button {
+                        focusedField = nil
+                        isShowingPairingScanner = true
+                    } label: {
+                        Label("Scan setup code", systemImage: "qrcode.viewfinder")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(OnboardingSecondaryButtonStyle())
+                    .disabled(viewModel.isWorking)
+                    .accessibilityHint("Scans a secret-free server address for review. It does not connect or sign in.")
 
                     if viewModel.isUsernameRequired {
                         OnboardingField(systemImage: "person.fill", title: String(localized: "Username")) {
@@ -147,5 +162,87 @@ struct OnboardingConnectPage: View {
             .padding(.bottom, 92)
         }
         .scrollBounceBehavior(.basedOnSize)
+        .sheet(isPresented: $isShowingPairingScanner, onDismiss: finishPairingScannerDismissal) {
+            PairingCameraView(
+                accepted: { pairing in
+                    pairingPendingScannerDismissal = pairing
+                    focusesServerAfterScannerDismissal = false
+                    isShowingPairingScanner = false
+                },
+                manual: {
+                    pairingPendingScannerDismissal = nil
+                    focusesServerAfterScannerDismissal = true
+                    isShowingPairingScanner = false
+                },
+                cancel: {
+                    pairingPendingScannerDismissal = nil
+                    focusesServerAfterScannerDismissal = false
+                    isShowingPairingScanner = false
+                }
+            )
+            .presentationDetents([.large])
+        }
+        .sheet(item: $pairingToReview) { pairing in
+            PairingOriginReviewView(
+                pairing: pairing,
+                confirm: {
+                    viewModel.applyConfirmedPairingOrigin(pairing)
+                    pairingToReview = nil
+                    focusedField = .serverURL
+                },
+                cancel: { pairingToReview = nil }
+            )
+            .presentationDetents([.medium, .large])
+        }
+    }
+
+    private func finishPairingScannerDismissal() {
+        if let pairingPendingScannerDismissal {
+            pairingToReview = pairingPendingScannerDismissal
+            self.pairingPendingScannerDismissal = nil
+        } else if focusesServerAfterScannerDismissal {
+            focusedField = .serverURL
+        }
+        focusesServerAfterScannerDismissal = false
+    }
+}
+
+private struct PairingOriginReviewView: View {
+    let pairing: PairingImport
+    let confirm: () -> Void
+    let cancel: () -> Void
+
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.appColorPalette) private var palette
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                SemrehBackdrop().ignoresSafeArea()
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        Label("Review server address", systemImage: "qrcode.viewfinder")
+                            .font(.title3.weight(.bold))
+                        Text(pairing.origin.absoluteString)
+                            .font(.system(.body, design: .monospaced))
+                            .foregroundStyle(OnboardingTheme.primaryText(for: colorScheme, palette: palette))
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
+                        Text("Compare the complete address with your server or administrator. A QR code does not prove who owns a server. Confirming only fills the existing connection form.")
+                            .font(.footnote)
+                            .foregroundStyle(OnboardingTheme.secondaryText(for: colorScheme, palette: palette))
+                            .fixedSize(horizontal: false, vertical: true)
+                        Button("Use this address", action: confirm)
+                            .buttonStyle(OnboardingPrimaryButtonStyle())
+                        Button("Cancel", role: .cancel, action: cancel)
+                            .buttonStyle(OnboardingSecondaryButtonStyle())
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(24)
+                }
+            }
+            .navigationTitle("Setup Code")
+            .navigationBarTitleDisplayMode(.inline)
+        }
     }
 }

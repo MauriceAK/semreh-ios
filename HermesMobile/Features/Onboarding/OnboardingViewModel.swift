@@ -40,6 +40,21 @@ final class OnboardingViewModel {
         authStatus?.authEnabled != false
     }
 
+    /// Applies an address only after the user has reviewed and confirmed the
+    /// complete origin decoded from a secret-free Semreh pairing code.
+    func applyConfirmedPairingOrigin(_ pairing: PairingImport) {
+        serverURLString = pairing.origin.absoluteString
+        // A newly selected origin must not inherit discovery or credentials from
+        // a previously saved server. The normal test/connect path remains the
+        // only authority that can authenticate or persist the new server.
+        username = ""
+        password = ""
+        customHeaders = []
+        authStatus = nil
+        connectionMessage = nil
+        errorMessage = nil
+    }
+
     func testConnection(authManager: AuthManager) async {
         errorMessage = nil
         connectionMessage = nil

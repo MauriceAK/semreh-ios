@@ -53,7 +53,7 @@
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Semreh uses microphone access for composer dictation and voice note recording that you explicitly start.</string>
 	<key>NSCameraUsageDescription</key>
-	<string>Semreh needs camera access to capture and attach photos directly in chat.</string>
+	<string>Semreh uses camera access to scan setup QR codes or capture photos you choose to attach in chat.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Semreh needs photo library access to attach images to chat messages.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
