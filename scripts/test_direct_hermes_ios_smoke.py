@@ -46,7 +46,7 @@ class IOSSmokeGuardTests(unittest.TestCase):
                 self.assertRejected(arguments, message)
 
     def test_lifecycle_phases_export_exact_target_and_phase(self):
-        for phase in ('finish', 'stop', 'steer', 'background', 'terminate'):
+        for phase in ('finish', 'stop', 'steer', 'background', 'terminate', 'automatic-restore'):
             with self.subTest(phase=phase), tempfile.TemporaryDirectory() as temporary:
                 smoke = load_smoke_module()
                 products = Path(temporary).resolve()

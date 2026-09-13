@@ -47,7 +47,7 @@ def main():
     parser.add_argument('--slice4-skill-ui', action='store_true')
     parser.add_argument('--personal-bootstrap-ui', action='store_true')
     parser.add_argument('--stabilization-ui', action='store_true')
-    parser.add_argument('--lifecycle-ui', choices=['finish', 'stop', 'steer', 'background', 'terminate'])
+    parser.add_argument('--lifecycle-ui', choices=['finish', 'stop', 'steer', 'background', 'terminate', 'automatic-restore'])
     parser.add_argument('--interim-heading-ui', action='store_true')
     parser.add_argument('--a2-profile-ui', action='store_true')
     parser.add_argument('--a3-organizer-ui', action='store_true')
