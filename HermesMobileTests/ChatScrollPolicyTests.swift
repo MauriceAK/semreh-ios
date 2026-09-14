@@ -633,22 +633,73 @@ final class ChatScrollPolicyTests: XCTestCase {
             ChatTranscriptRestorePolicy.hasReachedTarget(
                 .message(id: "transcript:20"),
                 firstVisibleMessageID: "transcript:53",
-                isNearBottom: false
+                isNearBottom: false,
+                isTailVisible: false
             )
         )
         XCTAssertTrue(
             ChatTranscriptRestorePolicy.hasReachedTarget(
                 .message(id: "transcript:20"),
                 firstVisibleMessageID: "transcript:20",
-                isNearBottom: false
+                isNearBottom: false,
+                isTailVisible: false
             )
         )
         XCTAssertTrue(
             ChatTranscriptRestorePolicy.hasReachedTarget(
                 .latest,
                 firstVisibleMessageID: nil,
+                isNearBottom: true,
+                isTailVisible: true
+            )
+        )
+    }
+
+    func testLatestRestoreRejectsProvisionalZeroDistanceBeforeLazyTailExists() {
+        var state = ChatTranscriptRestoreState()
+        state.recordMetrics(
+            isNearBottom: true,
+            isDirectlyInteracting: false,
+            isDecelerating: false
+        )
+
+        XCTAssertFalse(
+            state.shouldSettle(
+                target: .latest,
+                firstVisibleMessageID: nil,
+                isNearBottom: true
+            ),
+            "zero-distance geometry cannot prove that the lazy transcript rendered its tail"
+        )
+
+        state.recordTailVisibility(true)
+        XCTAssertTrue(
+            state.shouldSettle(
+                target: .latest,
+                firstVisibleMessageID: nil,
                 isNearBottom: true
             )
+        )
+    }
+
+    func testInitialRestoreRetainsTailPreferenceDeliveredBeforeToken() {
+        var state = ChatTranscriptRestoreState()
+        state.recordTailVisibility(true)
+
+        XCTAssertTrue(state.beginRestore(token: 1))
+        state.recordMetrics(
+            isNearBottom: true,
+            isDirectlyInteracting: false,
+            isDecelerating: false
+        )
+
+        XCTAssertTrue(
+            state.shouldSettle(
+                target: .latest,
+                firstVisibleMessageID: nil,
+                isNearBottom: true
+            ),
+            "an unchanged SwiftUI preference may not be delivered again after the token arrives"
         )
     }
 
@@ -721,6 +772,7 @@ final class ChatScrollPolicyTests: XCTestCase {
         )
 
         state.recordRestoreAttempt()
+        state.recordTailVisibility(true)
 
         XCTAssertTrue(
             state.shouldSettle(
@@ -738,6 +790,7 @@ final class ChatScrollPolicyTests: XCTestCase {
             isDirectlyInteracting: false,
             isDecelerating: false
         )
+        state.recordTailVisibility(true)
 
         XCTAssertTrue(
             state.shouldSettle(
@@ -835,6 +888,7 @@ final class ChatScrollPolicyTests: XCTestCase {
 
         XCTAssertTrue(state.beginRestore(token: 2))
         state.recordRestoreAttempt()
+        state.recordTailVisibility(true)
         XCTAssertTrue(
             state.shouldSettle(
                 target: .latest,
@@ -852,6 +906,7 @@ final class ChatScrollPolicyTests: XCTestCase {
             isDirectlyInteracting: false,
             isDecelerating: true
         )
+        deceleratingState.recordTailVisibility(true)
         XCTAssertFalse(deceleratingState.isCancelled)
         XCTAssertTrue(
             deceleratingState.shouldSettle(

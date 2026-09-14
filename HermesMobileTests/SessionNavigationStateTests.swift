@@ -174,6 +174,65 @@ final class SessionNavigationStateTests: XCTestCase {
         XCTAssertGreaterThan(try! XCTUnwrap(restoreIndices.last), refreshFinishIndex)
     }
 
+    @MainActor
+    func testDelayedAuthoritativeRestoreDoesNotReopenDismissedChatButColdRestoreAndReselectWork() async {
+        let saved = SessionSummary(sessionId: "saved", title: "Saved")
+        var state = SessionNavigationState(lastSelectedSessionID: saved.sessionId)
+        var refreshResume: CheckedContinuation<Void, Never>?
+        var restorePasses = 0
+        let refreshSuspended = expectation(description: "refresh is suspended")
+        let optimisticRestoreFinished = expectation(description: "optimistic restore finished")
+
+        let loadTask = Task { @MainActor in
+            await SessionListInitialLoad.run(
+                resolvePendingDeepLink: {},
+                refreshSessionsAndActiveProfile: {
+                    await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                        refreshResume = continuation
+                        refreshSuspended.fulfill()
+                    }
+                },
+                restoreLastSelectedSession: { clearsMissingSelection in
+                    restorePasses += 1
+                    if clearsMissingSelection {
+                        state.reconcileAuthoritativeSelection(from: [saved])
+                    } else {
+                        state.restoreIfNeeded(
+                            from: [saved],
+                            clearsMissingSelection: false
+                        )
+                        optimisticRestoreFinished.fulfill()
+                    }
+                }
+            )
+        }
+
+        await fulfillment(of: [refreshSuspended, optimisticRestoreFinished], timeout: 1)
+        XCTAssertEqual(state.destination, .session(saved))
+
+        state.clearDestination()
+        XCTAssertNil(state.destination)
+        XCTAssertEqual(state.lastSelectedSessionID, saved.sessionId)
+
+        guard let refreshResume else {
+            return XCTFail("The delayed refresh must expose its resume gate")
+        }
+        refreshResume.resume()
+        await loadTask.value
+
+        XCTAssertEqual(restorePasses, 2)
+        XCTAssertNil(state.destination)
+        XCTAssertEqual(state.lastSelectedSessionID, saved.sessionId)
+
+        var coldState = SessionNavigationState(lastSelectedSessionID: state.lastSelectedSessionID)
+        coldState.restoreIfNeeded(from: [saved])
+        XCTAssertEqual(coldState.destination, .session(saved))
+
+        coldState.clearDestination()
+        coldState.select(saved)
+        XCTAssertEqual(coldState.destination, .session(saved))
+    }
+
     func testInitialRestoreIsOptimisticBeforeRefreshAndAuthoritativeAfterward() async {
         let recorder = SessionRestoreAuthorityRecorder()
 

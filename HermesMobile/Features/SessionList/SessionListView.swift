@@ -18,6 +18,7 @@ struct SessionListView: View {
     @Binding private var pendingSharedImport: SharedImport?
     @Binding private var pendingDeepLinkedSessionID: String?
     @Binding private var requestedNewChat: NewChatRequest?
+    @Binding private var requestedSessionFilter: SessionFilterRequest?
 
     @Environment(\.modelContext) private var modelContext
     @Environment(\.colorScheme) private var colorScheme
@@ -43,6 +44,9 @@ struct SessionListView: View {
     @State private var selectedProjectID: String?
     @State private var selectedBot: String?
     @State private var pinnedOnly = false
+    @State private var scheduledHistoryOnly = false
+    @State private var isPresentingSessionFilters = false
+    @State private var shouldPresentProjectCreationAfterFiltersDismissal = false
     @State private var sidebarScrollPosition: String?
     @State private var didCompleteInitialLoad = false
     @State private var returnRefreshID: UUID?
@@ -86,6 +90,7 @@ struct SessionListView: View {
         pendingSharedImport: Binding<SharedImport?> = .constant(nil),
         pendingDeepLinkedSessionID: Binding<String?> = .constant(nil),
         requestedNewChat: Binding<NewChatRequest?> = .constant(nil),
+        requestedSessionFilter: Binding<SessionFilterRequest?> = .constant(nil),
         usesShellChrome: Bool = false,
         shellSurfaceVisitID: Int = 0,
         onConversationVisibilityChanged: @escaping (Bool) -> Void = { _ in },
@@ -103,6 +108,7 @@ struct SessionListView: View {
         _pendingSharedImport = pendingSharedImport
         _pendingDeepLinkedSessionID = pendingDeepLinkedSessionID
         _requestedNewChat = requestedNewChat
+        _requestedSessionFilter = requestedSessionFilter
         _viewModel = State(initialValue: SessionListViewModel(server: server))
         _navigationState = State(
             initialValue: SessionNavigationState(
@@ -123,6 +129,29 @@ struct SessionListView: View {
 
     var body: some View {
         navigationContainer
+            .sheet(
+                isPresented: $isPresentingSessionFilters,
+                onDismiss: presentPendingProjectCreationIfNeeded
+            ) {
+                NavigationStack {
+                    SessionFiltersSheet(
+                        selectedBot: $selectedBot,
+                        pinnedOnly: $pinnedOnly,
+                        scheduledHistoryOnly: $scheduledHistoryOnly,
+                        selectedProjectID: $selectedProjectID,
+                        botOptions: availableBotNames,
+                        projects: viewModel.projects,
+                        projectsEnabled: projectsEnabled && showsProjectsSection,
+                        clearFilters: clearSessionFilters,
+                        createProject: {
+                            shouldPresentProjectCreationAfterFiltersDismissal = true
+                            isPresentingSessionFilters = false
+                        }
+                    )
+                }
+                .presentationDetents([.medium, .large])
+                .adaptiveFormPresentation()
+            }
             .sheet(item: $sessionExportShareItem) { item in
                 SessionExportShareSheet(fileURL: item.fileURL)
                     .presentationDetents([.medium, .large])
@@ -292,6 +321,7 @@ struct SessionListView: View {
                 viewModel.startGatewayObservation()
                 drainPendingExternalNewChatRequestsIfIdle()
                 refreshAfterReturningIfNeeded()
+                applyPendingSessionFilterIfNeeded()
                 onConversationVisibilityChanged(navigationState.isConversationPresented)
             }
             .onChange(of: sidebarHasPendingEdit) { _, editing in
@@ -309,6 +339,9 @@ struct SessionListView: View {
             .onChange(of: requestedNewChat) {
                 drainPendingExternalNewChatRequestsIfIdle()
             }
+            .onChange(of: requestedSessionFilter) {
+                applyPendingSessionFilterIfNeeded()
+            }
             .onChange(of: showsProjectsSection) {
                 // The "All" button that clears a project filter lives in the
                 // Projects header, so hiding the section mid-filter would strand
@@ -318,7 +351,11 @@ struct SessionListView: View {
             }
             .onChange(of: shellSurfaceVisitID) { _, newValue in
                 guard usesShellChrome, newValue > 0 else { return }
-                navigationState.resetForShellSurfaceSwitch()
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
+                    navigationState.resetForShellSurfaceSwitch()
+                }
                 persistLastSelectedSession()
                 onConversationVisibilityChanged(false)
             }
@@ -413,12 +450,11 @@ struct SessionListView: View {
             if usesShellChrome {
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     Button("New chat", systemImage: "square.and.pencil", action: onNewChat)
-                    Button("Account and settings", systemImage: "person.crop.circle", action: onAccount)
+                    Button(AppShellSettingsAction.accessibilityLabel, systemImage: AppShellSettingsAction.systemImage, action: onAccount)
                 }
             }
         }
-        .toolbarBackground(SemrehVisualTheme.canvas(for: colorScheme, palette: palette), for: .navigationBar)
-        .toolbarBackground(.visible, for: .navigationBar)
+        .toolbarBackground(.hidden, for: .navigationBar)
     }
 
     @ViewBuilder
@@ -445,6 +481,9 @@ struct SessionListView: View {
                 session: session,
                 server: server,
                 onAPIError: authManager.handleAPIError,
+                onParentBack: {
+                    navigationState.clearDestination()
+                },
                 loadsInitialMessages: destination.loadsInitialMessages
             )
                 .id(session.id)
@@ -453,6 +492,9 @@ struct SessionListView: View {
                 session: session,
                 server: server,
                 onAPIError: authManager.handleAPIError,
+                onParentBack: {
+                    navigationState.clearDestination()
+                },
                 initialDraft: route.initialDraft,
                 initialAttachments: route.initialAttachments,
                 loadsInitialMessages: destination.loadsInitialMessages,
@@ -523,6 +565,7 @@ struct SessionListView: View {
 
     private var content: some View {
         let sessionGroups = scheduledSessionGroups
+        let pinnedSessions = shellPinnedSessions
 
         return List {
             if usesShellChrome {
@@ -546,7 +589,11 @@ struct SessionListView: View {
 
             if let utilityRowsVisibility = SessionListUtilityRowsVisibilityPolicy.visibleSections(
                 usesShellChrome: usesShellChrome,
-                projectsEnabled: projectsEnabled,
+                projectsEnabled: projectsEnabled && AppShellOrganizerPolicy.showsProjects(
+                    isShell: usesShellChrome,
+                    hasProjects: !viewModel.projects.isEmpty,
+                    hasSelection: selectedProjectID != nil
+                ),
                 isSearchingSessions: isSearchingSessions,
                 userVisibility: sidebarSectionVisibility
             ) {
@@ -572,7 +619,19 @@ struct SessionListView: View {
                 )
             }
 
-            if sessionGroups.showsDisclosure(isSearchActive: isSearchingSessions) {
+            if !pinnedSessions.isEmpty {
+                PinnedSessionStrip(
+                    viewModel: viewModel,
+                    sessions: pinnedSessions,
+                    server: server,
+                    actions: sessionRowActions
+                )
+                .sessionsScreenListRow(
+                    insets: EdgeInsets(top: 4, leading: 0, bottom: 8, trailing: 0)
+                )
+            }
+
+            if !usesShellChrome, sessionGroups.showsDisclosure(isSearchActive: isSearchingSessions) {
                 ScheduledSessionsDisclosure(
                     viewModel: viewModel,
                     sessions: sessionGroups.scheduled,
@@ -592,7 +651,7 @@ struct SessionListView: View {
             SessionListRowsSection(
                 viewModel: viewModel,
                 server: server,
-                sessions: sessionGroups.ordinary,
+                sessions: usesShellChrome ? shellHistorySessions : sessionGroups.ordinary,
                 emptyTitle: emptySessionsTitle,
                 emptyDescription: emptySessionsDescription,
                 isSearchActive: isSearchingSessions,
@@ -602,7 +661,9 @@ struct SessionListView: View {
                     ? navigationState.selectedSessionID
                     : nil,
                 actions: sessionRowActions,
-                suppressEmptyState: !sessionGroups.scheduled.isEmpty,
+                suppressEmptyState: usesShellChrome
+                    ? !pinnedSessions.isEmpty
+                    : !sessionGroups.scheduled.isEmpty,
                 useMessagesStyle: usesShellChrome,
                 showsSectionHeader: !usesShellChrome
             )
@@ -808,12 +869,10 @@ struct SessionListView: View {
             }
         } label: {
             ZStack {
-                Text(settingsInitials)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(initialsAvatarForegroundColor)
+                Image(systemName: AppShellSettingsAction.systemImage)
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(.primary)
                     .frame(width: Self.searchChromeIconVisualSize, height: Self.searchChromeIconVisualSize)
-                    .background(selectedHeaderLogoColor, in: Circle())
-                    .overlay(Circle().stroke(.white.opacity(0.18), lineWidth: 1))
                     .opacity(searchChromeIsExpanded ? 0 : 1)
                     .scaleEffect(searchChromeIsExpanded ? 0.72 : 1)
                     .rotationEffect(.degrees(searchChromeIsExpanded ? -18 : 0))
@@ -836,7 +895,7 @@ struct SessionListView: View {
                 ? "Closes search and clears the current query."
                 : "Opens Settings. Long press to switch servers."
         )
-        // Long-press the avatar to switch the active server, reusing #17's
+        // Long-press the settings control to switch the active server, reusing #17's
         // switch/add actions. Suppressed while search is expanded so the
         // "close search" tap state is untouched (#283). The plain tap above is
         // preserved — `contextMenu` adds long-press without stealing the tap.
@@ -917,32 +976,140 @@ struct SessionListView: View {
         return ScheduledSessionGroups(
             ordinary: ordinary,
             scheduled: scheduled,
-            totalScheduledCount: selectedBot == nil && !pinnedOnly ? groups.totalScheduledCount : scheduled.count
+            totalScheduledCount: selectedBot == nil
+                && !pinnedOnly
+                && !scheduledHistoryOnly
+                && selectedProjectID == nil
+                ? groups.totalScheduledCount
+                : scheduled.count
         )
     }
 
+    private var shellHistorySessions: [SessionSummary] {
+        // The shell is a history list. Scheduled rows stay in the same
+        // recency-sorted collection, and the explicit scheduled-history filter
+        // selects cron-origin rows without implying an active job.
+        let sessions = visibleSessions.filter(matchesShellFilters)
+        guard shouldShowPinnedSessionStrip else { return sessions }
+
+        return PinnedSessionStripPolicy.ordinarySessions(
+            from: sessions,
+            excluding: shellPinnedSessions
+        )
+    }
+
+    private var shellPinnedSessions: [SessionSummary] {
+        guard PinnedSessionStripPolicy.shouldShow(
+            usesShellChrome: usesShellChrome,
+            isSearchActive: isSearchingSessions,
+            hasActiveFilters: hasActiveSessionFilters,
+            searchText: normalizedSearchText
+        ) else {
+            return []
+        }
+
+        return PinnedSessionStripPolicy.pinnedSessions(
+            from: visibleSessions.filter(matchesShellFilters)
+        )
+    }
+
+    private var shouldShowPinnedSessionStrip: Bool {
+        !shellPinnedSessions.isEmpty
+    }
+
     private func matchesShellFilters(_ session: SessionSummary) -> Bool {
-        SessionShellFilter.matches(session, bot: selectedBot, pinnedOnly: pinnedOnly)
+        SessionShellFilter.matches(
+            session,
+            bot: selectedBot,
+            pinnedOnly: pinnedOnly,
+            scheduledHistoryOnly: scheduledHistoryOnly,
+            projectID: selectedProjectID
+        )
+    }
+
+    private var availableBotNames: [String] {
+        var names = Set<String>(
+            viewModel.sessions.compactMap { profile in
+                guard let profile = profile.profile?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !profile.isEmpty else { return nil }
+                return profile
+            }
+        )
+        if let selectedBot, !selectedBot.isEmpty {
+            names.insert(selectedBot)
+        }
+        return names.sorted()
+    }
+
+    private var selectedProjectName: String? {
+        guard let selectedProjectID else { return nil }
+        return viewModel.projects.first(where: { $0.projectId == selectedProjectID })?.name
+            .flatMap { name in
+                let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                return trimmed.isEmpty ? nil : trimmed
+            }
+            ?? String(localized: "Project")
+    }
+
+    private var hasActiveSessionFilters: Bool {
+        selectedBot != nil || pinnedOnly || scheduledHistoryOnly || selectedProjectID != nil
+    }
+
+    private var activeSessionFilterSummary: String? {
+        var parts: [String] = []
+        if let selectedBot {
+            parts.append(selectedBot)
+        }
+        if pinnedOnly {
+            parts.append(String(localized: "Pinned"))
+        }
+        if scheduledHistoryOnly {
+            parts.append(String(localized: "Scheduled history"))
+        }
+        if let selectedProjectName {
+            parts.append(selectedProjectName)
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    private func clearSessionFilters() {
+        selectedBot = nil
+        pinnedOnly = false
+        scheduledHistoryOnly = false
+        selectedProjectID = nil
     }
 
     private var sessionFilters: some View {
-        HStack(spacing: 16) {
-            Menu {
-                Button("All bots") { selectedBot = nil }
-                ForEach(Array(Set(viewModel.sessions.compactMap(\.profile))).sorted(), id: \.self) { name in
-                    Button(name) { selectedBot = name }
+        HStack(spacing: 8) {
+            Button { isPresentingSessionFilters = true } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: hasActiveSessionFilters
+                        ? "line.3.horizontal.decrease.circle.fill"
+                        : "line.3.horizontal.decrease.circle")
+                    Text("Filters")
+                    if let activeSessionFilterSummary {
+                        Text(activeSessionFilterSummary)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
                 }
-            } label: {
-                Label(selectedBot ?? "All bots", systemImage: "line.3.horizontal.decrease")
-                    .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
             }
-            .accessibilityLabel("Filter by bot: \(selectedBot ?? "All bots")")
-            Button {
-                pinnedOnly.toggle()
-            } label: {
-                Label("Pinned", systemImage: pinnedOnly ? "pin.fill" : "pin")
+            .buttonStyle(.plain)
+            .accessibilityLabel("Session filters")
+            .accessibilityValue(activeSessionFilterSummary ?? "None")
+            .accessibilityHint("Filters sessions by bot, pinned state, scheduled history, or project.")
+
+            if hasActiveSessionFilters {
+                Button("Clear", action: clearSessionFilters)
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .buttonStyle(.plain)
+                    .accessibilityHint("Clears all session filters.")
             }
-            .accessibilityAddTraits(pinnedOnly ? .isSelected : [])
             Spacer(minLength: 0)
         }
         .font(AppFont.subheadline(weight: .medium))
@@ -1032,14 +1199,14 @@ struct SessionListView: View {
 
     private var emptySessionsDescription: String? {
         if hasActiveSessionFilter {
-            return String(localized: "Try another search or project filter.")
+            return String(localized: "Try another search or filter.")
         }
 
         return String(localized: "Tap Chat to start.")
     }
 
     private var hasActiveSessionFilter: Bool {
-        selectedProjectID != nil || !normalizedSearchText.isEmpty
+        hasActiveSessionFilters || !normalizedSearchText.isEmpty
     }
 
     private var showsSearchClearButton: Bool {
@@ -1239,6 +1406,29 @@ struct SessionListView: View {
             await Task.yield()
             openSearch()
         }
+    }
+
+    /// Applies a one-shot profile filter from Bot details. This only changes the
+    /// Sessions list predicate; it never switches the server's active profile.
+    private func applyPendingSessionFilterIfNeeded() {
+        guard let request = requestedSessionFilter else { return }
+        requestedSessionFilter = nil
+        guard let route = SessionFilterRoutePolicy.profileHistoryRoute(profileName: request.profileName) else {
+            return
+        }
+
+        selectedBot = route.profileName
+        pinnedOnly = route.pinnedOnly
+        scheduledHistoryOnly = route.scheduledHistoryOnly
+        selectedProjectID = route.projectID
+        searchText = route.searchText
+        closeSearch()
+    }
+
+    private func presentPendingProjectCreationIfNeeded() {
+        guard shouldPresentProjectCreationAfterFiltersDismissal else { return }
+        shouldPresentProjectCreationAfterFiltersDismissal = false
+        isPresentingProjectCreation = true
     }
 
     private func handleSearchFieldFocusChange(_ isFocused: Bool) {
@@ -1571,6 +1761,306 @@ struct SessionListView: View {
         SessionNavigationPersistence.save(navigationState.lastSelectedSessionID, for: server)
     }
 
+}
+
+/// Chooses the compact shell-only pinned strip without changing the server
+/// session model. Pinned identity is a conversation ID, never a profile: two
+/// chats using the same bot therefore remain separate entries.
+enum PinnedSessionStripPolicy {
+    static func shouldShow(
+        usesShellChrome: Bool,
+        isSearchActive: Bool,
+        hasActiveFilters: Bool,
+        searchText: String
+    ) -> Bool {
+        usesShellChrome
+            && !isSearchActive
+            && !hasActiveFilters
+            && searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    static func pinnedSessions(from sessions: [SessionSummary]) -> [SessionSummary] {
+        var seenIDs = Set<String>()
+
+        return sessions.filter { session in
+            guard session.pinned == true else { return false }
+            return seenIDs.insert(sessionIdentity(for: session)).inserted
+        }
+    }
+
+    static func ordinarySessions(
+        from sessions: [SessionSummary],
+        excluding pinnedSessions: [SessionSummary]
+    ) -> [SessionSummary] {
+        let pinnedIDs = Set(pinnedSessions.map { sessionIdentity(for: $0) })
+        var seenIDs = Set<String>()
+
+        return sessions.filter { session in
+            let identity = sessionIdentity(for: session)
+            guard !pinnedIDs.contains(identity) else { return false }
+            return seenIDs.insert(identity).inserted
+        }
+    }
+
+    static func shortTitle(for session: SessionSummary, maxCharacters: Int = 18) -> String {
+        let title = SessionRowView.displayTitle(for: session)
+        guard maxCharacters > 1, title.count > maxCharacters else { return title }
+        return String(title.prefix(maxCharacters - 1)) + "…"
+    }
+
+    static func accessibilityLabel(for session: SessionSummary) -> String {
+        let title = SessionRowView.displayTitle(for: session)
+        let bot: String
+        if let profile = session.profile {
+            let trimmedProfile = profile.trimmingCharacters(in: .whitespacesAndNewlines)
+            bot = trimmedProfile.isEmpty ? "default" : trimmedProfile
+        } else {
+            bot = "default"
+        }
+        return "\(title), bot \(bot)"
+    }
+
+    private static func sessionIdentity(for session: SessionSummary) -> String {
+        if let sessionID = session.sessionId?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !sessionID.isEmpty {
+            return "session:\(sessionID)"
+        }
+
+        return "fallback:\(session.id)"
+    }
+}
+
+private struct PinnedSessionStrip: View {
+    let viewModel: SessionListViewModel
+    let sessions: [SessionSummary]
+    let server: URL
+    let actions: SessionListRowActions
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(alignment: .top, spacing: 14) {
+                ForEach(sessions) { session in
+                    PinnedSessionStripItem(
+                        viewModel: viewModel,
+                        session: session,
+                        server: server,
+                        actions: actions
+                    )
+                }
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 4)
+        }
+        // Keep the compact baseline while allowing the caption to grow under
+        // Dynamic Type instead of clipping the strip at its fixed baseline.
+        .frame(minHeight: 76)
+        .accessibilityElement(children: .contain)
+    }
+}
+
+private struct PinnedSessionStripItem: View {
+    let viewModel: SessionListViewModel
+    let session: SessionSummary
+    let server: URL
+    let actions: SessionListRowActions
+
+    private var actionCapabilities: SessionRowActionPolicy.Capabilities {
+        SessionRowActionPolicy.Capabilities(
+            isSearchOnlySession: viewModel.isSearchOnlySession(session),
+            isViewingCachedData: viewModel.isViewingCachedData
+        )
+    }
+
+    var body: some View {
+        Button {
+            actions.open(session)
+        } label: {
+            VStack(spacing: 3) {
+                avatar
+                    .frame(width: 48, height: 48)
+
+                Text(PinnedSessionStripPolicy.shortTitle(for: session))
+                    .font(AppFont.caption2(weight: .medium))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(width: 76)
+            }
+            .frame(width: 76)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(PinnedSessionStripPolicy.accessibilityLabel(for: session))
+        .accessibilityHint("Opens this conversation.")
+        .contextMenu {
+            SessionRowContextMenu(
+                session: session,
+                projects: viewModel.projects,
+                isViewingCachedData: viewModel.isViewingCachedData,
+                isRenamingSession: viewModel.isRenamingSession,
+                isCreatingProject: viewModel.isCreatingProject,
+                isMovingSession: viewModel.isMovingSession,
+                isLoadingProjects: viewModel.isLoadingProjects,
+                isMutating: viewModel.isMutating(session),
+                capabilities: actionCapabilities,
+                actions: actions
+            )
+        }
+    }
+
+    @ViewBuilder
+    private var avatar: some View {
+        if let identity = BirdAvatarIdentity(server: server, profile: session.profile) {
+            BirdAvatarView(identity: identity)
+        } else {
+            ZStack {
+                Circle()
+                    .fill(Color.accentColor.opacity(0.28))
+                Text(fallbackInitials)
+                    .font(.system(size: 15, weight: .bold, design: .rounded))
+                    .foregroundStyle(.primary)
+            }
+            .overlay {
+                Circle()
+                    .stroke(Color.primary.opacity(0.14), lineWidth: 1)
+            }
+        }
+    }
+
+    private var fallbackInitials: String {
+        let title = SessionRowView.displayTitle(for: session)
+        let words = title.split(whereSeparator: { $0 == " " || $0 == "-" || $0 == "_" })
+        if words.count > 1 {
+            return String(words.prefix(2).compactMap(\.first)).uppercased()
+        }
+
+        return String(title.prefix(2)).uppercased()
+    }
+}
+
+/// Compact native filter surface for the shell Sessions list. The controls are
+/// deliberately local: they only change the existing sidebar predicates and do
+/// not introduce a new server-side filter model.
+private struct SessionFiltersSheet: View {
+    @Binding var selectedBot: String?
+    @Binding var pinnedOnly: Bool
+    @Binding var scheduledHistoryOnly: Bool
+    @Binding var selectedProjectID: String?
+
+    let botOptions: [String]
+    let projects: [ProjectSummary]
+    let projectsEnabled: Bool
+    let clearFilters: () -> Void
+    let createProject: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        List {
+            Section {
+                Picker("Bot", selection: $selectedBot) {
+                    Text("All bots").tag(nil as String?)
+                    ForEach(botOptions, id: \.self) { name in
+                        Text(name).tag(Optional(name))
+                    }
+                }
+            } header: {
+                Text("Bot")
+            }
+
+            Section {
+                Toggle("Pinned only", isOn: $pinnedOnly)
+                Toggle("Scheduled history", isOn: $scheduledHistoryOnly)
+                Text("Scheduled history shows past cron-origin sessions; it does not indicate an active job.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            } header: {
+                Text("History")
+            }
+
+            if projectsEnabled {
+                Section {
+                    Button {
+                        selectedProjectID = nil
+                    } label: {
+                        filterChoiceLabel(
+                            title: String(localized: "All projects"),
+                            systemImage: "square.grid.2x2",
+                            isSelected: selectedProjectID == nil
+                        )
+                    }
+                    .buttonStyle(.plain)
+
+                    ForEach(projects) { project in
+                        Button {
+                            selectedProjectID = project.projectId
+                        } label: {
+                            filterChoiceLabel(
+                                title: projectDisplayName(project),
+                                systemImage: "folder",
+                                isSelected: selectedProjectID == project.projectId
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(project.projectId == nil)
+                    }
+
+                    Button("New project", systemImage: "folder.badge.plus", action: createProject)
+                } header: {
+                    Text("Project")
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .scrollContentBackground(.hidden)
+        .background { SemrehBackdrop().ignoresSafeArea() }
+        .navigationTitle("Filters")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("Clear", action: clearFilters)
+                    .disabled(!hasActiveFilters)
+            }
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Done") { dismiss() }
+            }
+        }
+    }
+
+    private var hasActiveFilters: Bool {
+        selectedBot != nil
+            || pinnedOnly
+            || scheduledHistoryOnly
+            || selectedProjectID != nil
+    }
+
+    private func filterChoiceLabel(title: String, systemImage: String, isSelected: Bool) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: systemImage)
+                .foregroundStyle(.secondary)
+                .frame(width: 22)
+            Text(title)
+                .foregroundStyle(.primary)
+            Spacer(minLength: 0)
+            if isSelected {
+                Image(systemName: "checkmark")
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(.tint)
+                    .accessibilityHidden(true)
+            }
+        }
+        .contentShape(Rectangle())
+        .frame(minHeight: 30)
+    }
+
+    private func projectDisplayName(_ project: ProjectSummary) -> String {
+        let name = project.name?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let name, !name.isEmpty else {
+            return String(localized: "Untitled Project")
+        }
+        return name
+    }
 }
 
 enum SessionListForegroundRefreshPolicy {

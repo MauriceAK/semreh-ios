@@ -429,6 +429,7 @@ struct ChatView: View {
     private let activeRunStatusSpacerHeight: CGFloat = 36
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
     @Environment(\.scenePhase) private var scenePhase
@@ -444,6 +445,7 @@ struct ChatView: View {
     let session: SessionSummary
     let server: URL
     let onAPIError: (Error) -> Void
+    let onParentBack: (() -> Void)?
     let loadsInitialMessages: Bool
     let disablesExternalLifecycle: Bool
     /// When true, the composer auto-starts voice dictation on appear — set by the
@@ -503,6 +505,11 @@ struct ChatView: View {
     @State private var gitToastState = GitActionToastState()
     @State private var gitAlert: GitChatAlert?
     @State private var composerHeight: CGFloat = 52
+    @State private var showsChatControls = false
+    @State private var showsBotDetails = false
+    @State private var showsChatFiles = false
+    @State private var workspacePickerRequest = 0
+    @State private var gitBranchPickerRequest = 0
     @State private var isComposerResizing = false
     @State private var composerResizeFollowIntent = false
     @State private var composerResizeGeneration = 0
@@ -522,6 +529,7 @@ struct ChatView: View {
         session: SessionSummary,
         server: URL,
         onAPIError: @escaping (Error) -> Void,
+        onParentBack: (() -> Void)? = nil,
         initialDraft: String = "",
         initialAttachments: [SharedAttachmentImport] = [],
         loadsInitialMessages: Bool = true,
@@ -532,6 +540,7 @@ struct ChatView: View {
         self.session = session
         self.server = server
         self.onAPIError = onAPIError
+        self.onParentBack = onParentBack
         self.loadsInitialMessages = loadsInitialMessages
         self.autoStartsVoiceInput = autoStartsVoiceInput
         self.disablesExternalLifecycle = disablesExternalLifecycle
@@ -716,7 +725,10 @@ struct ChatView: View {
             },
             onRefreshGitBranches: {
                 Task { await gitAvailabilityViewModel.loadBranches() }
-            }
+            },
+            controlsPresentation: $showsChatControls,
+            workspacePickerRequest: workspacePickerRequest,
+            gitBranchPickerRequest: gitBranchPickerRequest
         )
         // The composer flips wholesale with the transcript under the RTL
         // toggle (#259): input, placeholder, and chrome mirror together.
@@ -758,56 +770,121 @@ struct ChatView: View {
     }
 
     private var chatBotHeader: some View {
-        VStack(spacing: 0) {
-            if let identity = BirdAvatarIdentity(server: server, profile: viewModel.selectedProfileName ?? session.profile) {
-                BirdAvatarView(identity: identity)
-                    .frame(width: 54, height: 54)
-            }
-            Menu {
-                Text(displayTitle)
-                Section("Profile") {
-                    Text(viewModel.selectedProfileTitle)
-                    if !viewModel.isSingleProfileMode {
-                        ForEach(viewModel.profileOptions, id: \.self) { profile in
-                            Button {
-                                handleProfileSelection(profile)
-                            } label: {
-                                if viewModel.isSelectedProfile(profile) {
-                                    Label(profile.displayName, systemImage: "checkmark")
-                                } else {
-                                    Text(profile.displayName)
-                                }
-                            }
-                            .disabled(viewModel.isViewingCachedData || viewModel.isStartingChat
-                                || viewModel.isSendingVoiceNote || viewModel.isCompressingSession
-                                || viewModel.activeStreamID != nil || viewModel.isUpdatingComposerConfiguration)
-                        }
-                    }
+        Button {
+            showsBotDetails = true
+        } label: {
+            VStack(spacing: 2) {
+                if let identity = BirdAvatarIdentity(server: server, profile: viewModel.selectedProfileName ?? session.profile) {
+                    BirdAvatarView(identity: identity)
+                        .frame(width: 48, height: 48)
                 }
-            } label: {
-                HStack(spacing: 5) {
-                    Text(viewModel.selectedProfileTitle)
-                        .font(.system(.subheadline, design: .rounded).weight(.medium))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Image(systemName: "chevron.down").font(.caption2)
-                }
-                .padding(.horizontal, 14)
-                .frame(minHeight: 32)
-                .adaptiveGlass(.regular, isInteractive: true, fallbackMaterial: .thinMaterial, in: Capsule())
+
+                Text(viewModel.selectedProfileTitle)
+                    .font(.system(.body, design: .rounded).weight(.medium))
+                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
+                    .truncationMode(.middle)
+                    .minimumScaleFactor(0.75)
+                    .padding(.horizontal, 12)
+                    .frame(minHeight: 32)
+                    .adaptiveGlass(.regular, isInteractive: true, fallbackMaterial: .thinMaterial, in: Capsule())
             }
-            .accessibilityLabel("Choose bot profile")
-            .accessibilityValue(viewModel.selectedProfileTitle)
         }
-        .frame(maxWidth: .infinity)
-        .padding(.bottom, 8)
+        .buttonStyle(.plain)
+        .accessibilityLabel("View details for \(viewModel.selectedProfileTitle)")
+        .accessibilityValue(headerSubtitle ?? viewModel.selectedProfileTitle)
+        .accessibilityHint("Shows read-only bot details.")
+    }
+
+    private var chatNavigationBar: some View {
+        ZStack(alignment: .top) {
+            HStack(spacing: 0) {
+                Spacer(minLength: 0)
+                chatBotHeader
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 56)
+            .frame(maxWidth: .infinity)
+            .frame(minHeight: 96, alignment: .center)
+
+            HStack(alignment: .top, spacing: 8) {
+                Button {
+                    if let onParentBack {
+                        onParentBack()
+                    } else {
+                        dismiss()
+                    }
+                } label: {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 20, weight: .medium))
+                        .frame(width: 44, height: 44)
+                        .contentShape(Circle())
+                        .adaptiveGlass(.regular, isInteractive: true, fallbackMaterial: .thinMaterial, in: Circle())
+                }
+                .frame(width: 44, height: 44)
+                .contentShape(Circle())
+                .accessibilityLabel("Back")
+                Spacer()
+                Button { showsChatControls = true } label: {
+                    Image(systemName: "slider.horizontal.3")
+                        .frame(width: 44, height: 44)
+                        .contentShape(Circle())
+                        .adaptiveGlass(.regular, isInteractive: true, fallbackMaterial: .thinMaterial, in: Circle())
+                }
+                .frame(width: 44, height: 44)
+                .contentShape(Circle())
+                .accessibilityLabel("Chat controls")
+                chatOverflowMenu
+            }
+            .buttonStyle(.plain)
+            .frame(maxWidth: .infinity, alignment: .top)
+            .padding(.top, 4)
+            .padding(.horizontal, 12)
+        }
+        .frame(minHeight: 96)
+        .background {
+            ChatHeaderReadabilityBackdrop()
+                .padding(.bottom, -24)
+                .ignoresSafeArea(.container, edges: .top)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
+    }
+
+    private var chatOverflowMenu: some View {
+        Menu {
+            if showsFilesButton {
+                Button("Files", systemImage: "folder") { showsChatFiles = true }
+                    .disabled(viewModel.isViewingCachedData)
+            }
+            Button("Choose workspace path", systemImage: "folder.badge.gearshape") {
+                workspacePickerRequest += 1
+            }
+            .disabled(viewModel.isViewingCachedData || viewModel.isStartingChat
+                || viewModel.isSendingVoiceNote || viewModel.isCompressingSession
+                || viewModel.activeStreamID != nil || viewModel.isUpdatingComposerConfiguration)
+            if viewModel.hasActivatedGoalCommand { goalControlMenu }
+            if showsGitControls, gitAvailabilityViewModel.hasRepository {
+                gitActionsMenu
+                Button("Git branch", systemImage: "arrow.triangle.branch") {
+                    gitBranchPickerRequest += 1
+                }
+                .disabled(viewModel.isViewingCachedData || viewModel.activeStreamID != nil
+                    || gitAvailabilityViewModel.isLoadingBranches || gitAvailabilityViewModel.isSwitchingBranch)
+            }
+        } label: {
+            Image(systemName: "ellipsis")
+                .frame(width: 44, height: 44)
+                .contentShape(Circle())
+                .adaptiveGlass(.regular, isInteractive: true, fallbackMaterial: .thinMaterial, in: Circle())
+        }
+        .frame(width: 44, height: 44)
+        .contentShape(Circle())
+        .accessibilityLabel("Chat options")
     }
 
     private var chatBaseView: some View {
         ZStack(alignment: .bottom) {
             VStack(spacing: 0) {
-                chatBotHeader
-
                 if viewModel.isViewingCachedData {
                     ChatOfflineCacheBanner()
                 }
@@ -818,6 +895,7 @@ struct ChatView: View {
                     // Scope RTL to the chat transcript only (#259): the offline
                     // banner above stays in the app's default direction.
                     .environment(\.layoutDirection, chatLayoutDirection)
+
             }
             .animation(ChatMotion.quickState(reduceMotion: reduceMotion), value: viewModel.showsListenPlaybackBar)
 
@@ -909,6 +987,7 @@ struct ChatView: View {
             }
 
         }
+        .safeAreaInset(edge: .top, spacing: 0) { chatNavigationBar }
         .background {
             SemrehBackdrop().ignoresSafeArea()
                 .onChange(of: draftMessage) {
@@ -950,7 +1029,21 @@ struct ChatView: View {
             GitActionToastOverlay(state: gitToastState)
         }
         .navigationTitle("")
+        .toolbar(.hidden, for: .navigationBar)
+        .navigationDestination(isPresented: $showsChatFiles) {
+            FileBrowserView(session: session, server: server, onAPIError: onAPIError)
+                .toolbar(.visible, for: .navigationBar)
+        }
+        .sheet(isPresented: $showsBotDetails) {
+            NavigationStack {
+                ChatBotDetailsView(
+                    profile: activeProfileDetails,
+                    profileTitle: viewModel.selectedProfileTitle
+                )
+            }
+        }
         .navigationBarTitleDisplayMode(.inline)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("chat-detail:\(viewModel.displayTitle)")
         .task(id: didCompleteInitialAppearance) {
             await handleInitialAppearanceTask()
@@ -1020,35 +1113,6 @@ struct ChatView: View {
             .onChange(of: viewModel.responseCompletionHapticTrigger) {
                 guard viewModel.responseCompletionHapticTrigger > 0 else { return }
                 handleResponseCompletionSideEffects()
-            }
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    ChatToolbarActionCluster {
-                        if viewModel.hasActivatedGoalCommand {
-                            ChatToolbarActionSlot {
-                                goalControlMenu
-                            }
-                        }
-
-                        if showsFilesButton {
-                            ChatToolbarActionSlot {
-                                NavigationLink {
-                                    FileBrowserView(session: session, server: server, onAPIError: onAPIError)
-                                } label: {
-                                    Label("Files", systemImage: "folder")
-                                }
-                                .disabled(viewModel.isViewingCachedData)
-                                .accessibilityLabel("Files")
-                            }
-                        }
-
-                        if showsGitControls, gitAvailabilityViewModel.hasRepository {
-                            ChatToolbarActionSlot {
-                                gitActionsMenu
-                            }
-                        }
-                    }
-                }
             }
             .navigationDestination(item: $forkedSession) { session in
                 ChatView(session: session, server: server, onAPIError: onAPIError)
@@ -1544,7 +1608,9 @@ struct ChatView: View {
             transcriptRestoreCancellationToken: transcriptRestoreCancellationToken,
             followRejoinScrollToken: followRejoinScrollToken,
             isComposerResizing: isComposerResizing,
-            transcriptRenderRevision: viewModel.transcriptRenderRevision
+            transcriptRenderRevision: viewModel.transcriptRenderRevision,
+            outgoingInsertionScope: viewModel.outgoingInsertionScope,
+            outgoingInsertionEvent: viewModel.outgoingInsertionEvent
         )
         .equatable()
     }
@@ -1631,6 +1697,17 @@ struct ChatView: View {
 
     private var displayTitle: String {
         viewModel.displayTitle
+    }
+
+    private var activeProfileDetails: ProfileSummary? {
+        guard let profileName = (viewModel.selectedProfileName ?? session.profile)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !profileName.isEmpty
+        else {
+            return nil
+        }
+
+        return viewModel.profileOptions.first { $0.normalizedName == profileName }
     }
 
     private var headerSubtitle: String? {
@@ -2917,6 +2994,82 @@ struct ChatView: View {
         }
 
         return max(0, transcriptMessages.count - 1 - index)
+    }
+}
+
+/// A scroll-edge fade, not a separate header panel. It protects the status bar
+/// and floating identity without changing transcript layout or intercepting taps.
+private struct ChatHeaderReadabilityBackdrop: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.appColorPalette) private var palette
+
+    var body: some View {
+        let canvas = SemrehVisualTheme.canvas(for: colorScheme, palette: palette)
+        LinearGradient(
+            stops: [
+                .init(color: canvas.opacity(0.98), location: 0),
+                .init(color: canvas.opacity(0.94), location: 0.45),
+                .init(color: canvas.opacity(0.70), location: 0.75),
+                .init(color: canvas.opacity(0), location: 1)
+            ],
+            startPoint: .top,
+            endPoint: .bottom
+        )
+    }
+}
+
+private struct ChatBotDetailsView: View {
+    let profile: ProfileSummary?
+    let profileTitle: String
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        List {
+            Section("Profile") {
+                LabeledContent("Name", value: profile?.displayName ?? profileTitle)
+                if let provider = nonEmpty(profile?.provider) {
+                    LabeledContent("Provider", value: provider)
+                }
+                if let model = nonEmpty(profile?.model) {
+                    LabeledContent("Model", value: model)
+                }
+            }
+
+            if let profile {
+                Section("Available metadata") {
+                    if let gatewayRunning = profile.gatewayRunning {
+                        LabeledContent("Gateway", value: gatewayRunning ? "Running" : "Stopped")
+                    }
+                    if let hasEnv = profile.hasEnv {
+                        LabeledContent("Environment", value: hasEnv ? "Configured" : "Not configured")
+                    }
+                    if let skillCount = profile.skillCount {
+                        LabeledContent("Skills", value: String(skillCount))
+                    }
+                    if profile.isDefault == true {
+                        LabeledContent("Server default", value: "Yes")
+                    }
+                    if profile.isActive == true {
+                        LabeledContent("Active profile", value: "Yes")
+                    }
+                }
+            }
+        }
+        .navigationTitle(profileTitle)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("Done") { dismiss() }
+            }
+        }
+        .scrollContentBackground(.hidden)
+        .background { SemrehBackdrop().ignoresSafeArea() }
+    }
+
+    private func nonEmpty(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }
 

@@ -2384,6 +2384,10 @@ private actor DirectLoadTestTransport: HermesGatewayTransport {
     func request(method: String, params: JSONValue?, timeout: Duration?) async throws -> JSONValue? {
         if let failure { throw failure }
         if acceptsPrompt, method == "prompt.submit" { return .object(["status": .string("streaming")]) }
+        // Idle direct loads schedule a best-effort context snapshot after the
+        // canonical transcript read.  This fixture does not need to publish a
+        // usage value, but it must accept the legitimate nonblocking RPC.
+        if method == "session.usage" { return .object([:]) }
         guard method == "session.resume" else {
             XCTFail("Unexpected load RPC: \(method)")
             throw URLError(.badURL)

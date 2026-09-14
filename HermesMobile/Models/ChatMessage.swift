@@ -200,6 +200,53 @@ struct ChatMessage: Decodable, Equatable, Identifiable {
     }
 }
 
+/// The accessibility contract for a rendered transcript message.
+///
+/// Keep the row identity independent from the visible text. A few legacy
+/// messages do not carry a server message ID, so callers supply their stable
+/// render identity as a bounded fallback rather than deriving an identifier
+/// from potentially mutable/private content.
+enum ChatMessageAccessibility {
+    static let rowIdentifierPrefix = "message-row:"
+
+    static func rowIdentifier(messageID: String?, renderID: String) -> String {
+        let stableID = messageID?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let stableID, !stableID.isEmpty else {
+            return rowIdentifierPrefix + renderID
+        }
+        return rowIdentifierPrefix + stableID
+    }
+
+    static func rowIdentifier(forStableMessageID messageID: String) -> String {
+        rowIdentifierPrefix + messageID
+    }
+
+    static func rowLabel(
+        role: String?,
+        content: String?,
+        visibleContent: String? = nil,
+        attachmentCount: Int = 0
+    ) -> String {
+        let roleLabel: String
+        switch role {
+        case "user": roleLabel = "User"
+        case "assistant": roleLabel = "Assistant"
+        case "local_assistant": roleLabel = "Semreh"
+        case "local_notice": roleLabel = "Notice"
+        default: roleLabel = "Message"
+        }
+
+        let text = (visibleContent ?? content)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let text, !text.isEmpty {
+            return "\(roleLabel) message: \(text)"
+        }
+
+        guard attachmentCount > 0 else { return "\(roleLabel) message" }
+        let noun = attachmentCount == 1 ? "attachment" : "attachments"
+        return "\(roleLabel) message with \(attachmentCount) \(noun)"
+    }
+}
+
 enum TranscriptTurnClassifier {
     static func anchorID(for message: ChatMessage, at index: Int, messageOffset: Int? = nil) -> String {
         if let messageID = nonEmpty(message.messageId) {

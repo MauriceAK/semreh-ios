@@ -7,6 +7,7 @@ struct ControlView: View {
     let server: URL
     let projectsEnabled: Bool
     let isActive: Bool
+    let showsConnectionRows: Bool
     let onNestedDestinationVisibilityChanged: (Bool) -> Void
 
     @Environment(\.modelContext) private var modelContext
@@ -50,12 +51,14 @@ struct ControlView: View {
         server: URL,
         projectsEnabled: Bool = true,
         isActive: Bool = true,
+        showsConnectionRows: Bool = true,
         onNestedDestinationVisibilityChanged: @escaping (Bool) -> Void = { _ in }
     ) {
         self.authManager = authManager
         self.server = server
         self.projectsEnabled = projectsEnabled
         self.isActive = isActive
+        self.showsConnectionRows = showsConnectionRows
         self.onNestedDestinationVisibilityChanged = onNestedDestinationVisibilityChanged
         _viewModel = State(initialValue: SessionListViewModel(server: server))
         _showsCliSessions = AppStorage(
@@ -97,25 +100,27 @@ struct ControlView: View {
                     }
                 )
 
-                Section("Session history") {
-                    Button {
-                        navigationState.select(.archived)
-                    } label: {
-                        Label("Archived Sessions", systemImage: "archivebox")
-                    }
-                }
-
-                Section("Connection") {
-                    Button {
-                        navigationState.select(.settings(nil))
-                    } label: {
-                        Label("Settings", systemImage: "gearshape")
+                if showsConnectionRows {
+                    Section("Session history") {
+                        Button {
+                            navigationState.select(.archived)
+                        } label: {
+                            Label("Archived Sessions", systemImage: "archivebox")
+                        }
                     }
 
-                    Button {
-                        navigationState.select(.settings(.servers))
-                    } label: {
-                        Label("Manage Servers", systemImage: "server.rack")
+                    Section("Connection") {
+                        Button {
+                            navigationState.select(.settings(nil))
+                        } label: {
+                            Label("Settings", systemImage: "gearshape")
+                        }
+
+                        Button {
+                            navigationState.select(.settings(.servers))
+                        } label: {
+                            Label("Manage Servers", systemImage: "server.rack")
+                        }
                     }
                 }
             }
@@ -123,6 +128,8 @@ struct ControlView: View {
             .contentMargins(.top, 8, for: .scrollContent)
             .scrollContentBackground(.hidden)
             .background(SemrehBackdrop().ignoresSafeArea())
+            .navigationTitle(showsConnectionRows ? "" : "Tools")
+            .navigationBarTitleDisplayMode(.inline)
             .navigationDestination(item: $navigationState.destination) { destination in
                 utilityDestination(destination)
             }

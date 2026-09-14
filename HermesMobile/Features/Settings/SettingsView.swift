@@ -294,7 +294,7 @@ struct SettingsView: View {
                     SettingsDivider()
 
                     SettingsToggleRow(
-                        title: String(localized: "Files Button"),
+                        title: String(localized: "Show Files in chat menu"),
                         systemImage: "folder",
                         isOn: $showsChatFilesButton
                     )
@@ -302,7 +302,7 @@ struct SettingsView: View {
                     SettingsDivider()
 
                     SettingsToggleRow(
-                        title: String(localized: "Git Actions"),
+                        title: String(localized: "Show Git actions"),
                         systemImage: "arrow.triangle.branch",
                         isOn: $showsChatGitControls
                     )
@@ -312,6 +312,23 @@ struct SettingsView: View {
 
 
                 SettingsCard(title: String(localized: "Tools")) {
+                    NavigationLink {
+                        ControlView(
+                            authManager: authManager,
+                            server: server,
+                            showsConnectionRows: false
+                        )
+                    } label: {
+                        SettingsAccessoryRow(
+                            title: String(localized: "Open Tools"),
+                            systemImage: "square.grid.2x2"
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("Opens secondary tools and organizers.")
+
+                    SettingsDivider()
+
                     SettingsToggleRow(
                         title: String(localized: "Tasks"),
                         systemImage: "calendar.badge.clock",

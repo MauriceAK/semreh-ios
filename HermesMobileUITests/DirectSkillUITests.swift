@@ -30,8 +30,13 @@ final class DirectSkillUITests: XCTestCase {
 
         let app = XCUIApplication()
         app.launch()
-        let back = app.buttons["BackButton"]
+        let back = app.buttons.matching(NSPredicate(format: "label == %@", "Back")).firstMatch
         let sessions = app.buttons["Sessions"]
+        // A restored detail legitimately hides the tab bar. Return through the
+        // actual Back control before deciding authentication setup is required.
+        if back.waitForExistence(timeout: 5), back.isHittable {
+            back.tap()
+        }
         if !sessions.waitForExistence(timeout: 5) {
             _ = try openContainedNewChat(app: app)
         }
@@ -42,41 +47,187 @@ final class DirectSkillUITests: XCTestCase {
         XCTAssertTrue(sessions.waitForExistence(timeout: 15) && sessions.isHittable)
         sessions.tap()
         XCTAssertTrue(app.navigationBars["Sessions"].waitForExistence(timeout: 10))
-        let botFilter = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Filter by bot:")).firstMatch
-        XCTAssertTrue(botFilter.isHittable)
-        XCTAssertTrue(app.buttons["Pinned"].isHittable)
-        XCTAssertTrue(app.buttons["Expand projects"].isHittable)
+        let filters = app.buttons["Session filters"]
+        XCTAssertTrue(filters.waitForExistence(timeout: 5) && filters.isHittable)
         retainPreviewScreenshot("Preview shell Sessions", app: app)
 
-        let pinned = app.buttons["Pinned"]
-        pinned.tap()
-        XCTAssertTrue(pinned.isSelected || pinned.value as? String == "1")
-        pinned.tap()
-
-        botFilter.tap()
-        let fixtureProfile = app.buttons["default"]
-        XCTAssertTrue(fixtureProfile.waitForExistence(timeout: 5) && fixtureProfile.isHittable)
-        fixtureProfile.tap()
-        XCTAssertTrue(app.buttons["Filter by bot: default"].waitForExistence(timeout: 5))
-        pinned.tap()
-        XCTAssertTrue(pinned.isSelected || pinned.value as? String == "1")
-        XCTAssertTrue(app.buttons["Filter by bot: default"].exists)
-        pinned.tap()
-        app.buttons["Filter by bot: default"].tap()
-        let allBots = app.buttons["All bots"]
-        XCTAssertTrue(allBots.waitForExistence(timeout: 5) && allBots.isHittable); allBots.tap()
-        XCTAssertTrue(app.buttons["Filter by bot: All bots"].waitForExistence(timeout: 5))
+        print("SEMREH_FILTER_FRAME \(filters.frame)")
+        filters.tap()
+        let pinnedOnly = app.switches["Pinned only"]
+        XCTAssertTrue(pinnedOnly.waitForExistence(timeout: 5))
+        RunLoop.main.run(until: Date().addingTimeInterval(1))
+        app.swipeUp()
+        XCTAssertTrue(pinnedOnly.waitForExistence(timeout: 5) && pinnedOnly.isHittable)
+        print("SEMREH_PINNED_ONLY_FRAME \(pinnedOnly.frame)")
+        retainPreviewScreenshot("Preview shell filters expanded before pinned toggle", app: app)
+        // SwiftUI exposes the whole settings row as the switch element. Tap the
+        // visible trailing control rather than the row's label/empty center.
+        pinnedOnly.coordinate(withNormalizedOffset: CGVector(dx: 0.90, dy: 0.50)).tap()
+        XCTAssertEqual(pinnedOnly.value as? String, "1")
+        retainPreviewScreenshot("Preview shell filters after pinned toggle", app: app)
+        let filtersNavigationBar = app.navigationBars["Filters"]
+        filtersNavigationBar.buttons["Clear"].tap()
+        XCTAssertEqual(pinnedOnly.value as? String, "0")
+        filtersNavigationBar.buttons["Done"].tap()
+        XCTAssertTrue(filters.waitForExistence(timeout: 5))
 
         let bots = app.buttons["Bots"]
         XCTAssertTrue(bots.isHittable); bots.tap()
-        XCTAssertTrue(app.buttons["Default bot"].waitForExistence(timeout: 10))
-        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "bot-profile:")).count > 0)
+        let botRows = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "bot-profile:"))
+        XCTAssertTrue(botRows.firstMatch.waitForExistence(timeout: 10))
         retainPreviewScreenshot("Preview shell Bots", app: app)
+
+        let details = app.buttons.matching(NSPredicate(
+            format: "identifier BEGINSWITH %@", "bot-profile-info:"
+        )).firstMatch
+        XCTAssertTrue(details.waitForExistence(timeout: 5) && details.isHittable)
+        details.tap()
+        let viewSessions = app.buttons["bot-details-view-sessions"]
+        XCTAssertTrue(viewSessions.waitForExistence(timeout: 5) && viewSessions.isHittable)
+        viewSessions.tap()
+        XCTAssertTrue(app.navigationBars["Sessions"].waitForExistence(timeout: 10))
+
+        bots.tap()
+        XCTAssertTrue(botRows.firstMatch.waitForExistence(timeout: 10))
 
         let activity = app.buttons["Activity"]
         XCTAssertTrue(activity.isHittable); activity.tap()
         XCTAssertTrue(app.navigationBars["Tasks"].waitForExistence(timeout: 10))
         retainPreviewScreenshot("Preview shell Activity", app: app)
+
+        sessions.tap()
+        XCTAssertTrue(app.navigationBars["Sessions"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.buttons["Back"].exists,
+                       "Returning to Sessions from another tab must show the root list, not reopen the last chat.")
+    }
+
+    @MainActor
+    func testOptInPreviewSessionPinRoundTrip() throws {
+        continueAfterFailure = false
+        try requirePreviewShellFixture()
+        let app = XCUIApplication()
+        app.launch()
+        returnToPreviewSessionsRoot(app)
+
+        let row = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "SEMREH_SLICE1_ACK #")).firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 10) && row.isHittable)
+        let originalLabel = row.label
+        XCTAssertFalse(originalLabel.isEmpty)
+        let title = originalLabel.split(separator: ",", maxSplits: 1).first.map(String.init) ?? originalLabel
+        row.swipeRight()
+        let pin = app.buttons["Pin"]
+        XCTAssertTrue(pin.waitForExistence(timeout: 5) && pin.isHittable)
+        pin.tap()
+        let pinnedMatches = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", title))
+        let pinned = pinnedMatches.firstMatch
+        XCTAssertTrue(pinned.waitForExistence(timeout: 10) && pinned.isHittable)
+        XCTAssertEqual(pinnedMatches.count, 1,
+                       "A pinned chat must appear once, not remain duplicated in ordinary history.")
+        retainPreviewScreenshot("Preview pinned session strip", app: app)
+        pinned.press(forDuration: 1.0)
+        let unpin = app.buttons["Unpin"]
+        XCTAssertTrue(unpin.waitForExistence(timeout: 5) && unpin.isHittable)
+        unpin.tap()
+        XCTAssertTrue(app.cells.firstMatch.waitForExistence(timeout: 10))
+    }
+
+    @MainActor
+    func testOptInPreviewChatControlsAndComposer() throws {
+        continueAfterFailure = false
+        try requirePreviewShellFixture()
+        let app = XCUIApplication()
+        app.launch()
+        returnToPreviewSessionsRoot(app)
+        let row = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "SEMREH_SLICE1_ACK #")).firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 10) && row.isHittable); row.tap()
+
+        let details = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "View details for ")).firstMatch
+        XCTAssertTrue(details.waitForExistence(timeout: 10) && details.isHittable); details.tap()
+        XCTAssertTrue(app.navigationBars.firstMatch.waitForExistence(timeout: 5))
+        retainPreviewScreenshot("Preview bot header details", app: app)
+        app.navigationBars.firstMatch.buttons["Done"].tap()
+
+        let controls = app.buttons.matching(NSPredicate(format: "label == %@", "Chat controls")).firstMatch
+        XCTAssertTrue(controls.waitForExistence(timeout: 5) && controls.isHittable); controls.tap()
+        XCTAssertTrue(app.navigationBars["Chat controls"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Models"].exists)
+        XCTAssertTrue(app.staticTexts["Custom endpoint"].exists,
+                      "Opening Chat controls must expose actual model choices directly.")
+        XCTAssertTrue(app.sliders.firstMatch.exists)
+        XCTAssertTrue(app.staticTexts["Context usage unavailable"].exists || app.progressIndicators["Context used"].exists)
+        retainPreviewScreenshot("Preview chat sliders and context", app: app)
+        app.navigationBars["Chat controls"].buttons["Done"].tap()
+
+        let options = app.buttons["Chat options"]
+        XCTAssertTrue(options.waitForExistence(timeout: 5) && options.isHittable); options.tap()
+        let files = app.buttons["Files"]
+        XCTAssertTrue(files.waitForExistence(timeout: 5) && files.isHittable); files.tap()
+        let filesNavigationBar = app.navigationBars["Files"]
+        XCTAssertTrue(filesNavigationBar.waitForExistence(timeout: 10))
+        retainPreviewScreenshot("Preview chat Files", app: app)
+        filesNavigationBar.buttons.firstMatch.tap()
+
+        let composer = app.descendants(matching: .any).matching(identifier: "chat-composer-input").firstMatch
+        XCTAssertTrue(composer.waitForExistence(timeout: 10) && composer.isHittable)
+        let marker = "SEMREH_COMPOSER_MOTION_\(UUID().uuidString)"
+        composer.tap(); composer.typeText("\(marker)\nsecond line")
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        retainPreviewScreenshot("Preview multiline composer keyboard on", app: app)
+        let sendButton = app.buttons["Send"]
+        XCTAssertTrue(sendButton.waitForExistence(timeout: 5) && sendButton.isHittable); sendButton.tap()
+        waitForIdle(app: app)
+        XCTAssertTrue(containing(marker, app: app).waitForExistence(timeout: 10))
+        retainPreviewScreenshot("Preview multiline send settled", app: app)
+    }
+
+    @MainActor
+    func testOptInPreviewExistingToolActivityDisclosure() throws {
+        continueAfterFailure = false
+        try requirePreviewShellFixture()
+        let app = XCUIApplication()
+        app.launch()
+        returnToPreviewSessionsRoot(app)
+        let search = app.otherElements["Search sessions"]
+        XCTAssertTrue(search.waitForExistence(timeout: 5) && search.isHittable); search.tap()
+        let field = app.textFields["Search sessions"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5)); field.tap(); field.typeText(interimHeadingMarker)
+        let result = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "SEMREH_SLICE1_ACK")).firstMatch
+        XCTAssertTrue(result.waitForExistence(timeout: 20) && result.isHittable); result.tap()
+        XCTAssertTrue(containing(interimHeadingText, app: app).waitForExistence(timeout: 20))
+        let completedActivities = app.buttons.matching(NSPredicate(format: "label ENDSWITH %@", ", Completed"))
+        let completedActivity = completedActivities.firstMatch
+        XCTAssertTrue(completedActivity.waitForExistence(timeout: 10) && completedActivity.isHittable)
+        XCTAssertEqual(completedActivities.count, 1)
+        retainPreviewScreenshot("Preview compact completed activity", app: app)
+        completedActivity.tap()
+        XCTAssertEqual(completedActivities.count, 2,
+                       "Expanding the activity group must reveal its completed child action row.")
+        XCTAssertTrue(completedActivities.firstMatch.isSelected)
+        retainPreviewScreenshot("Preview expanded completed activity", app: app)
+    }
+
+    private func requirePreviewShellFixture() throws {
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("Preview shell verification is simulator-only.")
+        #endif
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SEMREH_PREVIEW_SHELL_UI"] == "1",
+              environment["SEMREH_SLICE2_UI_LIVE"] == "1",
+              environment["SEMREH_SLICE1_HTTPS"] == "1",
+              environment["SEMREH_SLICE2_UI_BACKEND_MODE"] == "stock",
+              environment["SEMREH_SLICE2_UI_BACKEND_SHA"] == backendSHA,
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == credentialsPath else {
+            throw XCTSkip("Preview shell verification requires the contained pinned stock fixture.")
+        }
+    }
+
+    private func returnToPreviewSessionsRoot(_ app: XCUIApplication) {
+        let back = app.buttons.matching(NSPredicate(format: "label == %@", "Back")).firstMatch
+        if back.waitForExistence(timeout: 5), back.isHittable { back.tap() }
+        let sessions = app.buttons["Sessions"]
+        XCTAssertTrue(sessions.waitForExistence(timeout: 10) && sessions.isHittable)
+        sessions.tap()
+        XCTAssertTrue(app.navigationBars["Sessions"].waitForExistence(timeout: 10))
     }
 
     @MainActor
@@ -107,7 +258,7 @@ final class DirectSkillUITests: XCTestCase {
         _ = try openContainedNewChat(app: app)
         let back = app.navigationBars.buttons["BackButton"]
         XCTAssertTrue(back.waitForExistence(timeout: 10) && back.isHittable); back.tap()
-        XCTAssertTrue(app.buttons["Chats"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["Sessions"].waitForExistence(timeout: 10))
         retainPreviewScreenshot("Public preview Chats light", app: app)
         let search = app.otherElements["Search sessions"]
         XCTAssertTrue(search.waitForExistence(timeout: 5) && search.isHittable); search.tap()
@@ -135,7 +286,8 @@ final class DirectSkillUITests: XCTestCase {
         XCTAssertNotEqual(profileName, "default", "Preview routing must exercise a non-default fixture profile.")
         retainPreviewScreenshot("Public preview new chat bot picker", app: app)
         profileButton.tap()
-        let composer = app.textViews.matching(NSPredicate(format: "identifier BEGINSWITH %@", "chat-detail:")).firstMatch
+        let composer = app.descendants(matching: .any)
+            .matching(identifier: "chat-composer-input").firstMatch
         XCTAssertTrue(composer.waitForExistence(timeout: 15) && composer.isHittable)
         let marker = "SEMREH_PREVIEW_PROFILE_\(UUID().uuidString)"
         send(marker, through: composer, app: app); waitForIdle(app: app)
@@ -200,7 +352,7 @@ final class DirectSkillUITests: XCTestCase {
         if restoredDetailBack.waitForExistence(timeout: 10) && restoredDetailBack.isHittable {
             restoredDetailBack.tap()
         }
-        XCTAssertTrue(app.buttons["Chats"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.buttons["Sessions"].waitForExistence(timeout: 15))
         retainPreviewScreenshot("Public preview Chats dark", app: app)
         let darkAccount = app.buttons["Account and settings"]
         XCTAssertTrue(darkAccount.waitForExistence(timeout: 10) && darkAccount.isHittable); darkAccount.tap()
@@ -245,6 +397,117 @@ final class DirectSkillUITests: XCTestCase {
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)
+    }
+
+    @MainActor
+    func testOptInProductionLongAutomaticRestore() async throws {
+        continueAfterFailure = false
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("Long automatic-restore verification is simulator-only.")
+        #endif
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SEMREH_LONG_RESTORE_UI"] == "1",
+              environment["SEMREH_SLICE2_UI_LIVE"] == "1",
+              environment["SEMREH_SLICE1_HTTPS"] == "1",
+              environment["SEMREH_SLICE2_UI_BACKEND_MODE"] == "stock",
+              environment["SEMREH_SLICE2_UI_BACKEND_SHA"] == backendSHA,
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == credentialsPath else {
+            throw XCTSkip("Long restore verification requires the contained pinned stock fixture.")
+        }
+
+        let observer = try await LifecycleCanonicalObserver(
+            origin: try XCTUnwrap(URL(string: origin)), credentials: try readCredentials()
+        )
+        defer { observer.invalidate() }
+        let app = XCUIApplication()
+        let fixture: (storedID: String, rows: [[String: Any]])
+        if let existing = try await observer.discoverLongStoredSession(minimumRows: 20) {
+            fixture = existing
+        } else {
+            app.launch()
+            let composer = try openContainedNewChat(app: app)
+            let prefix = "SEMREH_LONG_RESTORE_\(UUID().uuidString)"
+            var prompts = ["\(prefix)_01"]
+            send(prompts[0], through: composer, app: app)
+            waitForIdle(app: app)
+            let storedID = try await observer.discoverStoredID(uniquePrompt: prompts[0])
+            _ = try await waitForCanonical(observer: observer, storedID: storedID) {
+                self.exactCanonicalPairs($0, users: prompts)
+            }
+            for index in 2...10 {
+                prompts.append(String(format: "%@_%02d", prefix, index))
+                send(prompts.last!, through: composer, app: app)
+                waitForIdle(app: app)
+                _ = try await waitForCanonical(observer: observer, storedID: storedID) {
+                    self.exactCanonicalPairs($0, users: prompts)
+                }
+            }
+            let rows = try await observer.transcript(storedID: storedID, limit: 100)
+            guard rows.count >= 20 else {
+                XCTFail("The bounded production-UI seed did not create a 20-row transcript.")
+                throw NSError(domain: "DirectSkillUITests", code: 25)
+            }
+            fixture = (storedID, rows)
+        }
+        var visibleTail = Array(fixture.rows.filter { row in
+            guard let content = canonicalText(row) else { return false }
+            return !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }.suffix(2))
+        guard visibleTail.count == 2 else {
+            throw XCTSkip("The qualifying transcript did not have two visible canonical tail rows.")
+        }
+
+        var link = URLComponents()
+        link.scheme = "semreh"
+        link.host = "session"
+        link.queryItems = [URLQueryItem(name: "id", value: fixture.storedID)]
+
+        if app.state != .runningForeground { app.launch() }
+        app.open(try XCTUnwrap(link.url))
+        let selectedTailText = try XCTUnwrap(canonicalText(visibleTail[0]))
+        let selectedTail = app.staticTexts.matching(
+            NSPredicate(format: "label == %@", selectedTailText)
+        ).firstMatch
+        XCTAssertTrue(selectedTail.waitForExistence(timeout: 30),
+                      "Production deep link must display the selected long transcript tail.")
+        let selectedDetail = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "chat-detail:")
+        ).firstMatch
+        XCTAssertTrue(selectedDetail.waitForExistence(timeout: 20))
+        try assertAccessibleTranscriptRows(
+            visibleTail, in: selectedDetail, context: "selected long chat before termination"
+        )
+
+        let transcript = selectedDetail.descendants(matching: .scrollView)
+            .matching(identifier: "chat-transcript-scroll").firstMatch
+        let tailRow = transcript.descendants(matching: .any)
+            .matching(identifier: try XCTUnwrap(accessibleTranscriptRow(visibleTail[0])).identifier)
+            .firstMatch
+        tailRow.press(forDuration: 1.1)
+        let copyAction = app.buttons["Copy"]
+        XCTAssertTrue(copyAction.waitForExistence(timeout: 5) && copyAction.isHittable,
+                      "The canonical row container must retain its message context menu.")
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.95)).tap()
+
+        for launchNumber in 1...3 {
+            app.terminate()
+            XCTAssertEqual(app.state, .notRunning)
+            app.launch()
+            let restoredDetail = app.descendants(matching: .any).matching(
+                identifier: selectedDetail.identifier
+            ).firstMatch
+            XCTAssertTrue(restoredDetail.waitForExistence(timeout: 30),
+                          "Long chat plain launch \(launchNumber) must restore the same detail.")
+            try assertAccessibleTranscriptRows(
+                visibleTail,
+                in: restoredDetail,
+                context: "long automatic restore \(launchNumber) before interaction"
+            )
+            let screenshot = XCTAttachment(screenshot: app.screenshot())
+            screenshot.name = "Long automatic restore \(launchNumber) before interaction"
+            screenshot.lifetime = .keepAlways
+            add(screenshot)
+        }
     }
 
     @MainActor
@@ -302,37 +565,43 @@ final class DirectSkillUITests: XCTestCase {
             link.host = "session"
             link.queryItems = [URLQueryItem(name: "id", value: storedID)]
             app.open(try XCTUnwrap(link.url))
-            let selectedComposer = app.textViews.matching(
-                NSPredicate(format: "identifier BEGINSWITH %@", "chat-detail:")
-            ).firstMatch
+            let selectedComposer = app.descendants(matching: .any)
+                .matching(identifier: "chat-composer-input").firstMatch
             XCTAssertTrue(selectedComposer.waitForExistence(timeout: 30))
-            XCTAssertTrue(containing(warmup, app: app).waitForExistence(timeout: 20))
-            waitForVisibleACKCount(1, app: app)
             let selectedDetail = app.descendants(matching: .any).matching(
                 NSPredicate(format: "identifier BEGINSWITH %@", "chat-detail:")
             ).firstMatch
             XCTAssertTrue(selectedDetail.waitForExistence(timeout: 10))
+            try assertAccessibleTranscriptRows(
+                baseline,
+                in: selectedDetail,
+                context: "selected existing chat before termination"
+            )
             let selectedDetailID = selectedDetail.identifier
             // This gate isolates existing-chat viewport restoration. Completion
             // while away and explicit send-next remain separate lifecycle gates.
-            app.terminate()
-            XCTAssertEqual(app.state, .notRunning)
-            app.launch()
-            let restoredComposer = app.textViews.matching(
-                NSPredicate(format: "identifier BEGINSWITH %@", "chat-detail:")
-            ).firstMatch
-            XCTAssertTrue(restoredComposer.waitForExistence(timeout: 30),
-                          "Plain launch must restore the selected existing conversation.")
-            XCTAssertTrue(app.descendants(matching: .any).matching(identifier: selectedDetailID)
-                .firstMatch.waitForExistence(timeout: 10),
-                "Plain launch must preserve the pre-termination chat detail identity.")
-            XCTAssertTrue(containing(warmup, app: app).waitForExistence(timeout: 20))
-            let screenshot = XCTAttachment(screenshot: app.screenshot())
-            screenshot.name = "Automatically restored existing chat before interaction"
-            screenshot.lifetime = .keepAlways
-            add(screenshot)
-            waitForVisibleACKCount(1, app: app)
-            XCTAssertTrue(containing(warmup, app: app).isHittable)
+            for launchNumber in 1...3 {
+                app.terminate()
+                XCTAssertEqual(app.state, .notRunning)
+                app.launch()
+                let restoredComposer = app.descendants(matching: .any)
+                    .matching(identifier: "chat-composer-input").firstMatch
+                XCTAssertTrue(restoredComposer.waitForExistence(timeout: 30),
+                              "Plain launch \(launchNumber) must restore the selected existing conversation.")
+                XCTAssertTrue(app.descendants(matching: .any).matching(identifier: selectedDetailID)
+                    .firstMatch.waitForExistence(timeout: 10),
+                    "Plain launch \(launchNumber) must preserve the pre-termination chat detail identity.")
+                let restoredDetail = app.descendants(matching: .any).matching(identifier: selectedDetailID).firstMatch
+                try assertAccessibleTranscriptRows(
+                    baseline,
+                    in: restoredDetail,
+                    context: "automatic restore \(launchNumber) before interaction"
+                )
+                let screenshot = XCTAttachment(screenshot: app.screenshot())
+                screenshot.name = "Automatic restore \(launchNumber) before interaction"
+                screenshot.lifetime = .keepAlways
+                add(screenshot)
+            }
             _ = try await waitForCanonical(observer: observer, storedID: storedID) {
                 self.exactCanonicalPairs($0, users: [warmup])
             }
@@ -398,9 +667,8 @@ final class DirectSkillUITests: XCTestCase {
             app.activate()
             XCTAssertTrue(containing(marker, app: app).waitForExistence(timeout: 20))
             waitForVisibleACKCount(2, app: app)
-            let foregroundComposer = app.textViews.matching(
-                NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
-            ).firstMatch
+            let foregroundComposer = app.descendants(matching: .any)
+                .matching(identifier: "chat-composer-input").firstMatch
             XCTAssertTrue(foregroundComposer.waitForExistence(timeout: 20))
             let next = try sendUniqueCompleted("SEMREH_LIFECYCLE_AFTER_BACKGROUND",
                                                composer: foregroundComposer, app: app)
@@ -424,7 +692,7 @@ final class DirectSkillUITests: XCTestCase {
             }) { self.exactCanonicalPairs($0, users: [warmup, marker]) }
             app.launch()
             dismissKnownPasswordSavePrompt(app, timeout: 3)
-            let sessions = app.buttons["Chats"]
+            let sessions = app.buttons["Sessions"]
             let restoredChat = app.otherElements.matching(
                 NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
             ).firstMatch
@@ -440,9 +708,8 @@ final class DirectSkillUITests: XCTestCase {
             link.host = "session"
             link.queryItems = [URLQueryItem(name: "id", value: storedID)]
             app.open(try XCTUnwrap(link.url))
-            let reopenedComposer = app.textViews.matching(
-                NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
-            ).firstMatch
+            let reopenedComposer = app.descendants(matching: .any)
+                .matching(identifier: "chat-composer-input").firstMatch
             XCTAssertTrue(reopenedComposer.waitForExistence(timeout: 30))
             XCTAssertTrue(containing(marker, app: app).waitForExistence(timeout: 20))
             XCTAssertEqual(exactCount(marker, app: app), 1)
@@ -525,9 +792,8 @@ final class DirectSkillUITests: XCTestCase {
         XCTAssertTrue(newSession.waitForExistence(timeout: 15) && newSession.isHittable)
         newSession.tap()
 
-        let composer = app.textViews.matching(
-            NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
-        ).firstMatch
+        let composer = app.descendants(matching: .any)
+            .matching(identifier: "chat-composer-input").firstMatch
         XCTAssertTrue(composer.waitForExistence(timeout: 20) && composer.isHittable)
         send("SEMREH_INTERRUPT_FIXTURE", through: composer, app: app)
         let stop = app.buttons["Stop response"]
@@ -594,7 +860,7 @@ final class DirectSkillUITests: XCTestCase {
         paste(credentials.password, into: password, app: app)
         app.buttons["Connect"].tap()
 
-        let sessions = app.buttons["Chats"]
+        let sessions = app.buttons["Sessions"]
         let restoredChat = app.otherElements.matching(
             NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
         ).firstMatch
@@ -615,9 +881,8 @@ final class DirectSkillUITests: XCTestCase {
         XCTAssertTrue(newSession.waitForExistence(timeout: 15) && newSession.isHittable)
         newSession.tap()
 
-        let composer = app.textViews.matching(
-            NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
-        ).firstMatch
+        let composer = app.descendants(matching: .any)
+            .matching(identifier: "chat-composer-input").firstMatch
         XCTAssertTrue(composer.waitForExistence(timeout: 20) && composer.isHittable)
         send(interimHeadingMarker, through: composer, app: app)
 
@@ -773,7 +1038,7 @@ final class DirectSkillUITests: XCTestCase {
         replace(username, with: credentials.username, app: app)
         paste(credentials.password, into: password, app: app)
         app.buttons["Connect"].tap()
-        let sessions = app.buttons["Chats"]
+        let sessions = app.buttons["Sessions"]
         let restoredChat = app.otherElements.matching(
             NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
         ).firstMatch
@@ -795,9 +1060,8 @@ final class DirectSkillUITests: XCTestCase {
         sessions.tap()
         XCTAssertTrue(app.buttons["New chat"].waitForExistence(timeout: 15))
         app.buttons["New chat"].tap()
-        let composer = app.textViews.matching(
-            NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
-        ).firstMatch
+        let composer = app.descendants(matching: .any)
+            .matching(identifier: "chat-composer-input").firstMatch
         XCTAssertTrue(composer.waitForExistence(timeout: 20))
 
         send("/skills", through: composer, app: app)
@@ -821,6 +1085,21 @@ final class DirectSkillUITests: XCTestCase {
 
     private func containing(_ value: String, app: XCUIApplication) -> XCUIElement {
         app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", value)).firstMatch
+    }
+
+    @MainActor
+    private func chatBackButton(app: XCUIApplication) -> XCUIElement {
+        // The current chat header owns Back outside the hidden navigation bar.
+        // Keep the native navigation-bar selector as a compatibility fallback
+        // for destinations that still expose the legacy stack button.
+        // ChatView's container identifier is intentionally inherited by its
+        // descendants, so subscript lookup may prefer that identifier over the
+        // visible button label. Match the button role and exact label directly.
+        let customBack = app.buttons.matching(
+            NSPredicate(format: "label == %@", "Back")
+        ).firstMatch
+        if customBack.exists { return customBack }
+        return app.navigationBars.buttons["BackButton"]
     }
 
     @MainActor
@@ -851,7 +1130,7 @@ final class DirectSkillUITests: XCTestCase {
         paste(credentials.password, into: password, app: app)
         app.buttons["Connect"].tap()
 
-        let sessions = app.buttons["Chats"]
+        let sessions = app.buttons["Sessions"]
         let restoredChat = app.otherElements.matching(
             NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
         ).firstMatch
@@ -862,7 +1141,7 @@ final class DirectSkillUITests: XCTestCase {
         }
         dismissKnownPasswordSavePrompt(app, timeout: 3)
         if restoredChat.exists {
-            let back = app.navigationBars.buttons["BackButton"]
+            let back = chatBackButton(app: app)
             XCTAssertTrue(back.waitForExistence(timeout: 5) && back.isHittable)
             back.tap()
         }
@@ -876,9 +1155,8 @@ final class DirectSkillUITests: XCTestCase {
             XCTAssertTrue(defaultBot.isHittable)
             defaultBot.tap()
         }
-        let composer = app.textViews.matching(
-            NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
-        ).firstMatch
+        let composer = app.descendants(matching: .any)
+            .matching(identifier: "chat-composer-input").firstMatch
         XCTAssertTrue(composer.waitForExistence(timeout: 20) && composer.isHittable)
         return composer
     }
@@ -891,12 +1169,20 @@ final class DirectSkillUITests: XCTestCase {
             NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
         ).firstMatch
         if chat.exists {
-            let back = app.navigationBars.buttons["BackButton"]
+            let back = chatBackButton(app: app)
             XCTAssertTrue(back.waitForExistence(timeout: 5) && back.isHittable)
             back.tap()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.75))
+            let remainingChat = app.otherElements.matching(
+                NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
+            ).firstMatch
+            XCTAssertFalse(
+                remainingChat.exists,
+                "Back tap must return to the Sessions root without restoring the same chat."
+            )
         }
         if !app.staticTexts["Settings"].exists {
-            let you = app.buttons["Account and settings"]
+            let you = app.buttons.matching(NSPredicate(format: "label == %@", "Settings")).firstMatch
             XCTAssertTrue(you.waitForExistence(timeout: 10) && you.isHittable)
             you.tap()
         }
@@ -1005,6 +1291,93 @@ final class DirectSkillUITests: XCTestCase {
         return ids.count == rows.count && Set(ids).count == ids.count
     }
 
+    private struct AccessibleTranscriptRow {
+        let identifier: String
+        let label: String
+    }
+
+    @MainActor
+    private func assertAccessibleTranscriptRows(
+        _ rows: [[String: Any]],
+        in detail: XCUIElement,
+        context: String
+    ) throws {
+        let expected = rows.compactMap(accessibleTranscriptRow)
+        guard expected.count == rows.count else {
+            XCTFail("\(context) must expose a stable canonical ID for every visible row.")
+            throw NSError(domain: "DirectSkillUITests", code: 17)
+        }
+
+        let transcript = detail.descendants(matching: .scrollView)
+            .matching(identifier: "chat-transcript-scroll")
+            .firstMatch
+        guard transcript.waitForExistence(timeout: 10) else {
+            XCTFail("\(context) must expose the canonical transcript scroll container.")
+            throw NSError(domain: "DirectSkillUITests", code: 18)
+        }
+
+        let deadline = Date().addingTimeInterval(30)
+        while Date() < deadline {
+            let allPresent = expected.allSatisfy { row in
+                transcript.descendants(matching: .any).matching(identifier: row.identifier).count == 1
+            }
+            if allPresent { break }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        }
+
+        for row in expected {
+            let matches = transcript.descendants(matching: .any).matching(identifier: row.identifier)
+            guard matches.count == 1 else {
+                XCTFail("\(context) must expose exactly one AX row for \(row.identifier).")
+                throw NSError(domain: "DirectSkillUITests", code: 19)
+            }
+            let element = matches.firstMatch
+            guard element.waitForExistence(timeout: 5) else {
+                XCTFail("\(context) must expose the \(row.identifier) AX row.")
+                throw NSError(domain: "DirectSkillUITests", code: 20)
+            }
+            guard element.label == row.label else {
+                XCTFail("\(context) AX row must identify its truthful role and content.")
+                throw NSError(domain: "DirectSkillUITests", code: 21)
+            }
+            guard element.isHittable else {
+                XCTFail("\(context) AX row must be visible and hittable before interaction.")
+                throw NSError(domain: "DirectSkillUITests", code: 22)
+            }
+        }
+    }
+
+    private func accessibleTranscriptRow(_ row: [String: Any]) -> AccessibleTranscriptRow? {
+        guard let messageID = canonicalMessageID(row),
+              let role = row["role"] as? String,
+              let content = canonicalText(row) else { return nil }
+        return AccessibleTranscriptRow(
+            identifier: "message-row:\(messageID)",
+            label: accessibleTranscriptRowLabel(role: role, content: content)
+        )
+    }
+
+    private func accessibleTranscriptRowLabel(role: String, content: String) -> String {
+        let roleLabel: String
+        switch role {
+        case "user": roleLabel = "User"
+        case "assistant": roleLabel = "Assistant"
+        case "local_assistant": roleLabel = "Semreh"
+        case "local_notice": roleLabel = "Notice"
+        default: roleLabel = "Message"
+        }
+
+        let text = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return "\(roleLabel) message" }
+        return "\(roleLabel) message: \(text)"
+    }
+
+    private func canonicalMessageID(_ row: [String: Any]) -> String? {
+        if let value = row["id"] as? String, !value.isEmpty { return value }
+        if let value = row["id"] as? NSNumber { return value.stringValue }
+        return nil
+    }
+
     @MainActor
     private func waitForVisibleACKCount(_ expected: Int, app: XCUIApplication) {
         let acknowledgements = app.staticTexts.matching(
@@ -1032,11 +1405,17 @@ final class DirectSkillUITests: XCTestCase {
     private func waitForIdle(app: XCUIApplication) {
         let deadline = Date().addingTimeInterval(45)
         while Date() < deadline {
-            if !app.buttons["Stop response"].exists && app.buttons["Send"].exists { return }
+            let composer = app.descendants(matching: .any)
+                .matching(identifier: "chat-composer-input").firstMatch
+            if !app.buttons["Stop response"].exists && composer.isHittable
+                && (app.buttons["Send"].exists || app.buttons["Voice input"].exists) { return }
             RunLoop.main.run(until: Date().addingTimeInterval(0.1))
         }
         XCTAssertFalse(app.buttons["Stop response"].exists)
-        XCTAssertTrue(app.buttons["Send"].exists)
+        let composer = app.descendants(matching: .any)
+            .matching(identifier: "chat-composer-input").firstMatch
+        XCTAssertTrue(composer.isHittable)
+        XCTAssertTrue(app.buttons["Send"].exists || app.buttons["Voice input"].exists)
     }
 
     private func signOutIfNeeded(_ app: XCUIApplication) throws {
@@ -1222,14 +1601,76 @@ final class DirectSkillUITests: XCTestCase {
                           userInfo: [NSLocalizedDescriptionKey: "No exact warmup match in \(lastCandidateCount) bounded candidates."])
         }
 
-        func transcript(storedID: String, profile: String = "default") async throws -> [[String: Any]] {
+        func discoverLongStoredSession(
+            minimumRows: Int,
+            profile: String = "default"
+        ) async throws -> (storedID: String, rows: [[String: Any]])? {
+            var components = URLComponents()
+            components.path = "/api/sessions"
+            components.queryItems = [
+                URLQueryItem(name: "profile", value: profile),
+                URLQueryItem(name: "limit", value: "20"),
+                URLQueryItem(name: "offset", value: "0"),
+                URLQueryItem(name: "order", value: "recent"),
+                URLQueryItem(name: "archived", value: "exclude"),
+            ]
+            let (data, response) = try await request(
+                path: try XCTUnwrap(components.string), method: "GET"
+            )
+            guard (200..<300).contains(response.statusCode),
+                  let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let sessions = payload["sessions"] as? [[String: Any]],
+                  sessions.count <= 20 else {
+                throw NSError(domain: "DirectSkillUITests", code: 23)
+            }
+
+            var best: (storedID: String, rows: [[String: Any]])?
+            for candidate in sessions {
+                guard let storedID = candidate["id"] as? String,
+                      storedID.range(of: "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
+                                     options: .regularExpression) != nil else {
+                    throw NSError(domain: "DirectSkillUITests", code: 24)
+                }
+                let rows = try await transcript(storedID: storedID, profile: profile, limit: 100)
+                guard rows.count >= minimumRows else { continue }
+                let ids = rows.compactMap { row -> String? in
+                    if let value = row["id"] as? String, !value.isEmpty { return value }
+                    if let value = row["id"] as? NSNumber { return value.stringValue }
+                    return nil
+                }
+                guard ids.count == rows.count, Set(ids).count == ids.count else { continue }
+                if best == nil || rows.count > best!.rows.count {
+                    best = (storedID, rows)
+                }
+            }
+            return best
+        }
+
+        func waitForLongTranscript(
+            storedID: String,
+            predicate: ([[String: Any]]) -> Bool
+        ) async throws -> [[String: Any]] {
+            let deadline = Date().addingTimeInterval(45)
+            while Date() < deadline {
+                let rows = try await transcript(storedID: storedID, limit: 100)
+                if predicate(rows) { return rows }
+                try await Task.sleep(for: .milliseconds(100))
+            }
+            throw NSError(domain: "DirectSkillUITests", code: 26)
+        }
+
+        func transcript(
+            storedID: String,
+            profile: String = "default",
+            limit: Int = 20
+        ) async throws -> [[String: Any]] {
             var components = URLComponents()
             components.path = "/api/sessions/\(storedID)/messages"
             components.queryItems = [
                 URLQueryItem(name: "profile", value: profile),
                 URLQueryItem(name: "include_compacted", value: "true"),
                 URLQueryItem(name: "order", value: "oldest"),
-                URLQueryItem(name: "limit", value: "20"),
+                URLQueryItem(name: "limit", value: String(limit)),
                 URLQueryItem(name: "offset", value: "0"),
             ]
             let (data, response) = try await request(path: try XCTUnwrap(components.string), method: "GET")

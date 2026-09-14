@@ -4,6 +4,103 @@ import XCTest
 
 @MainActor
 final class ChatViewModelDirectGatewayTests: APIClientTestCase {
+    func testColdIdleLoadRequestsCurrentContextUsageSnapshot() async throws {
+        let fake = ChatDirectFakeTransport()
+        fake.setUsageResponse(.object([
+            "input": .number(800),
+            "output": .number(200),
+            "context_used": .number(12_345),
+            "context_max": .number(128_000)
+        ]))
+        let runtime = try makeRuntime(fake)
+        let vm = makeViewModel(
+            client: makeDirectBlockingTestClient(),
+            runtime: runtime,
+            sessionID: "durable-1"
+        )
+
+        await vm.loadMessages()
+        await waitUntil { vm.contextWindowSnapshot?.lastPromptTokens == 12_345 }
+
+        XCTAssertEqual(fake.calls().filter { $0.method == "session.usage" }.count, 1)
+        XCTAssertEqual(vm.contextWindowSnapshot?.lastPromptTokens, 12_345)
+        XCTAssertEqual(vm.contextWindowSnapshot?.contextLength, 128_000)
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testStalledContextUsageDoesNotHoldChatReadiness() async throws {
+        let fake = ChatDirectFakeTransport()
+        fake.setUsageResponse(.object([
+            "input": .number(800),
+            "output": .number(200),
+            "context_used": .number(12_345),
+            "context_max": .number(128_000)
+        ]))
+        let usageGate = ChatDirectAsyncGate()
+        fake.setUsageGate(usageGate)
+        let runtime = try makeRuntime(fake)
+        let vm = makeViewModel(
+            client: makeDirectBlockingTestClient(),
+            runtime: runtime,
+            sessionID: "durable-1"
+        )
+
+        let load = Task { @MainActor in await vm.loadMessages() }
+        await waitUntil { fake.calls().contains { $0.method == "session.usage" } }
+        await waitUntil { !vm.isLoading }
+
+        XCTAssertFalse(vm.isEstablishingConnection)
+        XCTAssertNil(vm.contextWindowSnapshot)
+
+        await usageGate.release()
+        await load.value
+        await waitUntil { vm.contextWindowSnapshot?.lastPromptTokens == 12_345 }
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testStaleContextUsageFromReloadCannotOverwriteNewerSnapshot() async throws {
+        let fake = ChatDirectFakeTransport()
+        fake.setUsageResponse(.object([
+            "input": .number(100),
+            "output": .number(10),
+            "context_used": .number(100),
+            "context_max": .number(128_000)
+        ]))
+        let staleUsageGate = ChatDirectAsyncGate()
+        fake.setUsageGate(staleUsageGate)
+        let runtime = try makeRuntime(fake)
+        let vm = makeViewModel(
+            client: makeDirectBlockingTestClient(),
+            runtime: runtime,
+            sessionID: "durable-1"
+        )
+
+        let firstLoad = Task { @MainActor in await vm.loadMessages() }
+        await waitUntil { fake.calls().filter { $0.method == "session.usage" }.count == 1 }
+        await firstLoad.value
+
+        fake.setUsageResponse(.object([
+            "input": .number(900),
+            "output": .number(90),
+            "context_used": .number(900),
+            "context_max": .number(128_000)
+        ]))
+        fake.setUsageGate(nil)
+        await vm.loadMessages()
+        await waitUntil { vm.contextWindowSnapshot?.lastPromptTokens == 900 }
+
+        // The cancelled first request may still return from a transport that
+        // does not interrupt an in-flight receive. Its old snapshot is stale.
+        await staleUsageGate.release()
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(vm.contextWindowSnapshot?.lastPromptTokens, 900)
+
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
     func testDirectBackgroundTasksCompleteInterleavedAndStatusTracksPendingCount() async throws {
         let fake = ChatDirectFakeTransport()
         let runtime = try makeRuntime(fake)
@@ -3561,6 +3658,8 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
     private var sessionStatusResponse: JSONValue = .object([
         "output": .string("Agent Running: No")
     ])
+    private var usageResponse: JSONValue = .object([:])
+    private var usageGate: ChatDirectAsyncGate?
     private var clarifyResponse: JSONValue = .object(["status": .string("ok")])
     private var sessionCloseResponse: JSONValue = .object([:])
     private var resumeResponseAfterSessionClose: JSONValue?
@@ -3629,6 +3728,14 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
 
     func setSessionStatusResponse(_ response: JSONValue) {
         withLock { sessionStatusResponse = response }
+    }
+
+    func setUsageResponse(_ response: JSONValue) {
+        withLock { usageResponse = response }
+    }
+
+    func setUsageGate(_ gate: ChatDirectAsyncGate?) {
+        withLock { usageGate = gate }
     }
 
     func setClarifyGate(_ gate: ChatDirectAsyncGate?) {
@@ -3755,6 +3862,8 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
                 return (.object(["status": .string("interrupted")]), nil, nil, false, nil, nil)
             case "session.status":
                 return (sessionStatusResponse, nil, nil, false, nil, nil)
+            case "session.usage":
+                return (usageResponse, nil, usageGate, false, nil, nil)
             case "session.close":
                 if let resumeResponseAfterSessionClose {
                     self.resumeResponse = resumeResponseAfterSessionClose
@@ -3807,6 +3916,9 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
             await gate.wait()
         }
         if method == "prompt.background", let gate = behavior.2 {
+            await gate.wait()
+        }
+        if method == "session.usage", let gate = behavior.2 {
             await gate.wait()
         }
         if let requestError { throw requestError }

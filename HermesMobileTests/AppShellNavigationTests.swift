@@ -3,6 +3,87 @@ import XCTest
 
 @MainActor
 final class AppShellNavigationTests: XCTestCase {
+    func testRootSettingsActionUsesOneGearDestination() {
+        XCTAssertEqual(AppShellSettingsAction.systemImage, "gearshape")
+        XCTAssertEqual(AppShellSettingsAction.accessibilityLabel, "Settings")
+    }
+
+    func testToolsDestinationOmitsSettingsAndServerLoopRows() {
+        let tools = ControlView(
+            authManager: AuthManager(),
+            server: URL(staticString: "https://example.test"),
+            showsConnectionRows: false
+        )
+        XCTAssertFalse(tools.showsConnectionRows)
+    }
+
+    func testBotProfileRoutesKeepExactProfileForChatAndSessionsFilter() throws {
+        let profile = ProfileSummary(
+            name: " research ",
+            path: nil,
+            isDefault: true,
+            isActive: true,
+            gatewayRunning: true,
+            model: "model-a",
+            provider: "provider-a",
+            hasEnv: true,
+            skillCount: 3
+        )
+        let name = try XCTUnwrap(profile.normalizedName)
+
+        let chatRequest = NewChatRequest(profileName: name)
+        let filterRequest = SessionFilterRequest(profileName: "  \(name)  ")
+
+        XCTAssertEqual(chatRequest.profileName, name)
+        XCTAssertEqual(filterRequest.profileName, name)
+        XCTAssertNotEqual(chatRequest.id, filterRequest.id)
+        XCTAssertTrue(SessionShellFilter.matches(
+            SessionSummary(sessionId: "session-1", profile: name),
+            bot: filterRequest.profileName,
+            pinnedOnly: false
+        ))
+    }
+
+    func testSessionFilterRequestRejectsNoProfileMutationAndSupportsRepeatRoutes() {
+        let first = SessionFilterRequest(profileName: "work")
+        let second = SessionFilterRequest(profileName: "work")
+
+        XCTAssertEqual(first.profileName, second.profileName)
+        XCTAssertNotEqual(first.id, second.id)
+        XCTAssertEqual(NewChatRequest(profileName: first.profileName).profileName, "work")
+    }
+
+    func testProfileHistoryRouteClearsConflictingSessionFilters() throws {
+        let route = try XCTUnwrap(
+            SessionFilterRoutePolicy.profileHistoryRoute(profileName: "  research ")
+        )
+
+        XCTAssertEqual(route.profileName, "research")
+        XCTAssertFalse(route.pinnedOnly)
+        XCTAssertFalse(route.scheduledHistoryOnly)
+        XCTAssertNil(route.projectID)
+        XCTAssertEqual(route.searchText, "")
+    }
+
+    func testProfileHistoryRouteRejectsBlankProfileNames() {
+        XCTAssertNil(SessionFilterRoutePolicy.profileHistoryRoute(profileName: "  \n"))
+    }
+
+    func testSessionDepartureResetsButIntentionalIncomingRoutesDoNot() {
+        XCTAssertTrue(AppShellSessionReturnPolicy.resetsOnDeparture(from: .sessions, to: .control))
+        XCTAssertTrue(AppShellSessionReturnPolicy.resetsOnDeparture(from: .sessions, to: .you))
+        XCTAssertFalse(AppShellSessionReturnPolicy.resetsOnDeparture(from: .control, to: .sessions))
+        XCTAssertFalse(AppShellSessionReturnPolicy.resetsOnDeparture(from: .you, to: .sessions))
+        XCTAssertFalse(AppShellSessionReturnPolicy.resetsOnDeparture(from: .sessions, to: .sessions))
+    }
+
+    func testEmptyShellProjectsHideButSelectionKeepsClearFilterReachable() {
+        XCTAssertFalse(AppShellOrganizerPolicy.showsProjects(isShell: true, hasProjects: false, hasSelection: false))
+        XCTAssertTrue(AppShellOrganizerPolicy.showsProjects(isShell: true, hasProjects: true, hasSelection: false))
+        XCTAssertTrue(AppShellOrganizerPolicy.showsProjects(isShell: true, hasProjects: false, hasSelection: true))
+        XCTAssertTrue(AppShellOrganizerPolicy.showsProjects(isShell: false, hasProjects: false, hasSelection: false))
+    }
+
     func testPrimaryTabsSeparateBotConfigurationFromSessionsAndActivity() {
         XCTAssertEqual(AppShellSurface.primaryTabs, [.control, .sessions, .you])
     }

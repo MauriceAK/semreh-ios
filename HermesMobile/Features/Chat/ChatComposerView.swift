@@ -148,14 +148,16 @@ struct MessageComposerView: View {
     let onSelectGitBranch: (GitCheckoutTarget) -> Void
     let onCreateGitBranch: (GitCheckoutTarget) -> Void
     let onRefreshGitBranches: () -> Void
+    var controlsPresentation: Binding<Bool>? = nil
+    var workspacePickerRequest = 0
+    var gitBranchPickerRequest = 0
 
     @State private var textFieldHeight: CGFloat = 0
     @State private var textInputHeight: CGFloat = 22
     @State private var noticeMessage: String?
     @State private var showsAllModelsSheet = false
-    @State private var showsIntelligenceOptions = false
-    @State private var opensAllModelsAfterIntelligence = false
     @State private var showsWorkspaceSheet = false
+    @State private var showsGitBranchSheet = false
     @State private var optimisticWorkspacePath: String?
     @State private var favoriteModelKeys = ModelFavoritesStore.shared.favoriteKeys
     @State private var recentModelKeys = ModelRecentsStore.shared.recentKeys
@@ -258,8 +260,9 @@ struct MessageComposerView: View {
     }
 
     var body: some View {
-        AdaptiveGlassContainer(spacing: 6) {
-            VStack(spacing: 6) {
+        let composer = AnyView(
+            AdaptiveGlassContainer(spacing: 6) {
+                VStack(spacing: 6) {
                 if voiceNoteRecorder.isRecording {
                     ComposerVoiceRecordingBar(
                         elapsed: voiceNoteRecorder.elapsed,
@@ -346,7 +349,7 @@ struct MessageComposerView: View {
                                 .padding(.bottom, 4)
                         }
 
-                        HStack(alignment: .bottom, spacing: 2) {
+                        HStack(alignment: .center, spacing: 2) {
                             ComposerTextInputView(
                                 text: $draftMessage,
                                 isFocused: $isFocused,
@@ -409,9 +412,11 @@ struct MessageComposerView: View {
                 }
                 .padding(.horizontal, 12)
                 .padding(.bottom, 4)
+                }
             }
-        }
-        .background(
+        )
+        let composerWithControls = composer
+            .background(
             GeometryReader { proxy in
                 Color.clear
                     .onAppear {
@@ -421,16 +426,16 @@ struct MessageComposerView: View {
                         onHeightChange(newHeight)
                     }
             }
-        )
-        .task(id: slashAutocompleteLoadKey) {
+            )
+            .task(id: slashAutocompleteLoadKey) {
             await loadSlashAutocompleteSubArgsIfNeeded()
-        }
-        .task {
+            }
+            .task {
             // Cold path: the composer appears already active (the usual case for the
             // "New Chat with Voice" intent once its session is created) — start here.
             autoStartVoiceInputIfNeeded()
-        }
-        .onChange(of: scenePhase) { _, newPhase in
+            }
+            .onChange(of: scenePhase) { _, newPhase in
             if newPhase != .active {
                 voiceInput.stopBeforeSubmittingDraft()
                 // Backgrounding stops the recorder's run-loop ticker, so cancel
@@ -441,68 +446,48 @@ struct MessageComposerView: View {
                 // a beat after it appeared; auto-start once we're active (#338).
                 autoStartVoiceInputIfNeeded()
             }
-        }
-        .onChange(of: voiceInputProfileName) { _, _ in
+            }
+            .onChange(of: voiceInputProfileName) { _, _ in
             voiceInput.stopBeforeSubmittingDraft()
-        }
-        .onChange(of: voiceNoteRecorder.elapsed) { _, elapsed in
+            }
+            .onChange(of: voiceNoteRecorder.elapsed) { _, elapsed in
             // Enforce the max-duration cap: auto-stop and send (not cancel) once
             // the clip hits the limit, mirroring a finger release.
             if voiceNoteRecorder.isRecording, elapsed >= ComposerVoiceNoteRecorder.maximumDuration {
                 finishVoiceNote(translationHeight: 0)
             }
-        }
-        .sheet(isPresented: $showsAllModelsSheet, onDismiss: restoreFocusAfterPresentationIfNeeded) {
-            ComposerModelPickerSheet(
-                modelGroups: modelGroups,
-                selectedModelID: selectedModelID,
-                selectedModelProviderID: selectedModelProviderID,
-                favoriteModelKeys: favoriteModelKeys,
-                recentModelKeys: recentModelKeys,
-                onSelect: { option in
-                    selectModel(option)
-                    showsAllModelsSheet = false
-                },
-                onToggleFavorite: { option in
-                    favoriteModelKeys = ModelFavoritesStore.shared.toggleFavorite(for: option)
-                },
-                onDeleteSavedCustom: { option in
-                    favoriteModelKeys = ModelFavoritesStore.shared.removeFavorite(for: option)
-                    recentModelKeys = ModelRecentsStore.shared.removeRecent(for: option)
-                }
-            )
-            .presentationDetents([.medium, .large])
-            .presentationDragIndicator(.visible)
-            .task {
-                await onModelPickerOpen()
             }
-        }
-        .toolbar {
-            ToolbarItemGroup(placement: .topBarTrailing) {
+            .sheet(isPresented: controlsPresentation ?? $showsAllModelsSheet, onDismiss: restoreFocusAfterPresentationIfNeeded) {
+            controlsSheetContent
+            }
+            .toolbar {
+            if controlsPresentation == nil {
+              ToolbarItemGroup(placement: .topBarTrailing) {
                 gitBranchPicker
                 intelligenceOptionsButton
                 chatOptionsMenu
+              }
             }
-        }
-        .sheet(isPresented: $showsWorkspaceSheet, onDismiss: restoreFocusAfterPresentationIfNeeded) {
-            ComposerWorkspacePickerSheet(
-                workspaceRoots: workspaceRoots,
-                selectedWorkspacePath: displayedWorkspacePath,
-                suggestions: workspaceSuggestions,
-                managementServer: isOfflineReadOnly ? nil : workspaceManagementServer,
-                managementProfile: workspaceManagementProfile,
-                onLoadSuggestions: onLoadWorkspaceSuggestions,
-                onSelect: { path in
-                    optimisticWorkspacePath = path
-                    showsWorkspaceSheet = false
-                    await onSelectWorkspace(path)
-                },
-                onRegistryChanged: onWorkspaceRegistryChanged
-            )
-            .presentationDetents([.medium, .large])
-            .presentationDragIndicator(.visible)
-        }
-        .fileImporter(
+            }
+            .onChange(of: controlsPresentation?.wrappedValue) { _, presented in
+            if presented == true { prepareForComposerPresentation() }
+            }
+            .onChange(of: workspacePickerRequest) { _, _ in
+            prepareForComposerPresentation()
+            showsWorkspaceSheet = true
+            }
+            .onChange(of: gitBranchPickerRequest) { _, _ in
+            prepareForComposerPresentation()
+            showsGitBranchSheet = true
+            }
+            .sheet(isPresented: $showsGitBranchSheet, onDismiss: restoreFocusAfterPresentationIfNeeded) {
+            gitBranchSheetContent
+            }
+            .sheet(isPresented: $showsWorkspaceSheet, onDismiss: restoreFocusAfterPresentationIfNeeded) {
+            workspaceSheetContent
+            }
+        let composerWithImporter = composerWithControls
+            .fileImporter(
             isPresented: $showFileImporter,
             allowedContentTypes: [.item],
             allowsMultipleSelection: true
@@ -524,7 +509,8 @@ struct MessageComposerView: View {
                 noticeMessage = error.localizedDescription
             }
         }
-        .alert(
+        let composerWithAlert = composerWithImporter
+            .alert(
             "Composer Option",
             isPresented: Binding(
                 get: { noticeMessage != nil },
@@ -541,7 +527,8 @@ struct MessageComposerView: View {
         } message: {
             Text(noticeMessage ?? "")
         }
-        .onChange(of: selectedWorkspacePath) { _, newValue in
+        return composerWithAlert
+            .onChange(of: selectedWorkspacePath) { _, newValue in
             if optimisticWorkspacePath == newValue {
                 optimisticWorkspacePath = nil
             }
@@ -588,6 +575,67 @@ struct MessageComposerView: View {
             cancelVoiceNote()
         }
         .padding(.bottom, keyboardIsVisible ? 10 : 0)
+    }
+
+    private var controlsSheetContent: some View {
+        ComposerModelPickerSheet(
+            modelGroups: modelGroups,
+            selectedModelID: selectedModelID,
+            selectedModelProviderID: selectedModelProviderID,
+            favoriteModelKeys: favoriteModelKeys,
+            recentModelKeys: recentModelKeys,
+            onSelect: { option in
+                selectModel(option)
+            },
+            onToggleFavorite: { option in
+                favoriteModelKeys = ModelFavoritesStore.shared.toggleFavorite(for: option)
+            },
+            onDeleteSavedCustom: { option in
+                favoriteModelKeys = ModelFavoritesStore.shared.removeFavorite(for: option)
+                recentModelKeys = ModelRecentsStore.shared.removeRecent(for: option)
+            },
+            controlsHeader: AnyView(chatControlsHeader),
+            selectionDisabled: isConfigurationControlDisabled
+        )
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+        .task {
+            await onModelPickerOpen()
+        }
+    }
+
+    private var gitBranchSheetContent: some View {
+        GitBranchPickerSheet(
+            branches: gitViewModel.branches,
+            currentBranch: gitViewModel.currentBranchName,
+            isLoading: gitViewModel.isLoadingBranches,
+            isSwitching: gitViewModel.isSwitchingBranch,
+            onSelect: { target in
+                showsGitBranchSheet = false
+                onSelectGitBranch(target)
+            },
+            onRefresh: onRefreshGitBranches
+        )
+        .presentationDetents([.medium, .large])
+    }
+
+    private var workspaceSheetContent: some View {
+        ComposerWorkspacePickerSheet(
+            workspaceRoots: workspaceRoots,
+            selectedWorkspacePath: displayedWorkspacePath,
+            suggestions: workspaceSuggestions,
+            managementServer: isOfflineReadOnly ? nil : workspaceManagementServer,
+            managementProfile: workspaceManagementProfile,
+            onLoadSuggestions: onLoadWorkspaceSuggestions,
+            onSelect: { path in
+                optimisticWorkspacePath = path
+                showsWorkspaceSheet = false
+                await onSelectWorkspace(path)
+            },
+            onRegistryChanged: onWorkspaceRegistryChanged
+        )
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
     }
 
     @ViewBuilder
@@ -708,51 +756,62 @@ struct MessageComposerView: View {
     private var intelligenceOptionsButton: some View {
         Button {
             prepareForComposerPresentation()
-            showsIntelligenceOptions = true
+            showsAllModelsSheet = true
         } label: {
-            Label("Model, reasoning and usage", systemImage: "brain")
+            Label("Chat controls", systemImage: "slider.horizontal.3")
         }
-        .accessibilityLabel("Model, reasoning and usage")
-        .popover(isPresented: $showsIntelligenceOptions) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Model").font(.headline)
-                    modelMenu
-                    if showsReasoningControl {
-                        Divider()
-                        Text("Reasoning").font(.headline)
-                        reasoningMenu
-                        if isReasoningChangeDeferred {
-                            Text("Changes apply to the next turn.")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                    }
-                    Divider()
-                    Text("Context usage").font(.headline)
-                    if let snapshot = contextWindowSnapshot {
-                        Text(ContextWindowFormatter.tokensLabel(from: snapshot))
-                        Text("Input: \(ContextWindowFormatter.inputTokensLabel(from: snapshot))")
-                        Text("Output: \(ContextWindowFormatter.outputTokensLabel(from: snapshot))")
-                        Text("Threshold: \(ContextWindowFormatter.thresholdLabel(from: snapshot))")
-                        Text("Cost: \(ContextWindowFormatter.costLabel(from: snapshot))")
-                    } else {
-                        Text("Context usage unavailable").foregroundStyle(.secondary)
-                    }
-                }
-                .font(.subheadline)
-                .padding(20)
+        .accessibilityLabel("Chat controls")
+    }
+
+    private var chatControlsHeader: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            if !isSingleProfileMode {
+                ComposerProfileSelectorMenu(
+                    profileOptions: profileOptions,
+                    selectedProfileName: selectedProfileName,
+                    selectedProfileTitle: selectedProfileTitle,
+                    isDisabled: isConfigurationControlDisabled,
+                    lineLimit: usesAccessibilityLayout ? 2 : 1,
+                    verticalPadding: 8,
+                    horizontalPadding: 10,
+                    color: metaControlColor,
+                    controlFont: .subheadline,
+                    chevronFont: .caption,
+                    onSelectProfile: onSelectProfile
+                )
             }
-            .frame(idealWidth: 320, maxHeight: 460)
-            .presentationCompactAdaptation(.popover)
-            .onDisappear {
-                if opensAllModelsAfterIntelligence {
-                    opensAllModelsAfterIntelligence = false
-                    showsAllModelsSheet = true
+            Text(selectedModelTitle).font(.headline)
+            if showsReasoningControl {
+                ComposerReasoningStepControl(
+                    supportedEfforts: supportedReasoningEfforts,
+                    selectedEffort: selectedReasoningEffort,
+                    allowsInheritance: allowsReasoningInheritance,
+                    isDisabled: isReasoningControlDisabled,
+                    isDeferred: isReasoningChangeDeferred,
+                    onSelect: onSelectReasoningEffort
+                )
+                .id("\(selectedModelProviderID ?? "")|\(selectedModelID ?? "")")
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Context").font(.subheadline.weight(.medium))
+                if let snapshot = contextWindowSnapshot,
+                   let used = snapshot.tokensUsed, used >= 0,
+                   let limit = snapshot.contextLength, limit > 0 {
+                    Text(ContextWindowFormatter.tokensLabel(from: snapshot) + " tokens")
+                    ProgressView(value: min(Double(used) / Double(limit), 1))
+                        .accessibilityLabel("Context used")
+                        .accessibilityValue(ContextWindowFormatter.tokensLabel(from: snapshot))
                 } else {
-                    restoreFocusAfterPresentationIfNeeded()
+                    Text("Context usage unavailable").foregroundStyle(.secondary)
                 }
             }
+            if let configurationErrorMessage {
+                Text(configurationErrorMessage).font(.caption).foregroundStyle(.secondary)
+            }
+            Text("Models").font(.headline)
+            if isLoadingModels { ProgressView("Loading models") }
         }
+        .padding(.vertical, 8)
     }
 
     private var chatOptionsMenu: some View {
@@ -765,31 +824,6 @@ struct MessageComposerView: View {
                 }
                 .disabled(isConfigurationControlDisabled)
             }
-
-            Section("Profile") {
-                Text(selectedProfileTitle)
-                if !isSingleProfileMode {
-                    Menu("Choose profile") {
-                        if profileOptions.isEmpty {
-                            Text("No profiles available")
-                        } else {
-                            ForEach(profileOptions, id: \.self) { profile in
-                                Button {
-                                    onSelectProfile(profile)
-                                } label: {
-                                    if profile.name == selectedProfileName {
-                                        Label(profile.displayName, systemImage: "checkmark")
-                                    } else {
-                                        Text(profile.displayName)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    .disabled(isConfigurationControlDisabled)
-                }
-            }
-
 
         } label: {
             Label("Chat options", systemImage: "ellipsis")
@@ -817,63 +851,6 @@ struct MessageComposerView: View {
 
     private var usesAccessibilityLayout: Bool {
         dynamicTypeSize.isAccessibilitySize
-    }
-
-    private var metaControlFont: Font {
-        AppFont.footnote()
-    }
-
-    private var metaChevronFont: Font {
-        AppFont.caption2()
-    }
-
-    private var modelControlMaxWidth: CGFloat {
-        usesAccessibilityLayout ? 156 : 132
-    }
-
-    private var reasoningControlWidth: CGFloat {
-        usesAccessibilityLayout ? 126 : 104
-    }
-
-    private var modelMenu: some View {
-        ComposerModelMenu(
-            modelGroups: modelGroups,
-            selectedModelID: selectedModelID,
-            selectedModelProviderID: selectedModelProviderID,
-            selectedModelTitle: selectedModelTitle,
-            isLoadingModels: isLoadingModels,
-            favoriteModelKeys: favoriteModelKeys,
-            recentModelKeys: recentModelKeys,
-            isDisabled: isConfigurationControlDisabled,
-            maxWidth: modelControlMaxWidth,
-            color: metaControlColor,
-            controlFont: metaControlFont,
-            chevronFont: metaChevronFont,
-            onSelectModel: selectModel
-        ) {
-            if showsIntelligenceOptions {
-                opensAllModelsAfterIntelligence = true
-                showsIntelligenceOptions = false
-            } else {
-                prepareForComposerPresentation()
-                showsAllModelsSheet = true
-            }
-        }
-    }
-
-    private var reasoningMenu: some View {
-        ComposerReasoningMenu(
-            selectedReasoningEffort: selectedReasoningEffort,
-            supportedEfforts: supportedReasoningEfforts,
-            includeInherit: allowsReasoningInheritance,
-            reasoningTitle: reasoningTitle,
-            isDisabled: isReasoningControlDisabled,
-            width: reasoningControlWidth,
-            color: metaControlColor,
-            controlFont: metaControlFont,
-            chevronFont: metaChevronFont,
-            onSelectReasoningEffort: onSelectReasoningEffort
-        )
     }
 
     private func selectModel(_ option: ModelCatalogOption) {
@@ -1060,13 +1037,6 @@ struct MessageComposerView: View {
         isComposerExpanded ? 8 : 7
     }
 
-    private var reasoningTitle: String {
-        guard let selectedReasoningEffort else {
-            return String(localized: "Reasoning")
-        }
-
-        return ReasoningEffortOption.title(for: selectedReasoningEffort)
-    }
 
     private var trimmedDraftMessage: String {
         draftMessage.trimmingCharacters(in: .whitespacesAndNewlines)

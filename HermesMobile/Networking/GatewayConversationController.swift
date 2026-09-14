@@ -4036,6 +4036,31 @@ final class GatewayConversationController {
         ["session_id": .string(storedID ?? ""), "profile": .string(profile), "omit_messages": .bool(true), "defer_history": .bool(true)]
     }
 
+    /// Reads current context-window occupancy for an already attached session.
+    /// Periodic `session.usage` events exist only while a run is active, so an
+    /// idle or cold-restored chat must request the same canonical snapshot.
+    func contextUsageSnapshot() async throws -> ContextWindowSnapshot? {
+        guard !disposed, let binding else { return nil }
+        let capturedLifecycle = lifecycle
+        let capturedGeneration = runtime.connectionGeneration
+        let result = try await runtime.request("session.usage", parameters: {
+            guard !self.disposed,
+                  self.lifecycle == capturedLifecycle,
+                  self.binding == binding,
+                  self.runtime.connectionGeneration == capturedGeneration else {
+                throw DirectSessionError.staleOperation
+            }
+            return self.rpcParams(binding)
+        })
+        guard !disposed,
+              lifecycle == capturedLifecycle,
+              self.binding == binding,
+              runtime.connectionGeneration == capturedGeneration else {
+            throw DirectSessionError.staleOperation
+        }
+        return Self.contextUsageSnapshot(from: result)
+    }
+
     private func rpcParams(_ binding: GatewaySessionBinding) -> [String: JSONValue] {
         ["session_id": .string(binding.runtimeID), "profile": .string(profile)]
     }

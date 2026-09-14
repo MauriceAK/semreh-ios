@@ -121,6 +121,15 @@ final class GatewayConversationEventMappingTests: XCTestCase {
         XCTAssertEqual(snapshot.lastPromptTokens, 4)
         XCTAssertEqual(snapshot.tokensPerSecond, 3)
 
+        let idleSnapshot = GatewayConversationController.contextUsageSnapshot(from: .object([
+            "input": .number(40),
+            "output": .number(8),
+            "context_used": .number(12_345),
+            "context_max": .number(128_000)
+        ]))
+        XCTAssertEqual(idleSnapshot?.lastPromptTokens, 12_345)
+        XCTAssertEqual(idleSnapshot?.contextLength, 128_000)
+
         let malformedText = event(type: "message.delta", payload: ["text": .null])
         XCTAssertEqual(
             GatewayConversationController.presentationEvent(for: malformedText),

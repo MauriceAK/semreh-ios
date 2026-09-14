@@ -6,6 +6,46 @@ import UIKit
 import UniformTypeIdentifiers
 @testable import HermesMobile
 
+final class OutgoingInsertionLedgerTests: XCTestCase {
+    func testFirstEmptyTranscriptSendAndLaterSendsEachClaimOnce() {
+        let scope = UUID()
+        let ledger = OutgoingInsertionLedger()
+        ledger.mount(scope: scope, through: 0)
+        let first = OutgoingInsertionEvent(scope: scope, messageID: "local-1", sequence: 1)
+        XCTAssertTrue(ledger.claim(first, messageID: "local-1", role: "user", allowed: true))
+        XCTAssertFalse(ledger.claim(first, messageID: "local-1", role: "user", allowed: true))
+        let next = OutgoingInsertionEvent(scope: scope, messageID: "local-2", sequence: 2)
+        XCTAssertTrue(ledger.claim(next, messageID: "local-2", role: "user", allowed: true))
+    }
+
+    func testHistoricalReentryCanonicalReplacementAndOtherScopesNeverAnimate() {
+        let scope = UUID()
+        let event = OutgoingInsertionEvent(scope: scope, messageID: "local-1", sequence: 1)
+        let ledger = OutgoingInsertionLedger()
+        XCTAssertFalse(ledger.isEligible(event, messageID: "local-1", role: "user", allowed: true))
+        ledger.mount(scope: scope, through: 0)
+        XCTAssertFalse(ledger.isEligible(event, messageID: "canonical-1", role: "user", allowed: true))
+        XCTAssertFalse(ledger.isEligible(event, messageID: "local-1", role: "assistant", allowed: true))
+        XCTAssertFalse(ledger.isEligible(event, messageID: "local-1", role: "user", allowed: false))
+        ledger.unmount()
+        ledger.mount(scope: scope, through: 1)
+        XCTAssertFalse(ledger.isEligible(event, messageID: "local-1", role: "user", allowed: true))
+        ledger.mount(scope: UUID(), through: 0)
+        XCTAssertFalse(ledger.isEligible(event, messageID: "local-1", role: "user", allowed: true))
+    }
+
+    func testRestoreOrReadingEarlierDiscardsPendingEventWithoutBlockingLaterSend() {
+        let scope = UUID()
+        let ledger = OutgoingInsertionLedger()
+        ledger.mount(scope: scope, through: 0)
+        let old = OutgoingInsertionEvent(scope: scope, messageID: "local-1", sequence: 1)
+        ledger.discardPending(through: 1)
+        XCTAssertFalse(ledger.isEligible(old, messageID: "local-1", role: "user", allowed: true))
+        let next = OutgoingInsertionEvent(scope: scope, messageID: "local-2", sequence: 2)
+        XCTAssertTrue(ledger.claim(next, messageID: "local-2", role: "user", allowed: true))
+    }
+}
+
 final class TranscriptMessageTests: XCTestCase {
     func testAttachmentImageCacheSeparatesSamePathAcrossServerSessionNamespaces() async throws {
         let cache = AttachmentImageCache()

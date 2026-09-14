@@ -50,6 +50,10 @@ struct SessionNavigationState: Equatable {
     private var pendingNewChatRoute: PendingNewChatRoute?
     private var deepLinkedSessionLoadID: String?
     private var destinationOrigin: DestinationOrigin?
+    /// A user-initiated back must win over the second, authoritative restore
+    /// pass for this view lifetime. The remembered ID remains available to a
+    /// newly-created state on the next cold open.
+    private var didExplicitlyDismissDestination = false
 
     init(lastSelectedSessionID: String? = nil) {
         self.lastSelectedSessionID = Self.normalized(lastSelectedSessionID)
@@ -77,6 +81,7 @@ struct SessionNavigationState: Equatable {
         pendingNewChatRoute = nil
         destination = .session(session)
         destinationOrigin = .explicit
+        didExplicitlyDismissDestination = false
         remember(session)
     }
 
@@ -100,6 +105,7 @@ struct SessionNavigationState: Equatable {
         pendingNewChatRoute = nil
         destination = .newChat(session: session, route: route)
         destinationOrigin = .explicit
+        didExplicitlyDismissDestination = false
         remember(session)
         return true
     }
@@ -114,6 +120,7 @@ struct SessionNavigationState: Equatable {
         pendingNewChatRoute = nil
         destination = .utility(utility)
         destinationOrigin = .explicit
+        didExplicitlyDismissDestination = false
     }
 
     mutating func remember(_ session: SessionSummary) {
@@ -125,6 +132,7 @@ struct SessionNavigationState: Equatable {
         destination = nil
         pendingNewChatRoute = nil
         destinationOrigin = nil
+        didExplicitlyDismissDestination = true
     }
 
     /// The shell's surface switch is an explicit request to return to the
@@ -166,6 +174,7 @@ struct SessionNavigationState: Equatable {
               pendingNewChatRoute == nil,
               deepLinkedSessionLoadID == nil,
               Self.normalized(pendingDeepLinkedSessionID) == nil,
+              !didExplicitlyDismissDestination,
               let lastSelectedSessionID
         else { return }
 
@@ -192,7 +201,8 @@ struct SessionNavigationState: Equatable {
         pendingDeepLinkedSessionID: String? = nil
     ) {
         guard deepLinkedSessionLoadID == nil,
-              Self.normalized(pendingDeepLinkedSessionID) == nil
+              Self.normalized(pendingDeepLinkedSessionID) == nil,
+              !didExplicitlyDismissDestination
         else { return }
 
         if destinationOrigin == .explicit {

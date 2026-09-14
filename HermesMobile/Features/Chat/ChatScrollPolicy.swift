@@ -360,11 +360,16 @@ enum ChatTranscriptRestorePolicy {
     static func hasReachedTarget(
         _ target: ChatTranscriptRestoreTarget,
         firstVisibleMessageID: String?,
-        isNearBottom: Bool
+        isNearBottom: Bool,
+        isTailVisible: Bool
     ) -> Bool {
         switch target {
         case .latest:
-            return isNearBottom
+            // UIKit can report a zero distance while the lazy stack still has
+            // no realized tail. Treating that provisional geometry as success
+            // leaves the scroll view at an empty estimated offset until a touch
+            // forces another layout pass.
+            return isNearBottom && isTailVisible
         case .message(let id):
             return firstVisibleMessageID == id
         }
@@ -394,6 +399,7 @@ struct ChatTranscriptRestoreState: Equatable {
     private(set) var hasConfirmedMetricsSample = false
     private(set) var isCancelled = false
     private(set) var isNearBottom = false
+    private(set) var isTailVisible = false
 
     /// Claims a restore token without allowing a pre-request cancellation to be
     /// replaced by a fresh state. A different token represents a new lifecycle
@@ -406,6 +412,9 @@ struct ChatTranscriptRestoreState: Equatable {
         hasIssuedRestoreAttempt = false
         hasConfirmedMetricsSample = false
         isNearBottom = false
+        // Keep the latest preference-backed visibility sample. SwiftUI may
+        // deliver the bottom-anchor preference before the initial restore token
+        // arrives and will not necessarily redeliver an unchanged value.
         isCancelled = preservePreRequestCancellation
         return !isCancelled
     }
@@ -437,6 +446,11 @@ struct ChatTranscriptRestoreState: Equatable {
         self.isNearBottom = isNearBottom
     }
 
+    mutating func recordTailVisibility(_ visible: Bool) {
+        guard !isCancelled else { return }
+        isTailVisible = visible
+    }
+
     func shouldSettle(
         target: ChatTranscriptRestoreTarget,
         firstVisibleMessageID: String?,
@@ -449,7 +463,8 @@ struct ChatTranscriptRestoreState: Equatable {
         return ChatTranscriptRestorePolicy.hasReachedTarget(
             target,
             firstVisibleMessageID: firstVisibleMessageID,
-            isNearBottom: isNearBottom ?? self.isNearBottom
+            isNearBottom: isNearBottom ?? self.isNearBottom,
+            isTailVisible: isTailVisible
         )
     }
 }

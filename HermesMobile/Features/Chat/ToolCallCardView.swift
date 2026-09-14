@@ -26,7 +26,7 @@ struct ToolCallCardView: View {
                 header(statusDisplay: statusDisplay)
             }
             .buttonStyle(.plain)
-            .accessibilityLabel(String(localized: "\(toolCall.displayName), \(statusDisplay.detailText)"))
+            .accessibilityLabel(String(localized: "\(actionTitle), \(statusDisplay.detailText)"))
             .accessibilityHint(isExpanded ? "Double tap to collapse details." : "Double tap to expand details.")
 
             if isExpanded {
@@ -34,12 +34,7 @@ struct ToolCallCardView: View {
                     .transition(ChatMotion.disclosureTransition(reduceMotion: reduceMotion))
             }
         }
-        .padding(.horizontal, 9)
         .padding(.vertical, isExpanded ? 8 : 7)
-        .chatTimelineAccessorySurface(
-            fallbackMaterial: .thinMaterial,
-            cornerRadius: 9
-        )
         .frame(maxWidth: .infinity, alignment: .leading)
         // Tool-call bodies are commands, JSON, file paths, and results — code-like
         // content that must stay left-to-right inside an RTL message (#259). The
@@ -72,7 +67,7 @@ struct ToolCallCardView: View {
     private func header(statusDisplay: ToolCallStatusDisplay) -> some View {
         HStack(alignment: usesStackedHeader ? .top : .center, spacing: 8) {
             Image(systemName: statusIcon)
-                .font(.system(size: 14, weight: .semibold))
+                .font(.system(size: 14, weight: .regular))
                 .foregroundStyle(statusColor)
                 .frame(width: 18, height: 18)
 
@@ -92,20 +87,23 @@ struct ToolCallCardView: View {
                 }
             }
 
-            Spacer(minLength: 6)
-
-            Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+            Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
     }
 
     private var titleText: some View {
-        Text(toolCall.displayName)
-            .font(AppFont.caption(weight: .semibold))
-            .foregroundStyle(.primary)
+        Text(actionTitle)
+            .font(AppFont.caption())
+            .foregroundStyle(.secondary)
             .lineLimit(1)
+    }
+
+    private var actionTitle: String {
+        ToolCallPresentationLabel.title(for: toolCall)
     }
 
     private var statusIcon: String {

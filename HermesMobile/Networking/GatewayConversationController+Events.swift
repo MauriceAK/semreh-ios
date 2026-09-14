@@ -72,7 +72,7 @@ extension GatewayConversationController {
             return .reasoningDelta(text)
 
         case "session.usage":
-            guard let usage = decodeUsage(from: event.payload?.gatewayFields["usage"]) else {
+            guard let usage = contextUsageSnapshot(from: event.payload?.gatewayFields["usage"]) else {
                 return .control(event)
             }
             return .usage(usage)
@@ -125,11 +125,11 @@ extension GatewayConversationController {
             status: fields["status"]?.presentationString,
             reasoning: fields["reasoning"]?.presentationString,
             error: fields["error"]?.presentationString,
-            usage: decodeUsage(from: fields["usage"])
+            usage: contextUsageSnapshot(from: fields["usage"])
         )
     }
 
-    private static func decodeUsage(from value: JSONValue?) -> ContextWindowSnapshot? {
+    static func contextUsageSnapshot(from value: JSONValue?) -> ContextWindowSnapshot? {
         guard let fields = value?.presentationObject else { return nil }
         let knownKeys = ["input", "output", "context_used", "context_max", "avg_tps"]
         guard fields.keys.contains(where: knownKeys.contains) else { return nil }

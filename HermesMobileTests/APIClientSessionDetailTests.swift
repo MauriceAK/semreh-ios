@@ -711,6 +711,97 @@ final class APIClientSessionDetailTests: APIClientTestCase {
         XCTAssertEqual(display.detailText, "Failed")
     }
 
+    func testToolCallPresentationLabelUsesExactPinnedNamesAndRawUnknownFallback() {
+        let cases: [(name: String, title: String)] = [
+            ("terminal", "Run command"),
+            ("read_file", "Read file"),
+            ("search_files", "Search files"),
+            ("web_search", "Search web"),
+            ("skill_view", "View skill"),
+            ("apply_patch", "Apply patch")
+        ]
+
+        for item in cases {
+            XCTAssertEqual(
+                ToolCallPresentationLabel.title(
+                    for: ToolCall(name: item.name, preview: nil, args: nil)
+                ),
+                item.title,
+                "Expected a conservative presentation title for \(item.name)."
+            )
+        }
+
+        XCTAssertEqual(
+            ToolCallPresentationLabel.title(
+                for: ToolCall(name: "terminal_helper", preview: nil, args: nil)
+            ),
+            "terminal_helper"
+        )
+        XCTAssertEqual(
+            ToolCallPresentationLabel.title(
+                for: ToolCall(name: "  CustomTool  ", preview: nil, args: nil)
+            ),
+            "CustomTool"
+        )
+        XCTAssertEqual(
+            ToolCallPresentationLabel.title(
+                for: ToolCall(name: "functions.terminal", preview: nil, args: nil)
+            ),
+            "functions.terminal",
+            "An unverified namespaced name must remain a raw fallback."
+        )
+        XCTAssertEqual(
+            ToolCallPresentationLabel.title(
+                for: ToolCall(name: "wait_agent", preview: nil, args: nil)
+            ),
+            "wait_agent",
+            "Waiting must not be presented as a completed agent action."
+        )
+    }
+
+    func testToolCallPresentationGroupTitleStaysNeutralAcrossKindsAndStatuses() {
+        XCTAssertEqual(
+            ToolCallPresentationLabel.groupTitle(for: [
+                ToolCall(id: "read-1", name: "read_file", preview: nil, args: nil, isCompleted: true),
+                ToolCall(id: "read-2", name: "read_file", preview: nil, args: nil, isCompleted: true)
+            ]),
+            "2 actions",
+            "Multiple file reads must not be reported as a file count."
+        )
+        XCTAssertEqual(
+            ToolCallPresentationLabel.groupTitle(for: [
+                ToolCall(id: "read", name: "read_file", preview: nil, args: nil, isCompleted: false),
+                ToolCall(id: "patch", name: "apply_patch", preview: nil, args: nil, isError: true, isCompleted: true)
+            ]),
+            "2 actions",
+            "Mixed running and failed calls must keep a neutral action count."
+        )
+        XCTAssertEqual(
+            ToolCallPresentationLabel.groupTitle(for: [
+                ToolCall(id: "command", name: "terminal", preview: nil, args: nil, isCompleted: false),
+                ToolCall(id: "unknown", name: "wait_agent", preview: nil, args: nil, isCompleted: true)
+            ]),
+            "2 actions",
+            "A waiting tool must not make a group look finished or agent-counted."
+        )
+        XCTAssertEqual(
+            ToolCallPresentationLabel.groupTitle(for: [
+                ToolCall(id: "terminal", name: "terminal", preview: nil, args: nil, isCompleted: true)
+            ]),
+            "Run command"
+        )
+        XCTAssertEqual(
+            ToolCallPresentationLabel.groupTitle(for: [
+                ToolCall(id: "wait", name: "wait_agent", preview: nil, args: nil, isCompleted: false)
+            ]),
+            "wait_agent"
+        )
+        XCTAssertEqual(
+            ToolCallPresentationLabel.groupTitle(for: []),
+            "No actions"
+        )
+    }
+
     func testToolCallDisplayFormatterParsesTerminalJSONOutput() {
         let display = ToolCallDisplayFormatter.resultDisplay(
             preview: #"{"output":"line one\nline two\n","exit_code":0,"error":null}"#,

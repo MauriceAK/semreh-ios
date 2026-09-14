@@ -60,7 +60,10 @@ final class StreamReconnectContractTests: APIClientTestCase {
         XCTAssertEqual(viewModel.messages.first?.id, userIDBeforeRecovery)
         XCTAssertEqual(viewModel.messages.compactMap(\.messageId), ["1", "2"])
         XCTAssertFalse(viewModel.messages.contains { $0.content == "Alpha bravo " })
-        XCTAssertEqual(transport.methods(), ["session.resume", "session.resume"])
+        let methods = transport.methods()
+        XCTAssertEqual(methods.filter { $0 == "session.resume" }, ["session.resume", "session.resume"])
+        XCTAssertEqual(methods.filter { $0 == "session.usage" }, ["session.usage"])
+        XCTAssertEqual(methods.filter { $0 != "session.resume" && $0 != "session.usage" }, [])
         XCTAssertFalse(transport.methods().contains("prompt.submit"))
         XCTAssertNil(viewModel.streamingAssistantMessageID)
         XCTAssertNil(viewModel.sendErrorMessage)
@@ -240,13 +243,21 @@ private final class MissingTerminalDirectTransport: HermesGatewayTransport, @unc
 
     func request(method: String, params: JSONValue?, timeout: Duration?) async throws -> JSONValue? {
         lock.withLock { recorded.append(method) }
-        guard method == "session.resume" else { throw DirectSessionError.invalidResponse }
-        return lock.withLock {
-            .object([
-                "session_id": .string("runtime-1"),
-                "session_key": .string("durable-1"),
-                "running": .bool(running)
-            ])
+        switch method {
+        case "session.resume":
+            return lock.withLock {
+                .object([
+                    "session_id": .string("runtime-1"),
+                    "session_key": .string("durable-1"),
+                    "running": .bool(running)
+                ])
+            }
+        case "session.usage":
+            // ChatViewModel requests this snapshot asynchronously after an
+            // idle load; the reconnect contract does not need usage data.
+            return .object([:])
+        default:
+            throw DirectSessionError.invalidResponse
         }
     }
 

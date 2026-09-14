@@ -80,12 +80,7 @@ struct ReasoningBlockView: View {
                         .transition(ChatMotion.disclosureTransition(reduceMotion: reduceMotion))
                 }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 9)
-            .chatTimelineAccessorySurface(
-                fallbackMaterial: .thinMaterial,
-                cornerRadius: 10
-            )
+            .padding(.vertical, 8)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -114,19 +109,18 @@ struct ReasoningBlockView: View {
                 }
             }
 
-            Spacer(minLength: 6)
-
-            Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+            Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
     }
 
     private var titleText: some View {
         Text("Thinking")
-            .font(AppFont.caption(weight: .semibold))
-            .foregroundStyle(.primary)
+            .font(AppFont.caption())
+            .foregroundStyle(.secondary)
             .lineLimit(1)
     }
 

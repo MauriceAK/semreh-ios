@@ -281,10 +281,15 @@ final class ChatViewModel {
     @ObservationIgnored private var incrementalTranscriptMessageIndex: Int?
     @ObservationIgnored private var streamingAssistantMessageIndex: Int?
     @ObservationIgnored private var messageLoadGeneration = 0
+    @ObservationIgnored private var contextUsageRevision = 0
     /// Monotonic invalidation key for transcript-rendering data. ChatView uses
     /// this instead of comparing every message/string when unrelated composer
     /// state changes cause the parent view to be reevaluated.
     private(set) var transcriptRenderRevision = 0
+
+    let outgoingInsertionScope = UUID()
+    @ObservationIgnored private var outgoingInsertionSequence: UInt64 = 0
+    private(set) var outgoingInsertionEvent: OutgoingInsertionEvent?
 
     @ObservationIgnored private(set) var messages: [ChatMessage] = [] {
         didSet {
@@ -598,7 +603,9 @@ final class ChatViewModel {
         }
     }
     private(set) var hasOlderMessages = false
-    private(set) var contextWindowSnapshot: ContextWindowSnapshot?
+    private(set) var contextWindowSnapshot: ContextWindowSnapshot? {
+        didSet { contextUsageRevision &+= 1 }
+    }
     private(set) var responseCompletionHapticTrigger = 0
     private(set) var responseCompletionNeedsTranscriptRefresh = false
     private(set) var modelCatalogGroups: [ModelCatalogGroup] = []
@@ -810,6 +817,8 @@ final class ChatViewModel {
     private var directConversation: GatewayConversationController?
     private var directRuntime: HermesServerRuntime?
     @ObservationIgnored private var directAttachmentTask: Task<GatewayConversationController, Error>?
+    @ObservationIgnored private var contextUsageSnapshotTask: Task<Void, Never>?
+    @ObservationIgnored private var contextUsageSnapshotTaskOwner: UUID?
     private var directInvalidated = false
     private var directVisible = false
     private var directLiveActivityRun: (owner: UUID, sessionID: String, profile: String)?
@@ -985,6 +994,7 @@ final class ChatViewModel {
         pendingStreamingContentFlushTask?.cancel()
         connectionVisibilityTask?.cancel()
         listenPreparationTask?.cancel()
+        contextUsageSnapshotTask?.cancel()
         listenPlaybackTicker?.invalidate()
     }
 
@@ -1427,6 +1437,7 @@ final class ChatViewModel {
         backgroundLocalRowScopes.removeAll()
         directInvalidated = true
         directReasoningRefreshTask?.cancel()
+        cancelContextUsageSnapshotTask()
         directSessionReasoningSupported = false
         isReasoningChangeDeferred = false
         directClarificationPrompt = nil
@@ -1463,9 +1474,49 @@ final class ChatViewModel {
 
     @ObservationIgnored private var directLoadWaitOwner: UUID?
 
+    private func cancelContextUsageSnapshotTask() {
+        contextUsageSnapshotTask?.cancel()
+        contextUsageSnapshotTask = nil
+        contextUsageSnapshotTaskOwner = nil
+    }
+
+    private func scheduleContextUsageSnapshot(
+        for controller: GatewayConversationController,
+        loadGeneration: Int,
+        requestedSessionID: String?,
+        requestedProfile: String?
+    ) {
+        cancelContextUsageSnapshotTask()
+        let owner = UUID()
+        let usageRevision = contextUsageRevision
+        contextUsageSnapshotTaskOwner = owner
+        contextUsageSnapshotTask = Task { @MainActor [weak self, controller] in
+            defer {
+                if let self, self.contextUsageSnapshotTaskOwner == owner {
+                    self.contextUsageSnapshotTask = nil
+                    self.contextUsageSnapshotTaskOwner = nil
+                }
+            }
+
+            guard let usage = try? await controller.contextUsageSnapshot(),
+                  !Task.isCancelled,
+                  let self,
+                  self.contextUsageSnapshotTaskOwner == owner,
+                  self.messageLoadGeneration == loadGeneration,
+                  self.contextUsageRevision == usageRevision,
+                  !self.directInvalidated,
+                  self.directConversation === controller,
+                  self.canonicalSessionID == requestedSessionID,
+                  self.requestProfileName == requestedProfile,
+                  controller.runState == .idle else { return }
+            self.contextWindowSnapshot = usage
+        }
+    }
+
     private func loadDirectMessages(modelContext: ModelContext?) async {
         guard !directInvalidated else { return }
         messageLoadGeneration &+= 1
+        cancelContextUsageSnapshotTask()
         let generation = messageLoadGeneration
         let requestedID = canonicalSessionID
         let requestedProfile = requestProfileName
@@ -1496,6 +1547,19 @@ final class ChatViewModel {
             if wasAttached, controller.runState == .idle { try await controller.refresh() }
             guard messageLoadGeneration == generation, !directInvalidated,
                   requestedProfile == requestProfileName else { return }
+            // Usage ticks are emitted while a run is active. Cold-restored and
+            // already-idle chats need one explicit snapshot so controls do not
+            // misleadingly present context as unavailable until the next send.
+            // This optional telemetry must not extend the transcript's loading
+            // or connection-wait window.
+            if controller.runState == .idle {
+                scheduleContextUsageSnapshot(
+                    for: controller,
+                    loadGeneration: generation,
+                    requestedSessionID: canonicalSessionID,
+                    requestedProfile: requestedProfile
+                )
+            }
             errorMessage = nil
         } catch DirectSessionError.staleOperation {
             // A newer turn/read owns presentation; this is not a load failure.
@@ -1708,6 +1772,7 @@ final class ChatViewModel {
         }
         directModelContext = modelContext ?? directModelContext
         isStartingChat = true
+        cancelContextUsageSnapshotTask()
         sendErrorMessage = nil
         lastError = nil
         defer {
@@ -1782,6 +1847,11 @@ final class ChatViewModel {
             reasoningAnchorMessageID = nil
             toolCallAnchorMessageID = nil
             directResponseComplete = false
+            outgoingInsertionSequence += 1
+            outgoingInsertionEvent = OutgoingInsertionEvent(
+                scope: outgoingInsertionScope, messageID: localID,
+                sequence: outgoingInsertionSequence
+            )
             messages.append(ChatMessage(
                 role: "user",
                 content: text,
@@ -1936,6 +2006,9 @@ final class ChatViewModel {
             if directGoalStatusEventKeys.insert(key).inserted {
                 appendLocalNoticeMessage(text)
             }
+        }
+        if event.type == "message.start" {
+            cancelContextUsageSnapshotTask()
         }
         if !["message.delta", "thinking.delta", "reasoning.delta"].contains(event.type) {
             flushPendingStreamingContent()
@@ -5535,6 +5608,54 @@ struct ReasoningGroupAnchorLookup: Equatable {
 
     func groups(anchorMessageID: String?) -> [ReasoningGroup] {
         groupsByAnchor[anchorMessageID] ?? []
+    }
+}
+
+/// Ephemeral UI evidence of this view model's exact local append. Never persisted
+/// or used as a delivery acknowledgement, routing identity, or scroll request.
+struct OutgoingInsertionEvent: Equatable {
+    let id = UUID()
+    let scope: UUID
+    let messageID: String
+    let sequence: UInt64
+}
+
+/// Main-thread presentation ledger. Consumption deliberately does not publish a
+/// view update: the already-mounted bubble owns its own animation completion.
+final class OutgoingInsertionLedger {
+    private var scope: UUID?
+    private var observedThrough: UInt64 = 0
+    private var consumedThrough: UInt64 = 0
+
+    func mount(scope: UUID?, through sequence: UInt64) {
+        self.scope = scope
+        observedThrough = sequence
+        consumedThrough = sequence
+    }
+
+    func unmount() {
+        scope = nil
+    }
+
+    func discardPending(through sequence: UInt64) {
+        observedThrough = max(observedThrough, sequence)
+    }
+
+    func isEligible(_ event: OutgoingInsertionEvent?, messageID: String,
+                    role: String?, allowed: Bool) -> Bool {
+        guard allowed, role == "user", let event, let scope,
+              event.scope == scope, event.messageID == messageID,
+              event.sequence > observedThrough,
+              event.sequence > consumedThrough else { return false }
+        return true
+    }
+
+    func claim(_ event: OutgoingInsertionEvent?, messageID: String,
+               role: String?, allowed: Bool) -> Bool {
+        guard isEligible(event, messageID: messageID, role: role, allowed: allowed),
+              let event else { return false }
+        consumedThrough = event.sequence
+        return true
     }
 }
 

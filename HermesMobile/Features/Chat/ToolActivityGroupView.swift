@@ -36,12 +36,7 @@ struct ToolActivityGroupView: View {
                 .transition(ChatMotion.disclosureTransition(reduceMotion: reduceMotion))
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 9)
-        .chatTimelineAccessorySurface(
-            fallbackMaterial: .thinMaterial,
-            cornerRadius: 10
-        )
+        .padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .contain)
     }
@@ -53,14 +48,13 @@ struct ToolActivityGroupView: View {
     private var header: some View {
         HStack(alignment: usesStackedHeader ? .top : .center, spacing: 8) {
             Image(systemName: activityIcon)
-                .font(.system(size: 14, weight: .semibold))
+                .font(.system(size: 14, weight: .regular))
                 .foregroundStyle(activityColor)
                 .frame(width: 18, height: 18)
 
             if usesStackedHeader {
                 VStack(alignment: .leading, spacing: 3) {
                     titleText
-                    summaryTextView(lineLimit: 2)
                     if let collapsedStateText {
                         TranscriptStatusPill(text: collapsedStateText, color: activityColor)
                     }
@@ -68,34 +62,29 @@ struct ToolActivityGroupView: View {
             } else {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     titleText
-                    summaryTextView(lineLimit: 1)
                     if let collapsedStateText {
                         TranscriptStatusPill(text: collapsedStateText, color: activityColor)
                     }
                 }
             }
 
-            Spacer(minLength: 6)
-
-            Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+            Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
     }
 
     private var titleText: some View {
-        Text(group.activityTitle)
-            .font(AppFont.caption(weight: .semibold))
-            .foregroundStyle(.primary)
+        Text(actionSummary)
+            .font(AppFont.caption())
+            .foregroundStyle(.secondary)
             .lineLimit(1)
     }
 
-    private func summaryTextView(lineLimit: Int) -> some View {
-        Text(summaryText)
-            .font(AppFont.caption())
-            .foregroundStyle(.secondary)
-            .lineLimit(lineLimit)
+    private var actionSummary: String {
+        ToolCallPresentationLabel.groupTitle(for: group.toolCalls)
     }
 
     private var activityIcon: String {
@@ -123,7 +112,7 @@ struct ToolActivityGroupView: View {
     }
 
     private var activityAccessibilityLabel: String {
-        "\(group.activityTitle), \(activityStateText), \(summaryText)"
+        "\(actionSummary), \(activityStateText)"
     }
 
     private var activityStateText: String {
@@ -132,28 +121,5 @@ struct ToolActivityGroupView: View {
         }
 
         return group.isComplete ? String(localized: "Completed") : String(localized: "Running")
-    }
-
-    private var summaryText: String {
-        let names = group.toolCalls.map(\.displayName)
-        let uniqueNames = names.reduce(into: [String]()) { result, name in
-            if !result.contains(name) {
-                result.append(name)
-            }
-        }
-
-        guard !uniqueNames.isEmpty else {
-            return String(localized: "No tools")
-        }
-
-        let visibleNames = uniqueNames.prefix(3)
-        let remainingCount = uniqueNames.count - visibleNames.count
-        let visibleSummary = visibleNames.joined(separator: ", ")
-
-        guard remainingCount > 0 else {
-            return visibleSummary
-        }
-
-        return "\(visibleSummary), +\(remainingCount)"
     }
 }

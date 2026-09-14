@@ -300,6 +300,43 @@ enum ToolCallDisplayFormatter {
     }
 }
 
+/// User-facing names for the exact tool names supported by the pinned adapter.
+/// Unknown names retain ToolCall.displayName, and groups stay count-neutral so
+/// a tool count is never presented as a file, agent, or command count.
+enum ToolCallPresentationLabel {
+    static func title(for toolCall: ToolCall) -> String {
+        switch toolCall.name?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "terminal":
+            return String(localized: "Run command")
+        case "read_file":
+            return String(localized: "Read file")
+        case "search_files":
+            return String(localized: "Search files")
+        case "web_search":
+            return String(localized: "Search web")
+        case "skill_view":
+            return String(localized: "View skill")
+        case "apply_patch":
+            return String(localized: "Apply patch")
+        default:
+            return toolCall.displayName
+        }
+    }
+
+    /// Returns a neutral summary suitable for a collapsed activity row. Only a
+    /// single call can use its exact action title; groups never infer a subtype
+    /// or completion state from their count.
+    static func groupTitle(for toolCalls: [ToolCall]) -> String {
+        guard let first = toolCalls.first else {
+            return String(localized: "No actions")
+        }
+        guard toolCalls.count == 1 else {
+            return String(localized: "\(toolCalls.count) actions")
+        }
+        return title(for: first)
+    }
+}
+
 private extension JSONValue {
     var inlineDisplayText: String? {
         switch self {

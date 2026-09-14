@@ -1,6 +1,96 @@
 import SwiftUI
 import UIKit
 
+/// Discrete server-advertised levels only. Dragging previews locally; release
+/// submits one supported value through the existing profile-scoped callback.
+struct ComposerReasoningStepControl: View {
+    let supportedEfforts: [String]?
+    let selectedEffort: String?
+    let allowsInheritance: Bool
+    let isDisabled: Bool
+    let isDeferred: Bool
+    let onSelect: (String) -> Void
+    @State private var draftIndex: Double = 0
+    @State private var isEditing = false
+    @State private var editingLevels: [String] = []
+
+    private var levels: [ReasoningEffortOption] {
+        guard let supportedEfforts, !supportedEfforts.isEmpty else { return [] }
+        return ReasoningEffortOption.options(forSupportedEfforts: supportedEfforts, includeInherit: false)
+    }
+    private var currentTitle: String {
+        if isEditing, levels.indices.contains(Int(draftIndex)) { return levels[Int(draftIndex)].title }
+        return selectedEffort.map(ReasoningEffortOption.title(for:)) ?? "Unavailable"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Reasoning").font(.subheadline.weight(.medium))
+                Spacer()
+                Text(currentTitle).font(.subheadline)
+            }
+            if levels.count > 1 {
+                Slider(value: $draftIndex, in: 0...Double(levels.count - 1), step: 1) { editing in
+                    isEditing = editing
+                    if editing {
+                        editingLevels = levels.map(\.id)
+                    } else if !isDisabled, editingLevels == levels.map(\.id),
+                              levels.indices.contains(Int(draftIndex)),
+                              levels[Int(draftIndex)].id != selectedEffort {
+                        onSelect(levels[Int(draftIndex)].id)
+                    }
+                }
+                .disabled(isDisabled)
+                .accessibilityLabel("Reasoning effort")
+                .accessibilityValue(currentTitle)
+                .accessibilityAdjustableAction { direction in
+                    guard !isDisabled else { return }
+                    let current = levels.firstIndex { $0.id == selectedEffort } ?? Int(draftIndex)
+                    let next: Int
+                    switch direction {
+                    case .increment: next = min(current + 1, levels.count - 1)
+                    case .decrement: next = max(current - 1, 0)
+                    @unknown default: return
+                    }
+                    guard levels[next].id != selectedEffort else { return }
+                    draftIndex = Double(next)
+                    onSelect(levels[next].id)
+                }
+                HStack {
+                    Text(levels.first?.title ?? "")
+                    Spacer()
+                    Text(levels.last?.title ?? "")
+                }.font(.caption).foregroundStyle(.secondary)
+            } else if let only = levels.first {
+                Button(only.title) { onSelect(only.id) }.disabled(isDisabled)
+            } else {
+                Text("This model has not reported selectable reasoning levels.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if allowsInheritance {
+                Button("Use profile default") { onSelect(ReasoningEffortOption.inheritID) }
+                    .font(.caption)
+                    .disabled(isDisabled || selectedEffort == ReasoningEffortOption.inheritID)
+            }
+            if isDeferred {
+                Text("Changes apply to the next turn.").font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .onAppear(perform: synchronize)
+        .onChange(of: selectedEffort) { _, _ in if !isEditing { synchronize() } }
+        .onChange(of: supportedEfforts) { _, _ in
+            isEditing = false
+            editingLevels = []
+            synchronize()
+        }
+    }
+
+    private func synchronize() {
+        draftIndex = Double(levels.firstIndex { $0.id == selectedEffort } ?? 0)
+    }
+}
+
 struct ComposerWorkspaceSelectorButton: View {
     let title: String
     let isDisabled: Bool

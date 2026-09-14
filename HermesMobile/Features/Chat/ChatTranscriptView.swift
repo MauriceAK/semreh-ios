@@ -136,6 +136,9 @@ struct ChatTranscriptView: View, Equatable {
     var followRejoinScrollToken: Int = 0
     var isComposerResizing = false
     var transcriptRenderRevision = 0
+    var outgoingInsertionScope: UUID?
+    var outgoingInsertionEvent: OutgoingInsertionEvent?
+    @State private var insertionLedger = OutgoingInsertionLedger()
 
     @State private var trackedVisibleTranscriptRowID: String?
     @State private var restoreSettlementTask: Task<Void, Never>?
@@ -167,6 +170,7 @@ struct ChatTranscriptView: View, Equatable {
     }
 
     var body: some View {
+        ZStack {
         if isLoading && messages.isEmpty && clarificationPrompt == nil {
             ChatTranscriptLoadingSkeletonView()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -192,6 +196,23 @@ struct ChatTranscriptView: View, Equatable {
             }
         } else {
             transcriptScrollView
+        }
+        }
+        .onAppear { insertionLedger.mount(scope: outgoingInsertionScope, through: outgoingInsertionEvent?.sequence ?? 0) }
+        .onDisappear { insertionLedger.unmount() }
+        .onChange(of: outgoingInsertionScope) { _, scope in
+            insertionLedger.mount(scope: scope, through: outgoingInsertionEvent?.sequence ?? 0)
+        }
+        .onChange(of: restoreScrollToken) { _, _ in
+            insertionLedger.discardPending(through: outgoingInsertionEvent?.sequence ?? 0)
+        }
+        .onChange(of: shouldFollowLatestMessage) { _, follows in
+            if !follows { insertionLedger.discardPending(through: outgoingInsertionEvent?.sequence ?? 0) }
+        }
+        .onChange(of: outgoingInsertionEvent) { _, event in
+            if !shouldFollowLatestMessage || restoreSettlementTask != nil {
+                insertionLedger.discardPending(through: event?.sequence ?? 0)
+            }
         }
     }
 
@@ -233,6 +254,7 @@ struct ChatTranscriptView: View, Equatable {
                     }
                     .scrollDismissesKeyboard(.interactively)
                     .coordinateSpace(name: Self.transcriptCoordinateSpaceName)
+                    .accessibilityIdentifier("chat-transcript-scroll")
                     .safeAreaInset(edge: .bottom, spacing: 0) {
                         Color.clear
                             .frame(height: transcriptBottomInsetHeight)
@@ -319,7 +341,9 @@ struct ChatTranscriptView: View, Equatable {
                             bottomInset: transcriptBottomInsetHeight
                         )
                     }
-                    onTranscriptTailVisibilityChange(isVisible(latestFrame), isVisible(frames[bottomAnchorID]))
+                    let isBottomVisible = isVisible(frames[bottomAnchorID])
+                    restoreSettlementState.recordTailVisibility(isBottomVisible)
+                    onTranscriptTailVisibilityChange(isVisible(latestFrame), isBottomVisible)
                     let visibleID = ChatTranscriptVisibilityPolicy.firstVisibleMessageID(
                         frames: frames.filter { $0.key != bottomAnchorID },
                         viewportHeight: viewport.size.height
@@ -361,6 +385,10 @@ struct ChatTranscriptView: View, Equatable {
                 VStack(alignment: .leading, spacing: transcriptMessageSpacing) {
                     ChatTranscriptMessageBlock(
                         transcriptMessage: transcriptMessage,
+                        outgoingInsertionEvent: outgoingInsertionEvent?.messageID == transcriptMessage.message.id
+                            ? outgoingInsertionEvent : nil,
+                        insertionLedger: insertionLedger,
+                        allowsOutgoingMotion: shouldFollowLatestMessage && restoreSettlementTask == nil,
                         transcriptBlockSpacing: transcriptBlockSpacing,
                         showsThinkingAndToolCards: showsThinkingAndToolCards,
                         reasoningGroups: reasoningGroupsForAnchor(transcriptMessage.anchorID),
@@ -687,7 +715,9 @@ extension ChatTranscriptView {
     /// comparison explicit lets composer keystrokes avoid rebuilding every lazy
     /// transcript row.
     static func == (lhs: ChatTranscriptView, rhs: ChatTranscriptView) -> Bool {
-        lhs.transcriptRenderRevision == rhs.transcriptRenderRevision &&
+        lhs.outgoingInsertionEvent == rhs.outgoingInsertionEvent &&
+            lhs.outgoingInsertionScope == rhs.outgoingInsertionScope &&
+            lhs.transcriptRenderRevision == rhs.transcriptRenderRevision &&
             lhs.isLoading == rhs.isLoading &&
             lhs.errorMessage == rhs.errorMessage &&
             lhs.messages.count == rhs.messages.count &&
@@ -734,6 +764,9 @@ extension ChatTranscriptView {
 
 private struct ChatTranscriptMessageBlock: View, Equatable {
     let transcriptMessage: TranscriptMessage
+    let outgoingInsertionEvent: OutgoingInsertionEvent?
+    let insertionLedger: OutgoingInsertionLedger
+    let allowsOutgoingMotion: Bool
     let transcriptBlockSpacing: CGFloat
     let showsThinkingAndToolCards: Bool
     let reasoningGroups: [ReasoningGroup]
@@ -773,7 +806,9 @@ private struct ChatTranscriptMessageBlock: View, Equatable {
     // This lets `.equatable()` skip re-evaluating rows whose data is unchanged
     // even though their closure props are recreated on every parent body pass.
     static func == (lhs: ChatTranscriptMessageBlock, rhs: ChatTranscriptMessageBlock) -> Bool {
-        lhs.transcriptMessage == rhs.transcriptMessage &&
+        lhs.outgoingInsertionEvent == rhs.outgoingInsertionEvent &&
+            lhs.allowsOutgoingMotion == rhs.allowsOutgoingMotion &&
+            lhs.transcriptMessage == rhs.transcriptMessage &&
             lhs.transcriptBlockSpacing == rhs.transcriptBlockSpacing &&
             lhs.showsThinkingAndToolCards == rhs.showsThinkingAndToolCards &&
             lhs.reasoningGroups == rhs.reasoningGroups &&
@@ -804,6 +839,16 @@ private struct ChatTranscriptMessageBlock: View, Equatable {
             if shouldRenderMessageRow(transcriptMessage.message) {
                 ChatTranscriptMessageRow(
                     message: transcriptMessage.message,
+                    accessibilityRowIdentifier: ChatMessageAccessibility.rowIdentifier(
+                        messageID: transcriptMessage.message.messageId,
+                        renderID: transcriptMessage.renderID
+                    ),
+                    accessibilityRowLabel: ChatMessageAccessibility.rowLabel(
+                        role: transcriptMessage.message.role,
+                        content: transcriptMessage.message.content,
+                        visibleContent: transcriptMessage.attachmentDisplayContent,
+                        attachmentCount: transcriptMessage.message.attachments?.count ?? 0
+                    ),
                     visibleIndex: transcriptMessage.loadedIndex,
                     actionContext: actionContext(transcriptMessage.message, transcriptMessage.loadedIndex),
                     localAttachmentPreviews: localAttachmentPreviews,
@@ -835,6 +880,12 @@ private struct ChatTranscriptMessageBlock: View, Equatable {
                     onFork: onFork,
                     onCopy: onCopy
                 )
+                .modifier(OutgoingBubbleInsertionModifier(
+                    event: outgoingInsertionEvent,
+                    message: transcriptMessage.message,
+                    ledger: insertionLedger,
+                    isAllowed: allowsOutgoingMotion
+                ))
             }
         }
     }
@@ -893,6 +944,8 @@ private struct ChatTranscriptMessageBlock: View, Equatable {
 
 private struct ChatTranscriptMessageRow: View {
     let message: ChatMessage
+    let accessibilityRowIdentifier: String
+    let accessibilityRowLabel: String
     let visibleIndex: Int
     let actionContext: MessageActionContext?
     let localAttachmentPreviews: [String: Data]?
@@ -920,33 +973,42 @@ private struct ChatTranscriptMessageRow: View {
     let onCopy: (MessageActionContext) -> Void
 
     var body: some View {
-        // Compaction marker messages render as collapsible cards (matching the
-        // web UI), never as user bubbles — and without bubble actions, which
-        // don't apply to system-emitted markers.
-        if let markerKind = ChatMarkerMessageClassifier.classify(message) {
-            MarkerMessageCardView(kind: markerKind, content: message.content)
-        } else if let actionContext {
-            bubble
-                .contextMenu {
-                    ChatMessageActionMenu(
-                        context: actionContext,
-                        listeningMessageID: listeningMessageID,
-                        isViewingCachedData: isViewingCachedData,
-                        hasActiveStream: hasActiveStream,
-                        isRegeneratingMessage: isRegeneratingMessage,
-                        isEditingMessage: isEditingMessage,
-                        isForkingMessage: isForkingMessage,
-                        onToggleListening: onToggleListening,
-                        onSelectText: onSelectText,
-                        onRegenerate: onRegenerate,
-                        onEdit: onEdit,
-                        onFork: onFork,
-                        onCopy: onCopy
-                    )
-                }
-        } else {
-            bubble
+        VStack(alignment: .leading, spacing: 0) {
+            // Compaction marker messages render as collapsible cards (matching
+            // the web UI), never as user bubbles — and without bubble actions,
+            // which don't apply to system-emitted markers.
+            if let markerKind = ChatMarkerMessageClassifier.classify(message) {
+                MarkerMessageCardView(kind: markerKind, content: message.content)
+            } else if let actionContext {
+                bubble
+                    .contextMenu {
+                        ChatMessageActionMenu(
+                            context: actionContext,
+                            listeningMessageID: listeningMessageID,
+                            isViewingCachedData: isViewingCachedData,
+                            hasActiveStream: hasActiveStream,
+                            isRegeneratingMessage: isRegeneratingMessage,
+                            isEditingMessage: isEditingMessage,
+                            isForkingMessage: isForkingMessage,
+                            onToggleListening: onToggleListening,
+                            onSelectText: onSelectText,
+                            onRegenerate: onRegenerate,
+                            onEdit: onEdit,
+                            onFork: onFork,
+                            onCopy: onCopy
+                        )
+                    }
+            } else {
+                bubble
+            }
         }
+        // Expose one truthful, stable row while retaining all descendants. In
+        // particular, link and attachment buttons remain independently
+        // discoverable/actionable to VoiceOver and UI tests.
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(accessibilityRowIdentifier)
+        .accessibilityLabel(accessibilityRowLabel)
+        .accessibilityAddTraits(.isStaticText)
     }
 
     private var bubble: some View {
@@ -964,6 +1026,72 @@ private struct ChatTranscriptMessageRow: View {
             isStreaming: isStreaming,
             liveTokensPerSecond: liveTokensPerSecond
         )
+    }
+}
+
+private struct OutgoingBubbleInsertionModifier: ViewModifier {
+    let event: OutgoingInsertionEvent?
+    let message: ChatMessage
+    let ledger: OutgoingInsertionLedger
+    let isAllowed: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var settled: Bool
+
+    init(event: OutgoingInsertionEvent?, message: ChatMessage,
+         ledger: OutgoingInsertionLedger, isAllowed: Bool) {
+        self.event = event
+        self.message = message
+        self.ledger = ledger
+        self.isAllowed = isAllowed
+        _settled = State(initialValue: !ledger.isEligible(
+            event, messageID: message.id, role: message.role,
+            allowed: isAllowed
+        ))
+    }
+
+    private var shouldAnimate: Bool {
+        !settled && !reduceMotion && ledger.isEligible(
+            event,
+            messageID: message.id,
+            role: message.role,
+            allowed: isAllowed
+        )
+    }
+
+    func body(content: Content) -> some View {
+        content
+            // Eligibility is part of the visible-state guard as well as the
+            // initial state. If a lazy row is reused after follow/restore is
+            // withdrawn, it must become visible immediately rather than retain
+            // a stale opacity-zero state.
+            .opacity(shouldAnimate ? 0 : 1)
+            .offset(y: shouldAnimate ? 8 : 0)
+            .onAppear {
+                let accepted = ledger.claim(event, messageID: message.id, role: message.role,
+                                            allowed: isAllowed)
+                if accepted && !reduceMotion {
+                    withAnimation(.easeOut(duration: 0.18)) { settled = true }
+                } else {
+                    settled = true
+                }
+            }
+            .onChange(of: reduceMotion) { _, enabled in
+                if enabled { settled = true }
+            }
+            .onChange(of: isAllowed) { _, allowed in
+                if !allowed { settled = true }
+            }
+            .onChange(of: event) { _, _ in
+                if !ledger.isEligible(
+                    event,
+                    messageID: message.id,
+                    role: message.role,
+                    allowed: isAllowed
+                ) {
+                    settled = true
+                }
+            }
+            .onDisappear { settled = true }
     }
 }
 
