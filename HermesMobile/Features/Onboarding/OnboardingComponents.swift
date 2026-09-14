@@ -16,12 +16,20 @@ enum OnboardingTheme {
         primaryText(for: colorScheme, palette: palette).opacity(colorScheme == .dark ? 0.42 : 0.50)
     }
 
-    static func action(for colorScheme: ColorScheme, palette: AppColorPalette = .semreh) -> Color {
-        SemrehVisualTheme.action(for: colorScheme, palette: palette)
+    static func action(
+        for colorScheme: ColorScheme,
+        palette: AppColorPalette = .semreh,
+        accent: AppAccent = .warm
+    ) -> Color {
+        SemrehVisualTheme.action(for: colorScheme, palette: palette, accent: accent)
     }
 
-    static func actionForeground(for colorScheme: ColorScheme, palette: AppColorPalette = .semreh) -> Color {
-        SemrehVisualTheme.accentForeground(for: colorScheme, palette: palette)
+    static func actionForeground(
+        for colorScheme: ColorScheme,
+        palette: AppColorPalette = .semreh,
+        accent: AppAccent = .warm
+    ) -> Color {
+        SemrehVisualTheme.accentForeground(for: colorScheme, palette: palette, accent: accent)
     }
 
     static func panel(for colorScheme: ColorScheme, palette: AppColorPalette = .semreh) -> Color {
@@ -34,20 +42,31 @@ enum OnboardingTheme {
 }
 
 struct SemrehBrandLockup: View {
-    var width: CGFloat = 246
+    /// The lockup stays within the compact 210–224pt onboarding target. The
+    /// supplied app icon is the approved winged-S mark; the wordmark remains
+    /// native rounded text so it follows Dynamic Type and the active contrast.
+    var width: CGFloat = 220
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        VStack(spacing: 14) {
-            Image("SemrehWing")
+        HStack(spacing: 14) {
+            Image("SemrehAppIcon")
                 .resizable()
                 .scaledToFit()
-                .frame(width: width * 0.62)
+                .frame(width: 62, height: 62)
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
 
-            Image("SemrehWordmark")
-                .resizable()
-                .scaledToFit()
-                .frame(width: width)
+            Text("Semreh")
+                .font(.system(.largeTitle, design: .rounded, weight: .medium))
+                .foregroundStyle(
+                    colorScheme == .dark
+                        ? Color(hexRGB: "#F7F3EA")!
+                        : Color(hexRGB: SemrehVisualTheme.logoNavyHex)!
+                )
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
         }
+        .frame(width: width, alignment: .center)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Semreh")
         .accessibilityAddTraits(.isImage)
@@ -182,12 +201,13 @@ struct OnboardingField<Content: View>: View {
     @ViewBuilder let content: Content
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.appColorPalette) private var palette
+    @Environment(\.appAccent) private var accent
 
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: systemImage)
                 .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(OnboardingTheme.action(for: colorScheme, palette: palette))
+                .foregroundStyle(OnboardingTheme.action(for: colorScheme, palette: palette, accent: accent))
                 .frame(width: 24)
 
             VStack(alignment: .leading, spacing: 4) {
@@ -252,17 +272,18 @@ struct OnboardingStatusBanner: View {
 struct OnboardingPrimaryButtonStyle: ButtonStyle {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.appColorPalette) private var palette
+    @Environment(\.appAccent) private var accent
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.subheadline.weight(.semibold))
-            .foregroundStyle(OnboardingTheme.actionForeground(for: colorScheme, palette: palette))
+            .foregroundStyle(OnboardingTheme.actionForeground(for: colorScheme, palette: palette, accent: accent))
             .lineLimit(1)
             .minimumScaleFactor(0.78)
             .frame(maxWidth: .infinity)
             .padding(.horizontal, 10)
-            .padding(.vertical, 15)
-            .background(OnboardingTheme.action(for: colorScheme, palette: palette), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+            .frame(minHeight: 52)
+            .background(OnboardingTheme.action(for: colorScheme, palette: palette, accent: accent), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
             .opacity(configuration.isPressed ? 0.78 : 1)
     }
 }
@@ -325,6 +346,8 @@ struct OnboardingPageIndicator: View {
     let currentPage: Int
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.appColorPalette) private var palette
+    @Environment(\.appAccent) private var accent
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         HStack(spacing: 8) {
@@ -332,13 +355,16 @@ struct OnboardingPageIndicator: View {
                 Capsule()
                     .fill(
                         index == currentPage
-                            ? OnboardingTheme.action(for: colorScheme, palette: palette)
+                            ? OnboardingTheme.action(for: colorScheme, palette: palette, accent: accent)
                             : OnboardingTheme.primaryText(for: colorScheme, palette: palette).opacity(0.18)
                     )
                     .frame(width: index == currentPage ? 24 : 8, height: 8)
             }
         }
-        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: currentPage)
+        .animation(
+            reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.8),
+            value: currentPage
+        )
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(String(localized: "Page \(currentPage + 1) of \(pageCount)"))
     }

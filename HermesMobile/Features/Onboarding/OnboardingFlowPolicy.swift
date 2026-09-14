@@ -1,8 +1,10 @@
 import Foundation
 
 enum OnboardingFlowPolicy {
-    static let pageCount = 2
-    static let connectPageIndex = 1
+    static let welcomePageIndex = 0
+    static let appearancePageIndex = 1
+    static let connectPageIndex = 2
+    static let pageCount = 3
     static let serverGuidanceSteps: [(title: String, detail: String)] = [
         (
             String(localized: "Use first-party Hermes"),
@@ -24,8 +26,10 @@ enum OnboardingFlowPolicy {
 
     static func primaryButtonTitle(for page: Int) -> String {
         switch page {
-        case 0:
+        case welcomePageIndex:
             return String(localized: "Get Started")
+        case appearancePageIndex:
+            return String(localized: "Continue")
         case connectPageIndex:
             return String(localized: "Connect")
         default:
@@ -38,6 +42,17 @@ enum OnboardingFlowPolicy {
     }
 
     static func initialPage(hasSavedServer: Bool) -> Int {
-        hasSavedServer ? connectPageIndex : 0
+        hasSavedServer ? connectPageIndex : welcomePageIndex
+    }
+
+    static func shouldShowBackButton(for page: Int, hasSavedServer: Bool) -> Bool {
+        !hasSavedServer && page > welcomePageIndex
+    }
+
+    static func previousPage(for page: Int, hasSavedServer: Bool) -> Int? {
+        guard shouldShowBackButton(for: page, hasSavedServer: hasSavedServer) else {
+            return nil
+        }
+        return max(welcomePageIndex, page - 1)
     }
 }

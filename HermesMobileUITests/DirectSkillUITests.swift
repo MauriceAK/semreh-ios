@@ -375,7 +375,7 @@ final class DirectSkillUITests: XCTestCase {
         app.launch()
 
         try signOutIfNeeded(app)
-        let welcome = app.staticTexts["Your conversations.\nYour agents."]
+        let welcome = containing("Your Hermes companion", app: app)
         XCTAssertTrue(welcome.waitForExistence(timeout: 10))
         retainPreviewScreenshot("Public preview onboarding light", app: app)
         app.buttons["Need help connecting?"].tap()
@@ -997,6 +997,240 @@ final class DirectSkillUITests: XCTestCase {
     }
 
     @MainActor
+    func testOptInPhoneOnboardingAppearanceAndContainedLogin() async throws {
+        continueAfterFailure = false
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("Phone onboarding verification is simulator-only.")
+        #endif
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SEMREH_PHONE_ONBOARDING_UI"] == "1" else {
+            throw XCTSkip("Phone onboarding verification is opt-in.")
+        }
+        guard environment["SEMREH_SLICE2_UI_LIVE"] == "1",
+              environment["SEMREH_SLICE1_HTTPS"] == "1",
+              environment["SEMREH_SLICE2_UI_BACKEND_MODE"] == "stock",
+              environment["SEMREH_SLICE2_UI_BACKEND_SHA"] == backendSHA,
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == credentialsPath else {
+            return XCTFail("Phone onboarding verification requires the contained pinned stock fixture.")
+        }
+
+        let credentials = try readCredentials()
+        let app = XCUIApplication()
+        app.launch()
+        defer { UIPasteboard.general.items = [] }
+
+        // This helper refuses to sign out unless the exact contained fixture host
+        // is visible. Normal sign-out clears only that disposable fixture's local
+        // auth material; no app-container reset, uninstall, or test auth bypass.
+        try prepareExclusiveContainedFixtureSignOut(app: app)
+        let welcome = containing("Your Hermes companion", app: app)
+        XCTAssertTrue(welcome.waitForExistence(timeout: 15) && welcome.isHittable)
+        retainPhoneScreenshot("Phone onboarding Welcome", app: app)
+
+        let getStarted = app.buttons["Get Started"]
+        XCTAssertTrue(getStarted.waitForExistence(timeout: 5) && getStarted.isHittable)
+        getStarted.tap()
+        XCTAssertTrue(containing("Make it yours", app: app).waitForExistence(timeout: 10))
+
+        let darkTheme = app.buttons["Dark"]
+        XCTAssertTrue(darkTheme.waitForExistence(timeout: 5) && darkTheme.isHittable)
+        darkTheme.tap()
+        let violetAccent = app.buttons["Violet accent"]
+        XCTAssertTrue(violetAccent.waitForExistence(timeout: 5) && violetAccent.isHittable)
+        violetAccent.tap()
+        XCTAssertTrue(
+            containing("Preview using Dark appearance and Violet accent", app: app)
+                .waitForExistence(timeout: 5)
+        )
+        retainPhoneScreenshot("Phone onboarding Appearance Dark Violet", app: app)
+
+        let continueButton = app.buttons["Continue"]
+        XCTAssertTrue(continueButton.waitForExistence(timeout: 5) && continueButton.isHittable)
+        continueButton.tap()
+        let server = app.textFields["onboarding-server-url"]
+        XCTAssertTrue(server.waitForExistence(timeout: 10) && server.isHittable)
+        retainPhoneScreenshot("Phone onboarding Connect manual and QR choices", app: app)
+
+        let scan = app.buttons["Scan setup code"]
+        XCTAssertTrue(scan.waitForExistence(timeout: 5) && scan.isHittable)
+        scan.tap()
+        XCTAssertTrue(containing("Scan your server address", app: app).waitForExistence(timeout: 5))
+        XCTAssertTrue(containing("Scanning does not connect or sign in", app: app).exists)
+        let enterInstead = app.buttons["Enter an address instead"]
+        XCTAssertTrue(enterInstead.waitForExistence(timeout: 5) && enterInstead.isHittable)
+        retainPhoneScreenshot("Phone onboarding QR scanner manual fallback", app: app)
+        enterInstead.tap()
+        XCTAssertTrue(server.waitForExistence(timeout: 5) && server.isHittable)
+
+        replace(server, with: origin, app: app)
+        let testConnection = app.buttons["Test Connection"]
+        XCTAssertTrue(testConnection.waitForExistence(timeout: 5) && testConnection.isHittable)
+        testConnection.tap()
+        let username = app.textFields["onboarding-username"]
+        let password = app.secureTextFields["onboarding-password"]
+        XCTAssertTrue(username.waitForExistence(timeout: 30))
+        replace(username, with: credentials.username, app: app)
+        paste(credentials.password, into: password, app: app)
+        let connect = app.buttons["Connect"]
+        XCTAssertTrue(connect.waitForExistence(timeout: 5) && connect.isHittable)
+        connect.tap()
+
+        let sessions = app.buttons["Sessions"]
+        let restoredChat = app.otherElements.matching(
+            NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
+        ).firstMatch
+        let destinationDeadline = Date().addingTimeInterval(45)
+        while !sessions.exists && !restoredChat.exists && Date() < destinationDeadline {
+            dismissKnownPasswordSavePrompt(app, timeout: 0)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        }
+        dismissKnownPasswordSavePrompt(app, timeout: 3)
+        if restoredChat.exists {
+            let back = chatBackButton(app: app)
+            XCTAssertTrue(back.waitForExistence(timeout: 5) && back.isHittable)
+            back.tap()
+        }
+        XCTAssertTrue(sessions.waitForExistence(timeout: 30) && sessions.isHittable)
+        sessions.tap()
+        XCTAssertTrue(app.navigationBars["Sessions"].waitForExistence(timeout: 10))
+        retainPhoneScreenshot("Phone onboarding authenticated contained fixture", app: app)
+
+        let bots = app.buttons["Bots"]
+        XCTAssertTrue(bots.waitForExistence(timeout: 5) && bots.isHittable)
+        bots.tap()
+        XCTAssertTrue(app.navigationBars["Bots"].waitForExistence(timeout: 10))
+        let botRows = app.buttons.matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "bot-profile:")
+        )
+        XCTAssertGreaterThan(botRows.count, 0, "The fixture must expose at least one flat server profile.")
+        XCTAssertTrue(app.staticTexts["Your Team"].exists)
+        retainPhoneScreenshot("Phone onboarding Bots flat fixture profiles", app: app)
+
+        app.terminate()
+        app.launch()
+        let coldDestinationDeadline = Date().addingTimeInterval(30)
+        while !sessions.exists && !app.navigationBars["Sessions"].exists
+            && !app.otherElements.matching(
+                NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
+            ).firstMatch.exists
+            && Date() < coldDestinationDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        }
+        // Capture the actual cold-restored production destination before any
+        // interaction. This is visual evidence for the persisted appearance's
+        // next consumer; Settings readback below independently checks the value.
+        retainPhoneScreenshot("Phone onboarding cold Dark Violet production consumer", app: app)
+
+        let coldChat = app.otherElements.matching(
+            NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
+        ).firstMatch
+        if coldChat.exists {
+            let back = chatBackButton(app: app)
+            XCTAssertTrue(back.waitForExistence(timeout: 5) && back.isHittable)
+            back.tap()
+        }
+        XCTAssertTrue(sessions.waitForExistence(timeout: 15) && sessions.isHittable)
+        sessions.tap()
+        XCTAssertTrue(app.navigationBars["Sessions"].waitForExistence(timeout: 10))
+
+        let settings = app.buttons["Settings"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 5) && settings.isHittable)
+        settings.tap()
+        let done = app.buttons["Done"]
+        XCTAssertTrue(done.waitForExistence(timeout: 10) && done.isHittable)
+        let appearance = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Appearance,")
+        ).firstMatch
+        XCTAssertTrue(appearance.waitForExistence(timeout: 5) && appearance.isHittable)
+        appearance.tap()
+        XCTAssertTrue(app.staticTexts["Dark"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Violet"].waitForExistence(timeout: 5))
+        retainPhoneScreenshot("Phone onboarding cold Appearance readback", app: app)
+        let settingsTheme = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Theme,")
+        ).firstMatch
+        let settingsAccent = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Accent,")
+        ).firstMatch
+        settingsTheme.tap()
+        XCTAssertTrue(app.buttons["System"].waitForExistence(timeout: 5))
+        app.buttons["System"].tap()
+        settingsAccent.tap()
+        XCTAssertTrue(app.buttons["Warm"].waitForExistence(timeout: 5))
+        app.buttons["Warm"].tap()
+        let settingsTint = app.switches["Tint New Chat & Send"]
+        if (settingsTint.value as? String) == "1" { settingsTint.tap() }
+        app.navigationBars["Appearance"].buttons.firstMatch.tap()
+        done.tap()
+        XCTAssertTrue(app.navigationBars["Sessions"].waitForExistence(timeout: 10))
+    }
+
+    @MainActor
+    func testOptInPhoneTasksLoadingAndBotsReturnRegression() throws {
+        continueAfterFailure = false
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("Phone tab loading verification is simulator-only.")
+        #endif
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SEMREH_PHONE_TAB_LOADING_UI"] == "1" else {
+            throw XCTSkip("Phone tab loading verification is opt-in.")
+        }
+        guard environment["SEMREH_SLICE2_UI_LIVE"] == "1",
+              environment["SEMREH_SLICE1_HTTPS"] == "1",
+              environment["SEMREH_SLICE2_UI_BACKEND_MODE"] == "stock",
+              environment["SEMREH_SLICE2_UI_BACKEND_SHA"] == backendSHA,
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == credentialsPath else {
+            return XCTFail("Phone tab loading verification requires the contained pinned stock fixture.")
+        }
+
+        let app = XCUIApplication()
+        app.launch()
+        let sessions = app.buttons["Sessions"]
+        let restoredChat = app.otherElements.matching(
+            NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
+        ).firstMatch
+        if restoredChat.waitForExistence(timeout: 5) {
+            let back = chatBackButton(app: app)
+            XCTAssertTrue(back.waitForExistence(timeout: 5) && back.isHittable)
+            back.tap()
+        }
+        XCTAssertTrue(sessions.waitForExistence(timeout: 15) && sessions.isHittable)
+
+        let activity = app.buttons["Activity"]
+        XCTAssertTrue(activity.waitForExistence(timeout: 5) && activity.isHittable)
+        activity.tap()
+        XCTAssertTrue(app.navigationBars["Tasks"].waitForExistence(timeout: 10))
+        retainPhoneScreenshot("Phone current Tasks immediate loading surface", app: app)
+        let loadingActivity = app.staticTexts["Loading activity"]
+        XCTAssertTrue(loadingActivity.waitForNonExistence(timeout: 30))
+        XCTAssertTrue(
+            containing("Scheduled work", app: app).exists
+                || containing("Activity unavailable", app: app).exists
+        )
+        retainPhoneScreenshot("Phone current Tasks settled surface", app: app)
+
+        let bots = app.buttons["Bots"]
+        XCTAssertTrue(bots.waitForExistence(timeout: 5) && bots.isHittable)
+        bots.tap()
+        XCTAssertTrue(app.navigationBars["Bots"].waitForExistence(timeout: 10))
+        retainPhoneScreenshot("Phone current Bots immediate loading surface", app: app)
+        let botRows = app.buttons.matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "bot-profile:")
+        )
+        XCTAssertTrue(botRows.firstMatch.waitForExistence(timeout: 30))
+        XCTAssertFalse(app.staticTexts["Loading bots"].exists)
+        retainPhoneScreenshot("Phone current Bots settled Your Team", app: app)
+
+        sessions.tap()
+        XCTAssertTrue(app.navigationBars["Sessions"].waitForExistence(timeout: 10))
+        bots.tap()
+        XCTAssertTrue(app.navigationBars["Bots"].waitForExistence(timeout: 10))
+        XCTAssertTrue(botRows.firstMatch.waitForExistence(timeout: 10))
+        XCTAssertFalse(app.staticTexts["Loading bots"].exists)
+        retainPhoneScreenshot("Phone current Bots return remains loaded", app: app)
+    }
+
+    @MainActor
     func testOptInProductionLifecyclePhase() async throws {
         continueAfterFailure = false
         #if !targetEnvironment(simulator)
@@ -1237,13 +1471,14 @@ final class DirectSkillUITests: XCTestCase {
 
         let server = app.textFields["onboarding-server-url"]
         if !(server.waitForExistence(timeout: 4) && server.isHittable) {
-            let welcome = app.staticTexts["Your conversations.\nYour agents."]
+            let welcome = containing("Your Hermes companion", app: app)
             guard welcome.waitForExistence(timeout: 5) && welcome.isHittable else {
                 return XCTFail("Refusing to sign out or navigate an authenticated non-fixture account.")
             }
             let existingServer = app.buttons["Get Started"]
             XCTAssertTrue(existingServer.waitForExistence(timeout: 5) && existingServer.isHittable)
             existingServer.tap()
+            advanceOnboardingAppearanceIfNeeded(app: app)
             XCTAssertTrue(server.waitForExistence(timeout: 5) && server.isHittable)
         }
         replace(server, with: origin, app: app)
@@ -1326,13 +1561,14 @@ final class DirectSkillUITests: XCTestCase {
 
         let server = app.textFields["onboarding-server-url"]
         if !(server.waitForExistence(timeout: 4) && server.isHittable) {
-            let welcome = app.staticTexts["Your conversations.\nYour agents."]
+            let welcome = containing("Your Hermes companion", app: app)
             guard welcome.waitForExistence(timeout: 5) && welcome.isHittable else {
                 return XCTFail("Refusing to sign out or navigate an authenticated non-fixture account.")
             }
             let existingServer = app.buttons["Get Started"]
             XCTAssertTrue(existingServer.waitForExistence(timeout: 5) && existingServer.isHittable)
             existingServer.tap()
+            advanceOnboardingAppearanceIfNeeded(app: app)
             XCTAssertTrue(server.waitForExistence(timeout: 5) && server.isHittable)
         }
         replace(server, with: origin, app: app)
@@ -1447,11 +1683,12 @@ final class DirectSkillUITests: XCTestCase {
         let server = app.textFields["onboarding-server-url"]
         if !(server.waitForExistence(timeout: 4) && server.isHittable) {
             try signOutIfNeeded(app)
-            let welcome = app.staticTexts["Your conversations.\nYour agents."]
+            let welcome = containing("Your Hermes companion", app: app)
             XCTAssertTrue(welcome.waitForExistence(timeout: 15) && welcome.isHittable)
             let existingServer = app.buttons["Get Started"]
             XCTAssertTrue(existingServer.waitForExistence(timeout: 5) && existingServer.isHittable)
             existingServer.tap()
+            advanceOnboardingAppearanceIfNeeded(app: app)
             XCTAssertTrue(server.waitForExistence(timeout: 5) && server.isHittable)
         }
         replace(server, with: personalPilotOrigin, app: app)
@@ -1496,7 +1733,7 @@ final class DirectSkillUITests: XCTestCase {
         defer { UIPasteboard.general.items = [] }
         dismissKnownPasswordSavePrompt(app, timeout: 1)
         try signOutIfNeeded(app)
-        let welcome = app.staticTexts["Your conversations.\nYour agents."]
+        let welcome = containing("Your Hermes companion", app: app)
         if welcome.waitForExistence(timeout: 15) && welcome.isHittable {
             let help = app.buttons["Need help connecting?"]
             XCTAssertTrue(help.waitForExistence(timeout: 5) && help.isHittable); help.tap()
@@ -1511,6 +1748,7 @@ final class DirectSkillUITests: XCTestCase {
 
             let getStarted = app.buttons["Get Started"]
             XCTAssertTrue(getStarted.waitForExistence(timeout: 5) && getStarted.isHittable); getStarted.tap()
+            advanceOnboardingAppearanceIfNeeded(app: app)
         } else {
             return XCTFail("Sign-out did not return to the visible onboarding welcome page.")
         }
@@ -1595,7 +1833,7 @@ final class DirectSkillUITests: XCTestCase {
         try prepareContainedSignIn(app: app)
         let server = app.textFields["onboarding-server-url"]
         if !(server.waitForExistence(timeout: 4) && server.isHittable) {
-            let welcome = app.staticTexts["Your conversations.\nYour agents."]
+            let welcome = containing("Your Hermes companion", app: app)
             guard welcome.waitForExistence(timeout: 5) && welcome.isHittable else {
                 XCTFail("Refusing to sign out or navigate an authenticated non-fixture account.")
                 throw NSError(domain: "DirectSkillUITests", code: 3)
@@ -1603,6 +1841,7 @@ final class DirectSkillUITests: XCTestCase {
             let existingServer = app.buttons["Get Started"]
             XCTAssertTrue(existingServer.waitForExistence(timeout: 5) && existingServer.isHittable)
             existingServer.tap()
+            advanceOnboardingAppearanceIfNeeded(app: app)
             XCTAssertTrue(server.waitForExistence(timeout: 5) && server.isHittable)
         }
         replace(server, with: origin, app: app)
@@ -1649,7 +1888,7 @@ final class DirectSkillUITests: XCTestCase {
 
     @MainActor
     private func prepareContainedSignIn(app: XCUIApplication) throws {
-        let welcome = app.staticTexts["Your conversations.\nYour agents."]
+        let welcome = containing("Your Hermes companion", app: app)
         if welcome.waitForExistence(timeout: 5) || app.textFields["onboarding-server-url"].exists { return }
         let chat = app.otherElements.matching(
             NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
@@ -1680,6 +1919,56 @@ final class DirectSkillUITests: XCTestCase {
         XCTAssertTrue(confirmation.waitForExistence(timeout: 5))
         confirmation.buttons["Sign Out"].tap()
         XCTAssertTrue(welcome.waitForExistence(timeout: 20))
+    }
+
+    @MainActor
+    private func prepareExclusiveContainedFixtureSignOut(app: XCUIApplication) throws {
+        let welcome = containing("Your Hermes companion", app: app)
+        if welcome.waitForExistence(timeout: 5) && welcome.isHittable { return }
+
+        XCTAssertFalse(
+            app.textFields["onboarding-server-url"].exists,
+            "Refusing to modify authentication from an unproven onboarding state."
+        )
+
+        let chat = app.otherElements.matching(
+            NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
+        ).firstMatch
+        if chat.exists {
+            let back = chatBackButton(app: app)
+            XCTAssertTrue(back.waitForExistence(timeout: 5) && back.isHittable)
+            back.tap()
+        }
+
+        let settings = app.buttons["Settings"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 10) && settings.isHittable)
+        settings.tap()
+        XCTAssertTrue(
+            app.staticTexts["semreh-slice1-test.tailda8427.ts.net"].waitForExistence(timeout: 15),
+            "Refusing to sign out an authenticated server other than the contained fixture."
+        )
+
+        let aboutAndStorage = app.staticTexts["About & Storage"]
+        for _ in 0..<8 where !aboutAndStorage.isHittable { app.scrollViews.firstMatch.swipeUp() }
+        XCTAssertTrue(aboutAndStorage.waitForExistence(timeout: 5) && aboutAndStorage.isHittable)
+        aboutAndStorage.tap()
+
+        let singleServerFootnote = app.staticTexts[
+            "Signs out of the active server and returns to onboarding."
+        ]
+        for _ in 0..<8 where !singleServerFootnote.isHittable { app.scrollViews.firstMatch.swipeUp() }
+        XCTAssertTrue(
+            singleServerFootnote.waitForExistence(timeout: 5) && singleServerFootnote.isHittable,
+            "Refusing sign-out unless the contained fixture is the only configured server."
+        )
+
+        let signOut = app.buttons["Sign Out of This Server"]
+        XCTAssertTrue(signOut.waitForExistence(timeout: 5) && signOut.isHittable)
+        signOut.tap()
+        let confirmation = app.alerts["Sign out of this server?"]
+        XCTAssertTrue(confirmation.waitForExistence(timeout: 5))
+        confirmation.buttons["Sign Out"].tap()
+        XCTAssertTrue(welcome.waitForExistence(timeout: 20) && welcome.isHittable)
     }
 
     @MainActor
@@ -1905,7 +2194,7 @@ final class DirectSkillUITests: XCTestCase {
     }
 
     private func signOutIfNeeded(_ app: XCUIApplication) throws {
-        let welcome = app.staticTexts["Your conversations.\nYour agents."]
+        let welcome = containing("Your Hermes companion", app: app)
         if welcome.waitForExistence(timeout: 4) && welcome.isHittable { return }
         let you = app.buttons["Account and settings"]
         if !app.staticTexts["Settings"].exists && !you.waitForExistence(timeout: 5) {
@@ -1922,6 +2211,15 @@ final class DirectSkillUITests: XCTestCase {
         XCTAssertTrue(confirmation.waitForExistence(timeout: 5))
         confirmation.buttons["Sign Out"].tap()
         XCTAssertTrue(welcome.waitForExistence(timeout: 20))
+    }
+
+    @MainActor
+    private func advanceOnboardingAppearanceIfNeeded(app: XCUIApplication) {
+        let appearance = app.staticTexts["Make it yours"]
+        guard appearance.waitForExistence(timeout: 5) else { return }
+        let continueButton = app.buttons["Continue"]
+        XCTAssertTrue(continueButton.waitForExistence(timeout: 5) && continueButton.isHittable)
+        continueButton.tap()
     }
 
     private func containedSignOutButton(_ app: XCUIApplication) -> XCUIElement {

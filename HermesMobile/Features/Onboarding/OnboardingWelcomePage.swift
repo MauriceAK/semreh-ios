@@ -3,50 +3,97 @@ import SwiftUI
 struct OnboardingWelcomePage: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.colorScheme) private var colorScheme
-    @Environment(\.appColorPalette) private var palette
 
     private var logoWidth: CGFloat {
-        dynamicTypeSize.isAccessibilitySize ? 208 : 244
+        dynamicTypeSize.isAccessibilitySize ? 210 : 220
     }
 
+    private let birdIdentities: [BirdAvatarIdentity] = {
+        guard let server = URL(string: "https://semreh.example") else { return [] }
+        return (0..<5).compactMap { BirdAvatarIdentity(server: server, profile: "onboarding-\($0)") }
+    }()
+
     var body: some View {
-        ScrollView {
-        VStack(spacing: 0) {
-            Spacer(minLength: 30)
+        GeometryReader { geometry in
+            ScrollView(.vertical, showsIndicators: false) {
+                ZStack {
+                    if shouldShowBirds(in: geometry.size) {
+                        OnboardingBirdPerimeter(
+                            identities: birdIdentities,
+                            canvasSize: geometry.size
+                        )
+                    }
 
-            SemrehBrandLockup(width: logoWidth)
+                    VStack(spacing: 0) {
+                        Spacer(minLength: 70)
 
-            Spacer(minLength: 34)
+                        SemrehBrandLockup(width: logoWidth)
 
-            VStack(spacing: 12) {
-                Text("Your conversations.\nYour agents.")
-                    .font(SemrehTypography.title)
-                    .foregroundStyle(OnboardingTheme.primaryText(for: colorScheme, palette: palette))
-                    .multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
+                        Color.clear.frame(height: 20)
 
-                Text("Connect to your Hermes server to pick up a conversation or start something new.")
-                    .font(SemrehTypography.body)
-                    .foregroundStyle(OnboardingTheme.secondaryText(for: colorScheme, palette: palette))
-                    .multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
+                        Text("Your Hermes companion")
+                            .font(.system(.title3, design: .rounded, weight: .medium))
+                            .foregroundStyle(OnboardingTheme.primaryText(for: colorScheme, palette: .semreh))
+                            .multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
 
-                Text("Use your existing server address and sign-in, or scan a server QR code.")
-                    .font(SemrehTypography.caption)
-                    .foregroundStyle(OnboardingTheme.secondaryText(for: colorScheme, palette: palette))
-                    .multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.top, 12)
+                        Spacer(minLength: 70)
+                    }
+                    .frame(width: min(420, max(0, geometry.size.width - 48)))
+                    .frame(minHeight: geometry.size.height)
+                    .padding(.horizontal, 24)
+                }
+                .frame(width: geometry.size.width)
+                .frame(minHeight: geometry.size.height)
+                .padding(.bottom, 18)
             }
-            .frame(maxWidth: 420)
+            .scrollBounceBehavior(.basedOnSize)
+        }
+    }
 
-            Spacer(minLength: 18)
+    private func shouldShowBirds(in size: CGSize) -> Bool {
+        !dynamicTypeSize.isAccessibilitySize && size.width >= 320 && size.height >= 420
+    }
+}
+
+private struct OnboardingBirdPerimeter: View {
+    let identities: [BirdAvatarIdentity]
+    let canvasSize: CGSize
+
+    private let placements: [(x: CGFloat, y: CGFloat, size: CGFloat)] = [
+        (42, 90, 48),
+        (-42, 152, 58),
+        (28, 0.42, 46),
+        (-34, 0.58, 64),
+        (-70, -74, 52)
+    ]
+
+    var body: some View {
+        ZStack {
+            ForEach(Array(placements.enumerated()), id: \.offset) { index, placement in
+                if index < identities.count {
+                    BirdAvatarView(identity: identities[index])
+                        .frame(width: placement.size, height: placement.size)
+                        .position(
+                            x: positionX(placement.x),
+                            y: positionY(placement.y)
+                        )
+                }
+            }
         }
-        .padding(.horizontal, 24)
-        .padding(.top, 28)
-        .padding(.bottom, 22)
-        .frame(maxWidth: .infinity)
+        .frame(width: canvasSize.width, height: canvasSize.height)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    private func positionX(_ offset: CGFloat) -> CGFloat {
+        offset >= 0 ? offset : canvasSize.width + offset
+    }
+
+    private func positionY(_ value: CGFloat) -> CGFloat {
+        if value > 0, value < 1 {
+            return canvasSize.height * value
         }
-        .scrollBounceBehavior(.basedOnSize)
+        return value >= 0 ? value : canvasSize.height + value
     }
 }

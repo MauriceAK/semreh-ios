@@ -43,22 +43,25 @@ final class TasksViewModel {
         defer { if generation == loadGeneration { isLoading = false } }
 
         do {
-            async let jobsResponse = client.directCronJobs(profile: profile)
-            // Optional endpoint: failure must not break the task list, and a
-            // nil result keeps the editor's free-text deliver fallback.
-            async let deliveryOptionsResponse = try? client.directCronDeliveryOptions()
-
-            let jobsResult = try await jobsResponse
-            let options = await deliveryOptionsResponse
-            guard generation == loadGeneration else { return }
+            // The jobs endpoint is the required list payload. Publish it as
+            // soon as it is ready; delivery-target discovery is optional and
+            // must not hold the list behind a slow or unavailable endpoint.
+            let jobsResult = try await client.directCronJobs(profile: profile)
+            guard generation == loadGeneration, !Task.isCancelled else { return }
             runningJobs = Dictionary(jobsResult.compactMap { job in
                 guard let id = job.jobId, let elapsed = job.latestExecution?.runningElapsed() else { return nil }
                 return (id, elapsed)
             }, uniquingKeysWith: { _, newest in newest })
             jobs = jobsResult.sorted(by: sortJobs)
+            isLoading = false
+
+            // Optional endpoint: failure must not break the task list, and a
+            // nil result keeps the editor's free-text deliver fallback.
+            let options = try? await client.directCronDeliveryOptions()
+            guard generation == loadGeneration, !Task.isCancelled else { return }
             deliveryOptions = options
         } catch {
-            guard generation == loadGeneration else { return }
+            guard generation == loadGeneration, !Task.isCancelled else { return }
             lastError = error
             errorMessage = error.localizedDescription
         }

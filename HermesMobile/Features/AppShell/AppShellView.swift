@@ -260,12 +260,10 @@ private struct AppShellBotsView: View {
 
     var body: some View {
         List {
-            Section {
-                Text("Choose a server profile to start a chat.")
-                    .foregroundStyle(.secondary)
-                if isLoading {
+            Section("Your Team") {
+                if isLoading && profiles.isEmpty {
                     ProgressView("Loading bots")
-                } else if loadFailed {
+                } else if loadFailed && profiles.isEmpty {
                     Text("Bots couldn’t be loaded.").foregroundStyle(.secondary)
                     Button("Retry") { Task { await load() } }
                 } else if profiles.isEmpty {
@@ -284,7 +282,10 @@ private struct AppShellBotsView: View {
         .scrollContentBackground(.hidden)
         .background { SemrehBackdrop().ignoresSafeArea() }
         .task(id: server) { await load() }
-        .onDisappear { loadIdentity = nil }
+        .onDisappear {
+            loadIdentity = nil
+            isLoading = false
+        }
         .refreshable { await load() }
         .sheet(item: $selectedProfileForDetails) { profile in
             NavigationStack {
@@ -484,7 +485,7 @@ private struct AppShellActivityView: View {
 
     var body: some View {
         Group {
-            if isLoading {
+            if isLoading && profileName == nil {
                 ProgressView("Loading activity").frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let profileName {
                 TasksView(server: server, profile: profileName, onAPIError: onAPIError)
@@ -511,7 +512,10 @@ private struct AppShellActivityView: View {
         .scrollContentBackground(.hidden)
         .background { SemrehBackdrop().ignoresSafeArea() }
         .task(id: server) { await load() }
-        .onDisappear { loadIdentity = nil }
+        .onDisappear {
+            loadIdentity = nil
+            isLoading = false
+        }
         .refreshable { await load() }
     }
 
@@ -537,7 +541,6 @@ private struct AppShellActivityView: View {
         } catch {
             guard request.accepts(current: loadIdentity, cancelled: Task.isCancelled) else { return }
             loadFailed = true
-            profileName = nil
             onAPIError(error)
         }
     }

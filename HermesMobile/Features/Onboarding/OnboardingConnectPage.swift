@@ -14,6 +14,7 @@ struct OnboardingConnectPage: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.appColorPalette) private var palette
+    @Environment(\.appAccent) private var accent
     @State private var isShowingAdvanced = false
     @State private var isShowingPairingScanner = false
     @State private var pairingPendingScannerDismissal: PairingImport?
@@ -37,7 +38,7 @@ struct OnboardingConnectPage: View {
                         .font(.title3.weight(.bold))
                         .foregroundStyle(OnboardingTheme.primaryText(for: colorScheme, palette: palette))
 
-                    Text("Enter the exact HTTPS Tailscale Serve URL your agent returned, for example `https://server.tailnet-name.ts.net`.")
+                    Text("Enter your Hermes server’s HTTPS address, or scan its setup code. Need an address? Open connection help below.")
                         .font(.footnote)
                         .foregroundStyle(OnboardingTheme.secondaryText(for: colorScheme, palette: palette))
                         .fixedSize(horizontal: false, vertical: true)
@@ -47,7 +48,7 @@ struct OnboardingConnectPage: View {
                     OnboardingField(systemImage: "link", title: String(localized: "Server URL")) {
                         ZStack(alignment: .leading) {
                             if viewModel.serverURLString.isEmpty {
-                                Text(verbatim: "https://server.tailnet-name.ts.net")
+                                Text(verbatim: "https://server.example.com")
                                     .foregroundStyle(OnboardingTheme.tertiaryText(for: colorScheme, palette: palette))
                                     .allowsHitTesting(false)
                             }
@@ -59,7 +60,7 @@ struct OnboardingConnectPage: View {
                                 .accessibilityIdentifier("onboarding-server-url")
                                 .foregroundStyle(OnboardingTheme.primaryText(for: colorScheme, palette: palette))
                                 .submitLabel(.go)
-                                .tint(OnboardingTheme.action(for: colorScheme, palette: palette))
+                                .tint(OnboardingTheme.action(for: colorScheme, palette: palette, accent: accent))
                                 .focused($focusedField, equals: .serverURL)
                                 .onSubmit(submitConnection)
                         }
@@ -90,7 +91,7 @@ struct OnboardingConnectPage: View {
                             .accessibilityIdentifier("onboarding-username")
                             .foregroundStyle(OnboardingTheme.primaryText(for: colorScheme, palette: palette))
                             .submitLabel(.next)
-                            .tint(OnboardingTheme.action(for: colorScheme, palette: palette))
+                            .tint(OnboardingTheme.action(for: colorScheme, palette: palette, accent: accent))
                             .focused($focusedField, equals: .username)
                             .onSubmit {
                                 if viewModel.isPasswordRequired {
@@ -130,13 +131,13 @@ struct OnboardingConnectPage: View {
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(OnboardingTheme.primaryText(for: colorScheme, palette: palette).opacity(0.86))
                 }
-                .tint(OnboardingTheme.action(for: colorScheme, palette: palette).opacity(0.72))
+                .tint(OnboardingTheme.action(for: colorScheme, palette: palette, accent: accent).opacity(0.72))
 
                 if viewModel.isWorking {
                     OnboardingStatusBanner(
                         text: String(localized: "Checking server..."),
                         systemImage: "arrow.triangle.2.circlepath",
-                        tint: OnboardingTheme.action(for: colorScheme, palette: palette),
+                        tint: OnboardingTheme.action(for: colorScheme, palette: palette, accent: accent),
                         showsProgress: true
                     )
                 }

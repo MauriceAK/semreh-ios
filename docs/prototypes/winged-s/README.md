@@ -1,5 +1,7 @@
 # Winged S candidate
 
+September 14 optical alignment: translate the unchanged paths by `(49, -32)` instead of `(17, -12)`, moving the mark 32 units right and 20 up on the 1024 canvas. This centers the broad S body rather than balancing the extended wing tips. Root inspected the exported mark at 1024 and 64 pixels; production AppIcon and in-app image use identical opaque exports. Native display review remains separate.
+
 Source-faithful manual vector reconstruction of the user's selected “Original Refined” photo reference. The photo is not an editable vector, so curves are reconstructed rather than claimed byte-exact. Preserved upper swept two-feather charcoal band, lower slate S band, pointed inner terminals and overall proportions. Removed photographic shading, rounded outer icon tile and caption. No new logo concept.
 
 Master: `winged-s-master.svg`. Candidate: `winged-s-app-icon-candidate.png`, 1024×1024 RGB PNG, no alpha. Full-bleed paper #F7F3EA, charcoal #20252B, slate #8DA4B5. iOS supplies the outer icon mask. Root visually approved the candidate; identical PNG copied into `AppIcon.appiconset/semreh_app_icon.png` and `SemrehAppIcon.imageset/semreh_app_icon.png` under `HermesMobile/Resources/Assets.xcassets`. Both production copies checked 1024×1024 with no alpha. Existing catalog filename entries remain valid and unchanged. Asset diff check passed. Native validation pending verifier.

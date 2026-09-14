@@ -127,10 +127,12 @@ final class AppShellNavigationTests: XCTestCase {
     func testShellLoadRejectsCancelledReplacedDepartedAndOtherServerResponses() {
         let server = URL(staticString: "https://one.example.test")
         let request = AppShellLoadIdentity(server: server)
+        let reentered = AppShellLoadIdentity(server: server)
         XCTAssertTrue(request.accepts(current: request, cancelled: false))
         XCTAssertFalse(request.accepts(current: request, cancelled: true))
         XCTAssertFalse(request.accepts(current: nil, cancelled: false))
-        XCTAssertFalse(request.accepts(current: AppShellLoadIdentity(server: server), cancelled: false))
+        XCTAssertFalse(request.accepts(current: reentered, cancelled: false))
+        XCTAssertTrue(reentered.accepts(current: reentered, cancelled: false))
         XCTAssertFalse(request.accepts(
             current: AppShellLoadIdentity(server: URL(staticString: "https://two.example.test")),
             cancelled: false

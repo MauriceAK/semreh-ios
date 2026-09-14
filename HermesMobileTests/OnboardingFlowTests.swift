@@ -29,17 +29,32 @@ final class OnboardingFlowTests: XCTestCase {
 
     func testPrimaryButtonTitlesFollowPagerFlow() {
         XCTAssertEqual(OnboardingFlowPolicy.primaryButtonTitle(for: 0), "Get Started")
-        XCTAssertEqual(OnboardingFlowPolicy.primaryButtonTitle(for: 1), "Connect")
-        XCTAssertEqual(OnboardingFlowPolicy.pageCount, 2)
+        XCTAssertEqual(
+            OnboardingFlowPolicy.primaryButtonTitle(for: OnboardingFlowPolicy.appearancePageIndex),
+            "Continue"
+        )
+        XCTAssertEqual(
+            OnboardingFlowPolicy.primaryButtonTitle(for: OnboardingFlowPolicy.connectPageIndex),
+            "Connect"
+        )
+        XCTAssertEqual(OnboardingFlowPolicy.pageCount, 3)
     }
 
     func testConnectFocusClearsWhenLeavingConnectPage() {
         XCTAssertTrue(OnboardingFlowPolicy.shouldClearConnectFocusWhenLeavingPage(0))
+        XCTAssertTrue(
+            OnboardingFlowPolicy.shouldClearConnectFocusWhenLeavingPage(
+                OnboardingFlowPolicy.appearancePageIndex
+            )
+        )
         XCTAssertFalse(OnboardingFlowPolicy.shouldClearConnectFocusWhenLeavingPage(OnboardingFlowPolicy.connectPageIndex))
     }
 
     func testFreshSetupStartsAtWelcomeAndSavedServerSkipsToConnect() {
-        XCTAssertEqual(OnboardingFlowPolicy.initialPage(hasSavedServer: false), 0)
+        XCTAssertEqual(
+            OnboardingFlowPolicy.initialPage(hasSavedServer: false),
+            OnboardingFlowPolicy.welcomePageIndex
+        )
         XCTAssertEqual(OnboardingFlowPolicy.initialPage(hasSavedServer: true), OnboardingFlowPolicy.connectPageIndex)
     }
 
@@ -68,5 +83,72 @@ final class OnboardingFlowTests: XCTestCase {
 
     func testConnectPageIndexIsFinalPagerPage() {
         XCTAssertEqual(OnboardingFlowPolicy.connectPageIndex, OnboardingFlowPolicy.pageCount - 1)
+    }
+
+    func testFirstRunBackNavigationIsExplicitAndSavedServerSkipsIntro() {
+        XCTAssertFalse(
+            OnboardingFlowPolicy.shouldShowBackButton(
+                for: OnboardingFlowPolicy.welcomePageIndex,
+                hasSavedServer: false
+            )
+        )
+        XCTAssertTrue(
+            OnboardingFlowPolicy.shouldShowBackButton(
+                for: OnboardingFlowPolicy.appearancePageIndex,
+                hasSavedServer: false
+            )
+        )
+        XCTAssertTrue(
+            OnboardingFlowPolicy.shouldShowBackButton(
+                for: OnboardingFlowPolicy.connectPageIndex,
+                hasSavedServer: false
+            )
+        )
+        XCTAssertFalse(
+            OnboardingFlowPolicy.shouldShowBackButton(
+                for: OnboardingFlowPolicy.connectPageIndex,
+                hasSavedServer: true
+            )
+        )
+
+        XCTAssertNil(
+            OnboardingFlowPolicy.previousPage(
+                for: OnboardingFlowPolicy.welcomePageIndex,
+                hasSavedServer: false
+            )
+        )
+        XCTAssertEqual(
+            OnboardingFlowPolicy.previousPage(
+                for: OnboardingFlowPolicy.appearancePageIndex,
+                hasSavedServer: false
+            ),
+            OnboardingFlowPolicy.welcomePageIndex
+        )
+        XCTAssertEqual(
+            OnboardingFlowPolicy.previousPage(
+                for: OnboardingFlowPolicy.connectPageIndex,
+                hasSavedServer: false
+            ),
+            OnboardingFlowPolicy.appearancePageIndex
+        )
+        XCTAssertNil(
+            OnboardingFlowPolicy.previousPage(
+                for: OnboardingFlowPolicy.connectPageIndex,
+                hasSavedServer: true
+            )
+        )
+    }
+
+    func testAppearanceUsesExistingPersistedPreferenceKeysAndChoices() {
+        XCTAssertEqual(AppTheme.storageKey, "appTheme")
+        XCTAssertEqual(AppAccent.storageKey, "appearance.appAccent")
+        XCTAssertEqual(
+            AppAccent.allCases.map(\.rawValue),
+            ["warm", "violet", "blue", "mint", "rose"]
+        )
+        XCTAssertEqual(
+            AppAccent.allCases.map(\.title),
+            ["Warm", "Violet", "Blue", "Mint", "Rose"]
+        )
     }
 }

@@ -269,6 +269,49 @@ final class CronManagementViewModelTests: XCTestCase {
     }
 
     @MainActor
+    func testTaskListPublishesJobsBeforeOptionalDeliveryOptionsFinish() async throws {
+        let observed = expectation(description: "delivery options held")
+        let client = makeGatedClient(
+            path: "/api/cron/delivery-targets",
+            first: #"{"targets":[{"id":"local","name":"Local"}]}"#,
+            later: #"{"id":"job-delayed","profile":"default","name":"Digest"}"#,
+            observed: observed
+        )
+        let model = TasksViewModel(server: URL(string: "https://example.test")!, client: client)
+        let load = Task { await model.load() }
+
+        await fulfillment(of: [observed], timeout: 2)
+        XCTAssertEqual(model.jobs.map(\.jobId), ["job-delayed"])
+        XCTAssertFalse(model.isLoading, "Required jobs must be ready while optional discovery is pending.")
+        XCTAssertNil(model.deliveryOptions)
+
+        CronReadGateURLProtocol.release()
+        await load.value
+        XCTAssertEqual(model.deliveryOptions?.map(\.value), ["local"])
+    }
+
+    @MainActor
+    func testCancelledTaskListLoadDoesNotPublishLateJobsOrRemainLoading() async throws {
+        let observed = expectation(description: "jobs held")
+        let client = makeGatedClient(
+            path: "/api/cron/jobs",
+            first: #"[{"id":"late","profile":"default","name":"Late"}]"#,
+            later: #"{"id":"new","profile":"default","name":"New"}"#,
+            observed: observed
+        )
+        let model = TasksViewModel(server: URL(string: "https://example.test")!, client: client)
+        let load = Task { await model.load() }
+
+        await fulfillment(of: [observed], timeout: 2)
+        load.cancel()
+        CronReadGateURLProtocol.release()
+        await load.value
+
+        XCTAssertTrue(model.jobs.isEmpty, "A cancelled request must not publish its late response.")
+        XCTAssertFalse(model.isLoading)
+    }
+
+    @MainActor
     func testNewerTaskDetailLoadOwnsMetadataAndClearsCompletedRunningState() async throws {
         let observed = expectation(description: "older detail held")
         let client = makeGatedClient(path: "/api/cron/jobs/job1",

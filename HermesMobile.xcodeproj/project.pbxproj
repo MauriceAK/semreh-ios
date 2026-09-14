@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		E91400000000000000000002 /* HostedBotGroup.swift in Sources */ = {isa = PBXBuildFile; fileRef = E91400000000000000000001 /* HostedBotGroup.swift */; };
+		E91400000000000000000004 /* HostedBotGroupTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E91400000000000000000003 /* HostedBotGroupTests.swift */; };
 		E91300000000000000000002 /* BirdAvatarIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = E91300000000000000000001 /* BirdAvatarIdentity.swift */; };
 		E91300000000000000000004 /* BirdAvatarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E91300000000000000000003 /* BirdAvatarView.swift */; };
 		E91300000000000000000006 /* BirdAvatarIdentityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E91300000000000000000005 /* BirdAvatarIdentityTests.swift */; };
@@ -425,6 +427,8 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		E91400000000000000000001 /* HostedBotGroup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostedBotGroup.swift; sourceTree = "<group>"; };
+		E91400000000000000000003 /* HostedBotGroupTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostedBotGroupTests.swift; sourceTree = "<group>"; };
 		E91300000000000000000001 /* BirdAvatarIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BirdAvatarIdentity.swift; sourceTree = "<group>"; };
 		E91300000000000000000003 /* BirdAvatarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BirdAvatarView.swift; sourceTree = "<group>"; };
 		E91300000000000000000005 /* BirdAvatarIdentityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BirdAvatarIdentityTests.swift; sourceTree = "<group>"; };
@@ -993,6 +997,7 @@
 				C04400000000000000000004 /* CacheFallbackPolicyTests.swift */,
 				1A2B3C4D5E6F700000000103 /* AppThemeTests.swift */,
 				E91300000000000000000005 /* BirdAvatarIdentityTests.swift */,
+				E91400000000000000000003 /* HostedBotGroupTests.swift */,
 				C012400000000000000005 /* AppIconChoiceTests.swift */,
 				C03120000000000000F006 /* APIClientGitTests.swift */,
 				C03120000000000000F007 /* GitWorkspaceViewModelTests.swift */,
@@ -1095,6 +1100,7 @@
 				1A2B3C4D5E6F7000000000B4 /* ServerInfo.swift */,
 				1A2B3C4D5E6F7000000000BB /* Session.swift */,
 				1A2B3C4D5E6F7000000000BA /* ChatMessage.swift */,
+				E91400000000000000000001 /* HostedBotGroup.swift */,
 				1A2B3C4D5E6F7000000000BD /* Workspace.swift */,
 				C03120000000000000F001 /* GitWorkspace.swift */,
 				1A2B3C4D5E6F7000000000BE /* ServerCatalog.swift */,
@@ -1768,6 +1774,7 @@
 				1A2B3C4D5E6F7000000000A4 /* ServerInfo.swift in Sources */,
 				1A2B3C4D5E6F7000000000AB /* Session.swift in Sources */,
 				1A2B3C4D5E6F7000000000AA /* ChatMessage.swift in Sources */,
+				E91400000000000000000002 /* HostedBotGroup.swift in Sources */,
 				1A2B3C4D5E6F7000000000AD /* Workspace.swift in Sources */,
 				1A2B3C4D5E6F7000000000AE /* ServerCatalog.swift in Sources */,
 				1A2B3C4D5E6F70000000140 /* ModelFavoritesStore.swift in Sources */,
@@ -2007,6 +2014,7 @@
 				C04400000000000000000003 /* CacheFallbackPolicyTests.swift in Sources */,
 				1A2B3C4D5E6F700000000102 /* AppThemeTests.swift in Sources */,
 				E91300000000000000000006 /* BirdAvatarIdentityTests.swift in Sources */,
+				E91400000000000000000004 /* HostedBotGroupTests.swift in Sources */,
 				C012400000000000000006 /* AppIconChoiceTests.swift in Sources */,
 				C03120000000000000B006 /* APIClientGitTests.swift in Sources */,
 				C03120000000000000B007 /* GitWorkspaceViewModelTests.swift in Sources */,
