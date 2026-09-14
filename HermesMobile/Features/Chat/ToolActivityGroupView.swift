@@ -36,7 +36,6 @@ struct ToolActivityGroupView: View {
                 .transition(ChatMotion.disclosureTransition(reduceMotion: reduceMotion))
             }
         }
-        .padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .contain)
     }
@@ -73,12 +72,13 @@ struct ToolActivityGroupView: View {
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(minHeight: 44)
         .contentShape(Rectangle())
     }
 
     private var titleText: some View {
         Text(actionSummary)
-            .font(AppFont.caption())
+            .font(AppFont.subheadline())
             .foregroundStyle(.secondary)
             .lineLimit(1)
     }
@@ -92,7 +92,9 @@ struct ToolActivityGroupView: View {
             return "exclamationmark.triangle.fill"
         }
 
-        return group.isComplete ? "checkmark.circle.fill" : "wrench.and.screwdriver.fill"
+        return group.toolCalls.count == 1
+            ? ToolCallPresentationLabel.icon(for: group.toolCalls.first?.name)
+            : "wrench.and.screwdriver"
     }
 
     private var activityColor: Color {

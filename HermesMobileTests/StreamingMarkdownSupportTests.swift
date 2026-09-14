@@ -2,6 +2,17 @@ import XCTest
 @testable import HermesMobile
 
 final class ReasoningDisplayTextTests: XCTestCase {
+    func testReasoningBlockDefaultsToCompletedStaticPresentation() {
+        XCTAssertFalse(ReasoningBlockView(text: "Actual reasoning").isActive)
+        XCTAssertFalse(ReasoningDisplayText.shouldAnimateShine(isActive: false, reduceMotion: false))
+    }
+
+    func testReasoningShineOnlyRunsForActiveReasoningWhenMotionIsAllowed() {
+        XCTAssertTrue(ReasoningDisplayText.shouldAnimateShine(isActive: true, reduceMotion: false))
+        XCTAssertFalse(ReasoningDisplayText.shouldAnimateShine(isActive: true, reduceMotion: true))
+        XCTAssertFalse(ReasoningDisplayText.shouldAnimateShine(isActive: false, reduceMotion: true))
+    }
+
     func testSummaryPreservesPlainText() {
         XCTAssertEqual(ReasoningDisplayText.summary("Checking the available sources."), "Checking the available sources.")
     }

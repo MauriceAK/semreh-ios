@@ -1,3 +1,4 @@
+import SwiftUI
 import XCTest
 @testable import HermesMobile
 
@@ -49,6 +50,213 @@ final class ChatScrollPolicyTests: XCTestCase {
                 viewportHeight: 400
             )
         )
+    }
+
+    func testVisibleTranscriptPolicyRetainsAnchorAcrossTransientEmptyPreference() {
+        XCTAssertEqual(
+            ChatTranscriptVisibilityPolicy.retainedVisibleMessageID(
+                currentID: "row-reading",
+                incomingID: nil,
+                hasMessages: true
+            ),
+            "row-reading"
+        )
+        XCTAssertEqual(
+            ChatTranscriptVisibilityPolicy.retainedVisibleMessageID(
+                currentID: "row-reading",
+                incomingID: "row-new",
+                hasMessages: true
+            ),
+            "row-new"
+        )
+        XCTAssertNil(
+            ChatTranscriptVisibilityPolicy.retainedVisibleMessageID(
+                currentID: "row-reading",
+                incomingID: nil,
+                hasMessages: false
+            )
+        )
+    }
+
+    func testActivationRecoveryLeavesAReaderWithRealizedRowsAlone() {
+        XCTAssertFalse(
+            ChatTranscriptViewportRecoveryPolicy.shouldRecoverAfterActivation(
+                hasMessages: true,
+                hadObservedRows: true,
+                hasVisibleRows: true,
+                shouldFollowLatest: false,
+                isNearBottom: false,
+                isTailVisible: false,
+                isDirectlyInteracting: false,
+                isDecelerating: false
+            ),
+            "a valid history viewport must not be re-scrolled on activation"
+        )
+    }
+
+    func testActivationRecoveryRepairsBlankOrUnrealizedTailOnlyWithEvidence() {
+        XCTAssertTrue(
+            ChatTranscriptViewportRecoveryPolicy.shouldRecoverAfterActivation(
+                hasMessages: true,
+                hadObservedRows: true,
+                hasVisibleRows: false,
+                shouldFollowLatest: false,
+                isNearBottom: false,
+                isTailVisible: false,
+                isDirectlyInteracting: false,
+                isDecelerating: false
+            )
+        )
+        XCTAssertTrue(
+            ChatTranscriptViewportRecoveryPolicy.shouldRecoverAfterActivation(
+                hasMessages: true,
+                hadObservedRows: true,
+                hasVisibleRows: true,
+                shouldFollowLatest: true,
+                isNearBottom: true,
+                isTailVisible: false,
+                isDirectlyInteracting: false,
+                isDecelerating: false
+            )
+        )
+        XCTAssertFalse(
+            ChatTranscriptViewportRecoveryPolicy.shouldRecoverAfterActivation(
+                hasMessages: true,
+                hadObservedRows: false,
+                hasVisibleRows: false,
+                shouldFollowLatest: true,
+                isNearBottom: true,
+                isTailVisible: false,
+                isDirectlyInteracting: false,
+                isDecelerating: false
+            )
+        )
+        XCTAssertFalse(
+            ChatTranscriptViewportRecoveryPolicy.shouldRecoverAfterActivation(
+                hasMessages: true,
+                hadObservedRows: true,
+                hasVisibleRows: false,
+                shouldFollowLatest: false,
+                isNearBottom: false,
+                isTailVisible: false,
+                isDirectlyInteracting: true,
+                isDecelerating: false
+            )
+        )
+    }
+
+    func testOlderMessagePrefetchUsesMeasuredNearTopBoundary() {
+        let loadedPageBoundary = ChatTranscriptVisibilityPolicy.VisibleRow(
+            id: "row-oldest-loaded",
+            frame: CGRect(x: 0, y: 200, width: 300, height: 80)
+        )
+        let nearTop = ChatTranscriptVisibilityPolicy.VisibleRow(
+            id: "row-near-top",
+            frame: CGRect(x: 0, y: ChatTranscriptPagingPolicy.nearTopPrefetchDistance, width: 300, height: 80)
+        )
+        let loadedPageOutsideBoundary = ChatTranscriptVisibilityPolicy.VisibleRow(
+            id: "row-oldest-outside-boundary",
+            frame: CGRect(x: 0, y: ChatTranscriptPagingPolicy.nearTopPrefetchDistance + 1, width: 300, height: 80)
+        )
+
+        XCTAssertTrue(
+            ChatTranscriptPagingPolicy.shouldPrefetchOlderMessages(
+                firstLoadedRow: loadedPageBoundary,
+                firstVisibleRow: nearTop,
+                viewportHeight: 400,
+                hasOlderMessages: true,
+                isLoadingOlderMessages: false,
+                hasPendingRestore: false,
+                shouldFollowLatest: false,
+                lastRequestedVisibleRowID: nil
+            )
+        )
+        XCTAssertFalse(
+            ChatTranscriptPagingPolicy.shouldPrefetchOlderMessages(
+                firstLoadedRow: loadedPageOutsideBoundary,
+                firstVisibleRow: nearTop,
+                viewportHeight: 400,
+                hasOlderMessages: true,
+                isLoadingOlderMessages: false,
+                hasPendingRestore: false,
+                shouldFollowLatest: false,
+                lastRequestedVisibleRowID: nil
+            )
+        )
+        XCTAssertFalse(
+            ChatTranscriptPagingPolicy.shouldPrefetchOlderMessages(
+                firstLoadedRow: .init(
+                    id: loadedPageBoundary.id,
+                    frame: CGRect(x: 0, y: -500, width: 300, height: 80)
+                ),
+                firstVisibleRow: nearTop,
+                viewportHeight: 400,
+                hasOlderMessages: true,
+                isLoadingOlderMessages: false,
+                hasPendingRestore: false,
+                shouldFollowLatest: false,
+                lastRequestedVisibleRowID: nil
+            ),
+            "a visible row near the top is not enough when the loaded page boundary is far away"
+        )
+        XCTAssertFalse(
+            ChatTranscriptPagingPolicy.shouldPrefetchOlderMessages(
+                firstLoadedRow: loadedPageBoundary,
+                firstVisibleRow: nearTop,
+                viewportHeight: 400,
+                hasOlderMessages: true,
+                isLoadingOlderMessages: false,
+                hasPendingRestore: false,
+                shouldFollowLatest: false,
+                lastRequestedVisibleRowID: nearTop.id
+            )
+        )
+        XCTAssertFalse(
+            ChatTranscriptPagingPolicy.shouldPrefetchOlderMessages(
+                firstLoadedRow: loadedPageBoundary,
+                firstVisibleRow: nearTop,
+                viewportHeight: 400,
+                hasOlderMessages: true,
+                isLoadingOlderMessages: false,
+                hasPendingRestore: false,
+                shouldFollowLatest: true,
+                lastRequestedVisibleRowID: nil
+            )
+        )
+    }
+
+    func testOlderPageLoadSkipsCorrectionWhenAnchorStayedPut() {
+        XCTAssertFalse(
+            ChatTranscriptPagingPolicy.shouldRestorePrependedAnchor(
+                beforeFrame: CGRect(x: 0, y: 96, width: 300, height: 80),
+                afterFrame: CGRect(x: 0, y: 104, width: 300, height: 80)
+            )
+        )
+        XCTAssertTrue(
+            ChatTranscriptPagingPolicy.shouldRestorePrependedAnchor(
+                beforeFrame: CGRect(x: 0, y: 96, width: 300, height: 80),
+                afterFrame: CGRect(x: 0, y: 120, width: 300, height: 80)
+            )
+        )
+        XCTAssertTrue(
+            ChatTranscriptPagingPolicy.shouldRestorePrependedAnchor(
+                beforeFrame: CGRect(x: 0, y: 96, width: 300, height: 80),
+                afterFrame: nil
+            )
+        )
+    }
+
+    func testPrependedAnchorAlignmentPreservesPartiallyVisibleRowInsteadOfForcingTop() throws {
+        let alignment = try XCTUnwrap(
+            ChatTranscriptPagingPolicy.preservedAnchorAlignment(
+                beforeFrame: CGRect(x: 0, y: -120, width: 300, height: 180),
+                viewportHeight: 400
+            )
+        )
+
+        XCTAssertEqual(alignment.x, 0.5, accuracy: 0.001)
+        XCTAssertEqual(alignment.y, -0.54545, accuracy: 0.001)
+        XCTAssertNotEqual(alignment.y, UnitPoint.top.y)
     }
 
     func testTranscriptVisibilityAcceptsPartlyVisibleRow() {

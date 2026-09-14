@@ -234,6 +234,11 @@ enum ChatScrollPolicy {
 /// LazyVStack rows, so this stays bounded to the visible window rather than
 /// walking the entire transcript.
 enum ChatTranscriptVisibilityPolicy {
+    struct VisibleRow: Equatable {
+        let id: String
+        let frame: CGRect
+    }
+
     static func isVisible(
         frame: CGRect?,
         viewportHeight: CGFloat,
@@ -251,6 +256,16 @@ enum ChatTranscriptVisibilityPolicy {
         frames: [String: CGRect],
         viewportHeight: CGFloat
     ) -> String? {
+        firstVisibleMessage(
+            frames: frames,
+            viewportHeight: viewportHeight
+        )?.id
+    }
+
+    static func firstVisibleMessage(
+        frames: [String: CGRect],
+        viewportHeight: CGFloat
+    ) -> VisibleRow? {
         guard viewportHeight > 0 else { return nil }
 
         return frames
@@ -262,9 +277,125 @@ enum ChatTranscriptVisibilityPolicy {
                     return lhs.key < rhs.key
                 }
                 return lhs.value.minY < rhs.value.minY
-            }?
-            .key
+            }
+            .map { VisibleRow(id: $0.key, frame: $0.value) }
     }
+
+    /// A preference pass can transiently contain no realized rows while a lazy
+    /// stack is being rebuilt. Do not erase the last usable restore anchor from
+    /// that sample; a truly empty transcript is the only case that clears it.
+    static func retainedVisibleMessageID(
+        currentID: String?,
+        incomingID: String?,
+        hasMessages: Bool
+    ) -> String? {
+        guard hasMessages else { return nil }
+        return incomingID ?? currentID
+    }
+}
+
+/// Bounded recovery decisions for the lazy transcript. These rules intentionally
+/// require a prior realized viewport and current geometry evidence, so a normal
+/// return to a chat does not re-scroll a reader who is legitimately reading old
+/// messages.
+enum ChatTranscriptViewportRecoveryPolicy {
+    static func shouldRecoverAfterActivation(
+        hasMessages: Bool,
+        hadObservedRows: Bool,
+        hasVisibleRows: Bool,
+        shouldFollowLatest: Bool,
+        isNearBottom: Bool,
+        isTailVisible: Bool,
+        isDirectlyInteracting: Bool,
+        isDecelerating: Bool
+    ) -> Bool {
+        guard hasMessages,
+              hadObservedRows,
+              !isDirectlyInteracting,
+              !isDecelerating
+        else { return false }
+
+        // No realized row means the existing lazy offset is not usable. When
+        // following latest, a near-bottom sample without the concrete tail is
+        // the other known stale-estimate case. A reader with visible rows is
+        // otherwise left exactly where they are.
+        return !hasVisibleRows || (shouldFollowLatest && isNearBottom && !isTailVisible)
+    }
+}
+
+/// Paging keeps older-page loads ahead of the top edge without tying the
+/// trigger to a particular page size. Only visible row geometry is inspected,
+/// so the decision remains bounded by the lazy viewport.
+enum ChatTranscriptPagingPolicy {
+    static let nearTopPrefetchDistance: CGFloat = 240
+    static let anchorPreservationTolerance: CGFloat = 12
+
+    static func shouldPrefetchOlderMessages(
+        firstLoadedRow: ChatTranscriptVisibilityPolicy.VisibleRow?,
+        firstVisibleRow: ChatTranscriptVisibilityPolicy.VisibleRow?,
+        viewportHeight: CGFloat,
+        hasOlderMessages: Bool,
+        isLoadingOlderMessages: Bool,
+        hasPendingRestore: Bool,
+        shouldFollowLatest: Bool,
+        lastRequestedVisibleRowID: String?
+    ) -> Bool {
+        guard hasOlderMessages,
+              !isLoadingOlderMessages,
+              !hasPendingRestore,
+              !shouldFollowLatest,
+              viewportHeight > 0,
+              let firstLoadedRow,
+              let firstVisibleRow,
+              firstLoadedRow.frame.height > 0,
+              firstLoadedRow.frame.maxY >= -nearTopPrefetchDistance,
+              firstLoadedRow.frame.minY <= nearTopPrefetchDistance,
+              firstVisibleRow.frame.height > 0,
+              firstVisibleRow.frame.maxY > 0,
+              firstVisibleRow.id != lastRequestedVisibleRowID
+        else { return false }
+
+        return true
+    }
+
+    /// A prepend should not issue a corrective jump when SwiftUI kept the
+    /// anchor's screen position. If the row was displaced or temporarily fell
+    /// out of the realized window, one non-animated correction is warranted.
+    static func shouldRestorePrependedAnchor(
+        beforeFrame: CGRect?,
+        afterFrame: CGRect?
+    ) -> Bool {
+        guard let afterFrame else { return true }
+        guard let beforeFrame else { return false }
+        return abs(afterFrame.minY - beforeFrame.minY) > anchorPreservationTolerance
+    }
+
+    /// Converts the measured pre-page row position into the custom scroll
+    /// alignment that keeps its top edge at the same viewport coordinate. This
+    /// is more faithful than always using `.top`, especially for a partially
+    /// visible or unusually tall message bubble.
+    static func preservedAnchorAlignment(
+        beforeFrame: CGRect?,
+        viewportHeight: CGFloat
+    ) -> UnitPoint? {
+        guard let beforeFrame,
+              viewportHeight > 0,
+              beforeFrame.height >= 0
+        else { return nil }
+
+        let availableAlignmentDistance = viewportHeight - beforeFrame.height
+        guard abs(availableAlignmentDistance) > .ulpOfOne else { return nil }
+
+        let y = beforeFrame.minY / availableAlignmentDistance
+        guard y.isFinite else { return nil }
+        return UnitPoint(x: 0.5, y: y)
+    }
+}
+
+struct ChatTranscriptViewportAnchor: Equatable {
+    let messageID: String
+    let frame: CGRect?
+    let viewportHeight: CGFloat?
 }
 
 /// Keeps transcript reconciliation and other state-heavy startup work out of
@@ -417,6 +548,18 @@ struct ChatTranscriptRestoreState: Equatable {
         // arrives and will not necessarily redeliver an unchanged value.
         isCancelled = preservePreRequestCancellation
         return !isCancelled
+    }
+
+    /// Starts a geometry-proven recovery after a scene/tab activation. Unlike
+    /// the initial restore, this is allowed to supersede a previously cancelled
+    /// request because the caller has already ruled out an active finger drag.
+    mutating func beginViewportRecovery(token: Int) -> Bool {
+        restoreToken = token
+        hasIssuedRestoreAttempt = false
+        hasConfirmedMetricsSample = false
+        isNearBottom = false
+        isCancelled = false
+        return true
     }
 
     mutating func recordRestoreAttempt() {

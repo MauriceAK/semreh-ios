@@ -17,6 +17,7 @@ struct TasksView: View {
 
     var body: some View {
         content
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .safeAreaInset(edge: .bottom) {
                 if viewModel.creationNeedsInspection {
                     VStack(alignment: .leading, spacing: 8) {

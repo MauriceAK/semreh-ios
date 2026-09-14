@@ -304,6 +304,16 @@ enum ToolCallDisplayFormatter {
 /// Unknown names retain ToolCall.displayName, and groups stay count-neutral so
 /// a tool count is never presented as a file, agent, or command count.
 enum ToolCallPresentationLabel {
+    static func icon(for name: String?) -> String {
+        switch name?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "terminal": "terminal"
+        case "read_file", "skill_view": "book"
+        case "search_files", "web_search": "magnifyingglass"
+        case "apply_patch": "pencil"
+        default: "wrench.and.screwdriver"
+        }
+    }
+
     static func title(for toolCall: ToolCall) -> String {
         switch toolCall.name?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
         case "terminal":

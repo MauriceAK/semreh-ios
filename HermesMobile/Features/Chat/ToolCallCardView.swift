@@ -34,7 +34,7 @@ struct ToolCallCardView: View {
                     .transition(ChatMotion.disclosureTransition(reduceMotion: reduceMotion))
             }
         }
-        .padding(.vertical, isExpanded ? 8 : 7)
+        .padding(.bottom, isExpanded ? 8 : 0)
         .frame(maxWidth: .infinity, alignment: .leading)
         // Tool-call bodies are commands, JSON, file paths, and results — code-like
         // content that must stay left-to-right inside an RTL message (#259). The
@@ -92,12 +92,13 @@ struct ToolCallCardView: View {
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(minHeight: 44)
         .contentShape(Rectangle())
     }
 
     private var titleText: some View {
         Text(actionTitle)
-            .font(AppFont.caption())
+            .font(AppFont.subheadline())
             .foregroundStyle(.secondary)
             .lineLimit(1)
     }
@@ -111,7 +112,7 @@ struct ToolCallCardView: View {
             return "exclamationmark.triangle.fill"
         }
 
-        return toolCall.isCompleted ? "checkmark.circle.fill" : "wrench.and.screwdriver.fill"
+        return ToolCallPresentationLabel.icon(for: toolCall.name)
     }
 
     private var statusColor: Color {

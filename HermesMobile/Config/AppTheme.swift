@@ -28,6 +28,12 @@ enum AppColorPalette: String, CaseIterable, Sendable {
 
 enum AppTheme: String, CaseIterable, Identifiable {
     case system
+    /// Semreh's cream/charcoal light appearance. The older `light` case below
+    /// remains the Goku Light value for persisted-settings compatibility.
+    case semrehLight
+    /// Semreh's cream/charcoal dark appearance. The older `dark` case below
+    /// remains the Goku Dark value for persisted-settings compatibility.
+    case semrehDark
     case light
     case dark
     case chatgpt
@@ -43,6 +49,10 @@ enum AppTheme: String, CaseIterable, Identifiable {
         switch self {
         case .system:
             String(localized: "Semreh")
+        case .semrehLight:
+            String(localized: "Light")
+        case .semrehDark:
+            String(localized: "Dark")
         case .light:
             String(localized: "Goku Light")
         case .dark:
@@ -60,9 +70,9 @@ enum AppTheme: String, CaseIterable, Identifiable {
 
     var colorScheme: ColorScheme? {
         switch self {
-        case .light:
+        case .semrehLight, .light:
             .light
-        case .dark:
+        case .semrehDark, .dark:
             .dark
         case .system, .chatgpt, .midnight, .forest, .sand:
             nil
@@ -71,7 +81,7 @@ enum AppTheme: String, CaseIterable, Identifiable {
 
     var palette: AppColorPalette {
         switch self {
-        case .system:
+        case .system, .semrehLight, .semrehDark:
             .semreh
         case .light, .dark:
             .goku

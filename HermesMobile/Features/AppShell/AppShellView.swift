@@ -1,5 +1,18 @@
 import SwiftUI
 
+/// Keep native tab roots mounted; reveal only their content without animating
+/// navigation state, destroying scroll identity, or fading through a blank frame.
+private struct ShellTabReveal: ViewModifier {
+    let isSelected: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(isSelected || reduceMotion ? 1 : 0.92)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: isSelected)
+    }
+}
+
 /// Raw values remain stable for existing routes; labels describe the actual destinations.
 enum AppShellSurface: String, CaseIterable, Hashable, Identifiable {
     case control, sessions, you
@@ -137,7 +150,8 @@ struct AppShellView: View {
                 .toolbarBackground(SemrehVisualTheme.canvas(for: colorScheme, palette: palette), for: .navigationBar)
                 .toolbarBackground(.visible, for: .navigationBar)
             }
-            .tabItem { Image(systemName: AppShellSurface.control.systemImage).accessibilityLabel("Bots") }
+            .modifier(ShellTabReveal(isSelected: selectedSurface == .control))
+            .tabItem { Image(uiImage: BirdTabIcon.image).accessibilityLabel("Bots") }
             .tag(AppShellSurface.control)
 
             SessionListView(
@@ -154,6 +168,7 @@ struct AppShellView: View {
                 onNewChat: { showsBotPicker = true },
                 onAccount: { showsSettings = true }
             )
+            .modifier(ShellTabReveal(isSelected: selectedSurface == .sessions))
             .toolbar(isSessionConversationPresented ? .hidden : .visible, for: .tabBar)
             .tabItem { Image(systemName: AppShellSurface.sessions.systemImage).accessibilityLabel("Sessions") }
             .tag(AppShellSurface.sessions)
@@ -166,6 +181,7 @@ struct AppShellView: View {
                     .toolbarBackground(SemrehVisualTheme.canvas(for: colorScheme, palette: palette), for: .navigationBar)
                     .toolbarBackground(.visible, for: .navigationBar)
             }
+            .modifier(ShellTabReveal(isSelected: selectedSurface == .you))
             .tabItem { Image(systemName: AppShellSurface.you.systemImage).accessibilityLabel("Activity") }
             .tag(AppShellSurface.you)
         }
@@ -199,11 +215,13 @@ struct AppShellView: View {
                     Button("Done") { showsSettings = false }
                 }
                 .padding()
-                .background(.bar)
+                .background(SemrehVisualTheme.canvas(for: colorScheme, palette: palette))
 
                 YouView(authManager: authManager, server: server)
                     .clipped()
             }
+            .background(SemrehVisualTheme.canvas(for: colorScheme, palette: palette).ignoresSafeArea())
+            .presentationBackground(SemrehVisualTheme.canvas(for: colorScheme, palette: palette))
         }
     }
 

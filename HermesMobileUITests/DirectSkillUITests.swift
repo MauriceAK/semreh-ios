@@ -511,6 +511,492 @@ final class DirectSkillUITests: XCTestCase {
     }
 
     @MainActor
+    func testOptInPhoneNavigationLifecycleAndPagingRegression() async throws {
+        continueAfterFailure = false
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("Phone regression verification is simulator-only.")
+        #endif
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SEMREH_PHONE_REGRESSION_UI"] == "1" else {
+            throw XCTSkip("Phone regression verification is opt-in.")
+        }
+        guard environment["SEMREH_SLICE2_UI_LIVE"] == "1",
+              environment["SEMREH_SLICE1_HTTPS"] == "1",
+              environment["SEMREH_SLICE2_UI_BACKEND_MODE"] == "stock",
+              environment["SEMREH_SLICE2_UI_BACKEND_SHA"] == backendSHA,
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == credentialsPath else {
+            return XCTFail("Phone regression verification requires the contained pinned stock fixture.")
+        }
+
+        let observer = try await LifecycleCanonicalObserver(
+            origin: try XCTUnwrap(URL(string: origin)), credentials: try readCredentials()
+        )
+        defer { observer.invalidate() }
+        guard let longFixture = try await observer.discoverLongStoredSession(minimumRows: 20) else {
+            throw XCTSkip("The approved fixture needs one existing populated long transcript.")
+        }
+        var longRows = longFixture.rows
+        XCTAssertGreaterThanOrEqual(longRows.count, min(100, longRows.count))
+        let firstCanonicalID = try XCTUnwrap(accessibleTranscriptRow(longRows[0])).identifier
+        let lastCanonicalID = try XCTUnwrap(accessibleTranscriptRow(longRows[longRows.count - 1])).identifier
+        let discoveryAttachment = XCTAttachment(
+            string: "sample_rows=\(min(100, longRows.count))\nfull_rows=\(longRows.count)\nfirst=\(firstCanonicalID)\nlast=\(lastCanonicalID)"
+        )
+        discoveryAttachment.name = "Phone regression bounded long fixture discovery"
+        discoveryAttachment.lifetime = .keepAlways
+        add(discoveryAttachment)
+
+        let app = XCUIApplication()
+        app.launch()
+        defer { UIPasteboard.general.items = [] }
+        let shortComposer = try openContainedNewChat(app: app)
+        let shortMarker = try sendUniqueCompleted(
+            "SEMREH_PHONE_NAV_SHORT", composer: shortComposer, app: app
+        )
+        let shortStoredID = try await observer.discoverStoredID(uniquePrompt: shortMarker)
+
+        let shortBack = chatBackButton(app: app)
+        XCTAssertTrue(shortBack.waitForExistence(timeout: 10) && shortBack.isHittable)
+        let backStart = Date()
+        shortBack.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        let sessionsRoot = app.navigationBars["Sessions"]
+        XCTAssertTrue(sessionsRoot.waitForExistence(timeout: 5),
+                      "One center tap on Back must reach the Sessions root.")
+        XCTAssertFalse(app.buttons.matching(NSPredicate(format: "label == %@", "Back")).firstMatch.exists)
+        var timings = ["back_center_seconds=\(Date().timeIntervalSince(backStart))"]
+        defer {
+            let timingAttachment = XCTAttachment(string: timings.joined(separator: "\n"))
+            timingAttachment.name = "Phone regression bounded transition timings"
+            timingAttachment.lifetime = .keepAlways
+            add(timingAttachment)
+        }
+
+        for tab in ["Bots", "Activity", "Sessions"] {
+            let control = app.buttons[tab]
+            XCTAssertTrue(control.waitForExistence(timeout: 10) && control.isHittable)
+            let start = Date()
+            control.tap()
+            let destination: XCUIElement
+            switch tab {
+            case "Bots": destination = app.navigationBars["Bots"]
+            case "Activity": destination = app.navigationBars["Tasks"]
+            default: destination = app.navigationBars["Sessions"]
+            }
+            XCTAssertTrue(destination.waitForExistence(timeout: 10),
+                          "\(tab) must settle on its root destination.")
+            timings.append("tab_\(tab.lowercased())_seconds=\(Date().timeIntervalSince(start))")
+        }
+        let tabScreenshot = XCTAttachment(screenshot: app.screenshot())
+        tabScreenshot.name = "Phone regression native tab artwork and Sessions root"
+        tabScreenshot.lifetime = .keepAlways
+        add(tabScreenshot)
+
+        if environment["SEMREH_PHONE_REGRESSION_CORE_ONLY"] != "1" {
+            let settings = app.buttons["Settings"]
+            XCTAssertTrue(settings.waitForExistence(timeout: 10) && settings.isHittable)
+            settings.tap()
+            let done = app.buttons["Done"]
+            XCTAssertTrue(done.waitForExistence(timeout: 10) && done.isHittable)
+            let settingsScreenshot = XCTAttachment(screenshot: app.screenshot())
+            settingsScreenshot.name = "Phone regression Settings index full sheet"
+            settingsScreenshot.lifetime = .keepAlways
+            add(settingsScreenshot)
+            for destinationName in ["Appearance", "Connections"] {
+            let destinationRow = app.buttons[destinationName]
+            XCTAssertTrue(destinationRow.waitForExistence(timeout: 10) && destinationRow.isHittable)
+            destinationRow.tap()
+            let navigationBar = app.navigationBars[destinationName]
+            XCTAssertTrue(navigationBar.waitForExistence(timeout: 10),
+                          "Settings destination \(destinationName) must expose native navigation chrome.")
+            XCTAssertTrue(done.exists && done.isHittable,
+                          "The Settings sheet Done control must remain available in \(destinationName).")
+            if destinationName == "Appearance" {
+                let theme = app.buttons["Theme"]
+                XCTAssertTrue(theme.waitForExistence(timeout: 5) && theme.isHittable)
+                theme.tap()
+                let systemTheme = app.buttons["System"]
+                XCTAssertTrue(systemTheme.waitForExistence(timeout: 5) && systemTheme.isHittable)
+                systemTheme.tap()
+
+                let accent = app.buttons["Accent"]
+                XCTAssertTrue(accent.waitForExistence(timeout: 5) && accent.isHittable)
+                accent.tap()
+                let violet = app.buttons["Violet"]
+                XCTAssertTrue(violet.waitForExistence(timeout: 5) && violet.isHittable)
+                violet.tap()
+
+                let tintActions = app.switches["Tint New Chat & Send"]
+                XCTAssertTrue(tintActions.waitForExistence(timeout: 5) && tintActions.isHittable)
+                if (tintActions.value as? String) != "1" { tintActions.tap() }
+                let appearanceScreenshot = XCTAttachment(screenshot: app.screenshot())
+                appearanceScreenshot.name = "Phone regression Semreh System Violet appearance selection"
+                appearanceScreenshot.lifetime = .keepAlways
+                add(appearanceScreenshot)
+            }
+            let destinationBack = navigationBar.buttons.firstMatch
+            XCTAssertTrue(destinationBack.waitForExistence(timeout: 5) && destinationBack.isHittable)
+            destinationBack.tap()
+            XCTAssertTrue(app.buttons[destinationName].waitForExistence(timeout: 10),
+                          "One native Back tap must return from \(destinationName) to Settings.")
+            }
+            done.tap()
+            XCTAssertFalse(done.waitForExistence(timeout: 5))
+        }
+
+        var shortLink = URLComponents()
+        shortLink.scheme = "semreh"
+        shortLink.host = "session"
+        shortLink.queryItems = [URLQueryItem(name: "id", value: shortStoredID)]
+        app.open(try XCTUnwrap(shortLink.url))
+        XCTAssertTrue(containing(shortMarker, app: app).waitForExistence(timeout: 20))
+        let violetChatScreenshot = XCTAttachment(screenshot: app.screenshot())
+        violetChatScreenshot.name = "Phone regression Violet chat bubble and composer tint"
+        violetChatScreenshot.lifetime = .keepAlways
+        add(violetChatScreenshot)
+
+        var link = URLComponents()
+        link.scheme = "semreh"
+        link.host = "session"
+        link.queryItems = [URLQueryItem(name: "id", value: longFixture.storedID)]
+        let openStart = Date()
+        app.open(try XCTUnwrap(link.url))
+        let detail = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "chat-detail:")
+        ).firstMatch
+        XCTAssertTrue(detail.waitForExistence(timeout: 20))
+        var visibleTail = Array(longRows.suffix(2))
+        try assertAccessibleTranscriptRows(
+            visibleTail, in: detail, context: "long chat after mixed navigation before interaction"
+        )
+        timings.append("open_long_seconds=\(Date().timeIntervalSince(openStart))")
+
+        // Extend the retained real history only as far as the direct gateway's
+        // 120-row boundary requires. This cannot turn paging into a no-op or an
+        // unbounded fixture-generation loop.
+        if longRows.count <= 120 {
+            let seedTurns = (121 - longRows.count + 1) / 2
+            XCTAssertLessThanOrEqual(seedTurns, 50, "Fixture paging setup must remain bounded.")
+            let longComposer = app.descendants(matching: .any)
+                .matching(identifier: "chat-composer-input").firstMatch
+            XCTAssertTrue(longComposer.waitForExistence(timeout: 10) && longComposer.isHittable)
+            for index in 0..<seedTurns {
+                let marker = "SEMREH_PHONE_PAGE_SEED_\(index)_\(UUID().uuidString)"
+                let baseline = longRows
+                send(marker, through: longComposer, app: app)
+                waitForIdle(app: app)
+                longRows = try await observer.waitForLongTranscript(storedID: longFixture.storedID) { rows in
+                    self.hasStableBaseline(rows, baseline: baseline)
+                        && rows.count == baseline.count + 2
+                        && rows[rows.count - 2]["role"] as? String == "user"
+                        && self.canonicalText(rows[rows.count - 2]) == marker
+                        && rows.last?["role"] as? String == "assistant"
+                        && rows.last.flatMap({ self.canonicalText($0) }) == "SEMREH_SLICE1_ACK"
+                }
+            }
+            XCTAssertGreaterThan(longRows.count, 120)
+            visibleTail = Array(longRows.suffix(2))
+            timings.append("paging_seed_turns=\(seedTurns)")
+        }
+
+        let busyMarker = "SEMREH_INTERRUPT_FIXTURE SEMREH_PHONE_BUSY_BACK_\(UUID().uuidString)"
+        let busyBaseline = longRows
+        let busyComposer = app.descendants(matching: .any)
+            .matching(identifier: "chat-composer-input").firstMatch
+        send(busyMarker, through: busyComposer, app: app)
+        XCTAssertTrue(app.buttons["Stop response"].waitForExistence(timeout: 10))
+        let busyBack = chatBackButton(app: app)
+        XCTAssertTrue(busyBack.waitForExistence(timeout: 5) && busyBack.isHittable)
+        let busyBackStart = Date()
+        busyBack.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        XCTAssertTrue(app.navigationBars["Sessions"].waitForExistence(timeout: 5),
+                      "One center Back tap must leave a busy, heavily populated chat.")
+        timings.append("busy_back_seconds=\(Date().timeIntervalSince(busyBackStart))")
+        longRows = try await observer.waitForLongTranscript(storedID: longFixture.storedID) { rows in
+            self.hasStableBaseline(rows, baseline: busyBaseline)
+                && rows.count == busyBaseline.count + 2
+                && self.canonicalText(rows[rows.count - 2]) == busyMarker
+                && rows.last.flatMap({ self.canonicalText($0) }) == "SEMREH_SLICE1_ACK"
+        }
+        app.open(try XCTUnwrap(link.url))
+        visibleTail = Array(longRows.suffix(2))
+        try assertAccessibleTranscriptRows(
+            visibleTail, in: detail, context: "busy long chat warm reentry before interaction"
+        )
+        app.terminate()
+        XCTAssertEqual(app.state, .notRunning)
+        app.launch()
+        app.open(try XCTUnwrap(link.url))
+        visibleTail = Array(longRows.suffix(2))
+        try assertAccessibleTranscriptRows(
+            visibleTail, in: detail, context: "busy long chat reentry before interaction"
+        )
+
+        XCUIDevice.shared.press(.home)
+        let backgroundDeadline = Date().addingTimeInterval(5)
+        while app.state == .runningForeground && Date() < backgroundDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        }
+        XCTAssertNotEqual(app.state, .runningForeground)
+        let foregroundStart = Date()
+        app.activate()
+        try assertAccessibleTranscriptRows(
+            visibleTail, in: detail, context: "long chat after background and foreground before interaction"
+        )
+        timings.append("foreground_long_seconds=\(Date().timeIntervalSince(foregroundStart))")
+
+        let transcript = detail.descendants(matching: .scrollView)
+            .matching(identifier: "chat-transcript-scroll").firstMatch
+        let anchor = try XCTUnwrap(accessibleTranscriptRow(longRows[longRows.count - 120]))
+        let anchorElement = transcript.descendants(matching: .any).matching(identifier: anchor.identifier).firstMatch
+        let oldest = try XCTUnwrap(accessibleTranscriptRow(longRows[0]))
+        let oldestElement = transcript.descendants(matching: .any).matching(identifier: oldest.identifier).firstMatch
+        XCTAssertFalse(oldestElement.exists,
+                       "Cold reentry must begin with the canonical 120-row tail before paging.")
+        let loadOlder = app.buttons["Load older messages"]
+        for _ in 0..<15 where !anchorElement.isHittable { transcript.swipeDown() }
+        XCTAssertTrue(anchorElement.waitForExistence(timeout: 10) && anchorElement.isHittable)
+        let anchorY = anchorElement.frame.midY
+        let pagingStart = Date()
+        // Automatic near-top prefetch is the production path. If it has not
+        // started after reaching the boundary, use the visible manual control;
+        // either path must realize a genuinely older canonical row.
+        if !oldestElement.waitForExistence(timeout: 3) {
+            XCTAssertTrue(loadOlder.waitForExistence(timeout: 5) && loadOlder.isHittable)
+            loadOlder.tap()
+        }
+        XCTAssertTrue(oldestElement.waitForExistence(timeout: 20),
+                      "Paging must prepend a canonical row older than the initial 120-row tail.")
+        XCTAssertTrue(anchorElement.waitForExistence(timeout: 20) && anchorElement.isHittable)
+        let anchorDisplacement = abs(anchorElement.frame.midY - anchorY)
+        XCTAssertLessThanOrEqual(anchorDisplacement, 80,
+                                 "Loading older history must preserve the visible anchor position.")
+        timings.append("paging_seconds=\(Date().timeIntervalSince(pagingStart))")
+        timings.append("paging_anchor_displacement_points=\(anchorDisplacement)")
+
+        let scrollToLatest = app.buttons["Scroll to latest message"]
+        XCTAssertTrue(scrollToLatest.waitForExistence(timeout: 10) && scrollToLatest.isHittable)
+        let farLatestStart = Date()
+        scrollToLatest.tap()
+        try assertAccessibleTranscriptRows(
+            visibleTail, in: detail, context: "far-history return to latest"
+        )
+        timings.append("far_history_to_latest_seconds=\(Date().timeIntervalSince(farLatestStart))")
+        let nearTail = transcript.descendants(matching: .any)
+            .matching(identifier: try XCTUnwrap(accessibleTranscriptRow(visibleTail[0])).identifier).firstMatch
+        XCTAssertTrue(nearTail.waitForExistence(timeout: 5) && nearTail.isHittable)
+        let nearTailY = nearTail.frame.midY
+        transcript.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.48))
+            .press(forDuration: 0.35,
+                   thenDragTo: transcript.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.52)))
+        XCTAssertTrue(nearTail.exists)
+        let nearDisplacement = abs(nearTail.frame.midY - nearTailY)
+        XCTAssertGreaterThan(nearDisplacement, 0)
+        XCTAssertLessThanOrEqual(nearDisplacement, 640,
+                                 "Near-bottom motion gate must stay inside the product animation band.")
+        XCTAssertTrue(scrollToLatest.waitForExistence(timeout: 10) && scrollToLatest.isHittable)
+        let nearLatestStart = Date()
+        scrollToLatest.tap()
+        try assertAccessibleTranscriptRows(
+            visibleTail, in: detail, context: "near-bottom return to latest"
+        )
+        timings.append("near_bottom_to_latest_seconds=\(Date().timeIntervalSince(nearLatestStart))")
+        timings.append("near_bottom_displacement_points=\(nearDisplacement)")
+
+        app.open(try XCTUnwrap(shortLink.url))
+        let composer = app.descendants(matching: .any)
+            .matching(identifier: "chat-composer-input").firstMatch
+        XCTAssertTrue(composer.waitForExistence(timeout: 20) && composer.isHittable)
+        XCTAssertTrue(containing(shortMarker, app: app).waitForExistence(timeout: 20),
+                      "Switching chats must render the selected transcript before the next send.")
+        let stopBaseline = try await observer.transcript(storedID: shortStoredID, limit: 100)
+        let interrupted = "SEMREH_INTERRUPT_FIXTURE SEMREH_PHONE_STOP_\(UUID().uuidString)"
+        send(interrupted, through: composer, app: app)
+        let stop = app.buttons["Stop response"]
+        XCTAssertTrue(stop.waitForExistence(timeout: 10) && stop.isHittable)
+        XCTAssertEqual(exactCount(interrupted, app: app), 1)
+        stop.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        let stoppingLabels = app.staticTexts.matching(
+            NSPredicate(format: "label == %@", "Stopping response...")
+        )
+        let observedStopping = stoppingLabels.firstMatch.waitForExistence(timeout: 0.5)
+        if observedStopping {
+            XCTAssertEqual(stoppingLabels.count, 1,
+                           "Stopping must not be duplicated in the transcript overlay.")
+        }
+        timings.append("stopping_label_observed=\(observedStopping)")
+        waitForIdle(app: app)
+        _ = try await observer.waitForLongTranscript(storedID: shortStoredID) { rows in
+            self.exactAcceptedWithoutAssistant(rows, baseline: stopBaseline, prompt: interrupted)
+        }
+        try await Task.sleep(for: .seconds(16))
+        let durableStoppedRows = try await observer.transcript(storedID: shortStoredID, limit: 100)
+        XCTAssertTrue(
+            exactAcceptedWithoutAssistant(
+                durableStoppedRows, baseline: stopBaseline, prompt: interrupted
+            ),
+            "Cancellation must remain durable beyond the deterministic fixture response deadline."
+        )
+        XCTAssertEqual(exactCount(interrupted, app: app), 1)
+        XCTAssertFalse(app.staticTexts["Loading messages"].exists)
+        let stoppedScreenshot = XCTAttachment(screenshot: app.screenshot())
+        stoppedScreenshot.name = "Phone regression final stopped short chat"
+        stoppedScreenshot.lifetime = .keepAlways
+        add(stoppedScreenshot)
+
+        let finalBack = chatBackButton(app: app)
+        XCTAssertTrue(finalBack.waitForExistence(timeout: 5) && finalBack.isHittable)
+        finalBack.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        XCTAssertTrue(app.navigationBars["Sessions"].waitForExistence(timeout: 5))
+        if environment["SEMREH_PHONE_REGRESSION_CORE_ONLY"] != "1" {
+            let settings = app.buttons["Settings"]
+            let done = app.buttons["Done"]
+            XCTAssertTrue(settings.waitForExistence(timeout: 5) && settings.isHittable)
+            settings.tap()
+            XCTAssertTrue(done.waitForExistence(timeout: 5) && done.isHittable)
+            XCTAssertTrue(app.buttons["Appearance"].waitForExistence(timeout: 5))
+            app.buttons["Appearance"].tap()
+            XCTAssertTrue(app.navigationBars["Appearance"].waitForExistence(timeout: 5))
+            XCTAssertEqual(app.buttons["Theme"].value as? String, "System")
+            XCTAssertEqual(app.buttons["Accent"].value as? String, "Violet")
+            app.buttons["Accent"].tap()
+            XCTAssertTrue(app.buttons["Warm"].waitForExistence(timeout: 5) && app.buttons["Warm"].isHittable)
+            app.buttons["Warm"].tap()
+            let finalTintActions = app.switches["Tint New Chat & Send"]
+            if (finalTintActions.value as? String) == "1" { finalTintActions.tap() }
+            app.navigationBars["Appearance"].buttons.firstMatch.tap()
+            XCTAssertTrue(done.waitForExistence(timeout: 5) && done.isHittable)
+            done.tap()
+        }
+
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "Phone regression restored Warm System settings root"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+    }
+
+    @MainActor
+    func testOptInPhoneSettingsAppearanceRegression() async throws {
+        continueAfterFailure = false
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("Phone Settings verification is simulator-only.")
+        #endif
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SEMREH_PHONE_SETTINGS_UI"] == "1" else {
+            throw XCTSkip("Phone Settings verification is opt-in.")
+        }
+        guard environment["SEMREH_SLICE2_UI_LIVE"] == "1",
+              environment["SEMREH_SLICE1_HTTPS"] == "1",
+              environment["SEMREH_SLICE2_UI_BACKEND_MODE"] == "stock",
+              environment["SEMREH_SLICE2_UI_BACKEND_SHA"] == backendSHA,
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == credentialsPath else {
+            return XCTFail("Phone Settings verification requires the contained pinned stock fixture.")
+        }
+
+        let app = XCUIApplication()
+        app.launch()
+        defer { UIPasteboard.general.items = [] }
+        let back = chatBackButton(app: app)
+        if back.waitForExistence(timeout: 5), back.isHittable { back.tap() }
+        XCTAssertTrue(app.navigationBars["Sessions"].waitForExistence(timeout: 10))
+        let activityTab = app.buttons["Activity"]
+        XCTAssertTrue(activityTab.waitForExistence(timeout: 5) && activityTab.isHittable)
+        activityTab.tap()
+        retainPhoneScreenshot("Phone Tasks loading themed canvas", app: app)
+        XCTAssertTrue(app.navigationBars["Tasks"].waitForExistence(timeout: 10))
+        retainPhoneScreenshot("Phone Tasks settled themed canvas", app: app)
+        let sessionsTab = app.buttons["Sessions"]
+        XCTAssertTrue(sessionsTab.waitForExistence(timeout: 5) && sessionsTab.isHittable)
+        sessionsTab.tap()
+        XCTAssertTrue(app.navigationBars["Sessions"].waitForExistence(timeout: 10))
+        let settings = app.buttons["Settings"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 5) && settings.isHittable)
+        settings.tap()
+        let done = app.buttons["Done"]
+        XCTAssertTrue(done.waitForExistence(timeout: 10) && done.isHittable)
+        retainPhoneScreenshot("Phone Settings corrected full sheet canvas", app: app)
+
+        let appearance = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Appearance,")
+        ).firstMatch
+        XCTAssertTrue(appearance.waitForExistence(timeout: 5) && appearance.isHittable)
+        appearance.tap()
+        let appearanceBar = app.navigationBars["Appearance"]
+        XCTAssertTrue(appearanceBar.waitForExistence(timeout: 10))
+        XCTAssertTrue(done.exists && done.isHittable)
+        retainPhoneScreenshot("Phone Settings full Appearance destination", app: app)
+        let themePicker = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Theme,")
+        ).firstMatch
+        let accentPicker = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Accent,")
+        ).firstMatch
+        XCTAssertTrue(themePicker.exists && themePicker.isHittable)
+        themePicker.tap()
+        XCTAssertTrue(app.buttons["Dark"].waitForExistence(timeout: 5))
+        app.buttons["Dark"].tap()
+        retainPhoneScreenshot("Phone Settings forced Dark Appearance", app: app)
+        themePicker.tap()
+        XCTAssertTrue(app.buttons["System"].waitForExistence(timeout: 5))
+        app.buttons["System"].tap()
+        XCTAssertTrue(accentPicker.exists && accentPicker.isHittable)
+        accentPicker.tap()
+        XCTAssertTrue(app.buttons["Violet"].waitForExistence(timeout: 5))
+        app.buttons["Violet"].tap()
+        let tintActions = app.switches["Tint New Chat & Send"]
+        XCTAssertTrue(tintActions.waitForExistence(timeout: 5) && tintActions.isHittable)
+        if (tintActions.value as? String) != "1" { tintActions.tap() }
+        retainPhoneScreenshot("Phone Settings System Violet selected", app: app)
+        let appearanceBack = appearanceBar.buttons.firstMatch
+        XCTAssertTrue(appearanceBack.waitForExistence(timeout: 5) && appearanceBack.isHittable)
+        appearanceBack.tap()
+        XCTAssertTrue(appearance.waitForExistence(timeout: 5))
+
+        let connections = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Connections,")
+        ).firstMatch
+        XCTAssertTrue(connections.waitForExistence(timeout: 5) && connections.isHittable)
+        connections.tap()
+        let connectionsBar = app.navigationBars["Connections"]
+        XCTAssertTrue(connectionsBar.waitForExistence(timeout: 10))
+        XCTAssertTrue(done.exists && done.isHittable)
+        let connectionsBack = connectionsBar.buttons.firstMatch
+        XCTAssertTrue(connectionsBack.waitForExistence(timeout: 5) && connectionsBack.isHittable)
+        connectionsBack.tap()
+        XCTAssertTrue(connections.waitForExistence(timeout: 5))
+        done.tap()
+        XCTAssertFalse(done.waitForExistence(timeout: 5))
+
+        let composer = try openContainedNewChat(app: app)
+        _ = try sendUniqueCompleted("SEMREH_PHONE_VIOLET", composer: composer, app: app)
+        retainPhoneScreenshot("Phone Settings Violet chat bubble and composer tint", app: app)
+        let chatBack = chatBackButton(app: app)
+        XCTAssertTrue(chatBack.waitForExistence(timeout: 5) && chatBack.isHittable)
+        chatBack.tap()
+        XCTAssertTrue(app.navigationBars["Sessions"].waitForExistence(timeout: 5))
+
+        app.terminate()
+        app.launch()
+        let restoredChatBack = chatBackButton(app: app)
+        if restoredChatBack.waitForExistence(timeout: 5), restoredChatBack.isHittable {
+            restoredChatBack.tap()
+        }
+        XCTAssertTrue(app.navigationBars["Sessions"].waitForExistence(timeout: 10))
+        settings.tap()
+        XCTAssertTrue(done.waitForExistence(timeout: 5))
+        appearance.tap()
+        XCTAssertTrue(app.staticTexts["System"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Violet"].waitForExistence(timeout: 5))
+        XCTAssertEqual(tintActions.value as? String, "1")
+        accentPicker.tap()
+        XCTAssertTrue(app.buttons["Warm"].waitForExistence(timeout: 5))
+        app.buttons["Warm"].tap()
+        if (tintActions.value as? String) == "1" { tintActions.tap() }
+        appearanceBar.buttons.firstMatch.tap()
+        done.tap()
+        XCTAssertTrue(app.navigationBars["Sessions"].waitForExistence(timeout: 5))
+    }
+
+    @MainActor
     func testOptInProductionLifecyclePhase() async throws {
         continueAfterFailure = false
         #if !targetEnvironment(simulator)
@@ -1443,7 +1929,7 @@ final class DirectSkillUITests: XCTestCase {
                       "Refusing to sign out an authenticated server other than the contained fixture.")
         let signOut = app.buttons["Sign Out of This Server"]
         if !signOut.exists {
-            let appSettings = app.staticTexts["App & maintenance"]
+            let appSettings = app.staticTexts["About & Storage"]
             for _ in 0..<8 where !appSettings.isHittable { app.scrollViews.firstMatch.swipeUp() }
             XCTAssertTrue(appSettings.waitForExistence(timeout: 5) && appSettings.isHittable)
             appSettings.tap()
@@ -1451,6 +1937,13 @@ final class DirectSkillUITests: XCTestCase {
         for _ in 0..<8 where !signOut.isHittable { app.scrollViews.firstMatch.swipeUp() }
         XCTAssertTrue(signOut.waitForExistence(timeout: 5) && signOut.isHittable)
         return signOut
+    }
+
+    private func retainPhoneScreenshot(_ name: String, app: XCUIApplication) {
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
     }
 
     private func replace(_ field: XCUIElement, with value: String, app: XCUIApplication) {
@@ -1643,7 +2136,12 @@ final class DirectSkillUITests: XCTestCase {
                     best = (storedID, rows)
                 }
             }
-            return best
+            guard let best else { return nil }
+            let fullRows = try await fullTranscript(storedID: best.storedID)
+            guard fullRows.count >= best.rows.count else {
+                throw NSError(domain: "DirectSkillUITests", code: 25)
+            }
+            return (best.storedID, fullRows)
         }
 
         func waitForLongTranscript(
@@ -1652,7 +2150,7 @@ final class DirectSkillUITests: XCTestCase {
         ) async throws -> [[String: Any]] {
             let deadline = Date().addingTimeInterval(45)
             while Date() < deadline {
-                let rows = try await transcript(storedID: storedID, limit: 100)
+                let rows = try await fullTranscript(storedID: storedID)
                 if predicate(rows) { return rows }
                 try await Task.sleep(for: .milliseconds(100))
             }
@@ -1662,7 +2160,8 @@ final class DirectSkillUITests: XCTestCase {
         func transcript(
             storedID: String,
             profile: String = "default",
-            limit: Int = 20
+            limit: Int = 20,
+            offset: Int = 0
         ) async throws -> [[String: Any]] {
             var components = URLComponents()
             components.path = "/api/sessions/\(storedID)/messages"
@@ -1671,7 +2170,7 @@ final class DirectSkillUITests: XCTestCase {
                 URLQueryItem(name: "include_compacted", value: "true"),
                 URLQueryItem(name: "order", value: "oldest"),
                 URLQueryItem(name: "limit", value: String(limit)),
-                URLQueryItem(name: "offset", value: "0"),
+                URLQueryItem(name: "offset", value: String(offset)),
             ]
             let (data, response) = try await request(path: try XCTUnwrap(components.string), method: "GET")
             guard (200..<300).contains(response.statusCode),
@@ -1680,6 +2179,22 @@ final class DirectSkillUITests: XCTestCase {
                   let rows = payload["messages"] as? [[String: Any]] else {
                 throw NSError(domain: "DirectSkillUITests", code: 8)
             }
+            return rows
+        }
+
+        private func fullTranscript(
+            storedID: String,
+            profile: String = "default"
+        ) async throws -> [[String: Any]] {
+            var rows: [[String: Any]] = []
+            for offset in stride(from: 0, through: 400, by: 100) {
+                let page = try await transcript(
+                    storedID: storedID, profile: profile, limit: 100, offset: offset
+                )
+                rows.append(contentsOf: page)
+                if page.count < 100 { break }
+            }
+            guard rows.count <= 500 else { throw NSError(domain: "DirectSkillUITests", code: 27) }
             return rows
         }
 

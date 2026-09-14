@@ -1207,7 +1207,7 @@ private struct PlainMarkdownFallbackView: View {
 
     var body: some View {
         Text(verbatim: content)
-            .font(.body)
+            .font(AppFont.body())
             .foregroundStyle(.primary)
             .fixedSize(horizontal: false, vertical: true)
             .textSelection(.enabled)
@@ -1225,6 +1225,7 @@ private extension MarkdownUI.Theme {
             .text {
                 ForegroundColor(.primary)
                 BackgroundColor(nil)
+                FontFamily(.system(.rounded))
                 FontSize(16)
             }
             .code {

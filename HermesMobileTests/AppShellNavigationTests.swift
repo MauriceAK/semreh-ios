@@ -3,6 +3,14 @@ import XCTest
 
 @MainActor
 final class AppShellNavigationTests: XCTestCase {
+    func testBirdTabUsesNonemptyTemplateArtwork() {
+        let image = BirdTabIcon.image
+        XCTAssertEqual(image.size.width, 25, accuracy: 0.1)
+        XCTAssertEqual(image.size.height, 25, accuracy: 0.1)
+        XCTAssertEqual(image.renderingMode, .alwaysTemplate)
+        XCTAssertNotNil(image.cgImage)
+    }
+
     func testRootSettingsActionUsesOneGearDestination() {
         XCTAssertEqual(AppShellSettingsAction.systemImage, "gearshape")
         XCTAssertEqual(AppShellSettingsAction.accessibilityLabel, "Settings")

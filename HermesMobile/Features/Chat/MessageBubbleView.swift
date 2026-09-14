@@ -3,17 +3,18 @@ import SwiftUI
 struct MessageBubbleView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.appColorPalette) private var palette
+    @Environment(\.appAccent) private var accent
 
     private var userBubbleBackground: Color {
-        SemrehVisualTheme.promptBubbleBackground(for: colorScheme, palette: palette)
+        SemrehVisualTheme.promptBubbleBackground(for: colorScheme, palette: palette, accent: accent)
     }
 
     private var userBubbleForeground: Color {
-        SemrehVisualTheme.promptBubbleForeground(for: palette)
+        SemrehVisualTheme.promptBubbleForeground(for: palette, accent: accent)
     }
 
     private var userBubbleBorder: Color {
-        SemrehVisualTheme.promptBubbleBorder(for: colorScheme, palette: palette).opacity(0.82)
+        SemrehVisualTheme.promptBubbleBorder(for: colorScheme, palette: palette, accent: accent).opacity(0.82)
     }
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @AppStorage(ChatTranscriptDisplaySettings.hidesAttachmentPathsKey) private var hidesAttachmentPaths = true

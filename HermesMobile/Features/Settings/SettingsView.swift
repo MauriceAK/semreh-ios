@@ -3,20 +3,44 @@ import SwiftData
 import UIKit
 import UserNotifications
 
-/// A Settings section a deep link can scroll to when the screen opens — the
-/// avatar long-press "Manage Servers" shortcut lands on the Servers card (#283).
+/// A Settings section a deep link can open when the screen opens — the avatar
+/// long-press "Manage Servers" shortcut lands on Connections (#283).
 enum SettingsScrollAnchor: Hashable {
     case servers
+}
+
+private enum SettingsDestination: Hashable {
+    case appearance
+    case chat
+    case connections
+    case toolsAndHistory
+    case aboutAndStorage
+
+    var title: String {
+        switch self {
+        case .appearance:
+            String(localized: "Appearance")
+        case .chat:
+            String(localized: "Chat")
+        case .connections:
+            String(localized: "Connections")
+        case .toolsAndHistory:
+            String(localized: "Tools & History")
+        case .aboutAndStorage:
+            String(localized: "About & Storage")
+        }
+    }
 }
 
 struct SettingsView: View {
     @Bindable var authManager: AuthManager
     let server: URL
-    /// When set, Settings scrolls to this section once on first appear (#283).
+    /// When set, Settings opens the matching destination once on first appear (#283).
     let initialScrollTarget: SettingsScrollAnchor?
     /// Optional content rendered above the existing settings cards (for example,
     /// the profile summary in the shell's You tab).
     let header: AnyView?
+    private let destination: SettingsDestination?
 
     init(
         authManager: AuthManager,
@@ -28,16 +52,23 @@ struct SettingsView: View {
         self.server = server
         self.initialScrollTarget = initialScrollTarget
         self.header = header
+        self.destination = nil
+        _cliSessionsSync = State(initialValue: CliSessionsSyncModel(server: server))
+    }
+
+    private init(authManager: AuthManager, server: URL, destination: SettingsDestination) {
+        self.authManager = authManager
+        self.server = server
+        self.initialScrollTarget = nil
+        self.header = nil
+        self.destination = destination
         _cliSessionsSync = State(initialValue: CliSessionsSyncModel(server: server))
     }
 
     @ScaledMetric(relativeTo: .body) private var settingsCardSpacing: CGFloat = 18
     @State private var isConfirmingReconfigure = false
     @State private var didScrollToInitialTarget = false
-    @State private var showsPersonalSettings = false
-    @State private var showsConversationSettings = false
-    @State private var showsServerSettings = false
-    @State private var showsAppSettings = false
+    @State private var isPresentingInitialServerDestination = false
     @State private var isPresentingAddServer = false
     @State private var isConfirmingClearCache = false
     @State private var isClearingCache = false
@@ -63,6 +94,7 @@ struct SettingsView: View {
     @State private var notificationPermissionStatus: UNAuthorizationStatus?
     @State private var notificationStatusMessage: String?
     @AppStorage(AppTheme.storageKey) private var appThemeRawValue = AppTheme.system.rawValue
+    @AppStorage(AppAccent.storageKey) private var appAccentRawValue = AppAccent.defaultValue.rawValue
     @AppStorage(AppHaptics.isEnabledKey) private var isHapticsEnabled = true
     @AppStorage(ResponseCompletionNotifications.isEnabledKey) private var isResponseCompletionNotificationsEnabled = false
     @AppStorage(ResponseCompletionNotifications.hasRequestedPermissionKey) private var hasRequestedResponseCompletionNotificationPermission = false
@@ -85,6 +117,9 @@ struct SettingsView: View {
     @AppStorage(ChatTranscriptDisplaySettings.rtlChatLayoutEnabledKey) private var rtlChatLayoutEnabled = ChatTranscriptDisplaySettings.rtlChatLayoutDefaultEnabled
     @AppStorage(StreamedTextAnimationSettings.isEnabledKey) private var isStreamedTextAnimationEnabled = true
     @AppStorage(PrimaryActionTintSettings.isEnabledKey) private var tintsPrimaryActions = false
+    // These legacy identity values remain persisted and are still consumed by
+    // the server registry/session list. The editor is intentionally not on the
+    // settings index; per-server identity remains available from Connections.
     @AppStorage(SessionIdentitySettings.displayNameKey) private var identityDisplayName = ""
     @AppStorage(SessionIdentitySettings.initialsKey) private var identityInitials = ""
     @AppStorage(SectionVisibilitySettings.tasksKey) private var showsTasksSection = true
@@ -102,42 +137,54 @@ struct SettingsView: View {
     @Environment(\.appColorPalette) private var palette
 
     var body: some View {
-        ScrollViewReader { proxy in
         ScrollView {
             VStack(spacing: settingsCardSpacing) {
-                if let header {
-                    header
-                } else {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Make Semreh yours.").font(SemrehTypography.heading)
-                        Text("Your preferences, conversations, and connected servers.")
-                            .font(SemrehTypography.body).foregroundStyle(.secondary)
-                    }.frame(maxWidth: .infinity, alignment: .leading)
+                if destination == nil {
+                    if let header {
+                        header
+                    } else {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Make Semreh yours.").font(SemrehTypography.heading)
+                            Text("Your preferences, conversations, and connected servers.")
+                                .font(SemrehTypography.body).foregroundStyle(.secondary)
+                        }.frame(maxWidth: .infinity, alignment: .leading)
+                    }
+
+                    settingsDestinationIndex
                 }
 
-                SettingsCategory(title: "Profile & appearance", subtitle: "Identity, theme, and accent", systemImage: "person.crop.circle", isExpanded: $showsPersonalSettings) {
-                SettingsCard(title: String(localized: "Identity")) {
-                    SessionIdentitySettingsEditor(
-                        displayName: $identityDisplayName,
-                        initials: identityInitialsBinding,
-                        previewInitials: identityPreviewInitials,
-                        previewColor: SemrehVisualTheme.brandActionColor(for: palette),
-                        previewForeground: SemrehVisualTheme.energyForeground(for: palette)
-                    )
-                }
-
-                SettingsCard(title: String(localized: "Appearance")) {
+                if destination == .appearance {
+                SettingsCard {
                     SettingsPickerRow(
                         title: String(localized: "Theme"),
                         systemImage: "circle.lefthalf.filled",
-                        selection: $appThemeRawValue
+                        selection: appThemeSettingsBinding
                     ) {
-                        ForEach(AppTheme.allCases) { theme in
-                            Text(theme.title).tag(theme.rawValue)
+                        ForEach(settingsThemeOptions) { theme in
+                            Text(settingsThemeTitle(for: theme)).tag(theme.rawValue)
                         }
                     }
 
-                    SettingsFootnote(String(localized: "Semreh follows your system appearance. Goku Light and Goku Dark keep the legacy Goku colors; other themes restyle the app."))
+                    SettingsFootnote(String(localized: "System follows the device appearance. Light and Dark use Semreh's cream and charcoal palette."))
+
+                    if let legacyThemeTitle {
+                        SettingsFootnote(String(localized: "Legacy theme \(legacyThemeTitle) is still preserved. Choose System, Light, or Dark to switch."))
+                    }
+
+                    SettingsDivider()
+
+                    SettingsPickerRow(
+                        title: String(localized: "Accent"),
+                        systemImage: "paintbrush",
+                        selection: Binding(
+                            get: { AppAccent.storedValue(appAccentRawValue).rawValue },
+                            set: { appAccentRawValue = $0 }
+                        )
+                    ) {
+                        ForEach(AppAccent.allCases) { accent in
+                            Text(accent.title).tag(accent.rawValue)
+                        }
+                    }
 
                     SettingsDivider()
 
@@ -151,7 +198,8 @@ struct SettingsView: View {
                 }
                 }
 
-                SettingsCategory(title: "Chat & sessions", subtitle: "Responses, dictation, alerts, and history", systemImage: "bubble.left.and.bubble.right", isExpanded: $showsConversationSettings) {
+                if destination == .chat {
+                SettingsCategory(title: "Chat", subtitle: "Responses, dictation, and transcript details", systemImage: "bubble.left.and.bubble.right") {
                 SettingsCard(title: String(localized: "Interaction")) {
                     SettingsToggleRow(
                         title: String(localized: "Haptic Feedback"),
@@ -170,6 +218,8 @@ struct SettingsView: View {
                     if let notificationStatusText {
                         SettingsFootnote(notificationStatusText)
                     }
+
+                    SettingsFootnote(String(localized: "Uses on-device iOS notifications. Remote push delivery is not configured."))
 
                     SettingsDivider()
 
@@ -309,8 +359,11 @@ struct SettingsView: View {
 
                     SettingsFootnote(String(localized: "Covers both the git menu in the chat toolbar and the branch picker in the composer."))
                 }
+                }
+                }
 
-
+                if destination == .toolsAndHistory {
+                SettingsCategory(title: "Tools & History", subtitle: "Organizers, session visibility, and archives", systemImage: "square.grid.2x2") {
                 SettingsCard(title: String(localized: "Tools")) {
                     NavigationLink {
                         ControlView(
@@ -446,14 +499,16 @@ struct SettingsView: View {
                 SettingsCard(title: String(localized: "Archived Sessions")) {
                     NavigationLink {
                         ArchivedSessionsView(server: server, onAPIError: authManager.handleAPIError)
-                    } label: {
+                } label: {
                         SettingsAccessoryRow(title: String(localized: "Archived Sessions"), systemImage: "archivebox")
                     }
                     .buttonStyle(.plain)
                 }
                 }
+                }
 
-                SettingsCategory(title: "Servers & models", subtitle: "Connections, profiles, providers, and updates", systemImage: "server.rack", isExpanded: $showsServerSettings) {
+                if destination == .connections {
+                SettingsCategory(title: "Connections", subtitle: "Servers, profiles, providers, and updates", systemImage: "server.rack") {
                 serversCard
 
                 SettingsCard(title: String(localized: "Active Server")) {
@@ -491,6 +546,17 @@ struct SettingsView: View {
 
                     SettingsDivider()
 
+                    SettingsValueRow(title: String(localized: "Version")) {
+                        serverVersionContent
+                    }
+
+                    serverUpdateCheckAction
+                    serverUpdateNote
+                    serverUpdateAction
+                }
+
+                SettingsCard(title: String(localized: "Advanced")) {
+
                     NavigationLink {
                         ProvidersView(server: server)
                     } label: {
@@ -514,19 +580,12 @@ struct SettingsView: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityHint("Opens the custom request headers editor.")
-
-                    SettingsValueRow(title: String(localized: "Version")) {
-                        serverVersionContent
-                    }
-
-                    serverUpdateCheckAction
-                    serverUpdateNote
-                    serverUpdateAction
                 }
                 }
-                .id(SettingsScrollAnchor.servers)
+                }
 
-                SettingsCategory(title: "App & maintenance", subtitle: "Shortcuts, support, offline data, and sign out", systemImage: "gearshape", isExpanded: $showsAppSettings) {
+                if destination == .aboutAndStorage {
+                SettingsCategory(title: "About & Storage", subtitle: "Support, offline data, and account", systemImage: "info.circle") {
                 SettingsCard(title: String(localized: "Siri & Shortcuts")) {
                     if let settingsURL = URL(string: UIApplication.openSettingsURLString) {
                         Link(destination: settingsURL) {
@@ -602,6 +661,7 @@ struct SettingsView: View {
                     }
                 }
                 }
+                }
             }
             .padding(.horizontal, 16)
             .padding(.top, 18)
@@ -609,10 +669,14 @@ struct SettingsView: View {
             .adaptiveReadableContent(maxWidth: AdaptiveReadableContentWidth.secondaryDestination)
         }
         .background { SemrehVisualTheme.canvas(for: colorScheme, palette: palette).ignoresSafeArea() }
-        .navigationTitle("Settings")
+        .navigationTitle(destination?.title ?? "Settings")
+        .toolbar(header == nil ? .visible : .hidden, for: .navigationBar)
         .task {
-            await loadServerSettings()
-            await refreshNotificationPermissionStatus()
+            if destination == .connections {
+                await loadServerSettings()
+            } else if destination == .chat {
+                await refreshNotificationPermissionStatus()
+            }
         }
         .onDisappear {
             updateOperation?.cancel()
@@ -711,18 +775,95 @@ struct SettingsView: View {
                 }
             )
         }
+        .navigationDestination(isPresented: $isPresentingInitialServerDestination) {
+            SettingsView(authManager: authManager, server: server, destination: .connections)
+        }
         .onAppear {
-            // Land on the requested section once when opened via a deep link
-            // (the avatar's "Manage Servers" → Servers card), not on every
-            // re-appear after popping back from a sub-screen (#283).
-            guard let initialScrollTarget, !didScrollToInitialTarget else { return }
-            showsServerSettings = true
+            // Land on the Connections destination when opened via the avatar's
+            // "Manage Servers" deep link. The one-shot guard prevents popping
+            // back from a server detail screen from reopening it (#283).
+            guard destination == nil,
+                  initialScrollTarget == .servers,
+                  !didScrollToInitialTarget else { return }
             didScrollToInitialTarget = true
             DispatchQueue.main.async {
-                proxy.scrollTo(initialScrollTarget, anchor: .top)
+                isPresentingInitialServerDestination = true
             }
         }
+    }
+
+    @ViewBuilder
+    private var settingsDestinationIndex: some View {
+        VStack(spacing: 0) {
+            NavigationLink {
+                SettingsView(authManager: authManager, server: server, destination: .appearance)
+            } label: {
+                SettingsDestinationRow(
+                    title: String(localized: "Appearance"),
+                    subtitle: String(localized: "Theme and primary actions"),
+                    systemImage: "paintpalette"
+                )
+            }
+            .buttonStyle(.plain)
+
+            SettingsIndexDivider()
+
+            NavigationLink {
+                SettingsView(authManager: authManager, server: server, destination: .chat)
+            } label: {
+                SettingsDestinationRow(
+                    title: String(localized: "Chat"),
+                    subtitle: String(localized: "Interaction, dictation, and transcript details"),
+                    systemImage: "bubble.left.and.bubble.right"
+                )
+            }
+            .buttonStyle(.plain)
+
+            SettingsIndexDivider()
+
+            NavigationLink {
+                SettingsView(authManager: authManager, server: server, destination: .connections)
+            } label: {
+                SettingsDestinationRow(
+                    title: String(localized: "Connections"),
+                    subtitle: String(localized: "Servers, profiles, models, and headers"),
+                    systemImage: "server.rack"
+                )
+            }
+            .buttonStyle(.plain)
+
+            SettingsIndexDivider()
+
+            NavigationLink {
+                SettingsView(authManager: authManager, server: server, destination: .toolsAndHistory)
+            } label: {
+                SettingsDestinationRow(
+                    title: String(localized: "Tools & History"),
+                    subtitle: String(localized: "Organizers, session visibility, and archives"),
+                    systemImage: "square.grid.2x2"
+                )
+            }
+            .buttonStyle(.plain)
+
+            SettingsIndexDivider()
+
+            NavigationLink {
+                SettingsView(authManager: authManager, server: server, destination: .aboutAndStorage)
+            } label: {
+                SettingsDestinationRow(
+                    title: String(localized: "About & Storage"),
+                    subtitle: String(localized: "Support, offline data, and account"),
+                    systemImage: "info.circle"
+                )
+            }
+            .buttonStyle(.plain)
         }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 4)
+        .background(
+            SemrehVisualTheme.raisedPanel(for: colorScheme, palette: palette),
+            in: RoundedRectangle(cornerRadius: 22, style: .continuous)
+        )
     }
 
     @ViewBuilder
@@ -850,6 +991,47 @@ struct SettingsView: View {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? String(localized: "Unknown")
     }
 
+    private var settingsThemeOptions: [AppTheme] {
+        [.system, .semrehLight, .semrehDark]
+    }
+
+    /// The index intentionally offers only the supported three choices. An
+    /// older stored palette remains untouched until the user explicitly picks
+    /// one of these options, so upgrading never silently changes appearance.
+    private var appThemeSettingsBinding: Binding<String> {
+        Binding(
+            get: {
+                guard let storedTheme = AppTheme(rawValue: appThemeRawValue),
+                      settingsThemeOptions.contains(storedTheme) else {
+                    return AppTheme.system.rawValue
+                }
+                return storedTheme.rawValue
+            },
+            set: { appThemeRawValue = $0 }
+        )
+    }
+
+    private var legacyThemeTitle: String? {
+        guard let storedTheme = AppTheme(rawValue: appThemeRawValue),
+              !settingsThemeOptions.contains(storedTheme) else {
+            return nil
+        }
+        return storedTheme.title
+    }
+
+    private func settingsThemeTitle(for theme: AppTheme) -> String {
+        switch theme {
+        case .system:
+            return String(localized: "System")
+        case .semrehLight:
+            return String(localized: "Light")
+        case .semrehDark:
+            return String(localized: "Dark")
+        case .light, .dark, .chatgpt, .midnight, .forest, .sand:
+            return theme.title
+        }
+    }
+
     private var responseCompletionNotificationBinding: Binding<Bool> {
         Binding(
             get: { isResponseCompletionNotificationsEnabled },
@@ -865,21 +1047,6 @@ struct SettingsView: View {
                     }
                 }
             }
-        )
-    }
-
-    private var identityInitialsBinding: Binding<String> {
-        Binding(
-            get: { identityInitials },
-            set: { identityInitials = SessionIdentitySettings.normalizedInitials($0) }
-        )
-    }
-
-    private var identityPreviewInitials: String {
-        SessionIdentitySettings.displayInitials(
-            displayName: identityDisplayName,
-            storedInitials: identityInitials,
-            fallbackFullName: NSFullUserName()
         )
     }
 
@@ -1332,29 +1499,77 @@ private extension UNAuthorizationStatus {
     }
 }
 
+private struct SettingsDestinationRow: View {
+    let title: String
+    let subtitle: String
+    let systemImage: String
+
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.appColorPalette) private var palette
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Image(systemName: systemImage)
+                .font(AppFont.body(weight: .semibold))
+                .foregroundStyle(SemrehVisualTheme.action(for: colorScheme, palette: palette))
+                .frame(width: 36, height: 36)
+                .background(
+                    SemrehVisualTheme.canvas(for: colorScheme, palette: palette),
+                    in: RoundedRectangle(cornerRadius: 11, style: .continuous)
+                )
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(AppFont.subheadline(weight: .semibold))
+                    .foregroundStyle(.primary)
+
+                Text(subtitle)
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 8)
+
+            Image(systemName: "chevron.forward")
+                .font(AppFont.caption(weight: .semibold))
+                .foregroundStyle(.tertiary)
+                .accessibilityHidden(true)
+        }
+        .padding(.vertical, 11)
+        .frame(maxWidth: .infinity, minHeight: 64, alignment: .leading)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+        .accessibilityHint("Opens this settings section.")
+    }
+}
+
+private struct SettingsIndexDivider: View {
+    var body: some View {
+        Divider()
+            .padding(.leading, 50)
+            .opacity(0.72)
+    }
+}
+
 private struct SettingsCategory<Content: View>: View {
     @Environment(\.appColorPalette) private var palette
     @Environment(\.colorScheme) private var colorScheme
     let title: LocalizedStringKey
     let subtitle: LocalizedStringKey
     let systemImage: String
-    @Binding var isExpanded: Bool
     @ViewBuilder let content: Content
 
-    init(title: LocalizedStringKey, subtitle: LocalizedStringKey, systemImage: String, isExpanded: Binding<Bool>, @ViewBuilder content: () -> Content) {
+    init(title: LocalizedStringKey, subtitle: LocalizedStringKey, systemImage: String, @ViewBuilder content: () -> Content) {
         self.title = title
         self.subtitle = subtitle
         self.systemImage = systemImage
-        _isExpanded = isExpanded
         self.content = content()
     }
 
     var body: some View {
-        DisclosureGroup(isExpanded: $isExpanded) {
-            VStack(spacing: 20) { content }
-                .padding(.top, 18)
-                .padding(.bottom, 4)
-        } label: {
+        VStack(alignment: .leading, spacing: 16) {
             HStack(alignment: .top, spacing: 12) {
                 Image(systemName: systemImage)
                     .font(.body.weight(.semibold))
@@ -1367,49 +1582,9 @@ private struct SettingsCategory<Content: View>: View {
                     Text(subtitle).font(SemrehTypography.caption).foregroundStyle(.secondary)
                 }.fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 0)
-            }.padding(.vertical, 4)
-        }
-        .tint(SemrehVisualTheme.action(for: colorScheme, palette: palette))
-        .padding(16)
-        .background(SemrehVisualTheme.raisedPanel(for: colorScheme, palette: palette), in: RoundedRectangle(cornerRadius: 22))
-    }
-}
-
-private struct SessionIdentitySettingsEditor: View {
-    @ScaledMetric(relativeTo: .caption) private var avatarPreviewSize: CGFloat = 36
-
-    @Binding var displayName: String
-    @Binding var initials: String
-    let previewInitials: String
-    let previewColor: Color
-    let previewForeground: Color
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 12) {
-                Text(previewInitials)
-                    .font(AppFont.caption(weight: .semibold))
-                    .foregroundStyle(previewForeground)
-                    .frame(width: avatarPreviewSize, height: avatarPreviewSize)
-                    .background(previewColor, in: Circle())
-                    .overlay(Circle().stroke(.white.opacity(0.18), lineWidth: 1))
-                    .accessibilityHidden(true)
-
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Sessions Avatar")
-                        .font(AppFont.subheadline(weight: .medium))
-
-                    Text("Stored on this device only.")
-                        .font(AppFont.caption())
-                        .foregroundStyle(.secondary)
-                }
             }
 
-            SettingsTextFieldRow(title: String(localized: "Display Name"), text: $displayName, placeholder: NSFullUserName())
-
-            SettingsDivider()
-
-            SettingsTextFieldRow(title: String(localized: "Initials"), text: $initials, placeholder: previewInitials)
+            VStack(spacing: 20) { content }
         }
     }
 }
@@ -1477,22 +1652,24 @@ private struct SettingsCard<Content: View>: View {
     @Environment(\.colorScheme) private var colorScheme
     @ScaledMetric(relativeTo: .body) private var contentSpacing: CGFloat = 12
 
-    let title: String
+    let title: String?
     @ViewBuilder let content: Content
 
-    init(title: String, @ViewBuilder content: () -> Content) {
+    init(title: String? = nil, @ViewBuilder content: () -> Content) {
         self.title = title
         self.content = content()
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            if let title {
             Text(title)
                 .textCase(.uppercase)
                 .font(AppFont.caption(weight: .semibold))
                 .foregroundStyle(SemrehVisualTheme.brandAccent(for: colorScheme, palette: palette))
                 .padding(.horizontal, 4)
                 .padding(.bottom, 8)
+            }
 
             VStack(alignment: .leading, spacing: contentSpacing) {
                 content

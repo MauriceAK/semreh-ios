@@ -427,6 +427,11 @@ struct ChatView: View {
     private let transcriptBlockSpacing: CGFloat = 6
     private let composerAccessoryVerticalSpacing: CGFloat = 8
     private let activeRunStatusSpacerHeight: CGFloat = 36
+    /// Keep a short, nearby return-to-latest motion readable without animating
+    /// a tour through a long transcript. This is intentionally a band, not a
+    /// continuously-updated distance, so scroll metrics do not invalidate the
+    /// whole chat on every point of a drag.
+    private let nearbyBottomMotionDistance: CGFloat = 640
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -473,6 +478,7 @@ struct ChatView: View {
     @State private var explicitBottomScrollTask: Task<Void, Never>?
     @State private var isExplicitBottomDecelerationActive = false
     @State private var isUserInteractingWithScroll = false
+    @State private var isNearBottomForMotion = false
     @State private var userScrollCooldownUntil: Date?
     /// While set and in the future, auto-follow scrolls snap instead of animating, so
     /// the cache-first → network reconcile re-pins to the bottom without a jump (#289).
@@ -514,6 +520,7 @@ struct ChatView: View {
     @State private var composerResizeFollowIntent = false
     @State private var composerResizeGeneration = 0
     @State private var composerResizeTask: Task<Void, Never>?
+    @State private var shouldAnimateNextFollowAfterComposerResize = false
     @State private var composerIsFocused = false
     @State private var didCompleteInitialAppearance = false
     @State private var isInitialComposerFocusContentReady = false
@@ -808,11 +815,7 @@ struct ChatView: View {
 
             HStack(alignment: .top, spacing: 8) {
                 Button {
-                    if let onParentBack {
-                        onParentBack()
-                    } else {
-                        dismiss()
-                    }
+                    handleBackNavigation()
                 } label: {
                     Image(systemName: "chevron.left")
                         .font(.system(size: 20, weight: .medium))
@@ -848,6 +851,18 @@ struct ChatView: View {
                 .allowsHitTesting(false)
                 .accessibilityHidden(true)
         }
+    }
+
+    /// The Sessions shell owns the selected destination, while this view owns
+    /// the actual navigation destination presented by SwiftUI. Clear both
+    /// pieces of state on an explicit Back request: the parent callback keeps
+    /// a late restore from reopening this chat, and `dismiss()` performs the
+    /// immediate pop from the destination's navigation context. The latter is
+    /// required for the custom header button because it is outside the system
+    /// navigation bar and therefore has no implicit pop action of its own.
+    private func handleBackNavigation() {
+        onParentBack?()
+        dismiss()
     }
 
     private var chatOverflowMenu: some View {
@@ -1662,7 +1677,10 @@ struct ChatView: View {
     }
 
     private var activeRunStatusPresentation: ChatActiveRunStatusPresentation? {
-        ChatActiveRunStatusPolicy.presentation(
+        // The composer already owns the pending-stop label. A second floating
+        // copy both repeats it and inserts another 36pt into the transcript.
+        guard !viewModel.isCancellingStream else { return nil }
+        return ChatActiveRunStatusPolicy.presentation(
             isStartingChat: viewModel.isStartingChat,
             hasActiveStream: viewModel.activeStreamID != nil,
             activeStreamRecoveryState: viewModel.activeStreamRecoveryState,
@@ -2467,6 +2485,7 @@ struct ChatView: View {
         explicitBottomScrollTask?.cancel()
         explicitBottomScrollGeneration &+= 1
         let generation = explicitBottomScrollGeneration
+        let shouldAnimateInitialJump = isNearBottomForMotion && !reduceMotion
 
         userScrollCooldownUntil = nil
         isExplicitBottomDecelerationActive = false
@@ -2483,7 +2502,7 @@ struct ChatView: View {
         // Do not wait for a task hop before the first jump. In particular, an
         // old near-bottom/tail-visible metrics sample must not make the request
         // look settled without ever delivering its target to UIKit.
-        issueExplicitBottomScroll(proxy)
+        issueExplicitBottomScroll(proxy, animated: shouldAnimateInitialJump)
         guard isExplicitBottomScrollActive else { return }
 
         explicitBottomScrollTask = Task { @MainActor in
@@ -2505,9 +2524,10 @@ struct ChatView: View {
                 }
 
                 // Realize the concrete last row before refining toward trailing
-                // content. Jumping directly to an off-list sentinel after a lazy
-                // transcript mutation can land in estimated, unrendered space.
-                issueExplicitBottomScroll(proxy)
+                // content. Keep nearby settlement calls animated so a retry
+                // retargets the in-flight motion instead of cancelling it;
+                // far-history settlement remains direct.
+                issueExplicitBottomScroll(proxy, animated: shouldAnimateInitialJump)
             }
 
             guard generation == explicitBottomScrollGeneration else { return }
@@ -2517,13 +2537,22 @@ struct ChatView: View {
         }
     }
 
-    private func issueExplicitBottomScroll(_ proxy: ScrollViewProxy) {
+    private func issueExplicitBottomScroll(
+        _ proxy: ScrollViewProxy,
+        animated: Bool = false
+    ) {
         let target = ChatScrollPolicy.explicitBottomTargetID(
             latestMessageID: latestTranscriptMessageID,
             latestMessageIsVisible: isLatestTranscriptRowVisible,
             bottomAnchorID: bottomAnchorID
         )
-        proxy.scrollTo(target, anchor: .bottom)
+        if animated, let animation = ChatMotion.scrollToLatest(reduceMotion: reduceMotion) {
+            withAnimation(animation) {
+                proxy.scrollTo(target, anchor: .bottom)
+            }
+        } else {
+            proxy.scrollTo(target, anchor: .bottom)
+        }
         guard isExplicitBottomScrollActive else { return }
         hasIssuedExplicitBottomScroll = true
     }
@@ -2570,13 +2599,15 @@ struct ChatView: View {
         animated: Bool = true,
         isUserInitiated: Bool = false
     ) {
+        let animateAfterComposerResize = shouldAnimateNextFollowAfterComposerResize
+        shouldAnimateNextFollowAfterComposerResize = false
         guard !viewModel.messages.isEmpty else { return }
 
         scheduleFollowScroll(
             proxy,
             targetID: bottomAnchorID,
             anchor: .bottom,
-            animated: animated,
+            animated: animated || animateAfterComposerResize,
             isUserInitiated: isUserInitiated
         )
     }
@@ -2637,7 +2668,14 @@ struct ChatView: View {
             // taller server transcript replacing the cached one doesn't animate a jump
             // (#289). Evaluated at fire time so it's robust to onChange ordering.
             let isCacheFirstSnapWindow = cacheFirstSnapUntil.map { Date() < $0 } ?? false
-            if animated, !isCacheFirstSnapWindow {
+            // Keep nearby follow motions readable, but never animate a long
+            // return through history. `isNearBottomForMotion` is a coarse band
+            // updated only when crossing its threshold, not a per-pixel state.
+            let shouldAnimate = animated
+                && isNearBottomForMotion
+                && !isCacheFirstSnapWindow
+                && !reduceMotion
+            if shouldAnimate {
                 // While streaming, follow with the short cadence-synced curve so
                 // back-to-back triggers retarget smoothly; otherwise keep the
                 // regular follow-scroll feel.
@@ -2746,6 +2784,7 @@ struct ChatView: View {
             isComposerResizing = false
 
             guard shouldFollow else { return }
+            shouldAnimateNextFollowAfterComposerResize = true
             followRejoinScrollToken += 1
         }
     }
@@ -2794,6 +2833,10 @@ struct ChatView: View {
         }
 
         let isStreaming = viewModel.activeStreamID != nil
+        let isNearBottomForMotionNow = max(0, metrics.distanceFromBottom) <= nearbyBottomMotionDistance
+        if isNearBottomForMotion != isNearBottomForMotionNow {
+            isNearBottomForMotion = isNearBottomForMotionNow
+        }
         let isNearBottom = ChatScrollPolicy.isNearBottom(
             distanceFromBottom: max(0, metrics.distanceFromBottom),
             isStreaming: isStreaming

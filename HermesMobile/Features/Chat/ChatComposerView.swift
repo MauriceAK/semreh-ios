@@ -57,6 +57,7 @@ struct MessageComposerView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.appColorPalette) private var palette
+    @Environment(\.appAccent) private var accent
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage(PrimaryActionTintSettings.isEnabledKey) private var tintsPrimaryActions = false
@@ -1000,14 +1001,14 @@ struct MessageComposerView: View {
             isEnabled: tintsPrimaryActions,
             controlIsEnabled: !isActionButtonDisabled
         ) {
-            return SemrehVisualTheme.action(for: colorScheme, palette: palette)
+            return SemrehVisualTheme.action(for: colorScheme, palette: palette, accent: accent)
         }
 
         if isActionButtonDisabled {
             return colorScheme == .dark ? Color.white.opacity(0.18) : Color.black.opacity(0.12)
         }
 
-        return SemrehVisualTheme.energy(for: palette)
+        return SemrehVisualTheme.energy(for: palette, accent: accent)
     }
 
     private var actionButtonForeground: Color {
@@ -1015,14 +1016,14 @@ struct MessageComposerView: View {
             isEnabled: tintsPrimaryActions,
             controlIsEnabled: !isActionButtonDisabled
         ) {
-            return SemrehVisualTheme.accentForeground(for: colorScheme, palette: palette)
+            return SemrehVisualTheme.accentForeground(for: colorScheme, palette: palette, accent: accent)
         }
 
         if isActionButtonDisabled {
             return Color(.secondaryLabel)
         }
 
-        return SemrehVisualTheme.energyForeground(for: palette)
+        return SemrehVisualTheme.energyForeground(for: palette, accent: accent)
     }
 
     private var isComposerExpanded: Bool {

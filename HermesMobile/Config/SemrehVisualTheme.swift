@@ -1,4 +1,54 @@
+import Foundation
 import SwiftUI
+
+/// The small, product-level accent family used by Semreh's native controls and
+/// user message surfaces. This is intentionally separate from `HeaderLogoColor`,
+/// which remains a legacy per-server identity color.
+enum AppAccent: String, CaseIterable, Identifiable, Sendable {
+    case warm
+    case violet
+    case blue
+    case mint
+    case rose
+
+    static let storageKey = "appearance.appAccent"
+    static let defaultValue: AppAccent = .warm
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .warm:
+            String(localized: "Warm")
+        case .violet:
+            String(localized: "Violet")
+        case .blue:
+            String(localized: "Blue")
+        case .mint:
+            String(localized: "Mint")
+        case .rose:
+            String(localized: "Rose")
+        }
+    }
+
+    /// Invalid or stale persisted values must never change the default look.
+    static func storedValue(_ rawValue: String) -> AppAccent {
+        AppAccent(rawValue: rawValue) ?? defaultValue
+    }
+}
+
+private struct AppAccentKey: EnvironmentKey {
+    static let defaultValue = AppAccent.defaultValue
+}
+
+extension EnvironmentValues {
+    /// The resolved accent for the current app tree. Pure theme functions take
+    /// this value explicitly so they remain deterministic and testable.
+    var appAccent: AppAccent {
+        get { self[AppAccentKey.self] }
+        set { self[AppAccentKey.self] = newValue }
+    }
+}
 
 private struct AppColorPaletteKey: EnvironmentKey {
     static let defaultValue = AppColorPalette.semreh
@@ -48,28 +98,64 @@ enum SemrehVisualTheme {
         tokens(for: palette).panelHex(for: colorScheme)
     }
 
-    static func actionHex(for colorScheme: ColorScheme, palette: AppColorPalette = .semreh) -> String {
-        tokens(for: palette).actionHex(for: colorScheme)
+    static func actionHex(
+        for colorScheme: ColorScheme,
+        palette: AppColorPalette = .semreh,
+        accent: AppAccent = .warm
+    ) -> String {
+        if palette == .semreh {
+            return accentTokens(for: accent).actionHex(for: colorScheme)
+        }
+
+        return tokens(for: palette).actionHex(for: colorScheme)
     }
 
-    static func action(for colorScheme: ColorScheme, palette: AppColorPalette = .semreh) -> Color {
-        Color(hexRGB: actionHex(for: colorScheme, palette: palette))!
+    static func action(
+        for colorScheme: ColorScheme,
+        palette: AppColorPalette = .semreh,
+        accent: AppAccent = .warm
+    ) -> Color {
+        Color(hexRGB: actionHex(for: colorScheme, palette: palette, accent: accent))!
     }
 
-    static func accentForegroundHex(for colorScheme: ColorScheme, palette: AppColorPalette = .semreh) -> String {
-        tokens(for: palette).accentForegroundHex(for: colorScheme)
+    static func accentForegroundHex(
+        for colorScheme: ColorScheme,
+        palette: AppColorPalette = .semreh,
+        accent: AppAccent = .warm
+    ) -> String {
+        if palette == .semreh {
+            return accentTokens(for: accent).accentForegroundHex(for: colorScheme)
+        }
+
+        return tokens(for: palette).accentForegroundHex(for: colorScheme)
     }
 
-    static func accentForeground(for colorScheme: ColorScheme, palette: AppColorPalette = .semreh) -> Color {
-        Color(hexRGB: accentForegroundHex(for: colorScheme, palette: palette))!
+    static func accentForeground(
+        for colorScheme: ColorScheme,
+        palette: AppColorPalette = .semreh,
+        accent: AppAccent = .warm
+    ) -> Color {
+        Color(hexRGB: accentForegroundHex(for: colorScheme, palette: palette, accent: accent))!
     }
 
-    static func brandAccentHex(for colorScheme: ColorScheme, palette: AppColorPalette = .semreh) -> String {
-        tokens(for: palette).brandAccentHex(for: colorScheme)
+    static func brandAccentHex(
+        for colorScheme: ColorScheme,
+        palette: AppColorPalette = .semreh,
+        accent: AppAccent = .warm
+    ) -> String {
+        if palette == .semreh {
+            return accentTokens(for: accent).brandAccentHex(for: colorScheme)
+        }
+
+        return tokens(for: palette).brandAccentHex(for: colorScheme)
     }
 
-    static func brandAccent(for colorScheme: ColorScheme, palette: AppColorPalette = .semreh) -> Color {
-        Color(hexRGB: brandAccentHex(for: colorScheme, palette: palette))!
+    static func brandAccent(
+        for colorScheme: ColorScheme,
+        palette: AppColorPalette = .semreh,
+        accent: AppAccent = .warm
+    ) -> Color {
+        Color(hexRGB: brandAccentHex(for: colorScheme, palette: palette, accent: accent))!
     }
 
     static func canvas(for colorScheme: ColorScheme, palette: AppColorPalette = .semreh) -> Color {
@@ -84,102 +170,156 @@ enum SemrehVisualTheme {
         Color(hexRGB: tokens(for: palette).raisedHex(for: colorScheme))!
     }
 
-    static func energyHex(for palette: AppColorPalette = .semreh) -> String {
-        tokens(for: palette).energyHex
+    static func energyHex(
+        for palette: AppColorPalette = .semreh,
+        accent: AppAccent = .warm
+    ) -> String {
+        if palette == .semreh {
+            return accentTokens(for: accent).energyHex
+        }
+
+        return tokens(for: palette).energyHex
     }
 
-    static func energy(for palette: AppColorPalette = .semreh) -> Color {
-        Color(hexRGB: energyHex(for: palette))!
+    static func energy(
+        for palette: AppColorPalette = .semreh,
+        accent: AppAccent = .warm
+    ) -> Color {
+        Color(hexRGB: energyHex(for: palette, accent: accent))!
     }
 
-    static func energyForegroundHex(for palette: AppColorPalette = .semreh) -> String {
-        tokens(for: palette).energyForegroundHex
+    static func energyForegroundHex(
+        for palette: AppColorPalette = .semreh,
+        accent: AppAccent = .warm
+    ) -> String {
+        if palette == .semreh {
+            return accentTokens(for: accent).energyForegroundHex
+        }
+
+        return tokens(for: palette).energyForegroundHex
     }
 
-    static func energyForeground(for palette: AppColorPalette = .semreh) -> Color {
-        Color(hexRGB: energyForegroundHex(for: palette))!
+    static func energyForeground(
+        for palette: AppColorPalette = .semreh,
+        accent: AppAccent = .warm
+    ) -> Color {
+        Color(hexRGB: energyForegroundHex(for: palette, accent: accent))!
     }
 
-    static func brandActionColor(for palette: AppColorPalette = .semreh) -> Color {
-        Color(hexRGB: tokens(for: palette).brandActionHex)!
+    static func brandActionHex(
+        for palette: AppColorPalette = .semreh,
+        accent: AppAccent = .warm
+    ) -> String {
+        if palette == .semreh {
+            return accentTokens(for: accent).brandActionHex
+        }
+
+        return tokens(for: palette).brandActionHex
+    }
+
+    static func brandActionColor(
+        for palette: AppColorPalette = .semreh,
+        accent: AppAccent = .warm
+    ) -> Color {
+        Color(hexRGB: brandActionHex(for: palette, accent: accent))!
     }
 
     /// Prompt surfaces coordinate with the accent without saturating the transcript.
     static func promptBubbleBackgroundHex(
         for colorScheme: ColorScheme,
-        palette: AppColorPalette = .semreh
+        palette: AppColorPalette = .semreh,
+        accent: AppAccent = .warm
     ) -> String {
+        if palette == .semreh {
+            return accentTokens(for: accent).promptBubbleBackgroundHex(for: colorScheme)
+        }
+
         switch palette {
         case .goku:
-            colorScheme == .dark ? "#2FE099" : "#39E89A"
+            return colorScheme == .dark ? "#2FE099" : "#39E89A"
         case .semreh:
-            colorScheme == .dark ? "#D4B992" : "#E7D3B3"
+            return colorScheme == .dark ? "#D4B992" : "#E7D3B3"
         case .chatgpt:
-            colorScheme == .dark ? "#2DD4A0" : "#43D39E"
+            return colorScheme == .dark ? "#2DD4A0" : "#43D39E"
         case .midnight:
-            colorScheme == .dark ? "#73E8C0" : "#8BE8C7"
+            return colorScheme == .dark ? "#73E8C0" : "#8BE8C7"
         case .forest:
-            colorScheme == .dark ? "#6ED39A" : "#8BE0A5"
+            return colorScheme == .dark ? "#6ED39A" : "#8BE0A5"
         case .sand:
-            colorScheme == .dark ? "#8FD6A4" : "#A8E6B8"
+            return colorScheme == .dark ? "#8FD6A4" : "#A8E6B8"
         }
     }
 
     static func promptBubbleForegroundHex(
-        for palette: AppColorPalette = .semreh
+        for palette: AppColorPalette = .semreh,
+        accent: AppAccent = .warm
     ) -> String {
+        if palette == .semreh {
+            return accentTokens(for: accent).promptBubbleForegroundHex
+        }
+
         switch palette {
         case .goku:
-            gokuDeepNavyHex
+            return gokuDeepNavyHex
         case .semreh:
-            "#30251D"
+            return "#30251D"
         case .chatgpt:
-            "#06281F"
+            return "#06281F"
         case .midnight:
-            "#151B3D"
+            return "#151B3D"
         case .forest:
-            "#102016"
+            return "#102016"
         case .sand:
-            "#1B2A20"
+            return "#1B2A20"
         }
     }
 
     static func promptBubbleBorderHex(
         for colorScheme: ColorScheme,
-        palette: AppColorPalette = .semreh
+        palette: AppColorPalette = .semreh,
+        accent: AppAccent = .warm
     ) -> String {
+        if palette == .semreh {
+            return accentTokens(for: accent).promptBubbleBorderHex(for: colorScheme)
+        }
+
         switch palette {
         case .goku:
-            colorScheme == .dark ? gokuBlueDarkHex : "#5F8FE8"
+            return colorScheme == .dark ? gokuBlueDarkHex : "#5F8FE8"
         case .semreh:
-            colorScheme == .dark ? "#AC8C63" : "#C6AB83"
+            return colorScheme == .dark ? "#AC8C63" : "#C6AB83"
         case .chatgpt:
-            colorScheme == .dark ? "#62D9B4" : "#19C37D"
+            return colorScheme == .dark ? "#62D9B4" : "#19C37D"
         case .midnight:
-            colorScheme == .dark ? "#A5B4FF" : "#7C8CFF"
+            return colorScheme == .dark ? "#A5B4FF" : "#7C8CFF"
         case .forest:
-            colorScheme == .dark ? "#6ED39A" : "#4FAE73"
+            return colorScheme == .dark ? "#6ED39A" : "#4FAE73"
         case .sand:
-            colorScheme == .dark ? "#E8A07A" : "#C96442"
+            return colorScheme == .dark ? "#E8A07A" : "#C96442"
         }
     }
 
     static func promptBubbleBackground(
         for colorScheme: ColorScheme,
-        palette: AppColorPalette = .semreh
+        palette: AppColorPalette = .semreh,
+        accent: AppAccent = .warm
     ) -> Color {
-        Color(hexRGB: promptBubbleBackgroundHex(for: colorScheme, palette: palette))!
+        Color(hexRGB: promptBubbleBackgroundHex(for: colorScheme, palette: palette, accent: accent))!
     }
 
-    static func promptBubbleForeground(for palette: AppColorPalette = .semreh) -> Color {
-        Color(hexRGB: promptBubbleForegroundHex(for: palette))!
+    static func promptBubbleForeground(
+        for palette: AppColorPalette = .semreh,
+        accent: AppAccent = .warm
+    ) -> Color {
+        Color(hexRGB: promptBubbleForegroundHex(for: palette, accent: accent))!
     }
 
     static func promptBubbleBorder(
         for colorScheme: ColorScheme,
-        palette: AppColorPalette = .semreh
+        palette: AppColorPalette = .semreh,
+        accent: AppAccent = .warm
     ) -> Color {
-        Color(hexRGB: promptBubbleBorderHex(for: colorScheme, palette: palette))!
+        Color(hexRGB: promptBubbleBorderHex(for: colorScheme, palette: palette, accent: accent))!
     }
 
     static func statusPositive(for palette: AppColorPalette = .semreh) -> Color {
@@ -307,6 +447,96 @@ enum SemrehVisualTheme {
         let lighter = max(foreground, background)
         let darker = min(foreground, background)
         return (lighter + 0.05) / (darker + 0.05)
+    }
+
+    static func accentTokens(for accent: AppAccent) -> SemrehAccentTokens {
+        switch accent {
+        case .warm:
+            SemrehAccentTokens(
+                brandActionHex: "#D4B992",
+                energyHex: "#D4B992",
+                energyForegroundHex: "#30251D",
+                actionLightHex: "#795334",
+                actionDarkHex: "#D9B98C",
+                brandAccentLightHex: "#795334",
+                brandAccentDarkHex: "#D9B98C",
+                accentForegroundLightHex: "#FFF9EF",
+                accentForegroundDarkHex: "#30251D",
+                promptBubbleBackgroundLightHex: "#E7D3B3",
+                promptBubbleBackgroundDarkHex: "#D4B992",
+                promptBubbleForegroundHex: "#30251D",
+                promptBubbleBorderLightHex: "#C6AB83",
+                promptBubbleBorderDarkHex: "#AC8C63"
+            )
+        case .violet:
+            SemrehAccentTokens(
+                brandActionHex: "#CBB6E6",
+                energyHex: "#CBB6E6",
+                energyForegroundHex: "#211629",
+                actionLightHex: "#6B4AA1",
+                actionDarkHex: "#C8A8FF",
+                brandAccentLightHex: "#6B4AA1",
+                brandAccentDarkHex: "#C8A8FF",
+                accentForegroundLightHex: "#FFFFFF",
+                accentForegroundDarkHex: "#251938",
+                promptBubbleBackgroundLightHex: "#E8DDF6",
+                promptBubbleBackgroundDarkHex: "#CBB6E6",
+                promptBubbleForegroundHex: "#211629",
+                promptBubbleBorderLightHex: "#A989CF",
+                promptBubbleBorderDarkHex: "#9676BC"
+            )
+        case .blue:
+            SemrehAccentTokens(
+                brandActionHex: "#BFD8F7",
+                energyHex: "#BFD8F7",
+                energyForegroundHex: "#0D223C",
+                actionLightHex: "#285B9E",
+                actionDarkHex: "#8EBBFF",
+                brandAccentLightHex: "#285B9E",
+                brandAccentDarkHex: "#8EBBFF",
+                accentForegroundLightHex: "#FFFFFF",
+                accentForegroundDarkHex: "#102A4B",
+                promptBubbleBackgroundLightHex: "#DCEBFB",
+                promptBubbleBackgroundDarkHex: "#BFD8F7",
+                promptBubbleForegroundHex: "#0D223C",
+                promptBubbleBorderLightHex: "#8CB6E5",
+                promptBubbleBorderDarkHex: "#6195D0"
+            )
+        case .mint:
+            SemrehAccentTokens(
+                brandActionHex: "#B7E6D3",
+                energyHex: "#B7E6D3",
+                energyForegroundHex: "#103328",
+                actionLightHex: "#1D725F",
+                actionDarkHex: "#77DCC2",
+                brandAccentLightHex: "#1D725F",
+                brandAccentDarkHex: "#77DCC2",
+                accentForegroundLightHex: "#FFFFFF",
+                accentForegroundDarkHex: "#12352B",
+                promptBubbleBackgroundLightHex: "#D8F2E8",
+                promptBubbleBackgroundDarkHex: "#B7E6D3",
+                promptBubbleForegroundHex: "#103328",
+                promptBubbleBorderLightHex: "#73C5AB",
+                promptBubbleBorderDarkHex: "#4BA889"
+            )
+        case .rose:
+            SemrehAccentTokens(
+                brandActionHex: "#F0BCCD",
+                energyHex: "#F0BCCD",
+                energyForegroundHex: "#351A22",
+                actionLightHex: "#9A3E5C",
+                actionDarkHex: "#F1A0B8",
+                brandAccentLightHex: "#9A3E5C",
+                brandAccentDarkHex: "#F1A0B8",
+                accentForegroundLightHex: "#FFFFFF",
+                accentForegroundDarkHex: "#401523",
+                promptBubbleBackgroundLightHex: "#F6DCE4",
+                promptBubbleBackgroundDarkHex: "#F0BCCD",
+                promptBubbleForegroundHex: "#351A22",
+                promptBubbleBorderLightHex: "#D17C98",
+                promptBubbleBorderDarkHex: "#C86B8A"
+            )
+        }
     }
 
     static func tokens(for palette: AppColorPalette) -> VisualThemeTokens {
@@ -504,6 +734,43 @@ struct VisualThemeTokens: Equatable {
     }
 }
 
+struct SemrehAccentTokens: Equatable {
+    let brandActionHex: String
+    let energyHex: String
+    let energyForegroundHex: String
+    let actionLightHex: String
+    let actionDarkHex: String
+    let brandAccentLightHex: String
+    let brandAccentDarkHex: String
+    let accentForegroundLightHex: String
+    let accentForegroundDarkHex: String
+    let promptBubbleBackgroundLightHex: String
+    let promptBubbleBackgroundDarkHex: String
+    let promptBubbleForegroundHex: String
+    let promptBubbleBorderLightHex: String
+    let promptBubbleBorderDarkHex: String
+
+    func actionHex(for colorScheme: ColorScheme) -> String {
+        colorScheme == .dark ? actionDarkHex : actionLightHex
+    }
+
+    func brandAccentHex(for colorScheme: ColorScheme) -> String {
+        colorScheme == .dark ? brandAccentDarkHex : brandAccentLightHex
+    }
+
+    func accentForegroundHex(for colorScheme: ColorScheme) -> String {
+        colorScheme == .dark ? accentForegroundDarkHex : accentForegroundLightHex
+    }
+
+    func promptBubbleBackgroundHex(for colorScheme: ColorScheme) -> String {
+        colorScheme == .dark ? promptBubbleBackgroundDarkHex : promptBubbleBackgroundLightHex
+    }
+
+    func promptBubbleBorderHex(for colorScheme: ColorScheme) -> String {
+        colorScheme == .dark ? promptBubbleBorderDarkHex : promptBubbleBorderLightHex
+    }
+}
+
 struct SemrehBackdrop: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
@@ -563,6 +830,7 @@ struct SemrehBackdrop: View {
 
 private struct SemrehAppThemeModifier: ViewModifier {
     @AppStorage(AppTheme.storageKey) private var appThemeRawValue = AppTheme.system.rawValue
+    @AppStorage(AppAccent.storageKey) private var appAccentRawValue = AppAccent.defaultValue.rawValue
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
@@ -570,10 +838,15 @@ private struct SemrehAppThemeModifier: ViewModifier {
         AppTheme.storedValue(appThemeRawValue).palette
     }
 
+    private var accent: AppAccent {
+        AppAccent.storedValue(appAccentRawValue)
+    }
+
     func body(content: Content) -> some View {
         content
             .environment(\.appColorPalette, palette)
-            .tint(SemrehVisualTheme.action(for: colorScheme, palette: palette))
+            .environment(\.appAccent, accent)
+            .tint(SemrehVisualTheme.action(for: colorScheme, palette: palette, accent: accent))
             .background { SemrehBackdrop().ignoresSafeArea() }
             .toolbarBackground(
                 SemrehVisualTheme.navigationBarBackground(

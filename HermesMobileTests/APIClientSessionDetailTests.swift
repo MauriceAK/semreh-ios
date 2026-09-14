@@ -711,6 +711,15 @@ final class APIClientSessionDetailTests: APIClientTestCase {
         XCTAssertEqual(display.detailText, "Failed")
     }
 
+    func testToolActionIconsDescribeTheToolRatherThanInventingSuccess() {
+        XCTAssertEqual(ToolCallPresentationLabel.icon(for: "terminal"), "terminal")
+        XCTAssertEqual(ToolCallPresentationLabel.icon(for: "skill_view"), "book")
+        XCTAssertEqual(ToolCallPresentationLabel.icon(for: "read_file"), "book")
+        XCTAssertEqual(ToolCallPresentationLabel.icon(for: "web_search"), "magnifyingglass")
+        XCTAssertEqual(ToolCallPresentationLabel.icon(for: "apply_patch"), "pencil")
+        XCTAssertEqual(ToolCallPresentationLabel.icon(for: "unknown"), "wrench.and.screwdriver")
+    }
+
     func testToolCallPresentationLabelUsesExactPinnedNamesAndRawUnknownFallback() {
         let cases: [(name: String, title: String)] = [
             ("terminal", "Run command"),

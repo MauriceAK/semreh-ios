@@ -1,5 +1,16 @@
 import SwiftUI
 
+/// A cached template image is required by the native tab bar. Its alpha mask
+/// comes from the same artwork as avatars, so the silhouette cannot drift.
+@MainActor
+enum BirdTabIcon {
+    static let image: UIImage = {
+        let renderer = ImageRenderer(content: BirdArtwork(palette: .sky).frame(width: 25, height: 25))
+        renderer.scale = 3
+        return (renderer.uiImage ?? UIImage()).withRenderingMode(.alwaysTemplate)
+    }()
+}
+
 /// Static approved companion. Shared vector geometry stays crisp in rows and headers.
 struct BirdAvatarView: View {
     let identity: BirdAvatarIdentity

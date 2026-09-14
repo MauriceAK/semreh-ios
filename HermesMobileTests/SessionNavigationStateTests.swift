@@ -59,6 +59,29 @@ final class SessionNavigationStateTests: XCTestCase {
         XCTAssertEqual(state.lastSelectedSessionID, "session-1")
     }
 
+    func testExplicitBackIsIdempotentAndBlocksLateRestoreUntilReselect() {
+        let saved = SessionSummary(sessionId: "saved", title: "Saved")
+        var state = SessionNavigationState()
+        state.select(saved)
+
+        // A custom Back control can receive a second tap during the pop
+        // transition. Repeated clears must stay harmless while preserving the
+        // remembered chat for a future cold launch.
+        state.clearDestination()
+        state.clearDestination()
+        state.restoreIfNeeded(from: [saved])
+        state.reconcileAuthoritativeSelection(from: [saved])
+
+        XCTAssertNil(state.destination)
+        XCTAssertEqual(state.lastSelectedSessionID, saved.sessionId)
+
+        // A deliberate new selection starts a new visible route and clears the
+        // explicit-dismiss guard, so normal navigation remains available.
+        let replacement = SessionSummary(sessionId: "replacement", title: "Replacement")
+        state.select(replacement)
+        XCTAssertEqual(state.destination, .session(replacement))
+    }
+
     func testRestoreSkipsWhileDeepLinkIsPendingAndKeepsStoredSelection() {
         let stored = SessionSummary(sessionId: "stored")
         var state = SessionNavigationState(lastSelectedSessionID: "stored")

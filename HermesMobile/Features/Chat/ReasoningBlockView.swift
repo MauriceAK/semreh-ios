@@ -1,10 +1,14 @@
 import SwiftUI
 
 enum ReasoningDisplayText {
-    /// Collapsed cards need only a short preview. Bounding the parsed source
-    /// keeps a long live reasoning stream from reparsing its full history on
-    /// every token while still giving Markdown enough context for the header.
+    /// Retained for existing display-model tests and callers that need a
+    /// bounded preview. The reasoning disclosure itself intentionally uses the
+    /// literal "Thinking" label and does not render this summary.
     private static let maximumParsedCharacters = 512
+
+    static func shouldAnimateShine(isActive: Bool, reduceMotion: Bool) -> Bool {
+        isActive && !reduceMotion
+    }
 
     static func summary(_ source: String, maximumCharacters: Int = 80) -> String {
         let maximumCharacters = max(0, maximumCharacters)
@@ -42,11 +46,18 @@ enum ReasoningDisplayText {
 
 struct ReasoningBlockView: View {
     let text: String
+    /// Live reasoning callers can opt into a gentle title shine. Completed
+    /// reasoning keeps the quiet static label by default.
+    let isActive: Bool
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @AppStorage(ChatTranscriptDisplaySettings.thinkingCardsStartExpandedKey) private var startsExpanded = false
     @State private var userToggledExpansion: Bool?
+
+    init(text: String, isActive: Bool = false) {
+        self.text = text
+        self.isActive = isActive
+    }
 
     private var isExpanded: Bool {
         ChatTranscriptDisplaySettings.isCardExpanded(
@@ -57,18 +68,16 @@ struct ReasoningBlockView: View {
 
     var body: some View {
         if let trimmedText {
-            let summary = summary(for: trimmedText)
-
             VStack(alignment: .leading, spacing: isExpanded ? 8 : 0) {
                 Button {
                     withAnimation(ChatMotion.disclosure(reduceMotion: reduceMotion)) {
                         userToggledExpansion = !isExpanded
                     }
                 } label: {
-                    header(summary: summary)
+                    header
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel(String(localized: "Thinking, \(summary)"))
+                .accessibilityLabel(String(localized: "Thinking"))
                 .accessibilityHint(isExpanded ? "Double tap to collapse details." : "Double tap to expand details.")
 
                 if isExpanded {
@@ -80,63 +89,96 @@ struct ReasoningBlockView: View {
                         .transition(ChatMotion.disclosureTransition(reduceMotion: reduceMotion))
                 }
             }
-            .padding(.vertical, 8)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
-    private var usesStackedHeader: Bool {
-        dynamicTypeSize.isAccessibilitySize
-    }
-
-    private func header(summary: String) -> some View {
-        HStack(alignment: usesStackedHeader ? .top : .center, spacing: 8) {
-            Image("LucideBrain")
-                .resizable()
-                .scaledToFit()
-                .foregroundStyle(.secondary)
-                .frame(width: 18, height: 18)
-
-            if usesStackedHeader {
-                VStack(alignment: .leading, spacing: 1) {
-                    titleText
-                    summaryText(summary, lineLimit: 2)
-                }
-            } else {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    titleText
-                    summaryText(summary, lineLimit: 1)
-                }
-            }
-
+    private var header: some View {
+        HStack(alignment: .center, spacing: 6) {
+            titleText
             Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(minHeight: 44)
         .contentShape(Rectangle())
     }
 
     private var titleText: some View {
         Text("Thinking")
-            .font(AppFont.caption())
-            .foregroundStyle(.secondary)
+            .font(AppFont.subheadline())
             .lineLimit(1)
-    }
-
-    private func summaryText(_ value: String, lineLimit: Int) -> some View {
-        Text(value)
-            .font(AppFont.caption())
-            .foregroundStyle(.secondary)
-            .lineLimit(lineLimit)
+            .modifier(ReasoningTextShineModifier(isActive: isActive))
     }
 
     private var trimmedText: String? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
     }
+}
 
-    private func summary(for value: String) -> String {
-        ReasoningDisplayText.summary(value)
+/// A low-contrast repeating sweep makes an active reasoning disclosure legible
+/// without turning completed history into an animated surface. The caller owns
+/// lifecycle truth (`isActive`); the view does not infer it from text contents.
+struct ReasoningTextShineModifier: ViewModifier {
+    let isActive: Bool
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var shinePosition = -1.0
+    @State private var isShining = false
+
+    func body(content: Content) -> some View {
+        Group {
+            if isShining {
+                content.foregroundStyle(
+                    LinearGradient(
+                        stops: [
+                            .init(color: .secondary.opacity(0.62), location: 0),
+                            .init(color: .primary.opacity(0.96), location: 0.5),
+                            .init(color: .secondary.opacity(0.62), location: 1)
+                        ],
+                        startPoint: UnitPoint(x: shinePosition - 0.7, y: 0.5),
+                        endPoint: UnitPoint(x: shinePosition + 0.7, y: 0.5)
+                    )
+                )
+            } else {
+                content.foregroundStyle(.secondary)
+            }
+        }
+        .onAppear {
+            updateShine()
+        }
+        .onChange(of: isActive) { _, _ in
+            updateShine()
+        }
+        .onChange(of: reduceMotion) { _, _ in
+            updateShine()
+        }
+        .onDisappear {
+            stopShine()
+        }
+    }
+
+    private func updateShine() {
+        guard ReasoningDisplayText.shouldAnimateShine(isActive: isActive, reduceMotion: reduceMotion) else {
+            stopShine()
+            return
+        }
+
+        shinePosition = -1
+        isShining = true
+        withAnimation(.linear(duration: 2).repeatForever(autoreverses: false)) {
+            shinePosition = 2
+        }
+    }
+
+    private func stopShine() {
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            isShining = false
+            shinePosition = -1
+        }
     }
 }

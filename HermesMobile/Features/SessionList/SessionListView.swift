@@ -27,6 +27,7 @@ struct SessionListView: View {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.appColorPalette) private var palette
+    @Environment(\.appAccent) private var accent
     @State private var viewModel: SessionListViewModel
     @State private var navigationState: SessionNavigationState
     @State private var sessionPendingRename: SessionSummary?
@@ -1232,7 +1233,7 @@ struct SessionListView: View {
     }
 
     private var selectedHeaderLogoColor: Color {
-        SemrehVisualTheme.brandActionColor(for: palette)
+        SemrehVisualTheme.brandActionColor(for: palette, accent: accent)
     }
 
     private var newSessionButtonUsesThemeColor: Bool {
@@ -1273,14 +1274,14 @@ struct SessionListView: View {
 
     private var newSessionButtonForegroundColor: Color {
         if newSessionButtonUsesThemeColor {
-            return SemrehVisualTheme.energyForeground(for: palette)
+            return SemrehVisualTheme.energyForeground(for: palette, accent: accent)
         }
 
         return colorScheme == .dark ? .black : .white
     }
 
     private var initialsAvatarForegroundColor: Color {
-        SemrehVisualTheme.energyForeground(for: palette)
+        SemrehVisualTheme.energyForeground(for: palette, accent: accent)
     }
 
     private var normalizedSearchText: String {
