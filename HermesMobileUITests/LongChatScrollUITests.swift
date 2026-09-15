@@ -8,6 +8,7 @@ final class LongChatScrollUITests: XCTestCase {
     private let performanceLabArgument = "--chat-performance-lab"
     private let performanceCycleLabArgument = "--chat-performance-cycle-lab"
     private let performanceSignpostsArgument = "--chat-performance-signposts"
+    private let performanceMetricProbeEnvironment = "SEMREH_CHAT_PERFORMANCE_METRIC_PROBE"
     private let approvedLiveOrigin = "https://semreh-slice1-test.tailda8427.ts.net"
     private let approvedLiveHost = "semreh-slice1-test.tailda8427.ts.net"
     private let stockBackendSHA = "29112bef099274229cadff79cdff7bf7b99c4b77"
@@ -535,6 +536,114 @@ final class LongChatScrollUITests: XCTestCase {
             measurements.joined(separator: "\n"),
             named: "long-chat-enter-back-20-cycle-timings"
         )
+    }
+
+    @MainActor
+    func testOptInLongChatXCTestMetricCapabilityProbe() throws {
+        continueAfterFailure = false
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("The metric capability probe is Simulator-only.")
+        #endif
+        guard ProcessInfo.processInfo.environment[performanceMetricProbeEnvironment] == "1" else {
+            throw XCTSkip("The long-chat XCTest metric capability probe is opt-in.")
+        }
+        guard #available(iOS 26.0, *) else {
+            throw XCTSkip("XCTHitchMetric requires iOS 26.0 or later.")
+        }
+
+        let app = XCUIApplication()
+        app.terminate()
+        app.launchArguments = [performanceCycleLabArgument, performanceSignpostsArgument]
+        app.launch()
+
+        let cycleLab = app.descendants(matching: .any)["performance-cycle-lab"]
+        XCTAssertTrue(
+            cycleLab.waitForExistence(timeout: 15),
+            "The metric probe must use the existing server-free two-chat cycle lab."
+        )
+
+        let options = XCTMeasureOptions()
+        // XCTest runs one unrecorded warm-up and one measured iteration.
+        // Each iteration visits both retained owners and includes a real swipe,
+        // arrow return, and Back navigation.
+        options.iterationCount = 1
+
+        let metricNotes = XCTAttachment(string: [
+            "fixture=DEBUG cycle lab; 2 synthetic conversations x 10,000 rows",
+            "measured_iterations=1; XCTest discards one warm-up iteration",
+            "requested=XCTHitchMetric(application), XCTCPUMetric(application), XCTMemoryMetric(application), navigationTransitionMetric, scrollingAndDecelerationMetric",
+            "scope=presentation-only; app CPU is process aggregate, not main-thread CPU",
+            "Simulator metric output only; do not interpret as physical FPS or device acceptance",
+            "The numeric measurements must appear in the .xcresult performance results; missing values are not a pass"
+        ].joined(separator: "\n"))
+        metricNotes.name = "Long-chat XCTest metric probe scope"
+        metricNotes.lifetime = .keepAlways
+        add(metricNotes)
+
+        measure(
+            metrics: [
+                XCTHitchMetric(application: app),
+                XCTCPUMetric(application: app),
+                XCTMemoryMetric(application: app),
+                XCTOSSignpostMetric.navigationTransitionMetric,
+                XCTOSSignpostMetric.scrollingAndDecelerationMetric
+            ],
+            options: options
+        ) {
+            for chatNumber in 1...2 {
+                let entry = app.buttons["performance-cycle-chat-\(chatNumber)"]
+                XCTAssertTrue(
+                    entry.waitForExistence(timeout: 15) && entry.isHittable,
+                    "The measured iteration must revisit chat \(chatNumber)'s seeded owner."
+                )
+                entry.tap()
+
+                let chat = app.otherElements[
+                    "chat-detail:10,000-row performance lab \(chatNumber)"
+                ]
+                assertHittable(
+                    chat,
+                    timeout: 25,
+                    message: "The measured iteration must enter long chat \(chatNumber)."
+                )
+
+                let transcript = app.scrollViews.firstMatch
+                XCTAssertTrue(transcript.waitForExistence(timeout: 5) && transcript.isHittable)
+                transcript.swipeDown()
+
+                let scrollToLatest = app.buttons[scrollToLatestLabel]
+                XCTAssertTrue(
+                    scrollToLatest.waitForExistence(timeout: 10) && scrollToLatest.isHittable,
+                    "A real swipe away must expose Scroll to latest for chat \(chatNumber)."
+                )
+                scrollToLatest.tap()
+
+                let endMarker = app.staticTexts.matching(
+                    NSPredicate(
+                        format: "label CONTAINS[c] %@",
+                        "End of 10,000-row conversation \(chatNumber)."
+                    )
+                ).firstMatch
+                assertHittable(
+                    endMarker,
+                    timeout: 25,
+                    message: "Arrow return must reveal chat \(chatNumber)'s deterministic end marker."
+                )
+                XCTAssertFalse(
+                    scrollToLatest.waitForExistence(timeout: 2),
+                    "Scroll to latest must clear after the measured return."
+                )
+
+                let back = app.buttons["Back"]
+                XCTAssertTrue(back.waitForExistence(timeout: 10) && back.isHittable)
+                back.tap()
+                assertHittable(
+                    entry,
+                    timeout: 20,
+                    message: "The measured iteration must return to the cycle lab list."
+                )
+            }
+        }
     }
 
     func testMultiChatPerformanceLabSwitchesStreamsAndScrolls() {

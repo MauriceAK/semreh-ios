@@ -15,8 +15,11 @@ commit with its stated evidence; **Blocked** = exact missing authority/dependenc
 **Deferred** = deliberately outside the current preview priority. A unit pass is
 not visual, physical-device, or release acceptance. New reports reopen prior gates.
 
-Current app base: `0af48f08d50087bf1239b6b5214ad8e93e07086b`, branch
-`integration/direct-hermes`. New combined app changes are uncommitted, not installed.
+Current integrated app checkpoint: `2814248`, branch `integration/direct-hermes`.
+Preview/recovery batch is committed locally, not pushed or installed on the phone.
+Separate Live Activity/widget dirt remains uncommitted and excluded from this
+checkpoint. Native builds included that existing dirt; its local helper checks do
+not establish widget visual acceptance or closed-app delivery.
 Signed unit build `feedback-unit-build-v4` passed; focused
 `feedback-focused-units-v3.xcresult`: **174 passed, 0 failed, 0 skipped**.
 Evidence root: `/Users/maurice/workspace/semreh-slice1-evidence/onboarding-20260914`.
@@ -65,13 +68,29 @@ candidate: real fixture connection, optional personalization and cold appearance
 readback. Prior recipe failures/interruption retained: system deep-link dialog,
 expired fixture auth, Save Password sheet and duplicated tagline identifying
 Personalize as Welcome. Setup now uses fail-closed exact-fixture checks and real
-screen controls. Shell/controls/Bots-Tasks same-build checks continuing.
+screen controls. Final same-build shell/controls **2/0**,90.724s, Bots-Tasks
+**1/0**,28.302s, longscroll v7 **1/0**,140.196s. Root reviewed settled v7 post-AX
+capture. Final test commands omitted diagnostics-never; raw result diagnostics are
+quarantined. Only separately reviewed images were selected/audited (75files/0flags).
+
+Integration status for the table: P02–P05, P07, P10 and P13 source changes are
+included in2814248; “verification pending” below refers to remaining acceptance,
+not uncommitted source. P06 was deliberately excluded. P13's real contained login
+and appearance cold-readback are verified; physical QR remains open.
+
+P15 metric capability checkpoint: signed build and opt-in probe **1/0**,97.838s.
+Existing synthetic2×10k presentation lab, one warmup/one measured iteration:
+app CPU20.658953638s, peak physical215665.136kB, absolute physical91982.272kB,
+memory change14041.088kB, navigation signpost total0.741173916s, scrolling signpost
+total2.534600417s. Numeric records verified in feedback-metric-probe-v1.xcresult.
+Requested XCTHitchMetric absent: NO hitch-rate/FPS claim. No regression baseline,
+percentiles, production lifecycle/provider or physical-device performance claim.
 
 | ID / priority | User-visible outcome | Current verified status / owner | Remaining acceptance |
 |---|---|---|---|
-| P01 / top | No blank transcript after long background, reopen, mixed long-chat navigation, or send | **Fix implemented; scoped verification passed; not integrated.** Recovery arming defect repaired. Latest long-scroll v6 and active-background v1 passed exact tail checks after60s away;93 focused tests passed. Earlier background-v5 genuine first-entry blank remains historical evidence, distinct from longscroll-v5's recipe failure. | Settled pixel/recording review, repeated mixed-navigation/cold return and reader-position checks remain. Do not mark universally fixed from these two passes. |
+| P01 / top | No blank transcript after long background, reopen, mixed long-chat navigation, or send | **Integrated2814248; scoped verification passed.** Recovery arming defect repaired; completed v6/v7 and active-background v1 passed exact tail checks after60s away. Root reviewed populated settled v7 post-AX image. Earlier background-v5 genuine first-entry blank retained, distinct from longscroll-v5's recipe failure. | Repeated mixed-navigation/cold return, physical-device and reader-position stress remain. Settled post-AX image is not literal first-frame proof; no universal fix claim. |
 | P02 / top | Down-arrow works during momentum and smoothly scrolls even from distant history | **Implemented / verification pending** for distance-independent explicit animation; focused policy passed. Deceleration reliability remains **Investigating**. | New production long-scroll selector + scoped geometry and recording-based row displacement; Reduce Motion immediate; actual arrival before button hides. |
-| P03 / top | Compact Thinking/actions show latest meaningful work and expand cleanly; preserved tasks match; no spinner faces or stale empty Thinking | **Partially verified, not integrated.** Focused tests passed; root inspected `feedback-componentlab-v1` Thinking/task expanded and collapsed screenshots. Raw task-checkbox syntax in collapsed preview returned for polish. Preserve raw content and legitimate code/history. | Production chronology and completion motion; meaningful activity versus finished placeholder; long history and Reduce Motion. Component-only evidence does not close these gates. |
+| P03 / top | Compact Thinking/actions show latest meaningful work and expand cleanly; preserved tasks match; no spinner faces or stale empty Thinking | **Integrated2814248; partially verified.** Focused tests and componentcompletionv2 passed; root inspected rich Thinking/task and completed component screen. Collapsed checkbox syntax polished. Raw meaningful content/code preserved. | Production chronology and completion motion; meaningful activity versus finished placeholder; long history and Reduce Motion. Component-only evidence does not close these gates. |
 | P04 / top | No redundant “Hermes is working” pill or success-reconnect transcript banner | **Implemented / verification pending.** Generic active pill removed; policy passed; earlier reconnect tests passed. Real errors/recovery retained. | Production running/background return without misleading success chrome or changing scroll inset on ordinary active scrolling. |
 | P05 / top | Smooth local send, response streaming, stop/resend and completion actions | **Implemented / verification pending.** Trailing text motion, bottom-aligned multiline composer and latest-completed Copy footer in candidate; focused checks passed. | Motion recordings and immediate local-message visibility, no blank-on-send; historical context-menu Copy and completion reading-position preservation. |
 | P06 / top | Live Activity / Dynamic Island updates or ends when Hermes completes while app is backgrounded | **Local logic partially verified; remote completion blocked on deployment/team decision.** `feedback-liveactivity-units-v1`:24 passed/0 failed/0 skipped. Installed `0af48f0` ignores ActivityKit `context.isStale`; existing dirty widget patch handles it, not installed. Current request uses `pushType:nil`; bounded background runtime cannot guarantee terminal receipt. | Actual stale widget/Dynamic Island rendering and device delivery remain unverified. True closed-app completion needs authenticated ActivityKit token registration/rotation and APNs update/end relay absent from pinned Hermes. Async question sent for relay approval/Apple team; no keys or service deployment. Cold orphan reconciliation also open (direct activities lack streamID). |
@@ -83,7 +102,7 @@ screen controls. Shell/controls/Bots-Tasks same-build checks continuing.
 | P12 | Bots and Tasks load promptly without blank/black transitions | Baseline `0af48f0` integrated with prior loading/native evidence; new overall performance gate still open. | Repeated reentry, stale/cancelled loads, themed transient frames; no fake “instant” network guarantee. |
 | P13 | Welcome → Connect → optional Personalize, easy first-party Hermes connection | **Implemented / verification pending** for reordered candidate; focused onboarding checks passed previously. Transparent logo/bird entrance in candidate. | Fresh login, failed-login retry, saved-server reauth, actual isolated Hermes connection and physical QR. Manual entry retained; no unverified SSH/automatic installer promise. |
 | P14 | Create/configure bots and real Groups above Your Team | **Investigating / incomplete.** Profile creation exists in Settings; real group DTO foundation only. Safety gaps in clone/config creation identified. | Safe real create/config/readback and group send/stop. Live group execution blocked on explicitly approved disposable two-profile fixture; no personal provider/service use. |
-| P15 | Measured smoothness under many long chats, scrolling, sending, stop, app switching | **Partially measured, not accepted.** Prior isolated 20-cycle 2×10k-row lab passed, but bypassed external lifecycle; no physical FPS benchmark. | Representative production traces and device FPS/hitch evidence; Simulator Animation Hitches unsupported. No “no drops” claim from screenshots or wall timings. |
+| P15 | Measured smoothness under many long chats, scrolling, sending, stop, app switching | **Capability probe implementing; not accepted.** Prior20-cycle2×10k lab passed but bypassed external lifecycle; walltimings include XCTest waits. Luna owns opt-in existing-lab XCTest hitch/CPU/memory probe, no product changes. | Installed SDK declares XCTHitchMetric; runtime availability/data unverified. Instruments template limitation does not establish XCTest metric unavailability. Production/device FPS gate remains; no “no drops” claim from screenshots/walltimings. |
 | P16 | Durable implementer → verifier queue → evidence review → integration without user reminders | **Partially implemented/tested.** Night Shift local commit `4e06dbd`, 82 fake controller checks and read-only Luna→Sol automatic handoff passed. Root currently manages native agents. | Fresh app queue/controller integration, durable completion handling and verified continuation. No claim of crashed/ended-chat wake or production unattended readiness. |
 | P17 | Keep phone current and make safe room for verification | Last confirmed phone dev build is `0af48f0`; new candidate **not installed**. Owned regenerable caches cleaned; no source/app-data deletion. | Install only identified tested candidate preserving data; confirm actual device build. Evidence offload to Drive not done; sanitize before any upload. |
 | P18 / deferred | Modular navbar, advanced bird customization/morph, cross-machine A2A/WSL, terminal/phone remote control, TestFlight/team release | **Deferred** behind preview reliability; preserve existing candidate work and capability audits. | Separate bounded decisions/authority and feature-specific tests. No WSL instance or release upload authorized by this ledger. |
