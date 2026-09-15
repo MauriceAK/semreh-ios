@@ -16,7 +16,8 @@ commit with its stated evidence; **Blocked** = exact missing authority/dependenc
 not visual, physical-device, or release acceptance. New reports reopen prior gates.
 
 Current integrated app checkpoint: `2814248`, branch `integration/direct-hermes`.
-Preview/recovery batch is committed locally, not pushed or installed on the phone.
+Preview/recovery batch is committed locally, not pushed. Clean2814248 device build
+installed as Semreh Dev1.0/build8; device readback confirmed on September14.
 Separate Live Activity/widget dirt remains uncommitted and excluded from this
 checkpoint. Native builds included that existing dirt; its local helper checks do
 not establish widget visual acceptance or closed-app delivery.
@@ -104,7 +105,7 @@ percentiles, production lifecycle/provider or physical-device performance claim.
 | P14 | Create/configure bots and real Groups above Your Team | **Investigating / incomplete.** Profile creation exists in Settings; real group DTO foundation only. Safety gaps in clone/config creation identified. | Safe real create/config/readback and group send/stop. Live group execution blocked on explicitly approved disposable two-profile fixture; no personal provider/service use. |
 | P15 | Measured smoothness under many long chats, scrolling, sending, stop, app switching | **Capability probe implementing; not accepted.** Prior20-cycle2×10k lab passed but bypassed external lifecycle; walltimings include XCTest waits. Luna owns opt-in existing-lab XCTest hitch/CPU/memory probe, no product changes. | Installed SDK declares XCTHitchMetric; runtime availability/data unverified. Instruments template limitation does not establish XCTest metric unavailability. Production/device FPS gate remains; no “no drops” claim from screenshots/walltimings. |
 | P16 | Durable implementer → verifier queue → evidence review → integration without user reminders | **Partially implemented/tested.** Night Shift local commit `4e06dbd`, 82 fake controller checks and read-only Luna→Sol automatic handoff passed. Root currently manages native agents. | Fresh app queue/controller integration, durable completion handling and verified continuation. No claim of crashed/ended-chat wake or production unattended readiness. |
-| P17 | Keep phone current and make safe room for verification | Last confirmed phone dev build is `0af48f0`; new candidate **not installed**. Owned regenerable caches cleaned; no source/app-data deletion. | Install only identified tested candidate preserving data; confirm actual device build. Evidence offload to Drive not done; sanitize before any upload. |
+| P17 | Keep phone current and make safe room for verification | **Installed and read back:** clean2814248, Semreh Dev1.0/build8, com.maurice.semreh.dev. Signed generic devicebuildv2 passed; direct install succeeded. No uninstall/datareset or productionapp mutation. | Physical interaction/FPS acceptance remains distinct from successful installation. Initial Xcode destination timeout retained. Drive offload not done; sanitize before upload. |
 | P18 / deferred | Modular navbar, advanced bird customization/morph, cross-machine A2A/WSL, terminal/phone remote control, TestFlight/team release | **Deferred** behind preview reliability; preserve existing candidate work and capability audits. | Separate bounded decisions/authority and feature-specific tests. No WSL instance or release upload authorized by this ledger. |
 
 Current ownership: Luna Max implements, Sol Low independently verifies on the sole
