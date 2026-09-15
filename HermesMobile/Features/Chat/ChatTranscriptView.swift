@@ -1,3 +1,4 @@
+import OSLog
 import SwiftUI
 import UIKit
 
@@ -58,7 +59,7 @@ private final class ChatTranscriptViewportTracker {
     var visibleRowID: String?
     var visibleRowFrame: CGRect?
     var viewportHeight: CGFloat = 0
-    var hasObservedRows = false
+    var activationRecoveryState = ChatTranscriptActivationRecoveryState()
     var latestFrames: [String: CGRect] = [:]
     var framesGeneration = 0
     var activationBaselineFramesGeneration = 0
@@ -70,6 +71,52 @@ private final class ChatTranscriptViewportTracker {
     var pendingOlderMessagesBaselineRenderRevision: Int?
     var pendingOlderMessagesBaselineFirstLoadedRowID: String?
     var lastOlderMessagesPrefetchVisibleRowID: String?
+}
+
+struct ChatTranscriptActivationRecoveryState: Equatable {
+    private(set) var hasObservedRows = false
+    private(set) var isArmed = false
+
+    mutating func recordPreferenceSample(hasVisibleMessageRows: Bool) {
+        if hasVisibleMessageRows {
+            hasObservedRows = true
+        }
+    }
+
+    @discardableResult
+    mutating func armForActivation() -> Bool {
+        isArmed = hasObservedRows
+        return isArmed
+    }
+
+    mutating func disarm() {
+        isArmed = false
+    }
+
+    mutating func reset() {
+        hasObservedRows = false
+        isArmed = false
+    }
+}
+
+enum ChatTranscriptActivationProbeDisposition: Equatable {
+    case freshGeometryArrived
+    case evaluateEmptyCache
+    case waitForFreshGeometry(visibleCachedRowCount: Int)
+
+    static func resolve(
+        currentFramesGeneration: Int,
+        activationBaselineFramesGeneration: Int,
+        cachedFrameCount: Int,
+        visibleCachedRowCount: Int
+    ) -> Self {
+        if currentFramesGeneration > activationBaselineFramesGeneration {
+            return .freshGeometryArrived
+        }
+        return cachedFrameCount == 0
+            ? .evaluateEmptyCache
+            : .waitForFreshGeometry(visibleCachedRowCount: visibleCachedRowCount)
+    }
 }
 
 struct ChatTranscriptView: View, Equatable {
@@ -98,6 +145,7 @@ struct ChatTranscriptView: View, Equatable {
     let showsThinkingAndToolCards: Bool
     let showsAssistantTypingIndicator: Bool
     let showsScrollToBottomButton: Bool
+    var hasExplicitBottomScrollRequest = false
     let shouldFollowLatestMessage: Bool
     let latestTranscriptMessageRole: String?
     let isScrolledNearBottom: Bool
@@ -166,8 +214,17 @@ struct ChatTranscriptView: View, Equatable {
     @State private var viewportTracker = ChatTranscriptViewportTracker()
     @State private var restoreSettlementTask: Task<Void, Never>?
     @State private var restoreSettlementState = ChatTranscriptRestoreState()
-    @State private var activationRecoveryCheckArmed = false
+#if DEBUG
+    @State private var pendingMessageCountDiagnostic: Int?
+    @State private var hasLoggedExplicitBottomTarget = false
+#endif
     private static let transcriptCoordinateSpaceName = "chatTranscript"
+#if DEBUG
+    private static let activationRecoveryLogger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "HermesMobile",
+        category: "TranscriptActivationRecovery"
+    )
+#endif
 
     private var renderedTranscriptMessages: [TranscriptMessage] {
         return ChatTranscriptRenderSequence.filtering(
@@ -298,6 +355,28 @@ struct ChatTranscriptView: View, Equatable {
                             ChatScrollToBottomButton(
                                 bottomPadding: scrollToBottomButtonBottomPadding,
                                 onTap: {
+#if DEBUG
+                                    let frames = viewportTracker.latestFrames
+                                    let latestRowVisible = ChatTranscriptVisibilityPolicy.isVisible(
+                                        frame: latestRenderedID.flatMap { frames[$0] },
+                                        viewportHeight: viewport.size.height,
+                                        bottomInset: transcriptBottomInsetHeight
+                                    )
+                                    let tailVisible = ChatTranscriptVisibilityPolicy.isVisible(
+                                        frame: frames[bottomAnchorID],
+                                        viewportHeight: viewport.size.height,
+                                        bottomInset: transcriptBottomInsetHeight
+                                    )
+                                    logTranscriptScrollSnapshot(
+                                        event: "explicit_bottom_tap",
+                                        decision: "dispatch_scroll_request",
+                                        viewportHeight: viewport.size.height,
+                                        targetKind: "latest_row_or_tail",
+                                        targetExists: latestRenderedID != nil,
+                                        targetVisible: latestRowVisible || tailVisible,
+                                        attempt: 0
+                                    )
+#endif
                                     cancelTranscriptRestore()
                                     onScrollToBottom(proxy)
                                 }
@@ -315,8 +394,17 @@ struct ChatTranscriptView: View, Equatable {
                     // without a new restore token. Arm only a geometry check;
                     // the preference callback decides whether any recovery is
                     // actually needed.
-                    activationRecoveryCheckArmed = viewportTracker.hasObservedRows
+                    viewportTracker.activationRecoveryState.armForActivation()
                     viewportTracker.activationBaselineFramesGeneration = viewportTracker.framesGeneration
+#if DEBUG
+                    if viewportTracker.activationRecoveryState.isArmed {
+                        logTranscriptScrollSnapshot(
+                            event: "appear_armed",
+                            decision: "await_fresh_geometry",
+                            viewportHeight: viewport.size.height
+                        )
+                    }
+#endif
                     scheduleActivationRecoveryProbe(
                         proxy: proxy,
                         viewportHeight: viewport.size.height,
@@ -328,8 +416,17 @@ struct ChatTranscriptView: View, Equatable {
                     // Foregrounding is not itself a reason to scroll. Wait for
                     // the next realized-row sample before deciding whether the
                     // retained viewport is blank or out of range.
-                    activationRecoveryCheckArmed = viewportTracker.hasObservedRows
+                    viewportTracker.activationRecoveryState.armForActivation()
                     viewportTracker.activationBaselineFramesGeneration = viewportTracker.framesGeneration
+#if DEBUG
+                    if viewportTracker.activationRecoveryState.isArmed {
+                        logTranscriptScrollSnapshot(
+                            event: "foreground_armed",
+                            decision: "await_fresh_geometry",
+                            viewportHeight: viewport.size.height
+                        )
+                    }
+#endif
                     scheduleActivationRecoveryProbe(
                         proxy: proxy,
                         viewportHeight: viewport.size.height,
@@ -337,9 +434,41 @@ struct ChatTranscriptView: View, Equatable {
                     )
                 }
                 .onChange(of: messages.count) {
+                    let isLatestUserRow = latestTranscriptMessageRole == "user"
+#if DEBUG
+                    let frames = viewportTracker.latestFrames
+                    let latestRowVisible = ChatTranscriptVisibilityPolicy.isVisible(
+                        frame: latestRenderedID.flatMap { frames[$0] },
+                        viewportHeight: viewport.size.height,
+                        bottomInset: transcriptBottomInsetHeight
+                    )
+                    let tailVisible = ChatTranscriptVisibilityPolicy.isVisible(
+                        frame: frames[bottomAnchorID],
+                        viewportHeight: viewport.size.height,
+                        bottomInset: transcriptBottomInsetHeight
+                    )
+                    let isOutgoingUserInsertion = isLatestUserRow
+                        && outgoingInsertionEvent?.scope == outgoingInsertionScope
+                        && outgoingInsertionEvent?.messageID == latestRenderedID
+                    logTranscriptScrollSnapshot(
+                        event: "message_count_change",
+                        decision: shouldFollowLatestMessage
+                            ? (isLatestUserRow ? "follow_latest_user_row" : "follow_latest_content")
+                            : "preserve_reader_position",
+                        viewportHeight: viewport.size.height,
+                        targetKind: isLatestUserRow ? "latest_row" : "latest_content",
+                        targetExists: latestRenderedID != nil,
+                        targetVisible: isLatestUserRow ? latestRowVisible : tailVisible,
+                        attempt: 0,
+                        outgoingUserInsertion: isOutgoingUserInsertion
+                    )
+#endif
                     guard shouldFollowLatestMessage else { return }
+#if DEBUG
+                    pendingMessageCountDiagnostic = messages.count
+#endif
 
-                    if latestTranscriptMessageRole == "user" {
+                    if isLatestUserRow {
                         onScrollToLatestTranscriptMessage(proxy)
                     } else {
                         onScrollToLatestContent(proxy, true)
@@ -355,15 +484,40 @@ struct ChatTranscriptView: View, Equatable {
                     // The loaded branch may first mount with a pending request.
                     // Observing only later changes misses that initial restore.
                     guard restoreScrollToken > 0 else { return }
-                    applyTranscriptRestore(proxy)
+                    applyTranscriptRestore(proxy, viewportHeight: viewport.size.height)
                 }
                 .onChange(of: transcriptRestoreCancellationToken) {
                     cancelTranscriptRestore()
                 }
+#if DEBUG
+                .onChange(of: hasExplicitBottomScrollRequest) { _, active in
+                    hasLoggedExplicitBottomTarget = false
+                    let frames = viewportTracker.latestFrames
+                    let latestRowVisible = ChatTranscriptVisibilityPolicy.isVisible(
+                        frame: latestRenderedID.flatMap { frames[$0] },
+                        viewportHeight: viewport.size.height,
+                        bottomInset: transcriptBottomInsetHeight
+                    )
+                    let tailVisible = ChatTranscriptVisibilityPolicy.isVisible(
+                        frame: frames[bottomAnchorID],
+                        viewportHeight: viewport.size.height,
+                        bottomInset: transcriptBottomInsetHeight
+                    )
+                    logTranscriptScrollSnapshot(
+                        event: active ? "explicit_bottom_state_started" : "explicit_bottom_state_ended",
+                        decision: active ? "settling" : "ended",
+                        viewportHeight: viewport.size.height,
+                        targetKind: "latest_row_or_tail",
+                        targetExists: latestRenderedID != nil,
+                        targetVisible: latestRowVisible || tailVisible,
+                        attempt: 0
+                    )
+                }
+#endif
                 .onDisappear {
                     restoreSettlementTask?.cancel()
                     restoreSettlementTask = nil
-                    activationRecoveryCheckArmed = false
+                    viewportTracker.activationRecoveryState.disarm()
                 }
                 .onChange(of: followRejoinScrollToken) {
                     guard followRejoinScrollToken > 0 else { return }
@@ -395,12 +549,50 @@ struct ChatTranscriptView: View, Equatable {
                             bottomInset: transcriptBottomInsetHeight
                         )
                     }
+                    let isLatestRowVisible = isVisible(latestFrame)
                     let isBottomVisible = isVisible(frames[bottomAnchorID])
+#if DEBUG
+                    if pendingMessageCountDiagnostic == messages.count {
+                        let isLatestUserRow = latestTranscriptMessageRole == "user"
+                        logTranscriptScrollSnapshot(
+                            event: "message_count_layout_sample",
+                            decision: isLatestUserRow
+                                ? (isLatestRowVisible ? "latest_user_row_visible" : "latest_user_row_not_visible")
+                                : (isBottomVisible ? "tail_visible" : "tail_not_visible"),
+                            viewportHeight: viewport.size.height,
+                            targetKind: isLatestUserRow ? "latest_row" : "latest_content",
+                            targetExists: latestRenderedID != nil,
+                            targetVisible: isLatestUserRow ? isLatestRowVisible : isBottomVisible,
+                            attempt: 0,
+                            outgoingUserInsertion: isLatestUserRow
+                                && outgoingInsertionEvent?.scope == outgoingInsertionScope
+                                && outgoingInsertionEvent?.messageID == latestRenderedID
+                        )
+                        pendingMessageCountDiagnostic = nil
+                    }
+                    if hasExplicitBottomScrollRequest,
+                       !hasLoggedExplicitBottomTarget,
+                       isLatestRowVisible || isBottomVisible {
+                        hasLoggedExplicitBottomTarget = true
+                        logTranscriptScrollSnapshot(
+                            event: "explicit_bottom_target_visible",
+                            decision: "visible_geometry_sample",
+                            viewportHeight: viewport.size.height,
+                            targetKind: "latest_row_or_tail",
+                            targetExists: latestRenderedID != nil,
+                            targetVisible: true,
+                            attempt: 0
+                        )
+                    }
+#endif
                     restoreSettlementState.recordTailVisibility(isBottomVisible)
-                    onTranscriptTailVisibilityChange(isVisible(latestFrame), isBottomVisible)
+                    onTranscriptTailVisibilityChange(isLatestRowVisible, isBottomVisible)
                     let visibleRow = ChatTranscriptVisibilityPolicy.firstVisibleMessage(
                         frames: frames.filter { $0.key != bottomAnchorID },
                         viewportHeight: viewport.size.height
+                    )
+                    viewportTracker.activationRecoveryState.recordPreferenceSample(
+                        hasVisibleMessageRows: visibleRow != nil
                     )
                     evaluateActivationRecovery(
                         proxy: proxy,
@@ -467,7 +659,7 @@ struct ChatTranscriptView: View, Equatable {
         latestRenderedID: String?,
         isFreshActivationSample: Bool
     ) {
-        guard activationRecoveryCheckArmed else { return }
+        guard viewportTracker.activationRecoveryState.isArmed else { return }
 
         let messageFrames = frames.filter { $0.key != bottomAnchorID }
         func isVisible(_ frame: CGRect?) -> Bool {
@@ -482,17 +674,13 @@ struct ChatTranscriptView: View, Equatable {
             viewportHeight: viewportHeight
         )
         let hasVisibleRows = visibleRow != nil || messageFrames.contains { isVisible($0.value) }
-        if hasVisibleRows {
-            viewportTracker.hasObservedRows = true
-        }
-
         // A cached frame dictionary can be left over from before foregrounding.
         // Keep the check armed while those frames look healthy; only a fresh
         // post-activation preference sample may disarm a healthy result.
         if !isFreshActivationSample && hasVisibleRows {
             return
         }
-        activationRecoveryCheckArmed = false
+        viewportTracker.activationRecoveryState.disarm()
 
         let currentMetrics = currentScrollMetricsForRecovery() ?? viewportTracker.latestScrollMetrics
         let isNearBottom = currentMetrics.map {
@@ -503,18 +691,26 @@ struct ChatTranscriptView: View, Equatable {
         } ?? isScrolledNearBottom
         let isTailVisible = isVisible(frames[bottomAnchorID])
             || isVisible(latestRenderedID.flatMap { frames[$0] })
-        guard ChatTranscriptViewportRecoveryPolicy.shouldRecoverAfterActivation(
+        let shouldRecover = ChatTranscriptViewportRecoveryPolicy.shouldRecoverAfterActivation(
             hasMessages: !messages.isEmpty,
-            hadObservedRows: viewportTracker.hasObservedRows,
+            hadObservedRows: viewportTracker.activationRecoveryState.hasObservedRows,
             hasVisibleRows: hasVisibleRows,
             shouldFollowLatest: shouldFollowLatestMessage,
             isNearBottom: isNearBottom,
             isTailVisible: isTailVisible,
             isDirectlyInteracting: currentMetrics?.isDirectlyInteracting ?? false,
             isDecelerating: currentMetrics?.isDecelerating ?? false
-        ) else { return }
+        )
+#if DEBUG
+        logTranscriptScrollSnapshot(
+            event: isFreshActivationSample ? "fresh_sample" : "empty_cache_sample",
+            decision: shouldRecover ? "restore_saved_viewport" : "keep_viewport",
+            viewportHeight: viewportHeight
+        )
+#endif
+        guard shouldRecover else { return }
 
-        applyTranscriptViewportRecovery(proxy)
+        applyTranscriptViewportRecovery(proxy, viewportHeight: viewportHeight)
     }
 
     private func scheduleActivationRecoveryProbe(
@@ -522,25 +718,64 @@ struct ChatTranscriptView: View, Equatable {
         viewportHeight: CGFloat,
         latestRenderedID: String?
     ) {
-        guard activationRecoveryCheckArmed, viewportHeight > 0 else { return }
+        guard viewportTracker.activationRecoveryState.isArmed, viewportHeight > 0 else { return }
         let baselineGeneration = viewportTracker.activationBaselineFramesGeneration
         Task { @MainActor in
             // Let SwiftUI/UIKit publish a new layout sample without introducing
             // an arbitrary timer delay. A preference callback with a newer
             // generation owns the normal path below.
             await Task.yield()
-            guard scenePhase == .active, activationRecoveryCheckArmed else { return }
+            guard scenePhase == .active, viewportTracker.activationRecoveryState.isArmed else { return }
             viewportTracker.scrollView?.setNeedsLayout()
             viewportTracker.scrollView?.layoutIfNeeded()
 
-            if viewportTracker.framesGeneration > baselineGeneration {
+            let visibleCachedRowCount = viewportTracker.latestFrames.filter { $0.key != bottomAnchorID }
+                .filter {
+                    ChatTranscriptVisibilityPolicy.isVisible(
+                        frame: $0.value,
+                        viewportHeight: viewportHeight,
+                        bottomInset: transcriptBottomInsetHeight
+                    )
+                }
+                .count
+            let disposition = ChatTranscriptActivationProbeDisposition.resolve(
+                currentFramesGeneration: viewportTracker.framesGeneration,
+                activationBaselineFramesGeneration: baselineGeneration,
+                cachedFrameCount: viewportTracker.latestFrames.count,
+                visibleCachedRowCount: visibleCachedRowCount
+            )
+
+            if case .freshGeometryArrived = disposition {
+#if DEBUG
+                logTranscriptScrollSnapshot(
+                    event: "probe_fresh_geometry",
+                    decision: "preference_callback_owns_recovery",
+                    viewportHeight: viewportHeight
+                )
+#endif
                 return
             }
 
-            // If the preference remains unchanged, only an empty cached sample
-            // is actionable. Healthy cached rows stay armed until a fresh sample
-            // arrives, avoiding an activation-time jump for a reader.
-            guard viewportTracker.latestFrames.isEmpty else { return }
+            // Cached nonempty frames may predate a long suspension. Do not
+            // reposition a reader based on them; record the ambiguity and wait
+            // for a real post-activation preference sample instead.
+            guard case .evaluateEmptyCache = disposition else {
+#if DEBUG
+                logTranscriptScrollSnapshot(
+                    event: "probe_stale_nonempty_cache",
+                    decision: "wait_for_fresh_geometry",
+                    viewportHeight: viewportHeight
+                )
+#endif
+                return
+            }
+#if DEBUG
+            logTranscriptScrollSnapshot(
+                event: "probe_empty_cache",
+                decision: "evaluate_empty_geometry",
+                viewportHeight: viewportHeight
+            )
+#endif
             evaluateActivationRecovery(
                 proxy: proxy,
                 viewportHeight: viewportHeight,
@@ -550,6 +785,72 @@ struct ChatTranscriptView: View, Equatable {
             )
         }
     }
+
+#if DEBUG
+    /// Emits bounded, content-free transcript viewport evidence. It omits
+    /// transcript text, row IDs, profile names, and paths.
+    private func logTranscriptScrollSnapshot(
+        event: String,
+        decision: String,
+        viewportHeight: CGFloat,
+        targetKind: String = "none",
+        targetExists: Bool? = nil,
+        targetVisible: Bool? = nil,
+        attempt: Int? = nil,
+        animated: Bool? = nil,
+        outgoingUserInsertion: Bool? = nil
+    ) {
+        let frames = viewportTracker.latestFrames
+        let rowFrames = frames.filter { $0.key != bottomAnchorID }.map(\.value)
+        let visibleRowCount = rowFrames.filter {
+            ChatTranscriptVisibilityPolicy.isVisible(
+                frame: $0,
+                viewportHeight: viewportHeight,
+                bottomInset: transcriptBottomInsetHeight
+            )
+        }.count
+        let scrollView = viewportTracker.scrollView
+        let bounds = scrollView?.bounds.size ?? .zero
+        let contentSize = scrollView?.contentSize ?? .zero
+        let contentOffset = scrollView?.contentOffset ?? .zero
+        let insets = scrollView?.adjustedContentInset ?? .zero
+        let hostVisibleHeight = max(0, bounds.height - insets.top - insets.bottom)
+        let normalizedOffset = contentOffset.y + insets.top
+        let maximumOffset = contentSize.height - hostVisibleHeight
+        let signedDistanceToMax = maximumOffset - normalizedOffset
+        let contentFitsViewport = contentSize.height >= hostVisibleHeight
+        let isPastMaxOffset = contentFitsViewport && normalizedOffset > maximumOffset + 1
+        let isPastMinOffset = normalizedOffset < -1
+        let frameMinY = rowFrames.map(\.minY).min() ?? .nan
+        let frameMaxY = rowFrames.map(\.maxY).max() ?? .nan
+        let currentMetrics = currentScrollMetricsForRecovery() ?? viewportTracker.latestScrollMetrics
+        let latestFrame = renderedTranscriptMessages.last.flatMap { frames[$0.renderID] }
+        let tailVisible = ChatTranscriptVisibilityPolicy.isVisible(
+            frame: frames[bottomAnchorID] ?? latestFrame,
+            viewportHeight: viewportHeight,
+            bottomInset: transcriptBottomInsetHeight
+        )
+        let targetExistsValue = targetExists.map { $0 ? "true" : "false" } ?? "unknown"
+        let targetVisibleValue = targetVisible.map { $0 ? "true" : "false" } ?? "unknown"
+        let attemptValue = attempt.map(String.init) ?? "none"
+        let animatedValue = animated.map { $0 ? "true" : "false" } ?? "unknown"
+        let outgoingValue = outgoingUserInsertion.map { $0 ? "true" : "false" } ?? "unknown"
+
+        Self.activationRecoveryLogger.debug("""
+            event=\(event, privacy: .public) decision=\(decision, privacy: .public) sceneActive=\(scenePhase == .active, privacy: .public) \
+            targetKind=\(targetKind, privacy: .public) targetExists=\(targetExistsValue, privacy: .public) targetVisible=\(targetVisibleValue, privacy: .public) attempt=\(attemptValue, privacy: .public) animated=\(animatedValue, privacy: .public) outgoingUserInsertion=\(outgoingValue, privacy: .public) \
+            messages=\(messages.count, privacy: .public) displayedRows=\(displayedTranscriptMessages.count, privacy: .public) renderedRows=\(renderedTranscriptMessages.count, privacy: .public) \
+            hasObservedRows=\(viewportTracker.activationRecoveryState.hasObservedRows, privacy: .public) recoveryArmed=\(viewportTracker.activationRecoveryState.isArmed, privacy: .public) frames=\(frames.count, privacy: .public) visibleFrames=\(visibleRowCount, privacy: .public) \
+            frameY=\(Double(frameMinY), privacy: .public)...\(Double(frameMaxY), privacy: .public) generation=\(viewportTracker.framesGeneration, privacy: .public) baseline=\(viewportTracker.activationBaselineFramesGeneration, privacy: .public) \
+            viewportHeight=\(Double(viewportHeight), privacy: .public) followLatest=\(shouldFollowLatestMessage, privacy: .public) nearBottom=\(isScrolledNearBottom, privacy: .public) tailVisible=\(tailVisible, privacy: .public) explicitBottomRequest=\(hasExplicitBottomScrollRequest, privacy: .public) \
+            streamActive=\(activeStreamID != nil, privacy: .public) hostInWindow=\(scrollView?.window != nil, privacy: .public) \
+            hostBounds=\(Double(bounds.width), privacy: .public)x\(Double(bounds.height), privacy: .public) hostVisibleHeight=\(Double(hostVisibleHeight), privacy: .public) \
+            contentSize=\(Double(contentSize.width), privacy: .public)x\(Double(contentSize.height), privacy: .public) contentOffset=\(Double(contentOffset.x), privacy: .public),\(Double(contentOffset.y), privacy: .public) insets=\(Double(insets.top), privacy: .public),\(Double(insets.bottom), privacy: .public) \
+            maxOffset=\(Double(maximumOffset), privacy: .public) normalizedOffset=\(Double(normalizedOffset), privacy: .public) signedDistanceToMax=\(Double(signedDistanceToMax), privacy: .public) contentFitsViewport=\(contentFitsViewport, privacy: .public) pastMin=\(isPastMinOffset, privacy: .public) pastMax=\(isPastMaxOffset, privacy: .public) \
+            distanceFromBottomClamped=\(Double(currentMetrics?.distanceFromBottom ?? .nan), privacy: .public) tracking=\(scrollView?.isTracking ?? false, privacy: .public) dragging=\(scrollView?.isDragging ?? false, privacy: .public) decelerating=\(scrollView?.isDecelerating ?? false, privacy: .public)
+            """)
+    }
+#endif
 
     private func currentScrollMetricsForRecovery() -> ChatScrollMetrics? {
         guard let scrollView = viewportTracker.scrollView else { return nil }
@@ -575,7 +876,13 @@ struct ChatTranscriptView: View, Equatable {
         contentWidth: CGFloat,
         renderedMessages: [TranscriptMessage]
     ) -> some View {
-        LazyVStack(spacing: transcriptMessageSpacing) {
+        let latestCompletedAssistantRenderID = AssistantResponseActionPolicy.latestCompletedAssistantRenderID(
+            in: renderedMessages,
+            hasActiveStream: activeStreamID != nil,
+            streamingAssistantMessageID: streamingAssistantMessageID
+        )
+
+        return LazyVStack(spacing: transcriptMessageSpacing) {
             olderMessagesButton(proxy: proxy)
 
             if let compressionReferenceCard, compressionReferenceCard.afterRenderID == nil {
@@ -598,6 +905,7 @@ struct ChatTranscriptView: View, Equatable {
                 VStack(alignment: .leading, spacing: transcriptMessageSpacing) {
                     ChatTranscriptMessageBlock(
                         transcriptMessage: transcriptMessage,
+                        latestCompletedAssistantRenderID: latestCompletedAssistantRenderID,
                         outgoingInsertionEvent: outgoingInsertionEvent?.messageID == transcriptMessage.message.id
                             ? outgoingInsertionEvent : nil,
                         insertionLedger: insertionLedger,
@@ -712,10 +1020,43 @@ struct ChatTranscriptView: View, Equatable {
         max(0, viewportWidth - (transcriptHorizontalPadding * 2))
     }
 
+#if DEBUG
+    private func restoreTargetDiagnostic(
+        _ target: ChatTranscriptRestoreTarget,
+        viewportHeight: CGFloat
+    ) -> (kind: String, exists: Bool, visible: Bool) {
+        let frames = viewportTracker.latestFrames
+        switch target {
+        case .latest:
+            let latestID = renderedTranscriptMessages.last?.renderID
+            let latestVisible = ChatTranscriptVisibilityPolicy.isVisible(
+                frame: latestID.flatMap { frames[$0] },
+                viewportHeight: viewportHeight,
+                bottomInset: transcriptBottomInsetHeight
+            )
+            let tailVisible = ChatTranscriptVisibilityPolicy.isVisible(
+                frame: frames[bottomAnchorID],
+                viewportHeight: viewportHeight,
+                bottomInset: transcriptBottomInsetHeight
+            )
+            return ("latest_content", latestID != nil, latestVisible || tailVisible)
+        case .message(let id):
+            let exists = renderedTranscriptMessages.contains { $0.renderID == id }
+            let visible = ChatTranscriptVisibilityPolicy.isVisible(
+                frame: frames[id],
+                viewportHeight: viewportHeight,
+                bottomInset: transcriptBottomInsetHeight
+            )
+            return ("saved_message", exists, visible)
+        }
+    }
+#endif
+
     private func applyTranscriptRestore(
         _ proxy: ScrollViewProxy,
         target: ChatTranscriptRestoreTarget? = nil,
-        isViewportRecovery: Bool = false
+        isViewportRecovery: Bool = false,
+        viewportHeight: CGFloat
     ) {
         guard ChatTranscriptRestorePolicy.shouldProgrammaticallyRestoreOnAppear(hasMessages: !messages.isEmpty) else {
             return
@@ -733,7 +1074,21 @@ struct ChatTranscriptView: View, Equatable {
             return
         }
         let target = target ?? restoreTarget
+#if DEBUG
+        let startDiagnostic = restoreTargetDiagnostic(target, viewportHeight: viewportHeight)
+        logTranscriptScrollSnapshot(
+            event: isViewportRecovery ? "viewport_recovery_start" : "initial_restore_start",
+            decision: "settling_target",
+            viewportHeight: viewportHeight,
+            targetKind: startDiagnostic.kind,
+            targetExists: startDiagnostic.exists,
+            targetVisible: startDiagnostic.visible,
+            attempt: 0,
+            animated: false
+        )
+#endif
         restoreSettlementTask = Task { @MainActor in
+            var attempt = 0
             for delay in ChatTranscriptRestorePolicy.settlementDelays {
                 if delay > 0 {
                     try? await Task.sleep(nanoseconds: delay)
@@ -747,6 +1102,22 @@ struct ChatTranscriptView: View, Equatable {
                     target: target,
                     firstVisibleMessageID: viewportTracker.visibleRowID
                 ) {
+#if DEBUG
+                    let settledDiagnostic = restoreTargetDiagnostic(
+                        target,
+                        viewportHeight: viewportHeight
+                    )
+                    logTranscriptScrollSnapshot(
+                        event: isViewportRecovery ? "viewport_recovery_settled" : "initial_restore_settled",
+                        decision: "target_confirmed",
+                        viewportHeight: viewportHeight,
+                        targetKind: settledDiagnostic.kind,
+                        targetExists: settledDiagnostic.exists,
+                        targetVisible: settledDiagnostic.visible,
+                        attempt: attempt,
+                        animated: false
+                    )
+#endif
                     restoreSettlementTask = nil
                     return
                 }
@@ -754,7 +1125,24 @@ struct ChatTranscriptView: View, Equatable {
                 // Count the attempt immediately before issuing the proxy call.
                 // A default near-bottom value is not allowed to short-circuit the
                 // first real restore pass.
+                attempt += 1
                 restoreSettlementState.recordRestoreAttempt()
+#if DEBUG
+                let attemptDiagnostic = restoreTargetDiagnostic(
+                    target,
+                    viewportHeight: viewportHeight
+                )
+                logTranscriptScrollSnapshot(
+                    event: isViewportRecovery ? "viewport_recovery_attempt" : "initial_restore_attempt",
+                    decision: "issue_scroll_target",
+                    viewportHeight: viewportHeight,
+                    targetKind: attemptDiagnostic.kind,
+                    targetExists: attemptDiagnostic.exists,
+                    targetVisible: attemptDiagnostic.visible,
+                    attempt: attempt,
+                    animated: false
+                )
+#endif
                 switch target {
                 case .latest:
                     onScrollToLatestContent(proxy, false)
@@ -764,11 +1152,30 @@ struct ChatTranscriptView: View, Equatable {
             }
 
             guard !Task.isCancelled else { return }
+#if DEBUG
+            let exhaustedDiagnostic = restoreTargetDiagnostic(
+                target,
+                viewportHeight: viewportHeight
+            )
+            logTranscriptScrollSnapshot(
+                event: isViewportRecovery ? "viewport_recovery_exhausted" : "initial_restore_exhausted",
+                decision: "bounded_attempts_finished",
+                viewportHeight: viewportHeight,
+                targetKind: exhaustedDiagnostic.kind,
+                targetExists: exhaustedDiagnostic.exists,
+                targetVisible: exhaustedDiagnostic.visible,
+                attempt: attempt,
+                animated: false
+            )
+#endif
             restoreSettlementTask = nil
         }
     }
 
-    private func applyTranscriptViewportRecovery(_ proxy: ScrollViewProxy) {
+    private func applyTranscriptViewportRecovery(
+        _ proxy: ScrollViewProxy,
+        viewportHeight: CGFloat
+    ) {
         let target: ChatTranscriptRestoreTarget
         if shouldFollowLatestMessage {
             target = .latest
@@ -781,7 +1188,8 @@ struct ChatTranscriptView: View, Equatable {
         applyTranscriptRestore(
             proxy,
             target: target,
-            isViewportRecovery: true
+            isViewportRecovery: true,
+            viewportHeight: viewportHeight
         )
     }
 
@@ -798,7 +1206,7 @@ struct ChatTranscriptView: View, Equatable {
         viewportTracker.visibleRowID = nil
         viewportTracker.visibleRowFrame = nil
         viewportTracker.viewportHeight = 0
-        viewportTracker.hasObservedRows = false
+        viewportTracker.activationRecoveryState.reset()
         viewportTracker.latestFrames = [:]
         viewportTracker.latestScrollMetrics = nil
         viewportTracker.olderMessagesLoadInFlight = false
@@ -808,7 +1216,6 @@ struct ChatTranscriptView: View, Equatable {
         viewportTracker.pendingOlderMessagesBaselineRenderRevision = nil
         viewportTracker.pendingOlderMessagesBaselineFirstLoadedRowID = nil
         viewportTracker.lastOlderMessagesPrefetchVisibleRowID = nil
-        activationRecoveryCheckArmed = false
     }
 
     private func handleScrollMetrics(_ metrics: ChatScrollMetrics) {
@@ -1169,6 +1576,7 @@ extension ChatTranscriptView {
             lhs.showsThinkingAndToolCards == rhs.showsThinkingAndToolCards &&
             lhs.showsAssistantTypingIndicator == rhs.showsAssistantTypingIndicator &&
             lhs.showsScrollToBottomButton == rhs.showsScrollToBottomButton &&
+            lhs.hasExplicitBottomScrollRequest == rhs.hasExplicitBottomScrollRequest &&
             lhs.shouldFollowLatestMessage == rhs.shouldFollowLatestMessage &&
             lhs.latestTranscriptMessageRole == rhs.latestTranscriptMessageRole &&
             lhs.liveTokensPerSecond == rhs.liveTokensPerSecond &&
@@ -1202,6 +1610,7 @@ extension ChatTranscriptView {
 
 private struct ChatTranscriptMessageBlock: View, Equatable {
     let transcriptMessage: TranscriptMessage
+    let latestCompletedAssistantRenderID: String?
     let outgoingInsertionEvent: OutgoingInsertionEvent?
     let insertionLedger: OutgoingInsertionLedger
     let allowsOutgoingMotion: Bool
@@ -1245,26 +1654,27 @@ private struct ChatTranscriptMessageBlock: View, Equatable {
     // even though their closure props are recreated on every parent body pass.
     static func == (lhs: ChatTranscriptMessageBlock, rhs: ChatTranscriptMessageBlock) -> Bool {
         lhs.outgoingInsertionEvent == rhs.outgoingInsertionEvent &&
-            lhs.allowsOutgoingMotion == rhs.allowsOutgoingMotion &&
-            lhs.transcriptMessage == rhs.transcriptMessage &&
-            lhs.transcriptBlockSpacing == rhs.transcriptBlockSpacing &&
-            lhs.showsThinkingAndToolCards == rhs.showsThinkingAndToolCards &&
-            lhs.reasoningGroups == rhs.reasoningGroups &&
-            lhs.toolCallGroups == rhs.toolCallGroups &&
-            lhs.liveReasoningText == rhs.liveReasoningText &&
-            lhs.reasoningAnchorMessageID == rhs.reasoningAnchorMessageID &&
-            lhs.liveToolCalls == rhs.liveToolCalls &&
-            lhs.toolCallAnchorMessageID == rhs.toolCallAnchorMessageID &&
-            lhs.streamingAssistantMessageID == rhs.streamingAssistantMessageID &&
-            lhs.liveTokensPerSecond == rhs.liveTokensPerSecond &&
-            lhs.localAttachmentPreviews == rhs.localAttachmentPreviews &&
-            lhs.listeningMessageID == rhs.listeningMessageID &&
-            lhs.isViewingCachedData == rhs.isViewingCachedData &&
-            lhs.hasActiveStream == rhs.hasActiveStream &&
-            lhs.isRegeneratingMessage == rhs.isRegeneratingMessage &&
-            lhs.isEditingMessage == rhs.isEditingMessage &&
-            lhs.isForkingMessage == rhs.isForkingMessage &&
-            lhs.transcriptMediaCacheNamespace == rhs.transcriptMediaCacheNamespace
+        lhs.allowsOutgoingMotion == rhs.allowsOutgoingMotion &&
+        lhs.transcriptMessage == rhs.transcriptMessage &&
+        lhs.latestCompletedAssistantRenderID == rhs.latestCompletedAssistantRenderID &&
+        lhs.transcriptBlockSpacing == rhs.transcriptBlockSpacing &&
+        lhs.showsThinkingAndToolCards == rhs.showsThinkingAndToolCards &&
+        lhs.reasoningGroups == rhs.reasoningGroups &&
+        lhs.toolCallGroups == rhs.toolCallGroups &&
+        lhs.liveReasoningText == rhs.liveReasoningText &&
+        lhs.reasoningAnchorMessageID == rhs.reasoningAnchorMessageID &&
+        lhs.liveToolCalls == rhs.liveToolCalls &&
+        lhs.toolCallAnchorMessageID == rhs.toolCallAnchorMessageID &&
+        lhs.streamingAssistantMessageID == rhs.streamingAssistantMessageID &&
+        lhs.liveTokensPerSecond == rhs.liveTokensPerSecond &&
+        lhs.localAttachmentPreviews == rhs.localAttachmentPreviews &&
+        lhs.listeningMessageID == rhs.listeningMessageID &&
+        lhs.isViewingCachedData == rhs.isViewingCachedData &&
+        lhs.hasActiveStream == rhs.hasActiveStream &&
+        lhs.isRegeneratingMessage == rhs.isRegeneratingMessage &&
+        lhs.isEditingMessage == rhs.isEditingMessage &&
+        lhs.isForkingMessage == rhs.isForkingMessage &&
+        lhs.transcriptMediaCacheNamespace == rhs.transcriptMediaCacheNamespace
     }
 
     var body: some View {
@@ -1289,6 +1699,7 @@ private struct ChatTranscriptMessageBlock: View, Equatable {
                     ),
                     visibleIndex: transcriptMessage.loadedIndex,
                     actionContext: actionContext(transcriptMessage.message, transcriptMessage.loadedIndex),
+                    isLatestCompletedAssistant: latestCompletedAssistantRenderID == transcriptMessage.renderID,
                     localAttachmentPreviews: localAttachmentPreviews,
                     listeningMessageID: listeningMessageID,
                     isViewingCachedData: isViewingCachedData,
@@ -1381,11 +1792,14 @@ private struct ChatTranscriptMessageBlock: View, Equatable {
 }
 
 private struct ChatTranscriptMessageRow: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     let message: ChatMessage
     let accessibilityRowIdentifier: String
     let accessibilityRowLabel: String
     let visibleIndex: Int
     let actionContext: MessageActionContext?
+    let isLatestCompletedAssistant: Bool
     let localAttachmentPreviews: [String: Data]?
     let listeningMessageID: String?
     let isViewingCachedData: Bool
@@ -1436,6 +1850,7 @@ private struct ChatTranscriptMessageRow: View {
                             onCopy: onCopy
                         )
                     }
+                responseActionRow(for: actionContext)
             } else {
                 bubble
             }
@@ -1463,6 +1878,28 @@ private struct ChatTranscriptMessageRow: View {
             onPreviewTranscriptMedia: onPreviewTranscriptMedia,
             isStreaming: isStreaming,
             liveTokensPerSecond: liveTokensPerSecond
+        )
+    }
+
+    private func responseActionRow(for context: MessageActionContext) -> some View {
+        Group {
+            if shouldShowResponseActions(for: context) {
+                AssistantResponseActionRow(context: context, onCopy: onCopy)
+                    .transition(reduceMotion ? .identity : .opacity)
+            }
+        }
+        .animation(
+            reduceMotion ? nil : .easeOut(duration: 0.15),
+            value: shouldShowResponseActions(for: context)
+        )
+    }
+
+    private func shouldShowResponseActions(for context: MessageActionContext) -> Bool {
+        AssistantResponseActionPolicy.shouldShowPersistentCopy(
+            context: context,
+            messageRole: message.role,
+            isStreaming: isStreaming,
+            isLatestCompletedAssistant: isLatestCompletedAssistant
         )
     }
 }

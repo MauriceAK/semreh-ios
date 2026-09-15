@@ -806,7 +806,6 @@ final class ChatViewModel {
     private(set) var goalErrorMessage: String?
     private(set) var hasActivatedGoalCommand = false
     private var directGoalStatusEventKeys: Set<String> = []
-    private var directColdResumeNoticeKeys: Set<String> = []
 
     private var sessionID: String?
     var usesDirectGateway: Bool { gatewayRuntimeProvider != nil }
@@ -1215,13 +1214,6 @@ final class ChatViewModel {
             self.directBlockingInteractionErrorIdentity = nil
             if controller.hasAmbiguousPromptDelivery {
                 self.sendErrorMessage = self.promptDeliveryWarning(for: controller)
-            }
-            if controller.suppressesColdResumedContent,
-               let storedID = controller.storedID {
-                let key = "\(controller.sharedRuntime.connectionGeneration):\(controller.profile):\(storedID)"
-                if self.directColdResumeNoticeKeys.insert(key).inserted {
-                    self.appendLocalNoticeMessage("Reconnected to a running response. Showing saved messages until Hermes confirms completion.")
-                }
             }
         }
         controller.onReasoningConfiguration = { [weak self, weak controller] configuration in
@@ -3592,7 +3584,20 @@ final class ChatViewModel {
         guard let modelContext else { return }
 
         do {
-            try CacheStore.cacheMessages(Self.cacheMessageWindow(from: messages), serverURL: server, sessionID: transcriptCacheID(sessionID), in: modelContext)
+            let messageWindow = Self.cacheMessageWindow(from: messages)
+            let previewIdentity = usesDirectGateway
+                ? CachedSessionPreviewIdentity(
+                    profile: Self.nonEmpty(currentProfile) ?? "default",
+                    sessionID: sessionID
+                )
+                : nil
+            try CacheStore.cacheMessages(
+                messageWindow,
+                serverURL: server,
+                sessionID: transcriptCacheID(sessionID),
+                previewIdentity: previewIdentity,
+                in: modelContext
+            )
         } catch {
             cacheErrorMessage = error.localizedDescription
         }

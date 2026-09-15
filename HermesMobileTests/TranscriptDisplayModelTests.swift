@@ -669,12 +669,120 @@ final class TranscriptMessageTests: XCTestCase {
             source.range(of: "private func compressionReferenceCardView", range: contentStart.upperBound..<source.endIndex)
         )
         let scrollContent = source[contentStart.lowerBound..<contentEnd.lowerBound]
+        let constructionLines = scrollContent.split(separator: "\n").map { line in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            return trimmed.hasPrefix("return ") ? String(trimmed.dropFirst(7)) : trimmed
+        }
 
         XCTAssertTrue(
-            scrollContent.contains("\n        LazyVStack(spacing: transcriptMessageSpacing)"),
+            constructionLines.contains { $0.hasPrefix("LazyVStack(spacing: transcriptMessageSpacing)") },
             "Long conversations must lazily instantiate transcript rows instead of building the full history eagerly."
         )
-        XCTAssertFalse(scrollContent.contains("\n        VStack(spacing: transcriptMessageSpacing)"))
+        XCTAssertFalse(constructionLines.contains { $0.hasPrefix("VStack(spacing: transcriptMessageSpacing)") })
+    }
+}
+
+final class AssistantResponseActionPolicyTests: XCTestCase {
+    func testCopyStaysOnPriorCompletedResponseUntilStreamingReplyCompletes() throws {
+        let priorAssistant = row(role: "assistant", content: "Prior answer", id: "a1", index: 1)
+        let currentPartial = row(role: "assistant", content: "Draft", id: "a2", index: 3)
+        let activeTranscript = [
+            row(role: "user", content: "First question", id: "u1", index: 0),
+            priorAssistant,
+            row(role: "user", content: "Second question", id: "u2", index: 2),
+            currentPartial
+        ]
+
+        let activeLatest = AssistantResponseActionPolicy.latestCompletedAssistantRenderID(
+            in: activeTranscript,
+            hasActiveStream: true,
+            streamingAssistantMessageID: "a2"
+        )
+        XCTAssertEqual(activeLatest, priorAssistant.renderID)
+
+        let priorContext = try XCTUnwrap(MessageActionContext(
+            message: priorAssistant.message,
+            visibleIndex: priorAssistant.loadedIndex,
+            messagesOffset: nil
+        ))
+        let partialContext = try XCTUnwrap(MessageActionContext(
+            message: currentPartial.message,
+            visibleIndex: currentPartial.loadedIndex,
+            messagesOffset: nil
+        ))
+        XCTAssertTrue(AssistantResponseActionPolicy.shouldShowPersistentCopy(
+            context: priorContext,
+            messageRole: priorAssistant.message.role,
+            isStreaming: false,
+            isLatestCompletedAssistant: activeLatest == priorAssistant.renderID
+        ))
+        XCTAssertFalse(AssistantResponseActionPolicy.shouldShowPersistentCopy(
+            context: partialContext,
+            messageRole: currentPartial.message.role,
+            isStreaming: true,
+            isLatestCompletedAssistant: activeLatest == currentPartial.renderID
+        ))
+
+        let finalAssistant = row(role: "assistant", content: "Final answer", id: "a2", index: 3)
+        let completedTranscript = Array(activeTranscript.dropLast()) + [finalAssistant]
+        let completedLatest = AssistantResponseActionPolicy.latestCompletedAssistantRenderID(
+            in: completedTranscript,
+            hasActiveStream: false,
+            streamingAssistantMessageID: "a2" // A stale ID after completion must not hide the final response.
+        )
+        XCTAssertEqual(completedLatest, finalAssistant.renderID)
+
+        let finalContext = try XCTUnwrap(MessageActionContext(
+            message: finalAssistant.message,
+            visibleIndex: finalAssistant.loadedIndex,
+            messagesOffset: nil
+        ))
+        XCTAssertFalse(AssistantResponseActionPolicy.shouldShowPersistentCopy(
+            context: priorContext,
+            messageRole: priorAssistant.message.role,
+            isStreaming: false,
+            isLatestCompletedAssistant: completedLatest == priorAssistant.renderID
+        ))
+        XCTAssertTrue(AssistantResponseActionPolicy.shouldShowPersistentCopy(
+            context: finalContext,
+            messageRole: finalAssistant.message.role,
+            isStreaming: false,
+            isLatestCompletedAssistant: completedLatest == finalAssistant.renderID
+        ))
+    }
+
+    func testNonResponseAssistantMarkerDoesNotDisplaceLatestCopyAction() {
+        let answer = row(role: "assistant", content: "Keep this copy action", id: "a1", index: 0)
+        let marker = row(
+            role: "assistant",
+            content: "[Context compaction] Summary",
+            id: "marker",
+            index: 1
+        )
+
+        XCTAssertEqual(
+            AssistantResponseActionPolicy.latestCompletedAssistantRenderID(
+                in: [answer, marker],
+                hasActiveStream: false,
+                streamingAssistantMessageID: nil
+            ),
+            answer.renderID
+        )
+    }
+
+    private func row(role: String, content: String, id: String, index: Int) -> TranscriptMessage {
+        let message = ChatMessage(
+            role: role,
+            content: content,
+            timestamp: Double(index),
+            messageId: id
+        )
+        return TranscriptMessage(
+            loadedIndex: index,
+            renderID: id,
+            anchorID: id,
+            message: message
+        )
     }
 }
 
@@ -952,7 +1060,7 @@ final class ChatActiveRunStatusPolicyTests: XCTestCase {
         ))
     }
 
-    func testStatusShowsActiveRunWhenScrolledAwayFromBottom() {
+    func testGenericActiveRunDoesNotAddFloatingStatusWhenScrolledAway() {
         let presentation = ChatActiveRunStatusPolicy.presentation(
             isStartingChat: false,
             hasActiveStream: true,
@@ -961,8 +1069,7 @@ final class ChatActiveRunStatusPolicyTests: XCTestCase {
             isScrolledNearBottom: false
         )
 
-        XCTAssertEqual(presentation?.kind, .active)
-        XCTAssertEqual(presentation?.label, "Hermes is working")
+        XCTAssertNil(presentation)
     }
 
     func testStatusShowsStartingBeforeStreamIDExists() {

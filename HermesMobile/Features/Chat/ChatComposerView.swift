@@ -323,7 +323,7 @@ struct MessageComposerView: View {
                 }
                 .animation(ChatMotion.quickState(reduceMotion: reduceMotion), value: showsSlashAutocomplete)
 
-                HStack(alignment: .center, spacing: 8) {
+                HStack(alignment: isComposerExpanded ? .bottom : .center, spacing: 8) {
                     composerPlusMenu
                         .adaptiveGlass(.regular, isInteractive: true,
                                        fallbackMaterial: .ultraThinMaterial, in: Circle())
@@ -350,7 +350,7 @@ struct MessageComposerView: View {
                                 .padding(.bottom, 4)
                         }
 
-                        HStack(alignment: .center, spacing: 2) {
+                        HStack(alignment: isComposerExpanded ? .bottom : .center, spacing: 2) {
                             ComposerTextInputView(
                                 text: $draftMessage,
                                 isFocused: $isFocused,

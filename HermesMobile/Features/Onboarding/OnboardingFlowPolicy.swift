@@ -2,9 +2,9 @@ import Foundation
 
 enum OnboardingFlowPolicy {
     static let welcomePageIndex = 0
-    static let appearancePageIndex = 1
-    static let connectPageIndex = 2
-    static let pageCount = 3
+    static let connectPageIndex = 1
+    static let pageCount = 2
+    static let postLoginPersonalizationPendingStorageKey = "onboarding.postLoginPersonalizationPending"
     static let serverGuidanceSteps: [(title: String, detail: String)] = [
         (
             String(localized: "Use first-party Hermes"),
@@ -28,13 +28,28 @@ enum OnboardingFlowPolicy {
         switch page {
         case welcomePageIndex:
             return String(localized: "Get Started")
-        case appearancePageIndex:
-            return String(localized: "Continue")
         case connectPageIndex:
             return String(localized: "Connect")
         default:
             return String(localized: "Continue")
         }
+    }
+
+    @MainActor
+    static func isFreshOnboardingOrigin(_ state: AuthManager.State) -> Bool {
+        if case .unconfigured = state { return true }
+        return false
+    }
+
+    @MainActor
+    static func shouldStartPostLoginPersonalization(
+        hasFreshOnboardingOrigin: Bool,
+        to newState: AuthManager.State
+    ) -> Bool {
+        guard hasFreshOnboardingOrigin, case .loggedIn = newState else {
+            return false
+        }
+        return true
     }
 
     static func shouldClearConnectFocusWhenLeavingPage(_ page: Int) -> Bool {

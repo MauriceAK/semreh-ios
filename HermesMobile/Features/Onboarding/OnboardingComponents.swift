@@ -43,18 +43,16 @@ enum OnboardingTheme {
 
 struct SemrehBrandLockup: View {
     /// The lockup stays within the compact 210–224pt onboarding target. The
-    /// supplied app icon is the approved winged-S mark; the wordmark remains
+    /// standalone winged-S mark stays transparent so it does not bring the
+    /// opaque app-icon tile into the onboarding canvas. The wordmark remains
     /// native rounded text so it follows Dynamic Type and the active contrast.
     var width: CGFloat = 220
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         HStack(spacing: 14) {
-            Image("SemrehAppIcon")
-                .resizable()
-                .scaledToFit()
+            SemrehWingedSMark()
                 .frame(width: 62, height: 62)
-                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
 
             Text("Semreh")
                 .font(.system(.largeTitle, design: .rounded, weight: .medium))
@@ -70,6 +68,152 @@ struct SemrehBrandLockup: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Semreh")
         .accessibilityAddTraits(.isImage)
+    }
+}
+
+/// Code-native rendering of the approved winged-S paths. The source SVG's
+/// opaque paper rectangle is intentionally omitted; only its unchanged paths
+/// and optical translation are rendered here.
+struct SemrehWingedSMark: View {
+    private static let designSize: CGFloat = 1024
+    private static let opticalTranslation = CGAffineTransform(translationX: 49, y: -32)
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        GeometryReader { geometry in
+            let scale = min(geometry.size.width, geometry.size.height) / Self.designSize
+
+            ZStack {
+                Self.upperPath
+                    .applying(Self.opticalTranslation)
+                    .fill(upperColor)
+                Self.lowerPath
+                    .applying(Self.opticalTranslation)
+                    .fill(lowerColor)
+            }
+            .frame(width: Self.designSize, height: Self.designSize)
+            .scaleEffect(scale)
+            .frame(width: geometry.size.width, height: geometry.size.height)
+        }
+        .aspectRatio(1, contentMode: .fit)
+        .accessibilityHidden(true)
+    }
+
+    private var upperColor: Color {
+        // These are the approved mark colors already used by the canonical
+        // icon. Cream keeps the upper path legible on the dark canvas.
+        colorScheme == .dark
+            ? Color(hexRGB: "#F7F3EA")!
+            : Color(hexRGB: "#20252B")!
+    }
+
+    private var lowerColor: Color {
+        Color(hexRGB: "#8DA4B5")!
+    }
+
+    private static var upperPath: Path {
+        var path = Path()
+        path.move(to: CGPoint(x: 780, y: 187))
+        path.addCurve(
+            to: CGPoint(x: 681, y: 339),
+            control1: CGPoint(x: 774, y: 245),
+            control2: CGPoint(x: 779, y: 291)
+        )
+        path.addCurve(
+            to: CGPoint(x: 742, y: 319),
+            control1: CGPoint(x: 704, y: 337),
+            control2: CGPoint(x: 724, y: 328)
+        )
+        path.addCurve(
+            to: CGPoint(x: 622, y: 413),
+            control1: CGPoint(x: 724, y: 376),
+            control2: CGPoint(x: 682, y: 409)
+        )
+        path.addLine(to: CGPoint(x: 428, y: 414))
+        path.addCurve(
+            to: CGPoint(x: 362, y: 483),
+            control1: CGPoint(x: 387, y: 416),
+            control2: CGPoint(x: 363, y: 445)
+        )
+        path.addCurve(
+            to: CGPoint(x: 475, y: 621),
+            control1: CGPoint(x: 359, y: 541),
+            control2: CGPoint(x: 411, y: 582)
+        )
+        path.addLine(to: CGPoint(x: 362, y: 621))
+        path.addCurve(
+            to: CGPoint(x: 212, y: 493),
+            control1: CGPoint(x: 268, y: 621),
+            control2: CGPoint(x: 211, y: 578)
+        )
+        path.addCurve(
+            to: CGPoint(x: 351, y: 291),
+            control1: CGPoint(x: 212, y: 396),
+            control2: CGPoint(x: 264, y: 324)
+        )
+        path.addCurve(
+            to: CGPoint(x: 523, y: 270),
+            control1: CGPoint(x: 399, y: 272),
+            control2: CGPoint(x: 454, y: 274)
+        )
+        path.addCurve(
+            to: CGPoint(x: 780, y: 187),
+            control1: CGPoint(x: 637, y: 271),
+            control2: CGPoint(x: 725, y: 264)
+        )
+        path.closeSubpath()
+        return path
+    }
+
+    private static var lowerPath: Path {
+        var path = Path()
+        path.move(to: CGPoint(x: 432, y: 477))
+        path.addLine(to: CGPoint(x: 552, y: 477))
+        path.addCurve(
+            to: CGPoint(x: 711, y: 619),
+            control1: CGPoint(x: 641, y: 477),
+            control2: CGPoint(x: 711, y: 530)
+        )
+        path.addCurve(
+            to: CGPoint(x: 561, y: 805),
+            control1: CGPoint(x: 711, y: 716),
+            control2: CGPoint(x: 650, y: 784)
+        )
+        path.addCurve(
+            to: CGPoint(x: 441, y: 811),
+            control1: CGPoint(x: 527, y: 813),
+            control2: CGPoint(x: 486, y: 810)
+        )
+        path.addLine(to: CGPoint(x: 334, y: 811))
+        path.addCurve(
+            to: CGPoint(x: 173, y: 885),
+            control1: CGPoint(x: 259, y: 811),
+            control2: CGPoint(x: 211, y: 830)
+        )
+        path.addCurve(
+            to: CGPoint(x: 289, y: 699),
+            control1: CGPoint(x: 173, y: 790),
+            control2: CGPoint(x: 218, y: 728)
+        )
+        path.addCurve(
+            to: CGPoint(x: 407, y: 680),
+            control1: CGPoint(x: 326, y: 683),
+            control2: CGPoint(x: 363, y: 681)
+        )
+        path.addLine(to: CGPoint(x: 462, y: 680))
+        path.addCurve(
+            to: CGPoint(x: 551, y: 614),
+            control1: CGPoint(x: 514, y: 680),
+            control2: CGPoint(x: 550, y: 654)
+        )
+        path.addCurve(
+            to: CGPoint(x: 432, y: 477),
+            control1: CGPoint(x: 552, y: 563),
+            control2: CGPoint(x: 493, y: 518)
+        )
+        path.closeSubpath()
+        return path
     }
 }
 

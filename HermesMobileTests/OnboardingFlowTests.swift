@@ -28,34 +28,31 @@ final class OnboardingFlowTests: XCTestCase {
     }
 
     func testPrimaryButtonTitlesFollowPagerFlow() {
-        XCTAssertEqual(OnboardingFlowPolicy.primaryButtonTitle(for: 0), "Get Started")
-        XCTAssertEqual(
-            OnboardingFlowPolicy.primaryButtonTitle(for: OnboardingFlowPolicy.appearancePageIndex),
-            "Continue"
-        )
+        XCTAssertEqual(OnboardingFlowPolicy.primaryButtonTitle(for: OnboardingFlowPolicy.welcomePageIndex), "Get Started")
         XCTAssertEqual(
             OnboardingFlowPolicy.primaryButtonTitle(for: OnboardingFlowPolicy.connectPageIndex),
             "Connect"
         )
-        XCTAssertEqual(OnboardingFlowPolicy.pageCount, 3)
+        XCTAssertEqual(OnboardingFlowPolicy.pageCount, 2)
     }
 
     func testConnectFocusClearsWhenLeavingConnectPage() {
         XCTAssertTrue(OnboardingFlowPolicy.shouldClearConnectFocusWhenLeavingPage(0))
         XCTAssertTrue(
             OnboardingFlowPolicy.shouldClearConnectFocusWhenLeavingPage(
-                OnboardingFlowPolicy.appearancePageIndex
+                OnboardingFlowPolicy.welcomePageIndex
             )
         )
         XCTAssertFalse(OnboardingFlowPolicy.shouldClearConnectFocusWhenLeavingPage(OnboardingFlowPolicy.connectPageIndex))
     }
 
-    func testFreshSetupStartsAtWelcomeAndSavedServerSkipsToConnect() {
+    func testFreshSetupStartsAtWelcomeThenConnectAndSavedServerSkipsIntro() {
         XCTAssertEqual(
             OnboardingFlowPolicy.initialPage(hasSavedServer: false),
             OnboardingFlowPolicy.welcomePageIndex
         )
         XCTAssertEqual(OnboardingFlowPolicy.initialPage(hasSavedServer: true), OnboardingFlowPolicy.connectPageIndex)
+        XCTAssertEqual(OnboardingFlowPolicy.connectPageIndex, OnboardingFlowPolicy.welcomePageIndex + 1)
     }
 
     func testServerGuidanceUsesFirstPartyExistingServerContract() {
@@ -85,16 +82,10 @@ final class OnboardingFlowTests: XCTestCase {
         XCTAssertEqual(OnboardingFlowPolicy.connectPageIndex, OnboardingFlowPolicy.pageCount - 1)
     }
 
-    func testFirstRunBackNavigationIsExplicitAndSavedServerSkipsIntro() {
+    func testFirstRunBackNavigationReturnsFromConnectToWelcomeAndSavedServerSkipsIntro() {
         XCTAssertFalse(
             OnboardingFlowPolicy.shouldShowBackButton(
                 for: OnboardingFlowPolicy.welcomePageIndex,
-                hasSavedServer: false
-            )
-        )
-        XCTAssertTrue(
-            OnboardingFlowPolicy.shouldShowBackButton(
-                for: OnboardingFlowPolicy.appearancePageIndex,
                 hasSavedServer: false
             )
         )
@@ -119,22 +110,67 @@ final class OnboardingFlowTests: XCTestCase {
         )
         XCTAssertEqual(
             OnboardingFlowPolicy.previousPage(
-                for: OnboardingFlowPolicy.appearancePageIndex,
-                hasSavedServer: false
-            ),
-            OnboardingFlowPolicy.welcomePageIndex
-        )
-        XCTAssertEqual(
-            OnboardingFlowPolicy.previousPage(
                 for: OnboardingFlowPolicy.connectPageIndex,
                 hasSavedServer: false
             ),
-            OnboardingFlowPolicy.appearancePageIndex
+            OnboardingFlowPolicy.welcomePageIndex
         )
         XCTAssertNil(
             OnboardingFlowPolicy.previousPage(
                 for: OnboardingFlowPolicy.connectPageIndex,
                 hasSavedServer: true
+            )
+        )
+    }
+
+    @MainActor
+    func testFailedFirstLoginRetainsOriginForRetryButSavedReauthenticationDoesNot() {
+        let server = URL(string: "https://server.example.com")!
+        let anotherServer = URL(string: "https://other.example.com")!
+        let freshOnboardingOrigin = OnboardingFlowPolicy.isFreshOnboardingOrigin(.unconfigured)
+
+        XCTAssertTrue(freshOnboardingOrigin)
+        XCTAssertTrue(
+            OnboardingFlowPolicy.shouldStartPostLoginPersonalization(
+                hasFreshOnboardingOrigin: freshOnboardingOrigin,
+                to: .loggedIn(server: server)
+            )
+        )
+
+        // An interrupted probe remains unconfigured and a rejected password moves
+        // to loggedOut. Neither marks personalization pending, but the separate
+        // fresh origin survives so the next successful login can present it.
+        XCTAssertFalse(
+            OnboardingFlowPolicy.shouldStartPostLoginPersonalization(
+                hasFreshOnboardingOrigin: freshOnboardingOrigin,
+                to: .unconfigured
+            )
+        )
+        XCTAssertFalse(
+            OnboardingFlowPolicy.shouldStartPostLoginPersonalization(
+                hasFreshOnboardingOrigin: freshOnboardingOrigin,
+                to: .loggedOut(server: server)
+            )
+        )
+        XCTAssertFalse(OnboardingFlowPolicy.isFreshOnboardingOrigin(.loggedOut(server: server)))
+        XCTAssertTrue(
+            OnboardingFlowPolicy.shouldStartPostLoginPersonalization(
+                hasFreshOnboardingOrigin: freshOnboardingOrigin,
+                to: .loggedIn(server: server)
+            )
+        )
+
+        // Existing-server reauthentication and server switching are not first run.
+        XCTAssertFalse(
+            OnboardingFlowPolicy.shouldStartPostLoginPersonalization(
+                hasFreshOnboardingOrigin: false,
+                to: .loggedIn(server: server)
+            )
+        )
+        XCTAssertFalse(
+            OnboardingFlowPolicy.shouldStartPostLoginPersonalization(
+                hasFreshOnboardingOrigin: false,
+                to: .loggedIn(server: anotherServer)
             )
         )
     }

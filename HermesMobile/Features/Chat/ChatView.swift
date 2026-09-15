@@ -4,6 +4,7 @@ import UIKit
 import PhotosUI
 import CoreTransferable
 import UniformTypeIdentifiers
+import OSLog
 
 private struct ImportedPhotoVideo: Transferable {
     let data: Data
@@ -432,6 +433,12 @@ struct ChatView: View {
     /// continuously-updated distance, so scroll metrics do not invalidate the
     /// whole chat on every point of a drag.
     private let nearbyBottomMotionDistance: CGFloat = 640
+#if DEBUG
+    private static let transcriptScrollLogger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "HermesMobile",
+        category: "TranscriptActivationRecovery"
+    )
+#endif
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -473,6 +480,9 @@ struct ChatView: View {
     @State private var explicitBottomScrollGeneration = 0
     @State private var isExplicitBottomScrollActive = false
     @State private var hasIssuedExplicitBottomScroll = false
+#if DEBUG
+    @State private var explicitBottomScrollAttemptCount = 0
+#endif
     @State private var isLatestTranscriptRowVisible = false
     @State private var isTranscriptBottomVisible = false
     @State private var explicitBottomScrollTask: Task<Void, Never>?
@@ -780,10 +790,11 @@ struct ChatView: View {
         Button {
             showsBotDetails = true
         } label: {
-            VStack(spacing: 2) {
+            VStack(spacing: -3) {
                 if let identity = BirdAvatarIdentity(server: server, profile: viewModel.selectedProfileName ?? session.profile) {
                     BirdAvatarView(identity: identity)
-                        .frame(width: 48, height: 48)
+                        .frame(width: 52, height: 52)
+                        .offset(y: 2)
                 }
 
                 Text(viewModel.selectedProfileTitle)
@@ -1490,6 +1501,7 @@ struct ChatView: View {
             showsThinkingAndToolCards: showsThinkingAndToolCards,
             showsAssistantTypingIndicator: showsAssistantTypingIndicator,
             showsScrollToBottomButton: showsScrollToBottomButton,
+            hasExplicitBottomScrollRequest: isExplicitBottomScrollActive,
             shouldFollowLatestMessage: shouldFollowLatestMessage,
             latestTranscriptMessageRole: latestTranscriptMessageRole,
             isScrolledNearBottom: isScrolledNearBottom,
@@ -2485,7 +2497,17 @@ struct ChatView: View {
         explicitBottomScrollTask?.cancel()
         explicitBottomScrollGeneration &+= 1
         let generation = explicitBottomScrollGeneration
-        let shouldAnimateInitialJump = isNearBottomForMotion && !reduceMotion
+        let shouldAnimateInitialJump = ChatScrollPolicy.shouldAnimateExplicitBottomJump(
+            reduceMotion: reduceMotion
+        )
+#if DEBUG
+        explicitBottomScrollAttemptCount = 0
+        Self.transcriptScrollLogger.debug("""
+            event=explicit_bottom_start decision=\(shouldAnimateInitialJump ? "animate" : "reduce_motion_snap", privacy: .public) \
+            animated=\(shouldAnimateInitialJump, privacy: .public) reduceMotion=\(reduceMotion, privacy: .public) \
+            nearMotionBand=\(isNearBottomForMotion, privacy: .public) directInteraction=\(isUserInteractingWithScroll, privacy: .public)
+            """)
+#endif
 
         userScrollCooldownUntil = nil
         isExplicitBottomDecelerationActive = false
@@ -2532,6 +2554,13 @@ struct ChatView: View {
 
             guard generation == explicitBottomScrollGeneration else { return }
             explicitBottomScrollTask = nil
+#if DEBUG
+            Self.transcriptScrollLogger.debug("""
+                event=explicit_bottom_exhausted decision=keep_request_visible \
+                attempts=\(explicitBottomScrollAttemptCount, privacy: .public) nearBottom=\(isScrolledNearBottom, privacy: .public) \
+                latestRowVisible=\(isLatestTranscriptRowVisible, privacy: .public) tailVisible=\(isTranscriptBottomVisible, privacy: .public)
+                """)
+#endif
             // Leave the request active (and the button visible) if UIKit still
             // reports distance. A subsequent tap starts a fresh settlement pass.
         }
@@ -2546,6 +2575,15 @@ struct ChatView: View {
             latestMessageIsVisible: isLatestTranscriptRowVisible,
             bottomAnchorID: bottomAnchorID
         )
+#if DEBUG
+        explicitBottomScrollAttemptCount += 1
+        Self.transcriptScrollLogger.debug("""
+            event=explicit_bottom_attempt decision=proxy_scroll \
+            attempt=\(explicitBottomScrollAttemptCount, privacy: .public) animated=\(animated, privacy: .public) \
+            targetKind=\(target == bottomAnchorID ? "tail" : "latest_row", privacy: .public) \
+            latestRowExists=\(latestTranscriptMessageID != nil, privacy: .public) latestRowVisible=\(isLatestTranscriptRowVisible, privacy: .public)
+            """)
+#endif
         if animated, let animation = ChatMotion.scrollToLatest(reduceMotion: reduceMotion) {
             withAnimation(animation) {
                 proxy.scrollTo(target, anchor: .bottom)
@@ -2567,12 +2605,25 @@ struct ChatView: View {
 
     private func completeExplicitBottomScroll(generation: Int? = nil) {
         guard generation == nil || generation == explicitBottomScrollGeneration else { return }
+#if DEBUG
+        Self.transcriptScrollLogger.debug("""
+            event=explicit_bottom_settled decision=near_bottom_and_tail_visible \
+            attempts=\(explicitBottomScrollAttemptCount, privacy: .public) latestRowVisible=\(isLatestTranscriptRowVisible, privacy: .public) \
+            tailVisible=\(isTranscriptBottomVisible, privacy: .public)
+            """)
+#endif
         finishExplicitBottomScroll(generation: generation)
         shouldFollowLatestMessage = true
         isReadingOlderTranscript = false
     }
 
     private func cancelExplicitBottomScroll() {
+#if DEBUG
+        Self.transcriptScrollLogger.debug("""
+            event=explicit_bottom_cancelled decision=direct_interaction \
+            attempts=\(explicitBottomScrollAttemptCount, privacy: .public)
+            """)
+#endif
         explicitBottomScrollGeneration &+= 1
         isExplicitBottomDecelerationActive = false
         finishExplicitBottomScroll()
@@ -2642,9 +2693,20 @@ struct ChatView: View {
         animated: Bool,
         isUserInitiated: Bool
     ) {
+#if DEBUG
+        let targetKind = targetID == bottomAnchorID ? "latest_content" : "latest_row"
+#endif
         // Auto-follow (streaming tokens, new rows) must not override the user's
         // scroll position while they are interacting or within the cooldown.
         if !isUserInitiated, isAutoFollowScrollPaused {
+#if DEBUG
+            let cooldownActive = userScrollCooldownUntil.map { Date() < $0 } ?? false
+            Self.transcriptScrollLogger.debug("""
+                event=follow_scroll_skipped decision=auto_follow_paused targetKind=\(targetKind, privacy: .public) \
+                userInitiated=\(isUserInitiated, privacy: .public) animatedRequested=\(animated, privacy: .public) \
+                effectiveUserInteraction=\(isUserInteractingWithScroll, privacy: .public) cooldownActive=\(cooldownActive, privacy: .public)
+                """)
+#endif
             return
         }
 
@@ -2656,13 +2718,36 @@ struct ChatView: View {
         isReadingOlderTranscript = false
         followScrollGeneration += 1
         let generation = followScrollGeneration
+#if DEBUG
+        Self.transcriptScrollLogger.debug("""
+            event=follow_scroll_scheduled decision=await_layout targetKind=\(targetKind, privacy: .public) \
+            userInitiated=\(isUserInitiated, privacy: .public) animatedRequested=\(animated, privacy: .public) \
+            generation=\(generation, privacy: .public) nearMotionBand=\(isNearBottomForMotion, privacy: .public)
+            """)
+#endif
 
         Task { @MainActor in
             await Task.yield()
             try? await Task.sleep(nanoseconds: 16_000_000)
-            guard !Task.isCancelled, generation == followScrollGeneration else { return }
+            guard !Task.isCancelled, generation == followScrollGeneration else {
+#if DEBUG
+                Self.transcriptScrollLogger.debug("""
+                    event=follow_scroll_cancelled decision=generation_changed targetKind=\(targetKind, privacy: .public) \
+                    generation=\(generation, privacy: .public)
+                    """)
+#endif
+                return
+            }
             // Re-check at fire time: a gesture may have begun during the delay.
-            if !isUserInitiated, isAutoFollowScrollPaused { return }
+            if !isUserInitiated, isAutoFollowScrollPaused {
+#if DEBUG
+                Self.transcriptScrollLogger.debug("""
+                    event=follow_scroll_skipped decision=auto_follow_paused_at_fire targetKind=\(targetKind, privacy: .public) \
+                    generation=\(generation, privacy: .public) directInteraction=\(isUserInteractingWithScroll, privacy: .public)
+                    """)
+#endif
+                return
+            }
 
             // Snap (no animation) while inside the cache-first reconcile window so the
             // taller server transcript replacing the cached one doesn't animate a jump
@@ -2675,6 +2760,13 @@ struct ChatView: View {
                 && isNearBottomForMotion
                 && !isCacheFirstSnapWindow
                 && !reduceMotion
+#if DEBUG
+            Self.transcriptScrollLogger.debug("""
+                event=follow_scroll_command decision=proxy_scroll targetKind=\(targetKind, privacy: .public) \
+                generation=\(generation, privacy: .public) animated=\(shouldAnimate, privacy: .public) \
+                nearMotionBand=\(isNearBottomForMotion, privacy: .public) cacheFirstSnap=\(isCacheFirstSnapWindow, privacy: .public) reduceMotion=\(reduceMotion, privacy: .public)
+                """)
+#endif
             if shouldAnimate {
                 // While streaming, follow with the short cadence-synced curve so
                 // back-to-back triggers retarget smoothly; otherwise keep the

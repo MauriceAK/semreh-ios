@@ -121,6 +121,12 @@ enum ChatScrollPolicy {
         isNearBottom && !wasFollowingLatest
     }
 
+    /// An explicit tap owns its motion independently of how far away the tail
+    /// is. Automatic following keeps its separate near-bottom animation band.
+    static func shouldAnimateExplicitBottomJump(reduceMotion: Bool) -> Bool {
+        !reduceMotion
+    }
+
     /// A lazy transcript can need more than one layout pass before its bottom
     /// sentinel has an exact position. Explicit jumps therefore settle in a
     /// short, bounded sequence instead of trusting one open-loop `scrollTo`.

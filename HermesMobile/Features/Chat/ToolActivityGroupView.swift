@@ -15,11 +15,9 @@ struct ToolActivityGroupView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: isExpanded ? 8 : 0) {
+        VStack(alignment: .leading, spacing: isExpanded ? 4 : 0) {
             Button {
-                withAnimation(ChatMotion.disclosure(reduceMotion: reduceMotion)) {
-                    userToggledExpansion = !isExpanded
-                }
+                toggleExpansion()
             } label: {
                 header
             }
@@ -28,16 +26,21 @@ struct ToolActivityGroupView: View {
             .accessibilityHint(isExpanded ? "Double tap to collapse details." : "Double tap to expand details.")
 
             if isExpanded {
-                VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: 4) {
                     ForEach(group.toolCalls) { toolCall in
                         ToolCallCardView(toolCall: toolCall)
                     }
                 }
-                .transition(ChatMotion.disclosureTransition(reduceMotion: reduceMotion))
+                .transition(disclosureTransition)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .contain)
+        .transaction { transaction in
+            if reduceMotion {
+                transaction.disablesAnimations = true
+            }
+        }
     }
 
     private var usesStackedHeader: Bool {
@@ -67,7 +70,7 @@ struct ToolActivityGroupView: View {
                 }
             }
 
-            Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+            Image(systemName: isExpanded ? "chevron.down" : "chevron.forward")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
         }
@@ -84,7 +87,7 @@ struct ToolActivityGroupView: View {
     }
 
     private var actionSummary: String {
-        ToolCallPresentationLabel.groupTitle(for: group.toolCalls)
+        ToolActivityGroupPresentation.title(for: group)
     }
 
     private var activityIcon: String {
@@ -92,9 +95,7 @@ struct ToolActivityGroupView: View {
             return "exclamationmark.triangle.fill"
         }
 
-        return group.toolCalls.count == 1
-            ? ToolCallPresentationLabel.icon(for: group.toolCalls.first?.name)
-            : "wrench.and.screwdriver"
+        return ToolActivityGroupPresentation.icon(for: group)
     }
 
     private var activityColor: Color {
@@ -106,22 +107,59 @@ struct ToolActivityGroupView: View {
     }
 
     private var collapsedStateText: String? {
-        if group.hasFailedTool {
-            return String(localized: "Failed")
-        }
-
-        return group.isComplete ? nil : String(localized: "Running")
+        ToolActivityGroupPresentation.status(for: group)
     }
 
     private var activityAccessibilityLabel: String {
-        "\(actionSummary), \(activityStateText)"
+        guard let collapsedStateText else { return actionSummary }
+        return "\(actionSummary), \(collapsedStateText)"
     }
 
-    private var activityStateText: String {
+    private var disclosureTransition: AnyTransition {
+        reduceMotion ? .identity : ChatMotion.disclosureTransition(reduceMotion: false)
+    }
+
+    private func toggleExpansion() {
+        let update = { userToggledExpansion = !isExpanded }
+        if reduceMotion {
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction, update)
+        } else {
+            withAnimation(ChatMotion.disclosure(reduceMotion: false), update)
+        }
+    }
+}
+
+enum ToolActivityGroupPresentation {
+    static func title(for group: ToolCallGroup) -> String {
+        guard let latestToolCall = group.toolCalls.last else {
+            return String(localized: "No actions")
+        }
+        return ToolCallPresentationLabel.title(for: latestToolCall)
+    }
+
+    static func icon(for group: ToolCallGroup) -> String {
+        ToolCallPresentationLabel.icon(for: group.toolCalls.last?.name)
+    }
+
+    /// Reflects the most recent action without estimating a group duration.
+    /// A duration is shown only when the latest completed tool supplied a
+    /// finite, nonnegative value; missing/invalid values stay plain Completed.
+    static func status(for group: ToolCallGroup) -> String? {
         if group.hasFailedTool {
             return String(localized: "Failed")
         }
+        guard !group.toolCalls.isEmpty else { return nil }
+        guard group.isComplete else { return String(localized: "Running") }
 
-        return group.isComplete ? String(localized: "Completed") : String(localized: "Running")
+        if let duration = group.toolCalls.last?.duration,
+           duration.isFinite,
+           duration >= 0 {
+            let formatted = duration.formatted(.number.precision(.fractionLength(0...1)))
+            return String(localized: "Worked for \(formatted)s")
+        }
+
+        return String(localized: "Completed")
     }
 }

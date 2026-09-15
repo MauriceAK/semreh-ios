@@ -94,6 +94,74 @@ final class ChatScrollPolicyTests: XCTestCase {
         )
     }
 
+    func testVisiblePreferenceArmsRecoveryForTheNextActivation() {
+        var state = ChatTranscriptActivationRecoveryState()
+
+        XCTAssertFalse(state.armForActivation(), "a new transcript has no observed viewport yet")
+        state.recordPreferenceSample(hasVisibleMessageRows: true)
+
+        XCTAssertTrue(state.hasObservedRows)
+        XCTAssertTrue(state.armForActivation(), "a later background/foreground return can now probe the retained viewport")
+
+        state.disarm()
+        XCTAssertFalse(state.isArmed)
+        XCTAssertTrue(state.hasObservedRows, "disappearing only ends this activation check, not the observed-row history")
+        XCTAssertTrue(state.armForActivation())
+    }
+
+    func testEmptyPreferenceAndNewTranscriptResetDoNotArmRecovery() {
+        var state = ChatTranscriptActivationRecoveryState()
+
+        state.recordPreferenceSample(hasVisibleMessageRows: false)
+        XCTAssertFalse(state.hasObservedRows, "a bottom-anchor-only or empty preference is not a visible message row")
+        XCTAssertFalse(state.armForActivation())
+
+        state.recordPreferenceSample(hasVisibleMessageRows: true)
+        XCTAssertTrue(state.armForActivation())
+        state.reset()
+
+        XCTAssertFalse(state.hasObservedRows)
+        XCTAssertFalse(state.isArmed)
+        XCTAssertFalse(state.armForActivation())
+    }
+
+    func testActivationProbeClassifiesVisibleUnchangedFramesAsStale() {
+        XCTAssertEqual(
+            ChatTranscriptActivationProbeDisposition.resolve(
+                currentFramesGeneration: 12,
+                activationBaselineFramesGeneration: 12,
+                cachedFrameCount: 7,
+                visibleCachedRowCount: 3
+            ),
+            .waitForFreshGeometry(visibleCachedRowCount: 3),
+            "Even frames that look visible under the resumed viewport are not fresh evidence."
+        )
+    }
+
+    func testActivationProbeUsesFreshGenerationInsteadOfCachedFrameCount() {
+        XCTAssertEqual(
+            ChatTranscriptActivationProbeDisposition.resolve(
+                currentFramesGeneration: 13,
+                activationBaselineFramesGeneration: 12,
+                cachedFrameCount: 7,
+                visibleCachedRowCount: 3
+            ),
+            .freshGeometryArrived
+        )
+    }
+
+    func testActivationProbeEvaluatesOnlyAnEmptyUnchangedCacheAsFallback() {
+        XCTAssertEqual(
+            ChatTranscriptActivationProbeDisposition.resolve(
+                currentFramesGeneration: 12,
+                activationBaselineFramesGeneration: 12,
+                cachedFrameCount: 0,
+                visibleCachedRowCount: 0
+            ),
+            .evaluateEmptyCache
+        )
+    }
+
     func testActivationRecoveryRepairsBlankOrUnrealizedTailOnlyWithEvidence() {
         XCTAssertTrue(
             ChatTranscriptViewportRecoveryPolicy.shouldRecoverAfterActivation(
@@ -528,6 +596,11 @@ final class ChatScrollPolicyTests: XCTestCase {
                 isNearBottom: true
             )
         )
+    }
+
+    func testExplicitBottomJumpAnimatesRegardlessOfDistanceUnlessReduceMotion() {
+        XCTAssertTrue(ChatScrollPolicy.shouldAnimateExplicitBottomJump(reduceMotion: false))
+        XCTAssertFalse(ChatScrollPolicy.shouldAnimateExplicitBottomJump(reduceMotion: true))
     }
 
     func testExplicitBottomJumpStaysVisibleUntilViewportActuallyArrives() {

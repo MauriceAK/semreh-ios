@@ -1284,17 +1284,32 @@ final class ChatViewModelSendTests: XCTestCase {
 
     @MainActor
     func testDelayedSceneRefreshCannotClobberNewlyStartedResponse() async throws {
+        let context = try makeContext()
+        let server = try XCTUnwrap(URL(string: "https://example.test"))
         let viewModel = try makeOutOfOrderDirectLoadViewModel(mode: .staleLoadThenSend, acceptsPrompt: true)
-        await viewModel.loadMessages()
+        await viewModel.loadMessages(modelContext: context)
         viewModel.seedTranscriptForTesting([])
-        let delayed = Task { await viewModel.loadMessages() }
+        let delayed = Task { await viewModel.loadMessages(modelContext: context) }
         try await Task.sleep(for: .milliseconds(30))
         XCTAssertTrue(viewModel.isLoading)
         let accepted = await viewModel.sendMessage("New local prompt")
         XCTAssertTrue(accepted)
+        XCTAssertEqual(
+            try CacheStore.cachedSessionPreviews(serverURL: server, in: context)[
+                CachedSessionPreviewIdentity(profile: "default", sessionID: "session-abc")
+            ]?.text,
+            "New local prompt"
+        )
         await delayed.value
         XCTAssertTrue(viewModel.messages.compactMap(\.content).contains("New local prompt"))
         XCTAssertFalse(viewModel.messages.compactMap(\.content).contains("Stale transcript"))
+        XCTAssertEqual(
+            try CacheStore.cachedSessionPreviews(serverURL: server, in: context)[
+                CachedSessionPreviewIdentity(profile: "default", sessionID: "session-abc")
+            ]?.text,
+            "New local prompt",
+            "A stale transcript response must not overwrite the accepted prompt preview."
+        )
         XCTAssertFalse(viewModel.isLoading, "Successful send superseding a load must not strand its wait owner")
     }
 
@@ -2043,7 +2058,7 @@ final class ChatViewModelSendTests: XCTestCase {
     @MainActor
     func testDirectTerminalUsageAppliesAndCachesFinalTurnTPS() throws {
         let context = try makeContext()
-        let viewModel = try makeViewModel { request in
+        let viewModel = try makeViewModel(directLoad: true) { request in
             XCTFail("Direct terminal renderer must not issue an HTTP request: \(request)")
             throw URLError(.badURL)
         }
@@ -2071,9 +2086,16 @@ final class ChatViewModelSendTests: XCTestCase {
         XCTAssertEqual(
             try CacheStore.cachedMessages(
                 serverURL: URL(string: "https://example.test")!,
-                sessionID: "session-abc", in: context
+                sessionID: "direct:7:default:session-abc", in: context
             ).last?.turnTps,
             20.5
+        )
+        XCTAssertEqual(
+            try CacheStore.cachedSessionPreviews(
+                serverURL: URL(string: "https://example.test")!,
+                in: context
+            )[CachedSessionPreviewIdentity(profile: "default", sessionID: "session-abc")]?.text,
+            "Measured response."
         )
     }
 
@@ -2321,6 +2343,7 @@ final class ChatViewModelSendTests: XCTestCase {
         let container = try ModelContainer(
             for: CachedSession.self,
             CachedMessage.self,
+            CachedSessionPreviewRecord.self,
             configurations: configuration
         )
         return ModelContext(container)

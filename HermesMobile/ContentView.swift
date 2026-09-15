@@ -10,11 +10,19 @@ struct ContentView: View {
     @State private var needsGatewayForegroundRecovery = false
     @State private var intentRouter = AppIntentRouter.shared
     @State private var selectedSurface: AppShellSurface = .sessions
+    @State private var isFreshOnboardingOrigin = false
+    @State private var showsPostLoginPersonalization = false
+    @AppStorage(OnboardingFlowPolicy.postLoginPersonalizationPendingStorageKey)
+    private var isPostLoginPersonalizationPending = false
 
     var body: some View {
         content
             .onOpenURL(perform: handleOpenURL)
             .task {
+                if OnboardingFlowPolicy.isFreshOnboardingOrigin(authManager.state) {
+                    isFreshOnboardingOrigin = true
+                }
+                resumePostLoginPersonalizationIfNeeded(for: authManager.state)
                 guard !didCheckInitialPendingShare else { return }
                 didCheckInitialPendingShare = true
                 importPendingSharedDraftIfAvailable()
@@ -25,6 +33,9 @@ struct ContentView: View {
             .onChange(of: intentRouter.pendingDeepLink) {
                 // Warm launch: the intent set the deep link after the view appeared.
                 drainPendingIntentDeepLink()
+            }
+            .onChange(of: authManager.state) { oldState, newState in
+                handleAuthStateChange(from: oldState, to: newState)
             }
             .onChange(of: scenePhase) {
                 if scenePhase == .background {
@@ -37,6 +48,59 @@ struct ContentView: View {
                 needsGatewayForegroundRecovery = false
                 Task { await recoverActiveGatewayOnForeground() }
             }
+            .fullScreenCover(
+                isPresented: $showsPostLoginPersonalization,
+                onDismiss: finishPostLoginPersonalization
+            ) {
+                NavigationStack {
+                    ZStack {
+                        SemrehBackdrop()
+                            .ignoresSafeArea()
+                        OnboardingAppearancePage()
+                    }
+                    .navigationTitle("Personalize")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarLeading) {
+                            Button("Skip", action: finishPostLoginPersonalization)
+                        }
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button("Done", action: finishPostLoginPersonalization)
+                                .fontWeight(.semibold)
+                        }
+                    }
+                }
+                .environment(\.appColorPalette, .semreh)
+            }
+    }
+
+    private func handleAuthStateChange(from oldState: AuthManager.State, to newState: AuthManager.State) {
+        if OnboardingFlowPolicy.isFreshOnboardingOrigin(oldState) {
+            // Carry the first-run origin across an AuthManager `.loggedOut` state
+            // after rejected credentials. That transient state is not a saved reauth.
+            isFreshOnboardingOrigin = true
+        }
+        if OnboardingFlowPolicy.shouldStartPostLoginPersonalization(
+            hasFreshOnboardingOrigin: isFreshOnboardingOrigin,
+            to: newState
+        ) {
+            // Persist only after the first connection actually reaches logged-in.
+            // A failed or interrupted connection leaves this flag untouched.
+            isPostLoginPersonalizationPending = true
+            isFreshOnboardingOrigin = false
+        }
+        resumePostLoginPersonalizationIfNeeded(for: newState)
+    }
+
+    private func resumePostLoginPersonalizationIfNeeded(for state: AuthManager.State) {
+        guard isPostLoginPersonalizationPending, case .loggedIn = state else { return }
+        showsPostLoginPersonalization = true
+    }
+
+    private func finishPostLoginPersonalization() {
+        isPostLoginPersonalizationPending = false
+        showsPostLoginPersonalization = false
+        isFreshOnboardingOrigin = false
     }
 
     private func recoverActiveGatewayOnForeground() async {

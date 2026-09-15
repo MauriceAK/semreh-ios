@@ -141,7 +141,7 @@ final class StreamReconnectContractTests: APIClientTestCase {
         XCTAssertEqual(fake.methods(), ["session.resume"])
         XCTAssertEqual(vm.messages.filter { $0.role != "local_notice" }.compactMap(\.content), hasCompletedCurrentTurnSegment
             ? ["Already accepted", "Completed interim answer"] : ["Previous response", "Already accepted"])
-        XCTAssertTrue(vm.messages.contains { $0.role == "local_notice" && $0.content?.contains("Showing saved messages") == true })
+        XCTAssertFalse(vm.messages.contains { $0.role == "local_notice" })
         XCTAssertFalse(vm.messages.contains { $0.content == "Duplicate request" })
         let durableIDs = vm.messages.map(\.id)
         fake.emitDelta("new response")

@@ -63,9 +63,6 @@ struct OnboardingView: View {
                     OnboardingWelcomePage()
                         .tag(OnboardingFlowPolicy.welcomePageIndex)
 
-                    OnboardingAppearancePage()
-                        .tag(OnboardingFlowPolicy.appearancePageIndex)
-
                     OnboardingConnectPage(
                         viewModel: viewModel,
                         authManager: authManager,

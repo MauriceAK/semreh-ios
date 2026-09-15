@@ -12,6 +12,28 @@ final class DirectSkillUITests: XCTestCase {
     private let interimHeadingText = "SEMREH_INTERIM_HEADING_VISIBLE_V1"
     private let interimFinalText = "SEMREH_INTERIM_FINAL_VISIBLE_V1"
 
+    /// Optional suspension exposure for the contained live fixture. Opening
+    /// Settings changes no settings and avoids using a personal application.
+    @MainActor
+    private func exerciseProlongedBackgroundIfRequested(app: XCUIApplication) throws {
+        guard let raw = ProcessInfo.processInfo.environment["SEMREH_BACKGROUND_DWELL_SECONDS"] else { return }
+        let seconds = try XCTUnwrap(Double(raw))
+        XCTAssertTrue(seconds.isFinite && (30...180).contains(seconds))
+        guard seconds.isFinite && (30...180).contains(seconds) else { return }
+        #if targetEnvironment(simulator)
+        let settings = XCUIApplication(bundleIdentifier: "com.apple.Preferences")
+        settings.activate()
+        XCTAssertNotEqual(app.state, .runningForeground)
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            RunLoop.main.run(until: min(deadline, Date().addingTimeInterval(1)))
+            XCTAssertNotEqual(app.state, .runningForeground)
+        }
+        #else
+        throw XCTSkip("Prolonged background fixture is simulator-only.")
+        #endif
+    }
+
     @MainActor
     func testOptInPreviewShellVisualSurfaces() throws {
         continueAfterFailure = false
@@ -511,6 +533,304 @@ final class DirectSkillUITests: XCTestCase {
     }
 
     @MainActor
+    func testOptInProductionLongScrollInteractionRegression() async throws {
+        continueAfterFailure = false
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("Long-scroll interaction verification is simulator-only.")
+        #endif
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SEMREH_LONG_SCROLL_INTERACTION_UI"] == "1" else {
+            throw XCTSkip("Long-scroll interaction verification is opt-in.")
+        }
+        guard environment["SEMREH_SLICE2_UI_LIVE"] == "1",
+              environment["SEMREH_SLICE1_HTTPS"] == "1",
+              environment["SEMREH_SLICE2_UI_BACKEND_MODE"] == "stock",
+              environment["SEMREH_SLICE2_UI_BACKEND_SHA"] == backendSHA,
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == credentialsPath else {
+            return XCTFail("Long-scroll interaction verification requires the contained pinned stock fixture.")
+        }
+
+        let observer = try await LifecycleCanonicalObserver(
+            origin: try XCTUnwrap(URL(string: origin)), credentials: try readCredentials()
+        )
+        defer { observer.invalidate() }
+        // Discovery's bounded candidate probe is capped at 100 rows; it fetches
+        // the complete transcript only after finding a qualifying candidate.
+        guard let fixture = try await observer.discoverLongStoredSession(
+            minimumRows: 100, candidateLimit: 100
+        ),
+              fixture.rows.count >= 140 else {
+            throw XCTSkip("The approved fixture needs an existing 140-row transcript; this test does not seed one.")
+        }
+        let baseline = fixture.rows
+        let visibleTail = Array(baseline.filter { row in
+            guard let content = canonicalText(row) else { return false }
+            return !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }.suffix(2))
+        guard visibleTail.count == 2 else {
+            throw XCTSkip("The qualifying transcript did not have two visible canonical tail rows.")
+        }
+
+        var link = URLComponents()
+        link.scheme = "semreh"
+        link.host = "session"
+        link.queryItems = [URLQueryItem(name: "id", value: fixture.storedID)]
+
+        let app = XCUIApplication()
+        app.launch()
+        app.open(try XCTUnwrap(link.url))
+        // ChatView intentionally exposes its display title, not the stored ID,
+        // in the detail identifier. Scope through the one mounted chat detail
+        // and retain canonical message-ID assertions for transcript identity.
+        let details = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "chat-detail:")
+        )
+        let detail = details.firstMatch
+        XCTAssertTrue(detail.waitForExistence(timeout: 30))
+        XCTAssertEqual(details.count, 1, "The deep link must mount exactly one chat detail.")
+        try assertAccessibleTranscriptRows(
+            visibleTail, in: detail, context: "long-scroll initial tail"
+        )
+        let transcripts = detail.descendants(matching: .scrollView)
+            .matching(identifier: "chat-transcript-scroll")
+        let transcript = transcripts.firstMatch
+        XCTAssertTrue(transcript.waitForExistence(timeout: 10) && transcript.isHittable)
+        XCTAssertEqual(transcripts.count, 1, "The selected chat detail must contain one transcript.")
+        let latest = app.buttons["Scroll to latest message"]
+        let tailRow = transcript.descendants(matching: .any)
+            .matching(identifier: try XCTUnwrap(accessibleTranscriptRow(visibleTail[0])).identifier)
+            .firstMatch
+        var timings = [
+            "XCTest provides no public scroll-view deceleration state or offset geometry; "
+                + "the fling/tap timestamps and captured recording are timing evidence, not proof of active deceleration."
+        ]
+
+        // Establish the floating control first, then fling again and target its
+        // already-resolved screen coordinate as soon as XCTest returns from the
+        // synthesized gesture. This avoids a descendant query between fling and tap.
+        transcript.swipeDown(velocity: .fast)
+        XCTAssertTrue(latest.waitForExistence(timeout: 5) && latest.isHittable)
+        let latestCoordinate = latest.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        let flingStart = Date()
+        transcript.swipeDown(velocity: .fast)
+        let flingReturned = Date()
+        latestCoordinate.tap()
+        let flingTapReturned = Date()
+        retainPreviewScreenshot("Long scroll fling return immediate before AX queries", app: app)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+        retainPreviewScreenshot("Long scroll fling return plus 250ms before AX queries", app: app)
+        timings.append("fling_gesture_seconds=\(flingReturned.timeIntervalSince(flingStart))")
+        timings.append("fling_return_to_tap_return_seconds=\(flingTapReturned.timeIntervalSince(flingReturned))")
+        try assertAccessibleTranscriptRows(
+            visibleTail, in: detail, context: "fling then immediate latest control"
+        )
+
+        // Exercise a genuinely distant return separately. The two screenshots
+        // intentionally precede accessibility assertions so they can be compared
+        // with the test recording for intermediate animation frames.
+        for _ in 0..<6 { transcript.swipeDown(velocity: .fast) }
+        XCTAssertFalse(tailRow.isHittable, "Six fast reverse swipes must leave the canonical tail offscreen.")
+        XCTAssertTrue(latest.waitForExistence(timeout: 5) && latest.isHittable)
+        let distantTapStart = Date()
+        latest.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        let distantTapReturned = Date()
+        let distantImmediate = app.screenshot()
+        let distantImmediateAttachment = XCTAttachment(screenshot: distantImmediate)
+        distantImmediateAttachment.name = "Distant latest return immediate before AX queries"
+        distantImmediateAttachment.lifetime = .keepAlways
+        add(distantImmediateAttachment)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+        let distantSettled = app.screenshot()
+        let distantSettledAttachment = XCTAttachment(screenshot: distantSettled)
+        distantSettledAttachment.name = "Distant latest return plus 250ms before AX queries"
+        distantSettledAttachment.lifetime = .keepAlways
+        add(distantSettledAttachment)
+        // Raw screenshot inequality is not an animation assertion: clocks,
+        // cursors, or activity chrome can change independently. Review the
+        // retained recording for transcript-row displacement between captures.
+        timings.append("distant_latest_tap_seconds=\(distantTapReturned.timeIntervalSince(distantTapStart))")
+        try assertAccessibleTranscriptRows(
+            visibleTail, in: detail, context: "animated distant return to latest"
+        )
+
+        // Sending while reading old history must reveal the local user message;
+        // waiting for the backend completion first could conceal that regression.
+        for _ in 0..<3 { transcript.swipeDown(velocity: .fast) }
+        XCTAssertFalse(tailRow.isHittable, "The send checkpoint must begin away from the tail.")
+        let composer = app.descendants(matching: .any)
+            .matching(identifier: "chat-composer-input").firstMatch
+        XCTAssertTrue(composer.waitForExistence(timeout: 5) && composer.isHittable)
+        let marker = "SEMREH_OLD_POSITION_SEND_\(UUID().uuidString)"
+        let sendStart = Date()
+        send(marker, through: composer, app: app)
+        let localMessage = app.staticTexts.matching(
+            NSPredicate(format: "label == %@", marker)
+        ).firstMatch
+        XCTAssertTrue(localMessage.waitForExistence(timeout: 5) && localMessage.isHittable,
+                      "Sending from old history must make the local message visible without waiting for completion.")
+        timings.append("old_position_compose_and_send_to_visible_local_seconds=\(Date().timeIntervalSince(sendStart))")
+        retainPreviewScreenshot("Old-position send visible local message", app: app)
+        waitForIdle(app: app)
+        // This baseline is the complete long transcript, not the observer's
+        // default 20-row tail. Preserve exact history/count checks across pages.
+        let completedRows = try await observer.waitForLongTranscript(
+            storedID: fixture.storedID
+        ) { rows in
+            self.hasStableBaseline(rows, baseline: baseline)
+                && rows.count == baseline.count + 2
+                && self.canonicalText(rows[rows.count - 2]) == marker
+                && self.canonicalText(rows.last!) == "SEMREH_SLICE1_ACK"
+        }
+        let completedTail = Array(completedRows.suffix(2))
+        try assertAccessibleTranscriptRows(
+            completedTail, in: detail, context: "old-position send completed tail"
+        )
+
+        XCUIDevice.shared.press(.home)
+        let backgroundDeadline = Date().addingTimeInterval(5)
+        while app.state == .runningForeground && Date() < backgroundDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        }
+        XCTAssertNotEqual(app.state, .runningForeground)
+        try exerciseProlongedBackgroundIfRequested(app: app)
+        let foregroundStart = Date()
+        app.activate()
+        retainPreviewScreenshot("Long-scroll post-app.activate first XCTest-observable frame", app: app)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+        retainPreviewScreenshot("Long-scroll post-app.activate plus 250ms", app: app)
+        timings.append("background_activate_to_post_250ms_capture_seconds=\(Date().timeIntervalSince(foregroundStart))")
+        try assertAccessibleTranscriptRows(
+            completedTail, in: detail, context: "long-scroll background return without corrective scroll"
+        )
+        retainPreviewScreenshot("Long-scroll settled post-AX tail verification", app: app)
+
+        let timingAttachment = XCTAttachment(string: timings.joined(separator: "\n"))
+        timingAttachment.name = "Long-scroll interaction timing and evidence limits"
+        timingAttachment.lifetime = .keepAlways
+        add(timingAttachment)
+    }
+
+    @MainActor
+    func testOptInProductionLongActiveBackgroundCompletionRegression() async throws {
+        continueAfterFailure = false
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("Long active-background verification is simulator-only.")
+        #endif
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SEMREH_LONG_SCROLL_INTERACTION_UI"] == "1" else {
+            throw XCTSkip("Long active-background verification is opt-in.")
+        }
+        guard environment["SEMREH_SLICE2_UI_LIVE"] == "1",
+              environment["SEMREH_SLICE1_HTTPS"] == "1",
+              environment["SEMREH_SLICE2_UI_BACKEND_MODE"] == "stock",
+              environment["SEMREH_SLICE2_UI_BACKEND_SHA"] == backendSHA,
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == credentialsPath,
+              let dwellRaw = environment["SEMREH_BACKGROUND_DWELL_SECONDS"],
+              let dwellSeconds = Double(dwellRaw),
+              dwellSeconds.isFinite,
+              (30...180).contains(dwellSeconds) else {
+            return XCTFail(
+                "Long active-background verification requires the contained fixture and a 30...180 second dwell."
+            )
+        }
+
+        let observer = try await LifecycleCanonicalObserver(
+            origin: try XCTUnwrap(URL(string: origin)), credentials: try readCredentials()
+        )
+        defer { observer.invalidate() }
+        guard let fixture = try await observer.discoverLongStoredSession(
+            minimumRows: 100, candidateLimit: 100
+        ), fixture.rows.count >= 140 else {
+            throw XCTSkip("The approved fixture needs an existing 140-row transcript; this test does not seed one.")
+        }
+        let baseline = fixture.rows
+
+        var link = URLComponents()
+        link.scheme = "semreh"
+        link.host = "session"
+        link.queryItems = [URLQueryItem(name: "id", value: fixture.storedID)]
+
+        let app = XCUIApplication()
+        app.launch()
+        app.open(try XCTUnwrap(link.url))
+        let details = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "chat-detail:")
+        )
+        let detail = details.firstMatch
+        XCTAssertTrue(detail.waitForExistence(timeout: 30))
+        XCTAssertEqual(details.count, 1, "The deep link must mount exactly one chat detail.")
+        let transcripts = detail.descendants(matching: .scrollView)
+            .matching(identifier: "chat-transcript-scroll")
+        XCTAssertTrue(transcripts.firstMatch.waitForExistence(timeout: 10))
+        XCTAssertEqual(transcripts.count, 1, "The selected chat detail must contain one transcript.")
+
+        let composer = app.descendants(matching: .any)
+            .matching(identifier: "chat-composer-input").firstMatch
+        XCTAssertTrue(composer.waitForExistence(timeout: 5) && composer.isHittable)
+        let marker = "SEMREH_INTERRUPT_FIXTURE SEMREH_LONG_ACTIVE_BACKGROUND_\(UUID().uuidString)"
+        let sendStart = Date()
+        send(marker, through: composer, app: app)
+        XCTAssertTrue(app.buttons["Stop response"].waitForExistence(timeout: 10))
+        XCTAssertEqual(exactCount(marker, app: app), 1)
+        XCUIDevice.shared.press(.home)
+        let backgroundDeadline = Date().addingTimeInterval(5)
+        while app.state == .runningForeground && Date() < backgroundDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        }
+        XCTAssertNotEqual(app.state, .runningForeground)
+        let sendToBackgroundSeconds = Date().timeIntervalSince(sendStart)
+        XCTAssertLessThan(
+            sendToBackgroundSeconds, 15,
+            "The app must enter the background before the fixture's exact 15-second provider delay expires."
+        )
+
+        _ = try await observer.waitForLongTranscript(
+            storedID: fixture.storedID,
+            beforeRead: { XCTAssertNotEqual(app.state, .runningForeground) }
+        ) { rows in
+            self.hasStableBaseline(rows, baseline: baseline)
+                && rows.count == baseline.count + 1
+                && rows.last?["role"] as? String == "user"
+                && rows.last.flatMap({ self.canonicalText($0) }) == marker
+        }
+        let completedRows = try await observer.waitForLongTranscript(
+            storedID: fixture.storedID,
+            beforeRead: { XCTAssertNotEqual(app.state, .runningForeground) }
+        ) { rows in
+            self.hasStableBaseline(rows, baseline: baseline)
+                && rows.count == baseline.count + 2
+                && rows[rows.count - 2]["role"] as? String == "user"
+                && self.canonicalText(rows[rows.count - 2]) == marker
+                && rows.last?["role"] as? String == "assistant"
+                && self.canonicalText(rows.last!) == "SEMREH_SLICE1_ACK"
+        }
+        let completedTail = Array(completedRows.suffix(2))
+
+        try exerciseProlongedBackgroundIfRequested(app: app)
+        let activateStart = Date()
+        app.activate()
+        retainPreviewScreenshot("Long active-background post-app.activate first XCTest-observable frame", app: app)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+        retainPreviewScreenshot("Long active-background post-app.activate plus 250ms", app: app)
+        try assertAccessibleTranscriptRows(
+            completedTail,
+            in: detail,
+            context: "long active-background completion return without corrective scroll"
+        )
+
+        let timing = XCTAttachment(string: [
+            "fixture_provider_delay_seconds=15",
+            "send_start_to_background_seconds=\(sendToBackgroundSeconds)",
+            "background_dwell_seconds=\(dwellSeconds)",
+            "app_activate_to_post_250ms_capture_seconds=\(Date().timeIntervalSince(activateStart))",
+            "app.activate waits for XCTest automation quiescence; the first capture is not a literal scene first frame.",
+        ].joined(separator: "\n"))
+        timing.name = "Long active-background timing and evidence limits"
+        timing.lifetime = .keepAlways
+        add(timing)
+    }
+
+    @MainActor
     func testOptInPhoneNavigationLifecycleAndPagingRegression() async throws {
         continueAfterFailure = false
         #if !targetEnvironment(simulator)
@@ -737,8 +1057,10 @@ final class DirectSkillUITests: XCTestCase {
             RunLoop.main.run(until: Date().addingTimeInterval(0.1))
         }
         XCTAssertNotEqual(app.state, .runningForeground)
+        try exerciseProlongedBackgroundIfRequested(app: app)
         let foregroundStart = Date()
         app.activate()
+        retainPreviewScreenshot("Long background return before transcript queries or interaction", app: app)
         try assertAccessibleTranscriptRows(
             visibleTail, in: detail, context: "long chat after background and foreground before interaction"
         )
@@ -1019,34 +1341,42 @@ final class DirectSkillUITests: XCTestCase {
         app.launch()
         defer { UIPasteboard.general.items = [] }
 
+        // A prior simulator deep link can leave SpringBoard's explicit handoff
+        // confirmation above the app. Accept that exact action before inspecting
+        // or clearing only the contained fixture's authentication state.
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        let openInSemreh = springboard.alerts["Open in “Semreh”?"]
+        if openInSemreh.waitForExistence(timeout: 2) {
+            let openSemreh = openInSemreh.buttons["Open"]
+            XCTAssertTrue(openSemreh.exists && openSemreh.isHittable)
+            openSemreh.tap()
+        }
+
+        // A prior contained-fixture session may have expired while retaining its
+        // origin. Restore only that exact fixture before the guarded sign-out.
+        let expiredServer = app.textFields["onboarding-server-url"]
+        if expiredServer.waitForExistence(timeout: 2) {
+            let isExactContainedOrigin = expiredServer.value as? String == origin
+            let isExpiredSession = containing("Your session expired. Sign in again.", app: app)
+                .waitForExistence(timeout: 2)
+            guard isExactContainedOrigin && isExpiredSession else {
+                XCTFail("Refusing to authenticate an onboarding form without the exact contained expired-session state.")
+                throw NSError(domain: "DirectSkillUITests", code: 24)
+            }
+            _ = try openContainedNewChat(app: app)
+        }
+
         // This helper refuses to sign out unless the exact contained fixture host
         // is visible. Normal sign-out clears only that disposable fixture's local
         // auth material; no app-container reset, uninstall, or test auth bypass.
         try prepareExclusiveContainedFixtureSignOut(app: app)
-        let welcome = containing("Your Hermes companion", app: app)
-        XCTAssertTrue(welcome.waitForExistence(timeout: 15) && welcome.isHittable)
-        retainPhoneScreenshot("Phone onboarding Welcome", app: app)
-
         let getStarted = app.buttons["Get Started"]
-        XCTAssertTrue(getStarted.waitForExistence(timeout: 5) && getStarted.isHittable)
+        guard getStarted.waitForExistence(timeout: 15), getStarted.isHittable else {
+            XCTFail("Expected the unambiguous Welcome entry control after contained fixture sign-out.")
+            throw NSError(domain: "DirectSkillUITests", code: 31)
+        }
+        retainPhoneScreenshot("Phone onboarding Welcome", app: app)
         getStarted.tap()
-        XCTAssertTrue(containing("Make it yours", app: app).waitForExistence(timeout: 10))
-
-        let darkTheme = app.buttons["Dark"]
-        XCTAssertTrue(darkTheme.waitForExistence(timeout: 5) && darkTheme.isHittable)
-        darkTheme.tap()
-        let violetAccent = app.buttons["Violet accent"]
-        XCTAssertTrue(violetAccent.waitForExistence(timeout: 5) && violetAccent.isHittable)
-        violetAccent.tap()
-        XCTAssertTrue(
-            containing("Preview using Dark appearance and Violet accent", app: app)
-                .waitForExistence(timeout: 5)
-        )
-        retainPhoneScreenshot("Phone onboarding Appearance Dark Violet", app: app)
-
-        let continueButton = app.buttons["Continue"]
-        XCTAssertTrue(continueButton.waitForExistence(timeout: 5) && continueButton.isHittable)
-        continueButton.tap()
         let server = app.textFields["onboarding-server-url"]
         XCTAssertTrue(server.waitForExistence(timeout: 10) && server.isHittable)
         retainPhoneScreenshot("Phone onboarding Connect manual and QR choices", app: app)
@@ -1074,6 +1404,26 @@ final class DirectSkillUITests: XCTestCase {
         let connect = app.buttons["Connect"]
         XCTAssertTrue(connect.waitForExistence(timeout: 5) && connect.isHittable)
         connect.tap()
+
+        // Personalization follows a successful first connection; it is not a
+        // prerequisite for authentication and offers an explicit skip action.
+        XCTAssertTrue(containing("Make it yours", app: app).waitForExistence(timeout: 45))
+        XCTAssertTrue(app.buttons["Skip"].exists)
+        dismissKnownPasswordSavePrompt(app, timeout: 3)
+        let darkTheme = app.buttons["Dark"]
+        XCTAssertTrue(darkTheme.waitForExistence(timeout: 5) && darkTheme.isHittable)
+        darkTheme.tap()
+        let violetAccent = app.buttons["Violet accent"]
+        XCTAssertTrue(violetAccent.waitForExistence(timeout: 5) && violetAccent.isHittable)
+        violetAccent.tap()
+        XCTAssertTrue(
+            containing("Preview using Dark appearance and Violet accent", app: app)
+                .waitForExistence(timeout: 5)
+        )
+        retainPhoneScreenshot("Phone onboarding post-login Appearance Dark Violet", app: app)
+        let personalizeDone = app.buttons["Done"]
+        XCTAssertTrue(personalizeDone.waitForExistence(timeout: 5) && personalizeDone.isHittable)
+        personalizeDone.tap()
 
         let sessions = app.buttons["Sessions"]
         let restoredChat = app.otherElements.matching(
@@ -1492,6 +1842,15 @@ final class DirectSkillUITests: XCTestCase {
         paste(credentials.password, into: password, app: app)
         app.buttons["Connect"].tap()
 
+        // Fresh connections now offer optional personalization after login.
+        // Exercise its real Skip control before accessing the authenticated shell.
+        let personalize = app.navigationBars["Personalize"]
+        if personalize.waitForExistence(timeout: 5) {
+            let skipPersonalize = personalize.buttons["Skip"]
+            XCTAssertTrue(skipPersonalize.waitForExistence(timeout: 5) && skipPersonalize.isHittable)
+            skipPersonalize.tap()
+        }
+
         let sessions = app.buttons["Sessions"]
         let restoredChat = app.otherElements.matching(
             NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
@@ -1864,6 +2223,19 @@ final class DirectSkillUITests: XCTestCase {
             dismissKnownPasswordSavePrompt(app, timeout: 0)
             RunLoop.main.run(until: Date().addingTimeInterval(0.1))
         }
+        // The underlying shell may exist before its optional first-login cover
+        // finishes presenting. Do not equate existence with an accessible shell.
+        let postLoginPersonalize = app.navigationBars["Personalize"]
+        if postLoginPersonalize.waitForExistence(timeout: 5) {
+            // iOS can present its password-save sheet over the new cover. Clear
+            // that system interruption before requiring or tapping the cover's
+            // button, then verify the tap actually dismissed Personalize.
+            dismissKnownPasswordSavePrompt(app, timeout: 3)
+            let skip = postLoginPersonalize.buttons["Skip"]
+            XCTAssertTrue(skip.waitForExistence(timeout: 5) && skip.isHittable)
+            skip.tap()
+            XCTAssertTrue(postLoginPersonalize.waitForNonExistence(timeout: 5))
+        }
         dismissKnownPasswordSavePrompt(app, timeout: 3)
         if restoredChat.exists {
             let back = chatBackButton(app: app)
@@ -1888,6 +2260,12 @@ final class DirectSkillUITests: XCTestCase {
 
     @MainActor
     private func prepareContainedSignIn(app: XCUIApplication) throws {
+        let pendingPersonalize = app.navigationBars["Personalize"]
+        if pendingPersonalize.exists {
+            // Dismiss only the optional local appearance page. The contained
+            // server identity guard below still runs before any sign-out.
+            pendingPersonalize.buttons["Skip"].tap()
+        }
         let welcome = containing("Your Hermes companion", app: app)
         if welcome.waitForExistence(timeout: 5) || app.textFields["onboarding-server-url"].exists { return }
         let chat = app.otherElements.matching(
@@ -1911,8 +2289,10 @@ final class DirectSkillUITests: XCTestCase {
             XCTAssertTrue(you.waitForExistence(timeout: 10) && you.isHittable)
             you.tap()
         }
-        XCTAssertTrue(app.staticTexts["semreh-slice1-test.tailda8427.ts.net"].waitForExistence(timeout: 15),
-                      "Refusing to sign out an authenticated server other than the contained fixture.")
+        guard app.staticTexts["semreh-slice1-test.tailda8427.ts.net"].waitForExistence(timeout: 15) else {
+            XCTFail("Refusing to sign out an authenticated server other than the contained fixture.")
+            throw NSError(domain: "DirectSkillUITests", code: 27)
+        }
         let signOut = containedSignOutButton(app)
         signOut.tap()
         let confirmation = app.alerts["Sign out of this server?"]
@@ -1923,13 +2303,29 @@ final class DirectSkillUITests: XCTestCase {
 
     @MainActor
     private func prepareExclusiveContainedFixtureSignOut(app: XCUIApplication) throws {
-        let welcome = containing("Your Hermes companion", app: app)
+        let personalize = app.navigationBars["Personalize"]
+        if personalize.waitForExistence(timeout: 2) {
+            dismissKnownPasswordSavePrompt(app, timeout: 3)
+            let skip = personalize.buttons["Skip"]
+            guard skip.waitForExistence(timeout: 5), skip.isHittable else {
+                XCTFail("Cannot dismiss the optional Personalize step.")
+                throw NSError(domain: "DirectSkillUITests", code: 28)
+            }
+            skip.tap()
+            guard personalize.waitForNonExistence(timeout: 5) else {
+                XCTFail("Personalize did not dismiss; refusing subsequent authentication changes.")
+                throw NSError(domain: "DirectSkillUITests", code: 29)
+            }
+        }
+        // The same tagline appears in Personalize's preview; only the actual
+        // first-run entry control identifies Welcome unambiguously.
+        let welcome = app.buttons["Get Started"]
         if welcome.waitForExistence(timeout: 5) && welcome.isHittable { return }
 
-        XCTAssertFalse(
-            app.textFields["onboarding-server-url"].exists,
-            "Refusing to modify authentication from an unproven onboarding state."
-        )
+        guard !app.textFields["onboarding-server-url"].exists else {
+            XCTFail("Refusing to modify authentication from an unproven onboarding state.")
+            throw NSError(domain: "DirectSkillUITests", code: 25)
+        }
 
         let chat = app.otherElements.matching(
             NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
@@ -1943,10 +2339,10 @@ final class DirectSkillUITests: XCTestCase {
         let settings = app.buttons["Settings"]
         XCTAssertTrue(settings.waitForExistence(timeout: 10) && settings.isHittable)
         settings.tap()
-        XCTAssertTrue(
-            app.staticTexts["semreh-slice1-test.tailda8427.ts.net"].waitForExistence(timeout: 15),
-            "Refusing to sign out an authenticated server other than the contained fixture."
-        )
+        guard app.staticTexts["semreh-slice1-test.tailda8427.ts.net"].waitForExistence(timeout: 15) else {
+            XCTFail("Refusing to sign out an authenticated server other than the contained fixture.")
+            throw NSError(domain: "DirectSkillUITests", code: 26)
+        }
 
         let aboutAndStorage = app.staticTexts["About & Storage"]
         for _ in 0..<8 where !aboutAndStorage.isHittable { app.scrollViews.firstMatch.swipeUp() }
@@ -1957,10 +2353,10 @@ final class DirectSkillUITests: XCTestCase {
             "Signs out of the active server and returns to onboarding."
         ]
         for _ in 0..<8 where !singleServerFootnote.isHittable { app.scrollViews.firstMatch.swipeUp() }
-        XCTAssertTrue(
-            singleServerFootnote.waitForExistence(timeout: 5) && singleServerFootnote.isHittable,
-            "Refusing sign-out unless the contained fixture is the only configured server."
-        )
+        guard singleServerFootnote.waitForExistence(timeout: 5), singleServerFootnote.isHittable else {
+            XCTFail("Refusing sign-out unless the contained fixture is the only configured server.")
+            throw NSError(domain: "DirectSkillUITests", code: 30)
+        }
 
         let signOut = app.buttons["Sign Out of This Server"]
         XCTAssertTrue(signOut.waitForExistence(timeout: 5) && signOut.isHittable)
@@ -2394,13 +2790,17 @@ final class DirectSkillUITests: XCTestCase {
 
         func discoverLongStoredSession(
             minimumRows: Int,
+            candidateLimit: Int = 20,
             profile: String = "default"
         ) async throws -> (storedID: String, rows: [[String: Any]])? {
+            guard (1...100).contains(candidateLimit) else {
+                throw NSError(domain: "DirectSkillUITests", code: 23)
+            }
             var components = URLComponents()
             components.path = "/api/sessions"
             components.queryItems = [
                 URLQueryItem(name: "profile", value: profile),
-                URLQueryItem(name: "limit", value: "20"),
+                URLQueryItem(name: "limit", value: String(candidateLimit)),
                 URLQueryItem(name: "offset", value: "0"),
                 URLQueryItem(name: "order", value: "recent"),
                 URLQueryItem(name: "archived", value: "exclude"),
@@ -2411,7 +2811,7 @@ final class DirectSkillUITests: XCTestCase {
             guard (200..<300).contains(response.statusCode),
                   let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let sessions = payload["sessions"] as? [[String: Any]],
-                  sessions.count <= 20 else {
+                  sessions.count <= candidateLimit else {
                 throw NSError(domain: "DirectSkillUITests", code: 23)
             }
 
@@ -2444,10 +2844,12 @@ final class DirectSkillUITests: XCTestCase {
 
         func waitForLongTranscript(
             storedID: String,
+            beforeRead: () -> Void = {},
             predicate: ([[String: Any]]) -> Bool
         ) async throws -> [[String: Any]] {
             let deadline = Date().addingTimeInterval(45)
             while Date() < deadline {
+                beforeRead()
                 let rows = try await fullTranscript(storedID: storedID)
                 if predicate(rows) { return rows }
                 try await Task.sleep(for: .milliseconds(100))

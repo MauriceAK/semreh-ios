@@ -540,6 +540,7 @@ struct SessionSidebarUtilityRows: View {
 struct SessionListRowsSection: View {
     let viewModel: SessionListViewModel
     var server: URL? = nil
+    var latestMessagePreviews: [CachedSessionPreviewIdentity: CachedSessionPreview] = [:]
 
     let sessions: [SessionSummary]
     let emptyTitle: String
@@ -575,6 +576,7 @@ struct SessionListRowsSection: View {
                 .sessionsScreenListRow()
         } else {
             ForEach(sessions) { session in
+                let preview = latestPreview(for: session)
                 SessionInteractiveRow(
                     viewModel: viewModel,
                     session: session,
@@ -583,10 +585,27 @@ struct SessionListRowsSection: View {
                     showsWorkspace: showsWorkspace,
                     selectedSessionID: selectedSessionID,
                     actions: actions,
-                    useMessagesStyle: useMessagesStyle
+                    useMessagesStyle: useMessagesStyle,
+                    latestMessagePreview: preview?.text,
+                    latestMessageTimestamp: preview?.messageTimestamp
                 )
             }
         }
+    }
+
+    private func latestPreview(for session: SessionSummary) -> CachedSessionPreview? {
+        guard let sessionID = session.sessionId else { return nil }
+        let activeProfile = normalizedProfile(viewModel.activeProfileName) ?? "default"
+        let rowProfile = normalizedProfile(session.profile) ?? activeProfile
+        return latestMessagePreviews[
+            CachedSessionPreviewIdentity(profile: rowProfile, sessionID: sessionID)
+        ]
+    }
+
+    private func normalizedProfile(_ rawProfile: String?) -> String? {
+        guard let profile = rawProfile?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !profile.isEmpty else { return nil }
+        return profile
     }
 
     private var sessionsHeaderRow: some View {
@@ -673,6 +692,8 @@ struct SessionInteractiveRow: View {
     let selectedSessionID: String?
     let actions: SessionListRowActions
     var useMessagesStyle = false
+    var latestMessagePreview: String? = nil
+    var latestMessageTimestamp: Double? = nil
 
     private var actionCapabilities: SessionRowActionPolicy.Capabilities {
         SessionRowActionPolicy.Capabilities(
@@ -689,7 +710,9 @@ struct SessionInteractiveRow: View {
                 MessagesSessionRowView(
                     session: session,
                     isViewingCachedData: viewModel.isViewingCachedData,
-                    server: server
+                    server: server,
+                    latestMessagePreview: latestMessagePreview,
+                    latestMessageTimestamp: latestMessageTimestamp
                 )
             } else {
                 SessionRowView(

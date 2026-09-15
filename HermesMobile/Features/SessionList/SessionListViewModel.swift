@@ -116,6 +116,7 @@ final class SessionListViewModel {
     private(set) var errorMessage: String?
     private(set) var actionErrorMessage: String?
     private(set) var cacheErrorMessage: String?
+    private(set) var cachedSessionPreviews: [CachedSessionPreviewIdentity: CachedSessionPreview] = [:]
     private(set) var searchErrorMessage: String?
     private(set) var isSearchingRemoteSessions = false
     private(set) var sessionLoadError: Error?
@@ -393,6 +394,7 @@ final class SessionListViewModel {
     /// Publishes the saved sidebar before any network await so cold-launch
     /// navigation can restore the last selected chat immediately.
     func prepareInitialCachedSessions(modelContext: ModelContext) {
+        refreshCachedSessionPreviews(modelContext: modelContext)
         _ = renderCachedSessionsBeforeReload(modelContext: modelContext)
     }
 
@@ -417,6 +419,7 @@ final class SessionListViewModel {
             }
         }
 
+        refreshCachedSessionPreviews(modelContext: modelContext)
         _ = renderCachedSessionsBeforeReload(modelContext: modelContext)
 
         do {
@@ -546,6 +549,23 @@ final class SessionListViewModel {
             }
 
             return false
+        }
+    }
+
+    private func refreshCachedSessionPreviews(modelContext: ModelContext?) {
+        guard let modelContext else {
+            cachedSessionPreviews = [:]
+            return
+        }
+
+        do {
+            cachedSessionPreviews = try CacheStore.cachedSessionPreviews(
+                serverURL: server,
+                in: modelContext
+            )
+        } catch {
+            cachedSessionPreviews = [:]
+            cacheErrorMessage = error.localizedDescription
         }
     }
 
@@ -1201,7 +1221,12 @@ final class SessionListViewModel {
         )
         if let modelContext {
             do {
-                try CacheStore.deleteSession(sessionID: sessionId, serverURL: server, in: modelContext)
+                try CacheStore.deleteSession(
+                    sessionID: sessionId,
+                    serverURL: server,
+                    profile: profile,
+                    in: modelContext
+                )
             } catch {
                 cacheErrorMessage = error.localizedDescription
             }

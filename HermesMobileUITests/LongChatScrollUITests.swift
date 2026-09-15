@@ -6,6 +6,8 @@ import CoreFoundation
 
 final class LongChatScrollUITests: XCTestCase {
     private let performanceLabArgument = "--chat-performance-lab"
+    private let performanceCycleLabArgument = "--chat-performance-cycle-lab"
+    private let performanceSignpostsArgument = "--chat-performance-signposts"
     private let approvedLiveOrigin = "https://semreh-slice1-test.tailda8427.ts.net"
     private let approvedLiveHost = "semreh-slice1-test.tailda8427.ts.net"
     private let stockBackendSHA = "29112bef099274229cadff79cdff7bf7b99c4b77"
@@ -38,6 +40,35 @@ final class LongChatScrollUITests: XCTestCase {
     private let uncertaintyNewPromptPrefix = "SEMREH_SLICE3_UNCERTAINTY_NEW_"
     private let uncertaintyBannerIdentifier = "direct-prompt-uncertainty-banner"
     private let uncertaintyAllowIdentifier = "direct-prompt-uncertainty-allow-new-message"
+
+    @MainActor
+    func testResponseMotionComponentsCompletion() throws {
+        continueAfterFailure = false
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("The component fixture is simulator-only.")
+        #endif
+        let app = XCUIApplication()
+        app.launchArguments = ["--chat-response-motion-components-lab"]
+        app.launch()
+        let append = app.buttons["motion-lab-append"]
+        let complete = app.buttons["motion-lab-complete"]
+        XCTAssertTrue(append.waitForExistence(timeout: 10) && append.isHittable)
+        append.tap()
+        XCTAssertTrue(complete.isHittable)
+        complete.tap()
+        XCTAssertEqual(complete.label, "Restart")
+        XCTAssertFalse(append.isEnabled)
+        let completed = app.staticTexts["Response complete"]
+        for _ in 0..<8 {
+            if completed.exists && completed.isHittable { break }
+            app.swipeUp()
+        }
+        XCTAssertTrue(completed.exists && completed.isHittable)
+        let capture = XCTAttachment(screenshot: app.screenshot())
+        capture.name = "Component response completed — not production completion evidence"
+        capture.lifetime = .keepAlways
+        add(capture)
+    }
 
     @MainActor
     func testOptInProductionLocalOrganizerCRUDInSessionsAndControl() throws {
@@ -428,6 +459,82 @@ final class LongChatScrollUITests: XCTestCase {
                 message: "Chat \(chatNumber) must retain its deterministic end marker after rapid switching."
             )
         }
+    }
+
+    func testOptInTwentyLongChatEnterBackSwitchCycles() throws {
+        continueAfterFailure = false
+        guard ProcessInfo.processInfo.environment["SEMREH_CHAT_PERFORMANCE_CYCLES"] == "1" else {
+            throw XCTSkip("The 20-cycle long-chat performance trace is opt-in.")
+        }
+
+        let app = XCUIApplication()
+        app.terminate()
+        app.launchArguments = [performanceCycleLabArgument, performanceSignpostsArgument]
+        app.launch()
+
+        let cycleLab = app.descendants(matching: .any)["performance-cycle-lab"]
+        XCTAssertTrue(
+            cycleLab.waitForExistence(timeout: 15),
+            "The opt-in server-free long-chat cycle lab must launch."
+        )
+
+        let cycleCount = 20
+        var measurements = [
+            "# fixture=2 chats x 10,000 rows; pattern=alternating enter/back visits",
+            "# enter_ms is tap-to-chat-root-hittable; return_ms is Back-to-list-button-hittable",
+            "# These are XCTest wall-clock timings including accessibility waits; use Instruments for hitches/FPS.",
+            "# signposts=subsystem=com.jacobmoore.semreh category=ChatPerformance names=ChatPerformancePhase,ChatPerformanceTransition",
+            "cycle,chat,enter_ms,return_ms,total_ms"
+        ]
+
+        for cycle in 1...cycleCount {
+            // Alternating owners ensures every visit opens a different long
+            // chat than the preceding visit, matching the reported repro while
+            // keeping both retained fixtures deterministic.
+            let chatNumber = cycle.isMultiple(of: 2) ? 2 : 1
+            let entry = app.buttons["performance-cycle-chat-\(chatNumber)"]
+            assertHittable(
+                entry,
+                timeout: 15,
+                message: "Cycle \(cycle) must expose long chat \(chatNumber) in the lab list."
+            )
+
+            let cycleStarted = Date()
+            let enterStarted = Date()
+            entry.tap()
+
+            let chat = app.otherElements["chat-detail:10,000-row performance lab \(chatNumber)"]
+            assertHittable(
+                chat,
+                timeout: 25,
+                message: "Cycle \(cycle) must enter long chat \(chatNumber)."
+            )
+            let enterMilliseconds = Date().timeIntervalSince(enterStarted) * 1_000
+
+            let back = app.buttons["Back"]
+            assertHittable(
+                back,
+                timeout: 10,
+                message: "Cycle \(cycle) must expose the custom chat Back button."
+            )
+            let returnStarted = Date()
+            back.tap()
+            assertHittable(
+                entry,
+                timeout: 20,
+                message: "Cycle \(cycle) must return to the performance lab list."
+            )
+            let returnMilliseconds = Date().timeIntervalSince(returnStarted) * 1_000
+            let totalMilliseconds = Date().timeIntervalSince(cycleStarted) * 1_000
+
+            measurements.append(String(format: "%d,%d,%.1f,%.1f,%.1f", cycle, chatNumber,
+                                       enterMilliseconds, returnMilliseconds, totalMilliseconds))
+        }
+
+        attachPlainText(
+            measurements.joined(separator: "\n"),
+            named: "long-chat-enter-back-20-cycle-timings"
+        )
     }
 
     func testMultiChatPerformanceLabSwitchesStreamsAndScrolls() {

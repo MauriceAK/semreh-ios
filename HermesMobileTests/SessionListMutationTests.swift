@@ -230,6 +230,52 @@ final class SessionListMutationTests: XCTestCase {
     }
 
     @MainActor
+    func testListRefreshLoadsOneServerPreviewMapAcrossProfiles() async throws {
+        let context = try makeContext()
+        let server = try XCTUnwrap(URL(string: "https://example.test"))
+        let cachedAt = Date(timeIntervalSince1970: 1_790_000_000)
+        for (profile, sessionID, text) in [
+            ("default", "default-row", "Default latest answer"),
+            ("maurice", "maurice-row", "Maurice latest answer")
+        ] {
+            try CacheStore.cacheMessages(
+                [ChatMessage(role: "assistant", content: text, timestamp: 100, messageId: "message-\(profile)")],
+                serverURL: server,
+                sessionID: "direct:7:\(profile):\(sessionID)",
+                previewIdentity: CachedSessionPreviewIdentity(profile: profile, sessionID: sessionID),
+                in: context,
+                cachedAt: cachedAt
+            )
+        }
+
+        let viewModel = try makeViewModel { request in
+            switch request.url?.path {
+            case "/api/profiles/sessions":
+                return apiTestJSONResponse(
+                    #"{"sessions":[{"session_id":"default-row","profile":"default","archived":false},{"session_id":"maurice-row","profile":"maurice","archived":false}]}"#,
+                    for: request
+                )
+            case "/api/sessions":
+                return apiTestJSONResponse(#"{"sessions":[],"total":0,"limit":0,"offset":0}"#, for: request)
+            default:
+                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+        }
+
+        let loaded = await viewModel.load(modelContext: context)
+        XCTAssertTrue(loaded)
+        XCTAssertEqual(
+            viewModel.cachedSessionPreviews[CachedSessionPreviewIdentity(profile: "default", sessionID: "default-row")]?.text,
+            "Default latest answer"
+        )
+        XCTAssertEqual(
+            viewModel.cachedSessionPreviews[CachedSessionPreviewIdentity(profile: "maurice", sessionID: "maurice-row")]?.text,
+            "Maurice latest answer"
+        )
+    }
+
+    @MainActor
     func testLoadFallsBackToCachedSessionsForNetworkTimeout() async throws {
         let context = try makeContext()
         let serverURL = try XCTUnwrap(URL(string: "https://example.test"))
@@ -3426,6 +3472,7 @@ final class SessionListMutationTests: XCTestCase {
         let container = try ModelContainer(
             for: CachedSession.self,
             CachedMessage.self,
+            CachedSessionPreviewRecord.self,
             configurations: configuration
         )
         return ModelContext(container)

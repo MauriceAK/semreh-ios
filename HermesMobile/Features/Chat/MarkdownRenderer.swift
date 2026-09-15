@@ -17,8 +17,8 @@ struct MarkdownRenderer: View {
     }
 
     /// Keeps the streaming renderer mounted briefly after streaming ends so
-    /// the reveal queue's in-flight glyph cascade can finish instead of
-    /// snapping to the solid static rendering mid-fade.
+    /// the trailing text opacity reveal can finish before switching to the
+    /// solid static renderer.
     @State private var lingersAfterStreaming = false
 
     var body: some View {
@@ -43,7 +43,7 @@ struct MarkdownRenderer: View {
         }
         .task(id: isStreaming) {
             guard !isStreaming else { return }
-            try? await Task.sleep(for: .seconds(StreamingTextFadeDefaults.framePauseDelay))
+            try? await Task.sleep(for: .seconds(StreamingTrailingContentReveal.pauseDelay))
             guard !Task.isCancelled else { return }
             lingersAfterStreaming = false
         }
@@ -253,7 +253,7 @@ private struct StreamingMarkdownChunkedView: View {
             // Let queued reveals and the newest fade finish, then pause frame
             // updates until more content arrives (e.g. the stream stalls on
             // tool use). A new change cancels this task and restarts it.
-            try? await Task.sleep(for: .seconds(StreamingTextFadeDefaults.framePauseDelay))
+            try? await Task.sleep(for: .seconds(StreamingTrailingContentReveal.pauseDelay))
             guard !Task.isCancelled else { return }
             fadesActive = false
         }
@@ -319,11 +319,10 @@ private struct StreamingMarkdownChunkedView: View {
     }
 }
 
-/// One block of the streaming fade window, drawn through
-/// `StreamingTextFadeRenderer` with its own stamp store so neighbouring
-/// blocks' character offsets never collide. The block keeps fading after it
-/// completes — it only leaves the window (and joins the solid head) once its
-/// cascade is provably finished, which is what prevents end-of-block snaps.
+/// One block of the streaming tail, drawn through a short opacity-only text
+/// renderer with its own stamp store so neighbouring blocks' character offsets
+/// never collide. Newly appended glyphs appear at their final layout positions
+/// and fade together; they are not queued behind a per-token delay.
 private struct StreamingFadeBlockView: View {
     let text: String
     let colorScheme: ColorScheme
@@ -346,7 +345,11 @@ private struct StreamingFadeBlockView: View {
         self.fadeEnabled = fadeEnabled
         self.armOnAppear = armOnAppear
         self.clock = clock
-        _store = State(initialValue: StreamingTextFadeStampStore(chain: chain))
+        let store = StreamingTextFadeStampStore<Text.Layout.CharacterIndex>(chain: chain)
+        if armOnAppear {
+            store.rolloverReset()
+        }
+        _store = State(initialValue: store)
     }
 
     var body: some View {
@@ -358,7 +361,7 @@ private struct StreamingFadeBlockView: View {
                         colorScheme: colorScheme,
                         isStreaming: true
                     )
-                    .textRenderer(StreamingTextFadeRenderer(clock: clock, store: store))
+                    .textRenderer(StreamingTrailingContentOpacityRenderer(clock: clock, store: store))
                 } else {
                     ChatMarkdownView(
                         content: text,
@@ -368,14 +371,56 @@ private struct StreamingFadeBlockView: View {
                 }
             }
         }
-        .onAppear {
-            // Blocks appearing after the view mounted are newly streamed text
-            // and must fade from their first glyph; blocks present at mount
-            // are pre-existing text and take the solid baseline instead.
-            if armOnAppear {
-                store.rolloverReset()
+    }
+}
+
+private enum StreamingTrailingContentReveal {
+    static let duration: TimeInterval = 0.16
+    static let pauseDelay = duration + 0.1
+}
+
+/// A layout-neutral fade for just-arrived trailing glyphs. A zero-stagger,
+/// zero-lead stamp registers each renderer update immediately, so text stays
+/// in reading order and fades over 160ms without waiting behind a token queue.
+private struct StreamingTrailingContentOpacityRenderer: TextRenderer {
+    let clock: TimeInterval
+    let store: StreamingTextFadeStampStore<Text.Layout.CharacterIndex>
+
+    func draw(layout: Text.Layout, in context: inout GraphicsContext) {
+        var orderedKeys: [Text.Layout.CharacterIndex] = []
+        for line in layout {
+            for run in line {
+                for slice in run {
+                    if let key = slice.characterIndices.max() {
+                        orderedKeys.append(key)
+                    }
+                }
             }
         }
+
+        store.register(orderedKeys, clock: clock, glyphStagger: 0, maxStampLead: 0)
+
+        for line in layout {
+            for run in line {
+                for slice in run {
+                    let opacity = store.opacity(
+                        for: slice.characterIndices.max(),
+                        clock: clock,
+                        fadeDuration: StreamingTrailingContentReveal.duration
+                    )
+
+                    if opacity >= 1 {
+                        context.draw(slice)
+                    } else if opacity > 0 {
+                        var faded = context
+                        faded.opacity = opacity
+                        faded.draw(slice)
+                    }
+                }
+            }
+        }
+
+        store.finishBaseline()
     }
 }
 

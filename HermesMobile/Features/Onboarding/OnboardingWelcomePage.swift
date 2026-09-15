@@ -59,13 +59,15 @@ struct OnboardingWelcomePage: View {
 private struct OnboardingBirdPerimeter: View {
     let identities: [BirdAvatarIdentity]
     let canvasSize: CGSize
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var hasAppeared = false
 
-    private let placements: [(x: CGFloat, y: CGFloat, size: CGFloat)] = [
-        (42, 90, 48),
-        (-42, 152, 58),
-        (28, 0.42, 46),
-        (-34, 0.58, 64),
-        (-70, -74, 52)
+    private let placements: [(x: CGFloat, y: CGFloat, size: CGFloat, rotation: Double, mirrored: Bool)] = [
+        (42, 90, 48, -8, false),
+        (-42, 152, 58, 10, true),
+        (28, 0.42, 46, -5, false),
+        (-34, 0.58, 64, 8, true),
+        (-70, -74, 52, -11, false)
     ]
 
     var body: some View {
@@ -74,6 +76,16 @@ private struct OnboardingBirdPerimeter: View {
                 if index < identities.count {
                     BirdAvatarView(identity: identities[index])
                         .frame(width: placement.size, height: placement.size)
+                        .scaleEffect(x: placement.mirrored ? -1 : 1, y: 1)
+                        .rotationEffect(.degrees(placement.rotation))
+                        .opacity(reduceMotion || hasAppeared ? 1 : 0)
+                        .offset(y: reduceMotion || hasAppeared ? 0 : 6)
+                        .animation(
+                            reduceMotion
+                                ? nil
+                                : .easeOut(duration: 0.42).delay(Double(index) * 0.06),
+                            value: hasAppeared
+                        )
                         .position(
                             x: positionX(placement.x),
                             y: positionY(placement.y)
@@ -84,6 +96,7 @@ private struct OnboardingBirdPerimeter: View {
         .frame(width: canvasSize.width, height: canvasSize.height)
         .allowsHitTesting(false)
         .accessibilityHidden(true)
+        .onAppear { hasAppeared = true }
     }
 
     private func positionX(_ offset: CGFloat) -> CGFloat {

@@ -543,6 +543,94 @@ final class MessagesSessionRowFormatterTests: XCTestCase {
         )
     }
 
+    func testPreviewTextPrefersProvidedLatestMessageOverMetadata() {
+        let session = SessionSummary(
+            sessionId: "latest-message",
+            workspace: "/Users/example/hermes-mobile",
+            model: "fixture-model",
+            messageCount: 4
+        )
+
+        XCTAssertEqual(
+            MessagesSessionRowFormatter.previewText(
+                for: session,
+                latestMessagePreview: "  The latest reply\n\nuses two lines.  "
+            ),
+            "The latest reply uses two lines."
+        )
+    }
+
+    func testPreviewTextBoundsLongLatestMessageAndKeepsMetadataFallback() {
+        let longMessage = String(repeating: "x", count: 300)
+        let bounded = MessagesSessionRowFormatter.normalizedLatestMessagePreview(longMessage)
+        XCTAssertEqual(bounded?.count, 240)
+        XCTAssertTrue(bounded?.hasSuffix("…") == true)
+
+        let session = SessionSummary(
+            sessionId: "no-latest-cache",
+            workspace: "/Users/example/hermes-mobile",
+            model: "fixture-model"
+        )
+        XCTAssertEqual(
+            MessagesSessionRowFormatter.previewText(for: session),
+            "fixture-model · hermes-mobile"
+        )
+    }
+
+    func testMessagesSessionDateFormattingUsesLocalClockYesterdayAndCompactOlderDate() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(secondsFromGMT: 0))
+        let locale = Locale(identifier: "en_US_POSIX")
+
+        func date(_ year: Int, _ month: Int, _ day: Int, _ hour: Int, _ minute: Int) throws -> Date {
+            var components = DateComponents()
+            components.calendar = calendar
+            components.timeZone = calendar.timeZone
+            components.year = year
+            components.month = month
+            components.day = day
+            components.hour = hour
+            components.minute = minute
+            return try XCTUnwrap(calendar.date(from: components))
+        }
+
+        let now = try date(2026, 9, 14, 16, 8)
+        let localizedClock = MessagesSessionDateFormatter.localizedString(
+            for: try date(2026, 9, 14, 9, 7),
+            relativeTo: now,
+            calendar: calendar,
+            locale: locale
+        )
+        XCTAssertEqual(localizedClock.split(whereSeparator: \.isWhitespace).joined(separator: " "), "9:07 AM")
+        XCTAssertEqual(
+            MessagesSessionDateFormatter.localizedString(
+                for: try date(2026, 9, 13, 22, 0),
+                relativeTo: now,
+                calendar: calendar,
+                locale: locale
+            ),
+            "Yesterday"
+        )
+        XCTAssertEqual(
+            MessagesSessionDateFormatter.localizedString(
+                for: try date(2026, 9, 12, 15, 0),
+                relativeTo: now,
+                calendar: calendar,
+                locale: locale
+            ),
+            "Sep 12"
+        )
+        XCTAssertEqual(
+            MessagesSessionDateFormatter.localizedString(
+                for: try date(2025, 9, 12, 15, 0),
+                relativeTo: now,
+                calendar: calendar,
+                locale: locale
+            ),
+            "Sep 12, 2025"
+        )
+    }
+
     func testPreviewTextSecondaryMetadataFallback() {
         let singleMessage = SessionSummary(
             sessionId: "f1",

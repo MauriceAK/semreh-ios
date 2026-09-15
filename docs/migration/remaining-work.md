@@ -1,5 +1,99 @@
 # Remaining migration work
 
+## September 14 — current preview and phone-feedback queue
+
+This section is the current user-feedback dispatch ledger; older checkpoints below
+are historical evidence, not current worker status. Root owns this ledger and
+`CURRENT.md` (active lanes, exact candidate, commands and evidence). Decisions live
+in `../prototypes/preview-decisions.md`; existing feature-contract gaps remain in
+`secondary-feature-status.md`. Do not create a competing backlog.
+
+Status meanings: **Queued** = not implemented; **Investigating** = cause/contract
+work; **Implemented / verification pending** = source exists, not accepted;
+**Verified** = named checks passed for an exact candidate; **Integrated** = local
+commit with its stated evidence; **Blocked** = exact missing authority/dependency;
+**Deferred** = deliberately outside the current preview priority. A unit pass is
+not visual, physical-device, or release acceptance. New reports reopen prior gates.
+
+Current app base: `0af48f08d50087bf1239b6b5214ad8e93e07086b`, branch
+`integration/direct-hermes`. New combined app changes are uncommitted, not installed.
+Signed unit build `feedback-unit-build-v4` passed; focused
+`feedback-focused-units-v3.xcresult`: **174 passed, 0 failed, 0 skipped**.
+Evidence root: `/Users/maurice/workspace/semreh-slice1-evidence/onboarding-20260914`.
+
+Latest checkpoint: user reconfirmed continued implementation/verification and local
+integration; main/release and remote publishing remain untouched. Long-scroll v4
+failed a title-versus-session-ID accessibility selector, independently diagnosed
+by Sol with mounted transcript/120 rows present. Corrected v5 is assigned to Sol;
+this does not clear the earlier genuine blank-transcript reproduction. Acceptance
+must inspect close/background-return before scroll or accessibility interactions
+can repair rendering, for both active and completed long conversations.
+
+v5 checkpoint: signed selector build passed; UI failed canonical lifecycle observer
+after populated send/ACK. Root inspected both distant-return screenshots: populated
+tail, retracting the verifier's initial blank verdict. Animation/momentum remain
+unproven. P01 source review confirmed recovery could not arm from a fresh view:
+the observed-rows flag was only set inside already-armed evaluation. Luna is fixing
+that specific defect with a regression; it is not yet verified or integrated.
+
+P01 next checkpoint: recovery arming correction implemented; signed production
+long-scroll v6 completed **1 passed / 0 failed**,140.087s, including completed
+response background dwell and exact tail checks without corrective scrolling.
+Visual review, active-response background gate and broader repeated-navigation
+acceptance remain pending. This is not exhaustive reproduction elimination.
+
+P01 active-return checkpoint: signed builds passed; new focused units **93/0**
+(75 scroll-policy,18 marker-classifier). Active-background v1 **1/0**,100.750s:
+background entered7.635s after send before the15s fixture response; full canonical
+baseline+1 then+2 observed while nonforeground;60s dwell; exact returned tail
+passed without scroll. Root inspected populated return captures, which still show
+rounded app-transition edges; settled-frame review remains distinct/pending.
+Unchanged nonempty geometry can leave recovery armed awaiting a fresh sample;
+this run does not establish exhaustive lifecycle safety or momentum/FPS acceptance.
+
+Coherent checkpoint: fresh signed unit build v2 and full suite v2 passed:
+**2,209 executed /14 skipped /0 failed**,34.251s. Prior v1 retained one brittle
+source-string guard failure; corrected guard still requires lazy construction and
+rejects eager construction. Component completion v2 **1/0**,8.158s, after fixing
+its isolated launch recipe; component evidence is not real provider motion.
+Final authenticated shell/onboarding/loading and settled-return visual checks are
+assigned to Sol. Full-unit run reset isolated app auth; subsequent obstructed
+screenshots are invalid evidence, not accepted visuals. No new commit/install yet.
+
+P13 final onboarding v5 **1 passed /0 failed**,112.814s, same signed product
+candidate: real fixture connection, optional personalization and cold appearance
+readback. Prior recipe failures/interruption retained: system deep-link dialog,
+expired fixture auth, Save Password sheet and duplicated tagline identifying
+Personalize as Welcome. Setup now uses fail-closed exact-fixture checks and real
+screen controls. Shell/controls/Bots-Tasks same-build checks continuing.
+
+| ID / priority | User-visible outcome | Current verified status / owner | Remaining acceptance |
+|---|---|---|---|
+| P01 / top | No blank transcript after long background, reopen, mixed long-chat navigation, or send | **Fix implemented; scoped verification passed; not integrated.** Recovery arming defect repaired. Latest long-scroll v6 and active-background v1 passed exact tail checks after60s away;93 focused tests passed. Earlier background-v5 genuine first-entry blank remains historical evidence, distinct from longscroll-v5's recipe failure. | Settled pixel/recording review, repeated mixed-navigation/cold return and reader-position checks remain. Do not mark universally fixed from these two passes. |
+| P02 / top | Down-arrow works during momentum and smoothly scrolls even from distant history | **Implemented / verification pending** for distance-independent explicit animation; focused policy passed. Deceleration reliability remains **Investigating**. | New production long-scroll selector + scoped geometry and recording-based row displacement; Reduce Motion immediate; actual arrival before button hides. |
+| P03 / top | Compact Thinking/actions show latest meaningful work and expand cleanly; preserved tasks match; no spinner faces or stale empty Thinking | **Partially verified, not integrated.** Focused tests passed; root inspected `feedback-componentlab-v1` Thinking/task expanded and collapsed screenshots. Raw task-checkbox syntax in collapsed preview returned for polish. Preserve raw content and legitimate code/history. | Production chronology and completion motion; meaningful activity versus finished placeholder; long history and Reduce Motion. Component-only evidence does not close these gates. |
+| P04 / top | No redundant “Hermes is working” pill or success-reconnect transcript banner | **Implemented / verification pending.** Generic active pill removed; policy passed; earlier reconnect tests passed. Real errors/recovery retained. | Production running/background return without misleading success chrome or changing scroll inset on ordinary active scrolling. |
+| P05 / top | Smooth local send, response streaming, stop/resend and completion actions | **Implemented / verification pending.** Trailing text motion, bottom-aligned multiline composer and latest-completed Copy footer in candidate; focused checks passed. | Motion recordings and immediate local-message visibility, no blank-on-send; historical context-menu Copy and completion reading-position preservation. |
+| P06 / top | Live Activity / Dynamic Island updates or ends when Hermes completes while app is backgrounded | **Local logic partially verified; remote completion blocked on deployment/team decision.** `feedback-liveactivity-units-v1`:24 passed/0 failed/0 skipped. Installed `0af48f0` ignores ActivityKit `context.isStale`; existing dirty widget patch handles it, not installed. Current request uses `pushType:nil`; bounded background runtime cannot guarantee terminal receipt. | Actual stale widget/Dynamic Island rendering and device delivery remain unverified. True closed-app completion needs authenticated ActivityKit token registration/rotation and APNs update/end relay absent from pinned Hermes. Async question sent for relay approval/Apple team; no keys or service deployment. Cold orphan reconciliation also open (direct activities lack streamID). |
+| P07 | Chats rows: two-line latest-message preview; clock today, Yesterday, older date; iMessage-like spacing | **Implemented / verification pending.** Profile-safe server-wide compact cache map wired; migration/isolation/send/completion/date tests passed. | Real list pixels and return refresh. Latest locally received messages only: stock list preview is first user message and heartbeat is not a message timestamp. Unseen remote updates remain a contract/coverage gap. |
+| P08 | Reliable first-tap Back, no unsolicited session reopening, smooth tab/page navigation | Prior baseline integrated; newer long-chat phone reports **reopen verification**. | Repeated short/long conversation changes, first-tap exit, client-side navigation and transition recordings. |
+| P09 | Seamless older-history prefetch/loading, anchor preservation, animated latest return, minimal loading | Prior baseline integrated; paging gate **open** after v6 target not reached within existing bound. | Verify true prepend preserves anchor; distinguish old test distance from density regression without silently loosening assertions; long cached/cold loads. |
+| P10 | Larger/lower centered bird with overlapping glass name, no dropdown; outlined bird tab; no white logo tile | **Implemented / verification pending** in current candidate. Approved bird/color family in baseline; header52pt/down2, outline tab and transparent S in candidate. | Actual light/dark/screens and hit targets; no center drift or header/content hard panel. Experimental bird→S morph remains deferred. |
+| P11 | Clean menus/settings, direct model/reasoning/context controls, supported themes/accents; hide empty projects; unlabeled pins | Substantial baseline integration exists; candidate and reference-based final organization review **pending**. Canonical idle context snapshot is integrated in ancestor `4486357` (confirmed source/history), not a pending unmerged worker patch. | Verify reachable supported controls, context from canonical usage, no useless settings; preserve scheduled-history deletion protections; final reference comparison. |
+| P12 | Bots and Tasks load promptly without blank/black transitions | Baseline `0af48f0` integrated with prior loading/native evidence; new overall performance gate still open. | Repeated reentry, stale/cancelled loads, themed transient frames; no fake “instant” network guarantee. |
+| P13 | Welcome → Connect → optional Personalize, easy first-party Hermes connection | **Implemented / verification pending** for reordered candidate; focused onboarding checks passed previously. Transparent logo/bird entrance in candidate. | Fresh login, failed-login retry, saved-server reauth, actual isolated Hermes connection and physical QR. Manual entry retained; no unverified SSH/automatic installer promise. |
+| P14 | Create/configure bots and real Groups above Your Team | **Investigating / incomplete.** Profile creation exists in Settings; real group DTO foundation only. Safety gaps in clone/config creation identified. | Safe real create/config/readback and group send/stop. Live group execution blocked on explicitly approved disposable two-profile fixture; no personal provider/service use. |
+| P15 | Measured smoothness under many long chats, scrolling, sending, stop, app switching | **Partially measured, not accepted.** Prior isolated 20-cycle 2×10k-row lab passed, but bypassed external lifecycle; no physical FPS benchmark. | Representative production traces and device FPS/hitch evidence; Simulator Animation Hitches unsupported. No “no drops” claim from screenshots or wall timings. |
+| P16 | Durable implementer → verifier queue → evidence review → integration without user reminders | **Partially implemented/tested.** Night Shift local commit `4e06dbd`, 82 fake controller checks and read-only Luna→Sol automatic handoff passed. Root currently manages native agents. | Fresh app queue/controller integration, durable completion handling and verified continuation. No claim of crashed/ended-chat wake or production unattended readiness. |
+| P17 | Keep phone current and make safe room for verification | Last confirmed phone dev build is `0af48f0`; new candidate **not installed**. Owned regenerable caches cleaned; no source/app-data deletion. | Install only identified tested candidate preserving data; confirm actual device build. Evidence offload to Drive not done; sanitize before any upload. |
+| P18 / deferred | Modular navbar, advanced bird customization/morph, cross-machine A2A/WSL, terminal/phone remote control, TestFlight/team release | **Deferred** behind preview reliability; preserve existing candidate work and capability audits. | Separate bounded decisions/authority and feature-specific tests. No WSL instance or release upload authorized by this ledger. |
+
+Current ownership: Luna Max implements, Sol Low independently verifies on the sole
+Simulator/DerivedData lane, root reviews substantial UI/evidence and integrates.
+Native ownership and build identity are always checked in `CURRENT.md` before use.
+All failed/skipped attempts remain retained. Local integration does not imply a
+push, release merge, device installation, or TestFlight upload.
+
 ## September 11 — foreground lifecycle stabilization
 
 Night Shift remains paused; bounded native workers and one root-owned Simulator

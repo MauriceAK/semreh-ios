@@ -1,14 +1,104 @@
 import SwiftUI
 
-/// A cached template image is required by the native tab bar. Its alpha mask
-/// comes from the same artwork as avatars, so the silhouette cannot drift.
+/// A cached template image is required by the native tab bar. Its outline uses
+/// the same approved contour as the avatars while keeping the tab chrome light.
 @MainActor
 enum BirdTabIcon {
     static let image: UIImage = {
-        let renderer = ImageRenderer(content: BirdArtwork(palette: .sky).frame(width: 25, height: 25))
+        let renderer = ImageRenderer(content: BirdTabOutlineArtwork().frame(width: 25, height: 25))
         renderer.scale = 3
         return (renderer.uiImage ?? UIImage()).withRenderingMode(.alwaysTemplate)
     }()
+}
+
+/// Small, tintable outline variant for the tab bar. The body remains hollow so
+/// the selected tab's native tint reads as a line icon instead of a filled blob.
+private struct BirdTabOutlineArtwork: View {
+    private let outlineStyle = StrokeStyle(lineWidth: 6, lineCap: .round, lineJoin: .round)
+    private let detailStyle = StrokeStyle(lineWidth: 2.8, lineCap: .round, lineJoin: .round)
+
+    var body: some View {
+        GeometryReader { geometry in
+            let scale = min(geometry.size.width, geometry.size.height) / 100
+            ZStack {
+                bodyPath
+                    .stroke(Color.black, style: outlineStyle)
+
+                wingPath
+                    .stroke(Color.black, style: outlineStyle)
+
+                eyePath(at: CGPoint(x: 65.5, y: 38.5))
+                    .stroke(Color.black, style: detailStyle)
+                eyePath(at: CGPoint(x: 79.5, y: 36))
+                    .stroke(Color.black, style: detailStyle)
+                beakPath
+                    .stroke(Color.black, style: detailStyle)
+            }
+            .frame(width: 100, height: 100)
+            .scaleEffect(scale)
+            .frame(width: geometry.size.width, height: geometry.size.height)
+        }
+        .aspectRatio(1, contentMode: .fit)
+    }
+
+    private var bodyPath: Path {
+        var path = Path()
+        path.move(to: CGPoint(x: 8, y: 39))
+        path.addCurve(to: CGPoint(x: 38, y: 24), control1: CGPoint(x: 23, y: 48), control2: CGPoint(x: 31, y: 37))
+        path.addCurve(to: CGPoint(x: 65, y: 9), control1: CGPoint(x: 44, y: 14), control2: CGPoint(x: 53, y: 8))
+        path.addCurve(to: CGPoint(x: 94, y: 40), control1: CGPoint(x: 82, y: 8), control2: CGPoint(x: 92, y: 22))
+        path.addCurve(to: CGPoint(x: 86, y: 78), control1: CGPoint(x: 99, y: 57), control2: CGPoint(x: 95, y: 70))
+        path.addCurve(to: CGPoint(x: 52, y: 89), control1: CGPoint(x: 78, y: 88), control2: CGPoint(x: 65, y: 90))
+        path.addCurve(to: CGPoint(x: 24, y: 74), control1: CGPoint(x: 39, y: 90), control2: CGPoint(x: 30, y: 87))
+        featherTips(&path)
+        path.closeSubpath()
+        return path
+    }
+
+    private var wingPath: Path {
+        var path = Path()
+        path.move(to: CGPoint(x: 8, y: 39))
+        path.addCurve(to: CGPoint(x: 35, y: 45), control1: CGPoint(x: 17, y: 47), control2: CGPoint(x: 28, y: 45))
+        path.addCurve(to: CGPoint(x: 46, y: 55), control1: CGPoint(x: 44, y: 44), control2: CGPoint(x: 48, y: 48))
+        path.addCurve(to: CGPoint(x: 24, y: 74), control1: CGPoint(x: 46, y: 66), control2: CGPoint(x: 36, y: 73))
+        featherTips(&path)
+        path.closeSubpath()
+        return path
+    }
+
+    private var beakPath: Path {
+        var path = Path()
+        path.move(to: CGPoint(x: 71.5, y: 47))
+        path.addQuadCurve(to: CGPoint(x: 80, y: 45), control: CGPoint(x: 81, y: 43))
+        path.addLine(to: CGPoint(x: 78.5, y: 52))
+        path.addQuadCurve(to: CGPoint(x: 76, y: 53), control: CGPoint(x: 78, y: 55))
+        path.closeSubpath()
+        return path
+    }
+
+    private func eyePath(at center: CGPoint) -> Path {
+        var path = Path()
+        path.addRoundedRect(
+            in: CGRect(
+                x: center.x - 2.85,
+                y: center.y - 5.85,
+                width: 5.7,
+                height: 11.7
+            ),
+            cornerSize: CGSize(width: 2.85, height: 2.85)
+        )
+        let rotation = CGAffineTransform(translationX: center.x, y: center.y)
+            .rotated(by: -.pi * 14 / 180)
+            .translatedBy(x: -center.x, y: -center.y)
+        return path.applying(rotation)
+    }
+
+    private func featherTips(_ path: inout Path) {
+        path.addCurve(to: CGPoint(x: 8, y: 64), control1: CGPoint(x: 16, y: 75), control2: CGPoint(x: 9, y: 68))
+        path.addQuadCurve(to: CGPoint(x: 17, y: 61), control: CGPoint(x: 6, y: 60))
+        path.addCurve(to: CGPoint(x: 4, y: 43), control1: CGPoint(x: 8, y: 58), control2: CGPoint(x: 4, y: 51))
+        path.addQuadCurve(to: CGPoint(x: 8, y: 39), control: CGPoint(x: 3, y: 35))
+    }
 }
 
 /// Static approved companion. Shared vector geometry stays crisp in rows and headers.

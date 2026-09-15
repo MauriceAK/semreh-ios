@@ -492,8 +492,10 @@ enum ChatActiveRunStatusPolicy {
         }
 
         if hasActiveStream {
-            guard !isScrolledNearBottom else { return nil }
-            return ChatActiveRunStatusPresentation(kind: .active)
+            // The transcript activity rows and composer Stop control already
+            // expose the running state. Do not add floating chrome (and change
+            // the transcript inset) merely because the reader scrolls away.
+            return nil
         }
 
         if isEstablishingConnection {

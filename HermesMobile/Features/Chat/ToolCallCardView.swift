@@ -34,7 +34,7 @@ struct ToolCallCardView: View {
                     .transition(ChatMotion.disclosureTransition(reduceMotion: reduceMotion))
             }
         }
-        .padding(.bottom, isExpanded ? 8 : 0)
+        .padding(.bottom, isExpanded ? 4 : 0)
         .frame(maxWidth: .infinity, alignment: .leading)
         // Tool-call bodies are commands, JSON, file paths, and results — code-like
         // content that must stay left-to-right inside an RTL message (#259). The
@@ -87,7 +87,7 @@ struct ToolCallCardView: View {
                 }
             }
 
-            Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+            Image(systemName: isExpanded ? "chevron.down" : "chevron.forward")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
         }

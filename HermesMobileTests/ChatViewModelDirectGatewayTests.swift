@@ -1295,9 +1295,10 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         XCTAssertFalse(fake.calls().contains { $0.method == "session.create" || $0.method == "prompt.submit" })
         XCTAssertEqual(viewModel.messages.filter { ["user", "assistant"].contains($0.role ?? "") }.compactMap(\.content),
             ["Work externally", "Latest external progress"])
-        XCTAssertTrue(viewModel.messages.contains { $0.role == "local_notice" && $0.content?.contains("Showing saved messages") == true })
+        XCTAssertFalse(viewModel.messages.contains { $0.role == "local_notice" })
         XCTAssertEqual(viewModel.activeStreamID, "direct-run:durable-1")
         XCTAssertFalse(viewModel.isActiveStreamConnectionSuspended)
+        XCTAssertNil(viewModel.sendErrorMessage)
 
         fake.emit(ChatDirectEventFactory.event(
             sessionID: "other-runtime", type: "message.delta", sequence: 1,
@@ -3319,11 +3320,15 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         viewModel.setSendErrorMessage(nil)
         try await runtime.reconnect()
         await waitUntil { viewModel.sendErrorMessage?.contains("cannot confirm") == true }
+        XCTAssertFalse(viewModel.messages.contains { $0.role == "local_notice" })
         XCTAssertFalse(viewModel.messages.contains { $0.role == "user" && $0.content == "uncertain prompt" })
+        XCTAssertTrue(viewModel.sendErrorMessage?.contains("cannot confirm") == true,
+                      "Ambiguous delivery stays visible in the composer recovery warning.")
         let callsBeforeBlockedDraft = fake.calls().count
         let blocked = await viewModel.sendMessage("next draft")
         XCTAssertFalse(blocked)
         XCTAssertEqual(fake.calls().count, callsBeforeBlockedDraft)
+        XCTAssertEqual(fake.calls().filter { $0.method == "prompt.submit" }.count, 1)
 
         viewModel.invalidateDirectConversation()
         await runtime.stop()

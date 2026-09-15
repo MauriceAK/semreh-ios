@@ -918,6 +918,274 @@ final class CacheStoreTests: XCTestCase {
         )
     }
 
+    func testCacheMessagesPersistsLatestMeaningfulPreviewAndMessageTimestamp() throws {
+        let context = try makeContext()
+        let serverURL = URL(string: "https://preview.example.test")!
+        let cachedAt = Date(timeIntervalSince1970: 1_790_000_000)
+        let metadataHeartbeat = 1_880_000_000.0
+        try CacheStore.cacheSessions(
+            [SessionSummary(
+                sessionId: "durable-1",
+                title: "Metadata must not be the preview",
+                model: "metadata-model",
+                lastMessageAt: metadataHeartbeat,
+                profile: "alpha"
+            )],
+            serverURL: serverURL,
+            in: context,
+            cachedAt: cachedAt
+        )
+
+        try CacheStore.cacheMessages(
+            [
+                ChatMessage(role: "user", content: "First user message", timestamp: 100, messageId: "u1"),
+                ChatMessage(role: "assistant", content: "Latest\nmeaningful answer", timestamp: 1_780_000_000, messageId: "a1"),
+                ChatMessage(role: "tool", content: "Tool output is not the preview", timestamp: 300, messageId: "tool1"),
+                ChatMessage(role: "user", content: nil, timestamp: 400, messageId: "tool-result-only", toolCallId: "call-1", toolUseId: "use-1"),
+                ChatMessage(role: "assistant", content: "[context compaction: internal marker]", timestamp: 500, messageId: "marker"),
+                ChatMessage(role: "user", content: "[important: background process finished]", timestamp: 600, messageId: "wake")
+            ],
+            serverURL: serverURL,
+            sessionID: "direct:5:alpha:durable-1",
+            previewIdentity: CachedSessionPreviewIdentity(profile: "alpha", sessionID: "durable-1"),
+            in: context,
+            cachedAt: cachedAt
+        )
+
+        let cachedPreview = try XCTUnwrap(
+            CacheStore.cachedSessionPreviews(
+                serverURL: serverURL,
+                in: context,
+                now: cachedAt
+            )[CachedSessionPreviewIdentity(profile: "alpha", sessionID: "durable-1")]
+        )
+        XCTAssertEqual(cachedPreview.text, "Latest meaningful answer")
+        XCTAssertEqual(cachedPreview.messageTimestamp, 1_780_000_000)
+        XCTAssertEqual(cachedPreview.locallyObservedAt, cachedAt)
+        XCTAssertNotEqual(cachedPreview.messageTimestamp, metadataHeartbeat)
+    }
+
+    func testNonemptyMarkerOnlyWindowClearsPriorPreview() throws {
+        let context = try makeContext()
+        let serverURL = URL(string: "https://marker-window.example.test")!
+        let profile = "alpha"
+        let rawSessionID = "durable-marker-session"
+        let cachedAt = Date(timeIntervalSince1970: 1_790_000_000)
+        let identity = CachedSessionPreviewIdentity(profile: profile, sessionID: rawSessionID)
+
+        try CacheStore.cacheMessages(
+            [ChatMessage(role: "assistant", content: "Earlier answer", timestamp: 1_780_000_000, messageId: "answer")],
+            serverURL: serverURL,
+            sessionID: "direct:5:alpha:\(rawSessionID)",
+            previewIdentity: identity,
+            in: context,
+            cachedAt: cachedAt
+        )
+        XCTAssertEqual(
+            try CacheStore.cachedSessionPreviews(serverURL: serverURL, in: context, now: cachedAt)[identity]?.text,
+            "Earlier answer"
+        )
+
+        try CacheStore.cacheMessages(
+            [
+                ChatMessage(role: "tool", content: "Private tool output", timestamp: 1_780_000_100, messageId: "tool"),
+                ChatMessage(role: "user", content: "[important: background process finished]", timestamp: 1_780_000_200, messageId: "wake"),
+                ChatMessage(role: "assistant", content: "[context compaction: internal marker]", timestamp: 1_780_000_300, messageId: "compact")
+            ],
+            serverURL: serverURL,
+            sessionID: "direct:5:alpha:\(rawSessionID)",
+            previewIdentity: identity,
+            in: context,
+            cachedAt: cachedAt.addingTimeInterval(1)
+        )
+
+        XCTAssertNil(
+            try CacheStore.cachedSessionPreviews(
+                serverURL: serverURL,
+                in: context,
+                now: cachedAt.addingTimeInterval(1)
+            )[identity]
+        )
+    }
+
+    func testCachedPreviewsAreIsolatedByServerAndProfile() throws {
+        let context = try makeContext()
+        let serverA = URL(string: "https://a.example.test")!
+        let serverB = URL(string: "https://b.example.test")!
+        let cachedAt = Date(timeIntervalSince1970: 1_770_000_000)
+
+        for (server, profile, text, timestamp) in [
+            (serverA, "alpha", "Alpha copy", 100.0),
+            (serverA, "beta", "Beta copy", 200.0),
+            (serverB, "alpha", "Other server copy", 300.0)
+        ] {
+            try CacheStore.cacheMessages(
+                [ChatMessage(role: "assistant", content: text, timestamp: timestamp, messageId: "same-message-id")],
+                serverURL: server,
+                sessionID: "direct:\(profile.utf8.count):\(profile):same-session-id",
+                previewIdentity: CachedSessionPreviewIdentity(profile: profile, sessionID: "same-session-id"),
+                in: context,
+                cachedAt: cachedAt
+            )
+        }
+
+        XCTAssertEqual(
+            try CacheStore.cachedSessionPreviews(serverURL: serverA, in: context, now: cachedAt)[CachedSessionPreviewIdentity(profile: "alpha", sessionID: "same-session-id")]?.text,
+            "Alpha copy"
+        )
+        XCTAssertEqual(
+            try CacheStore.cachedSessionPreviews(serverURL: serverA, in: context, now: cachedAt)[CachedSessionPreviewIdentity(profile: "beta", sessionID: "same-session-id")]?.text,
+            "Beta copy"
+        )
+        XCTAssertEqual(
+            try CacheStore.cachedSessionPreviews(serverURL: serverB, in: context, now: cachedAt)[CachedSessionPreviewIdentity(profile: "alpha", sessionID: "same-session-id")]?.text,
+            "Other server copy"
+        )
+        XCTAssertNil(try CacheStore.cachedSessionPreviews(serverURL: serverB, in: context, now: cachedAt)[CachedSessionPreviewIdentity(profile: "beta", sessionID: "same-session-id")])
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<CachedSessionPreviewRecord>()), 3)
+    }
+
+    func testDeleteAndClearCacheRemoveOnlyScopedPreviews() throws {
+        let context = try makeContext()
+        let serverA = URL(string: "https://a.example.test")!
+        let serverB = URL(string: "https://b.example.test")!
+        let cachedAt = Date(timeIntervalSince1970: 1_770_000_000)
+
+        for (server, profile, text) in [
+            (serverA, "alpha", "Alpha copy"),
+            (serverA, "beta", "Beta copy"),
+            (serverB, "alpha", "Other server copy")
+        ] {
+            try CacheStore.cacheMessages(
+                [ChatMessage(role: "assistant", content: text, timestamp: 100, messageId: "message")],
+                serverURL: server,
+                sessionID: "direct:\(profile.utf8.count):\(profile):same-session-id",
+                previewIdentity: CachedSessionPreviewIdentity(profile: profile, sessionID: "same-session-id"),
+                in: context,
+                cachedAt: cachedAt
+            )
+        }
+
+        try CacheStore.deleteSession(
+            sessionID: "same-session-id",
+            serverURL: serverA,
+            profile: "alpha",
+            in: context
+        )
+        XCTAssertNil(try CacheStore.cachedSessionPreviews(serverURL: serverA, in: context, now: cachedAt)[CachedSessionPreviewIdentity(profile: "alpha", sessionID: "same-session-id")])
+        XCTAssertEqual(try CacheStore.cachedSessionPreviews(serverURL: serverA, in: context, now: cachedAt)[CachedSessionPreviewIdentity(profile: "beta", sessionID: "same-session-id")]?.text, "Beta copy")
+
+        try CacheStore.clearCache(for: serverA, in: context)
+        XCTAssertTrue(try CacheStore.cachedSessionPreviews(serverURL: serverA, in: context, now: cachedAt).isEmpty)
+        XCTAssertEqual(try CacheStore.cachedSessionPreviews(serverURL: serverB, in: context, now: cachedAt)[CachedSessionPreviewIdentity(profile: "alpha", sessionID: "same-session-id")]?.text, "Other server copy")
+    }
+
+    func testArchivingSessionClearsOnlyMatchingProfilePreview() throws {
+        let context = try makeContext()
+        let serverURL = URL(string: "https://archive-preview.example.test")!
+        let cachedAt = Date(timeIntervalSince1970: 1_770_000_000)
+        for (profile, text) in [("alpha", "Alpha copy"), ("beta", "Beta copy")] {
+            try CacheStore.cacheMessages(
+                [ChatMessage(role: "assistant", content: text, timestamp: 100, messageId: "message-\(profile)")],
+                serverURL: serverURL,
+                sessionID: "direct-cache-identity",
+                previewIdentity: CachedSessionPreviewIdentity(profile: profile, sessionID: "shared-session"),
+                in: context,
+                cachedAt: cachedAt
+            )
+        }
+
+        try CacheStore.cacheSession(
+            SessionSummary(sessionId: "shared-session", archived: true, profile: "alpha"),
+            serverURL: serverURL,
+            in: context,
+            cachedAt: cachedAt.addingTimeInterval(1)
+        )
+
+        let previews = try CacheStore.cachedSessionPreviews(serverURL: serverURL, in: context, now: cachedAt.addingTimeInterval(1))
+        XCTAssertNil(previews[CachedSessionPreviewIdentity(profile: "alpha", sessionID: "shared-session")])
+        XCTAssertEqual(previews[CachedSessionPreviewIdentity(profile: "beta", sessionID: "shared-session")]?.text, "Beta copy")
+    }
+
+    func testUnscopedSessionListRefreshDoesNotPurgeProfileScopedPreview() throws {
+        let context = try makeContext()
+        let serverURL = URL(string: "https://profile-refresh.example.test")!
+        let cachedAt = Date(timeIntervalSince1970: 1_770_000_000)
+        try CacheStore.cacheMessages(
+            [ChatMessage(role: "assistant", content: "Keep the beta preview", timestamp: 100, messageId: "beta-message")],
+            serverURL: serverURL,
+            sessionID: "direct:4:beta:shared-session",
+            previewIdentity: CachedSessionPreviewIdentity(profile: "beta", sessionID: "shared-session"),
+            in: context,
+            cachedAt: cachedAt
+        )
+
+        try CacheStore.cacheSessions([], serverURL: serverURL, in: context, cachedAt: cachedAt)
+
+        XCTAssertEqual(
+            try CacheStore.cachedSessionPreviews(serverURL: serverURL, in: context, now: cachedAt)[CachedSessionPreviewIdentity(profile: "beta", sessionID: "shared-session")]?.text,
+            "Keep the beta preview"
+        )
+    }
+
+    func testAddingPreviewEntityOpensPriorCacheSchemaWithEmptyPreviewFallback() throws {
+        let storeDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("semreh-cache-migration-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: storeDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: storeDirectory) }
+
+        let storeURL = storeDirectory.appendingPathComponent("Cache.store")
+        try seedLegacyCacheStore(at: storeURL)
+        try verifyPreviewSchemaOpensLegacyStore(at: storeURL)
+    }
+
+    private func verifyPreviewSchemaOpensLegacyStore(at storeURL: URL) throws {
+        let schema = Schema([CachedSession.self, CachedMessage.self, CachedSessionPreviewRecord.self])
+        let configuration = ModelConfiguration(
+            "LegacySessionCache",
+            schema: schema,
+            url: storeURL,
+            cloudKitDatabase: .none
+        )
+        let container = try ModelContainer(for: schema, configurations: [configuration])
+        let context = ModelContext(container)
+        let serverURL = URL(string: "https://legacy.example.test")!
+
+        XCTAssertEqual(try CacheStore.cachedSessions(serverURL: serverURL, in: context).map(\.sessionId), ["legacy-session"])
+        XCTAssertEqual(
+            try CacheStore.cachedMessages(
+                serverURL: serverURL,
+                sessionID: "direct:5:alpha:legacy-session",
+                in: context
+            ).map(\.content),
+            ["Legacy transcript"]
+        )
+        XCTAssertNil(try CacheStore.cachedSessionPreviews(serverURL: serverURL, in: context)[CachedSessionPreviewIdentity(profile: "alpha", sessionID: "legacy-session")])
+    }
+
+    private func seedLegacyCacheStore(at storeURL: URL) throws {
+        let legacySchema = Schema([CachedSession.self, CachedMessage.self])
+        let configuration = ModelConfiguration(
+            "LegacySessionCache",
+            schema: legacySchema,
+            url: storeURL,
+            cloudKitDatabase: .none
+        )
+        let container = try ModelContainer(for: legacySchema, configurations: [configuration])
+        let context = ModelContext(container)
+        context.insert(CachedSession(
+            serverURLString: "https://legacy.example.test",
+            session: SessionSummary(sessionId: "legacy-session", title: "Legacy title", profile: "alpha")
+        ))
+        context.insert(CachedMessage(
+            serverURLString: "https://legacy.example.test",
+            sessionID: "direct:5:alpha:legacy-session",
+            message: ChatMessage(role: "assistant", content: "Legacy transcript", timestamp: 100, messageId: "legacy-message"),
+            sortIndex: 0
+        ))
+        try context.save()
+    }
+
     func testCachingOneThousandSessionsCompletesWithinInteractiveBudget() throws {
         let context = try makeContext()
         let serverURL = URL(string: "https://performance.example.test")!
@@ -978,6 +1246,7 @@ final class CacheStoreTests: XCTestCase {
         let container = try ModelContainer(
             for: CachedSession.self,
             CachedMessage.self,
+            CachedSessionPreviewRecord.self,
             configurations: configuration
         )
         return ModelContext(container)

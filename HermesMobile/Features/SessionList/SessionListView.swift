@@ -652,6 +652,7 @@ struct SessionListView: View {
             SessionListRowsSection(
                 viewModel: viewModel,
                 server: server,
+                latestMessagePreviews: viewModel.cachedSessionPreviews,
                 sessions: usesShellChrome ? shellHistorySessions : sessionGroups.ordinary,
                 emptyTitle: emptySessionsTitle,
                 emptyDescription: emptySessionsDescription,
