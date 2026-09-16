@@ -9,6 +9,10 @@ struct PairingImport: Equatable, Identifiable {
 
     static func parse(_ text: String) throws -> Self {
         guard text.utf8.count <= 2048 else { throw Failure.tooLarge }
+        // Most administrators can share an ordinary QR containing the server
+        // origin. Keep the custom versioned envelope for compatibility, but
+        // route raw HTTPS origins through the exact same strict validator.
+        if text.hasPrefix("https://") { return try validateOrigin(text) }
         guard let data = text.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               Set(object.keys) == Set(["type", "version", "origin"]),

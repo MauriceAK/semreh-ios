@@ -1,18 +1,19 @@
 import SwiftUI
 
-/// A cached template image is required by the native tab bar. Its outline uses
-/// the same approved contour as the avatars while keeping the tab chrome light.
+/// Cached template images let the native tab bar use matching outline/filled bird states.
 @MainActor
 enum BirdTabIcon {
-    static let image: UIImage = {
-        let renderer = ImageRenderer(content: BirdTabOutlineArtwork().frame(width: 25, height: 25))
+    static let image = templateImage(for: BirdTabOutlineArtwork())
+    static let selectedImage = templateImage(for: BirdTabFilledArtwork())
+
+    private static func templateImage<Artwork: View>(for artwork: Artwork) -> UIImage {
+        let renderer = ImageRenderer(content: artwork.frame(width: 25, height: 25))
         renderer.scale = 3
         return (renderer.uiImage ?? UIImage()).withRenderingMode(.alwaysTemplate)
-    }()
+    }
 }
 
-/// Small, tintable outline variant for the tab bar. The body remains hollow so
-/// the selected tab's native tint reads as a line icon instead of a filled blob.
+/// Small, tintable outline variant for the inactive Bots tab.
 private struct BirdTabOutlineArtwork: View {
     private let outlineStyle = StrokeStyle(lineWidth: 6, lineCap: .round, lineJoin: .round)
     private let detailStyle = StrokeStyle(lineWidth: 2.8, lineCap: .round, lineJoin: .round)
@@ -21,17 +22,17 @@ private struct BirdTabOutlineArtwork: View {
         GeometryReader { geometry in
             let scale = min(geometry.size.width, geometry.size.height) / 100
             ZStack {
-                bodyPath
+                BirdArtworkGeometry.bodyPath
                     .stroke(Color.black, style: outlineStyle)
 
-                wingPath
+                BirdArtworkGeometry.wingPath
                     .stroke(Color.black, style: outlineStyle)
 
-                eyePath(at: CGPoint(x: 65.5, y: 38.5))
+                BirdArtworkGeometry.eyePath(at: BirdArtworkGeometry.leftEyeCenter)
                     .stroke(Color.black, style: detailStyle)
-                eyePath(at: CGPoint(x: 79.5, y: 36))
+                BirdArtworkGeometry.eyePath(at: BirdArtworkGeometry.rightEyeCenter)
                     .stroke(Color.black, style: detailStyle)
-                beakPath
+                BirdArtworkGeometry.beakPath
                     .stroke(Color.black, style: detailStyle)
             }
             .frame(width: 100, height: 100)
@@ -40,13 +41,35 @@ private struct BirdTabOutlineArtwork: View {
         }
         .aspectRatio(1, contentMode: .fit)
     }
+}
 
-    private var bodyPath: Path {
+/// Filled selected-state silhouette, with the eyes and beak kept as negative-space details.
+private struct BirdTabFilledArtwork: View {
+    var body: some View {
+        Canvas { context, size in
+            let scale = min(size.width, size.height) / 100
+            let transform = CGAffineTransform(scaleX: scale, y: scale)
+            context.fill(
+                BirdArtworkGeometry.filledPath.applying(transform),
+                with: .color(.black),
+                style: FillStyle(eoFill: true)
+            )
+        }
+        .aspectRatio(1, contentMode: .fit)
+    }
+}
+
+/// Shared artwork geometry keeps avatars and native tab-bar variants source-faithful.
+enum BirdArtworkGeometry {
+    static let leftEyeCenter = CGPoint(x: 65.5, y: 43)
+    static let rightEyeCenter = CGPoint(x: 79.5, y: 41)
+
+    static var bodyPath: Path {
         var path = Path()
         path.move(to: CGPoint(x: 8, y: 39))
-        path.addCurve(to: CGPoint(x: 38, y: 24), control1: CGPoint(x: 23, y: 48), control2: CGPoint(x: 31, y: 37))
-        path.addCurve(to: CGPoint(x: 65, y: 9), control1: CGPoint(x: 44, y: 14), control2: CGPoint(x: 53, y: 8))
-        path.addCurve(to: CGPoint(x: 94, y: 40), control1: CGPoint(x: 82, y: 8), control2: CGPoint(x: 92, y: 22))
+        path.addCurve(to: CGPoint(x: 38, y: 28), control1: CGPoint(x: 23, y: 48), control2: CGPoint(x: 31, y: 37))
+        path.addCurve(to: CGPoint(x: 65, y: 16), control1: CGPoint(x: 45, y: 18), control2: CGPoint(x: 56, y: 16))
+        path.addCurve(to: CGPoint(x: 94, y: 40), control1: CGPoint(x: 80, y: 16), control2: CGPoint(x: 91, y: 20))
         path.addCurve(to: CGPoint(x: 86, y: 78), control1: CGPoint(x: 99, y: 57), control2: CGPoint(x: 95, y: 70))
         path.addCurve(to: CGPoint(x: 52, y: 89), control1: CGPoint(x: 78, y: 88), control2: CGPoint(x: 65, y: 90))
         path.addCurve(to: CGPoint(x: 24, y: 74), control1: CGPoint(x: 39, y: 90), control2: CGPoint(x: 30, y: 87))
@@ -55,7 +78,7 @@ private struct BirdTabOutlineArtwork: View {
         return path
     }
 
-    private var wingPath: Path {
+    static var wingPath: Path {
         var path = Path()
         path.move(to: CGPoint(x: 8, y: 39))
         path.addCurve(to: CGPoint(x: 35, y: 45), control1: CGPoint(x: 17, y: 47), control2: CGPoint(x: 28, y: 45))
@@ -66,7 +89,7 @@ private struct BirdTabOutlineArtwork: View {
         return path
     }
 
-    private var beakPath: Path {
+    static var beakPath: Path {
         var path = Path()
         path.move(to: CGPoint(x: 71.5, y: 47))
         path.addQuadCurve(to: CGPoint(x: 80, y: 45), control: CGPoint(x: 81, y: 43))
@@ -76,7 +99,7 @@ private struct BirdTabOutlineArtwork: View {
         return path
     }
 
-    private func eyePath(at center: CGPoint) -> Path {
+    static func eyePath(at center: CGPoint) -> Path {
         var path = Path()
         path.addRoundedRect(
             in: CGRect(
@@ -93,7 +116,15 @@ private struct BirdTabOutlineArtwork: View {
         return path.applying(rotation)
     }
 
-    private func featherTips(_ path: inout Path) {
+    static var filledPath: Path {
+        var path = bodyPath
+        path.addPath(eyePath(at: leftEyeCenter))
+        path.addPath(eyePath(at: rightEyeCenter))
+        path.addPath(beakPath)
+        return path
+    }
+
+    private static func featherTips(_ path: inout Path) {
         path.addCurve(to: CGPoint(x: 8, y: 64), control1: CGPoint(x: 16, y: 75), control2: CGPoint(x: 9, y: 68))
         path.addQuadCurve(to: CGPoint(x: 17, y: 61), control: CGPoint(x: 6, y: 60))
         path.addCurve(to: CGPoint(x: 4, y: 43), control1: CGPoint(x: 8, y: 58), control2: CGPoint(x: 4, y: 51))
@@ -106,15 +137,23 @@ struct BirdAvatarView: View {
     let identity: BirdAvatarIdentity
 
     var body: some View {
-        // Retain the six existing hash buckets and nearest approved color families.
-        let assigned: [BirdPalette] = [.yellow, .orange, .mint, .pink, .sky, .violet]
-        BirdArtwork(palette: assigned[identity.presetIndex])
+        BirdArtwork(palette: BirdPalette.assignment(for: identity))
             .accessibilityHidden(true)
     }
 }
 
-private enum BirdPalette: CaseIterable {
+enum BirdPalette: CaseIterable, Equatable {
     case sky, violet, mint, pink, orange, yellow, teal, lavender
+
+    /// The standard server profile and its onboarding preview use sky/white/light blue.
+    /// Decorative and named profiles retain their deterministic hash-bucket assignments.
+    static func assignment(for identity: BirdAvatarIdentity) -> Self {
+        if identity.profileID == "default" || identity.profileID == "appearance-preview" {
+            return .sky
+        }
+        let assigned: [Self] = [.yellow, .orange, .mint, .pink, .sky, .violet]
+        return assigned[identity.presetIndex]
+    }
 
     var colors: (UInt32, UInt32, UInt32) {
         switch self {
@@ -138,54 +177,24 @@ private struct BirdArtwork: View {
         GeometryReader { geometry in
             let scale = min(geometry.size.width, geometry.size.height) / 100
             ZStack {
-                Path { p in
-                    p.move(to: CGPoint(x: 8, y: 39))
-                    p.addCurve(to: CGPoint(x: 38, y: 24), control1: CGPoint(x: 23, y: 48), control2: CGPoint(x: 31, y: 37))
-                    p.addCurve(to: CGPoint(x: 65, y: 9), control1: CGPoint(x: 44, y: 14), control2: CGPoint(x: 53, y: 8))
-                    p.addCurve(to: CGPoint(x: 94, y: 40), control1: CGPoint(x: 82, y: 8), control2: CGPoint(x: 92, y: 22))
-                    p.addCurve(to: CGPoint(x: 86, y: 78), control1: CGPoint(x: 99, y: 57), control2: CGPoint(x: 95, y: 70))
-                    p.addCurve(to: CGPoint(x: 52, y: 89), control1: CGPoint(x: 78, y: 88), control2: CGPoint(x: 65, y: 90))
-                    p.addCurve(to: CGPoint(x: 24, y: 74), control1: CGPoint(x: 39, y: 90), control2: CGPoint(x: 30, y: 87))
-                    featherTips(&p)
-                    p.closeSubpath()
-                }
-                .fill(LinearGradient(colors: [color(top), color(bottom)], startPoint: .top, endPoint: .bottomTrailing))
+                BirdArtworkGeometry.bodyPath
+                    .fill(LinearGradient(colors: [color(top), color(bottom)], startPoint: .top, endPoint: .bottomTrailing))
 
                 // Swept left wing with the reference's two feather tips.
-                Path { p in
-                    p.move(to: CGPoint(x: 8, y: 39))
-                    p.addCurve(to: CGPoint(x: 35, y: 45), control1: CGPoint(x: 17, y: 47), control2: CGPoint(x: 28, y: 45))
-                    p.addCurve(to: CGPoint(x: 46, y: 55), control1: CGPoint(x: 44, y: 44), control2: CGPoint(x: 48, y: 48))
-                    p.addCurve(to: CGPoint(x: 24, y: 74), control1: CGPoint(x: 46, y: 66), control2: CGPoint(x: 36, y: 73))
-                    featherTips(&p)
-                    p.closeSubpath()
-                }
-                .fill(LinearGradient(colors: [color(bottom), color(wing)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                BirdArtworkGeometry.wingPath
+                    .fill(LinearGradient(colors: [color(bottom), color(wing)], startPoint: .topLeading, endPoint: .bottomTrailing))
 
                 Capsule().fill(color(0x191933)).frame(width: 5.7, height: 11.7)
-                    .rotationEffect(.degrees(-14)).position(x: 65.5, y: 38.5)
+                    .rotationEffect(.degrees(-14)).position(BirdArtworkGeometry.leftEyeCenter)
                 Capsule().fill(color(0x191933)).frame(width: 5.7, height: 11.7)
-                    .rotationEffect(.degrees(-14)).position(x: 79.5, y: 36)
-                Path { p in
-                    p.move(to: CGPoint(x: 71.5, y: 47))
-                    p.addQuadCurve(to: CGPoint(x: 80, y: 45), control: CGPoint(x: 81, y: 43))
-                    p.addLine(to: CGPoint(x: 78.5, y: 52))
-                    p.addQuadCurve(to: CGPoint(x: 76, y: 53), control: CGPoint(x: 78, y: 55))
-                    p.closeSubpath()
-                }.fill(color(wing))
+                    .rotationEffect(.degrees(-14)).position(BirdArtworkGeometry.rightEyeCenter)
+                BirdArtworkGeometry.beakPath.fill(color(wing))
             }
             .frame(width: 100, height: 100)
             .scaleEffect(scale)
             .frame(width: geometry.size.width, height: geometry.size.height)
         }
         .aspectRatio(1, contentMode: .fit)
-    }
-
-    private func featherTips(_ p: inout Path) {
-        p.addCurve(to: CGPoint(x: 8, y: 64), control1: CGPoint(x: 16, y: 75), control2: CGPoint(x: 9, y: 68))
-        p.addQuadCurve(to: CGPoint(x: 17, y: 61), control: CGPoint(x: 6, y: 60))
-        p.addCurve(to: CGPoint(x: 4, y: 43), control1: CGPoint(x: 8, y: 58), control2: CGPoint(x: 4, y: 51))
-        p.addQuadCurve(to: CGPoint(x: 8, y: 39), control: CGPoint(x: 3, y: 35))
     }
 
     private func color(_ hex: UInt32) -> Color {
@@ -212,3 +221,83 @@ private struct BirdArtwork: View {
         }
     }
 }
+
+#if DEBUG
+/// Server-free visual comparison surface for the approved bird artwork.
+/// Keep this beside the private renderer so the lab cannot drift into a replica.
+struct BirdPaletteVisualLabView: View {
+    private let sizes: [CGFloat] = [24, 48, 52]
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                Text("Bird palette visual lab")
+                    .font(.title2.bold())
+                    .accessibilityAddTraits(.isHeader)
+                Text("Server-free · native BirdArtwork geometry and gradients · 8 palettes × 24 / 48 / 52 pt")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                ForEach([false, true], id: \.self) { isDark in
+                    let appearance = isDark ? "Dark" : "Light"
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("\(appearance) appearance")
+                            .font(.headline)
+                            .accessibilityAddTraits(.isHeader)
+
+                        VStack(spacing: 10) {
+                            ForEach(Array(BirdPalette.allCases.enumerated()), id: \.offset) { index, palette in
+                                HStack(spacing: 12) {
+                                    Text(palette.visualLabName)
+                                        .font(.caption.weight(.semibold))
+                                        .frame(width: 64, alignment: .leading)
+
+                                    Spacer(minLength: 0)
+
+                                    ForEach(sizes, id: \.self) { size in
+                                        BirdArtwork(palette: palette)
+                                            .frame(width: size, height: size)
+                                            .accessibilityHidden(true)
+                                    }
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .accessibilityIdentifier(
+                                    "bird-palette-lab-\(isDark ? "dark" : "light")-\(index)"
+                                )
+                            }
+                        }
+                    }
+                    .padding(16)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        isDark
+                            ? Color(red: 0.10, green: 0.09, blue: 0.16)
+                            : Color(red: 0.98, green: 0.97, blue: 0.94),
+                        in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    )
+                    .environment(\.colorScheme, isDark ? .dark : .light)
+                    .accessibilityIdentifier("bird-palette-lab-\(isDark ? "dark" : "light")")
+                }
+            }
+            .padding(20)
+        }
+        .background(Color(uiColor: .systemBackground).ignoresSafeArea())
+        .accessibilityIdentifier("bird-palette-visual-lab")
+    }
+}
+
+private extension BirdPalette {
+    var visualLabName: String {
+        switch self {
+        case .sky: "Sky"
+        case .violet: "Violet"
+        case .mint: "Mint"
+        case .pink: "Pink"
+        case .orange: "Orange"
+        case .yellow: "Yellow"
+        case .teal: "Teal"
+        case .lavender: "Lavender"
+        }
+    }
+}
+#endif

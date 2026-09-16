@@ -11,6 +11,7 @@ struct ChatScrollMetrics: Equatable {
 struct ChatScrollObserver: UIViewRepresentable {
     let isStreaming: Bool
     let onMetrics: @MainActor (ChatScrollMetrics) -> Void
+    var onContentSizeChange: @MainActor (CGSize) -> Void = { _ in }
     var onScrollViewReady: @MainActor (UIScrollView?) -> Void = { _ in }
 
     private var metricContext: MetricContext {
@@ -21,6 +22,7 @@ struct ChatScrollObserver: UIViewRepresentable {
         Coordinator(
             metricContext: metricContext,
             onMetrics: onMetrics,
+            onContentSizeChange: onContentSizeChange,
             onScrollViewReady: onScrollViewReady
         )
     }
@@ -31,6 +33,7 @@ struct ChatScrollObserver: UIViewRepresentable {
 
     func updateUIView(_ uiView: ObserverView, context: Context) {
         context.coordinator.onMetrics = onMetrics
+        context.coordinator.onContentSizeChange = onContentSizeChange
         context.coordinator.onScrollViewReady = onScrollViewReady
         uiView.coordinator = context.coordinator
         context.coordinator.updateMetricContext(metricContext)
@@ -87,22 +90,26 @@ struct ChatScrollObserver: UIViewRepresentable {
         }
 
         var onMetrics: @MainActor (ChatScrollMetrics) -> Void
+        var onContentSizeChange: @MainActor (CGSize) -> Void
         var onScrollViewReady: @MainActor (UIScrollView?) -> Void
 
         private weak var scrollView: UIScrollView?
         private var observations: [NSKeyValueObservation] = []
         private var metricContext: MetricContext
         private var lastMetrics: ChatScrollMetrics?
+        private var lastReportedContentSize: CGSize?
         private var pendingMetrics: ChatScrollMetrics?
         private var hasScheduledMetricDelivery = false
 
         init(
             metricContext: MetricContext,
             onMetrics: @escaping @MainActor (ChatScrollMetrics) -> Void,
+            onContentSizeChange: @escaping @MainActor (CGSize) -> Void,
             onScrollViewReady: @escaping @MainActor (UIScrollView?) -> Void
         ) {
             self.metricContext = metricContext
             self.onMetrics = onMetrics
+            self.onContentSizeChange = onContentSizeChange
             self.onScrollViewReady = onScrollViewReady
         }
 
@@ -124,14 +131,19 @@ struct ChatScrollObserver: UIViewRepresentable {
 
             observations.removeAll()
             lastMetrics = nil
+            lastReportedContentSize = scrollView.contentSize
             self.scrollView = scrollView
             onScrollViewReady(scrollView)
+            // Establish the app-facing baseline before observing later growth;
+            // this snapshot is not itself a follow request.
+            onContentSizeChange(scrollView.contentSize)
 
             observations = [
                 scrollView.observe(\.contentOffset, options: [.new]) { [weak self] _, _ in
                     Self.reportObservedMetrics(for: self)
                 },
                 scrollView.observe(\.contentSize, options: [.new]) { [weak self] _, _ in
+                    Self.reportObservedContentSize(for: self)
                     Self.reportObservedMetrics(for: self)
                 }
             ]
@@ -144,6 +156,7 @@ struct ChatScrollObserver: UIViewRepresentable {
             lastMetrics = nil
             pendingMetrics = nil
             hasScheduledMetricDelivery = false
+            lastReportedContentSize = nil
             scrollView = nil
             onScrollViewReady(nil)
         }
@@ -218,6 +231,30 @@ struct ChatScrollObserver: UIViewRepresentable {
             MainActor.assumeIsolated {
                 coordinator?.reportMetrics(delivery: .deferred)
             }
+        }
+
+        nonisolated private static func reportObservedContentSize(for coordinator: Coordinator?) {
+            guard Thread.isMainThread else {
+                DispatchQueue.main.async { [weak coordinator] in
+                    MainActor.assumeIsolated {
+                        coordinator?.reportContentSizeIfChanged()
+                    }
+                }
+                return
+            }
+
+            MainActor.assumeIsolated {
+                coordinator?.reportContentSizeIfChanged()
+            }
+        }
+
+        private func reportContentSizeIfChanged() {
+            guard let scrollView,
+                  scrollView.contentSize != lastReportedContentSize
+            else { return }
+
+            lastReportedContentSize = scrollView.contentSize
+            onContentSizeChange(scrollView.contentSize)
         }
 
         private func enclosingScrollView(for view: UIView) -> UIScrollView? {

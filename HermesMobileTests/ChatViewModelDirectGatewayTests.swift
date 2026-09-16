@@ -3385,6 +3385,190 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         await runtime.stop()
     }
 
+    func testSendResumeEmptyReconcileKeepsExistingRowsVisibleUntilOptimisticAppend() async throws {
+        let fake = ChatDirectFakeTransport()
+        let attachmentGate = ChatDirectAsyncGate()
+        fake.setAttachmentGate("file.attach", attachmentGate)
+        let runtime = try makeRuntime(fake)
+        let client = makeClient { request in
+            guard request.httpMethod == "GET",
+                  request.url?.path == "/api/sessions/durable-1/messages" else {
+                XCTFail("Send resume should only reconcile the direct transcript: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+            // This models the stock resume/read race: the existing durable
+            // session is known locally, but its canonical tail briefly reads
+            // empty before the send is persisted.
+            return apiTestJSONResponse(
+                #"{"session_id":"durable-1","messages":[],"pagination":{"limit":120,"offset":0,"order":"latest","returned":0}}"#,
+                for: request
+            )
+        }
+        let vm = makeViewModel(client: client, runtime: runtime, sessionID: "durable-1")
+        vm.seedTranscriptForTesting([
+            ChatMessage(role: "user", content: "Existing question", timestamp: 1, messageId: "existing-user"),
+            ChatMessage(role: "assistant", content: "Existing answer", timestamp: 2, messageId: "existing-assistant")
+        ])
+        await vm.uploadAttachment(data: Data("fixture body".utf8), filename: "fixture.txt")
+        XCTAssertEqual(vm.directPendingAttachments.count, 1)
+
+        let send = Task { await vm.sendMessage("Next question") }
+        await waitUntil { fake.calls().contains { $0.method == "file.attach" } }
+
+        // The attachment ACK is held after resume's empty transcript callback
+        // and before the optimistic row is appended. The old implementation
+        // exposed an empty transcript here; the existing rows must remain
+        // renderable throughout this real send ordering.
+        XCTAssertEqual(vm.messages.compactMap(\.messageId), ["existing-user", "existing-assistant"])
+        XCTAssertTrue(vm.messages.contains { $0.content == "Existing answer" })
+
+        await attachmentGate.release()
+        let didSend = await send.value
+        XCTAssertTrue(didSend)
+        XCTAssertTrue(vm.messages.contains { $0.content == "Next question" })
+        XCTAssertTrue(vm.messages.contains { $0.content == "Existing answer" })
+
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testOrdinaryAuthoritativeEmptyTranscriptRefreshClearsExistingRows() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let vm = makeViewModel(
+            client: makeEmptyDirectTranscriptClient(sessionID: "durable-1"),
+            runtime: runtime,
+            sessionID: "durable-1"
+        )
+        seedExistingTranscript(in: vm)
+
+        await vm.loadMessages()
+
+        XCTAssertTrue(vm.messages.isEmpty,
+                      "An ordinary canonical empty page remains authoritative outside the send window.")
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testSendResumeEmptyForAdoptedCanonicalSessionDropsPreviousRows() async throws {
+        let fake = ChatDirectFakeTransport()
+        fake.setResumeResponse(.object([
+            "session_id": .string("runtime-1"),
+            "session_key": .string("different-tip"),
+            "running": .bool(false)
+        ]))
+        let attachmentGate = ChatDirectAsyncGate()
+        fake.setAttachmentGate("file.attach", attachmentGate)
+        let runtime = try makeRuntime(fake)
+        let vm = makeViewModel(
+            client: makeEmptyDirectTranscriptClient(sessionID: "different-tip"),
+            runtime: runtime,
+            sessionID: "durable-1"
+        )
+        seedExistingTranscript(in: vm)
+        await vm.uploadAttachment(data: Data("fixture body".utf8), filename: "fixture.txt")
+
+        let send = Task { await vm.sendMessage("Next question") }
+        await waitUntil { fake.calls().contains { $0.method == "file.attach" } }
+
+        XCTAssertTrue(vm.messages.isEmpty,
+                      "A canonical-ID rollover must not retain the previous session's rows.")
+
+        await attachmentGate.release()
+        let didSend = await send.value
+        XCTAssertTrue(didSend)
+        XCTAssertFalse(vm.messages.contains { $0.content == "Existing answer" })
+        XCTAssertTrue(vm.messages.contains { $0.content == "Next question" })
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testExplicitClearDuringResumeEmptyGateWinsOverProtection() async throws {
+        let fake = ChatDirectFakeTransport()
+        let attachmentGate = ChatDirectAsyncGate()
+        fake.setAttachmentGate("file.attach", attachmentGate)
+        let runtime = try makeRuntime(fake)
+        let vm = makeViewModel(
+            client: makeEmptyDirectTranscriptClient(sessionID: "durable-1"),
+            runtime: runtime,
+            sessionID: "durable-1"
+        )
+        seedExistingTranscript(in: vm)
+        await vm.uploadAttachment(data: Data("fixture body".utf8), filename: "fixture.txt")
+
+        let send = Task { await vm.sendMessage("Next question") }
+        await waitUntil { fake.calls().contains { $0.method == "file.attach" } }
+        XCTAssertTrue(vm.messages.contains { $0.content == "Existing answer" })
+
+        vm.clearTranscript()
+        // Re-seed only to make the subsequent ordinary empty refresh observable;
+        // the explicit clear must cancel the protected resume window first.
+        vm.seedTranscriptForTesting([
+            ChatMessage(role: "assistant", content: "Post-clear fixture", timestamp: 3, messageId: "post-clear")
+        ])
+        await vm.loadMessages()
+        XCTAssertTrue(vm.messages.isEmpty,
+                      "An empty refresh after explicit clear must not be protected by the earlier send.")
+
+        await attachmentGate.release()
+        let didSend = await send.value
+        XCTAssertTrue(didSend)
+        XCTAssertFalse(vm.messages.contains { $0.content == "Existing answer" })
+        XCTAssertFalse(vm.messages.contains { $0.content == "Post-clear fixture" })
+        XCTAssertTrue(vm.messages.contains { $0.content == "Next question" })
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testInvalidationDuringResumeEmptyGateStopsSendWithoutReapplyingRows() async throws {
+        let fake = ChatDirectFakeTransport()
+        let attachmentGate = ChatDirectAsyncGate()
+        fake.setAttachmentGate("file.attach", attachmentGate)
+        let runtime = try makeRuntime(fake)
+        let vm = makeViewModel(
+            client: makeEmptyDirectTranscriptClient(sessionID: "durable-1"),
+            runtime: runtime,
+            sessionID: "durable-1"
+        )
+        seedExistingTranscript(in: vm)
+        await vm.uploadAttachment(data: Data("fixture body".utf8), filename: "fixture.txt")
+
+        let send = Task { await vm.sendMessage("Next question") }
+        await waitUntil { fake.calls().contains { $0.method == "file.attach" } }
+        XCTAssertTrue(vm.messages.contains { $0.content == "Existing answer" })
+
+        vm.invalidateDirectConversation()
+        await attachmentGate.release()
+
+        let didSend = await send.value
+        XCTAssertFalse(didSend,
+                       "Invalidation during attachment staging must stop the send before insertion.")
+        XCTAssertTrue(vm.messages.contains { $0.content == "Existing answer" })
+        XCTAssertFalse(vm.messages.contains { $0.content == "Next question" })
+        await runtime.stop()
+    }
+
+    private func seedExistingTranscript(in vm: ChatViewModel) {
+        vm.seedTranscriptForTesting([
+            ChatMessage(role: "user", content: "Existing question", timestamp: 1, messageId: "existing-user"),
+            ChatMessage(role: "assistant", content: "Existing answer", timestamp: 2, messageId: "existing-assistant")
+        ])
+    }
+
+    private func makeEmptyDirectTranscriptClient(sessionID: String) -> APIClient {
+        makeClient { request in
+            guard request.httpMethod == "GET",
+                  request.url?.path == "/api/sessions/\(sessionID)/messages" else {
+                XCTFail("Unexpected direct transcript request: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+            return apiTestJSONResponse(
+                "{\"session_id\":\"\(sessionID)\",\"messages\":[],\"pagination\":{\"limit\":120,\"offset\":0,\"order\":\"latest\",\"returned\":0}}",
+                for: request
+            )
+        }
+    }
+
     private let testServer = URL(string: "https://fixture.example")!
 
     private var directPNGData: Data {

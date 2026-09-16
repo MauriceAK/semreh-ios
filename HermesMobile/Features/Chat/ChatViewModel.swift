@@ -835,6 +835,10 @@ final class ChatViewModel {
     private var directComposerIsEditing = false
     private var directOlderOffset = 0
     private var directHistoryID: String?
+    /// Session identity captured for the narrow resume-before-send window.
+    /// This must not follow a controller's later canonical-ID adoption: an
+    /// empty page for a newly adopted session must still replace old rows.
+    private var sendTranscriptSessionID: String?
 #if DEBUG
     private var performanceLabStreamingTurnInFlight = false
 #endif
@@ -1428,6 +1432,7 @@ final class ChatViewModel {
         btwLocalRowScopes.removeAll()
         backgroundLocalRowScopes.removeAll()
         directInvalidated = true
+        sendTranscriptSessionID = nil
         directReasoningRefreshTask?.cancel()
         cancelContextUsageSnapshotTask()
         directSessionReasoningSupported = false
@@ -1660,6 +1665,21 @@ final class ChatViewModel {
             cacheCurrentMessages(sessionID: page.sessionID, modelContext: directModelContext)
             return
         }
+        // `sendDirectMessage` resumes an existing durable session before it
+        // stages the new prompt.  Hermes can acknowledge that resume while its
+        // canonical transcript read is still temporarily empty.  Do not turn
+        // a populated, same-session transcript into the empty-state view during
+        // that bounded send window; the later canonical tail owns the eventual
+        // replacement.  This is deliberately narrower than a generic empty
+        // page fallback: a different canonical session, an explicit clear, or
+        // an ordinary refresh still applies the empty page authoritatively.
+        if page.messages.isEmpty,
+           isStartingChat,
+           !messages.isEmpty,
+           page.sessionID == sendTranscriptSessionID,
+           (directHistoryID == nil || directHistoryID == page.sessionID) {
+            return
+        }
         let renderedCache = cacheFirstMessagePlaceholder != nil
         flushPendingStreamingContent()
         resetPendingStreamingContentBuffers()
@@ -1764,10 +1784,15 @@ final class ChatViewModel {
         }
         directModelContext = modelContext ?? directModelContext
         isStartingChat = true
+        // Capture before `open()`: resume may adopt a different canonical
+        // session before its transcript callback arrives.  Only an empty
+        // result for this original session can be the transient read race.
+        sendTranscriptSessionID = canonicalSessionID
         cancelContextUsageSnapshotTask()
         sendErrorMessage = nil
         lastError = nil
         defer {
+            sendTranscriptSessionID = nil
             isStartingChat = false
             OpenChatSessionStore.shared.noteStreamingStateChanged()
         }
@@ -1850,6 +1875,10 @@ final class ChatViewModel {
                 timestamp: Date().timeIntervalSince1970,
                 messageId: localID
             ))
+            // The protected interval ends at the optimistic insertion.  Any
+            // later empty refresh is no longer the pre-submit race and must
+            // retain the ordinary authoritative-empty semantics.
+            sendTranscriptSessionID = nil
             let stagedAttachments = directPendingAttachments.filter { attachmentIDs.contains($0.id) }
             guard stagedAttachments.count == attachmentIDs.count else { throw DirectSessionError.staleOperation }
             try await controller.submit(text, stagedAttachments: stagedAttachments, create: creation)
@@ -3609,6 +3638,8 @@ final class ChatViewModel {
     }
 
     func clearTranscript() {
+        // An explicit clear always wins over a pending resume reconciliation.
+        sendTranscriptSessionID = nil
         cancelPendingStreamingScrollTrigger()
         resetPendingStreamingContentBuffers()
         clearCompressionAnchorMetadata()
@@ -5664,6 +5695,18 @@ final class OutgoingInsertionLedger {
     }
 }
 
+/// Stable identity used by the Direct transcript path. Durable backend IDs
+/// must be namespaced before they become SwiftUI row IDs so they cannot
+/// collide with the legacy position-based transcript IDs.
+enum TranscriptRenderIdentity {
+    static let directPrefix = "transcript:row:"
+
+    static func directID(for canonicalMessageID: String?) -> String? {
+        guard let canonicalMessageID, !canonicalMessageID.isEmpty else { return nil }
+        return "\(directPrefix)\(canonicalMessageID)"
+    }
+}
+
 struct TranscriptMessage: Identifiable, Equatable {
     let loadedIndex: Int
     let renderID: String
@@ -5900,8 +5943,10 @@ extension ChatViewModel {
         // Direct pages have backwards cursors, not WebUI's stable absolute
         // offsets. Position-based IDs would retarget scroll anchors on prepend.
         // Keep legacy identity unchanged until that path is removed in Slice 4.
-        if preferDurableID, let id = message.messageId, !id.isEmpty {
-            return "transcript:row:\(id)"
+        if preferDurableID, let directID = TranscriptRenderIdentity.directID(
+            for: message.messageId
+        ) {
+            return directID
         }
         return "transcript:\(absoluteIndex)"
     }

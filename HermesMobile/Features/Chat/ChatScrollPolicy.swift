@@ -16,11 +16,16 @@ enum ChatScrollPolicy {
     /// Rich Markdown can finish measuring after the scroll view's initial
     /// layout. Keep those size changes bottom-pinned only while the app still
     /// owns follow-latest intent; return nil as soon as the reader scrolls away.
+    /// A composer/keyboard resize is also a size change. A latest-following
+    /// transcript must stay pinned while that viewport changes, otherwise the
+    /// newly inserted/streaming tail can briefly render behind the composer.
+    /// Reader mode remains unanchored during the same resize so its viewport is
+    /// not repositioned by the composer.
     static func sizeChangeAnchor(
         shouldFollowLatestMessage: Bool,
         isComposerResizing: Bool = false
     ) -> UnitPoint? {
-        guard !isComposerResizing else { return nil }
+        _ = isComposerResizing
         return shouldFollowLatestMessage ? .bottom : nil
     }
 
@@ -88,8 +93,9 @@ enum ChatScrollPolicy {
         return now < cooldownUntil
     }
 
-    /// Streaming follow is owned by `defaultScrollAnchor(..., for: .sizeChanges)`.
-    /// Extra `scrollTo` on every token is what lags when the user flicks back down.
+    /// Streaming follow uses the default size-change anchor plus bounded measured
+    /// content-growth corrections. Extra `scrollTo` on every token is what lags
+    /// when the user flicks back down.
     static func shouldProgrammaticallyFollowStreamTokens(shouldFollowLatestMessage: Bool) -> Bool {
         _ = shouldFollowLatestMessage
         return false
@@ -232,6 +238,75 @@ enum ChatScrollPolicy {
         !isDirectlyInteracting
             && isDecelerating
             && (wasExplicitBottomScrollActive || wasExplicitBottomDecelerationActive)
+    }
+}
+
+enum ChatTranscriptLayoutFollowChange: Equatable {
+    case invalid
+    case initial
+    case unchanged
+    case grew
+    case shrank
+}
+
+/// Tracks only measured content height. Offset-only scroll samples therefore
+/// cannot schedule a follow correction, and the reference can be updated
+/// without invalidating the SwiftUI transcript body.
+struct ChatTranscriptLayoutFollowState: Equatable {
+    static let heightTolerance: CGFloat = 0.5
+
+    private(set) var lastContentHeight: CGFloat?
+
+    mutating func recordContentHeight(_ height: CGFloat) -> ChatTranscriptLayoutFollowChange {
+        guard height.isFinite else { return .invalid }
+
+        guard let lastContentHeight else {
+            self.lastContentHeight = height
+            return .initial
+        }
+
+        self.lastContentHeight = height
+        if height > lastContentHeight + Self.heightTolerance {
+            return .grew
+        }
+        if height < lastContentHeight - Self.heightTolerance {
+            return .shrank
+        }
+        return .unchanged
+    }
+
+    mutating func reset() {
+        lastContentHeight = nil
+    }
+}
+
+enum ChatTranscriptLayoutFollowPolicy {
+    /// The first correction is delayed just enough to coalesce the preference
+    /// and content-size callbacks from one layout transaction.
+    static let coalescingDelay: TimeInterval = 0.016
+
+    /// A streaming row may grow many times per second. Keep proxy corrections
+    /// bounded to this cadence while retaining the latest pending growth.
+    static let minimumCommandInterval: TimeInterval = 0.1
+
+    static func shouldSchedule(
+        change: ChatTranscriptLayoutFollowChange,
+        hasRealizedLatestContent: Bool,
+        shouldFollowLatestMessage: Bool,
+        isUserInteracting: Bool,
+        isDecelerating: Bool,
+        hasPendingRestore: Bool,
+        hasExplicitBottomRequest: Bool,
+        isPaging: Bool
+    ) -> Bool {
+        change == .grew
+            && hasRealizedLatestContent
+            && shouldFollowLatestMessage
+            && !isUserInteracting
+            && !isDecelerating
+            && !hasPendingRestore
+            && !hasExplicitBottomRequest
+            && !isPaging
     }
 }
 
@@ -467,6 +542,50 @@ enum ChatTranscriptRestorePolicy {
         return .message(id: trimmed)
     }
 
+    /// A saved reader row can be supplied to SwiftUI's initial scroll-position
+    /// layout. Latest-follow already uses the bottom default anchor and should
+    /// not install a second initial target.
+    static func initialPositionMessageID(
+        for target: ChatTranscriptRestoreTarget
+    ) -> String? {
+        guard case let .message(id) = target else { return nil }
+        return id
+    }
+
+    static func initialTranscriptAnchor(
+        for target: ChatTranscriptRestoreTarget,
+        hasSavedMessage: Bool
+    ) -> UnitPoint {
+        guard initialPositionMessageID(for: target) != nil, hasSavedMessage else {
+            return ChatScrollPolicy.initialTranscriptAnchor
+        }
+        return .top
+    }
+
+    /// Preference geometry can be published before the transcript's UIKit host
+    /// enters a window. Only an attached sample is strong enough to retire the
+    /// native seed; otherwise the first in-window layout could fall back to the
+    /// provisional default anchor.
+    static func shouldConfirmInitialTargetGeometry(
+        targetMessageID: String?,
+        visibleMessageID: String?,
+        isScrollViewAttached: Bool
+    ) -> Bool {
+        guard isScrollViewAttached,
+              let targetMessageID,
+              let visibleMessageID
+        else { return false }
+
+        return targetMessageID == visibleMessageID
+    }
+
+    static func shouldAllowOutgoingInsertionMotion(
+        shouldFollowLatestMessage: Bool,
+        isRestoreInProgress: Bool
+    ) -> Bool {
+        shouldFollowLatestMessage && !isRestoreInProgress
+    }
+
     static func shouldProgrammaticallyRestoreOnAppear(hasMessages: Bool) -> Bool {
         hasMessages
     }
@@ -537,6 +656,8 @@ struct ChatTranscriptRestoreState: Equatable {
     private(set) var isCancelled = false
     private(set) var isNearBottom = false
     private(set) var isTailVisible = false
+    private(set) var hasObservedVisibleMessageSample = false
+    private(set) var observedVisibleMessageID: String?
 
     /// Claims a restore token without allowing a pre-request cancellation to be
     /// replaced by a fresh state. A different token represents a new lifecycle
@@ -549,9 +670,9 @@ struct ChatTranscriptRestoreState: Equatable {
         hasIssuedRestoreAttempt = false
         hasConfirmedMetricsSample = false
         isNearBottom = false
-        // Keep the latest preference-backed visibility sample. SwiftUI may
-        // deliver the bottom-anchor preference before the initial restore token
-        // arrives and will not necessarily redeliver an unchanged value.
+        // Keep the latest preference-backed visibility samples. SwiftUI may
+        // deliver the target row or bottom-anchor preference before the initial
+        // restore token arrives and will not necessarily redeliver them.
         isCancelled = preservePreRequestCancellation
         return !isCancelled
     }
@@ -564,6 +685,8 @@ struct ChatTranscriptRestoreState: Equatable {
         hasIssuedRestoreAttempt = false
         hasConfirmedMetricsSample = false
         isNearBottom = false
+        hasObservedVisibleMessageSample = false
+        observedVisibleMessageID = nil
         isCancelled = false
         return true
     }
@@ -600,14 +723,30 @@ struct ChatTranscriptRestoreState: Equatable {
         isTailVisible = visible
     }
 
+    mutating func recordVisibleMessageSample(_ messageID: String?) {
+        guard !isCancelled else { return }
+        hasObservedVisibleMessageSample = true
+        observedVisibleMessageID = messageID
+    }
+
     func shouldSettle(
         target: ChatTranscriptRestoreTarget,
         firstVisibleMessageID: String?,
         isNearBottom: Bool? = nil
     ) -> Bool {
-        guard !isCancelled,
-              hasIssuedRestoreAttempt || hasConfirmedMetricsSample
-        else { return false }
+        guard !isCancelled else { return false }
+
+        // On a fresh transcript mount, the seeded native position can already
+        // make the saved row the first visible row before the restore token's
+        // settling task gets its first turn. That fresh row-frame sample is
+        // sufficient evidence to skip the delayed proxy fallback.
+        if case let .message(id) = target,
+           hasObservedVisibleMessageSample,
+           observedVisibleMessageID == id {
+            return true
+        }
+
+        guard hasIssuedRestoreAttempt || hasConfirmedMetricsSample else { return false }
 
         return ChatTranscriptRestorePolicy.hasReachedTarget(
             target,

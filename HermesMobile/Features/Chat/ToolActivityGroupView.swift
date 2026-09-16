@@ -58,14 +58,14 @@ struct ToolActivityGroupView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     titleText
                     if let collapsedStateText {
-                        TranscriptStatusPill(text: collapsedStateText, color: activityColor)
+                        collapsedStatus(text: collapsedStateText)
                     }
                 }
             } else {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     titleText
                     if let collapsedStateText {
-                        TranscriptStatusPill(text: collapsedStateText, color: activityColor)
+                        collapsedStatus(text: collapsedStateText)
                     }
                 }
             }
@@ -77,6 +77,19 @@ struct ToolActivityGroupView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .frame(minHeight: 44)
         .contentShape(Rectangle())
+    }
+
+    @ViewBuilder
+    private func collapsedStatus(text: String) -> some View {
+        if group.hasFailedTool {
+            TranscriptStatusPill(text: text, color: activityColor)
+        } else {
+            Text(text)
+                .font(AppFont.caption2(weight: .semibold))
+                .foregroundStyle(activityColor)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
     }
 
     private var titleText: some View {

@@ -506,8 +506,13 @@ final class DirectSkillUITests: XCTestCase {
             .matching(identifier: try XCTUnwrap(accessibleTranscriptRow(visibleTail[0])).identifier)
             .firstMatch
         tailRow.press(forDuration: 1.1)
-        let copyAction = app.buttons["Copy"]
-        XCTAssertTrue(copyAction.waitForExistence(timeout: 5) && copyAction.isHittable,
+        // Completed assistant rows can expose a persistent Copy button behind
+        // the context-menu presentation. Select the visible menu action rather
+        // than letting XCTest bind to that obscured, non-hittable sibling.
+        let copyAction = app.buttons.matching(
+            NSPredicate(format: "label == %@ AND hittable == true", "Copy")
+        ).firstMatch
+        XCTAssertTrue(copyAction.waitForExistence(timeout: 5),
                       "The canonical row container must retain its message context menu.")
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.95)).tap()
 
@@ -968,6 +973,7 @@ final class DirectSkillUITests: XCTestCase {
         shortLink.host = "session"
         shortLink.queryItems = [URLQueryItem(name: "id", value: shortStoredID)]
         app.open(try XCTUnwrap(shortLink.url))
+        retainPreviewScreenshot("Short chat entry before transcript queries or interaction", app: app)
         XCTAssertTrue(containing(shortMarker, app: app).waitForExistence(timeout: 20))
         let violetChatScreenshot = XCTAttachment(screenshot: app.screenshot())
         violetChatScreenshot.name = "Phone regression Violet chat bubble and composer tint"
@@ -980,6 +986,7 @@ final class DirectSkillUITests: XCTestCase {
         link.queryItems = [URLQueryItem(name: "id", value: longFixture.storedID)]
         let openStart = Date()
         app.open(try XCTUnwrap(link.url))
+        retainPreviewScreenshot("Long chat entry after mixed navigation before transcript queries or interaction", app: app)
         let detail = app.descendants(matching: .any).matching(
             NSPredicate(format: "identifier BEGINSWITH %@", "chat-detail:")
         ).firstMatch
@@ -1038,6 +1045,7 @@ final class DirectSkillUITests: XCTestCase {
                 && rows.last.flatMap({ self.canonicalText($0) }) == "SEMREH_SLICE1_ACK"
         }
         app.open(try XCTUnwrap(link.url))
+        retainPreviewScreenshot("Busy long chat warm reentry before transcript queries or interaction", app: app)
         visibleTail = Array(longRows.suffix(2))
         try assertAccessibleTranscriptRows(
             visibleTail, in: detail, context: "busy long chat warm reentry before interaction"
@@ -1046,6 +1054,7 @@ final class DirectSkillUITests: XCTestCase {
         XCTAssertEqual(app.state, .notRunning)
         app.launch()
         app.open(try XCTUnwrap(link.url))
+        retainPreviewScreenshot("Busy long chat cold reentry before transcript queries or interaction", app: app)
         visibleTail = Array(longRows.suffix(2))
         try assertAccessibleTranscriptRows(
             visibleTail, in: detail, context: "busy long chat reentry before interaction"
@@ -1066,34 +1075,20 @@ final class DirectSkillUITests: XCTestCase {
         )
         timings.append("foreground_long_seconds=\(Date().timeIntervalSince(foregroundStart))")
 
-        let transcript = detail.descendants(matching: .scrollView)
-            .matching(identifier: "chat-transcript-scroll").firstMatch
-        let anchor = try XCTUnwrap(accessibleTranscriptRow(longRows[longRows.count - 120]))
-        let anchorElement = transcript.descendants(matching: .any).matching(identifier: anchor.identifier).firstMatch
-        let oldest = try XCTUnwrap(accessibleTranscriptRow(longRows[0]))
-        let oldestElement = transcript.descendants(matching: .any).matching(identifier: oldest.identifier).firstMatch
-        XCTAssertFalse(oldestElement.exists,
-                       "Cold reentry must begin with the canonical 120-row tail before paging.")
-        let loadOlder = app.buttons["Load older messages"]
-        for _ in 0..<15 where !anchorElement.isHittable { transcript.swipeDown() }
-        XCTAssertTrue(anchorElement.waitForExistence(timeout: 10) && anchorElement.isHittable)
-        let anchorY = anchorElement.frame.midY
-        let pagingStart = Date()
-        // Automatic near-top prefetch is the production path. If it has not
-        // started after reaching the boundary, use the visible manual control;
-        // either path must realize a genuinely older canonical row.
-        if !oldestElement.waitForExistence(timeout: 3) {
-            XCTAssertTrue(loadOlder.waitForExistence(timeout: 5) && loadOlder.isHittable)
-            loadOlder.tap()
+        if environment["SEMREH_PHONE_ENTRY_RETURN_ONLY"] == "1" {
+            let entryOnlyEvidence = XCTAttachment(string: timings.joined(separator: "\n"))
+            entryOnlyEvidence.name = "Phone entry and return timings before paging"
+            entryOnlyEvidence.lifetime = .keepAlways
+            add(entryOnlyEvidence)
+            return
         }
-        XCTAssertTrue(oldestElement.waitForExistence(timeout: 20),
-                      "Paging must prepend a canonical row older than the initial 120-row tail.")
-        XCTAssertTrue(anchorElement.waitForExistence(timeout: 20) && anchorElement.isHittable)
-        let anchorDisplacement = abs(anchorElement.frame.midY - anchorY)
-        XCTAssertLessThanOrEqual(anchorDisplacement, 80,
-                                 "Loading older history must preserve the visible anchor position.")
-        timings.append("paging_seconds=\(Date().timeIntervalSince(pagingStart))")
-        timings.append("paging_anchor_displacement_points=\(anchorDisplacement)")
+
+        let transcript = try exerciseProductionPaging(
+            app: app,
+            detail: detail,
+            longRows: longRows,
+            timings: &timings
+        )
 
         let scrollToLatest = app.buttons["Scroll to latest message"]
         XCTAssertTrue(scrollToLatest.waitForExistence(timeout: 10) && scrollToLatest.isHittable)
@@ -1194,6 +1189,898 @@ final class DirectSkillUITests: XCTestCase {
         screenshot.name = "Phone regression restored Warm System settings root"
         screenshot.lifetime = .keepAlways
         add(screenshot)
+    }
+
+    @MainActor
+    func testOptInPhonePagingAnchorOnly() async throws {
+        continueAfterFailure = false
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("Phone paging-anchor verification is simulator-only.")
+        #endif
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SEMREH_PHONE_PAGING_ANCHOR_UI"] == "1" else {
+            throw XCTSkip("Phone paging-anchor verification is opt-in.")
+        }
+        guard environment["SEMREH_SLICE2_UI_LIVE"] == "1",
+              environment["SEMREH_SLICE1_HTTPS"] == "1",
+              environment["SEMREH_SLICE2_UI_BACKEND_MODE"] == "stock",
+              environment["SEMREH_SLICE2_UI_BACKEND_SHA"] == backendSHA,
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == credentialsPath,
+              environment["SEMREH_SLICE2_TOOL_CWD"] == "/Users/maurice/workspace/semreh-slice1-runtime/tools" else {
+            return XCTFail("Paging-anchor verification requires the exact contained pinned stock fixture.")
+        }
+
+        let observer = try await LifecycleCanonicalObserver(
+            origin: try XCTUnwrap(URL(string: origin)), credentials: try readCredentials()
+        )
+        defer { observer.invalidate() }
+        guard let fixture = try await observer.discoverLongStoredSession(minimumRows: 121) else {
+            return XCTFail("The exact contained fixture must already provide a transcript over 120 rows; this test will not seed or send.")
+        }
+        XCTAssertGreaterThan(fixture.rows.count, 120)
+
+        let app = XCUIApplication()
+        app.terminate()
+        app.launchArguments = []
+        app.launch()
+
+        var link = URLComponents()
+        link.scheme = "semreh"
+        link.host = "session"
+        link.queryItems = [URLQueryItem(name: "id", value: fixture.storedID)]
+        app.open(try XCTUnwrap(link.url))
+        retainPreviewScreenshot("Paging-only long chat entry before transcript queries or interaction", app: app)
+
+        let detail = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "chat-detail:")
+        ).firstMatch
+        XCTAssertTrue(detail.waitForExistence(timeout: 20))
+        try assertAccessibleTranscriptRows(
+            Array(fixture.rows.suffix(1)),
+            in: detail,
+            context: "paging-only latest canonical row before interaction"
+        )
+
+        var timings: [String] = []
+        _ = try exerciseProductionPaging(
+            app: app,
+            detail: detail,
+            longRows: fixture.rows,
+            timings: &timings
+        )
+        let evidence = XCTAttachment(string: timings.joined(separator: "\n"))
+        evidence.name = "Paging-only canonical anchor evidence"
+        evidence.lifetime = .keepAlways
+        add(evidence)
+    }
+
+    @MainActor
+    func testOptInPhoneAutomaticPagingAnchorFromSavedBoundary() async throws {
+        continueAfterFailure = false
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("Automatic paging-anchor verification is simulator-only.")
+        #endif
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SEMREH_PHONE_P09_AUTOMATIC_PREPEND_UI"] == "1" else {
+            throw XCTSkip("Automatic paging-anchor verification is opt-in.")
+        }
+        guard environment["SEMREH_SLICE2_UI_LIVE"] == "1",
+              environment["SEMREH_SLICE1_HTTPS"] == "1",
+              environment["SEMREH_SLICE2_UI_BACKEND_MODE"] == "stock",
+              environment["SEMREH_SLICE2_UI_BACKEND_SHA"] == backendSHA,
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == credentialsPath,
+              environment["SEMREH_SLICE2_TOOL_CWD"] == "/Users/maurice/workspace/semreh-slice1-runtime/tools" else {
+            return XCTFail("Automatic paging-anchor verification requires the exact contained pinned stock fixture.")
+        }
+
+        let observer = try await LifecycleCanonicalObserver(
+            origin: try XCTUnwrap(URL(string: origin)), credentials: try readCredentials()
+        )
+        defer { observer.invalidate() }
+        guard let fixture = try await observer.discoverLongStoredSession(minimumRows: 121),
+              fixture.rows.count > 120,
+              canonicalIDsAreUnique(fixture.rows),
+              let savedRow = accessibleTranscriptRow(fixture.rows[fixture.rows.count - 120]),
+              let savedMessageID = canonicalMessageID(fixture.rows[fixture.rows.count - 120]),
+              let olderProbe = accessibleTranscriptRow(fixture.rows[fixture.rows.count - 121]) else {
+            return XCTFail("The exact contained fixture must expose unique canonical IDs across more than 120 rows.")
+        }
+
+        var link = URLComponents()
+        link.scheme = "semreh"
+        link.host = "session"
+        link.queryItems = [URLQueryItem(name: "id", value: fixture.storedID)]
+        let sessionLink = try XCTUnwrap(link.url)
+        let app = XCUIApplication()
+
+        func detailElement() -> XCUIElement {
+            app.descendants(matching: .any).matching(
+                NSPredicate(format: "identifier BEGINSWITH %@", "chat-detail:")
+            ).firstMatch
+        }
+
+        var seeded = false
+        defer {
+            app.terminate()
+            if seeded {
+                app.launchArguments = [
+                    "--chat-p09-cleanup-restore",
+                    "--chat-p09-restore-server=\(origin)",
+                    "--chat-p09-restore-session=\(fixture.storedID)",
+                ]
+                app.launch()
+                RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+                app.terminate()
+            }
+            app.terminate()
+        }
+
+        app.launchArguments = [
+            "--chat-p09-seed-restore",
+            "--chat-p09-restore-server=\(origin)",
+            "--chat-p09-restore-session=\(fixture.storedID)",
+            "--chat-p09-restore-message=\(savedMessageID)",
+        ]
+        seeded = true
+        app.terminate()
+        app.open(sessionLink)
+        retainPreviewScreenshot(
+            "P09 automatic saved-boundary entry before transcript AX queries", app: app
+        )
+
+        let detail = detailElement()
+        guard detail.waitForExistence(timeout: 20) else {
+            return XCTFail("The seeded production deep link must mount the exact transcript.")
+        }
+        let transcript = detail.descendants(matching: .scrollView)
+            .matching(identifier: "chat-transcript-scroll").firstMatch
+        guard transcript.waitForExistence(timeout: 10) else {
+            return XCTFail("The production transcript scroll container must exist.")
+        }
+
+        // The source older_prefetch_started record is the causal before-boundary;
+        // do not require an AX absence sample that can race automatic prefetch.
+        let probe = transcript.descendants(matching: .any)
+            .matching(identifier: olderProbe.identifier).firstMatch
+        let olderProbeRealized = probe.waitForExistence(timeout: 2)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.75))
+        let settledAnchor = transcript.descendants(matching: .any)
+            .matching(identifier: savedRow.identifier).firstMatch
+        guard settledAnchor.waitForExistence(timeout: 10),
+              !settledAnchor.frame.isEmpty,
+              settledAnchor.frame.intersects(transcript.frame) else {
+            return XCTFail("The same canonical saved row must be freshly realized in the settled transcript viewport.")
+        }
+        retainPreviewScreenshot("P09 automatic prepend settled canonical anchor", app: app)
+
+        // The seeded restore target is `.top`, and the joined source trace
+        // reports its pre-load focused frame relative to the source viewport.
+        // Convert the fresh AX frame into the same viewport-relative space.
+        let sourceAnchorMinYRelativeToViewport: CGFloat = 0
+        let settledAnchorMinYRelativeToViewport = settledAnchor.frame.minY - transcript.frame.minY
+        let anchorDisplacement = abs(
+            settledAnchorMinYRelativeToViewport - sourceAnchorMinYRelativeToViewport
+        )
+
+        let evidence = XCTAttachment(string: [
+            "fixture_rows=\(fixture.rows.count)",
+            "saved_anchor_key=\(opaquePagingAnchorKey("transcript:row:\(savedMessageID)"))",
+            "settled_anchor_frame=\(settledAnchor.frame)",
+            "settled_viewport_frame=\(transcript.frame)",
+            "source_anchor_min_y_relative_to_viewport=\(sourceAnchorMinYRelativeToViewport)",
+            "settled_anchor_min_y_relative_to_viewport=\(settledAnchorMinYRelativeToViewport)",
+            "anchor_displacement=\(anchorDisplacement)",
+            "anchor_displacement_limit=12.0",
+            "older_probe_realized=\(olderProbeRealized)",
+            "user_drags=0",
+            "single_measurement_process=true",
+            "measurement_pid_requires_joined_source_trace=true",
+            "acceptance_requires_joined_source_trace=true",
+        ].joined(separator: "\n"))
+        evidence.name = "P09 automatic prepend AX calibration evidence"
+        evidence.lifetime = .keepAlways
+        add(evidence)
+        XCTAssertLessThanOrEqual(
+            anchorDisplacement,
+            12,
+            "Automatic prepend must preserve the saved reader anchor within 12 points."
+        )
+    }
+
+    @MainActor
+    func testOptInP15ProductionMonitorVisibility() async throws {
+        continueAfterFailure = false
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("P15 production monitor visibility diagnosis is simulator-only.")
+        #endif
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SEMREH_P15_MONITOR_VISIBILITY_UI"] == "1" else {
+            throw XCTSkip("P15 production monitor visibility diagnosis is opt-in.")
+        }
+        guard environment["SEMREH_SLICE2_UI_LIVE"] == "1",
+              environment["SEMREH_SLICE1_HTTPS"] == "1",
+              environment["SEMREH_SLICE2_UI_BACKEND_MODE"] == "stock",
+              environment["SEMREH_SLICE2_UI_BACKEND_SHA"] == backendSHA,
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == credentialsPath,
+              environment["SEMREH_SLICE2_TOOL_CWD"] == "/Users/maurice/workspace/semreh-slice1-runtime/tools" else {
+            return XCTFail("P15 monitor visibility diagnosis requires the exact contained pinned stock fixture.")
+        }
+
+        let observer = try await LifecycleCanonicalObserver(
+            origin: try XCTUnwrap(URL(string: origin)), credentials: try readCredentials()
+        )
+        defer { observer.invalidate() }
+        let fixtures = try await observer.discoverLongStoredSessions(
+            minimumRows: 128, requiredCount: 1
+        )
+        guard let fixture = fixtures.first else {
+            return XCTFail("P15 monitor visibility diagnosis requires one exact contained rich transcript.")
+        }
+
+        let app = XCUIApplication()
+        app.terminate()
+        app.launchArguments = ["--chat-performance-app-wide-monitor"]
+        app.launch()
+        guard app.windows.firstMatch.waitForExistence(timeout: 10) else {
+            return XCTFail("The normal production root window must exist before monitor inspection.")
+        }
+
+        func visibilitySummary(stage: String) -> String {
+            let identifier = "chat-performance-app-wide-monitor-stop"
+            let anyMonitor = app.descendants(matching: .any).matching(identifier: identifier).firstMatch
+            let buttonMonitor = app.buttons[identifier]
+            let markerLabels = ["Personalize", "Skip", "Done", "New chat", "Settings", "Welcome"]
+            let markers = markerLabels.map { label in
+                "marker_\(label.replacingOccurrences(of: " ", with: "_"))=\(app.descendants(matching: .any)[label].exists)"
+            }
+            return ([
+                "stage=\(stage)",
+                "app_state=\(app.state.rawValue)",
+                "root_window=true",
+                "monitor_any_descendant=\(anyMonitor.exists)",
+                "monitor_button=\(buttonMonitor.exists)",
+                "monitor_button_hittable=\(buttonMonitor.exists && buttonMonitor.isHittable)",
+            ] + markers).joined(separator: "\n")
+        }
+
+        let initialEvidence = XCTAttachment(string: visibilitySummary(stage: "initial_root"))
+        initialEvidence.name = "P15 monitor visibility sanitized initial root state"
+        initialEvidence.lifetime = .keepAlways
+        add(initialEvidence)
+        retainPreviewScreenshot("P15 monitor visibility initial production root", app: app)
+
+        var link = URLComponents()
+        link.scheme = "semreh"
+        link.host = "session"
+        link.queryItems = [URLQueryItem(name: "id", value: fixture.storedID)]
+        app.open(try XCTUnwrap(link.url))
+        let detail = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "chat-detail:")
+        ).firstMatch
+        guard detail.waitForExistence(timeout: 20) else {
+            return XCTFail("The exact contained rich transcript must present before the second monitor inspection.")
+        }
+
+        let presentedEvidence = XCTAttachment(string: visibilitySummary(stage: "after_deep_link"))
+        presentedEvidence.name = "P15 monitor visibility sanitized presented state"
+        presentedEvidence.lifetime = .keepAlways
+        add(presentedEvidence)
+        retainPreviewScreenshot("P15 monitor visibility after contained deep link", app: app)
+    }
+
+    @MainActor
+    func testOptInPhoneRichTranscriptEntryReturnOnly() async throws {
+        continueAfterFailure = false
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("Rich transcript entry/return verification is simulator-only.")
+        #endif
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SEMREH_PHONE_RICH_ENTRY_RETURN_UI"] == "1" else {
+            throw XCTSkip("Rich transcript entry/return verification is opt-in.")
+        }
+        let recordsProductionCadence = environment["SEMREH_P15_REAL_NAV_CADENCE_UI"] == "1"
+        guard environment["SEMREH_SLICE2_UI_LIVE"] == "1",
+              environment["SEMREH_SLICE1_HTTPS"] == "1",
+              environment["SEMREH_SLICE2_UI_BACKEND_MODE"] == "stock",
+              environment["SEMREH_SLICE2_UI_BACKEND_SHA"] == backendSHA,
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == credentialsPath,
+              environment["SEMREH_SLICE2_TOOL_CWD"] == "/Users/maurice/workspace/semreh-slice1-runtime/tools" else {
+            return XCTFail("Rich entry/return verification requires the exact contained pinned stock fixture.")
+        }
+
+        let observer = try await LifecycleCanonicalObserver(
+            origin: try XCTUnwrap(URL(string: origin)), credentials: try readCredentials()
+        )
+        defer { observer.invalidate() }
+        let fixtures = try await observer.discoverLongStoredSessions(
+            minimumRows: 128, requiredCount: 3
+        )
+        guard fixtures.count == 3,
+              Set(fixtures.map(\.title)).count == 3,
+              fixtures.allSatisfy({ fixture in
+                  let originalCorpus = Array(fixture.rows.prefix(128))
+                  return !fixture.title.isEmpty
+                      && fixture.rows.count >= 128
+                      && originalCorpus.count == 128
+                      && canonicalIDsAreUnique(fixture.rows)
+                      && originalCorpus.filter({ $0["role"] as? String == "user" }).allSatisfy({
+                          canonicalText($0)?.hasPrefix("SEMREH_RICH_FIXTURE ") == true
+                      })
+                      && originalCorpus.filter({ $0["role"] as? String == "assistant" }).allSatisfy({
+                          guard let text = canonicalText($0) else { return false }
+                          return text.utf8.count >= 1_024
+                              && text.contains("Verification note: this deterministic passage")
+                      })
+              }) else {
+            return XCTFail("The contained fixture must expose the exact three 128-row rich transcripts.")
+        }
+
+        let app = XCUIApplication()
+        app.terminate()
+        app.launchArguments = recordsProductionCadence
+            ? ["--chat-performance-app-wide-monitor"] : []
+        app.launch()
+        func attachAvailableCadenceReport(_ context: String) {
+            guard recordsProductionCadence else { return }
+            let stop = app.buttons["chat-performance-app-wide-monitor-stop"]
+            guard stop.exists, stop.isHittable else { return }
+            stop.tap()
+            let summary = app.staticTexts["chat-performance-app-wide-monitor-summary"]
+            guard summary.waitForExistence(timeout: 5) else { return }
+            let evidence = XCTAttachment(string: summary.label)
+            evidence.name = "P15 cadence report before terminal \(context) failure"
+            evidence.lifetime = .keepAlways
+            add(evidence)
+        }
+        if recordsProductionCadence {
+            guard app.buttons["chat-performance-app-wide-monitor-stop"]
+                .waitForExistence(timeout: 10) else {
+                XCTFail("The real production shell must expose the opt-in cadence readback control.")
+                return
+            }
+        }
+
+        var sessionsTab = app.buttons["Sessions"]
+        var setupBackEventCount = 0
+        if !sessionsTab.waitForExistence(timeout: 3) {
+            let restoredDetail = app.descendants(matching: .any).matching(
+                NSPredicate(format: "identifier BEGINSWITH %@", "chat-detail:")
+            ).firstMatch
+            let restoredBack = chatBackButton(app: app)
+            guard restoredDetail.exists,
+                  restoredBack.waitForExistence(timeout: 5),
+                  restoredBack.isHittable else {
+                attachAvailableCadenceReport("initial root")
+                return XCTFail("Normal launch must show Sessions or one restorable production chat detail with Back.")
+            }
+            restoredBack.tap()
+            setupBackEventCount = 1
+            guard restoredDetail.waitForNonExistence(timeout: 10) else {
+                attachAvailableCadenceReport("restored detail dismissal")
+                return XCTFail("The single setup Back action must dismiss the restored production detail.")
+            }
+        }
+        guard sessionsTab.waitForExistence(timeout: 10), sessionsTab.isHittable else {
+            attachAvailableCadenceReport("Sessions shell")
+            return XCTFail("The production Sessions shell must be available for continuous navigation.")
+        }
+        sessionsTab.tap()
+
+        func freshSessionSearchField() -> XCUIElement? {
+            var field = app.textFields["Search sessions"]
+            if field.waitForExistence(timeout: 2), field.isHittable {
+                return field
+            }
+            let searchActivator = app.descendants(matching: .any)["Search sessions"]
+            guard searchActivator.waitForExistence(timeout: 5), searchActivator.isHittable else {
+                return nil
+            }
+            searchActivator.tap()
+            field = app.textFields["Search sessions"]
+            guard field.waitForExistence(timeout: 10), field.isHittable else { return nil }
+            return field
+        }
+
+        guard freshSessionSearchField() != nil else {
+            attachAvailableCadenceReport("Sessions search field")
+            return XCTFail("Activating production Sessions search must reveal its text field.")
+        }
+
+        for cycle in 1...2 {
+            for (index, fixture) in fixtures.enumerated() {
+                guard let sessionSearch = freshSessionSearchField() else {
+                    attachAvailableCadenceReport("fixture search reacquisition")
+                    return XCTFail("Each production list return must expose a freshly resolved Sessions search field.")
+                }
+                sessionSearch.tap()
+                sessionSearch.typeKey("a", modifierFlags: .command)
+                sessionSearch.typeKey(.delete, modifierFlags: [])
+                sessionSearch.typeText(fixture.title)
+
+                let matchingRows = app.buttons.matching(
+                    NSPredicate(format: "label BEGINSWITH %@", fixture.title)
+                )
+                let sessionRow = matchingRows.firstMatch
+                guard sessionRow.waitForExistence(timeout: 15),
+                      matchingRows.count == 1,
+                      sessionRow.isHittable else {
+                    attachAvailableCadenceReport("fixture selection")
+                    return XCTFail("Exact rich fixture \(index + 1) must be uniquely selectable through production Sessions search.")
+                }
+                sessionRow.tap()
+                retainPreviewScreenshot(
+                    "Rich transcript \(index + 1) cycle \(cycle) before transcript queries or interaction",
+                    app: app
+                )
+
+                let detail = app.descendants(matching: .any).matching(
+                    NSPredicate(format: "identifier BEGINSWITH %@", "chat-detail:")
+                ).firstMatch
+                guard detail.waitForExistence(timeout: 20) else {
+                    attachAvailableCadenceReport("detail mount")
+                    return XCTFail("Rich transcript \(index + 1) cycle \(cycle) must mount its production detail.")
+                }
+                try assertAccessibleTranscriptRows(
+                    Array(fixture.rows.suffix(1)),
+                    in: detail,
+                    context: "rich transcript \(index + 1) cycle \(cycle)"
+                )
+                let back = chatBackButton(app: app)
+                guard back.waitForExistence(timeout: 10), back.isHittable else {
+                    attachAvailableCadenceReport("production Back")
+                    return XCTFail("Rich transcript \(index + 1) cycle \(cycle) must expose the production Back control.")
+                }
+                back.tap()
+                sessionsTab = app.buttons["Sessions"]
+                guard detail.waitForNonExistence(timeout: 10),
+                      sessionsTab.waitForExistence(timeout: 10),
+                      sessionsTab.isHittable else {
+                    attachAvailableCadenceReport("return to Sessions")
+                    return XCTFail("Back must dismiss the production detail and restore the stable Sessions shell.")
+                }
+            }
+        }
+
+        if recordsProductionCadence {
+            let stop = app.buttons["chat-performance-app-wide-monitor-stop"]
+            guard stop.exists, stop.isHittable else {
+                return XCTFail("The cadence monitor must remain exposed after the final production Back transition.")
+            }
+            stop.tap()
+            let summary = app.staticTexts["chat-performance-app-wide-monitor-summary"]
+            guard summary.waitForExistence(timeout: 10) else {
+                return XCTFail("The production navigation cadence report must render after Stop.")
+            }
+            let report = summary.label
+            let evidence = XCTAttachment(string: report)
+            evidence.name = "P15 real rich production navigation cadence summary"
+            evidence.lifetime = .keepAlways
+            add(evidence)
+            let expectedBackEvents = 6 + setupBackEventCount
+            guard report.contains("CADisplayLink main-run-loop callback timing only"),
+                  report.contains("phase=entry phase_events=6"),
+                  report.contains("phase=back phase_events=\(expectedBackEvents)"),
+                  report.contains("worst_callback_gap_phase=") else {
+                return XCTFail(
+                    "The cadence report must cover six rich entries, six measured Back transitions, "
+                        + "and the separately recorded setup Back when present."
+                )
+            }
+            return
+        }
+
+        let returnFixture = fixtures[0]
+        var returnLink = URLComponents()
+        returnLink.scheme = "semreh"
+        returnLink.host = "session"
+        returnLink.queryItems = [URLQueryItem(name: "id", value: returnFixture.storedID)]
+        app.open(try XCTUnwrap(returnLink.url))
+        let returnDetail = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "chat-detail:")
+        ).firstMatch
+        XCTAssertTrue(returnDetail.waitForExistence(timeout: 20))
+        try assertAccessibleTranscriptRows(
+            Array(returnFixture.rows.suffix(1)), in: returnDetail, context: "rich background baseline"
+        )
+
+        XCUIDevice.shared.press(.home)
+        try await Task.sleep(for: .seconds(60))
+        app.activate()
+        retainPreviewScreenshot(
+            "Rich transcript after 60 second background before transcript queries or interaction",
+            app: app
+        )
+        try assertAccessibleTranscriptRows(
+            Array(returnFixture.rows.suffix(1)), in: returnDetail, context: "rich background return"
+        )
+    }
+
+    @MainActor
+    func testOptInPhoneRichTranscriptLiveSendStopAndForegroundReturn() async throws {
+        continueAfterFailure = false
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("Rich transcript live lifecycle verification is simulator-only.")
+        #endif
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SEMREH_PHONE_RICH_LIVE_UI"] == "1" else {
+            throw XCTSkip("Rich transcript live lifecycle verification is opt-in.")
+        }
+        guard environment["SEMREH_SLICE2_UI_LIVE"] == "1",
+              environment["SEMREH_SLICE1_HTTPS"] == "1",
+              environment["SEMREH_SLICE2_UI_BACKEND_MODE"] == "stock",
+              environment["SEMREH_SLICE2_UI_BACKEND_SHA"] == backendSHA,
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == credentialsPath,
+              environment["SEMREH_SLICE2_TOOL_CWD"] == "/Users/maurice/workspace/semreh-slice1-runtime/tools" else {
+            return XCTFail("Rich live lifecycle verification requires the exact contained pinned stock fixture.")
+        }
+
+        let observer = try await LifecycleCanonicalObserver(
+            origin: try XCTUnwrap(URL(string: origin)), credentials: try readCredentials()
+        )
+        defer { observer.invalidate() }
+        let fixtures = try await observer.discoverLongStoredSessions(minimumRows: 128, requiredCount: 3)
+        guard fixtures.count == 3 else {
+            return XCTFail("The exact owned rich corpus must already exist; this test never seeds it.")
+        }
+        let fixture = fixtures[0]
+        var link = URLComponents()
+        link.scheme = "semreh"
+        link.host = "session"
+        link.queryItems = [URLQueryItem(name: "id", value: fixture.storedID)]
+
+        let app = XCUIApplication()
+        app.terminate()
+        app.launch()
+        app.open(try XCTUnwrap(link.url))
+        let detail = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "chat-detail:")
+        ).firstMatch
+        XCTAssertTrue(detail.waitForExistence(timeout: 20))
+        try assertAccessibleTranscriptRows(Array(fixture.rows.suffix(1)), in: detail, context: "rich live baseline")
+        let composer = app.descendants(matching: .any)
+            .matching(identifier: "chat-composer-input").firstMatch
+        XCTAssertTrue(composer.waitForExistence(timeout: 10) && composer.isHittable)
+
+        let activeStop = app.buttons["Stop response"]
+        if activeStop.exists && activeStop.isHittable {
+            activeStop.tap()
+            XCTAssertTrue(activeStop.waitForNonExistence(timeout: 10))
+            waitForIdle(app: app)
+        }
+        clearTextInput(composer, app: app)
+        let refreshedFixtures = try await observer.discoverLongStoredSessions(
+            minimumRows: 128, requiredCount: 3
+        )
+        guard let refreshedFixture = refreshedFixtures.first(where: { $0.storedID == fixture.storedID }) else {
+            return XCTFail("The owned rich fixture must remain discoverable after settling any prior active run.")
+        }
+        let richPrompt = "SEMREH_RICH_FIXTURE 800011"
+        let richBaseline = refreshedFixture.rows
+        send(richPrompt, through: composer, app: app)
+        retainPreviewScreenshot(
+            "Rich live send immediately after tap before transcript queries or interaction", app: app
+        )
+        let completed = try await observer.waitForLongTranscript(storedID: fixture.storedID) { rows in
+            guard self.hasStableBaseline(rows, baseline: richBaseline),
+                  rows.count == richBaseline.count + 2,
+                  self.canonicalText(rows[rows.count - 2]) == richPrompt,
+                  let answer = rows.last.flatMap({ self.canonicalText($0) }) else { return false }
+            return rows.last?["role"] as? String == "assistant"
+                && answer.utf8.count >= 1_024
+                && answer.contains("Verification note: this deterministic passage")
+                && answer.contains("```swift")
+                && answer.contains("struct RenderSample: Identifiable")
+        }
+        try assertAccessibleTranscriptRows(Array(completed.suffix(1)), in: detail, context: "rich streamed completion")
+
+        let interrupted = "SEMREH_INTERRUPT_FIXTURE SEMREH_RICH_STOP_\(UUID().uuidString)"
+        send(interrupted, through: composer, app: app)
+        retainPreviewScreenshot(
+            "Rich live stop pending before transcript queries or interaction", app: app
+        )
+        let stop = app.buttons["Stop response"]
+        XCTAssertTrue(stop.waitForExistence(timeout: 10) && stop.isHittable)
+        stop.tap()
+        retainPreviewScreenshot(
+            "Rich live immediately after Stop before transcript queries or interaction", app: app
+        )
+        waitForIdle(app: app)
+        let stopped = try await observer.waitForLongTranscript(storedID: fixture.storedID) { rows in
+            self.hasStableBaseline(rows, baseline: completed)
+                && rows.count == completed.count + 1
+                && rows.last?["role"] as? String == "user"
+                && rows.last.flatMap({ self.canonicalText($0) }) == interrupted
+        }
+        XCTAssertEqual(stopped.count, completed.count + 1)
+        XCTAssertFalse(app.staticTexts["Loading messages"].exists)
+
+        XCUIDevice.shared.press(.home)
+        try await Task.sleep(for: .seconds(60))
+        app.activate()
+        let foregroundDeadline = Date().addingTimeInterval(10)
+        while app.state != .runningForeground && Date() < foregroundDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        XCTAssertEqual(app.state, .runningForeground)
+        // Do not inspect transcript accessibility until a full-screen live
+        // foreground frame has had time to replace the app-switcher card.
+        RunLoop.main.run(until: Date().addingTimeInterval(0.75))
+        retainPreviewScreenshot(
+            "Rich live full foreground after 60 second background before transcript queries", app: app
+        )
+        try assertAccessibleTranscriptRows(Array(stopped.suffix(1)), in: detail, context: "rich live foreground return")
+    }
+
+    @MainActor
+    func testOptInProductionRichComposerResizePreservesLatestAndReader() async throws {
+        continueAfterFailure = false
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("Rich composer-resize verification is simulator-only.")
+        #endif
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SEMREH_RICH_COMPOSER_RESIZE_UI"] == "1" else {
+            throw XCTSkip("Rich composer-resize verification is opt-in.")
+        }
+        guard environment["SEMREH_SLICE2_UI_LIVE"] == "1",
+              environment["SEMREH_SLICE1_HTTPS"] == "1",
+              environment["SEMREH_SLICE2_UI_BACKEND_MODE"] == "stock",
+              environment["SEMREH_SLICE2_UI_BACKEND_SHA"] == backendSHA,
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == credentialsPath,
+              environment["SEMREH_SLICE2_TOOL_CWD"] == "/Users/maurice/workspace/semreh-slice1-runtime/tools" else {
+            return XCTFail("Rich composer-resize verification requires the exact contained pinned stock fixture.")
+        }
+
+        let observer = try await LifecycleCanonicalObserver(
+            origin: try XCTUnwrap(URL(string: origin)), credentials: try readCredentials()
+        )
+        defer { observer.invalidate() }
+        let fixtures = try await observer.discoverLongStoredSessions(minimumRows: 128, requiredCount: 3)
+        guard fixtures.count == 3 else {
+            return XCTFail("The exact owned rich corpus must already exist; this test never seeds it.")
+        }
+        let fixture = fixtures[0]
+        var link = URLComponents()
+        link.scheme = "semreh"
+        link.host = "session"
+        link.queryItems = [URLQueryItem(name: "id", value: fixture.storedID)]
+
+        let app = XCUIApplication()
+        app.terminate()
+        app.launch()
+        app.open(try XCTUnwrap(link.url))
+        let detail = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "chat-detail:")
+        ).firstMatch
+        XCTAssertTrue(detail.waitForExistence(timeout: 20))
+        let transcript = detail.descendants(matching: .scrollView)
+            .matching(identifier: "chat-transcript-scroll").firstMatch
+        XCTAssertTrue(transcript.waitForExistence(timeout: 10) && transcript.isHittable)
+        let composer = app.descendants(matching: .any)
+            .matching(identifier: "chat-composer-input").firstMatch
+        XCTAssertTrue(composer.waitForExistence(timeout: 10) && composer.isHittable)
+
+        let baseline = fixture.rows
+        let latestCanonical = try XCTUnwrap(accessibleTranscriptRow(try XCTUnwrap(baseline.last)))
+        let latestRow = transcript.descendants(matching: .any)
+            .matching(identifier: latestCanonical.identifier).firstMatch
+        XCTAssertTrue(latestRow.waitForExistence(timeout: 10))
+        composer.tap()
+        let completedPrompt = "SEMREH_RICH_FIXTURE 800003"
+        composer.typeText("\(completedPrompt)\nmultiline draft line two\nmultiline draft line three")
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        retainPreviewScreenshot("P05 latest multiline before AX geometry queries", app: app)
+        XCTAssertTrue(latestRow.exists)
+        XCTAssertLessThanOrEqual(
+            latestRow.frame.maxY, composer.frame.minY + 2,
+            "The stable latest row's trailing edge must remain clear of the grown composer."
+        )
+        let sendButton = app.buttons["Send"]
+        XCTAssertTrue(sendButton.waitForExistence(timeout: 5) && sendButton.isHittable)
+        sendButton.tap()
+        retainPreviewScreenshot("P05 multiline send collapsed before transcript queries", app: app)
+        XCTAssertLessThanOrEqual(composer.frame.height, 100,
+                                 "Sending the multiline draft must collapse the composer.")
+        let completed = try await observer.waitForLongTranscript(storedID: fixture.storedID) { rows in
+            guard self.hasStableBaseline(rows, baseline: baseline), rows.count == baseline.count + 2,
+                  self.canonicalText(rows[rows.count - 2])?.hasPrefix(completedPrompt) == true,
+                  let answer = rows.last.flatMap({ self.canonicalText($0) }) else { return false }
+            return answer.utf8.count >= 1_024
+                && answer.contains("Verification note: this deterministic passage")
+                && answer.contains("```swift")
+                && answer.contains("struct RenderSample: Identifiable")
+        }
+        try assertAccessibleTranscriptRows(Array(completed.suffix(1)), in: detail, context: "P05 streamed tail")
+        let completedCanonical = try XCTUnwrap(accessibleTranscriptRow(try XCTUnwrap(completed.last)))
+        let completedRow = transcript.descendants(matching: .any)
+            .matching(identifier: completedCanonical.identifier).firstMatch
+        XCTAssertTrue(completedRow.exists)
+        let completedTrailingEdge = completedRow.frame.maxY
+        let completedComposerClearanceLimit = composer.frame.minY + 2
+        guard completedTrailingEdge <= completedComposerClearanceLimit else {
+            XCTFail(
+                "The completed streamed row's trailing edge must remain clear of the composer "
+                    + "(row maxY: \(completedTrailingEdge), limit: \(completedComposerClearanceLimit))."
+            )
+            return
+        }
+
+        let interrupted = "SEMREH_INTERRUPT_FIXTURE SEMREH_P05_STOP_\(UUID().uuidString)"
+        send(interrupted, through: composer, app: app)
+        let stop = app.buttons["Stop response"]
+        XCTAssertTrue(stop.waitForExistence(timeout: 10) && stop.isHittable)
+        retainPreviewScreenshot("P05 streaming stop pending before transcript queries", app: app)
+        stop.tap()
+        waitForIdle(app: app)
+        let stopped = try await observer.waitForLongTranscript(storedID: fixture.storedID) { rows in
+            self.hasStableBaseline(rows, baseline: completed)
+                && rows.count == completed.count + 1
+                && rows.last.flatMap({ self.canonicalText($0) }) == interrupted
+        }
+
+        if app.keyboards.firstMatch.exists {
+            transcript.coordinate(withNormalizedOffset: CGVector(dx: 0.02, dy: 0.35)).tap()
+        }
+        guard app.keyboards.firstMatch.waitForNonExistence(timeout: 5) else {
+            XCTFail("Reader baseline must begin with the keyboard hidden.")
+            return
+        }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+        let olderCanonicalByIdentifier = Dictionary(
+            uniqueKeysWithValues: stopped.dropLast().compactMap(accessibleTranscriptRow).map {
+                ($0.identifier, $0)
+            }
+        )
+        let contentViewport = CGRect(
+            x: transcript.frame.minX,
+            y: transcript.frame.minY,
+            width: transcript.frame.width,
+            height: max(0, min(transcript.frame.maxY, composer.frame.minY) - transcript.frame.minY)
+        )
+        var selectedReader: (canonical: AccessibleTranscriptRow, element: XCUIElement)?
+        for _ in 0..<4 where selectedReader == nil {
+            transcript.swipeDown(velocity: .slow)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+            let realizedRows = transcript.descendants(matching: .any)
+                .matching(NSPredicate(format: "identifier BEGINSWITH %@", "message-row:"))
+                .allElementsBoundByIndex
+            let visibleCanonicalRows = realizedRows.compactMap { element -> (AccessibleTranscriptRow, XCUIElement)? in
+                guard let canonical = olderCanonicalByIdentifier[element.identifier],
+                      !element.frame.isEmpty,
+                      element.frame.intersects(contentViewport) else { return nil }
+                return (canonical, element)
+            }
+            selectedReader = visibleCanonicalRows
+                .filter { contentViewport.contains($0.1.frame) }
+                .min { $0.1.frame.minY < $1.1.frame.minY }
+                ?? visibleCanonicalRows.min { $0.1.frame.minY < $1.1.frame.minY }
+        }
+        XCTAssertTrue(app.buttons["Scroll to latest message"].waitForExistence(timeout: 5))
+        guard let selectedReader else {
+            return XCTFail("A stable older canonical reader row must be visible before composer growth.")
+        }
+        let readerCanonical = selectedReader.canonical
+        let readerBaselineFrame = selectedReader.element.frame
+        let readerY = readerBaselineFrame.midY
+        let readerSelection = XCTAttachment(
+            string: "selected_identifier=\(readerCanonical.identifier)\n"
+                + "selected_frame=\(readerBaselineFrame)\n"
+                + "content_viewport=\(contentViewport)"
+        )
+        readerSelection.name = "P05 reader baseline selection"
+        readerSelection.lifetime = .keepAlways
+        add(readerSelection)
+        composer.tap()
+        composer.typeText("reader draft\nsecond line\nthird line")
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        retainPreviewScreenshot("P05 reader multiline before AX geometry queries", app: app)
+        let occludedReaderRow = transcript.descendants(matching: .any)
+            .matching(identifier: readerCanonical.identifier).firstMatch
+        let keyboardOcclusionDisplacement = occludedReaderRow.exists
+            ? abs(occludedReaderRow.frame.midY - readerY) : CGFloat.nan
+        transcript.coordinate(withNormalizedOffset: CGVector(dx: 0.02, dy: 0.35)).tap()
+        guard app.keyboards.firstMatch.waitForNonExistence(timeout: 5) else {
+            XCTFail("Transcript tap must dismiss the keyboard before settled reader measurement.")
+            return
+        }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+        let settledReaderRow = transcript.descendants(matching: .any)
+            .matching(identifier: readerCanonical.identifier).firstMatch
+        guard settledReaderRow.waitForExistence(timeout: 5),
+              !settledReaderRow.frame.isEmpty else {
+            XCTFail("The same canonical reader row must remain realized after keyboard dismissal.")
+            return
+        }
+        let settledReaderDisplacement = abs(settledReaderRow.frame.midY - readerY)
+        XCTAssertLessThanOrEqual(
+            settledReaderDisplacement, 12,
+            "After intentional keyboard occlusion is removed, multiline composer growth must preserve the reader anchor within 12 points."
+        )
+        XCTAssertTrue(app.buttons["Scroll to latest message"].exists,
+                      "Composer growth while reading must not jump to latest.")
+        let evidence = XCTAttachment(
+            string: "keyboard_occlusion_displacement_points=\(keyboardOcclusionDisplacement)\n"
+                + "settled_reader_displacement_points=\(settledReaderDisplacement)"
+        )
+        evidence.name = "P05 reader anchor geometry"
+        evidence.lifetime = .keepAlways
+        add(evidence)
+        clearTextInput(composer, app: app)
+    }
+
+    @MainActor
+    func testOptInProductionRichNearTailDragReleaseKeepsFollowing() async throws {
+        continueAfterFailure = false
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("Rich near-tail gesture verification is simulator-only.")
+        #endif
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SEMREH_P05_NEAR_TAIL_UI"] == "1" else {
+            throw XCTSkip("Rich near-tail gesture verification is opt-in.")
+        }
+        guard environment["SEMREH_SLICE2_UI_LIVE"] == "1",
+              environment["SEMREH_SLICE1_HTTPS"] == "1",
+              environment["SEMREH_SLICE2_UI_BACKEND_MODE"] == "stock",
+              environment["SEMREH_SLICE2_UI_BACKEND_SHA"] == backendSHA,
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == credentialsPath,
+              environment["SEMREH_SLICE2_TOOL_CWD"] == "/Users/maurice/workspace/semreh-slice1-runtime/tools" else {
+            return XCTFail("Rich near-tail gesture verification requires the exact contained pinned stock fixture.")
+        }
+
+        let observer = try await LifecycleCanonicalObserver(
+            origin: try XCTUnwrap(URL(string: origin)), credentials: try readCredentials()
+        )
+        defer { observer.invalidate() }
+        let fixtures = try await observer.discoverLongStoredSessions(minimumRows: 128, requiredCount: 3)
+        guard let fixture = fixtures.first else {
+            return XCTFail("The owned rich corpus must already exist; this test never seeds it.")
+        }
+        var link = URLComponents()
+        link.scheme = "semreh"
+        link.host = "session"
+        link.queryItems = [URLQueryItem(name: "id", value: fixture.storedID)]
+
+        let app = XCUIApplication()
+        app.terminate()
+        app.launch()
+        app.open(try XCTUnwrap(link.url))
+        let detail = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "chat-detail:")
+        ).firstMatch
+        XCTAssertTrue(detail.waitForExistence(timeout: 20))
+        let transcript = detail.descendants(matching: .scrollView)
+            .matching(identifier: "chat-transcript-scroll").firstMatch
+        let composer = app.descendants(matching: .any)
+            .matching(identifier: "chat-composer-input").firstMatch
+        XCTAssertTrue(transcript.waitForExistence(timeout: 10) && composer.waitForExistence(timeout: 10))
+        try assertAccessibleTranscriptRows(Array(fixture.rows.suffix(1)), in: detail, context: "near-tail baseline")
+        clearTextInput(composer, app: app)
+
+        let dragStart = transcript.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.42))
+        let dragEnd = transcript.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.50))
+        dragStart.press(forDuration: 0.05, thenDragTo: dragEnd, withVelocity: .slow, thenHoldForDuration: 0)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        XCTAssertFalse(app.buttons["Scroll to latest message"].exists,
+                       "A bounded near-tail drag must remain in latest-follow mode after release.")
+
+        let prompt = "SEMREH_RICH_FIXTURE 800019"
+        send(prompt, through: composer, app: app)
+        retainPreviewScreenshot("P05 near-tail released send before transcript queries", app: app)
+        let completed = try await observer.waitForLongTranscript(storedID: fixture.storedID) { rows in
+            guard self.hasStableBaseline(rows, baseline: fixture.rows), rows.count == fixture.rows.count + 2,
+                  self.canonicalText(rows[rows.count - 2]) == prompt,
+                  let answer = rows.last.flatMap({ self.canonicalText($0) }) else { return false }
+            return answer.utf8.count >= 1_024
+                && answer.contains("```swift")
+                && answer.contains("struct RenderSample: Identifiable")
+        }
+        let completedCanonical = try XCTUnwrap(accessibleTranscriptRow(try XCTUnwrap(completed.last)))
+        let completedRow = transcript.descendants(matching: .any)
+            .matching(identifier: completedCanonical.identifier).firstMatch
+        XCTAssertTrue(completedRow.waitForExistence(timeout: 10))
+        XCTAssertLessThanOrEqual(completedRow.frame.maxY, composer.frame.minY + 2,
+                                 "Near-tail release must keep the completed tail clear of the composer.")
+        XCTAssertFalse(app.buttons["Scroll to latest message"].exists,
+                       "The streamed completion must remain in latest-follow mode after a near-tail release.")
     }
 
     @MainActor
@@ -1513,6 +2400,306 @@ final class DirectSkillUITests: XCTestCase {
         app.navigationBars["Appearance"].buttons.firstMatch.tap()
         done.tap()
         XCTAssertTrue(app.navigationBars["Sessions"].waitForExistence(timeout: 10))
+    }
+
+    @MainActor
+    func testOptInPhoneOnboardingWrongPasswordRetryThenSuccess() async throws {
+        continueAfterFailure = false
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("Onboarding login retry verification is simulator-only.")
+        #endif
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SEMREH_PHONE_ONBOARDING_RETRY_UI"] == "1" else {
+            throw XCTSkip("Onboarding login retry verification is opt-in.")
+        }
+        guard environment["SEMREH_SLICE2_UI_LIVE"] == "1",
+              environment["SEMREH_SLICE1_HTTPS"] == "1",
+              environment["SEMREH_SLICE2_UI_BACKEND_MODE"] == "stock",
+              environment["SEMREH_SLICE2_UI_BACKEND_SHA"] == backendSHA,
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == credentialsPath else {
+            return XCTFail("Onboarding login retry requires the contained pinned stock fixture.")
+        }
+
+        let credentials = try readCredentials()
+        let expectedOrigin = try XCTUnwrap(URL(string: origin)).absoluteString
+        let app = XCUIApplication()
+        app.launch()
+        defer { UIPasteboard.general.items = [] }
+
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        let openInSemreh = springboard.alerts["Open in “Semreh”?"]
+        if openInSemreh.waitForExistence(timeout: 2) {
+            let openSemreh = openInSemreh.buttons["Open"]
+            XCTAssertTrue(openSemreh.exists && openSemreh.isHittable)
+            openSemreh.tap()
+        }
+
+        // Repair only a naturally expired session for this exact fixture before
+        // the test's guarded single-server sign-out. Never clear app data or
+        // authenticate an unrecognized saved origin.
+        let expiredServer = app.textFields["onboarding-server-url"]
+        if expiredServer.waitForExistence(timeout: 2) {
+            let isExactContainedOrigin = (expiredServer.value as? String) == expectedOrigin
+            let isExpiredSession = containing("Your session expired. Sign in again.", app: app)
+                .waitForExistence(timeout: 2)
+            guard isExactContainedOrigin && isExpiredSession else {
+                XCTFail("Refusing to authenticate an onboarding form without the exact contained expired-session state.")
+                throw NSError(domain: "DirectSkillUITests", code: 32)
+            }
+            _ = try openContainedNewChat(app: app)
+        }
+
+        try prepareExclusiveContainedFixtureSignOut(app: app)
+        let getStarted = app.buttons["Get Started"]
+        XCTAssertTrue(getStarted.waitForExistence(timeout: 15) && getStarted.isHittable)
+        getStarted.tap()
+
+        let server = app.textFields["onboarding-server-url"]
+        XCTAssertTrue(server.waitForExistence(timeout: 10) && server.isHittable)
+        replace(server, with: expectedOrigin, app: app)
+        let testConnection = app.buttons["Test Connection"]
+        XCTAssertTrue(testConnection.waitForExistence(timeout: 5) && testConnection.isHittable)
+        testConnection.tap()
+
+        let username = app.textFields["onboarding-username"]
+        let password = app.secureTextFields["onboarding-password"]
+        XCTAssertTrue(username.waitForExistence(timeout: 30) && password.exists)
+        replace(username, with: credentials.username, app: app)
+        paste(credentials.password + "-semreh-invalid-retry-test", into: password, app: app)
+
+        let connect = app.buttons["Connect"]
+        XCTAssertTrue(connect.waitForExistence(timeout: 5) && connect.isHittable)
+        connect.tap()
+
+        let rejection = containing("The Hermes username or password was rejected.", app: app)
+        guard rejection.waitForExistence(timeout: 30) else {
+            return XCTFail("A rejected password must surface the Hermes credential error.")
+        }
+        let retryServer = app.textFields["onboarding-server-url"]
+        XCTAssertTrue(retryServer.waitForExistence(timeout: 5))
+        XCTAssertEqual(retryServer.value as? String, expectedOrigin)
+        XCTAssertFalse(app.buttons["Get Started"].exists, "A rejected first login should keep the user on the direct sign-in form.")
+
+        let retryUsername = app.textFields["onboarding-username"]
+        let retryPassword = app.secureTextFields["onboarding-password"]
+        XCTAssertTrue(retryUsername.waitForExistence(timeout: 5) && retryPassword.exists)
+        guard retryUsername.value as? String == credentials.username else {
+            return XCTFail("Rejected login must retain the entered username for retry.")
+        }
+        let maskedRetryPassword = (retryPassword.value as? String) ?? ""
+        if !maskedRetryPassword.isEmpty,
+           maskedRetryPassword != retryPassword.placeholderValue,
+           maskedRetryPassword != "Server password" {
+            retryPassword.tap()
+            // Hardware-key selection avoids transient edit-menu availability.
+            retryPassword.typeKey("a", modifierFlags: .command)
+            retryPassword.typeText(XCUIKeyboardKey.delete.rawValue)
+        }
+        paste(credentials.password, into: retryPassword, app: app)
+        let retryConnect = app.buttons["Connect"]
+        XCTAssertTrue(retryConnect.waitForExistence(timeout: 5) && retryConnect.isHittable)
+        retryConnect.tap()
+
+        let personalize = app.navigationBars["Personalize"]
+        XCTAssertTrue(personalize.waitForExistence(timeout: 45), "A successful retry should complete first-run authentication.")
+        dismissKnownPasswordSavePrompt(app, timeout: 3)
+        let skip = personalize.buttons["Skip"]
+        XCTAssertTrue(skip.waitForExistence(timeout: 5) && skip.isHittable)
+        skip.tap()
+        XCTAssertTrue(personalize.waitForNonExistence(timeout: 5))
+
+        let sessions = app.tabBars.buttons["Sessions"]
+        let restoredChat = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
+        ).firstMatch
+        let shellDeadline = Date().addingTimeInterval(30)
+        while !sessions.exists && !restoredChat.exists && Date() < shellDeadline {
+            dismissKnownPasswordSavePrompt(app, timeout: 0)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        }
+        XCTAssertTrue(sessions.exists || restoredChat.exists, "Correct retry should enter the authenticated app shell.")
+    }
+
+    @MainActor
+    func testOptInPhoneOnboardingSavedReauthenticationOnlyWhenFixtureIsNaturallyExpired() async throws {
+        continueAfterFailure = false
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("Saved onboarding reauthentication verification is simulator-only.")
+        #endif
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SEMREH_PHONE_SAVED_REAUTH_UI"] == "1" else {
+            throw XCTSkip("Saved onboarding reauthentication verification is opt-in.")
+        }
+        guard environment["SEMREH_SLICE2_UI_LIVE"] == "1",
+              environment["SEMREH_SLICE1_HTTPS"] == "1",
+              environment["SEMREH_SLICE2_UI_BACKEND_MODE"] == "stock",
+              environment["SEMREH_SLICE2_UI_BACKEND_SHA"] == backendSHA,
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == credentialsPath else {
+            return XCTFail("Saved reauthentication requires the contained pinned stock fixture.")
+        }
+
+        let credentials = try readCredentials()
+        let expectedOrigin = try XCTUnwrap(URL(string: origin)).absoluteString
+        let app = XCUIApplication()
+        app.launch()
+        defer { UIPasteboard.general.items = [] }
+
+        // This test observes a natural structured session expiry only. It never
+        // clears cookies, expires credentials, or signs the fixture out to create
+        // the saved-server reauthentication state.
+        let server = app.textFields["onboarding-server-url"]
+        guard server.waitForExistence(timeout: 30) else {
+            throw XCTSkip("No naturally expired saved fixture session appeared; no expiry was forced.")
+        }
+        guard (server.value as? String) == expectedOrigin else {
+            XCTFail("Refusing to sign in from a saved server other than the contained fixture.")
+            throw NSError(domain: "DirectSkillUITests", code: 33)
+        }
+        let expiryMessage = containing("Your session expired. Sign in again.", app: app)
+        guard expiryMessage.waitForExistence(timeout: 5) else {
+            throw XCTSkip("The contained server is not in a naturally expired session state.")
+        }
+        XCTAssertFalse(app.buttons["Get Started"].exists, "A known saved server should open directly on Connect.")
+
+        let username = app.textFields["onboarding-username"]
+        let password = app.secureTextFields["onboarding-password"]
+        XCTAssertTrue(username.waitForExistence(timeout: 5) && password.exists)
+        replace(username, with: credentials.username, app: app)
+        paste(credentials.password, into: password, app: app)
+        let connect = app.buttons["Connect"]
+        XCTAssertTrue(connect.waitForExistence(timeout: 5) && connect.isHittable)
+        connect.tap()
+
+        let sessions = app.buttons["Sessions"]
+        let restoredChat = app.otherElements.matching(
+            NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
+        ).firstMatch
+        let shellDeadline = Date().addingTimeInterval(45)
+        while !sessions.exists && !restoredChat.exists && Date() < shellDeadline {
+            dismissKnownPasswordSavePrompt(app, timeout: 0)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        }
+        XCTAssertTrue(sessions.exists || restoredChat.exists, "Valid credentials should restore the authenticated fixture session.")
+        XCTAssertFalse(app.navigationBars["Personalize"].exists, "Saved-server reauthentication must not rerun first-login personalization.")
+    }
+
+    @MainActor
+    func testOptInPhoneOnboardingPairingInvalidRetryCancelAndConfirm() throws {
+        continueAfterFailure = false
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("Injected pairing-review UI verification is simulator-only.")
+        #endif
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SEMREH_PHONE_PAIRING_REVIEW_UI"] == "1" else {
+            throw XCTSkip("Injected pairing-review UI verification is opt-in.")
+        }
+        guard environment["SEMREH_SLICE2_UI_LIVE"] == "1",
+              environment["SEMREH_SLICE1_HTTPS"] == "1",
+              environment["SEMREH_SLICE2_UI_BACKEND_MODE"] == "stock",
+              environment["SEMREH_SLICE2_UI_BACKEND_SHA"] == backendSHA,
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == credentialsPath else {
+            return XCTFail("Pairing-review verification requires the contained pinned stock fixture.")
+        }
+
+        let expectedOrigin = try XCTUnwrap(URL(string: origin)).absoluteString
+        let app = XCUIApplication()
+        app.launchArguments.append("--semreh-pairing-test-event-source")
+        app.launchEnvironment["SEMREH_PAIRING_TEST_SOURCE"] = "injected"
+        app.launch()
+        defer { UIPasteboard.general.items = [] }
+
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        let openInSemreh = springboard.alerts["Open in “Semreh”?"]
+        if openInSemreh.waitForExistence(timeout: 2) {
+            let openSemreh = openInSemreh.buttons["Open"]
+            XCTAssertTrue(openSemreh.exists && openSemreh.isHittable)
+            openSemreh.tap()
+        }
+
+        // Recover only the exact contained fixture from a natural expired state,
+        // then use the existing single-server sign-out guard to reach Welcome.
+        let expiredServer = app.textFields["onboarding-server-url"]
+        if expiredServer.waitForExistence(timeout: 2) {
+            let isExactContainedOrigin = (expiredServer.value as? String) == expectedOrigin
+            let isExpiredSession = containing("Your session expired. Sign in again.", app: app)
+                .waitForExistence(timeout: 2)
+            guard isExactContainedOrigin && isExpiredSession else {
+                XCTFail("Refusing to authenticate an onboarding form without the exact contained expired-session state.")
+                throw NSError(domain: "DirectSkillUITests", code: 36)
+            }
+            _ = try openContainedNewChat(app: app)
+        }
+
+        try prepareExclusiveContainedFixtureSignOut(app: app)
+        let welcome = app.buttons["Get Started"]
+        guard welcome.waitForExistence(timeout: 15), welcome.isHittable else {
+            XCTFail("Expected the explicit Welcome control after contained fixture sign-out.")
+            throw NSError(domain: "DirectSkillUITests", code: 37)
+        }
+        welcome.tap()
+
+        let server = app.textFields["onboarding-server-url"]
+        XCTAssertTrue(server.waitForExistence(timeout: 10) && server.isHittable)
+        let initialOrigin = "https://before-scan.example.test"
+        replace(server, with: initialOrigin, app: app)
+        XCTAssertEqual(server.value as? String, initialOrigin)
+
+        let scan = app.buttons["Scan setup code"]
+        XCTAssertTrue(scan.waitForExistence(timeout: 5) && scan.isHittable)
+        scan.tap()
+        let scannerTitle = app.staticTexts["Scan your server address"]
+        XCTAssertTrue(scannerTitle.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["pairing-test-invalid-qr"].exists, "Injected events must remain unavailable until scanning is explicitly started.")
+
+        let allowScanning = app.buttons["Allow camera scanning"]
+        XCTAssertTrue(allowScanning.waitForExistence(timeout: 5) && allowScanning.isHittable)
+        allowScanning.tap()
+        XCTAssertTrue(app.staticTexts["pairing-test-event-source-active"].waitForExistence(timeout: 5))
+        let cameraViewfinder = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label CONTAINS[c] %@", "Camera viewfinder")
+        ).firstMatch
+        XCTAssertFalse(cameraViewfinder.exists, "Injected events must not be presented as physical camera recognition.")
+        XCTAssertFalse(app.buttons["Use this address"].exists, "Opening the scanner must not auto-open review or confirm an address.")
+
+        let invalidScan = app.buttons["pairing-test-invalid-qr"]
+        XCTAssertTrue(invalidScan.waitForExistence(timeout: 5) && invalidScan.isHittable)
+        invalidScan.tap()
+        XCTAssertTrue(app.staticTexts["pairing-invalid-code"].waitForExistence(timeout: 5))
+        XCTAssertTrue(scannerTitle.exists, "Invalid input should leave the scanner available for another QR.")
+        XCTAssertTrue(app.buttons["pairing-test-valid-qr"].isHittable)
+        XCTAssertFalse(app.buttons["Use this address"].exists, "Invalid input must not advance to review.")
+
+        app.buttons["pairing-test-valid-qr"].tap()
+        let review = app.navigationBars["Review Server Address"]
+        XCTAssertTrue(review.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["https://scan.example.test"].waitForExistence(timeout: 5))
+        let cancelReview = app.buttons.matching(NSPredicate(format: "label == %@", "Cancel")).firstMatch
+        XCTAssertTrue(cancelReview.waitForExistence(timeout: 5) && cancelReview.isHittable)
+        cancelReview.tap()
+
+        XCTAssertTrue(app.buttons["Scan setup code"].waitForExistence(timeout: 5))
+        XCTAssertEqual(server.value as? String ?? "", initialOrigin, "Cancel must not modify the existing form address.")
+        assertOnboardingCredentialsEmpty(app)
+
+        app.buttons["Scan setup code"].tap()
+        XCTAssertTrue(scannerTitle.waitForExistence(timeout: 5))
+        let allowSecondScan = app.buttons["Allow camera scanning"]
+        XCTAssertTrue(allowSecondScan.waitForExistence(timeout: 5) && allowSecondScan.isHittable)
+        allowSecondScan.tap()
+        XCTAssertTrue(app.staticTexts["pairing-test-event-source-active"].waitForExistence(timeout: 5))
+        let secondValidScan = app.buttons["pairing-test-valid-qr"]
+        XCTAssertTrue(secondValidScan.waitForExistence(timeout: 5) && secondValidScan.isHittable)
+        secondValidScan.tap()
+        XCTAssertTrue(review.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["https://scan.example.test"].exists)
+
+        let confirmReview = app.buttons["Use this address"]
+        XCTAssertTrue(confirmReview.waitForExistence(timeout: 5) && confirmReview.isHittable)
+        confirmReview.tap()
+        XCTAssertEqual(server.value as? String, "https://scan.example.test")
+        XCTAssertTrue(app.buttons["Test Connection"].exists, "Confirm should only fill the server field; network probing remains an explicit next action.")
+        assertOnboardingCredentialsEmpty(app)
+        XCTAssertFalse(app.tabBars.buttons["Sessions"].exists, "QR confirmation must not authenticate or navigate into the app shell.")
     }
 
     @MainActor
@@ -2468,6 +3655,192 @@ final class DirectSkillUITests: XCTestCase {
     }
 
     @MainActor
+    private func exerciseProductionPaging(
+        app: XCUIApplication,
+        detail: XCUIElement,
+        longRows: [[String: Any]],
+        timings: inout [String]
+    ) throws -> XCUIElement {
+        guard longRows.count > 120 else {
+            XCTFail("Production paging requires an existing canonical transcript over 120 rows.")
+            throw NSError(domain: "DirectSkillUITests", code: 38)
+        }
+
+        let transcript = detail.descendants(matching: .scrollView)
+            .matching(identifier: "chat-transcript-scroll").firstMatch
+        XCTAssertTrue(transcript.waitForExistence(timeout: 10) && transcript.isHittable)
+        XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5),
+                      "Paging baseline must begin with the keyboard hidden.")
+        let initialTail = Array(longRows.suffix(120))
+        let pageProbe = try XCTUnwrap(accessibleTranscriptRow(longRows[longRows.count - 121]))
+        func pageProbeElement() -> XCUIElement {
+            transcript.descendants(matching: .any)
+                .matching(identifier: pageProbe.identifier).firstMatch
+        }
+        XCTAssertFalse(pageProbeElement().exists,
+                       "Entry must begin with the canonical 120-row tail before paging.")
+
+        let loadOlder = app.buttons["Load older messages"]
+        let composer = app.descendants(matching: .any)
+            .matching(identifier: "chat-composer-input").firstMatch
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        let headerControls = [
+            app.buttons["Back"],
+            app.buttons["Chat controls"],
+            app.buttons["Chat options"],
+            app.buttons["View details for Default"],
+        ].filter(\.exists)
+        let composerOptions = app.buttons["Composer options"]
+        let headerBottom = headerControls.map(\.frame.maxY).max() ?? 167
+        let composerTop = composerOptions.exists ? composerOptions.frame.minY : composer.frame.minY
+        let interactionTop = headerBottom + 48
+        let interactionBottom = composerTop - 48
+        guard interactionBottom - interactionTop >= 240 else {
+            XCTFail("The production transcript must expose a safe interaction region between header and composer.")
+            throw NSError(domain: "DirectSkillUITests", code: 41)
+        }
+        let dragStartPoint = CGVector(
+            dx: 0.5,
+            dy: (interactionTop + (interactionBottom - interactionTop) * 0.30) / transcript.frame.height
+        )
+        let dragEndPoint = CGVector(
+            dx: 0.5,
+            dy: (interactionTop + (interactionBottom - interactionTop) * 0.80) / transcript.frame.height
+        )
+        func contentViewport() -> CGRect {
+            CGRect(
+                x: transcript.frame.minX,
+                y: interactionTop,
+                width: transcript.frame.width,
+                height: interactionBottom - interactionTop
+            )
+        }
+        func isVisibleAndHittable(_ element: XCUIElement) -> Bool {
+            guard element.exists else { return false }
+            let frame = element.frame
+            return !frame.isEmpty && contentViewport().intersects(frame) && element.isHittable
+        }
+        func realizedViewportSignature() -> String {
+            transcript.descendants(matching: .any)
+                .matching(NSPredicate(format: "identifier BEGINSWITH %@", "message-row:"))
+                .allElementsBoundByIndex
+                .filter { !$0.frame.isEmpty && $0.frame.intersects(contentViewport()) }
+                .map { "\($0.identifier):\(Int($0.frame.minY.rounded()))" }
+                .joined(separator: "|")
+        }
+        var coarseDrags = 0
+        var repeatedViewportSamples = 0
+        var lastViewportSignature: String?
+        var prefetchedBeforeControl = false
+        let positioningDeadline = Date().addingTimeInterval(480)
+        while !isVisibleAndHittable(loadOlder), coarseDrags < 240, Date() < positioningDeadline {
+            if pageProbeElement().exists {
+                prefetchedBeforeControl = true
+                break
+            }
+            transcript.coordinate(withNormalizedOffset: dragStartPoint)
+                .press(
+                    forDuration: 0.05,
+                    thenDragTo: transcript.coordinate(withNormalizedOffset: dragEndPoint)
+                )
+            coarseDrags += 1
+            if coarseDrags.isMultiple(of: 8) {
+                let signature = realizedViewportSignature()
+                if signature == lastViewportSignature {
+                    repeatedViewportSamples += 1
+                } else {
+                    repeatedViewportSamples = 0
+                    lastViewportSignature = signature
+                }
+                if repeatedViewportSamples >= 3 { break }
+            }
+        }
+        if prefetchedBeforeControl {
+            retainPreviewScreenshot("Paging automatic prefetch before causal control", app: app)
+            XCTFail("A canonical older page appeared before the explicit control could be captured; causal tap proof is unavailable.")
+            throw NSError(domain: "DirectSkillUITests", code: 40)
+        }
+        guard loadOlder.waitForExistence(timeout: 5), isVisibleAndHittable(loadOlder) else {
+            XCTFail("Adaptive paging must reach the real production prepend control.")
+            throw NSError(domain: "DirectSkillUITests", code: 42)
+        }
+        guard !pageProbeElement().exists else {
+            XCTFail("The older page must still be absent when the visible anchor frame is captured.")
+            throw NSError(domain: "DirectSkillUITests", code: 43)
+        }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 2))
+        let initialCanonicalByIdentifier = Dictionary(
+            uniqueKeysWithValues: initialTail.compactMap(accessibleTranscriptRow).map {
+                ($0.identifier, $0)
+            }
+        )
+        let realizedBefore = transcript.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "message-row:"))
+            .allElementsBoundByIndex
+        let visibleBefore = realizedBefore.compactMap { element -> (AccessibleTranscriptRow, CGRect)? in
+            guard let canonical = initialCanonicalByIdentifier[element.identifier],
+                  !element.frame.isEmpty,
+                  element.frame.intersects(contentViewport()) else { return nil }
+            return (canonical, element.frame)
+        }
+        guard let selectedAnchor = visibleBefore
+            .filter({ contentViewport().contains($0.1) })
+            .min(by: { $0.1.minY < $1.1.minY })
+            ?? visibleBefore.min(by: { $0.1.minY < $1.1.minY }) else {
+            XCTFail("A realized canonical row must visibly intersect the transcript before prepend.")
+            throw NSError(domain: "DirectSkillUITests", code: 39)
+        }
+        let anchorIdentifier = selectedAnchor.0.identifier
+        let anchorFrameBefore = selectedAnchor.1
+        let anchorY = anchorFrameBefore.midY
+        retainPreviewScreenshot("Paging causal anchor immediately before genuine prepend", app: app)
+        let pagingStart = Date()
+
+        loadOlder.tap()
+        let prependedPageProbe = pageProbeElement()
+        guard prependedPageProbe.waitForExistence(timeout: 20) else {
+            XCTFail("Paging must prepend the canonical row immediately older than the initial 120-row tail.")
+            throw NSError(domain: "DirectSkillUITests", code: 44)
+        }
+        let settledAnchor = transcript.descendants(matching: .any)
+            .matching(identifier: anchorIdentifier).firstMatch
+        guard settledAnchor.waitForExistence(timeout: 20) else {
+            XCTFail("The same canonical anchor ID must remain realized after prepend.")
+            throw NSError(domain: "DirectSkillUITests", code: 45)
+        }
+        let anchorFrameAfter = settledAnchor.frame
+        XCTAssertFalse(anchorFrameAfter.isEmpty)
+        XCTAssertTrue(anchorFrameAfter.intersects(contentViewport()),
+                      "The same canonical anchor must remain in the content viewport after prepend.")
+        let anchorDisplacement = abs(anchorFrameAfter.midY - anchorY)
+        retainPreviewScreenshot("Paging same canonical anchor after genuine prepend", app: app)
+        XCTAssertLessThanOrEqual(
+            anchorDisplacement,
+            12,
+            "Loading older history must preserve the visible anchor without a perceptible line jump."
+        )
+        timings.append("paging_seconds=\(Date().timeIntervalSince(pagingStart))")
+        timings.append("paging_anchor_displacement_points=\(anchorDisplacement)")
+        timings.append("paging_coarse_drags=\(coarseDrags)")
+        timings.append("paging_repeated_viewport_samples=\(repeatedViewportSamples)")
+        timings.append("paging_canonical_total_rows=\(longRows.count)")
+        timings.append("paging_initial_tail_rows=\(initialTail.count)")
+        timings.append("paging_prepended_probe_identifier=\(pageProbe.identifier)")
+        timings.append("paging_realized_rows_before=\(realizedBefore.count)")
+        timings.append("paging_anchor_identifier=\(anchorIdentifier)")
+        timings.append("paging_anchor_frame_before=\(anchorFrameBefore)")
+        timings.append("paging_anchor_frame_after=\(anchorFrameAfter)")
+        timings.append("paging_header_bottom=\(headerBottom)")
+        timings.append("paging_composer_top=\(composerTop)")
+        timings.append("paging_interaction_top=\(interactionTop)")
+        timings.append("paging_interaction_bottom=\(interactionBottom)")
+        timings.append("paging_drag_start_normalized_y=\(dragStartPoint.dy)")
+        timings.append("paging_drag_end_normalized_y=\(dragEndPoint.dy)")
+        return transcript
+    }
+
+    @MainActor
     private func assertAccessibleTranscriptRows(
         _ rows: [[String: Any]],
         in detail: XCUIElement,
@@ -2547,6 +3920,15 @@ final class DirectSkillUITests: XCTestCase {
         if let value = row["id"] as? String, !value.isEmpty { return value }
         if let value = row["id"] as? NSNumber { return value.stringValue }
         return nil
+    }
+
+    private func opaquePagingAnchorKey(_ messageID: String) -> String {
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        for byte in messageID.utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 1_099_511_628_211
+        }
+        return String(hash, radix: 16)
     }
 
     @MainActor
@@ -2649,6 +4031,28 @@ final class DirectSkillUITests: XCTestCase {
             XCTAssertTrue(selectAll.waitForExistence(timeout: 3)); selectAll.tap()
         }
         field.typeText(value)
+    }
+
+    private func clearTextInput(_ field: XCUIElement, app: XCUIApplication) {
+        field.tap()
+        let existing = (field.value as? String) ?? ""
+        if !existing.isEmpty, existing != field.placeholderValue {
+            field.typeKey("a", modifierFlags: .command)
+            field.typeKey(.delete, modifierFlags: [])
+        }
+        let cleared = (field.value as? String) ?? ""
+        XCTAssertTrue(cleared.isEmpty || cleared == field.placeholderValue,
+                      "The owned disposable composer draft must be empty before continuing.")
+    }
+
+    private func assertOnboardingCredentialsEmpty(_ app: XCUIApplication) {
+        let username = app.textFields["onboarding-username"]
+        let password = app.secureTextFields["onboarding-password"]
+        XCTAssertTrue(username.exists && password.exists)
+        let usernameValue = (username.value as? String) ?? ""
+        let passwordValue = (password.value as? String) ?? ""
+        XCTAssertTrue(usernameValue.isEmpty || usernameValue == username.placeholderValue)
+        XCTAssertTrue(passwordValue.isEmpty || passwordValue == password.placeholderValue)
     }
 
     private func paste(_ value: String, into field: XCUIElement, app: XCUIApplication) {
@@ -2822,7 +4226,7 @@ final class DirectSkillUITests: XCTestCase {
                                      options: .regularExpression) != nil else {
                     throw NSError(domain: "DirectSkillUITests", code: 24)
                 }
-                let rows = try await transcript(storedID: storedID, profile: profile, limit: 100)
+                let rows = try await fullTranscript(storedID: storedID, profile: profile)
                 guard rows.count >= minimumRows else { continue }
                 let ids = rows.compactMap { row -> String? in
                     if let value = row["id"] as? String, !value.isEmpty { return value }
@@ -2834,12 +4238,58 @@ final class DirectSkillUITests: XCTestCase {
                     best = (storedID, rows)
                 }
             }
-            guard let best else { return nil }
-            let fullRows = try await fullTranscript(storedID: best.storedID)
-            guard fullRows.count >= best.rows.count else {
-                throw NSError(domain: "DirectSkillUITests", code: 25)
+            return best
+        }
+
+        func discoverLongStoredSessions(
+            minimumRows: Int,
+            requiredCount: Int,
+            candidateLimit: Int = 20,
+            profile: String = "default"
+        ) async throws -> [(storedID: String, title: String, rows: [[String: Any]])] {
+            guard (1...3).contains(requiredCount), (requiredCount...100).contains(candidateLimit) else {
+                throw NSError(domain: "DirectSkillUITests", code: 28)
             }
-            return (best.storedID, fullRows)
+            var components = URLComponents()
+            components.path = "/api/sessions"
+            components.queryItems = [
+                URLQueryItem(name: "profile", value: profile),
+                URLQueryItem(name: "limit", value: String(candidateLimit)),
+                URLQueryItem(name: "offset", value: "0"),
+                URLQueryItem(name: "order", value: "recent"),
+                URLQueryItem(name: "archived", value: "exclude"),
+            ]
+            let (data, response) = try await request(
+                path: try XCTUnwrap(components.string), method: "GET"
+            )
+            guard (200..<300).contains(response.statusCode),
+                  let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let sessions = payload["sessions"] as? [[String: Any]],
+                  sessions.count <= candidateLimit else {
+                throw NSError(domain: "DirectSkillUITests", code: 29)
+            }
+
+            var matches: [(storedID: String, title: String, rows: [[String: Any]])] = []
+            for candidate in sessions {
+                guard let storedID = candidate["id"] as? String,
+                      let title = candidate["title"] as? String,
+                      !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      storedID.range(of: "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
+                                     options: .regularExpression) != nil else {
+                    throw NSError(domain: "DirectSkillUITests", code: 30)
+                }
+                let rows = try await fullTranscript(storedID: storedID, profile: profile)
+                guard rows.count >= minimumRows else { continue }
+                let ids = rows.compactMap { row -> String? in
+                    if let value = row["id"] as? String, !value.isEmpty { return value }
+                    if let value = row["id"] as? NSNumber { return value.stringValue }
+                    return nil
+                }
+                guard ids.count == rows.count, Set(ids).count == ids.count else { continue }
+                matches.append((storedID, title, rows))
+                if matches.count == requiredCount { return matches }
+            }
+            return matches
         }
 
         func waitForLongTranscript(

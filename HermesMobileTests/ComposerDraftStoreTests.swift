@@ -151,6 +151,234 @@ final class TranscriptRestoreStoreTests: XCTestCase {
     }
 }
 
+#if DEBUG
+@MainActor
+final class ChatP09DiagnosticRestoreBootstrapTests: XCTestCase {
+    private var defaults: UserDefaults!
+    private var suiteName: String!
+    private let server = URL(string: "https://semreh-slice1-test.tailda8427.ts.net")!
+    private let sessionID = "p09-session-123"
+    private let oldMessageID = "old-message-456"
+    private let seededMessageID = "seed-message-789"
+
+    override func setUp() {
+        super.setUp()
+        suiteName = "ChatP09DiagnosticRestoreBootstrapTests.\(UUID().uuidString)"
+        defaults = UserDefaults(suiteName: suiteName)
+    }
+
+    override func tearDown() {
+        defaults.removePersistentDomain(forName: suiteName)
+        defaults = nil
+        suiteName = nil
+        super.tearDown()
+    }
+
+    func testSeedRequestRequiresApprovedOriginAndCompleteCanonicalScope() {
+        let valid = seedArguments()
+        let request = ChatP09DiagnosticRestoreRequest.parse(arguments: valid)
+        XCTAssertEqual(request?.operation, .seed)
+        XCTAssertEqual(request?.server, server)
+        XCTAssertEqual(request?.sessionID, sessionID)
+        XCTAssertEqual(request?.visibleMessageID, seededMessageID)
+
+        let invalidRequests: [[String]] = [
+            [ChatP09DiagnosticRestoreRequest.seedArgument,
+             "\(ChatP09DiagnosticRestoreRequest.serverArgumentPrefix)https://other.example",
+             "\(ChatP09DiagnosticRestoreRequest.sessionArgumentPrefix)\(sessionID)",
+             "\(ChatP09DiagnosticRestoreRequest.messageArgumentPrefix)\(seededMessageID)"],
+            [ChatP09DiagnosticRestoreRequest.seedArgument,
+             "\(ChatP09DiagnosticRestoreRequest.serverArgumentPrefix)\(server.absoluteString)",
+             "\(ChatP09DiagnosticRestoreRequest.sessionArgumentPrefix)\(sessionID)"],
+            [ChatP09DiagnosticRestoreRequest.seedArgument,
+             "\(ChatP09DiagnosticRestoreRequest.serverArgumentPrefix)\(server.absoluteString)",
+             "\(ChatP09DiagnosticRestoreRequest.sessionArgumentPrefix)bad/session",
+             "\(ChatP09DiagnosticRestoreRequest.messageArgumentPrefix)\(seededMessageID)"],
+            [ChatP09DiagnosticRestoreRequest.seedArgument,
+             "\(ChatP09DiagnosticRestoreRequest.serverArgumentPrefix)\(server.absoluteString)",
+             "\(ChatP09DiagnosticRestoreRequest.sessionArgumentPrefix)\(sessionID)",
+             "\(ChatP09DiagnosticRestoreRequest.messageArgumentPrefix)bad/message"],
+            [ChatP09DiagnosticRestoreRequest.seedArgument,
+             "\(ChatP09DiagnosticRestoreRequest.serverArgumentPrefix)\(server.absoluteString)",
+             "\(ChatP09DiagnosticRestoreRequest.sessionArgumentPrefix)\(sessionID)",
+             "\(ChatP09DiagnosticRestoreRequest.messageArgumentPrefix)\(String(repeating: "x", count: 129))"],
+            [ChatP09DiagnosticRestoreRequest.seedArgument,
+             ChatP09DiagnosticRestoreRequest.cleanupArgument,
+             "\(ChatP09DiagnosticRestoreRequest.serverArgumentPrefix)\(server.absoluteString)",
+             "\(ChatP09DiagnosticRestoreRequest.sessionArgumentPrefix)\(sessionID)",
+             "\(ChatP09DiagnosticRestoreRequest.messageArgumentPrefix)\(seededMessageID)"],
+        ]
+
+        for arguments in invalidRequests {
+            XCTAssertNil(
+                ChatP09DiagnosticRestoreRequest.parse(arguments: arguments),
+                "out-of-scope P09 arguments must fail closed: \(arguments)"
+            )
+        }
+    }
+
+    func testSeedAndCleanupRestoreOnlyTheExactPriorReaderPoint() {
+        let store = TranscriptRestoreStore(defaults: defaults)
+        let unrelatedKey = "unrelated-setting"
+        defaults.set("preserve-me", forKey: unrelatedKey)
+        let prior = TranscriptRestorePoint(
+            followingLatest: false,
+            visibleMessageID: oldMessageID
+        )
+        store.save(prior, server: server, sessionID: sessionID)
+
+        XCTAssertEqual(
+            ChatP09DiagnosticRestoreBootstrap.apply(arguments: seedArguments(), defaults: defaults),
+            .installed
+        )
+        XCTAssertEqual(
+            store.load(server: server, sessionID: sessionID),
+            TranscriptRestorePoint(
+                followingLatest: false,
+                visibleMessageID: "transcript:row:\(seededMessageID)"
+            )
+        )
+        XCTAssertEqual(defaults.string(forKey: unrelatedKey), "preserve-me")
+        XCTAssertEqual(
+            ChatP09DiagnosticRestoreBootstrap.apply(arguments: seedArguments(), defaults: defaults),
+            .rejected,
+            "a second seed must not overwrite the saved backup"
+        )
+
+        XCTAssertEqual(
+            ChatP09DiagnosticRestoreBootstrap.apply(
+                arguments: cleanupArguments(),
+                defaults: defaults
+            ),
+            .restored
+        )
+        XCTAssertEqual(store.load(server: server, sessionID: sessionID), prior)
+        XCTAssertEqual(defaults.string(forKey: unrelatedKey), "preserve-me")
+    }
+
+    func testDirectTranscriptRenderIdentityUsesTheProductionNamespace() {
+        XCTAssertEqual(
+            TranscriptRenderIdentity.directID(for: seededMessageID),
+            "transcript:row:\(seededMessageID)"
+        )
+        XCTAssertNil(TranscriptRenderIdentity.directID(for: nil))
+        XCTAssertNil(TranscriptRenderIdentity.directID(for: ""))
+    }
+
+    func testCleanupWithoutMatchingSeedDoesNotWipeTheRestorePoint() {
+        let store = TranscriptRestoreStore(defaults: defaults)
+        let prior = TranscriptRestorePoint(
+            followingLatest: false,
+            visibleMessageID: oldMessageID
+        )
+        store.save(prior, server: server, sessionID: sessionID)
+
+        XCTAssertEqual(
+            ChatP09DiagnosticRestoreBootstrap.apply(
+                arguments: cleanupArguments(),
+                defaults: defaults
+            ),
+            .rejected
+        )
+        XCTAssertEqual(store.load(server: server, sessionID: sessionID), prior)
+    }
+
+    func testSeedWithoutPriorPointCleansBackToLatestWithoutLeavingBackup() {
+        let store = TranscriptRestoreStore(defaults: defaults)
+        XCTAssertEqual(store.load(server: server, sessionID: sessionID), .followingLatest)
+
+        XCTAssertEqual(
+            ChatP09DiagnosticRestoreBootstrap.apply(arguments: seedArguments(), defaults: defaults),
+            .installed
+        )
+        XCTAssertEqual(
+            ChatP09DiagnosticRestoreBootstrap.apply(
+                arguments: cleanupArguments(),
+                defaults: defaults
+            ),
+            .restored
+        )
+        XCTAssertEqual(store.load(server: server, sessionID: sessionID), .followingLatest)
+        XCTAssertFalse(
+            defaults.dictionaryRepresentation().keys.contains {
+                $0.contains("chatP09.restore-backup")
+            }
+        )
+    }
+
+    func testNonDataBackupRejectsSeedWithoutReplacingIt() {
+        let store = TranscriptRestoreStore(defaults: defaults)
+        let prior = TranscriptRestorePoint(
+            followingLatest: false,
+            visibleMessageID: oldMessageID
+        )
+        store.save(prior, server: server, sessionID: sessionID)
+        defaults.set("not-a-data-backup", forKey: backupKey)
+
+        XCTAssertEqual(
+            ChatP09DiagnosticRestoreBootstrap.apply(arguments: seedArguments(), defaults: defaults),
+            .rejected
+        )
+        XCTAssertEqual(store.load(server: server, sessionID: sessionID), prior)
+        XCTAssertEqual(defaults.string(forKey: backupKey), "not-a-data-backup")
+    }
+
+    func testNonDataPriorRestoreRejectsSeedWithoutReplacingIt() {
+        defaults.set("not-a-data-restore", forKey: restoreKey)
+
+        XCTAssertEqual(
+            ChatP09DiagnosticRestoreBootstrap.apply(arguments: seedArguments(), defaults: defaults),
+            .rejected
+        )
+        XCTAssertEqual(defaults.string(forKey: restoreKey), "not-a-data-restore")
+        XCTAssertNil(defaults.object(forKey: backupKey))
+    }
+
+    func testNonDataCleanupTargetRejectsWithoutOverwritingCurrentValue() {
+        XCTAssertEqual(
+            ChatP09DiagnosticRestoreBootstrap.apply(arguments: seedArguments(), defaults: defaults),
+            .installed
+        )
+        defaults.set("later-corrupt-value", forKey: restoreKey)
+
+        XCTAssertEqual(
+            ChatP09DiagnosticRestoreBootstrap.apply(
+                arguments: cleanupArguments(),
+                defaults: defaults
+            ),
+            .rejected
+        )
+        XCTAssertEqual(defaults.string(forKey: restoreKey), "later-corrupt-value")
+        XCTAssertNotNil(defaults.object(forKey: backupKey))
+    }
+
+    private func seedArguments() -> [String] {
+        [
+            ChatP09DiagnosticRestoreRequest.seedArgument,
+            "\(ChatP09DiagnosticRestoreRequest.serverArgumentPrefix)\(server.absoluteString)",
+            "\(ChatP09DiagnosticRestoreRequest.sessionArgumentPrefix)\(sessionID)",
+            "\(ChatP09DiagnosticRestoreRequest.messageArgumentPrefix)\(seededMessageID)",
+        ]
+    }
+
+    private func cleanupArguments() -> [String] {
+        [
+            ChatP09DiagnosticRestoreRequest.cleanupArgument,
+            "\(ChatP09DiagnosticRestoreRequest.serverArgumentPrefix)\(server.absoluteString)",
+            "\(ChatP09DiagnosticRestoreRequest.sessionArgumentPrefix)\(sessionID)",
+        ]
+    }
+
+    private var restoreKey: String {
+        "\(TranscriptRestoreStore.visibilityKeyPrefix)\(server.absoluteString)|\(sessionID)"
+    }
+
+    private var backupKey: String {
+        "semreh.debug.chatP09.restore-backup.\(server.absoluteString)|\(sessionID)"
+    }
+}
+#endif
+
 @MainActor
 final class LiveRunBookmarkStoreTests: XCTestCase {
     private var defaults: UserDefaults!

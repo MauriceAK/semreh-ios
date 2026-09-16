@@ -3,6 +3,38 @@ import XCTest
 
 @MainActor
 final class LiveActivityTests: XCTestCase {
+    func testPresentationDoesNotPresentStaleUpdatesAsLive() {
+        var state = AgentRunActivityStateReducer.initialState(
+            sessionID: "presentation", sessionTitle: "Build", startedAt: Date(timeIntervalSince1970: 100)
+        )
+        state.responseExcerpt = "Partial answer"
+        XCTAssertEqual(state.displayDetail(), "Partial answer")
+        XCTAssertEqual(state.displayStatus(systemIsStale: true), "Last known status")
+        XCTAssertNil(state.displayDetail(systemIsStale: true))
+        state.isStale = true
+        XCTAssertEqual(state.displayStatus(), "Last known status")
+        XCTAssertNil(state.displayDetail())
+    }
+
+    func testPresentationPreservesDistinctTerminalOutcomesAndErrorPriority() {
+        var state = AgentRunActivityStateReducer.initialState(
+            sessionID: "presentation", sessionTitle: "Build", startedAt: Date(timeIntervalSince1970: 100)
+        )
+        state.isFinal = true
+        state.isStale = true
+        state.responseExcerpt = "Partial answer"
+        state.errorSummary = "Connection failed"
+        for status in [AgentRunActivityStatus.complete, .failed, .cancelled, .ended] {
+            state.status = status
+            XCTAssertEqual(state.displayStatus(systemIsStale: true), status.title)
+        }
+        XCTAssertEqual(state.displayDetail(systemIsStale: true), "Connection failed")
+        state.errorSummary = nil
+        state.responseExcerpt = ""
+        state.currentActivity = state.status.title
+        XCTAssertNil(state.displayDetail())
+    }
+
     func testSanitizesLiveActivityText() {
         let title = AgentRunActivitySanitizer.sessionTitle("  A very long Hermes session title with\nmultiple lines and extra words  ")
         let activity = AgentRunActivitySanitizer.activityLine("Reading /Users/example/project/Secrets.swift\nwith details")

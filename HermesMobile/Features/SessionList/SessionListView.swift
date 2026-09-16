@@ -316,6 +316,9 @@ struct SessionListView: View {
                 await refreshSessionsAndActiveProfile(reconcileOpenTranscripts: true)
             }
             .onAppear {
+#if DEBUG
+                ChatPerformanceCadenceMonitor.end(.back)
+#endif
                 isSessionListVisible = true
                 viewModel.setSidebarEditing(sidebarHasPendingEdit)
                 viewModel.setSidebarDestructiveActionPending(sidebarHasPendingDestructiveAction)
@@ -1681,6 +1684,9 @@ struct SessionListView: View {
               navigationState.beginNewChatCreation(route)
         else { return false }
 
+#if DEBUG
+        ChatPerformanceCadenceMonitor.begin(.entry)
+#endif
         newChatCreationTask?.cancel()
         newChatCreationTask = Task { @MainActor in
             let session = await viewModel.createSession(
@@ -1734,6 +1740,9 @@ struct SessionListView: View {
     }
 
     private func selectSession(_ session: SessionSummary) {
+#if DEBUG
+        ChatPerformanceCadenceMonitor.begin(.entry)
+#endif
         navigationState.select(session)
         persistLastSelectedSession()
     }

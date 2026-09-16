@@ -2,9 +2,17 @@ import AVFoundation
 import SwiftUI
 import UIKit
 
+private protocol PairingScanEventSource: AnyObject {
+    var previewSession: AVCaptureSession? { get }
+    var result: (@Sendable (String, UUID) -> Void)? { get set }
+    var unavailable: (@Sendable (UUID) -> Void)? { get set }
+    func setActive(_ active: Bool, generation: UUID)
+}
+
 /// Capture operations and delegate callbacks are confined to one serial queue.
-private final class PairingCapture: NSObject, AVCaptureMetadataOutputObjectsDelegate, @unchecked Sendable {
+private final class PairingCapture: NSObject, AVCaptureMetadataOutputObjectsDelegate, PairingScanEventSource, @unchecked Sendable {
     let session = AVCaptureSession()
+    var previewSession: AVCaptureSession? { session }
     private let queue = DispatchQueue(label: "semreh.prototype.qr.capture")
     private var generation: UUID?
     private var configured = false
@@ -56,35 +64,95 @@ private final class PairingCapture: NSObject, AVCaptureMetadataOutputObjectsDele
     }
 }
 
+#if DEBUG
+/// Delivers deterministic strings only when the UI test explicitly asks for one.
+/// It never opens the camera and sends each string through the same result path
+/// as AVCaptureMetadataOutput.
+private final class PairingTestScanEventSource: PairingScanEventSource, @unchecked Sendable {
+    private let lock = NSLock()
+    private var activeGeneration: UUID?
+    var result: (@Sendable (String, UUID) -> Void)?
+    var unavailable: (@Sendable (UUID) -> Void)?
+    var previewSession: AVCaptureSession? { nil }
+
+    func setActive(_ active: Bool, generation: UUID) {
+        lock.lock()
+        activeGeneration = active ? generation : nil
+        lock.unlock()
+    }
+
+    func emit(_ text: String) {
+        lock.lock()
+        let generation = activeGeneration
+        lock.unlock()
+        guard let generation else { return }
+        result?(text, generation)
+    }
+}
+#endif
+
 @MainActor
 private final class PairingCameraModel: ObservableObject {
     enum Status { case explanation, scanning, denied, unavailable }
     @Published var status: Status = .explanation
     @Published var invalidCode = false
-    let capture = PairingCapture()
+    private let cameraSource = PairingCapture()
     private var policy = PairingScanPolicy()
     private var visible = false
     private var sceneActive = false
     private var requested = false
     var accepted: ((PairingImport) -> Void)?
 
+#if DEBUG
+    private let testEventSourceRequested: Bool
+    private var testEventSource: PairingTestScanEventSource?
+#endif
+
+    private var activeEventSource: PairingScanEventSource {
+#if DEBUG
+        if let testEventSource { return testEventSource }
+#endif
+        return cameraSource
+    }
+
+    var previewSession: AVCaptureSession? { activeEventSource.previewSession }
+
+    var showsInjectedScanControls: Bool {
+#if DEBUG
+        return testEventSource != nil
+#else
+        return false
+#endif
+    }
+
     init() {
-        capture.result = { [weak self] text, generation in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                do {
-                    guard let value = try self.policy.admit(text, generation: generation) else { return }
-                    self.capture.setActive(false, generation: self.policy.generation)
-                    self.accepted?(value)
-                } catch { self.invalidCode = true }
-            }
-        }
-        capture.unavailable = { [weak self] generation in
+#if DEBUG
+        let process = ProcessInfo.processInfo
+        testEventSourceRequested = process.arguments.contains("--semreh-pairing-test-event-source")
+            && process.environment["SEMREH_PAIRING_TEST_SOURCE"] == "injected"
+#endif
+        cameraSource.result = scanResultHandler()
+        cameraSource.unavailable = { [weak self] generation in
             Task { @MainActor [weak self] in
                 guard let self, self.policy.active, self.policy.generation == generation else { return }
                 self.status = .unavailable
                 self.policy.setActive(false)
-                self.capture.setActive(false, generation: self.policy.generation)
+                self.activeEventSource.setActive(false, generation: self.policy.generation)
+            }
+        }
+    }
+
+    private func scanResultHandler() -> @Sendable (String, UUID) -> Void {
+        { [weak self] text, generation in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                do {
+                    guard let value = try self.policy.admit(text, generation: generation) else { return }
+                    self.activeEventSource.setActive(false, generation: self.policy.generation)
+                    self.accepted?(value)
+                } catch {
+                    self.invalidCode = true
+                }
             }
         }
     }
@@ -96,6 +164,16 @@ private final class PairingCameraModel: ObservableObject {
     }
 
     func enableCamera() {
+#if DEBUG
+        if testEventSourceRequested {
+            let source = PairingTestScanEventSource()
+            source.result = cameraSource.result
+            testEventSource = source
+            requested = true
+            reconcile()
+            return
+        }
+#endif
         // A missing integration key must fall back rather than crash on requestAccess.
         guard let usage = Bundle.main.object(forInfoDictionaryKey: "NSCameraUsageDescription") as? String,
               !usage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -110,10 +188,19 @@ private final class PairingCameraModel: ObservableObject {
     }
 
     private func reconcile() {
+#if DEBUG
+        if testEventSourceRequested {
+            let shouldScan = visible && sceneActive && requested && !policy.consumed
+            policy.setActive(shouldScan)
+            testEventSource?.setActive(policy.active, generation: policy.generation)
+            if requested { status = .scanning }
+            return
+        }
+#endif
         let authorization = AVCaptureDevice.authorizationStatus(for: .video)
         let allowed = requested && authorization == .authorized
         policy.setActive(visible && sceneActive && allowed && !policy.consumed)
-        capture.setActive(policy.active, generation: policy.generation)
+        cameraSource.setActive(policy.active, generation: policy.generation)
         if requested {
             switch authorization {
             case .authorized: status = .scanning
@@ -123,6 +210,13 @@ private final class PairingCameraModel: ObservableObject {
             }
         }
     }
+
+#if DEBUG
+    func emitTestScan(_ text: String) {
+        guard testEventSourceRequested, policy.active else { return }
+        testEventSource?.emit(text)
+    }
+#endif
 }
 
 private final class PairingPreviewUIView: UIView {
@@ -155,22 +249,44 @@ struct PairingCameraView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 Label("Scan your server address", systemImage: "camera").font(.title2)
-                Text("Read a Semreh setup code, then review the full address before confirming. Scanning does not connect or sign in.")
+                Text("Scan a QR containing your server’s HTTPS address. Review the full address before continuing; scanning does not connect or sign in.")
                 switch model.status {
                 case .explanation:
                     Button("Allow camera scanning") { model.enableCamera() }
                 case .scanning:
-                    PairingCameraPreview(session: model.capture.session)
-                        .frame(height: 280).clipShape(RoundedRectangle(cornerRadius: 16))
-                        .accessibilityLabel("Camera viewfinder. Aim at your server’s Semreh setup QR code.")
+                    Group {
+                        if let session = model.previewSession {
+                            PairingCameraPreview(session: session)
+                                .frame(height: 280).clipShape(RoundedRectangle(cornerRadius: 16))
+                                .accessibilityLabel("Camera viewfinder. Aim at a QR containing your server’s HTTPS address.")
+                        }
+#if DEBUG
+                        if model.showsInjectedScanControls {
+                            VStack(alignment: .leading, spacing: 12) {
+                                Text("Test-only injected QR events; no camera is used.")
+                                    .font(.footnote)
+                                    .accessibilityIdentifier("pairing-test-event-source-active")
+                                Button("Inject invalid QR event") {
+                                    model.emitTestScan("not a supported HTTPS server address")
+                                }
+                                .accessibilityIdentifier("pairing-test-invalid-qr")
+                                Button("Inject valid HTTPS address QR") {
+                                    model.emitTestScan("https://scan.example.test")
+                                }
+                                .accessibilityIdentifier("pairing-test-valid-qr")
+                            }
+                        }
+#endif
+                    }
                 case .denied:
                     Text("Camera access is denied or restricted. You can enter the address manually, or enable camera access in Settings if permitted.")
                 case .unavailable:
                     Text("Camera scanning is unavailable. Enter your server address below instead.")
                 }
                 if model.invalidCode {
-                    Text("This code is not a supported Semreh address import. Try another code or enter the address manually.")
+                    Text("This QR does not contain a supported HTTPS server address. Try another QR or enter the address manually.")
                         .font(.footnote)
+                        .accessibilityIdentifier("pairing-invalid-code")
                 }
                 Button("Enter an address instead") { stop(); manual() }
                 Button("Cancel", role: .cancel) { stop(); cancel() }

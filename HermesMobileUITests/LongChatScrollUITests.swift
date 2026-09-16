@@ -9,6 +9,12 @@ final class LongChatScrollUITests: XCTestCase {
     private let performanceCycleLabArgument = "--chat-performance-cycle-lab"
     private let performanceSignpostsArgument = "--chat-performance-signposts"
     private let performanceMetricProbeEnvironment = "SEMREH_CHAT_PERFORMANCE_METRIC_PROBE"
+    private let performanceFrameCallbackProbeArgument = "--chat-performance-frame-callback-probe"
+    private let performanceFrameCallbackProbeEnvironment = "SEMREH_CHAT_FRAME_CALLBACK_PROBE"
+    private let appWidePerformanceMonitorArgument = "--chat-performance-app-wide-monitor"
+    private let appWidePerformanceMonitorEnvironment = "SEMREH_CHAT_APP_WIDE_MONITOR_UI"
+    private let birdPaletteLabArgument = "--bird-palette-visual-lab"
+    private let birdPaletteLabEnvironment = "SEMREH_BIRD_PALETTE_LAB_UI"
     private let approvedLiveOrigin = "https://semreh-slice1-test.tailda8427.ts.net"
     private let approvedLiveHost = "semreh-slice1-test.tailda8427.ts.net"
     private let stockBackendSHA = "29112bef099274229cadff79cdff7bf7b99c4b77"
@@ -69,6 +75,44 @@ final class LongChatScrollUITests: XCTestCase {
         capture.name = "Component response completed — not production completion evidence"
         capture.lifetime = .keepAlways
         add(capture)
+    }
+
+    @MainActor
+    func testOptInBirdPaletteVisualLabScreenshots() throws {
+        continueAfterFailure = false
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("The bird palette visual lab is simulator-only.")
+        #endif
+        guard ProcessInfo.processInfo.environment[birdPaletteLabEnvironment] == "1" else {
+            throw XCTSkip("The bird palette visual lab is opt-in.")
+        }
+
+        let app = XCUIApplication()
+        app.terminate()
+        app.launchArguments = [birdPaletteLabArgument]
+        app.launch()
+
+        let title = app.staticTexts["Bird palette visual lab"]
+        XCTAssertTrue(title.waitForExistence(timeout: 10),
+                      "The server-free bird palette visual lab must launch.")
+        let scrollView = app.scrollViews.firstMatch
+        XCTAssertTrue(scrollView.waitForExistence(timeout: 5),
+                      "The bird palette lab must expose its bounded scroll surface.")
+
+        let light = app.staticTexts["Light appearance"]
+        XCTAssertTrue(light.waitForExistence(timeout: 5) && light.isHittable,
+                       "The lab must show the light appearance first.")
+        attachScreenshot(named: "bird-palette-visual-lab-light")
+
+        let dark = app.staticTexts["Dark appearance"]
+        XCTAssertTrue(dark.waitForExistence(timeout: 5),
+                      "The lab must include a dark appearance panel.")
+        // Move to the bounded end so the dark screenshot contains all eight
+        // palette rows rather than only the first rows after one swipe.
+        for _ in 0..<3 {
+            scrollView.swipeUp()
+        }
+        attachScreenshot(named: "bird-palette-visual-lab-dark")
     }
 
     @MainActor
@@ -536,6 +580,205 @@ final class LongChatScrollUITests: XCTestCase {
             measurements.joined(separator: "\n"),
             named: "long-chat-enter-back-20-cycle-timings"
         )
+    }
+
+    @MainActor
+    func testOptInCycleLabFrameCallbackProbeReadback() throws {
+        continueAfterFailure = false
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("The DEBUG cycle-lab callback probe is Simulator-only.")
+        #endif
+        guard ProcessInfo.processInfo.environment[performanceFrameCallbackProbeEnvironment] == "1" else {
+            throw XCTSkip("The cycle-lab callback timing probe is opt-in.")
+        }
+
+        let app = XCUIApplication()
+        app.terminate()
+        app.launchArguments = [
+            performanceCycleLabArgument,
+            performanceSignpostsArgument,
+            performanceFrameCallbackProbeArgument
+        ]
+        app.launch()
+
+        let cycleLab = app.descendants(matching: .any)["performance-cycle-lab"]
+        XCTAssertTrue(cycleLab.waitForExistence(timeout: 15))
+        let start = app.buttons["frame-callback-probe-start"]
+        XCTAssertTrue(start.waitForExistence(timeout: 10) && start.isHittable)
+
+        let scope = XCTAttachment(string: [
+            "fixture=DEBUG cycle lab; 2 synthetic conversations x 10,000 rows",
+            "instrument=opt-in CADisplayLink callback timing on the app main run loop",
+            "reported=callback count, estimated target-interval gaps, max and histogram p95/p99",
+            "not_measured=presented pixels, GPU frame lifetime, physical FPS, or hitch pass/fail",
+            "lifecycle=sample pauses and drops timing baseline while scene is inactive",
+            "no_per_frame_state_or_logging=true"
+        ].joined(separator: "\n"))
+        scope.name = "Frame callback probe claim boundary"
+        scope.lifetime = .keepAlways
+        add(scope)
+
+        start.tap()
+
+        for chatNumber in 1...2 {
+            let entry = app.buttons["performance-cycle-chat-\(chatNumber)"]
+            assertHittable(
+                entry,
+                timeout: 15,
+                message: "The callback sample must expose long chat \(chatNumber) in the lab list."
+            )
+            entry.tap()
+
+            let chat = app.otherElements["chat-detail:10,000-row performance lab \(chatNumber)"]
+            assertHittable(chat, timeout: 25, message: "The callback sample must enter chat \(chatNumber).")
+            let transcript = app.scrollViews.firstMatch
+            XCTAssertTrue(transcript.waitForExistence(timeout: 10) && transcript.isHittable)
+            transcript.swipeDown()
+
+            let scrollToLatest = app.buttons[scrollToLatestLabel]
+            XCTAssertTrue(
+                scrollToLatest.waitForExistence(timeout: 10) && scrollToLatest.isHittable,
+                "A real swipe must expose Scroll to latest for chat \(chatNumber)."
+            )
+            scrollToLatest.tap()
+
+            let endMarker = app.staticTexts.matching(
+                NSPredicate(format: "label CONTAINS[c] %@", "End of 10,000-row conversation \(chatNumber).")
+            ).firstMatch
+            assertHittable(endMarker, timeout: 25, message: "Arrow return must reveal chat \(chatNumber)'s tail.")
+
+            let back = app.buttons["Back"]
+            XCTAssertTrue(back.waitForExistence(timeout: 10) && back.isHittable)
+            back.tap()
+            assertHittable(
+                entry,
+                timeout: 20,
+                message: "The callback sample must return to the lab after chat \(chatNumber)."
+            )
+        }
+
+        let stop = app.buttons["frame-callback-probe-stop"]
+        XCTAssertTrue(stop.waitForExistence(timeout: 10) && stop.isHittable)
+        stop.tap()
+
+        let summary = app.staticTexts["chat-performance-frame-callback-summary"]
+        XCTAssertTrue(summary.waitForExistence(timeout: 10))
+        let report = summary.label
+        XCTAssertTrue(report.contains("CADisplayLink main-run-loop callback timing only"))
+        XCTAssertTrue(report.contains("estimated_missed_target_intervals="))
+        XCTAssertTrue(report.contains("maximum_callback_gap_ms="))
+        XCTAssertTrue(report.contains("p95_callback_gap_ms_upper_bin="))
+        XCTAssertTrue(report.contains("p99_callback_gap_ms_upper_bin="))
+        XCTAssertTrue(report.contains("histogram_storage_bins="))
+        guard let callbackCountLine = report
+            .split(separator: "\n")
+            .first(where: { $0.hasPrefix("callbacks=") })
+        else {
+            XCTFail("The callback report must include its aggregate callback count.")
+            return
+        }
+        let callbackCountText = String(callbackCountLine.dropFirst("callbacks=".count))
+        guard let callbackCount = Int(callbackCountText) else {
+            XCTFail("The callback count must be a readable integer.")
+            return
+        }
+        XCTAssertGreaterThan(callbackCount, 0, "The probe must sample callbacks, without a performance threshold.")
+        attachPlainText(report, named: "long-chat-frame-callback-timing-summary")
+    }
+
+    @MainActor
+    func testOptInAppWideCadenceMonitorReadback() throws {
+        continueAfterFailure = false
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("The DEBUG app-wide cadence monitor is Simulator-only.")
+        #endif
+        guard ProcessInfo.processInfo.environment[appWidePerformanceMonitorEnvironment] == "1" else {
+            throw XCTSkip("The app-wide cadence monitor readback is opt-in.")
+        }
+
+        let app = XCUIApplication()
+        app.terminate()
+        app.launchArguments = [
+            performanceCycleLabArgument,
+            performanceSignpostsArgument,
+            appWidePerformanceMonitorArgument
+        ]
+        app.launch()
+
+        let cycleLab = app.descendants(matching: .any)["performance-cycle-lab"]
+        XCTAssertTrue(
+            cycleLab.waitForExistence(timeout: 15),
+            "The app-wide monitor must use the retained server-free cycle lab."
+        )
+        let stop = app.buttons["chat-performance-app-wide-monitor-stop"]
+        XCTAssertTrue(
+            stop.waitForExistence(timeout: 10) && stop.isHittable,
+            "The explicit opt-in monitor must expose its bounded stop/readout control."
+        )
+
+        for chatNumber in 1...2 {
+            let entry = app.buttons["performance-cycle-chat-\(chatNumber)"]
+            assertHittable(
+                entry,
+                timeout: 15,
+                message: "The app-wide cadence sample must expose long chat \(chatNumber)."
+            )
+            entry.tap()
+
+            let chat = app.otherElements["chat-detail:10,000-row performance lab \(chatNumber)"]
+            assertHittable(chat, timeout: 25, message: "The app-wide sample must enter chat \(chatNumber).")
+            let back = app.buttons["Back"]
+            XCTAssertTrue(
+                back.waitForExistence(timeout: 10) && back.isHittable,
+                "The app-wide sample must expose Back for chat \(chatNumber)."
+            )
+            back.tap()
+            assertHittable(
+                entry,
+                timeout: 20,
+                message: "The app-wide sample must return to the lab after chat \(chatNumber)."
+            )
+        }
+
+        // Scene sleep is a lifecycle boundary for the accumulator. This
+        // exercises pause/rebase accounting without turning background time
+        // into a fabricated callback gap; it is not a rendered-frame claim.
+        XCUIDevice.shared.press(.home)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        app.activate()
+        XCTAssertTrue(cycleLab.waitForExistence(timeout: 10))
+        XCTAssertTrue(stop.waitForExistence(timeout: 10) && stop.isHittable)
+
+        stop.tap()
+        let summary = app.staticTexts["chat-performance-app-wide-monitor-summary"]
+        XCTAssertTrue(summary.waitForExistence(timeout: 10))
+        let report = summary.label
+        XCTAssertTrue(report.contains("CADisplayLink main-run-loop callback timing only"))
+        XCTAssertTrue(report.contains("sample_duration_seconds="))
+        XCTAssertTrue(report.contains("phase_marker_scope="))
+        XCTAssertTrue(report.contains("p95_callback_gap_ms_upper_bin="))
+        XCTAssertTrue(report.contains("p99_callback_gap_ms_upper_bin="))
+        XCTAssertTrue(report.contains("interaction_duration_max_ms="))
+        XCTAssertTrue(report.contains("phase_callback_timing_coverage="))
+        XCTAssertTrue(report.contains("phase=entry phase_events=2"))
+        XCTAssertTrue(report.contains("phase=back phase_events=2"))
+        XCTAssertTrue(report.contains("phase=send"))
+        XCTAssertTrue(report.contains("phase=scene_pause"))
+
+        guard let callbackCountLine = report
+            .split(separator: "\n")
+            .first(where: { $0.hasPrefix("callbacks=") })
+        else {
+            XCTFail("The app-wide report must include its aggregate callback count.")
+            return
+        }
+        let callbackCountText = String(callbackCountLine.dropFirst("callbacks=".count))
+        guard let callbackCount = Int(callbackCountText) else {
+            XCTFail("The app-wide callback count must be a readable integer.")
+            return
+        }
+        XCTAssertGreaterThan(callbackCount, 0, "The monitor must observe callbacks, without a smoothness threshold.")
+        attachPlainText(report, named: "app-wide-cadence-timing-summary")
     }
 
     @MainActor

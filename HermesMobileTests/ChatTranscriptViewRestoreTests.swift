@@ -5,26 +5,63 @@ import XCTest
 
 @MainActor
 final class ChatTranscriptViewRestoreTests: XCTestCase {
-    func testInitialMountWithRestoreTokenRequestsSavedMessageRestore() async throws {
+    func testFirstDisplayLinkTickAfterWindowAttachmentTargetsSavedMessage() async throws {
         let appeared = expectation(description: "transcript enters the SwiftUI view lifecycle")
-        let restoreRequested = expectation(description: "initial nonzero restore token is observed")
-        restoreRequested.assertForOverFulfill = false
+        let firstDisplayLinkTick = expectation(description: "first display-link tick after window attachment is sampled")
+        let proxyFallback = expectation(description: "proxy fallback is unnecessary after initial positioning")
+        proxyFallback.isInverted = true
+        var latestVisibleRowID: String?
+        var firstDisplayLinkTickVisibleRowID: String?
 
         let window = try mountTranscript(
             restoreScrollToken: 1,
-            restoreTarget: .message(id: "message-0"),
+            restoreTarget: .message(id: "message-20"),
+            onAppear: { appeared.fulfill() },
+            onRestoreLatest: { _ in
+                XCTFail("A saved-message restore must not request the latest content.")
+            },
+            onRestoreMessage: { _, _ in
+                proxyFallback.fulfill()
+            },
+            onVisibleRowIDChange: { id in
+                latestVisibleRowID = id
+            },
+            onFirstDisplayLinkTick: {
+                firstDisplayLinkTickVisibleRowID = latestVisibleRowID
+                firstDisplayLinkTick.fulfill()
+            }
+        )
+
+        await fulfillment(of: [appeared, firstDisplayLinkTick], timeout: 1)
+        await fulfillment(of: [proxyFallback], timeout: 0.2)
+        XCTAssertEqual(
+            firstDisplayLinkTickVisibleRowID,
+            "message-20",
+            "pre-window preference samples are not user-visible; the first display-link tick after window attachment must already target the saved row"
+        )
+        tearDown(window)
+    }
+
+    func testMissingSavedMessageKeepsBoundedProxyFallback() async throws {
+        let appeared = expectation(description: "transcript enters the SwiftUI view lifecycle")
+        let fallbackRequested = expectation(description: "missing lazy target requests a proxy fallback")
+        fallbackRequested.assertForOverFulfill = false
+
+        let window = try mountTranscript(
+            restoreScrollToken: 1,
+            restoreTarget: .message(id: "not-loaded"),
             onAppear: { appeared.fulfill() },
             onRestoreLatest: { _ in
                 XCTFail("A saved-message restore must not request the latest content.")
             },
             onRestoreMessage: { id, animated in
-                XCTAssertEqual(id, "message-0")
+                XCTAssertEqual(id, "not-loaded")
                 XCTAssertFalse(animated)
-                restoreRequested.fulfill()
+                fallbackRequested.fulfill()
             }
         )
 
-        await fulfillment(of: [appeared, restoreRequested], timeout: 1)
+        await fulfillment(of: [appeared, fallbackRequested], timeout: 1)
         tearDown(window)
     }
 
@@ -50,7 +87,9 @@ final class ChatTranscriptViewRestoreTests: XCTestCase {
         restoreTarget: ChatTranscriptRestoreTarget,
         onAppear: @escaping () -> Void,
         onRestoreLatest: @escaping (Bool) -> Void,
-        onRestoreMessage: @escaping (String, Bool) -> Void
+        onRestoreMessage: @escaping (String, Bool) -> Void,
+        onVisibleRowIDChange: @escaping (String?) -> Void = { _ in },
+        onFirstDisplayLinkTick: @escaping () -> Void = {}
     ) throws -> MountedWindowFixture {
         let messages = (0..<40).map { index in
             ChatMessage(
@@ -91,7 +130,7 @@ final class ChatTranscriptViewRestoreTests: XCTestCase {
             showsThinkingAndToolCards: true,
             showsAssistantTypingIndicator: false,
             showsScrollToBottomButton: false,
-            shouldFollowLatestMessage: true,
+            shouldFollowLatestMessage: restoreTarget == .latest,
             latestTranscriptMessageRole: "assistant",
             isScrolledNearBottom: false,
             activeStreamID: nil,
@@ -129,6 +168,7 @@ final class ChatTranscriptViewRestoreTests: XCTestCase {
             onScrollToTranscriptMessage: { _, id, animated in
                 onRestoreMessage(id, animated)
             },
+            onVisibleTranscriptRowIDChange: onVisibleRowIDChange,
             onPreviewAttachment: { _, _ in },
             onPreviewTranscriptMedia: { _ in },
             onToggleListening: { _ in },
@@ -144,7 +184,11 @@ final class ChatTranscriptViewRestoreTests: XCTestCase {
         )
 
         let hostingController = UIHostingController(
-            rootView: MountedChatTranscriptRoot(transcript: view, onAppear: onAppear)
+            rootView: MountedChatTranscriptRoot(
+                transcript: view,
+                onAppear: onAppear,
+                onFirstDisplayLinkTick: onFirstDisplayLinkTick
+            )
         )
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
         let windowScene = try XCTUnwrap(
@@ -176,8 +220,61 @@ private struct MountedWindowFixture {
 private struct MountedChatTranscriptRoot: View {
     let transcript: ChatTranscriptView
     let onAppear: () -> Void
+    let onFirstDisplayLinkTick: () -> Void
 
     var body: some View {
-        transcript.onAppear(perform: onAppear)
+        transcript
+            .background {
+                WindowAttachmentDisplayLinkProbe(onFirstDisplayLinkTick: onFirstDisplayLinkTick)
+            }
+            .onAppear(perform: onAppear)
+    }
+}
+
+private struct WindowAttachmentDisplayLinkProbe: UIViewRepresentable {
+    let onFirstDisplayLinkTick: () -> Void
+
+    func makeUIView(context: Context) -> WindowAttachmentDisplayLinkProbeView {
+        let view = WindowAttachmentDisplayLinkProbeView()
+        view.onFirstDisplayLinkTick = onFirstDisplayLinkTick
+        return view
+    }
+
+    func updateUIView(_ uiView: WindowAttachmentDisplayLinkProbeView, context: Context) {
+        uiView.onFirstDisplayLinkTick = onFirstDisplayLinkTick
+    }
+
+    static func dismantleUIView(_ uiView: WindowAttachmentDisplayLinkProbeView, coordinator: ()) {
+        uiView.stop()
+    }
+}
+
+private final class WindowAttachmentDisplayLinkProbeView: UIView {
+    var onFirstDisplayLinkTick: (() -> Void)?
+    private var displayLink: CADisplayLink?
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        guard window != nil else {
+            stop()
+            return
+        }
+        guard displayLink == nil else { return }
+
+        let displayLink = CADisplayLink(target: self, selector: #selector(displayLinkDidTick(_:)))
+        displayLink.add(to: .main, forMode: .common)
+        self.displayLink = displayLink
+    }
+
+    @objc private func displayLinkDidTick(_ displayLink: CADisplayLink) {
+        stop()
+        let callback = onFirstDisplayLinkTick
+        onFirstDisplayLinkTick = nil
+        callback?()
+    }
+
+    func stop() {
+        displayLink?.invalidate()
+        displayLink = nil
     }
 }

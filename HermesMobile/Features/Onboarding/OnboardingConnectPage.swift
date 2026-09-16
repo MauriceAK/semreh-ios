@@ -38,7 +38,7 @@ struct OnboardingConnectPage: View {
                         .font(.title3.weight(.bold))
                         .foregroundStyle(OnboardingTheme.primaryText(for: colorScheme, palette: palette))
 
-                    Text("Enter your Hermes server’s HTTPS address, or scan its setup code. Need an address? Open connection help below.")
+                    Text("Enter your Hermes server’s HTTPS address, or scan a QR containing that address. Review it, then sign in. Need an address? Open connection help below.")
                         .font(.footnote)
                         .foregroundStyle(OnboardingTheme.secondaryText(for: colorScheme, palette: palette))
                         .fixedSize(horizontal: false, vertical: true)
@@ -242,7 +242,7 @@ private struct PairingOriginReviewView: View {
                     .padding(24)
                 }
             }
-            .navigationTitle("Setup Code")
+            .navigationTitle("Review Server Address")
             .navigationBarTitleDisplayMode(.inline)
         }
     }

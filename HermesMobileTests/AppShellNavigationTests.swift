@@ -3,12 +3,52 @@ import XCTest
 
 @MainActor
 final class AppShellNavigationTests: XCTestCase {
-    func testBirdTabUsesNonemptyTemplateArtwork() {
-        let image = BirdTabIcon.image
-        XCTAssertEqual(image.size.width, 25, accuracy: 0.1)
-        XCTAssertEqual(image.size.height, 25, accuracy: 0.1)
-        XCTAssertEqual(image.renderingMode, .alwaysTemplate)
-        XCTAssertNotNil(image.cgImage)
+    func testBirdTabProvidesOutlineAndFilledTemplateArtwork() {
+        let outline = BirdTabIcon.image
+        let filled = BirdTabIcon.selectedImage
+        for image in [outline, filled] {
+            XCTAssertEqual(image.size.width, 25, accuracy: 0.1)
+            XCTAssertEqual(image.size.height, 25, accuracy: 0.1)
+            XCTAssertEqual(image.renderingMode, .alwaysTemplate)
+            XCTAssertNotNil(image.cgImage)
+        }
+
+        XCTAssertLessThan(alphaAtCenter(of: outline), 32, "The inactive bird should remain an outline.")
+        XCTAssertGreaterThan(alphaAtCenter(of: filled), 223, "The selected bird should fill its body silhouette.")
+    }
+
+    func testPrimaryTabSymbolsUseOutlineWhenInactiveAndFillWhenSelected() {
+        XCTAssertEqual(AppShellSurface.sessions.tabBarSystemImage(isSelected: false), "bubble.left.and.bubble.right")
+        XCTAssertEqual(AppShellSurface.sessions.tabBarSystemImage(isSelected: true), "bubble.left.and.bubble.right.fill")
+        XCTAssertEqual(AppShellSurface.you.tabBarSystemImage(isSelected: false), "clock")
+        XCTAssertEqual(AppShellSurface.you.tabBarSystemImage(isSelected: true), "clock.fill")
+    }
+
+    private func alphaAtCenter(of image: UIImage, file: StaticString = #filePath, line: UInt = #line) -> UInt8 {
+        guard let cgImage = image.cgImage else {
+            XCTFail("The tab icon did not produce a CGImage.", file: file, line: line)
+            return 0
+        }
+
+        let width = cgImage.width
+        let height = cgImage.height
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        guard let context = CGContext(
+            data: &pixels,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: width * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            XCTFail("Could not create a bitmap context for the tab icon.", file: file, line: line)
+            return 0
+        }
+
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+        let centerIndex = ((height / 2) * width + width / 2) * 4 + 3
+        return pixels[centerIndex]
     }
 
     func testRootSettingsActionUsesOneGearDestination() {

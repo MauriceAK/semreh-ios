@@ -6,6 +6,13 @@ import CoreTransferable
 import UniformTypeIdentifiers
 import OSLog
 
+#if DEBUG
+private struct ChatTranscriptProxyGenerationDiagnostic {
+    let targetKey: String
+    let generation: Int
+}
+#endif
+
 private struct ImportedPhotoVideo: Transferable {
     let data: Data
 
@@ -424,8 +431,10 @@ private struct ListenPlaybackBar: View {
 
 struct ChatView: View {
     private let bottomAnchorID = "chat-bottom-anchor"
+    /// Keep ordinary transcript messages separated while compacting adjacent
+    /// Thinking/tool/action status blocks to the same restrained rhythm.
     private let transcriptMessageSpacing: CGFloat = 10
-    private let transcriptBlockSpacing: CGFloat = 6
+    private let transcriptBlockSpacing: CGFloat = 4
     private let composerAccessoryVerticalSpacing: CGFloat = 8
     private let activeRunStatusSpacerHeight: CGFloat = 36
     /// Keep a short, nearby return-to-latest motion readable without animating
@@ -482,6 +491,8 @@ struct ChatView: View {
     @State private var hasIssuedExplicitBottomScroll = false
 #if DEBUG
     @State private var explicitBottomScrollAttemptCount = 0
+    @State private var hasLoggedComposerCollapseForResize = false
+    @State private var pendingTranscriptProxyGenerationDiagnostic: ChatTranscriptProxyGenerationDiagnostic?
 #endif
     @State private var isLatestTranscriptRowVisible = false
     @State private var isTranscriptBottomVisible = false
@@ -644,9 +655,17 @@ struct ChatView: View {
             currentVoiceInputProfile: { viewModel.voiceInputProfileName },
             uploadAttachmentErrorMessage: viewModel.uploadAttachmentErrorMessage,
             onSend: {
+#if DEBUG
+                ChatPerformanceCadenceMonitor.begin(.send)
+                logChatScrollBoundary(event: "send_begin", decision: "composer_submit")
+#endif
                 Task { await sendDraftMessage() }
             },
             onSendVoiceNote: { data, filename in
+#if DEBUG
+                ChatPerformanceCadenceMonitor.begin(.send)
+                logChatScrollBoundary(event: "send_begin", decision: "voice_note_submit")
+#endif
                 Task { await sendVoiceNote(audioData: data, filename: filename) }
             },
             onCancel: {
@@ -872,6 +891,9 @@ struct ChatView: View {
     /// required for the custom header button because it is outside the system
     /// navigation bar and therefore has no implicit pop action of its own.
     private func handleBackNavigation() {
+#if DEBUG
+        ChatPerformanceCadenceMonitor.begin(.back)
+#endif
         onParentBack?()
         dismiss()
     }
@@ -1115,6 +1137,9 @@ struct ChatView: View {
                 viewModel.stopListening()
             }
             .onAppear {
+#if DEBUG
+                ChatPerformanceCadenceMonitor.end(.entry)
+#endif
                 viewModel.setTranscriptPresentationActive(true)
                 guard !disablesExternalLifecycle else { return }
                 foregroundRefreshTask?.cancel()
@@ -1542,10 +1567,20 @@ struct ChatView: View {
                 await loadMessages()
             },
             onLoadOlderMessages: {
+#if DEBUG
+                let previousCancellationToken = transcriptRestoreCancellationToken
+#endif
                 didInteractBeforeTranscriptRestore = true
                 isTranscriptRestorePending = false
                 pendingTranscriptRestoreMessageID = nil
                 transcriptRestoreCancellationToken &+= 1
+#if DEBUG
+                logTranscriptRestoreBoundary(
+                    event: "transcript_restore_cancellation",
+                    decision: "older_messages_callback",
+                    previousCancellationToken: previousCancellationToken
+                )
+#endif
                 return await loadOlderMessages()
             },
             onUpdateScrollMetrics: updateScrollMetrics,
@@ -1635,6 +1670,7 @@ struct ChatView: View {
             transcriptRestoreCancellationToken: transcriptRestoreCancellationToken,
             followRejoinScrollToken: followRejoinScrollToken,
             isComposerResizing: isComposerResizing,
+            isUserInteractingWithScroll: isUserInteractingWithScroll,
             transcriptRenderRevision: viewModel.transcriptRenderRevision,
             outgoingInsertionScope: viewModel.outgoingInsertionScope,
             outgoingInsertionEvent: viewModel.outgoingInsertionEvent
@@ -1916,7 +1952,17 @@ struct ChatView: View {
     }
 
     private func loadOlderMessages() async -> Bool {
+#if DEBUG
+        let previousFollowLatest = shouldFollowLatestMessage
+#endif
         shouldFollowLatestMessage = false
+#if DEBUG
+        logChatScrollBoundary(
+            event: "follow_state_transition",
+            decision: "load_older_messages",
+            previousFollowLatest: previousFollowLatest
+        )
+#endif
         if !isReadingOlderTranscript {
             withAnimation(ChatMotion.quickState(reduceMotion: reduceMotion)) {
                 isReadingOlderTranscript = true
@@ -1953,6 +1999,9 @@ struct ChatView: View {
     }
 
     private func sendDraftMessage() async {
+#if DEBUG
+        defer { ChatPerformanceCadenceMonitor.end(.send) }
+#endif
         let submittedDraft = draftMessage
         let shouldRestoreFocusAfterSend = composerIsFocused
 
@@ -1997,6 +2046,9 @@ struct ChatView: View {
     }
 
     private func sendVoiceNote(audioData: Data, filename: String) async {
+#if DEBUG
+        defer { ChatPerformanceCadenceMonitor.end(.send) }
+#endif
         prepareTranscriptForExplicitSend()
 
         let didSend = await viewModel.sendVoiceNote(
@@ -2437,6 +2489,79 @@ struct ChatView: View {
         Task { await gitAvailabilityViewModel.refreshAfterExternalMutation() }
     }
 
+#if DEBUG
+    private func debugOpaqueTranscriptTargetKey(_ targetID: String) -> String {
+        // Use a deterministic opaque key for cross-boundary correlation without
+        // placing a transcript/render ID in the diagnostic stream.
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        for byte in targetID.utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 1_099_511_628_211
+        }
+        return String(hash, radix: 16)
+    }
+
+    private func logTranscriptRestoreBoundary(
+        event: String,
+        decision: String,
+        previousCancellationToken: Int? = nil
+    ) {
+        let previousCancellationValue = previousCancellationToken.map(String.init) ?? "none"
+        Self.transcriptScrollLogger.debug("""
+            event=\(event, privacy: .public) decision=\(decision, privacy: .public) \
+            restoreScrollToken=\(restoreScrollToken, privacy: .public) transcriptRestoreCancellationToken=\(transcriptRestoreCancellationToken, privacy: .public) \
+            previousCancellationToken=\(previousCancellationValue, privacy: .public) didRequestRestore=\(didRequestTranscriptRestore, privacy: .public) \
+            didInteractBeforeRestore=\(didInteractBeforeTranscriptRestore, privacy: .public) restorePending=\(isTranscriptRestorePending, privacy: .public) \
+            savedFollowLatest=\(shouldFollowLatestMessage, privacy: .public) userInteracting=\(isUserInteractingWithScroll, privacy: .public) \
+            followGeneration=\(followScrollGeneration, privacy: .public)
+            """)
+    }
+
+    private func logTranscriptProxyGenerationBoundary(
+        event: String,
+        decision: String,
+        targetKey: String,
+        generation: Int
+    ) {
+        Self.transcriptScrollLogger.debug("""
+            event=\(event, privacy: .public) decision=\(decision, privacy: .public) \
+            proxyTargetKey=\(targetKey, privacy: .public) generation=\(generation, privacy: .public) \
+            currentGeneration=\(followScrollGeneration, privacy: .public) userInteracting=\(isUserInteractingWithScroll, privacy: .public) \
+            directTranscriptRestore=\(isTranscriptRestorePending, privacy: .public) followLatest=\(shouldFollowLatestMessage, privacy: .public)
+            """)
+    }
+
+    /// Emits bounded, content-free ChatView scroll-boundary evidence. Metrics are
+    /// supplied only by an existing scroll callback; no per-sample state is kept.
+    private func logChatScrollBoundary(
+        event: String,
+        decision: String,
+        previousFollowLatest: Bool? = nil,
+        metrics: ChatScrollMetrics? = nil
+    ) {
+        if let previousFollowLatest, previousFollowLatest == shouldFollowLatestMessage {
+            return
+        }
+        let previousFollowValue = previousFollowLatest.map { $0 ? "true" : "false" } ?? "unknown"
+        let directInteractionValue = metrics.map { $0.isDirectlyInteracting ? "true" : "false" } ?? "unknown"
+        let deceleratingValue = metrics.map { $0.isDecelerating ? "true" : "false" } ?? "unknown"
+        let distanceValue = metrics.map { String(Double($0.distanceFromBottom)) } ?? "unknown"
+
+        Self.transcriptScrollLogger.debug("""
+            event=\(event, privacy: .public) decision=\(decision, privacy: .public) \
+            followLatest=\(shouldFollowLatestMessage, privacy: .public) previousFollowLatest=\(previousFollowValue, privacy: .public) \
+            directInteraction=\(directInteractionValue, privacy: .public) decelerating=\(deceleratingValue, privacy: .public) \
+            effectiveUserInteraction=\(isUserInteractingWithScroll, privacy: .public) explicitBottomDeceleration=\(isExplicitBottomDecelerationActive, privacy: .public) \
+            followGeneration=\(followScrollGeneration, privacy: .public) distanceFromBottom=\(distanceValue, privacy: .public) \
+            nearBottom=\(isScrolledNearBottom, privacy: .public) nearMotionBand=\(isNearBottomForMotion, privacy: .public) \
+            latestRowVisible=\(isLatestTranscriptRowVisible, privacy: .public) tailVisible=\(isTranscriptBottomVisible, privacy: .public) \
+            composerHeight=\(Double(composerHeight), privacy: .public) transcriptBottomInsetHeight=\(Double(transcriptBottomInsetHeight), privacy: .public) \
+            composerAccessorySpacerHeight=\(Double(composerAccessorySpacerHeight), privacy: .public) composerResizeGeneration=\(composerResizeGeneration, privacy: .public) composerResizing=\(isComposerResizing, privacy: .public) \
+            streamActive=\(viewModel.activeStreamID != nil, privacy: .public)
+            """)
+    }
+#endif
+
     private func handleResponseCompletionSideEffects() {
         if !viewModel.responseCompletionNeedsTranscriptRefresh {
             viewModel.cacheCompletedResponse(modelContext: modelContext)
@@ -2518,8 +2643,18 @@ struct ChatView: View {
         // The explicit jump owns positioning until its concrete tail arrives.
         // Re-enabling automatic anchoring or expanding the composer here races
         // lazy measurement and can turn an estimated offset into a blank tail.
+#if DEBUG
+        let previousFollowLatest = shouldFollowLatestMessage
+#endif
         shouldFollowLatestMessage = false
         isExplicitBottomScrollActive = true
+#if DEBUG
+        logChatScrollBoundary(
+            event: "follow_state_transition",
+            decision: "explicit_bottom_settling",
+            previousFollowLatest: previousFollowLatest
+        )
+#endif
 
         // Do not wait for a task hop before the first jump. In particular, an
         // old near-bottom/tail-visible metrics sample must not make the request
@@ -2613,7 +2748,17 @@ struct ChatView: View {
             """)
 #endif
         finishExplicitBottomScroll(generation: generation)
+#if DEBUG
+        let previousFollowLatest = shouldFollowLatestMessage
+#endif
         shouldFollowLatestMessage = true
+#if DEBUG
+        logChatScrollBoundary(
+            event: "follow_state_transition",
+            decision: "explicit_bottom_settled",
+            previousFollowLatest: previousFollowLatest
+        )
+#endif
         isReadingOlderTranscript = false
     }
 
@@ -2668,13 +2813,54 @@ struct ChatView: View {
         messageID: String,
         animated: Bool
     ) {
+#if DEBUG
+        let targetKey = debugOpaqueTranscriptTargetKey(messageID)
+        if let pendingDiagnostic = pendingTranscriptProxyGenerationDiagnostic {
+            logTranscriptProxyGenerationBoundary(
+                event: "transcript_proxy_generation",
+                decision: "superseded_before_fire",
+                targetKey: pendingDiagnostic.targetKey,
+                generation: pendingDiagnostic.generation
+            )
+            pendingTranscriptProxyGenerationDiagnostic = nil
+        }
+#endif
         followScrollGeneration += 1
         let generation = followScrollGeneration
+#if DEBUG
+        pendingTranscriptProxyGenerationDiagnostic = ChatTranscriptProxyGenerationDiagnostic(
+            targetKey: targetKey,
+            generation: generation
+        )
+        logTranscriptProxyGenerationBoundary(
+            event: "transcript_proxy_generation",
+            decision: "scheduled",
+            targetKey: targetKey,
+            generation: generation
+        )
+#endif
 
         Task { @MainActor in
             await Task.yield()
             try? await Task.sleep(nanoseconds: 16_000_000)
+#if DEBUG
+            let taskWasCancelled = Task.isCancelled
+            let generationChanged = generation != followScrollGeneration
+            guard !taskWasCancelled, !generationChanged else {
+                if pendingTranscriptProxyGenerationDiagnostic?.generation == generation {
+                    logTranscriptProxyGenerationBoundary(
+                        event: "transcript_proxy_generation",
+                        decision: taskWasCancelled ? "task_cancelled" : "generation_changed",
+                        targetKey: targetKey,
+                        generation: generation
+                    )
+                    pendingTranscriptProxyGenerationDiagnostic = nil
+                }
+                return
+            }
+#else
             guard !Task.isCancelled, generation == followScrollGeneration else { return }
+#endif
 
             if animated {
                 withAnimation(ChatMotion.quickState(reduceMotion: reduceMotion)) {
@@ -2683,6 +2869,17 @@ struct ChatView: View {
             } else {
                 proxy.scrollTo(messageID, anchor: .top)
             }
+#if DEBUG
+            if pendingTranscriptProxyGenerationDiagnostic?.generation == generation {
+                logTranscriptProxyGenerationBoundary(
+                    event: "transcript_proxy_generation",
+                    decision: "issued",
+                    targetKey: targetKey,
+                    generation: generation
+                )
+                pendingTranscriptProxyGenerationDiagnostic = nil
+            }
+#endif
         }
     }
 
@@ -2714,10 +2911,20 @@ struct ChatView: View {
             userScrollCooldownUntil = nil
         }
 
+#if DEBUG
+        let previousFollowLatest = shouldFollowLatestMessage
+#endif
         shouldFollowLatestMessage = true
         isReadingOlderTranscript = false
         followScrollGeneration += 1
         let generation = followScrollGeneration
+#if DEBUG
+        logChatScrollBoundary(
+            event: "follow_state_transition",
+            decision: isUserInitiated ? "user_follow_scroll" : "automatic_follow_scroll",
+            previousFollowLatest: previousFollowLatest
+        )
+#endif
 #if DEBUG
         Self.transcriptScrollLogger.debug("""
             event=follow_scroll_scheduled decision=await_layout targetKind=\(targetKind, privacy: .public) \
@@ -2853,11 +3060,25 @@ struct ChatView: View {
     private func handleComposerHeightChange(_ height: CGFloat) {
         guard abs(composerHeight - height) > 0.5 else { return }
 
+#if DEBUG
+        let previousComposerHeight = composerHeight
+        if height > 100, hasLoggedComposerCollapseForResize {
+            hasLoggedComposerCollapseForResize = false
+        }
+#endif
         if !isComposerResizing {
             composerResizeFollowIntent = shouldFollowLatestMessage
         }
         composerHeight = height
         isComposerResizing = true
+#if DEBUG
+        if previousComposerHeight > 100,
+           height <= 100,
+           !hasLoggedComposerCollapseForResize {
+            hasLoggedComposerCollapseForResize = true
+            logChatScrollBoundary(event: "composer_collapse", decision: "height_decreased")
+        }
+#endif
         composerResizeGeneration &+= 1
         let generation = composerResizeGeneration
 
@@ -2913,11 +3134,30 @@ struct ChatView: View {
             return
         }
 
+#if DEBUG
+        let previousFollowLatest = shouldFollowLatestMessage
+#endif
         shouldFollowLatestMessage = viewModel.savedFollowingLatest
+#if DEBUG
+        logChatScrollBoundary(
+            event: "follow_state_transition",
+            decision: "restore_saved_follow_intent",
+            previousFollowLatest: previousFollowLatest
+        )
+#endif
         restoreScrollToken += 1
+#if DEBUG
+        logTranscriptRestoreBoundary(
+            event: "transcript_restore_request",
+            decision: "saved_target_requested"
+        )
+#endif
     }
 
     private func updateScrollMetrics(_ metrics: ChatScrollMetrics) {
+#if DEBUG
+        let previousFollowLatest = shouldFollowLatestMessage
+#endif
         if metrics.isDirectlyInteracting {
             didInteractBeforeTranscriptRestore = true
             isTranscriptRestorePending = false
@@ -3025,6 +3265,16 @@ struct ChatView: View {
                 }
             }
         }
+#if DEBUG
+        if previousFollowLatest != shouldFollowLatestMessage {
+            logChatScrollBoundary(
+                event: "follow_state_transition",
+                decision: shouldFollowLatestMessage ? "metrics_confirmed_near_bottom" : "metrics_effective_user_interaction",
+                previousFollowLatest: previousFollowLatest,
+                metrics: metrics
+            )
+        }
+#endif
     }
 
     private var isAutoFollowScrollPaused: Bool {
@@ -3046,9 +3296,19 @@ struct ChatView: View {
         isTranscriptRestorePending = false
         pendingTranscriptRestoreMessageID = nil
         transcriptRestoreCancellationToken &+= 1
+#if DEBUG
+        let previousFollowLatest = shouldFollowLatestMessage
+#endif
         shouldFollowLatestMessage = true
         userScrollCooldownUntil = nil
         followScrollGeneration += 1
+#if DEBUG
+        logChatScrollBoundary(
+            event: "follow_state_transition",
+            decision: "explicit_send",
+            previousFollowLatest: previousFollowLatest
+        )
+#endif
         if isReadingOlderTranscript {
             withAnimation(ChatMotion.quickState(reduceMotion: reduceMotion)) {
                 isReadingOlderTranscript = false

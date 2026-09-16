@@ -32,6 +32,16 @@ enum AppShellSurface: String, CaseIterable, Hashable, Identifiable {
         case .you: "clock"
         }
     }
+    /// Explicitly select the filled SF Symbol variant for the active system-icon tab.
+    /// Bots uses its custom bird artwork, which has separate outline and filled images.
+    func tabBarSystemImage(isSelected: Bool) -> String {
+        guard isSelected else { return systemImage }
+        return switch self {
+        case .control: systemImage
+        case .sessions: "bubble.left.and.bubble.right.fill"
+        case .you: "clock.fill"
+        }
+    }
     var showsPrimaryAction: Bool { self == .sessions }
 }
 
@@ -151,7 +161,10 @@ struct AppShellView: View {
                 .toolbarBackground(.visible, for: .navigationBar)
             }
             .modifier(ShellTabReveal(isSelected: selectedSurface == .control))
-            .tabItem { Image(uiImage: BirdTabIcon.image).accessibilityLabel("Bots") }
+            .tabItem {
+                Image(uiImage: selectedSurface == .control ? BirdTabIcon.selectedImage : BirdTabIcon.image)
+                    .accessibilityLabel("Bots")
+            }
             .tag(AppShellSurface.control)
 
             SessionListView(
@@ -170,7 +183,11 @@ struct AppShellView: View {
             )
             .modifier(ShellTabReveal(isSelected: selectedSurface == .sessions))
             .toolbar(isSessionConversationPresented ? .hidden : .visible, for: .tabBar)
-            .tabItem { Image(systemName: AppShellSurface.sessions.systemImage).accessibilityLabel("Sessions") }
+            .tabItem {
+                Image(systemName: AppShellSurface.sessions.tabBarSystemImage(isSelected: selectedSurface == .sessions))
+                    .accessibilityLabel("Sessions")
+                    .environment(\.symbolVariants, .none)
+            }
             .tag(AppShellSurface.sessions)
 
             NavigationStack {
@@ -182,7 +199,11 @@ struct AppShellView: View {
                     .toolbarBackground(.visible, for: .navigationBar)
             }
             .modifier(ShellTabReveal(isSelected: selectedSurface == .you))
-            .tabItem { Image(systemName: AppShellSurface.you.systemImage).accessibilityLabel("Activity") }
+            .tabItem {
+                Image(systemName: AppShellSurface.you.tabBarSystemImage(isSelected: selectedSurface == .you))
+                    .accessibilityLabel("Activity")
+                    .environment(\.symbolVariants, .none)
+            }
             .tag(AppShellSurface.you)
         }
         .onChange(of: selectedSurface) { oldValue, newValue in

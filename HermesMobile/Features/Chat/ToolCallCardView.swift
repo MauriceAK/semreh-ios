@@ -19,9 +19,7 @@ struct ToolCallCardView: View {
 
         VStack(alignment: .leading, spacing: isExpanded ? 8 : 0) {
             Button {
-                withAnimation(ChatMotion.disclosure(reduceMotion: reduceMotion)) {
-                    userToggledExpansion = !isExpanded
-                }
+                toggleExpansion()
             } label: {
                 header(statusDisplay: statusDisplay)
             }
@@ -31,7 +29,7 @@ struct ToolCallCardView: View {
 
             if isExpanded {
                 expandedContent(statusDisplay: statusDisplay)
-                    .transition(ChatMotion.disclosureTransition(reduceMotion: reduceMotion))
+                    .transition(disclosureTransition)
             }
         }
         .padding(.bottom, isExpanded ? 4 : 0)
@@ -40,6 +38,21 @@ struct ToolCallCardView: View {
         // content that must stay left-to-right inside an RTL message (#259). The
         // group's summary header above (ToolActivityGroupView) still mirrors.
         .forcedLeftToRight()
+    }
+
+    private var disclosureTransition: AnyTransition {
+        reduceMotion ? .identity : ChatMotion.disclosureTransition(reduceMotion: false)
+    }
+
+    private func toggleExpansion() {
+        let update = { userToggledExpansion = !isExpanded }
+        if reduceMotion {
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction, update)
+        } else {
+            withAnimation(ChatMotion.disclosure(reduceMotion: false), update)
+        }
     }
 
     private func expandedContent(statusDisplay: ToolCallStatusDisplay) -> some View {
@@ -75,14 +88,14 @@ struct ToolCallCardView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     titleText
                     if let collapsedText = statusDisplay.collapsedText {
-                        TranscriptStatusPill(text: collapsedText, color: statusColor)
+                        collapsedStatus(text: collapsedText)
                     }
                 }
             } else {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     titleText
                     if let collapsedText = statusDisplay.collapsedText {
-                        TranscriptStatusPill(text: collapsedText, color: statusColor)
+                        collapsedStatus(text: collapsedText)
                     }
                 }
             }
@@ -94,6 +107,15 @@ struct ToolCallCardView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .frame(minHeight: 44)
         .contentShape(Rectangle())
+    }
+
+    @ViewBuilder
+    private func collapsedStatus(text: String) -> some View {
+        if toolCall.isError == true {
+            TranscriptStatusPill(text: text, color: statusColor)
+        } else {
+            ToolCallStatusCaption(text: text, color: statusColor)
+        }
     }
 
     private var titleText: some View {
@@ -203,6 +225,19 @@ struct ToolCallCardView: View {
             .font(AppFont.mono(style: .caption))
             .foregroundStyle(.primary)
             .textSelection(.enabled)
+    }
+}
+
+private struct ToolCallStatusCaption: View {
+    let text: String
+    let color: Color
+
+    var body: some View {
+        Text(text)
+            .font(AppFont.caption2(weight: .semibold))
+            .foregroundStyle(color)
+            .lineLimit(1)
+            .truncationMode(.tail)
     }
 }
 

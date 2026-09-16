@@ -38,14 +38,12 @@ struct MarkerMessageCardView: View {
 
         VStack(alignment: .leading, spacing: isExpanded ? 4 : 0) {
             Button {
-                withAnimation(ChatMotion.disclosure(reduceMotion: reduceMotion)) {
-                    isExpanded.toggle()
-                }
+                toggleExpansion()
             } label: {
                 header(summary: summary)
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("\(kind.title), \(summary)")
+            .accessibilityLabel(summary.map { "\(kind.title), \($0)" } ?? kind.title)
             .accessibilityHint(isExpanded ? String(localized: "Double tap to collapse details.") : String(localized: "Double tap to expand details."))
 
             if isExpanded {
@@ -59,7 +57,7 @@ struct MarkerMessageCardView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .transition(ChatMotion.disclosureTransition(reduceMotion: reduceMotion))
+                .transition(disclosureTransition)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -82,8 +80,8 @@ struct MarkerMessageCardView: View {
         }
     }
 
-    private func header(summary: String) -> some View {
-        HStack(alignment: usesStackedHeader ? .top : .center, spacing: 8) {
+    private func header(summary: String?) -> some View {
+        HStack(alignment: usesStackedHeader ? .top : .center, spacing: 6) {
             Image(systemName: iconName)
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(.secondary)
@@ -92,20 +90,20 @@ struct MarkerMessageCardView: View {
             if usesStackedHeader {
                 VStack(alignment: .leading, spacing: 2) {
                     titleText
-                    summaryText(summary, lineLimit: 2)
+                    HStack(alignment: .firstTextBaseline, spacing: 4) {
+                        if let summary {
+                            summaryText(summary, lineLimit: 2)
+                        }
+                        disclosureChevron
+                    }
                 }
             } else {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    titleText
+                titleText
+                if let summary {
                     summaryText(summary, lineLimit: 1)
                 }
+                disclosureChevron
             }
-
-            Spacer(minLength: 6)
-
-            Image(systemName: isExpanded ? "chevron.down" : "chevron.forward")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .frame(minHeight: 44)
@@ -120,13 +118,35 @@ struct MarkerMessageCardView: View {
     }
 
     private func summaryText(_ value: String, lineLimit: Int) -> some View {
-        Text(value)
+        Text("· \(value)")
             .font(AppFont.caption())
             .foregroundStyle(.secondary)
             .lineLimit(lineLimit)
+            .truncationMode(.tail)
     }
 
-    private func summary(for value: String) -> String {
+    private var disclosureChevron: some View {
+        Image(systemName: isExpanded ? "chevron.down" : "chevron.forward")
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+    }
+
+    private var disclosureTransition: AnyTransition {
+        reduceMotion ? .identity : ChatMotion.disclosureTransition(reduceMotion: false)
+    }
+
+    private func toggleExpansion() {
+        let update = { isExpanded.toggle() }
+        if reduceMotion {
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction, update)
+        } else {
+            withAnimation(ChatMotion.disclosure(reduceMotion: false), update)
+        }
+    }
+
+    private func summary(for value: String) -> String? {
         let oneLine = value
             .replacingOccurrences(of: "\n", with: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -140,13 +160,13 @@ struct MarkerMessageCardView: View {
 
         if kind == .preservedTaskList {
             guard let latestTask = MarkerMessageCardPresentation.latestTaskSummary(in: value) else {
-                return kind.title
+                return nil
             }
             return truncated(latestTask)
         }
 
         if oneLine.isEmpty {
-            return kind.title
+            return nil
         }
 
         return truncated(oneLine)

@@ -52,6 +52,22 @@ struct AgentRunActivityAttributes: ActivityAttributes {
     }
 }
 
+extension AgentRunActivityAttributes.ContentState {
+    func displayStatus(systemIsStale: Bool = false) -> String {
+        if !isFinal && (isStale || systemIsStale) {
+            return String(localized: "Last known status")
+        }
+        return status.title
+    }
+
+    func displayDetail(systemIsStale: Bool = false) -> String? {
+        if !isFinal && (isStale || systemIsStale) { return nil }
+        if let errorSummary, !errorSummary.isEmpty { return errorSummary }
+        if !responseExcerpt.isEmpty { return responseExcerpt }
+        return currentActivity.isEmpty || currentActivity == status.title ? nil : currentActivity
+    }
+}
+
 enum AgentRunActivityStatus: String, Codable, Hashable, CaseIterable {
     case starting
     case thinking

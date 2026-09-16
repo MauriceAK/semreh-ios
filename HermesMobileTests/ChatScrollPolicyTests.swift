@@ -7,18 +7,111 @@ final class ChatScrollPolicyTests: XCTestCase {
         XCTAssertEqual(ChatScrollPolicy.initialTranscriptAnchor, .bottom)
     }
 
-    func testTranscriptSizeChangesStayBottomAnchoredOnlyWhileFollowingLatest() {
+    func testTranscriptSizeChangesStayBottomAnchoredOnlyWhileFollowingLatestIncludingComposerResize() {
         XCTAssertEqual(
             ChatScrollPolicy.sizeChangeAnchor(shouldFollowLatestMessage: true),
             .bottom
         )
         XCTAssertNil(ChatScrollPolicy.sizeChangeAnchor(shouldFollowLatestMessage: false))
-        XCTAssertNil(
+        XCTAssertEqual(
             ChatScrollPolicy.sizeChangeAnchor(
                 shouldFollowLatestMessage: true,
                 isComposerResizing: true
+            ),
+            .bottom
+        )
+        XCTAssertNil(
+            ChatScrollPolicy.sizeChangeAnchor(
+                shouldFollowLatestMessage: false,
+                isComposerResizing: true
             )
         )
+    }
+
+    func testMeasuredLayoutFollowDetectsGrowthButNotOffsetOnlySamples() {
+        var state = ChatTranscriptLayoutFollowState()
+
+        XCTAssertEqual(state.recordContentHeight(400), .initial)
+        XCTAssertEqual(state.recordContentHeight(400.25), .unchanged)
+        XCTAssertEqual(state.recordContentHeight(400), .unchanged)
+        XCTAssertEqual(state.recordContentHeight(350), .shrank)
+        XCTAssertEqual(state.recordContentHeight(470), .grew)
+        XCTAssertEqual(state.recordContentHeight(470), .unchanged)
+    }
+
+    func testMeasuredLayoutFollowAllowsLateCompletionGrowth() {
+        XCTAssertTrue(
+            ChatTranscriptLayoutFollowPolicy.shouldSchedule(
+                change: .grew,
+                hasRealizedLatestContent: true,
+                shouldFollowLatestMessage: true,
+                isUserInteracting: false,
+                isDecelerating: false,
+                hasPendingRestore: false,
+                hasExplicitBottomRequest: false,
+                isPaging: false
+            ),
+            "a measured rich-layout growth after streaming completion can use the existing latest-content proxy"
+        )
+    }
+
+    func testMeasuredLayoutFollowCadenceCoalescesBeforeIssuingProxyCommands() {
+        XCTAssertGreaterThan(ChatTranscriptLayoutFollowPolicy.coalescingDelay, 0)
+        XCTAssertGreaterThanOrEqual(
+            ChatTranscriptLayoutFollowPolicy.minimumCommandInterval,
+            ChatTranscriptLayoutFollowPolicy.coalescingDelay
+        )
+    }
+
+    func testMeasuredLayoutFollowRejectsReaderGestureRestoreExplicitAndPaging() {
+        let blockedCases: [(String, Bool, Bool, Bool, Bool, Bool, Bool)] = [
+            ("reader", false, false, false, false, false, false),
+            ("gesture", true, true, false, false, false, false),
+            ("deceleration", true, false, true, false, false, false),
+            ("restore", true, false, false, true, false, false),
+            ("explicit jump", true, false, false, false, true, false),
+            ("older paging", true, false, false, false, false, true)
+        ]
+
+        for (name, shouldFollow, isInteracting, isDecelerating, hasRestore, hasExplicit, isPaging) in blockedCases {
+            XCTAssertFalse(
+                ChatTranscriptLayoutFollowPolicy.shouldSchedule(
+                    change: .grew,
+                    hasRealizedLatestContent: true,
+                    shouldFollowLatestMessage: shouldFollow,
+                    isUserInteracting: isInteracting,
+                    isDecelerating: isDecelerating,
+                    hasPendingRestore: hasRestore,
+                    hasExplicitBottomRequest: hasExplicit,
+                    isPaging: isPaging
+                ),
+                "measured follow must not issue a proxy correction during \(name)"
+            )
+        }
+
+        XCTAssertFalse(
+            ChatTranscriptLayoutFollowPolicy.shouldSchedule(
+                change: .grew,
+                hasRealizedLatestContent: false,
+                shouldFollowLatestMessage: true,
+                isUserInteracting: false,
+                isDecelerating: false,
+                hasPendingRestore: false,
+                hasExplicitBottomRequest: false,
+                isPaging: false
+            ),
+            "a correction waits for a realized latest row/tail preference"
+        )
+    }
+
+    func testMeasuredLayoutFollowStateResetInvalidatesScopePendingGrowth() {
+        var state = ChatTranscriptLayoutFollowState()
+
+        XCTAssertEqual(state.recordContentHeight(300), .initial)
+        XCTAssertEqual(state.recordContentHeight(360), .grew)
+        state.reset()
+        XCTAssertNil(state.lastContentHeight)
+        XCTAssertEqual(state.recordContentHeight(360), .initial)
     }
 
     func testVisibleTranscriptPolicyChoosesTopmostPartiallyVisibleRow() {
@@ -159,6 +252,19 @@ final class ChatScrollPolicyTests: XCTestCase {
                 visibleCachedRowCount: 0
             ),
             .evaluateEmptyCache
+        )
+    }
+
+    func testActivationProbeTreatsNonemptyButOffscreenCacheAsEmptyFallback() {
+        XCTAssertEqual(
+            ChatTranscriptActivationProbeDisposition.resolve(
+                currentFramesGeneration: 12,
+                activationBaselineFramesGeneration: 12,
+                cachedFrameCount: 8,
+                visibleCachedRowCount: 0
+            ),
+            .evaluateEmptyCache,
+            "stale offscreen frames must not leave a blank/out-of-range viewport waiting forever"
         )
     }
 
@@ -312,6 +418,248 @@ final class ChatScrollPolicyTests: XCTestCase {
                 afterFrame: nil
             )
         )
+    }
+
+    func testOlderPageEarlyPreferenceSurvivesOldViewPassUntilEligibleSnapshot() {
+        var reconciliation = ChatTranscriptPagingReconciliationState()
+
+        // The row preference arrives while the load await is still pending.
+        reconciliation.recordPreferenceBeforeLoadCompletion()
+        XCTAssertTrue(reconciliation.hasPendingEarlyPreference)
+        XCTAssertTrue(
+            reconciliation.shouldRequestFreshViewPassAfterLoad(didLoad: true),
+            "a successful load must request one fresh view pass"
+        )
+
+        // The token's first pass can still contain the old 120-row snapshot.
+        // It must not consume the request or emit a terminal reconciliation.
+        XCTAssertFalse(
+            reconciliation.consumeIfEligible(
+                loadCompleted: true,
+                transcriptChanged: false,
+                firstLoadedIDChanged: false
+            )
+        )
+        XCTAssertTrue(
+            reconciliation.hasPendingEarlyPreference,
+            "the request must survive the stale token pass"
+        )
+
+        // The later 166-row snapshot has the new first loaded ID and is the
+        // sole eligible pass that may consume the request.
+        XCTAssertTrue(
+            reconciliation.consumeIfEligible(
+                loadCompleted: true,
+                transcriptChanged: true,
+                firstLoadedIDChanged: true
+            )
+        )
+        XCTAssertFalse(reconciliation.hasPendingEarlyPreference)
+        XCTAssertFalse(
+            reconciliation.consumeIfEligible(
+                loadCompleted: true,
+                transcriptChanged: true,
+                firstLoadedIDChanged: true
+            ),
+            "an eligible prepend must reconcile at most once"
+        )
+
+        reconciliation.reset()
+        reconciliation.recordPreferenceBeforeLoadCompletion()
+        XCTAssertFalse(
+            reconciliation.shouldRequestFreshViewPassAfterLoad(didLoad: false),
+            "a no-progress load must not schedule a fresh reconcile"
+        )
+    }
+
+    func testOlderPageMissingAnchorUsesOneProxyRealizationBeforeMeasuredCorrection() {
+        var reconciliation = ChatTranscriptPagingReconciliationState()
+
+        // The load's completion token can first revisit the old 120-row
+        // snapshot. It must not issue a realization or consume the request.
+        reconciliation.recordPreferenceBeforeLoadCompletion()
+        XCTAssertEqual(
+            reconciliation.actionForEligibleSnapshot(
+                loadCompleted: true,
+                transcriptChanged: false,
+                firstLoadedIDChanged: false,
+                hasAnchorFrame: false
+            ),
+            .waitForFreshSnapshot
+        )
+        XCTAssertTrue(reconciliation.hasPendingEarlyPreference)
+
+        // The 166-row snapshot is eligible, but the lazy stack currently
+        // exposes only the prepended boundary. Request the existing proxy once
+        // so the durable anchor can be measured; do not guess an offset.
+        XCTAssertEqual(
+            reconciliation.actionForEligibleSnapshot(
+                loadCompleted: true,
+                transcriptChanged: true,
+                firstLoadedIDChanged: true,
+                hasAnchorFrame: false
+            ),
+            .requestAnchorRealization
+        )
+        XCTAssertTrue(reconciliation.hasRequestedAnchorRealization)
+
+        // A repeated preference while the row is still unrealized cannot start
+        // another scroll command. Once the proxy realizes the row, the normal
+        // measured correction path is the sole terminal action.
+        XCTAssertEqual(
+            reconciliation.actionForEligibleSnapshot(
+                loadCompleted: true,
+                transcriptChanged: true,
+                firstLoadedIDChanged: true,
+                hasAnchorFrame: false
+            ),
+            .waitForFreshSnapshot
+        )
+        XCTAssertEqual(
+            reconciliation.actionForEligibleSnapshot(
+                loadCompleted: true,
+                transcriptChanged: true,
+                firstLoadedIDChanged: true,
+                hasAnchorFrame: true
+            ),
+            .applyMeasuredCorrection
+        )
+        XCTAssertFalse(reconciliation.hasPendingEarlyPreference)
+        XCTAssertFalse(reconciliation.hasRequestedAnchorRealization)
+
+        // Gesture/restore/scope cancellation uses the transcript's existing
+        // reset path. A later page may request one fresh realization, but the
+        // cancelled page cannot reuse the old request.
+        reconciliation.reset()
+        XCTAssertEqual(
+            reconciliation.actionForEligibleSnapshot(
+                loadCompleted: true,
+                transcriptChanged: true,
+                firstLoadedIDChanged: true,
+                hasAnchorFrame: false
+            ),
+            .requestAnchorRealization
+        )
+    }
+
+    func testOlderPagingTransfersAfterConfirmedRestoreButNotDuringCompetingRestore() {
+        // The production guard keeps an unconfirmed initial restore ahead of a
+        // page, including the native-seed-only interval before a restore task
+        // exists.
+        XCTAssertTrue(
+            ChatTranscriptRestorePagingOwnershipPolicy.shouldKeepRestoreOwner(
+                hasSettlementTask: true,
+                isInitialRestoreInProgress: true,
+                hasConfirmedTargetGeometry: false,
+                isInitialRestorePending: true
+            )
+        )
+        XCTAssertTrue(
+            ChatTranscriptRestorePagingOwnershipPolicy.shouldKeepRestoreOwner(
+                hasSettlementTask: false,
+                isInitialRestoreInProgress: false,
+                hasConfirmedTargetGeometry: false,
+                isInitialRestorePending: true
+            )
+        )
+
+        // The actual handoff is tied to the saved row's identity and an
+        // attached first-visible sample. This models the production prefetch
+        // anchor, which can be the first callback that still has that sample.
+        let savedTargetConfirmed =
+            ChatTranscriptRestorePagingOwnershipPolicy.hasConfirmedVisibleInitialTarget(
+                initialRestoreTargetID: "saved-row",
+                firstVisibleMessageID: "saved-row",
+                isScrollViewAttached: true
+            )
+        XCTAssertTrue(savedTargetConfirmed)
+        XCTAssertFalse(
+            ChatTranscriptRestorePagingOwnershipPolicy.hasConfirmedVisibleInitialTarget(
+                initialRestoreTargetID: "saved-row",
+                firstVisibleMessageID: "saved-row",
+                isScrollViewAttached: false
+            ),
+            "a pre-window preference cannot release initial restore ownership"
+        )
+        XCTAssertFalse(
+            ChatTranscriptRestorePagingOwnershipPolicy.hasConfirmedVisibleInitialTarget(
+                initialRestoreTargetID: "saved-row",
+                firstVisibleMessageID: "different-row",
+                isScrollViewAttached: true
+            ),
+            "an unrelated visible row cannot release the saved restore"
+        )
+        XCTAssertFalse(
+            ChatTranscriptRestorePagingOwnershipPolicy.shouldKeepRestoreOwner(
+                hasSettlementTask: true,
+                isInitialRestoreInProgress: true,
+                hasConfirmedTargetGeometry: savedTargetConfirmed,
+                isInitialRestorePending: true
+            ),
+            "a confirmed saved row transfers ownership to paging"
+        )
+
+        // A first-visible saved-row sample is the explicit ownership handoff;
+        // it must not be treated like an active competing restore task.
+        XCTAssertFalse(
+            ChatTranscriptRestorePagingOwnershipPolicy.shouldKeepRestoreOwner(
+                hasSettlementTask: true,
+                isInitialRestoreInProgress: true,
+                hasConfirmedTargetGeometry: true,
+                isInitialRestorePending: true
+            )
+        )
+        XCTAssertTrue(
+            ChatTranscriptRestorePagingOwnershipPolicy.shouldKeepRestoreOwner(
+                hasSettlementTask: true,
+                isInitialRestoreInProgress: false,
+                hasConfirmedTargetGeometry: true,
+                isInitialRestorePending: false
+            ),
+            "activation recovery remains a competing restore owner"
+        )
+
+        var reconciliation = ChatTranscriptPagingReconciliationState()
+        reconciliation.recordPreferenceBeforeLoadCompletion()
+        XCTAssertEqual(
+            reconciliation.actionForEligibleSnapshot(
+                loadCompleted: true,
+                transcriptChanged: false,
+                firstLoadedIDChanged: false,
+                hasAnchorFrame: false
+            ),
+            .waitForFreshSnapshot
+        )
+        XCTAssertEqual(
+            reconciliation.actionForEligibleSnapshot(
+                loadCompleted: true,
+                transcriptChanged: true,
+                firstLoadedIDChanged: true,
+                hasAnchorFrame: false
+            ),
+            .requestAnchorRealization
+        )
+        XCTAssertEqual(
+            reconciliation.actionForEligibleSnapshot(
+                loadCompleted: true,
+                transcriptChanged: true,
+                firstLoadedIDChanged: true,
+                hasAnchorFrame: false
+            ),
+            .waitForFreshSnapshot,
+            "the restore-to-paging handoff still permits only one proxy request"
+        )
+
+        // The same existing cancellation contract wins over a later page
+        // correction, and reset clears the one-shot request.
+        XCTAssertTrue(
+            ChatTranscriptRestorePolicy.shouldCancelPendingRestore(
+                isDirectlyInteracting: true,
+                isDecelerating: false
+            )
+        )
+        reconciliation.reset()
+        XCTAssertFalse(reconciliation.hasRequestedAnchorRealization)
     }
 
     func testPrependedAnchorAlignmentPreservesPartiallyVisibleRowInsteadOfForcingTop() throws {
@@ -932,6 +1280,124 @@ final class ChatScrollPolicyTests: XCTestCase {
                 firstVisibleMessageID: nil,
                 isNearBottom: true,
                 isTailVisible: true
+            )
+        )
+    }
+
+    func testInitialNativePositionTargetsOnlyASavedReaderMessage() {
+        XCTAssertEqual(
+            ChatTranscriptRestorePolicy.initialPositionMessageID(
+                for: .message(id: "transcript:20")
+            ),
+            "transcript:20"
+        )
+        XCTAssertNil(
+            ChatTranscriptRestorePolicy.initialPositionMessageID(for: .latest),
+            "latest-follow keeps the existing bottom default anchor"
+        )
+        XCTAssertEqual(
+            ChatTranscriptRestorePolicy.initialTranscriptAnchor(
+                for: .message(id: "transcript:20"),
+                hasSavedMessage: true
+            ),
+            .top,
+            "saved-reader entry must not first apply the provisional bottom anchor"
+        )
+        XCTAssertEqual(
+            ChatTranscriptRestorePolicy.initialTranscriptAnchor(
+                for: .latest,
+                hasSavedMessage: false
+            ),
+            ChatScrollPolicy.initialTranscriptAnchor
+        )
+        XCTAssertEqual(
+            ChatTranscriptRestorePolicy.initialTranscriptAnchor(
+                for: .message(id: "not-loaded"),
+                hasSavedMessage: false
+            ),
+            ChatScrollPolicy.initialTranscriptAnchor
+        )
+    }
+
+    func testInitialTargetGeometryRetiresOnlyAfterWindowAttachment() {
+        XCTAssertFalse(
+            ChatTranscriptRestorePolicy.shouldConfirmInitialTargetGeometry(
+                targetMessageID: "transcript:20",
+                visibleMessageID: "transcript:20",
+                isScrollViewAttached: false
+            ),
+            "a pre-window preference echo must not retire the native seed"
+        )
+        XCTAssertTrue(
+            ChatTranscriptRestorePolicy.shouldConfirmInitialTargetGeometry(
+                targetMessageID: "transcript:20",
+                visibleMessageID: "transcript:20",
+                isScrollViewAttached: true
+            )
+        )
+        XCTAssertFalse(
+            ChatTranscriptRestorePolicy.shouldConfirmInitialTargetGeometry(
+                targetMessageID: "transcript:20",
+                visibleMessageID: "transcript:23",
+                isScrollViewAttached: true
+            )
+        )
+    }
+
+    func testSavedMessageGeometryBeforeRestoreTokenAvoidsProxyFallback() {
+        var state = ChatTranscriptRestoreState()
+        state.recordVisibleMessageSample("transcript:20")
+
+        XCTAssertTrue(state.beginRestore(token: 1))
+        XCTAssertTrue(
+            state.shouldSettle(
+                target: .message(id: "transcript:20"),
+                firstVisibleMessageID: "transcript:20"
+            ),
+            "the native initial position may reach the reader row before ChatView issues its restore token"
+        )
+        XCTAssertFalse(state.hasIssuedRestoreAttempt)
+    }
+
+    func testBackgroundRecoveryDoesNotReuseCachedVisibleMessageSample() {
+        var state = ChatTranscriptRestoreState()
+        state.recordVisibleMessageSample("transcript:20")
+
+        XCTAssertTrue(state.beginViewportRecovery(token: 1))
+        XCTAssertFalse(
+            state.shouldSettle(
+                target: .message(id: "transcript:20"),
+                firstVisibleMessageID: "transcript:20"
+            ),
+            "activation recovery still requires fresh geometry or an issued correction"
+        )
+
+        state.recordVisibleMessageSample("transcript:20")
+        XCTAssertTrue(
+            state.shouldSettle(
+                target: .message(id: "transcript:20"),
+                firstVisibleMessageID: "transcript:20"
+            )
+        )
+    }
+
+    func testOutgoingInsertionMotionIsSuppressedDuringRestore() {
+        XCTAssertFalse(
+            ChatTranscriptRestorePolicy.shouldAllowOutgoingInsertionMotion(
+                shouldFollowLatestMessage: true,
+                isRestoreInProgress: true
+            )
+        )
+        XCTAssertFalse(
+            ChatTranscriptRestorePolicy.shouldAllowOutgoingInsertionMotion(
+                shouldFollowLatestMessage: false,
+                isRestoreInProgress: false
+            )
+        )
+        XCTAssertTrue(
+            ChatTranscriptRestorePolicy.shouldAllowOutgoingInsertionMotion(
+                shouldFollowLatestMessage: true,
+                isRestoreInProgress: false
             )
         )
     }
