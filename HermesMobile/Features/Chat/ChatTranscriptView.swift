@@ -556,8 +556,8 @@ struct ChatTranscriptView: View, Equatable {
         let stateTokenMatches = stateToken.map {
             $0 == restoreScrollToken
         } ?? false
-        let pagingSequence = viewportTracker.pendingPagingEvidence?.sequence
-            .map(String.init) ?? "none"
+        let pagingSequence = viewportTracker.pendingPagingEvidence
+            .map { String($0.sequence) } ?? "none"
 
         Self.activationRecoveryLogger.debug("""
             event=initial_restore_confirmation decision=\(decision, privacy: .public) source=\(source, privacy: .public) \
@@ -1337,7 +1337,7 @@ struct ChatTranscriptView: View, Equatable {
         anchor: ChatTranscriptViewportAnchor? = nil,
         evidence: ChatTranscriptPagingDebugEvidence? = nil
     ) -> (sequence: String, anchorKey: String) {
-        let sequence = evidence?.sequence.map(String.init) ?? "none"
+        let sequence = evidence.map { String($0.sequence) } ?? "none"
         let anchorKey = evidence?.anchorKey
             ?? anchor.map { debugOpaquePagingAnchorKey($0.messageID) }
             ?? "none"
@@ -1415,8 +1415,8 @@ struct ChatTranscriptView: View, Equatable {
             )
         } ?? false
         let baselineFirstLoadedRowID = viewportTracker.pendingOlderMessagesBaselineFirstLoadedRowID
-        let knownFirstLoadedIDChanged = baselineFirstLoadedRowID.map {
-            currentFirstLoadedRowID.map { $0 != $1 } ?? false
+        let knownFirstLoadedIDChanged = baselineFirstLoadedRowID.flatMap { baselineID in
+            currentFirstLoadedRowID.map { currentID in baselineID != currentID }
         }
         let metrics = currentScrollMetricsForRecovery() ?? viewportTracker.latestScrollMetrics
         let stateToken = restoreSettlementState.restoreToken
