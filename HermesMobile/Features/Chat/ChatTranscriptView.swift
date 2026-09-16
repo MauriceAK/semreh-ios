@@ -24,6 +24,7 @@ private struct ChatTranscriptPagingDebugEvidence {
     let startGeneration: Int
     var awaitsSettledPreference = false
     var minimumSettledGeneration = 0
+    var correctionGeneration: Int? = nil
     var loggedSilentGuardReasons = Set<String>()
 }
 #endif
@@ -1606,7 +1607,9 @@ struct ChatTranscriptView: View, Equatable {
             viewportGlobalFrame: viewportGlobalFrame,
             pagingSequence: evidence.sequence,
             pagingAnchorKey: evidence.anchorKey,
-            pagingStartGeneration: evidence.startGeneration
+            pagingStartGeneration: evidence.startGeneration,
+            correctionGeneration: evidence.correctionGeneration,
+            correctionAfterFrameMinY: afterFrame.minY
         )
         viewportTracker.pendingPagingEvidence = nil
     }
@@ -1666,6 +1669,33 @@ struct ChatTranscriptView: View, Equatable {
         viewportTracker.pendingPagingEvidence = nil
     }
 
+    private func logPagingCorrectionOffsetTransitionIfNeeded(
+        afterFrame: CGRect,
+        contentOffsetBeforeY: CGFloat?,
+        contentOffsetAfterY: CGFloat?
+    ) {
+        guard var evidence = viewportTracker.pendingPagingEvidence,
+              evidence.correctionGeneration == nil
+        else { return }
+
+        let correctionGeneration = viewportTracker.framesGeneration
+        evidence.correctionGeneration = correctionGeneration
+        viewportTracker.pendingPagingEvidence = evidence
+
+        let beforeOffset = contentOffsetBeforeY.map {
+            String(format: "%.3f", Double($0))
+        } ?? "unknown"
+        let afterOffset = contentOffsetAfterY.map {
+            String(format: "%.3f", Double($0))
+        } ?? "unknown"
+        Self.activationRecoveryLogger.debug("""
+            event=older_anchor_correction_offset_transition decision=correction_boundary \
+            pagingSequence=\(evidence.sequence, privacy: .public) pagingAnchorKey=\(evidence.anchorKey, privacy: .public) \
+            correctionGeneration=\(correctionGeneration, privacy: .public) afterFrameMinY=\(Double(afterFrame.minY), privacy: .public) \
+            contentOffsetBeforeY=\(beforeOffset, privacy: .public) contentOffsetImmediatelyAfterY=\(afterOffset, privacy: .public)
+            """)
+    }
+
     private func cancelPagingEvidenceForUserInteraction(viewportHeight: CGFloat) {
         guard let evidence = viewportTracker.pendingPagingEvidence else { return }
         logTranscriptScrollSnapshot(
@@ -1698,7 +1728,9 @@ struct ChatTranscriptView: View, Equatable {
         viewportGlobalFrame: CGRect? = nil,
         pagingSequence: Int? = nil,
         pagingAnchorKey: String? = nil,
-        pagingStartGeneration: Int? = nil
+        pagingStartGeneration: Int? = nil,
+        correctionGeneration: Int? = nil,
+        correctionAfterFrameMinY: CGFloat? = nil
     ) {
         let frames = viewportTracker.latestFrames
         let rowFrames = frames.filter { $0.key != bottomAnchorID }.map(\.value)
@@ -1748,6 +1780,10 @@ struct ChatTranscriptView: View, Equatable {
         let pagingSequenceValue = pagingSequence.map(String.init) ?? "none"
         let pagingAnchorKeyValue = pagingAnchorKey ?? "none"
         let pagingStartGenerationValue = pagingStartGeneration.map(String.init) ?? "none"
+        let correctionGenerationValue = correctionGeneration.map(String.init) ?? "none"
+        let correctionAfterFrameMinYValue = correctionAfterFrameMinY.map {
+            String(format: "%.3f", Double($0))
+        } ?? "none"
 
         Self.activationRecoveryLogger.debug("""
             event=\(event, privacy: .public) decision=\(decision, privacy: .public) sceneActive=\(scenePhase == .active, privacy: .public) \
@@ -1757,7 +1793,7 @@ struct ChatTranscriptView: View, Equatable {
             frameY=\(Double(frameMinY), privacy: .public)...\(Double(frameMaxY), privacy: .public) focusedFrameY=\(Double(focusedFrameMinY), privacy: .public)...\(Double(focusedFrameMaxY), privacy: .public) \
             focusedGlobalFrameX=\(Double(focusedGlobalFrameMinX), privacy: .public)...\(Double(focusedGlobalFrameMaxX), privacy: .public) focusedGlobalFrameY=\(Double(focusedGlobalFrameMinY), privacy: .public)...\(Double(focusedGlobalFrameMaxY), privacy: .public) \
             viewportGlobalFrameX=\(Double(viewportGlobalFrameMinX), privacy: .public)...\(Double(viewportGlobalFrameMaxX), privacy: .public) viewportGlobalFrameY=\(Double(viewportGlobalFrameMinY), privacy: .public)...\(Double(viewportGlobalFrameMaxY), privacy: .public) \
-            coordinateTransform=viewport_global_origin_plus_transcript_named_frame pagingSequence=\(pagingSequenceValue, privacy: .public) pagingAnchorKey=\(pagingAnchorKeyValue, privacy: .public) pagingStartGeneration=\(pagingStartGenerationValue, privacy: .public) generation=\(viewportTracker.framesGeneration, privacy: .public) baseline=\(viewportTracker.activationBaselineFramesGeneration, privacy: .public) \
+            coordinateTransform=viewport_global_origin_plus_transcript_named_frame pagingSequence=\(pagingSequenceValue, privacy: .public) pagingAnchorKey=\(pagingAnchorKeyValue, privacy: .public) pagingStartGeneration=\(pagingStartGenerationValue, privacy: .public) correctionGeneration=\(correctionGenerationValue, privacy: .public) correctionAfterFrameMinY=\(correctionAfterFrameMinYValue, privacy: .public) generation=\(viewportTracker.framesGeneration, privacy: .public) baseline=\(viewportTracker.activationBaselineFramesGeneration, privacy: .public) \
             viewportHeight=\(Double(viewportHeight), privacy: .public) followLatest=\(shouldFollowLatestMessage, privacy: .public) nearBottom=\(isScrolledNearBottom, privacy: .public) tailVisible=\(tailVisible, privacy: .public) explicitBottomRequest=\(hasExplicitBottomScrollRequest, privacy: .public) \
             streamActive=\(activeStreamID != nil, privacy: .public) hostInWindow=\(scrollView?.window != nil, privacy: .public) \
             hostBounds=\(Double(bounds.width), privacy: .public)x\(Double(bounds.height), privacy: .public) hostVisibleHeight=\(Double(hostVisibleHeight), privacy: .public) \
@@ -2320,6 +2356,10 @@ struct ChatTranscriptView: View, Equatable {
 #if DEBUG
         let stateToken = restoreSettlementState.restoreToken
         let stateTokenMatches = stateToken.map { $0 == restoreScrollToken } ?? false
+        let preservePagingEvidenceForActiveLoad = reason == "cancellation_token"
+            && viewportTracker.olderMessagesLoadInFlight
+            && viewportTracker.pendingOlderMessagesAnchor != nil
+            && viewportTracker.pendingPagingEvidence != nil
         let pagingIdentity = pagingDiagnosticIdentity(
             anchor: viewportTracker.pendingOlderMessagesAnchor,
             evidence: viewportTracker.pendingPagingEvidence
@@ -2331,7 +2371,7 @@ struct ChatTranscriptView: View, Equatable {
             pendingRestoreTokenPresent=\(pendingInitialRestoreToken != nil, privacy: .public) initialRestoreInProgress=\(isInitialRestoreInProgress, privacy: .public) \
             initialRestorePending=\(isInitialRestorePending, privacy: .public) pendingAnchorPresent=\(viewportTracker.pendingOlderMessagesAnchor != nil, privacy: .public) \
             pagingSequence=\(pagingIdentity.sequence, privacy: .public) pagingAnchorKey=\(pagingIdentity.anchorKey, privacy: .public) \
-            framesGeneration=\(viewportTracker.framesGeneration, privacy: .public)
+            framesGeneration=\(viewportTracker.framesGeneration, privacy: .public) pagingEvidencePreserved=\(preservePagingEvidenceForActiveLoad, privacy: .public)
             """)
 #endif
         invalidateMeasuredLayoutFollow()
@@ -2341,7 +2381,9 @@ struct ChatTranscriptView: View, Equatable {
         hasCompletedInitialRestore = true
         pendingInitialRestoreToken = nil
 #if DEBUG
-        viewportTracker.pendingPagingEvidence = nil
+        if !preservePagingEvidenceForActiveLoad {
+            viewportTracker.pendingPagingEvidence = nil
+        }
         viewportTracker.pendingAnchorDiagnosticKeys.removeAll(keepingCapacity: true)
         viewportTracker.restoreConfirmationDiagnosticToken = nil
         viewportTracker.restoreConfirmationDiagnosticDecisions.removeAll(keepingCapacity: true)
@@ -2852,18 +2894,17 @@ struct ChatTranscriptView: View, Equatable {
             afterFrame: afterFrame
         ) {
 #if DEBUG
-            let didMoveContentOffset = offsetBeforeCorrection.map { before in
-                guard let after = viewportTracker.scrollView?.contentOffset.y else { return false }
-                return abs(after - before) > 0.5
-            } ?? false
-            if didMoveContentOffset {
-                armPagingEvidenceForSettledPreference()
-            } else {
-                logPagingEvidenceWithoutSettledFrame(
-                    decision: "correction_not_applied",
-                    viewportHeight: anchor.viewportHeight ?? viewportTracker.viewportHeight
-                )
-            }
+            let offsetAfterCorrection = viewportTracker.scrollView?.contentOffset.y
+            logPagingCorrectionOffsetTransitionIfNeeded(
+                afterFrame: afterFrame,
+                contentOffsetBeforeY: offsetBeforeCorrection,
+                contentOffsetAfterY: offsetAfterCorrection
+            )
+            // Keep one bounded post-correction preference observation even when
+            // UIKit reports no immediate offset delta. That distinguishes a
+            // tolerance/clamp no-op from a correction overwritten by the next
+            // SwiftUI layout transaction without changing production state.
+            armPagingEvidenceForSettledPreference()
 #endif
             return
         }
