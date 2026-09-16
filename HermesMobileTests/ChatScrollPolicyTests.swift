@@ -542,6 +542,67 @@ final class ChatScrollPolicyTests: XCTestCase {
         )
     }
 
+    func testOlderPageUnchangedFrameIsProvisionalUntilNewerPreference() {
+        var state = ChatTranscriptPagingReconciliationState()
+        func sample(_ generation: Int, present: Bool = true, displaced: Bool = false)
+            -> ChatTranscriptPagingReconciliationAction {
+            state.actionForEligibleSnapshot(
+                loadCompleted: true, transcriptChanged: true, firstLoadedIDChanged: true,
+                hasAnchorFrame: present, frameGeneration: generation,
+                anchorNeedsCorrection: displaced
+            )
+        }
+        XCTAssertEqual(sample(8), .waitForFreshSnapshot)
+        XCTAssertEqual(sample(8), .waitForFreshSnapshot, "a reused preference is not settlement")
+        XCTAssertEqual(sample(9, present: false), .requestAnchorRealization)
+        XCTAssertEqual(sample(10, present: false), .waitForFreshSnapshot, "realize at most once")
+        XCTAssertEqual(sample(11, displaced: true), .applyMeasuredCorrection)
+
+        state.reset()
+        XCTAssertEqual(sample(8), .waitForFreshSnapshot)
+        XCTAssertEqual(sample(9, displaced: true), .applyMeasuredCorrection)
+
+        state.reset()
+        XCTAssertEqual(sample(8), .waitForFreshSnapshot)
+        XCTAssertEqual(sample(9), .applyMeasuredCorrection, "newer unchanged geometry may settle without a write")
+    }
+
+    func testOlderPageProvisionalSettlementYieldsToCancellationAndExpiresWithoutSuccess() {
+        var state = ChatTranscriptPagingReconciliationState()
+        func sample(_ generation: Int, present: Bool = true)
+            -> ChatTranscriptPagingReconciliationAction {
+            state.actionForEligibleSnapshot(
+                loadCompleted: true, transcriptChanged: true, firstLoadedIDChanged: true,
+                hasAnchorFrame: present, frameGeneration: generation,
+                anchorNeedsCorrection: false
+            )
+        }
+        state.startSettlement(at: 100)
+        XCTAssertEqual(sample(8), .waitForFreshSnapshot)
+        // Production metrics/user/restore/bottom/scene cancellation clears the
+        // anchor and calls this same cancellation transition synchronously.
+        state.cancel()
+        XCTAssertEqual(sample(9, present: false), .waitForFreshSnapshot)
+        XCTAssertTrue(state.isCancelled)
+        XCTAssertNil(state.provisionalUnchangedGeneration)
+
+        state.reset()
+        state.startSettlement(at: 200)
+        XCTAssertEqual(sample(8), .waitForFreshSnapshot)
+        XCTAssertFalse(state.expireSettlement(at: 201.999))
+        XCTAssertTrue(state.expireSettlement(at: 202))
+        XCTAssertEqual(sample(9, present: false), .waitForFreshSnapshot)
+        XCTAssertEqual(sample(10), .waitForFreshSnapshot, "expiry cannot report alignment success")
+        XCTAssertNil(state.settlementDeadline)
+
+        state.reset()
+        state.startSettlement(at: 300)
+        XCTAssertEqual(sample(8), .waitForFreshSnapshot)
+        XCTAssertEqual(sample(9, present: false), .requestAnchorRealization)
+        XCTAssertTrue(state.expireSettlement(at: 302), "an unrealized requested anchor is bounded too")
+        XCTAssertEqual(sample(10, present: false), .waitForFreshSnapshot)
+    }
+
     func testOlderPagingTransfersAfterConfirmedRestoreButNotDuringCompetingRestore() {
         // The production guard keeps an unconfirmed initial restore ahead of a
         // page, including the native-seed-only interval before a restore task
