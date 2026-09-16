@@ -314,7 +314,6 @@ enum ChatTranscriptRestorePagingOwnershipPolicy {
 struct ChatTranscriptPagingReconciliationState: Equatable {
     private(set) var hasPendingEarlyPreference = false
     private(set) var hasRequestedAnchorRealization = false
-    private(set) var provisionalUnchangedGeneration: Int?
     private(set) var isCancelled = false
     private(set) var settlementDeadline: TimeInterval?
     // A cancellation ceiling for an idle/missing preference stream, not a
@@ -356,7 +355,6 @@ struct ChatTranscriptPagingReconciliationState: Equatable {
         transcriptChanged: Bool,
         firstLoadedIDChanged: Bool,
         hasAnchorFrame: Bool,
-        frameGeneration: Int = 0,
         anchorNeedsCorrection: Bool = true
     ) -> ChatTranscriptPagingReconciliationAction {
         guard !isCancelled, loadCompleted,
@@ -366,15 +364,12 @@ struct ChatTranscriptPagingReconciliationState: Equatable {
             return .waitForFreshSnapshot
         }
 
-        // The first unchanged preference may still precede lazy-stack layout.
-        // A token/count callback reusing the same map cannot confirm it.
-        if let provisionalUnchangedGeneration,
-           frameGeneration <= provisionalUnchangedGeneration {
-            return .waitForFreshSnapshot
-        }
-        if hasAnchorFrame, !anchorNeedsCorrection,
-           provisionalUnchangedGeneration == nil {
-            provisionalUnchangedGeneration = frameGeneration
+        // Callback counts do not establish layout completion: several newer
+        // preferences can still echo unchanged anchor geometry before lazy
+        // layout displaces it. Keep observing within the cancellation ceiling
+        // until the anchor actually moves or disappears. Stable no-op pages
+        // expire unconfirmed without ever issuing a scroll or claiming success.
+        if hasAnchorFrame, !anchorNeedsCorrection {
             return .waitForFreshSnapshot
         }
 
@@ -410,7 +405,6 @@ struct ChatTranscriptPagingReconciliationState: Equatable {
     mutating func reset() {
         hasPendingEarlyPreference = false
         hasRequestedAnchorRealization = false
-        provisionalUnchangedGeneration = nil
         isCancelled = false
         settlementDeadline = nil
     }
@@ -1658,43 +1652,6 @@ struct ChatTranscriptView: View, Equatable {
         viewportTracker.pendingPagingEvidence = nil
     }
 
-    private func recordPagingEvidenceWithoutCorrection(
-        afterFrame: CGRect,
-        viewportHeight: CGFloat
-    ) {
-        guard let evidence = viewportTracker.pendingPagingEvidence else { return }
-        guard let viewportGlobalFrame = currentTranscriptViewportGlobalFrame() else {
-            logPagingEvidenceWithoutSettledFrame(
-                decision: "viewport_global_frame_unavailable",
-                viewportHeight: viewportHeight
-            )
-            return
-        }
-        logTranscriptScrollSnapshot(
-            event: "older_anchor_after_prepend",
-            decision: "no_correction_needed_realized_frame",
-            viewportHeight: viewportHeight,
-            targetKind: "older_anchor",
-            targetExists: true,
-            targetVisible: ChatTranscriptVisibilityPolicy.isVisible(
-                frame: afterFrame,
-                viewportHeight: viewportHeight,
-                bottomInset: transcriptBottomInsetHeight
-            ),
-            attempt: 0,
-            focusedFrame: afterFrame,
-            focusedGlobalFrame: globalFrame(
-                for: afterFrame,
-                viewportGlobalFrame: viewportGlobalFrame
-            ),
-            viewportGlobalFrame: viewportGlobalFrame,
-            pagingSequence: evidence.sequence,
-            pagingAnchorKey: evidence.anchorKey,
-            pagingStartGeneration: evidence.startGeneration
-        )
-        viewportTracker.pendingPagingEvidence = nil
-    }
-
     private func logPagingEvidenceWithoutSettledFrame(
         decision: String,
         viewportHeight: CGFloat
@@ -2865,7 +2822,6 @@ struct ChatTranscriptView: View, Equatable {
                 transcriptChanged: didChangeTranscript,
                 firstLoadedIDChanged: true,
                 hasAnchorFrame: frames[anchor.messageID] != nil,
-                frameGeneration: viewportTracker.framesGeneration,
                 anchorNeedsCorrection: ChatTranscriptPagingPolicy.shouldRestorePrependedAnchor(
                     beforeFrame: anchor.frame,
                     afterFrame: frames[anchor.messageID]
@@ -2966,21 +2922,15 @@ struct ChatTranscriptView: View, Equatable {
             return
         }
 
-        clearPendingOlderMessagesAnchor(reason: "correction_evaluation")
         guard ChatTranscriptPagingPolicy.shouldRestorePrependedAnchor(
             beforeFrame: anchor.frame,
             afterFrame: afterFrame
         ) else {
-#if DEBUG
-            // Unchanged alignment has now survived a newer preference; the
-            // first unchanged sample alone is deliberately nonterminal.
-            recordPagingEvidenceWithoutCorrection(
-                afterFrame: afterFrame,
-                viewportHeight: anchor.viewportHeight ?? viewportTracker.viewportHeight
-            )
-#endif
+            // Keep unchanged geometry provisional even if the state-machine
+            // call above is refactored; callback count is never settlement.
             return
         }
+        clearPendingOlderMessagesAnchor(reason: "correction_evaluation")
 
         // A prepend is a viewport-preserving operation. If the measured anchor
         // moved materially, restore its measured alignment without animation
