@@ -3,6 +3,9 @@ import AVFoundation
 import MediaPlayer
 import Observation
 import SwiftData
+#if DEBUG
+import OSLog
+#endif
 
 enum ListenPlaybackPhase: Equatable {
     case idle
@@ -271,6 +274,12 @@ enum ActiveStreamRecoveryState: Equatable {
 @MainActor
 @Observable
 final class ChatViewModel {
+#if DEBUG
+    private static let olderLoadOutcomeLogger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "HermesMobile",
+        category: "TranscriptActivationRecovery"
+    )
+#endif
     nonisolated private static let messagePageLimit = 50
     private static let directAmbiguousPromptDeliveryMessage =
         "Semreh cannot confirm the previous send. It was not resent; check the latest conversation before allowing a different message."
@@ -1608,8 +1617,30 @@ final class ChatViewModel {
     }
 
     private func loadOlderDirectMessages(modelContext: ModelContext?) async -> Bool {
+#if DEBUG
+        // One content-free result per invocation. -1 means refresh was never
+        // dispatched; no session IDs, row IDs, errors, or response bodies log.
+        let diagnosticCountBefore = messages.count
+        var diagnosticRequestedOffset = -1
+        var diagnosticOutcome = "guard_rejected"
+        defer {
+            Self.olderLoadOutcomeLogger.debug("""
+                event=older_loader_outcome reason=\(diagnosticOutcome, privacy: .public) \
+                requestedOffset=\(diagnosticRequestedOffset, privacy: .public) \
+                messagesBefore=\(diagnosticCountBefore, privacy: .public) messagesAfter=\(self.messages.count, privacy: .public)
+                """)
+        }
+#endif
         guard !directInvalidated, !isLoadingOlderMessages, hasOlderMessages,
-              directConversation != nil else { return false }
+              directConversation != nil else {
+#if DEBUG
+            diagnosticOutcome = directInvalidated ? "guard_invalidated"
+                : isLoadingOlderMessages ? "guard_already_loading"
+                : !hasOlderMessages ? "guard_no_older_messages"
+                : "guard_missing_controller"
+#endif
+            return false
+        }
         directModelContext = modelContext ?? directModelContext
         isLoadingOlderMessages = true
         defer { isLoadingOlderMessages = false }
@@ -1617,18 +1648,40 @@ final class ChatViewModel {
         do {
             let controller = try await ensureDirectConversation()
             let anchor = controller.runState == .idle ? nil : messages.first?.messageId
-            guard controller.runState == .idle || anchor != nil else { return false }
+            guard controller.runState == .idle || anchor != nil else {
+#if DEBUG
+                diagnosticOutcome = "guard_active_without_anchor"
+#endif
+                return false
+            }
+#if DEBUG
+            diagnosticRequestedOffset = directOlderOffset
+#endif
             try await controller.refresh(limit: 120, offset: directOlderOffset, olderAnchorID: anchor)
+#if DEBUG
+            diagnosticOutcome = messages.count > count ? "refresh_count_increased" : "refresh_no_count_increase"
+#endif
             return messages.count > count
         } catch GatewayConversationController.OlderPageError.canonicalChanged {
             // An active turn keeps its live identity. Terminal/reconnect owns
             // canonical revalidation; never retry this as a different page.
+#if DEBUG
+            diagnosticOutcome = "canonical_changed"
+#endif
             return false
         } catch DirectSessionError.staleOperation {
             // A newer tail/rebind won the race. Its cursor is authoritative;
             // leave the current rows in place and allow another explicit page.
+#if DEBUG
+            diagnosticOutcome = "stale_operation"
+#endif
             return false
-        } catch { lastError = error; errorMessage = "Could not load older messages."; return false }
+        } catch {
+#if DEBUG
+            diagnosticOutcome = "other_error"
+#endif
+            lastError = error; errorMessage = "Could not load older messages."; return false
+        }
     }
 
     private func applyDirectTranscript(_ page: DirectHermesTranscriptPage, older: Bool) {
