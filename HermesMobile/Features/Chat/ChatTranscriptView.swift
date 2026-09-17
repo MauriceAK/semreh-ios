@@ -494,6 +494,8 @@ struct ChatTranscriptView: View, Equatable {
     var onOpenTurnFileDiff: (GitFile) -> Void = { _ in }
     var restoreScrollToken: Int = 0
     var restoreTarget: ChatTranscriptRestoreTarget = .latest
+    var initialRestoreRequest: ChatTranscriptRestoreRequest?
+    var onInitialRestoreOutcome: (ChatTranscriptRestoreRequest, ChatTranscriptRestoreOutcome) -> Void = { _, _ in }
     var transcriptRestoreCancellationToken: Int = 0
     var followRejoinScrollToken: Int = 0
     var isComposerResizing = false
@@ -509,6 +511,7 @@ struct ChatTranscriptView: View, Equatable {
     @State private var hasCompletedInitialRestore = false
     @State private var hasObservedInitialTargetGeometry = false
     @State private var pendingInitialRestoreToken: Int?
+    @State private var ownedInitialRestoreRequest: ChatTranscriptRestoreRequest?
     @State private var pendingOlderMessagesReconcileToken = 0
 #if DEBUG
     @State private var pendingMessageCountDiagnostic: Int?
@@ -628,6 +631,11 @@ struct ChatTranscriptView: View, Equatable {
             return false
         }
 
+        if let request = ownedInitialRestoreRequest,
+           case let .message(requestedID) = request.target,
+           requestedID != visibleMessageID {
+            return false
+        }
         hasObservedInitialTargetGeometry = true
         if isInitialRestoreInProgress {
             // The saved row is already the first visible geometry. Transfer
@@ -637,6 +645,7 @@ struct ChatTranscriptView: View, Equatable {
             restoreSettlementTask = nil
             hasCompletedInitialRestore = true
             pendingInitialRestoreToken = nil
+            completeInitialRestore(.success, request: ownedInitialRestoreRequest)
         }
         return true
     }
@@ -856,6 +865,9 @@ struct ChatTranscriptView: View, Equatable {
                 }
                 .onChange(of: scenePhase) { _, phase in
                     guard phase == .active else {
+                        if ownedInitialRestoreRequest != nil || restoreSettlementTask != nil {
+                            cancelTranscriptRestore(reason: "scene_inactive")
+                        }
                         clearPendingOlderMessagesAnchor(reason: "scene_inactive")
                         invalidateMeasuredLayoutFollow()
 #if DEBUG
@@ -999,6 +1011,7 @@ struct ChatTranscriptView: View, Equatable {
                 }
 #endif
                 .onDisappear {
+                    completeInitialRestore(.cancelled, request: ownedInitialRestoreRequest)
                     restoreSettlementTask?.cancel()
                     restoreSettlementTask = nil
                     invalidateMeasuredLayoutFollow()
@@ -2181,6 +2194,21 @@ struct ChatTranscriptView: View, Equatable {
     }
 #endif
 
+    private func completeInitialRestore(
+        _ outcome: ChatTranscriptRestoreOutcome,
+        request: ChatTranscriptRestoreRequest?
+    ) {
+        guard let request, ownedInitialRestoreRequest == request else { return }
+        ownedInitialRestoreRequest = nil
+#if DEBUG
+        Self.activationRecoveryLogger.debug("""
+            event=initial_restore_outcome generation=\(request.generation, privacy: .public) \
+            outcome=\(String(describing: outcome), privacy: .public)
+            """)
+#endif
+        onInitialRestoreOutcome(request, outcome)
+    }
+
     private func applyTranscriptRestore(
         _ proxy: ScrollViewProxy,
         target: ChatTranscriptRestoreTarget? = nil,
@@ -2188,8 +2216,16 @@ struct ChatTranscriptView: View, Equatable {
         viewportHeight: CGFloat
     ) {
         invalidateMeasuredLayoutFollow()
+        if isViewportRecovery || ownedInitialRestoreRequest != initialRestoreRequest {
+            completeInitialRestore(.cancelled, request: ownedInitialRestoreRequest)
+        }
+        if !isViewportRecovery {
+            ownedInitialRestoreRequest = initialRestoreRequest
+        }
+        let request = isViewportRecovery ? nil : ownedInitialRestoreRequest
         guard ChatTranscriptRestorePolicy.shouldProgrammaticallyRestoreOnAppear(hasMessages: !messages.isEmpty) else {
             if !isViewportRecovery {
+                completeInitialRestore(.unavailable, request: request)
                 hasCompletedInitialRestore = true
                 pendingInitialRestoreToken = nil
             }
@@ -2223,12 +2259,22 @@ struct ChatTranscriptView: View, Equatable {
         guard didBegin else {
             restoreSettlementTask = nil
             if !isViewportRecovery {
+                completeInitialRestore(.cancelled, request: request)
                 hasCompletedInitialRestore = true
                 pendingInitialRestoreToken = nil
             }
             return
         }
-        let target = target ?? restoreTarget
+        let target = target ?? request?.target ?? restoreTarget
+        if !isViewportRecovery, !isLoading, !isViewingCachedData,
+           case let .message(id) = target,
+           !renderedTranscriptMessages.contains(where: { $0.renderID == id }) {
+            completeInitialRestore(.unavailable, request: request)
+            hasCompletedInitialRestore = true
+            pendingInitialRestoreToken = nil
+            restoreSettlementTask = nil
+            return
+        }
 #if DEBUG
         let startDiagnostic = restoreTargetDiagnostic(target, viewportHeight: viewportHeight)
         logTranscriptScrollSnapshot(
@@ -2252,6 +2298,7 @@ struct ChatTranscriptView: View, Equatable {
                 }
 
                 guard !Task.isCancelled else { return }
+                if let request, ownedInitialRestoreRequest != request { return }
                 guard !restoreSettlementState.isCancelled else { return }
                 if restoreSettlementState.shouldSettle(
                     target: target,
@@ -2275,6 +2322,7 @@ struct ChatTranscriptView: View, Equatable {
 #endif
                     restoreSettlementTask = nil
                     if !isViewportRecovery {
+                        completeInitialRestore(.success, request: request)
                         hasCompletedInitialRestore = true
                         pendingInitialRestoreToken = nil
                     }
@@ -2311,6 +2359,7 @@ struct ChatTranscriptView: View, Equatable {
             }
 
             guard !Task.isCancelled else { return }
+            if let request, ownedInitialRestoreRequest != request { return }
 #if DEBUG
             let exhaustedDiagnostic = restoreTargetDiagnostic(
                 target,
@@ -2329,6 +2378,7 @@ struct ChatTranscriptView: View, Equatable {
 #endif
             restoreSettlementTask = nil
             if !isViewportRecovery {
+                completeInitialRestore(.exhausted, request: request)
                 hasCompletedInitialRestore = true
                 pendingInitialRestoreToken = nil
             }
@@ -2357,6 +2407,7 @@ struct ChatTranscriptView: View, Equatable {
     }
 
     private func cancelTranscriptRestore(reason: String) {
+        completeInitialRestore(.cancelled, request: ownedInitialRestoreRequest)
 #if DEBUG
         let stateToken = restoreSettlementState.restoreToken
         let stateTokenMatches = stateToken.map { $0 == restoreScrollToken } ?? false
@@ -2395,6 +2446,7 @@ struct ChatTranscriptView: View, Equatable {
     }
 
     private func resetViewportForNewTranscript() {
+        completeInitialRestore(.cancelled, request: ownedInitialRestoreRequest)
         clearPendingOlderMessagesAnchor(reason: "transcript_changed")
         invalidateMeasuredLayoutFollow()
         restoreSettlementTask?.cancel()
@@ -2446,6 +2498,7 @@ struct ChatTranscriptView: View, Equatable {
         )
 
         if restoreSettlementState.isCancelled {
+            completeInitialRestore(.cancelled, request: ownedInitialRestoreRequest)
             // Invalidate the pending task in the same main-actor callback that
             // observed the finger drag, so a later sleep wake cannot yank the
             // viewport back. Deceleration and layout-only samples never enter
@@ -3257,6 +3310,7 @@ extension ChatTranscriptView {
             lhs.turnChangesSummary == rhs.turnChangesSummary &&
             lhs.restoreScrollToken == rhs.restoreScrollToken &&
             lhs.restoreTarget == rhs.restoreTarget &&
+            lhs.initialRestoreRequest == rhs.initialRestoreRequest &&
             lhs.transcriptRestoreCancellationToken == rhs.transcriptRestoreCancellationToken &&
             lhs.followRejoinScrollToken == rhs.followRejoinScrollToken &&
             lhs.isComposerResizing == rhs.isComposerResizing &&

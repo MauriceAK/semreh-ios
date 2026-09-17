@@ -1434,6 +1434,64 @@ final class ChatScrollPolicyTests: XCTestCase {
         XCTAssertFalse(state.hasIssuedRestoreAttempt)
     }
 
+    func testRestoreOutcomesReleaseOnlyMatchingOwnerAndPreserveUnconfirmedTarget() {
+        let scope = UUID()
+        let request = ChatTranscriptRestoreRequest(scope: scope, generation: 1,
+                                                   target: .message(id: "older-row"))
+        for outcome in [ChatTranscriptRestoreOutcome.exhausted, .unavailable, .cancelled] {
+            var state = ChatTranscriptRestoreOutcomeState()
+            state.begin(request)
+            XCTAssertTrue(state.complete(request, outcome: outcome, currentScope: scope))
+            XCTAssertNil(state.pending, "bounded terminal outcomes must release the parent's lock")
+            XCTAssertTrue(state.preservesDurableTarget, "failure is not a successful latest fallback")
+            XCTAssertFalse(state.complete(request, outcome: .success, currentScope: scope),
+                           "a duplicate late result cannot rewrite an exhausted outcome")
+            state.acceptUserIntent()
+            XCTAssertFalse(state.preservesDurableTarget, "a new real gesture or explicit send/jump owns persistence")
+        }
+        var state = ChatTranscriptRestoreOutcomeState()
+        state.begin(request)
+        XCTAssertTrue(state.complete(request, outcome: .success, currentScope: scope))
+        XCTAssertNil(state.pending)
+        XCTAssertFalse(state.preservesDurableTarget)
+    }
+
+    func testRestoreOutcomesIgnorePreviousChatAndGeneration() {
+        let scopeA = UUID()
+        let scopeB = UUID()
+        let old = ChatTranscriptRestoreRequest(scope: scopeA, generation: 1, target: .latest)
+        let newer = ChatTranscriptRestoreRequest(scope: scopeA, generation: 2, target: .message(id: "row"))
+        let otherChat = ChatTranscriptRestoreRequest(scope: scopeB, generation: 2, target: .message(id: "row"))
+        var state = ChatTranscriptRestoreOutcomeState()
+        state.begin(old)
+        state.begin(newer)
+        XCTAssertFalse(state.complete(old, outcome: .exhausted, currentScope: scopeA))
+        XCTAssertEqual(state.pending, newer)
+        XCTAssertFalse(state.complete(newer, outcome: .success, currentScope: scopeB))
+        XCTAssertEqual(state.pending, newer, "a changed conversation cannot accept the previous chat callback")
+        state.begin(otherChat)
+        XCTAssertFalse(state.complete(newer, outcome: .cancelled, currentScope: scopeB))
+        XCTAssertEqual(state.pending, otherChat)
+        state.acceptUserIntent()
+        XCTAssertFalse(state.complete(otherChat, outcome: .exhausted, currentScope: scopeB))
+        XCTAssertFalse(state.preservesDurableTarget, "late cancellation cannot take ownership back from a gesture")
+    }
+
+    func testBackgroundRecoveryRequiresFreshTailEvidenceAfterMetrics() {
+        var state = ChatTranscriptRestoreState()
+        state.recordTailVisibility(true)
+        state.recordMetrics(isNearBottom: true, isDirectlyInteracting: false, isDecelerating: false)
+        XCTAssertTrue(state.beginViewportRecovery(token: 1))
+        state.recordMetrics(isNearBottom: true, isDirectlyInteracting: false, isDecelerating: false)
+        XCTAssertFalse(state.shouldSettle(target: .latest, firstVisibleMessageID: nil),
+                       "foreground metrics without new tail preferences cannot settle from cached visibility")
+        state.recordRestoreAttempt()
+        XCTAssertFalse(state.shouldSettle(target: .latest, firstVisibleMessageID: nil),
+                       "issuing a correction alone is not confirmation")
+        state.recordTailVisibility(true)
+        XCTAssertTrue(state.shouldSettle(target: .latest, firstVisibleMessageID: nil))
+    }
+
     func testBackgroundRecoveryDoesNotReuseCachedVisibleMessageSample() {
         var state = ChatTranscriptRestoreState()
         state.recordVisibleMessageSample("transcript:20")

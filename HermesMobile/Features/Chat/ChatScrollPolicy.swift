@@ -512,6 +512,48 @@ enum ChatTranscriptRestoreTarget: Equatable {
     case message(id: String)
 }
 
+struct ChatTranscriptRestoreRequest: Equatable {
+    let scope: UUID
+    let generation: Int
+    let target: ChatTranscriptRestoreTarget
+}
+
+enum ChatTranscriptRestoreOutcome: Equatable {
+    case success
+    case exhausted
+    case unavailable
+    case cancelled
+}
+
+/// Parent ownership ends with the matching child's terminal result, while an
+/// unconfirmed restore must not overwrite the durable reader point on exit.
+struct ChatTranscriptRestoreOutcomeState: Equatable {
+    private(set) var pending: ChatTranscriptRestoreRequest?
+    private(set) var preservesDurableTarget = false
+
+    mutating func begin(_ request: ChatTranscriptRestoreRequest) {
+        pending = request
+        preservesDurableTarget = true
+    }
+
+    @discardableResult
+    mutating func complete(
+        _ request: ChatTranscriptRestoreRequest,
+        outcome: ChatTranscriptRestoreOutcome,
+        currentScope: UUID
+    ) -> Bool {
+        guard request.scope == currentScope, pending == request else { return false }
+        pending = nil
+        preservesDurableTarget = outcome != .success
+        return true
+    }
+
+    mutating func acceptUserIntent() {
+        pending = nil
+        preservesDurableTarget = false
+    }
+}
+
 /// Leave/reopen must land at latest or the last-read message.
 /// `defaultScrollAnchor(.bottom)` plus LazyVStack often paints mid-list first.
 enum ChatTranscriptRestorePolicy {
@@ -685,6 +727,7 @@ struct ChatTranscriptRestoreState: Equatable {
         hasIssuedRestoreAttempt = false
         hasConfirmedMetricsSample = false
         isNearBottom = false
+        isTailVisible = false
         hasObservedVisibleMessageSample = false
         observedVisibleMessageID = nil
         isCancelled = false

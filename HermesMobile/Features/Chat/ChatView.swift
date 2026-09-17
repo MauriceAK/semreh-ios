@@ -481,6 +481,7 @@ struct ChatView: View {
     @State private var didInteractBeforeTranscriptRestore = false
     @State private var isTranscriptRestorePending = false
     @State private var pendingTranscriptRestoreMessageID: String?
+    @State private var transcriptRestoreOutcomeState = ChatTranscriptRestoreOutcomeState()
     @State private var isScrolledNearBottom = true
     @State private var isReadingOlderTranscript = false
     @State private var shouldFollowLatestMessage = true
@@ -1667,6 +1668,14 @@ struct ChatView: View {
             },
             restoreScrollToken: restoreScrollToken,
             restoreTarget: viewModel.transcriptRestoreTarget,
+            initialRestoreRequest: transcriptRestoreOutcomeState.pending,
+            onInitialRestoreOutcome: { request, outcome in
+                guard transcriptRestoreOutcomeState.complete(
+                    request, outcome: outcome, currentScope: viewModel.outgoingInsertionScope
+                ) else { return }
+                isTranscriptRestorePending = false
+                pendingTranscriptRestoreMessageID = nil
+            },
             transcriptRestoreCancellationToken: transcriptRestoreCancellationToken,
             followRejoinScrollToken: followRejoinScrollToken,
             isComposerResizing: isComposerResizing,
@@ -2612,6 +2621,7 @@ struct ChatView: View {
     }
 
     private func scrollToBottom(_ proxy: ScrollViewProxy) {
+        transcriptRestoreOutcomeState.acceptUserIntent()
         didInteractBeforeTranscriptRestore = true
         isTranscriptRestorePending = false
         pendingTranscriptRestoreMessageID = nil
@@ -3103,6 +3113,7 @@ struct ChatView: View {
     }
 
     private func persistTranscriptRestore() {
+        guard !transcriptRestoreOutcomeState.preservesDurableTarget else { return }
         guard didRequestTranscriptRestore || didInteractBeforeTranscriptRestore else {
             // The durable point remains authoritative until appearance
             // restoration has initialized local state or the user makes a
@@ -3146,6 +3157,11 @@ struct ChatView: View {
         )
 #endif
         restoreScrollToken += 1
+        transcriptRestoreOutcomeState.begin(ChatTranscriptRestoreRequest(
+            scope: viewModel.outgoingInsertionScope,
+            generation: restoreScrollToken,
+            target: restoreTarget
+        ))
 #if DEBUG
         logTranscriptRestoreBoundary(
             event: "transcript_restore_request",
@@ -3159,6 +3175,7 @@ struct ChatView: View {
         let previousFollowLatest = shouldFollowLatestMessage
 #endif
         if metrics.isDirectlyInteracting {
+            transcriptRestoreOutcomeState.acceptUserIntent()
             didInteractBeforeTranscriptRestore = true
             isTranscriptRestorePending = false
             pendingTranscriptRestoreMessageID = nil
@@ -3292,6 +3309,7 @@ struct ChatView: View {
     }
 
     private func prepareTranscriptForExplicitSend() {
+        transcriptRestoreOutcomeState.acceptUserIntent()
         didInteractBeforeTranscriptRestore = true
         isTranscriptRestorePending = false
         pendingTranscriptRestoreMessageID = nil
