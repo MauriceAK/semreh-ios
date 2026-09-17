@@ -3,6 +3,52 @@ import XCTest
 @testable import HermesMobile
 
 final class ChatScrollPolicyTests: XCTestCase {
+    func testAutomaticPagingRequiresStartupRestoreAndPresentationHandoff() {
+        XCTAssertTrue(ChatTranscriptPagingPolicy.admitsAutomaticLoad(
+            startupReady: true, hasPendingRestore: false, isActive: true, isAttached: true
+        ))
+        // Preserved rows can arrive before startup/reconnect has joined.
+        XCTAssertFalse(ChatTranscriptPagingPolicy.admitsAutomaticLoad(
+            startupReady: false, hasPendingRestore: false, isActive: true, isAttached: true
+        ))
+        // A request owns restore even before its child task is created.
+        XCTAssertFalse(ChatTranscriptPagingPolicy.admitsAutomaticLoad(
+            startupReady: true, hasPendingRestore: true, isActive: true, isAttached: true
+        ))
+        XCTAssertFalse(ChatTranscriptPagingPolicy.admitsAutomaticLoad(
+            startupReady: true, hasPendingRestore: false, isActive: false, isAttached: true
+        ))
+        XCTAssertFalse(ChatTranscriptPagingPolicy.admitsAutomaticLoad(
+            startupReady: true, hasPendingRestore: false, isActive: true, isAttached: false
+        ))
+    }
+
+    func testAutomaticPagingIsNeverUserIntentIncludingNoProgress() {
+        XCTAssertFalse(ChatTranscriptOlderLoadIntent.automaticPrefetch.acceptsUserIntent)
+        XCTAssertTrue(ChatTranscriptOlderLoadIntent.explicitUserRequest.acceptsUserIntent)
+        XCTAssertFalse(ChatTranscriptOlderLoadResult.notAdmitted.wasDispatched)
+        XCTAssertTrue(ChatTranscriptOlderLoadResult.noProgress.wasDispatched)
+        XCTAssertTrue(ChatTranscriptOlderLoadResult.progress.wasDispatched)
+    }
+
+    func testPagingCompletionCannotReacquireCancelledOrNewScopeOwnership() {
+        var state = ChatTranscriptPagingOperationState()
+        let firstScope = UUID()
+        let first = state.begin(scope: firstScope)
+        XCTAssertTrue(state.matches(scope: firstScope, generation: first))
+        // Scene, user, restore and disappearance all use this cancellation.
+        state.cancel()
+        XCTAssertFalse(state.matches(scope: firstScope, generation: first))
+        let second = state.begin(scope: firstScope)
+        XCTAssertFalse(state.matches(scope: firstScope, generation: first))
+        XCTAssertTrue(state.matches(scope: firstScope, generation: second))
+        let nextScope = UUID()
+        let third = state.begin(scope: nextScope)
+        XCTAssertFalse(state.matches(scope: firstScope, generation: second))
+        XCTAssertFalse(state.matches(scope: firstScope, generation: third))
+        XCTAssertTrue(state.matches(scope: nextScope, generation: third))
+    }
+
     func testExistingTranscriptUsesBottomAsItsInitialLayoutAnchor() {
         XCTAssertEqual(ChatScrollPolicy.initialTranscriptAnchor, .bottom)
     }

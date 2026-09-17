@@ -174,6 +174,8 @@ private final class ChatTranscriptViewportTracker {
     var activationBaselineFramesGeneration = 0
     var latestScrollMetrics: ChatScrollMetrics?
     var olderMessagesLoadInFlight = false
+    var pagingOperation = ChatTranscriptPagingOperationState()
+    var automaticPagingAdmitted = false
     var pendingOlderMessagesAnchor: ChatTranscriptViewportAnchor?
     var pendingOlderMessagesLoadCompleted = false
     var pendingOlderMessagesBaselineMessageCount: Int?
@@ -464,7 +466,7 @@ struct ChatTranscriptView: View, Equatable {
     let actionContext: (ChatMessage, Int) -> MessageActionContext?
     let shouldRenderMessageRow: (ChatMessage) -> Bool
     let onLoadMessages: () async -> Void
-    let onLoadOlderMessages: () async -> Bool
+    let onLoadOlderMessages: (ChatTranscriptOlderLoadIntent) async -> ChatTranscriptOlderLoadResult
     let onUpdateScrollMetrics: (ChatScrollMetrics) -> Void
     let onDismissKeyboard: () -> Void
     let onScrollToBottom: (ScrollViewProxy) -> Void
@@ -495,6 +497,7 @@ struct ChatTranscriptView: View, Equatable {
     var restoreScrollToken: Int = 0
     var restoreTarget: ChatTranscriptRestoreTarget = .latest
     var initialRestoreRequest: ChatTranscriptRestoreRequest?
+    var isPagingStartupReady = false
     var onInitialRestoreOutcome: (ChatTranscriptRestoreRequest, ChatTranscriptRestoreOutcome) -> Void = { _, _ in }
     var transcriptRestoreCancellationToken: Int = 0
     var followRejoinScrollToken: Int = 0
@@ -558,6 +561,17 @@ struct ChatTranscriptView: View, Equatable {
     private var isInitialRestoreInProgress: Bool {
         guard let pendingInitialRestoreToken else { return false }
         return pendingInitialRestoreToken == restoreScrollToken
+    }
+
+    private var automaticPagingAdmitted: Bool {
+        ChatTranscriptPagingPolicy.admitsAutomaticLoad(
+            startupReady: isPagingStartupReady,
+            hasPendingRestore: initialRestoreRequest != nil
+                || ownedInitialRestoreRequest != nil || isInitialRestoreInProgress
+                || restoreSettlementTask != nil,
+            isActive: scenePhase == .active,
+            isAttached: viewportTracker.scrollView?.window != nil
+        )
     }
 
 #if DEBUG
@@ -781,7 +795,7 @@ struct ChatTranscriptView: View, Equatable {
                     .frame(width: viewportWidth)
                     .refreshable {
                         if hasOlderMessages {
-                            await loadOlderMessagesPreservingPosition(proxy: proxy)
+                            await loadOlderMessagesPreservingPosition(proxy: proxy, intent: .explicitUserRequest)
                         } else {
                             await onLoadMessages()
                         }
@@ -946,6 +960,15 @@ struct ChatTranscriptView: View, Equatable {
                         proxy: proxy,
                         currentFirstLoadedRowID: renderedMessages.first?.renderID
                     )
+                }
+                .onChange(of: automaticPagingAdmitted) { _, admitted in
+                    viewportTracker.automaticPagingAdmitted = admitted
+                    guard admitted else { return }
+                    // One layout pass on ownership handoff; only the resulting
+                    // real preference sample may admit a load. Never poll/load here.
+                    pendingOlderMessagesReconcileToken &+= 1
+                    viewportTracker.scrollView?.setNeedsLayout()
+                    viewportTracker.scrollView?.layoutIfNeeded()
                 }
 #if DEBUG
                 .onChange(of: activeStreamID) { oldStreamID, newStreamID in
@@ -1172,6 +1195,7 @@ struct ChatTranscriptView: View, Equatable {
                         }
                     }
 
+                    viewportTracker.automaticPagingAdmitted = automaticPagingAdmitted
                     if !hasOlderMessages {
                         viewportTracker.lastOlderMessagesPrefetchVisibleRowID = nil
                     } else if ChatTranscriptPagingPolicy.shouldPrefetchOlderMessages(
@@ -1182,11 +1206,10 @@ struct ChatTranscriptView: View, Equatable {
                         isLoadingOlderMessages: isLoadingOlderMessages
                             || viewportTracker.olderMessagesLoadInFlight
                             || viewportTracker.pendingOlderMessagesAnchor != nil,
-                        hasPendingRestore: restoreSettlementTask != nil,
+                        hasPendingRestore: !automaticPagingAdmitted,
                         shouldFollowLatest: shouldFollowLatestMessage,
                         lastRequestedVisibleRowID: viewportTracker.lastOlderMessagesPrefetchVisibleRowID
                     ), let visibleRow {
-                        viewportTracker.lastOlderMessagesPrefetchVisibleRowID = visibleRow.id
                         beginOlderMessagesPrefetch(proxy: proxy, row: visibleRow)
                     }
 
@@ -2522,7 +2545,7 @@ struct ChatTranscriptView: View, Equatable {
     private func olderMessagesButton(proxy: ScrollViewProxy) -> some View {
         if hasOlderMessages {
             LoadOlderMessagesButton(isLoading: isLoadingOlderMessages) {
-                Task { await loadOlderMessagesPreservingPosition(proxy: proxy) }
+                Task { await loadOlderMessagesPreservingPosition(proxy: proxy, intent: .explicitUserRequest) }
             }
         }
     }
@@ -2547,7 +2570,9 @@ struct ChatTranscriptView: View, Equatable {
         proxy: ScrollViewProxy,
         row: ChatTranscriptVisibilityPolicy.VisibleRow
     ) {
-        guard !viewportTracker.olderMessagesLoadInFlight, !isLoadingOlderMessages else { return }
+        guard automaticPagingAdmitted,
+              let scope = outgoingInsertionScope,
+              !viewportTracker.olderMessagesLoadInFlight, !isLoadingOlderMessages else { return }
 
         invalidateMeasuredLayoutFollow()
 
@@ -2555,6 +2580,7 @@ struct ChatTranscriptView: View, Equatable {
         // also prevents repeated preference passes at the same boundary from
         // starting another request after a failed/no-progress response.
         viewportTracker.olderMessagesLoadInFlight = true
+        let generation = viewportTracker.pagingOperation.begin(scope: scope)
         let anchor = ChatTranscriptViewportAnchor(
             messageID: row.id,
             frame: row.frame,
@@ -2570,17 +2596,29 @@ struct ChatTranscriptView: View, Equatable {
         Task { @MainActor in
             await loadOlderMessagesPreservingPosition(
                 proxy: proxy,
+                intent: .automaticPrefetch,
                 anchor: anchor,
-                hasReservedLoadSlot: true
+                reservedGeneration: generation
             )
         }
     }
 
     private func loadOlderMessagesPreservingPosition(
         proxy: ScrollViewProxy,
+        intent: ChatTranscriptOlderLoadIntent,
         anchor: ChatTranscriptViewportAnchor? = nil,
-        hasReservedLoadSlot: Bool = false
+        reservedGeneration: Int? = nil
     ) async {
+        guard let scope = outgoingInsertionScope else { return }
+        let hasReservedLoadSlot = reservedGeneration != nil
+        if let reservedGeneration {
+            guard viewportTracker.pagingOperation.matches(scope: scope, generation: reservedGeneration) else { return }
+        }
+        if intent == .automaticPrefetch,
+           (!viewportTracker.automaticPagingAdmitted || !automaticPagingAdmitted) {
+            if hasReservedLoadSlot { clearPendingOlderMessagesAnchor(reason: "automatic_admission_rejected") }
+            return
+        }
         guard hasOlderMessages, !isLoadingOlderMessages else {
             if hasReservedLoadSlot { viewportTracker.olderMessagesLoadInFlight = false }
 #if DEBUG
@@ -2592,6 +2630,7 @@ struct ChatTranscriptView: View, Equatable {
             return
         }
         guard hasReservedLoadSlot || !viewportTracker.olderMessagesLoadInFlight else { return }
+        let generation = reservedGeneration ?? viewportTracker.pagingOperation.begin(scope: scope)
 
         invalidateMeasuredLayoutFollow()
 #if DEBUG
@@ -2624,7 +2663,16 @@ struct ChatTranscriptView: View, Equatable {
             messagesAfter: pagingLoadMessagesBefore
         )
 #endif
-        let didLoad = await onLoadOlderMessages()
+        let previousPrefetchBoundary = viewportTracker.lastOlderMessagesPrefetchVisibleRowID
+        if intent == .automaticPrefetch {
+            viewportTracker.lastOlderMessagesPrefetchVisibleRowID = anchor?.messageID
+        }
+        let result = await onLoadOlderMessages(intent)
+        guard viewportTracker.pagingOperation.matches(scope: scope, generation: generation) else { return }
+        if !result.wasDispatched, intent == .automaticPrefetch {
+            viewportTracker.lastOlderMessagesPrefetchVisibleRowID = previousPrefetchBoundary
+        }
+        let didLoad = result == .progress
 #if DEBUG
         let pagingLoadElapsedMilliseconds = max(
             0,
@@ -3090,6 +3138,8 @@ struct ChatTranscriptView: View, Equatable {
 #if DEBUG
         logPendingOlderMessagesAnchorClearIfNeeded(reason: reason)
 #endif
+        viewportTracker.pagingOperation.cancel()
+        viewportTracker.olderMessagesLoadInFlight = false
         viewportTracker.pendingOlderMessagesAnchor = nil
         viewportTracker.olderMessagesSettlementExpiryTask?.cancel()
         viewportTracker.olderMessagesSettlementExpiryTask = nil
@@ -3278,6 +3328,7 @@ extension ChatTranscriptView {
             lhs.outgoingInsertionScope == rhs.outgoingInsertionScope &&
             lhs.transcriptRenderRevision == rhs.transcriptRenderRevision &&
             lhs.isLoading == rhs.isLoading &&
+            lhs.isPagingStartupReady == rhs.isPagingStartupReady &&
             lhs.errorMessage == rhs.errorMessage &&
             lhs.messages.count == rhs.messages.count &&
             lhs.messages.isEmpty == rhs.messages.isEmpty &&

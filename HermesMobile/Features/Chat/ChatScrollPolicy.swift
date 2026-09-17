@@ -407,7 +407,49 @@ enum ChatTranscriptViewportRecoveryPolicy {
 /// Paging keeps older-page loads ahead of the top edge without tying the
 /// trigger to a particular page size. Only visible row geometry is inspected,
 /// so the decision remains bounded by the lazy viewport.
+enum ChatTranscriptOlderLoadIntent: Equatable {
+    case automaticPrefetch
+    case explicitUserRequest
+
+    var acceptsUserIntent: Bool { self == .explicitUserRequest }
+}
+
+enum ChatTranscriptOlderLoadResult: Equatable {
+    case notAdmitted
+    case noProgress
+    case progress
+
+    var wasDispatched: Bool { self != .notAdmitted }
+}
+
+struct ChatTranscriptPagingOperationState: Equatable {
+    private(set) var generation = 0
+    private(set) var scope: UUID?
+
+    mutating func begin(scope: UUID) -> Int {
+        generation &+= 1
+        self.scope = scope
+        return generation
+    }
+
+    mutating func cancel() {
+        generation &+= 1
+        scope = nil
+    }
+
+    func matches(scope: UUID, generation: Int) -> Bool {
+        self.scope == scope && self.generation == generation
+    }
+}
+
 enum ChatTranscriptPagingPolicy {
+    static func admitsAutomaticLoad(
+        startupReady: Bool, hasPendingRestore: Bool,
+        isActive: Bool, isAttached: Bool
+    ) -> Bool {
+        startupReady && !hasPendingRestore && isActive && isAttached
+    }
+
     static let nearTopPrefetchDistance: CGFloat = 240
     static let anchorPreservationTolerance: CGFloat = 12
 

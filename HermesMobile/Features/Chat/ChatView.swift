@@ -545,6 +545,8 @@ struct ChatView: View {
     @State private var shouldAnimateNextFollowAfterComposerResize = false
     @State private var composerIsFocused = false
     @State private var didCompleteInitialAppearance = false
+    @State private var pagingStartupReadyScope: UUID?
+    @State private var pagingStartupOperation = ChatTranscriptPagingOperationState()
     @State private var isInitialComposerFocusContentReady = false
     @State private var didApplyInitialComposerFocusPolicy = false
     @State private var shouldRestoreComposerFocusAfterPreview = false
@@ -1567,22 +1569,30 @@ struct ChatView: View {
             onLoadMessages: {
                 await loadMessages()
             },
-            onLoadOlderMessages: {
+            onLoadOlderMessages: { intent in
+                if !intent.acceptsUserIntent {
+                    guard pagingStartupReadyScope == viewModel.outgoingInsertionScope,
+                          transcriptRestoreOutcomeState.pending == nil,
+                          scenePhase == .active else { return .notAdmitted }
+                }
+                if intent.acceptsUserIntent {
 #if DEBUG
-                let previousCancellationToken = transcriptRestoreCancellationToken
+                    let previousCancellationToken = transcriptRestoreCancellationToken
 #endif
-                didInteractBeforeTranscriptRestore = true
-                isTranscriptRestorePending = false
-                pendingTranscriptRestoreMessageID = nil
-                transcriptRestoreCancellationToken &+= 1
+                    didInteractBeforeTranscriptRestore = true
+                    transcriptRestoreOutcomeState.acceptUserIntent()
+                    isTranscriptRestorePending = false
+                    pendingTranscriptRestoreMessageID = nil
+                    transcriptRestoreCancellationToken &+= 1
 #if DEBUG
-                logTranscriptRestoreBoundary(
-                    event: "transcript_restore_cancellation",
-                    decision: "older_messages_callback",
-                    previousCancellationToken: previousCancellationToken
-                )
+                    logTranscriptRestoreBoundary(
+                        event: "transcript_restore_cancellation",
+                        decision: "explicit_older_messages_callback",
+                        previousCancellationToken: previousCancellationToken
+                    )
 #endif
-                return await loadOlderMessages()
+                }
+                return await loadOlderMessages(intent: intent) ? .progress : .noProgress
             },
             onUpdateScrollMetrics: updateScrollMetrics,
             onDismissKeyboard: dismissKeyboard,
@@ -1669,6 +1679,7 @@ struct ChatView: View {
             restoreScrollToken: restoreScrollToken,
             restoreTarget: viewModel.transcriptRestoreTarget,
             initialRestoreRequest: transcriptRestoreOutcomeState.pending,
+            isPagingStartupReady: pagingStartupReadyScope == viewModel.outgoingInsertionScope,
             onInitialRestoreOutcome: { request, outcome in
                 guard transcriptRestoreOutcomeState.complete(
                     request, outcome: outcome, currentScope: viewModel.outgoingInsertionScope
@@ -1856,7 +1867,9 @@ struct ChatView: View {
         prepareInitialAppearance()
 
         if disablesExternalLifecycle {
+            _ = pagingStartupOperation.begin(scope: viewModel.outgoingInsertionScope)
             requestTranscriptRestoreIfNeeded()
+            pagingStartupReadyScope = viewModel.outgoingInsertionScope
             isInitialComposerFocusContentReady = true
             handleInitialAppearanceCompletion()
             return
@@ -1875,6 +1888,9 @@ struct ChatView: View {
 
     private func performInitialAsyncWork() async {
         guard !Task.isCancelled else { return }
+        let startupScope = viewModel.outgoingInsertionScope
+        let startupGeneration = pagingStartupOperation.begin(scope: startupScope)
+        pagingStartupReadyScope = nil
 
         if loadsInitialMessages,
            ChatInitialAppearancePolicy.shouldReloadTranscriptOnAppear(
@@ -1899,7 +1915,11 @@ struct ChatView: View {
             await viewModel.reconnectStreamIfNeeded(modelContext: modelContext)
             guard !Task.isCancelled else { return }
         }
+        guard !Task.isCancelled,
+              startupScope == viewModel.outgoingInsertionScope,
+              pagingStartupOperation.matches(scope: startupScope, generation: startupGeneration) else { return }
         requestTranscriptRestoreIfNeeded()
+        pagingStartupReadyScope = startupScope
         if initialAttachments.isEmpty {
             isInitialComposerFocusContentReady = true
             applyInitialComposerFocusPolicyIfNeeded()
@@ -1960,21 +1980,23 @@ struct ChatView: View {
         }
     }
 
-    private func loadOlderMessages() async -> Bool {
+    private func loadOlderMessages(intent: ChatTranscriptOlderLoadIntent) async -> Bool {
+        if intent.acceptsUserIntent {
 #if DEBUG
-        let previousFollowLatest = shouldFollowLatestMessage
+            let previousFollowLatest = shouldFollowLatestMessage
 #endif
-        shouldFollowLatestMessage = false
+            shouldFollowLatestMessage = false
 #if DEBUG
-        logChatScrollBoundary(
-            event: "follow_state_transition",
-            decision: "load_older_messages",
-            previousFollowLatest: previousFollowLatest
-        )
+            logChatScrollBoundary(
+                event: "follow_state_transition",
+                decision: "explicit_load_older_messages",
+                previousFollowLatest: previousFollowLatest
+            )
 #endif
-        if !isReadingOlderTranscript {
-            withAnimation(ChatMotion.quickState(reduceMotion: reduceMotion)) {
-                isReadingOlderTranscript = true
+            if !isReadingOlderTranscript {
+                withAnimation(ChatMotion.quickState(reduceMotion: reduceMotion)) {
+                    isReadingOlderTranscript = true
+                }
             }
         }
 
