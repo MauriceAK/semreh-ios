@@ -25,6 +25,7 @@ private struct ChatTranscriptPagingDebugEvidence {
     var awaitsSettledPreference = false
     var minimumSettledGeneration = 0
     var correctionGeneration: Int? = nil
+    var postCommandObservationCounts: [String: Int] = [:]
     var loggedSilentGuardReasons = Set<String>()
 }
 #endif
@@ -272,6 +273,7 @@ enum ChatTranscriptPagingReconciliationAction: Equatable {
     case waitForFreshSnapshot
     case requestAnchorRealization
     case applyMeasuredCorrection
+    case confirmPreservation
 }
 
 /// Initial saved-row restoration and older-page reconciliation share one
@@ -318,12 +320,21 @@ struct ChatTranscriptPagingReconciliationState: Equatable {
     private(set) var hasRequestedAnchorRealization = false
     private(set) var isCancelled = false
     private(set) var settlementDeadline: TimeInterval?
+    private(set) var correctionGeneration: Int?
     // A cancellation ceiling for an idle/missing preference stream, not a
     // settling delay. Successful reconciliation does not wait for this timer.
     static let settlementLifetime: TimeInterval = 2
 
     mutating func startSettlement(at now: TimeInterval) {
+        guard settlementDeadline == nil else { return }
         settlementDeadline = now + Self.settlementLifetime
+    }
+
+    /// A command is not proof of presentation. Keep the original deadline and
+    /// the single realization budget while awaiting a newer measured sample.
+    mutating func recordCorrectionIssued(generation: Int) {
+        guard !isCancelled, correctionGeneration == nil else { return }
+        correctionGeneration = generation
     }
 
     /// Expiry abandons preservation; it is never evidence of settled geometry.
@@ -357,13 +368,26 @@ struct ChatTranscriptPagingReconciliationState: Equatable {
         transcriptChanged: Bool,
         firstLoadedIDChanged: Bool,
         hasAnchorFrame: Bool,
-        anchorNeedsCorrection: Bool = true
+        anchorNeedsCorrection: Bool = true,
+        sampleGeneration: Int = 0,
+        anchorIsVisible: Bool = true
     ) -> ChatTranscriptPagingReconciliationAction {
         guard !isCancelled, loadCompleted,
               transcriptChanged,
               firstLoadedIDChanged
         else {
             return .waitForFreshSnapshot
+        }
+
+        if let correctionGeneration {
+            guard sampleGeneration > correctionGeneration else { return .waitForFreshSnapshot }
+            if hasAnchorFrame {
+                return !anchorNeedsCorrection && anchorIsVisible
+                    ? .confirmPreservation : .waitForFreshSnapshot
+            }
+            guard !hasRequestedAnchorRealization else { return .waitForFreshSnapshot }
+            hasRequestedAnchorRealization = true
+            return .requestAnchorRealization
         }
 
         // Callback counts do not establish layout completion: several newer
@@ -384,7 +408,6 @@ struct ChatTranscriptPagingReconciliationState: Equatable {
         }
 
         hasPendingEarlyPreference = false
-        hasRequestedAnchorRealization = false
         return .applyMeasuredCorrection
     }
 
@@ -409,6 +432,7 @@ struct ChatTranscriptPagingReconciliationState: Equatable {
         hasRequestedAnchorRealization = false
         isCancelled = false
         settlementDeadline = nil
+        correctionGeneration = nil
     }
 }
 
@@ -1457,7 +1481,7 @@ struct ChatTranscriptView: View, Equatable {
             event=older_anchor_pending_clear decision=\(reason, privacy: .public) \
             pagingSequence=\(identity.sequence, privacy: .public) pagingAnchorKey=\(identity.anchorKey, privacy: .public) \
             pendingAnchorPresent=\(anchor != nil, privacy: .public) pendingEvidencePresent=\(evidence != nil, privacy: .public) \
-            anchorFramePresent=\(anchorFrame != nil, privacy: .public) anchorFrameVisible=\(anchorFrameVisible, privacy: .public) \
+            capturedBeforeFramePresent=\(anchorFrame != nil, privacy: .public) capturedBeforeFrameVisible=\(anchorFrameVisible, privacy: .public) \
             restoreToken=\(restoreScrollToken, privacy: .public) restoreTokenPresent=\(restoreScrollToken > 0, privacy: .public) \
             pendingRestoreTokenPresent=\(pendingInitialRestoreToken != nil, privacy: .public) pendingRestoreTokenMatches=\(pendingTokenMatches, privacy: .public) \
             stateRestoreTokenPresent=\(stateToken != nil, privacy: .public) stateRestoreTokenMatches=\(stateTokenMatches, privacy: .public) \
@@ -1642,9 +1666,9 @@ struct ChatTranscriptView: View, Equatable {
     ) {
         guard let evidence = viewportTracker.pendingPagingEvidence,
               evidence.awaitsSettledPreference,
-              viewportTracker.framesGeneration >= evidence.minimumSettledGeneration,
-              let afterFrame = frames[evidence.anchorID]
+              viewportTracker.framesGeneration >= evidence.minimumSettledGeneration
         else { return }
+        recordPagingPostCommandObservation(source: "preference", frames: frames)
 
         let currentMetrics = currentScrollMetricsForRecovery() ?? viewportTracker.latestScrollMetrics
         guard !isUserInteractingWithScroll,
@@ -1666,10 +1690,18 @@ struct ChatTranscriptView: View, Equatable {
             return
         }
 
-        guard let viewportGlobalFrame = currentTranscriptViewportGlobalFrame() else { return }
+        guard let afterFrame = frames[evidence.anchorID],
+              !ChatTranscriptPagingPolicy.shouldRestorePrependedAnchor(
+                beforeFrame: evidence.beforeFrame, afterFrame: afterFrame
+              ),
+              ChatTranscriptVisibilityPolicy.isVisible(
+                frame: afterFrame, viewportHeight: viewportHeight,
+                bottomInset: transcriptBottomInsetHeight
+              ),
+              let viewportGlobalFrame = currentTranscriptViewportGlobalFrame() else { return }
         logTranscriptScrollSnapshot(
             event: "older_anchor_after_correction",
-            decision: "correction_settled_realized_frame",
+            decision: "correction_target_confirmed",
             viewportHeight: viewportHeight,
             targetKind: "older_anchor",
             targetExists: true,
@@ -1692,6 +1724,33 @@ struct ChatTranscriptView: View, Equatable {
             correctionAfterFrameMinY: afterFrame.minY
         )
         viewportTracker.pendingPagingEvidence = nil
+    }
+
+    /// Scalar-only bounded observations. Missing lazy rows are evidence too;
+    /// metrics/content-size callbacks label their cached preference generation
+    /// rather than claiming they measured a fresh row frame.
+    private func recordPagingPostCommandObservation(source: String, frames: [String: CGRect]) {
+        guard var evidence = viewportTracker.pendingPagingEvidence,
+              let correctionGeneration = evidence.correctionGeneration else { return }
+        let count = evidence.postCommandObservationCounts[source, default: 0]
+        guard count < (source == "preference" ? 4 : 2) else { return }
+        evidence.postCommandObservationCounts[source] = count + 1
+        viewportTracker.pendingPagingEvidence = evidence
+        let frame = frames[evidence.anchorID]
+        let offsetY = viewportTracker.scrollView?.contentOffset.y ?? .nan
+        let contentHeight = viewportTracker.scrollView?.contentSize.height ?? .nan
+        let boundsHeight = viewportTracker.scrollView?.bounds.height ?? .nan
+        let insetTop = viewportTracker.scrollView?.adjustedContentInset.top ?? .nan
+        let insetBottom = viewportTracker.scrollView?.adjustedContentInset.bottom ?? .nan
+        Self.activationRecoveryLogger.debug("""
+            event=older_anchor_post_command_observation source=\(source, privacy: .public) \
+            pagingSequence=\(evidence.sequence, privacy: .public) pagingAnchorKey=\(evidence.anchorKey, privacy: .public) \
+            correctionGeneration=\(correctionGeneration, privacy: .public) framesGeneration=\(viewportTracker.framesGeneration, privacy: .public) \
+            anchorPresent=\(frame != nil, privacy: .public) capturedBeforeMinY=\(Double(evidence.beforeFrame.minY), privacy: .public) \
+            sampledMinY=\(Double(frame?.minY ?? .nan), privacy: .public) \
+            contentOffsetY=\(Double(offsetY), privacy: .public) contentSizeHeight=\(Double(contentHeight), privacy: .public) \
+            boundsHeight=\(Double(boundsHeight), privacy: .public) insetTop=\(Double(insetTop), privacy: .public) insetBottom=\(Double(insetBottom), privacy: .public)
+            """)
     }
 
     private func logPagingEvidenceWithoutSettledFrame(
@@ -1923,6 +1982,9 @@ struct ChatTranscriptView: View, Equatable {
         _ contentSize: CGSize,
         proxy: ScrollViewProxy
     ) {
+#if DEBUG
+        recordPagingPostCommandObservation(source: "content_size", frames: viewportTracker.latestFrames)
+#endif
         let change = viewportTracker.layoutFollowState.recordContentHeight(contentSize.height)
         guard change == .grew else { return }
 
@@ -2507,6 +2569,9 @@ struct ChatTranscriptView: View, Equatable {
     }
 
     private func handleScrollMetrics(_ metrics: ChatScrollMetrics) {
+#if DEBUG
+        recordPagingPostCommandObservation(source: "metrics", frames: viewportTracker.latestFrames)
+#endif
         viewportTracker.latestScrollMetrics = metrics
         if metrics.isDirectlyInteracting || metrics.isDecelerating {
             clearPendingOlderMessagesAnchor(reason: "user_or_deceleration_owned")
@@ -2703,13 +2768,10 @@ struct ChatTranscriptView: View, Equatable {
                 if viewportTracker.pendingOlderMessagesReconciliation.expireSettlement(
                     at: ProcessInfo.processInfo.systemUptime
                 ) {
-                    clearPendingOlderMessagesAnchor(reason: "settlement_expired_unconfirmed")
 #if DEBUG
-                    logPagingEvidenceWithoutSettledFrame(
-                        decision: "settlement_expired_unconfirmed",
-                        viewportHeight: viewportTracker.viewportHeight
-                    )
+                    recordPagingPostCommandObservation(source: "expiry", frames: viewportTracker.latestFrames)
 #endif
+                    clearPendingOlderMessagesAnchor(reason: "settlement_expired_unconfirmed")
                 }
             }
         }
@@ -2759,9 +2821,20 @@ struct ChatTranscriptView: View, Equatable {
         currentFirstLoadedRowID: String?
     ) {
         guard let anchor = viewportTracker.pendingOlderMessagesAnchor else { return }
+        guard scenePhase == .active, viewportTracker.scrollView?.window != nil else {
+            clearPendingOlderMessagesAnchor(reason: "inactive_or_detached")
+            return
+        }
         if viewportTracker.pendingOlderMessagesReconciliation.expireSettlement(
             at: ProcessInfo.processInfo.systemUptime
         ) {
+#if DEBUG
+            recordPagingPostCommandObservation(source: "expiry", frames: frames)
+            logPagingEvidenceWithoutSettledFrame(
+                decision: "settlement_expired_unconfirmed",
+                viewportHeight: viewportTracker.viewportHeight
+            )
+#endif
             clearPendingOlderMessagesAnchor(reason: "settlement_expired_unconfirmed")
             return
         }
@@ -2932,14 +3005,29 @@ struct ChatTranscriptView: View, Equatable {
                 anchorNeedsCorrection: ChatTranscriptPagingPolicy.shouldRestorePrependedAnchor(
                     beforeFrame: anchor.frame,
                     afterFrame: frames[anchor.messageID]
+                ),
+                sampleGeneration: viewportTracker.framesGeneration,
+                anchorIsVisible: ChatTranscriptVisibilityPolicy.isVisible(
+                    frame: frames[anchor.messageID],
+                    viewportHeight: viewportTracker.viewportHeight,
+                    bottomInset: transcriptBottomInsetHeight
                 )
             )
         switch reconciliationAction {
+        case .confirmPreservation:
+#if DEBUG
+            recordPagingEvidenceAfterPreferenceIfReady(
+                frames: frames, viewportHeight: viewportTracker.viewportHeight
+            )
+#endif
+            clearPendingOlderMessagesAnchor(reason: "fresh_target_confirmed")
+            return
         case .waitForFreshSnapshot:
             if frames[anchor.messageID] != nil {
 #if DEBUG
                 logPagingReconcileDispositionIfNeeded(
-                    decision: "wait_unchanged_anchor_confirmation",
+                    decision: viewportTracker.pendingOlderMessagesReconciliation.correctionGeneration == nil
+                        ? "wait_unchanged_anchor_confirmation" : "wait_post_correction_confirmation",
                     anchor: anchor,
                     frames: frames,
                     currentFirstLoadedRowID: currentFirstLoadedRowID,
@@ -2996,10 +3084,10 @@ struct ChatTranscriptView: View, Equatable {
                 pagingStartGeneration: viewportTracker.pendingPagingEvidence?.startGeneration
             )
 #endif
-            // Reuse ChatView's existing non-animated message proxy path; its
-            // bounded layout hop lets the lazy stack register the target and
-            // its generation guard yields to a new user interaction.
-            onScrollToTranscriptMessage(proxy, anchor.messageID, false)
+            // The existing proxy realization is issued while this operation's
+            // scene/user/restore/deadline guards still hold. Do not enqueue the
+            // parent's delayed hop: it could outlive paging cancellation.
+            proxy.scrollTo(anchor.messageID, anchor: .top)
             return
         case .applyMeasuredCorrection:
 #if DEBUG
@@ -3037,7 +3125,9 @@ struct ChatTranscriptView: View, Equatable {
             // call above is refactored; callback count is never settlement.
             return
         }
-        clearPendingOlderMessagesAnchor(reason: "correction_evaluation")
+        viewportTracker.pendingOlderMessagesReconciliation.recordCorrectionIssued(
+            generation: viewportTracker.framesGeneration
+        )
 
         // A prepend is a viewport-preserving operation. If the measured anchor
         // moved materially, restore its measured alignment without animation
@@ -3137,6 +3227,10 @@ struct ChatTranscriptView: View, Equatable {
     private func clearPendingOlderMessagesAnchor(reason: String) {
 #if DEBUG
         logPendingOlderMessagesAnchorClearIfNeeded(reason: reason)
+        recordPagingPostCommandObservation(source: "terminal", frames: viewportTracker.latestFrames)
+        logPagingEvidenceWithoutSettledFrame(
+            decision: reason, viewportHeight: viewportTracker.viewportHeight
+        )
 #endif
         viewportTracker.pagingOperation.cancel()
         viewportTracker.olderMessagesLoadInFlight = false

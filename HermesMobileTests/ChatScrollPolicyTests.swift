@@ -3,6 +3,68 @@ import XCTest
 @testable import HermesMobile
 
 final class ChatScrollPolicyTests: XCTestCase {
+    func testPagingCorrectionNeedsFreshVisibleTargetAndNeverRepeatsDelta() {
+        var state = ChatTranscriptPagingReconciliationState()
+        state.startSettlement(at: 10)
+        let deadline = state.settlementDeadline
+        func action(_ generation: Int, frame: Bool, displaced: Bool, visible: Bool = true) -> ChatTranscriptPagingReconciliationAction {
+            state.actionForEligibleSnapshot(
+                loadCompleted: true, transcriptChanged: true, firstLoadedIDChanged: true,
+                hasAnchorFrame: frame, anchorNeedsCorrection: displaced,
+                sampleGeneration: generation, anchorIsVisible: visible
+            )
+        }
+        XCTAssertEqual(action(12, frame: true, displaced: true), .applyMeasuredCorrection)
+        state.recordCorrectionIssued(generation: 12)
+        state.startSettlement(at: 11)
+        XCTAssertEqual(state.settlementDeadline, deadline, "a command never extends ownership")
+        XCTAssertEqual(action(12, frame: true, displaced: false), .waitForFreshSnapshot)
+        XCTAssertEqual(action(13, frame: true, displaced: true), .waitForFreshSnapshot)
+        XCTAssertEqual(action(14, frame: true, displaced: true), .waitForFreshSnapshot)
+        XCTAssertEqual(action(15, frame: false, displaced: true), .requestAnchorRealization)
+        XCTAssertEqual(action(16, frame: false, displaced: true), .waitForFreshSnapshot)
+        XCTAssertEqual(action(17, frame: true, displaced: true), .waitForFreshSnapshot)
+        XCTAssertEqual(action(18, frame: true, displaced: false, visible: false), .waitForFreshSnapshot)
+        XCTAssertEqual(action(19, frame: true, displaced: false), .confirmPreservation)
+        XCTAssertEqual(state.correctionGeneration, 12)
+    }
+
+    func testPagingCorrectionDoesNotReplenishRealizationOrOutliveOriginalDeadline() {
+        var state = ChatTranscriptPagingReconciliationState()
+        state.startSettlement(at: 10)
+        XCTAssertEqual(state.actionForEligibleSnapshot(
+            loadCompleted: true, transcriptChanged: true, firstLoadedIDChanged: true,
+            hasAnchorFrame: false
+        ), .requestAnchorRealization)
+        state.recordCorrectionIssued(generation: 12)
+        XCTAssertEqual(state.actionForEligibleSnapshot(
+            loadCompleted: true, transcriptChanged: true, firstLoadedIDChanged: true,
+            hasAnchorFrame: false, sampleGeneration: 13
+        ), .waitForFreshSnapshot)
+        XCTAssertFalse(state.expireSettlement(at: 11.9))
+        XCTAssertTrue(state.expireSettlement(at: 12))
+        XCTAssertTrue(state.isCancelled)
+        XCTAssertEqual(state.actionForEligibleSnapshot(
+            loadCompleted: true, transcriptChanged: true, firstLoadedIDChanged: true,
+            hasAnchorFrame: true, anchorNeedsCorrection: false, sampleGeneration: 14
+        ), .waitForFreshSnapshot)
+        XCTAssertNil(state.settlementDeadline)
+        XCTAssertNil(state.correctionGeneration)
+    }
+
+    func testPagingCorrectionYieldsToCancellationBeforeFreshConfirmation() {
+        var state = ChatTranscriptPagingReconciliationState()
+        state.startSettlement(at: 10)
+        state.recordCorrectionIssued(generation: 12)
+        state.cancel()
+        state.recordCorrectionIssued(generation: 13)
+        XCTAssertNil(state.correctionGeneration)
+        XCTAssertEqual(state.actionForEligibleSnapshot(
+            loadCompleted: true, transcriptChanged: true, firstLoadedIDChanged: true,
+            hasAnchorFrame: true, anchorNeedsCorrection: false, sampleGeneration: 14
+        ), .waitForFreshSnapshot)
+    }
+
     func testAutomaticPagingRequiresStartupRestoreAndPresentationHandoff() {
         XCTAssertTrue(ChatTranscriptPagingPolicy.admitsAutomaticLoad(
             startupReady: true, hasPendingRestore: false, isActive: true, isAttached: true
@@ -551,7 +613,8 @@ final class ChatScrollPolicyTests: XCTestCase {
 
         // A repeated preference while the row is still unrealized cannot start
         // another scroll command. Once the proxy realizes the row, the normal
-        // measured correction path is the sole terminal action.
+        // measured correction path may issue once, but does not replenish the
+        // realization budget or prove the resulting target is visible.
         XCTAssertEqual(
             reconciliation.actionForEligibleSnapshot(
                 loadCompleted: true,
@@ -571,7 +634,7 @@ final class ChatScrollPolicyTests: XCTestCase {
             .applyMeasuredCorrection
         )
         XCTAssertFalse(reconciliation.hasPendingEarlyPreference)
-        XCTAssertFalse(reconciliation.hasRequestedAnchorRealization)
+        XCTAssertTrue(reconciliation.hasRequestedAnchorRealization)
 
         // Gesture/restore/scope cancellation uses the transcript's existing
         // reset path. A later page may request one fresh realization, but the
