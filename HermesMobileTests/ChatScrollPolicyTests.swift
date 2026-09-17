@@ -1564,7 +1564,7 @@ final class ChatScrollPolicyTests: XCTestCase {
 
     func testInitialRestoreRetainsTailPreferenceDeliveredBeforeToken() {
         var state = ChatTranscriptRestoreState()
-        state.recordTailVisibility(true)
+        state.recordTailVisibility(true, isAttachedToActiveScene: true)
 
         XCTAssertTrue(state.beginRestore(token: 1))
         state.recordMetrics(
@@ -1581,6 +1581,59 @@ final class ChatScrollPolicyTests: XCTestCase {
             ),
             "an unchanged SwiftUI preference may not be delivered again after the token arrives"
         )
+    }
+
+    func testInitialRestoreRejectsDetachedOrInactivePreTokenTail() {
+        var state = ChatTranscriptRestoreState()
+        state.recordTailVisibility(true, isAttachedToActiveScene: false)
+        state.recordVisibleMessageSample("row", isAttachedToActiveScene: false)
+        XCTAssertTrue(state.beginRestore(token: 1))
+        state.recordMetrics(isNearBottom: true, isDirectlyInteracting: false, isDecelerating: false)
+        state.recordRestoreAttempt()
+        XCTAssertFalse(state.shouldSettle(target: .latest, firstVisibleMessageID: nil))
+        XCTAssertFalse(state.hasObservedVisibleMessageSample)
+        state.recordTailVisibility(true, isAttachedToActiveScene: true)
+        XCTAssertTrue(state.shouldSettle(target: .latest, firstVisibleMessageID: nil))
+    }
+
+    func testInitialRestoreInvalidatesPreTokenEvidenceAcrossSceneDeparture() {
+        var state = ChatTranscriptRestoreState()
+        state.recordTailVisibility(true, isAttachedToActiveScene: true)
+        state.recordVisibleMessageSample("old-row", isAttachedToActiveScene: true)
+        state.invalidateVisibilityEvidence() // inactive/disappear boundary before first token
+        XCTAssertTrue(state.beginRestore(token: 1))
+        state.recordMetrics(isNearBottom: true, isDirectlyInteracting: false, isDecelerating: false)
+        XCTAssertFalse(state.shouldSettle(target: .latest, firstVisibleMessageID: nil))
+        XCTAssertNil(state.observedVisibleMessageID)
+
+        var currentEpoch = ChatTranscriptRestoreState()
+        currentEpoch.recordTailVisibility(true, isAttachedToActiveScene: true)
+        currentEpoch.invalidateVisibilityEvidence()
+        currentEpoch.recordTailVisibility(true, isAttachedToActiveScene: true) // newly attached return
+        XCTAssertTrue(currentEpoch.beginRestore(token: 1))
+        currentEpoch.recordMetrics(isNearBottom: true, isDirectlyInteracting: false, isDecelerating: false)
+        XCTAssertTrue(currentEpoch.shouldSettle(target: .latest, firstVisibleMessageID: nil),
+                      "valid current-lifecycle evidence before the first token remains useful")
+    }
+
+    func testLaterRestoreTokenCannotReusePreviousTailOrSavedRowEvidence() {
+        var state = ChatTranscriptRestoreState()
+        XCTAssertTrue(state.beginRestore(token: 1))
+        state.recordTailVisibility(true, isAttachedToActiveScene: true)
+        state.recordVisibleMessageSample("old-row", isAttachedToActiveScene: true)
+        state.recordMetrics(isNearBottom: true, isDirectlyInteracting: false, isDecelerating: false)
+        XCTAssertTrue(state.shouldSettle(target: .latest, firstVisibleMessageID: nil))
+        XCTAssertTrue(state.beginRestore(token: 1))
+        XCTAssertTrue(state.isTailVisible, "revisiting the same request is not a new lifecycle")
+
+        XCTAssertTrue(state.beginRestore(token: 2))
+        state.recordMetrics(isNearBottom: true, isDirectlyInteracting: false, isDecelerating: false)
+        state.recordRestoreAttempt()
+        XCTAssertFalse(state.shouldSettle(target: .latest, firstVisibleMessageID: nil))
+        XCTAssertFalse(state.hasObservedVisibleMessageSample)
+        XCTAssertNil(state.observedVisibleMessageID)
+        state.recordTailVisibility(true, isAttachedToActiveScene: true)
+        XCTAssertTrue(state.shouldSettle(target: .latest, firstVisibleMessageID: nil))
     }
 
     func testInitialRestoreDoesNotOverwriteARealUserDecision() {

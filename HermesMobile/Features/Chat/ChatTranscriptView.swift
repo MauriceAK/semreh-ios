@@ -865,6 +865,7 @@ struct ChatTranscriptView: View, Equatable {
                 }
                 .onChange(of: scenePhase) { _, phase in
                     guard phase == .active else {
+                        restoreSettlementState.invalidateVisibilityEvidence()
                         if ownedInitialRestoreRequest != nil || restoreSettlementTask != nil {
                             cancelTranscriptRestore(reason: "scene_inactive")
                         }
@@ -1011,6 +1012,7 @@ struct ChatTranscriptView: View, Equatable {
                 }
 #endif
                 .onDisappear {
+                    restoreSettlementState.invalidateVisibilityEvidence()
                     completeInitialRestore(.cancelled, request: ownedInitialRestoreRequest)
                     restoreSettlementTask?.cancel()
                     restoreSettlementTask = nil
@@ -1093,7 +1095,11 @@ struct ChatTranscriptView: View, Equatable {
                         )
                     }
 #endif
-                    restoreSettlementState.recordTailVisibility(isBottomVisible)
+                    let isAttachedToActiveScene = scenePhase == .active
+                        && viewportTracker.scrollView?.window != nil
+                    restoreSettlementState.recordTailVisibility(
+                        isBottomVisible, isAttachedToActiveScene: isAttachedToActiveScene
+                    )
                     onTranscriptTailVisibilityChange(isLatestRowVisible, isBottomVisible)
                     let visibleRow = ChatTranscriptVisibilityPolicy.firstVisibleMessage(
                         frames: frames.filter { $0.key != bottomAnchorID },
@@ -1112,9 +1118,9 @@ struct ChatTranscriptView: View, Equatable {
                         source: "visible_row_preference"
                     )
 #endif
-                    if isScrollViewAttached {
-                        restoreSettlementState.recordVisibleMessageSample(visibleRow?.id)
-                    }
+                    restoreSettlementState.recordVisibleMessageSample(
+                        visibleRow?.id, isAttachedToActiveScene: isAttachedToActiveScene
+                    )
                     confirmInitialRestoreTargetIfVisible(
                         visibleMessageID: visibleRow?.id,
                         isScrollViewAttached: isScrollViewAttached

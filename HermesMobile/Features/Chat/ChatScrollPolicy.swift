@@ -708,13 +708,17 @@ struct ChatTranscriptRestoreState: Equatable {
         guard restoreToken != token else { return !isCancelled }
 
         let preservePreRequestCancellation = restoreToken == nil && isCancelled
+        if restoreToken != nil {
+            // A later request cannot inherit the previous request's evidence.
+            invalidateVisibilityEvidence()
+        }
         restoreToken = token
         hasIssuedRestoreAttempt = false
         hasConfirmedMetricsSample = false
         isNearBottom = false
-        // Keep the latest preference-backed visibility samples. SwiftUI may
-        // deliver the target row or bottom-anchor preference before the initial
-        // restore token arrives and will not necessarily redeliver them.
+        // The first token may retain active, attached preferences admitted in
+        // this lifecycle. They may precede the token without being redelivered.
+        // Scene departure/disappearance invalidates them independently below.
         isCancelled = preservePreRequestCancellation
         return !isCancelled
     }
@@ -761,12 +765,26 @@ struct ChatTranscriptRestoreState: Equatable {
         self.isNearBottom = isNearBottom
     }
 
-    mutating func recordTailVisibility(_ visible: Bool) {
+    mutating func invalidateVisibilityEvidence() {
+        isTailVisible = false
+        hasObservedVisibleMessageSample = false
+        observedVisibleMessageID = nil
+    }
+
+    mutating func recordTailVisibility(_ visible: Bool, isAttachedToActiveScene: Bool = true) {
+        guard isAttachedToActiveScene else {
+            invalidateVisibilityEvidence()
+            return
+        }
         guard !isCancelled else { return }
         isTailVisible = visible
     }
 
-    mutating func recordVisibleMessageSample(_ messageID: String?) {
+    mutating func recordVisibleMessageSample(_ messageID: String?, isAttachedToActiveScene: Bool = true) {
+        guard isAttachedToActiveScene else {
+            invalidateVisibilityEvidence()
+            return
+        }
         guard !isCancelled else { return }
         hasObservedVisibleMessageSample = true
         observedVisibleMessageID = messageID
