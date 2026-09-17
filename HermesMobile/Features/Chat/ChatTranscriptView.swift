@@ -3087,7 +3087,11 @@ struct ChatTranscriptView: View, Equatable {
             // The existing proxy realization is issued while this operation's
             // scene/user/restore/deadline guards still hold. Do not enqueue the
             // parent's delayed hop: it could outlive paging cancellation.
-            proxy.scrollTo(anchor.messageID, anchor: .top)
+            var realizationTransaction = Transaction(animation: nil)
+            realizationTransaction.disablesAnimations = true
+            withTransaction(realizationTransaction) {
+                proxy.scrollTo(anchor.messageID, anchor: .top)
+            }
             return
         case .applyMeasuredCorrection:
 #if DEBUG
