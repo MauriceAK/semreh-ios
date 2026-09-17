@@ -485,36 +485,52 @@ final class DirectSkillUITests: XCTestCase {
         link.queryItems = [URLQueryItem(name: "id", value: fixture.storedID)]
 
         if app.state != .runningForeground { app.launch() }
+        let entryDeadline = Date().addingTimeInterval(30)
         app.open(try XCTUnwrap(link.url))
         let selectedTailText = try XCTUnwrap(canonicalText(visibleTail[0]))
-        let selectedTail = app.staticTexts.matching(
-            NSPredicate(format: "label == %@", selectedTailText)
-        ).firstMatch
-        XCTAssertTrue(selectedTail.waitForExistence(timeout: 30),
-                      "Production deep link must display the selected long transcript tail.")
+        var semanticEntryGatePassed = false
+        var legacyRawLabelMatch = false
+        var legacyRawLabelSampled = false
+        defer {
+            // Keep the former raw-label lookup as a diagnosis-only scalar. The
+            // entry gate itself is the scoped canonical row contract below;
+            // never attach the canonical body to test evidence.
+            if !legacyRawLabelSampled {
+                legacyRawLabelMatch = app.staticTexts.matching(
+                    NSPredicate(format: "label == %@", selectedTailText)
+                ).count > 0
+            }
+            let evidence = XCTAttachment(string: [
+                "semantic_entry_gate_passed=\(semanticEntryGatePassed)",
+                "legacy_raw_label_match=\(legacyRawLabelMatch)",
+                "entry_deadline_seconds=30",
+                "corrective_interaction_before_gate=false",
+            ].joined(separator: "\n"))
+            evidence.name = "Long automatic restore entry selector diagnosis"
+            evidence.lifetime = .keepAlways
+            add(evidence)
+        }
         let selectedDetail = app.descendants(matching: .any).matching(
             NSPredicate(format: "identifier BEGINSWITH %@", "chat-detail:")
         ).firstMatch
-        XCTAssertTrue(selectedDetail.waitForExistence(timeout: 20))
-        try assertAccessibleTranscriptRows(
-            visibleTail, in: selectedDetail, context: "selected long chat before termination"
+        guard selectedDetail.waitForExistence(timeout: max(0, entryDeadline.timeIntervalSinceNow)),
+              app.descendants(matching: .any).matching(
+                NSPredicate(format: "identifier BEGINSWITH %@", "chat-detail:")
+              ).count == 1 else {
+            XCTFail("Production deep link must mount exactly one chat detail before the 30-second entry deadline.")
+            throw NSError(domain: "DirectSkillUITests", code: 46)
+        }
+        try assertAutomaticRestoreEntryRows(
+            visibleTail,
+            in: selectedDetail,
+            deadline: entryDeadline,
+            context: "selected long chat before termination"
         )
-
-        let transcript = selectedDetail.descendants(matching: .scrollView)
-            .matching(identifier: "chat-transcript-scroll").firstMatch
-        let tailRow = transcript.descendants(matching: .any)
-            .matching(identifier: try XCTUnwrap(accessibleTranscriptRow(visibleTail[0])).identifier)
-            .firstMatch
-        tailRow.press(forDuration: 1.1)
-        // Completed assistant rows can expose a persistent Copy button behind
-        // the context-menu presentation. Select the visible menu action rather
-        // than letting XCTest bind to that obscured, non-hittable sibling.
-        let copyAction = app.buttons.matching(
-            NSPredicate(format: "label == %@ AND hittable == true", "Copy")
-        ).firstMatch
-        XCTAssertTrue(copyAction.waitForExistence(timeout: 5),
-                      "The canonical row container must retain its message context menu.")
-        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.95)).tap()
+        legacyRawLabelMatch = app.staticTexts.matching(
+            NSPredicate(format: "label == %@", selectedTailText)
+        ).count > 0
+        legacyRawLabelSampled = true
+        semanticEntryGatePassed = true
 
         for launchNumber in 1...3 {
             app.terminate()
@@ -535,6 +551,7 @@ final class DirectSkillUITests: XCTestCase {
             screenshot.lifetime = .keepAlways
             add(screenshot)
         }
+
     }
 
     @MainActor
@@ -708,6 +725,31 @@ final class DirectSkillUITests: XCTestCase {
             completedTail, in: detail, context: "long-scroll background return without corrective scroll"
         )
         retainPreviewScreenshot("Long-scroll settled post-AX tail verification", app: app)
+
+        // Keep context-menu coverage in this separate bounded interaction test;
+        // the automatic-restore test above remains entirely no-intervention
+        // through its three relaunch assertions.
+        let contextTranscript = detail.descendants(matching: .scrollView)
+            .matching(identifier: "chat-transcript-scroll").firstMatch
+        let contextRow = contextTranscript.descendants(matching: .any)
+            .matching(identifier: try XCTUnwrap(accessibleTranscriptRow(completedTail.last!)).identifier)
+            .firstMatch
+        guard contextTranscript.waitForExistence(timeout: 5),
+              contextRow.waitForExistence(timeout: 5),
+              contextRow.isHittable else {
+            XCTFail("The completed canonical row must remain hittable for the context-menu check.")
+            return
+        }
+        contextRow.press(forDuration: 1.1)
+        // Completed assistant rows can expose a persistent Copy button behind
+        // the context-menu presentation. Select the visible menu action rather
+        // than letting XCTest bind to that obscured, non-hittable sibling.
+        let copyAction = app.buttons.matching(
+            NSPredicate(format: "label == %@ AND hittable == true", "Copy")
+        ).firstMatch
+        XCTAssertTrue(copyAction.waitForExistence(timeout: 5),
+                      "The canonical row container must retain its message context menu.")
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.95)).tap()
 
         let timingAttachment = XCTAttachment(string: timings.joined(separator: "\n"))
         timingAttachment.name = "Long-scroll interaction timing and evidence limits"
@@ -3838,6 +3880,91 @@ final class DirectSkillUITests: XCTestCase {
         timings.append("paging_drag_start_normalized_y=\(dragStartPoint.dy)")
         timings.append("paging_drag_end_normalized_y=\(dragEndPoint.dy)")
         return transcript
+    }
+
+    @MainActor
+    private func assertAutomaticRestoreEntryRows(
+        _ rows: [[String: Any]],
+        in detail: XCUIElement,
+        deadline: Date,
+        context: String
+    ) throws {
+        let expected = rows.compactMap(accessibleTranscriptRow)
+        guard expected.count == rows.count else {
+            XCTFail("\(context) must expose a stable canonical ID for every expected row.")
+            throw NSError(domain: "DirectSkillUITests", code: 47)
+        }
+
+        let transcripts = detail.descendants(matching: .scrollView)
+            .matching(identifier: "chat-transcript-scroll")
+        let transcript = transcripts.firstMatch
+        guard transcript.waitForExistence(timeout: max(0, deadline.timeIntervalSinceNow)),
+              transcripts.count == 1 else {
+            XCTFail("\(context) must expose exactly one canonical transcript before the 30-second entry deadline.")
+            throw NSError(domain: "DirectSkillUITests", code: 48)
+        }
+        let composer = detail.descendants(matching: .any)
+            .matching(identifier: "chat-composer-input").firstMatch
+        guard composer.waitForExistence(timeout: max(0, deadline.timeIntervalSinceNow)) else {
+            XCTFail("\(context) must expose its composer before the 30-second entry deadline.")
+            throw NSError(domain: "DirectSkillUITests", code: 49)
+        }
+
+        func isFinite(_ rect: CGRect) -> Bool {
+            [
+                rect.minX, rect.minY, rect.maxX, rect.maxY,
+                rect.width, rect.height,
+            ].allSatisfy(\.isFinite)
+        }
+
+        func visibleViewport() -> CGRect? {
+            let transcriptFrame = transcript.frame
+            let composerFrame = composer.frame
+            guard isFinite(transcriptFrame), !transcriptFrame.isEmpty,
+                  isFinite(composerFrame), !composerFrame.isEmpty else { return nil }
+            let bottom = min(transcriptFrame.maxY, composerFrame.minY)
+            guard bottom > transcriptFrame.minY else { return nil }
+            return CGRect(
+                x: transcriptFrame.minX,
+                y: transcriptFrame.minY,
+                width: transcriptFrame.width,
+                height: bottom - transcriptFrame.minY
+            )
+        }
+
+        func contractSatisfied() -> Bool {
+            guard let viewport = visibleViewport(), isFinite(viewport), !viewport.isEmpty else {
+                return false
+            }
+            return expected.allSatisfy { row in
+                let matches = transcript.descendants(matching: .any)
+                    .matching(identifier: row.identifier)
+                guard matches.count == 1 else { return false }
+                let element = matches.firstMatch
+                let frame = element.frame
+                return element.exists
+                    && element.label == row.label
+                    && element.isHittable
+                    && isFinite(frame)
+                    && !frame.isEmpty
+                    && viewport.intersects(frame)
+            }
+        }
+
+        while Date() < deadline {
+            if contractSatisfied() { return }
+            RunLoop.main.run(until: min(deadline, Date().addingTimeInterval(0.1)))
+        }
+
+        let viewportFinite = visibleViewport().map { isFinite($0) && !$0.isEmpty } ?? false
+        let realizedCounts = expected.map { row in
+            transcript.descendants(matching: .any).matching(identifier: row.identifier).count
+        }
+        XCTFail(
+            "\(context) did not satisfy the scoped canonical row contract before the 30-second "
+                + "entry deadline (viewport_finite=\(viewportFinite), realized_counts=\(realizedCounts))."
+        )
+        throw NSError(domain: "DirectSkillUITests", code: 50)
     }
 
     @MainActor
