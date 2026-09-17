@@ -154,6 +154,50 @@ final class TranscriptRestoreStoreTests: XCTestCase {
 #if DEBUG
 @MainActor
 final class ChatP09DiagnosticRestoreBootstrapTests: XCTestCase {
+    func testCalibrationOneShotRejectsDuplicateAndWrongScopeRelease() {
+        var state = ChatP09CalibrationState()
+        let scope = UUID()
+        XCTAssertFalse(state.finish(scope: scope, released: true))
+        XCTAssertTrue(state.begin(scope: scope))
+        XCTAssertFalse(state.begin(scope: scope))
+        XCTAssertFalse(state.finish(scope: UUID(), released: true))
+        XCTAssertEqual(state.phase, .waiting)
+        XCTAssertTrue(state.finish(scope: scope, released: true))
+        XCTAssertEqual(state.phase, .released)
+        XCTAssertFalse(state.finish(scope: scope, released: true))
+        XCTAssertFalse(state.begin(scope: scope))
+    }
+
+    func testCalibrationTimeoutAndCancellationAbortRatherThanRelease() {
+        for _ in ["timeout", "scope_or_user_cancellation"] {
+            var state = ChatP09CalibrationState()
+            let scope = UUID()
+            XCTAssertTrue(state.begin(scope: scope))
+            XCTAssertTrue(state.finish(scope: scope, released: false))
+            XCTAssertEqual(state.phase, .aborted)
+            XCTAssertFalse(state.finish(scope: scope, released: true))
+            XCTAssertFalse(state.begin(scope: scope))
+        }
+    }
+
+    func testCalibrationNonceRequiresExactSeedFixture() {
+        let nonce = UUID().uuidString
+        let key = "SEMREH_P09_CALIBRATION_NONCE"
+        let arguments = ["--chat-p09-seed-restore",
+                         "--chat-p09-restore-server=https://semreh-slice1-test.tailda8427.ts.net",
+                         "--chat-p09-restore-session=p09-test", "--chat-p09-restore-message=123"]
+        XCTAssertEqual(ChatP09CalibrationState.nonce(arguments: arguments, environment: [key: nonce]), nonce)
+        let server = URL(string: "https://semreh-slice1-test.tailda8427.ts.net")!
+        XCTAssertTrue(ChatP09CalibrationState.matchesFixture(arguments: arguments, server: server, sessionID: "p09-test"))
+        XCTAssertFalse(ChatP09CalibrationState.matchesFixture(arguments: arguments, server: server, sessionID: "other-session"))
+        XCTAssertFalse(ChatP09CalibrationState.matchesFixture(arguments: arguments, server: URL(string: "https://outside.example")!, sessionID: "p09-test"))
+        XCTAssertNil(ChatP09CalibrationState.nonce(arguments: [], environment: [key: nonce]))
+        XCTAssertNil(ChatP09CalibrationState.nonce(arguments: arguments, environment: [:]))
+        XCTAssertNil(ChatP09CalibrationState.nonce(arguments: arguments, environment: [key: "malformed"]))
+        XCTAssertNil(ChatP09CalibrationState.nonce(arguments: arguments.map { $0.replacingOccurrences(of: "semreh-slice1-test.tailda8427.ts.net", with: "outside.example") }, environment: [key: nonce]))
+        XCTAssertNil(ChatP09CalibrationState.nonce(arguments: arguments.map { $0.replacingOccurrences(of: "--chat-p09-seed-restore", with: "--chat-p09-cleanup-restore") }, environment: [key: nonce]))
+    }
+
     private var defaults: UserDefaults!
     private var suiteName: String!
     private let server = URL(string: "https://semreh-slice1-test.tailda8427.ts.net")!

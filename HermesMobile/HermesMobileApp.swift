@@ -2,6 +2,7 @@ import SwiftUI
 import SwiftData
 import OSLog
 import Foundation
+import CoreFoundation
 
 struct SemrehSceneActions {
     let canCreateNewChat: Bool
@@ -158,6 +159,106 @@ struct ChatP09DiagnosticRestoreRequest: Equatable {
         return URL(string: approvedOrigin)
     }
 }
+
+/// Pure one-shot state shared with focused tests. No timer can release a load.
+struct ChatP09CalibrationState: Equatable {
+    enum Phase: Equatable { case unused, waiting, released, aborted }
+    private(set) var phase: Phase = .unused
+    private(set) var scope: UUID?
+
+    mutating func begin(scope: UUID) -> Bool {
+        guard phase == .unused else { return false }
+        self.scope = scope
+        phase = .waiting
+        return true
+    }
+
+    mutating func finish(scope: UUID, released: Bool) -> Bool {
+        guard phase == .waiting, self.scope == scope else { return false }
+        phase = released ? .released : .aborted
+        return true
+    }
+
+    static func nonce(arguments: [String], environment: [String: String]) -> String? {
+        guard let request = ChatP09DiagnosticRestoreRequest.parse(arguments: arguments),
+              request.operation == .seed,
+              let raw = environment["SEMREH_P09_CALIBRATION_NONCE"],
+              let nonce = UUID(uuidString: raw), nonce.uuidString == raw else { return nil }
+        return raw
+    }
+
+    static func matchesFixture(arguments: [String], server: URL, sessionID: String) -> Bool {
+        guard let request = ChatP09DiagnosticRestoreRequest.parse(arguments: arguments) else { return false }
+        return request.operation == .seed && request.server == server && request.sessionID == sessionID
+    }
+}
+
+#if targetEnvironment(simulator)
+/// A test-process handshake, not a paging implementation. Only a validated
+/// contained P09 seed can hold one automatic request; timeout aborts it.
+@MainActor
+final class ChatP09PagingCalibration {
+    static let shared = ChatP09PagingCalibration()
+    private var state = ChatP09CalibrationState()
+    private var continuation: CheckedContinuation<Bool, Never>?
+    private var timeout: Task<Void, Never>?
+    private var releaseName: String?
+    private let center = CFNotificationCenterGetDarwinNotifyCenter()
+    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Semreh", category: "TranscriptActivationRecovery")
+
+    func waitIfConfigured(server: URL, sessionID: String, scope: UUID) async -> Bool {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SEMREH_P09_CALIBRATION_NONCE"] != nil else { return true }
+        let arguments = ProcessInfo.processInfo.arguments
+        guard let nonce = ChatP09CalibrationState.nonce(arguments: arguments, environment: environment),
+              ChatP09CalibrationState.matchesFixture(arguments: arguments, server: server, sessionID: sessionID),
+              !Task.isCancelled, state.begin(scope: scope) else { return false }
+        let release = "semreh.p09.calibration.\(nonce).release"
+        releaseName = release
+        CFNotificationCenterAddObserver(center, Unmanaged.passUnretained(self).toOpaque(), { _, observer, _, _, _ in
+            guard let observer else { return }
+            let gate = Unmanaged<ChatP09PagingCalibration>.fromOpaque(observer).takeUnretainedValue()
+            Task { @MainActor in gate.finish(released: true) }
+        }, release as CFString, nil, .deliverImmediately)
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                self.continuation = continuation
+                if Task.isCancelled { finish(released: false); return }
+                timeout = Task { @MainActor in
+                    try? await Task.sleep(for: .seconds(30))
+                    guard !Task.isCancelled else { return }
+                    finish(released: false)
+                }
+                logger.debug("event=p09_calibration_paused loaderDispatched=false")
+                CFNotificationCenterPostNotification(center,
+                    CFNotificationName("semreh.p09.calibration.\(nonce).paused" as CFString), nil, nil, true)
+            }
+        } onCancel: {
+            Task { @MainActor in self.cancel(scope: scope) }
+        }
+    }
+
+    func cancel(scope: UUID?) {
+        guard state.scope == scope else { return }
+        finish(released: false)
+    }
+
+    private func finish(released: Bool) {
+        guard let scope = state.scope, state.finish(scope: scope, released: released) else { return }
+        logger.debug("event=p09_calibration_completed released=\(released, privacy: .public)")
+        if let releaseName {
+            CFNotificationCenterRemoveObserver(center, Unmanaged.passUnretained(self).toOpaque(),
+                CFNotificationName(releaseName as CFString), nil)
+        }
+        releaseName = nil
+        timeout?.cancel()
+        timeout = nil
+        let resumed = continuation
+        continuation = nil
+        resumed?.resume(returning: released)
+    }
+}
+#endif
 
 @MainActor
 enum ChatP09DiagnosticRestoreBootstrap {

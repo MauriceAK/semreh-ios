@@ -1,8 +1,71 @@
 import XCTest
 import UIKit
 import UniformTypeIdentifiers
+import CoreFoundation
+
+private final class P09CalibrationSignal {
+    let expectation = XCTestExpectation(description: "P09 automatic request paused before dispatch")
+    private let name: String
+    init(nonce: String) {
+        name = "semreh.p09.calibration.\(nonce).paused"
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+            Unmanaged.passUnretained(self).toOpaque(), { _, observer, _, _, _ in
+                guard let observer else { return }
+                Unmanaged<P09CalibrationSignal>.fromOpaque(observer).takeUnretainedValue().expectation.fulfill()
+            }, name as CFString, nil, .deliverImmediately)
+    }
+    deinit {
+        CFNotificationCenterRemoveObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+            Unmanaged.passUnretained(self).toOpaque(), CFNotificationName(name as CFString), nil)
+    }
+    static func release(nonce: String) {
+        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+            CFNotificationName("semreh.p09.calibration.\(nonce).release" as CFString), nil, nil, true)
+    }
+}
+
+private enum P09CalibrationGeometry {
+    enum Invalid: Error { case frame, viewportChanged }
+    static func displacement(beforeRow: CGRect, beforeViewport: CGRect,
+                             afterRow: CGRect, afterViewport: CGRect) throws -> CGFloat {
+        for frame in [beforeRow, beforeViewport, afterRow, afterViewport] {
+            guard !frame.isEmpty, !frame.isNull, !frame.isInfinite,
+                  [frame.minX, frame.minY, frame.width, frame.height].allSatisfy(\.isFinite)
+            else { throw Invalid.frame }
+        }
+        guard beforeRow.intersects(beforeViewport), afterRow.intersects(afterViewport) else { throw Invalid.frame }
+        guard abs(beforeViewport.minX - afterViewport.minX) <= 0.5,
+              abs(beforeViewport.minY - afterViewport.minY) <= 0.5,
+              abs(beforeViewport.width - afterViewport.width) <= 0.5,
+              abs(beforeViewport.height - afterViewport.height) <= 0.5 else { throw Invalid.viewportChanged }
+        let relative = abs((afterRow.minY - afterViewport.minY) - (beforeRow.minY - beforeViewport.minY))
+        return max(relative, abs(afterRow.minY - beforeRow.minY))
+    }
+}
 
 final class DirectSkillUITests: XCTestCase {
+    func testP09CalibrationGeometryUsesMeasuredBaselineAndStableViewport() throws {
+        let viewport = CGRect(x: 0, y: 0, width: 390, height: 844)
+        let before = CGRect(x: 100, y: 144.75, width: 250, height: 37)
+        XCTAssertEqual(try P09CalibrationGeometry.displacement(
+            beforeRow: before, beforeViewport: viewport, afterRow: before, afterViewport: viewport
+        ), 0)
+        XCTAssertEqual(try P09CalibrationGeometry.displacement(
+            beforeRow: before, beforeViewport: viewport,
+            afterRow: before.offsetBy(dx: 0, dy: 12.25), afterViewport: viewport
+        ), 12.25)
+        XCTAssertThrowsError(try P09CalibrationGeometry.displacement(
+            beforeRow: before, beforeViewport: viewport,
+            afterRow: before.offsetBy(dx: 0, dy: 30), afterViewport: viewport.offsetBy(dx: 0, dy: 30)
+        ))
+        XCTAssertThrowsError(try P09CalibrationGeometry.displacement(
+            beforeRow: .zero, beforeViewport: viewport, afterRow: before, afterViewport: viewport
+        ))
+        XCTAssertThrowsError(try P09CalibrationGeometry.displacement(
+            beforeRow: .infinite, beforeViewport: viewport, afterRow: before, afterViewport: viewport
+        ))
+    }
+
     private let origin = "https://semreh-slice1-test.tailda8427.ts.net"
     private let personalPilotOrigin = "https://maumac.tailda8427.ts.net:8443"
     private let credentialsPath = "/Users/maurice/workspace/semreh-slice1-runtime/credentials.json"
@@ -1298,6 +1361,16 @@ final class DirectSkillUITests: XCTestCase {
 
     @MainActor
     func testOptInPhoneAutomaticPagingAnchorFromSavedBoundary() async throws {
+        try await exerciseAutomaticPagingAnchor(calibrated: true)
+    }
+
+    @MainActor
+    func testOptInPhoneAutomaticPagingAnchorUnheldDiagnostic() async throws {
+        try await exerciseAutomaticPagingAnchor(calibrated: false)
+    }
+
+    @MainActor
+    private func exerciseAutomaticPagingAnchor(calibrated: Bool) async throws {
         continueAfterFailure = false
         #if !targetEnvironment(simulator)
         throw XCTSkip("Automatic paging-anchor verification is simulator-only.")
@@ -1305,6 +1378,9 @@ final class DirectSkillUITests: XCTestCase {
         let environment = ProcessInfo.processInfo.environment
         guard environment["SEMREH_PHONE_P09_AUTOMATIC_PREPEND_UI"] == "1" else {
             throw XCTSkip("Automatic paging-anchor verification is opt-in.")
+        }
+        if !calibrated, environment["SEMREH_PHONE_P09_UNHELD_DIAGNOSTIC"] != "1" {
+            throw XCTSkip("Unheld timing observation is separate from calibrated preservation acceptance.")
         }
         guard environment["SEMREH_SLICE2_UI_LIVE"] == "1",
               environment["SEMREH_SLICE1_HTTPS"] == "1",
@@ -1335,6 +1411,10 @@ final class DirectSkillUITests: XCTestCase {
         let sessionLink = try XCTUnwrap(link.url)
         let app = XCUIApplication()
 
+        let nonce = UUID().uuidString
+        let signal = calibrated ? P09CalibrationSignal(nonce: nonce) : nil
+        if calibrated { app.launchEnvironment["SEMREH_P09_CALIBRATION_NONCE"] = nonce }
+
         func detailElement() -> XCUIElement {
             app.descendants(matching: .any).matching(
                 NSPredicate(format: "identifier BEGINSWITH %@", "chat-detail:")
@@ -1345,6 +1425,7 @@ final class DirectSkillUITests: XCTestCase {
         defer {
             app.terminate()
             if seeded {
+                app.launchEnvironment.removeValue(forKey: "SEMREH_P09_CALIBRATION_NONCE")
                 app.launchArguments = [
                     "--chat-p09-cleanup-restore",
                     "--chat-p09-restore-server=\(origin)",
@@ -1380,8 +1461,46 @@ final class DirectSkillUITests: XCTestCase {
             return XCTFail("The production transcript scroll container must exist.")
         }
 
-        // The source older_prefetch_started record is the causal before-boundary;
-        // do not require an AX absence sample that can race automatic prefetch.
+        var beforeRow: CGRect?
+        var beforeViewport: CGRect?
+        var beforeWindow: CGRect?
+        var beforeOrientation: UIDeviceOrientation?
+        if let signal {
+            guard await XCTWaiter.fulfillment(of: [signal.expectation], timeout: 20) == .completed else {
+                return XCTFail("The exact fixture automatic request must pause before loader dispatch.")
+            }
+            guard app.state == .runningForeground else { return XCTFail("Baseline requires foreground presentation.") }
+            let matches = transcript.descendants(matching: .any).matching(identifier: savedRow.identifier)
+            guard matches.count == 1 else { return XCTFail("Baseline requires exactly one same canonical row.") }
+            let row = matches.firstMatch
+            guard row.label == savedRow.label, row.isHittable else {
+                return XCTFail("Baseline requires truthful visible canonical row, without corrective interaction.")
+            }
+            let firstRow = row.frame
+            let firstViewport = transcript.frame
+            guard !transcript.descendants(matching: .any).matching(identifier: olderProbe.identifier).firstMatch.exists else {
+                return XCTFail("Before baseline must precede realization of the not-yet-loaded canonical older probe.")
+            }
+            retainPreviewScreenshot("P09 held real AX baseline before release", app: app)
+            let checkedRow = matches.firstMatch.frame
+            let checkedViewport = transcript.frame
+            guard try P09CalibrationGeometry.displacement(
+                beforeRow: firstRow, beforeViewport: firstViewport,
+                afterRow: checkedRow, afterViewport: checkedViewport
+            ) <= 0.5 else { return XCTFail("Pre-load AX baseline changed while held; no valid calibration.") }
+            beforeRow = checkedRow
+            beforeViewport = checkedViewport
+            beforeWindow = app.frame
+            beforeOrientation = XCUIDevice.shared.orientation
+            let baseline = XCTAttachment(string: "before_row_frame=\(checkedRow)\nbefore_viewport_frame=\(checkedViewport)\nloader_release_follows_baseline=true\nsynchronized_ax_warming=true")
+            baseline.name = "P09 independent pre-load AX baseline"
+            baseline.lifetime = .keepAlways
+            add(baseline)
+            P09CalibrationSignal.release(nonce: nonce)
+        }
+
+        // The calibrated route has a real held AX baseline. The separate unheld
+        // route retains timing evidence only and must not invent a baseline.
         let probe = transcript.descendants(matching: .any)
             .matching(identifier: olderProbe.identifier).firstMatch
         let olderProbeRealized = probe.waitForExistence(timeout: 2)
@@ -1395,21 +1514,45 @@ final class DirectSkillUITests: XCTestCase {
         }
         retainPreviewScreenshot("P09 automatic prepend settled canonical anchor", app: app)
 
-        // The seeded restore target is `.top`, and the joined source trace
-        // reports its pre-load focused frame relative to the source viewport.
-        // Convert the fresh AX frame into the same viewport-relative space.
-        let sourceAnchorMinYRelativeToViewport: CGFloat = 0
-        let settledAnchorMinYRelativeToViewport = settledAnchor.frame.minY - transcript.frame.minY
-        let anchorDisplacement = abs(
-            settledAnchorMinYRelativeToViewport - sourceAnchorMinYRelativeToViewport
+        guard calibrated else {
+            let diagnostic = XCTAttachment(string: "unheld_diagnostic=true\nnumeric_preservation_not_measured=true\nsettled_anchor_frame=\(settledAnchor.frame)\nsettled_viewport_frame=\(transcript.frame)\nolder_probe_realized=\(olderProbeRealized)")
+            diagnostic.name = "P09 unheld timing observation, not displacement acceptance"
+            diagnostic.lifetime = .keepAlways
+            add(diagnostic)
+            return
+        }
+
+        // Both endpoints are independently observed AX frames. Named-space
+        // source geometry and header estimates are diagnostics, never baseline.
+        let measuredBeforeRow = try XCTUnwrap(beforeRow)
+        let measuredBeforeViewport = try XCTUnwrap(beforeViewport)
+        guard olderProbeRealized else { return XCTFail("A new older canonical probe must be realized after release.") }
+        guard transcript.descendants(matching: .any).matching(identifier: savedRow.identifier).count == 1,
+              settledAnchor.label == savedRow.label, settledAnchor.isHittable else {
+            return XCTFail("After sample must retain the same truthful visible canonical row.")
+        }
+        guard app.state == .runningForeground, app.frame == beforeWindow,
+              XCUIDevice.shared.orientation == beforeOrientation else {
+            return XCTFail("Window/orientation changed between independent AX endpoints.")
+        }
+        let measuredAfterRow = settledAnchor.frame
+        let measuredAfterViewport = transcript.frame
+        let beforeAnchorMinYRelativeToViewport = measuredBeforeRow.minY - measuredBeforeViewport.minY
+        let settledAnchorMinYRelativeToViewport = measuredAfterRow.minY - measuredAfterViewport.minY
+        let anchorDisplacement = try P09CalibrationGeometry.displacement(
+            beforeRow: measuredBeforeRow, beforeViewport: measuredBeforeViewport,
+            afterRow: measuredAfterRow, afterViewport: measuredAfterViewport
         )
 
         let evidence = XCTAttachment(string: [
             "fixture_rows=\(fixture.rows.count)",
             "saved_anchor_key=\(opaquePagingAnchorKey("transcript:row:\(savedMessageID)"))",
-            "settled_anchor_frame=\(settledAnchor.frame)",
-            "settled_viewport_frame=\(transcript.frame)",
-            "source_anchor_min_y_relative_to_viewport=\(sourceAnchorMinYRelativeToViewport)",
+            "settled_anchor_frame=\(measuredAfterRow)",
+            "settled_viewport_frame=\(measuredAfterViewport)",
+            "before_anchor_min_y_relative_to_viewport=\(beforeAnchorMinYRelativeToViewport)",
+            "before_anchor_frame=\(measuredBeforeRow)",
+            "before_viewport_frame=\(measuredBeforeViewport)",
+            "synchronized_ax_warming=true",
             "settled_anchor_min_y_relative_to_viewport=\(settledAnchorMinYRelativeToViewport)",
             "anchor_displacement=\(anchorDisplacement)",
             "anchor_displacement_limit=12.0",

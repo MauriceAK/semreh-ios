@@ -157,7 +157,7 @@ final class ChatTranscriptViewRestoreTests: XCTestCase {
             actionContext: { _, _ in nil },
             shouldRenderMessageRow: { _ in true },
             onLoadMessages: {},
-            onLoadOlderMessages: { _ in .noProgress },
+            onLoadOlderMessages: { _, _ in .noProgress },
             onUpdateScrollMetrics: { _ in },
             onDismissKeyboard: {},
             onScrollToBottom: { _ in },

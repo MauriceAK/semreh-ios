@@ -1569,11 +1569,20 @@ struct ChatView: View {
             onLoadMessages: {
                 await loadMessages()
             },
-            onLoadOlderMessages: { intent in
+            onLoadOlderMessages: { intent, isCurrentOperation in
                 if !intent.acceptsUserIntent {
                     guard pagingStartupReadyScope == viewModel.outgoingInsertionScope,
                           transcriptRestoreOutcomeState.pending == nil,
                           scenePhase == .active else { return .notAdmitted }
+#if DEBUG && targetEnvironment(simulator)
+                    guard await ChatP09PagingCalibration.shared.waitIfConfigured(
+                        server: server, sessionID: session.sessionId ?? session.id,
+                        scope: viewModel.outgoingInsertionScope
+                    ), !Task.isCancelled, isCurrentOperation(),
+                        pagingStartupReadyScope == viewModel.outgoingInsertionScope,
+                        transcriptRestoreOutcomeState.pending == nil,
+                        scenePhase == .active else { return .notAdmitted }
+#endif
                 }
                 if intent.acceptsUserIntent {
 #if DEBUG

@@ -490,7 +490,7 @@ struct ChatTranscriptView: View, Equatable {
     let actionContext: (ChatMessage, Int) -> MessageActionContext?
     let shouldRenderMessageRow: (ChatMessage) -> Bool
     let onLoadMessages: () async -> Void
-    let onLoadOlderMessages: (ChatTranscriptOlderLoadIntent) async -> ChatTranscriptOlderLoadResult
+    let onLoadOlderMessages: (ChatTranscriptOlderLoadIntent, @MainActor () -> Bool) async -> ChatTranscriptOlderLoadResult
     let onUpdateScrollMetrics: (ChatScrollMetrics) -> Void
     let onDismissKeyboard: () -> Void
     let onScrollToBottom: (ScrollViewProxy) -> Void
@@ -2732,7 +2732,11 @@ struct ChatTranscriptView: View, Equatable {
         if intent == .automaticPrefetch {
             viewportTracker.lastOlderMessagesPrefetchVisibleRowID = anchor?.messageID
         }
-        let result = await onLoadOlderMessages(intent)
+        let result = await onLoadOlderMessages(intent) {
+            viewportTracker.pagingOperation.matches(scope: scope, generation: generation)
+                && viewportTracker.scrollView?.window != nil
+                && (intent.acceptsUserIntent || viewportTracker.automaticPagingAdmitted)
+        }
         guard viewportTracker.pagingOperation.matches(scope: scope, generation: generation) else { return }
         if !result.wasDispatched, intent == .automaticPrefetch {
             viewportTracker.lastOlderMessagesPrefetchVisibleRowID = previousPrefetchBoundary
@@ -3229,6 +3233,9 @@ struct ChatTranscriptView: View, Equatable {
     }
 
     private func clearPendingOlderMessagesAnchor(reason: String) {
+#if DEBUG && targetEnvironment(simulator)
+        ChatP09PagingCalibration.shared.cancel(scope: viewportTracker.pagingOperation.scope)
+#endif
 #if DEBUG
         logPendingOlderMessagesAnchorClearIfNeeded(reason: reason)
         recordPagingPostCommandObservation(source: "terminal", frames: viewportTracker.latestFrames)
