@@ -2367,15 +2367,11 @@ struct ChatTranscriptView: View, Equatable {
             return
         }
         let target = target ?? request?.target ?? restoreTarget
-        if !isViewportRecovery, !isLoading, !isViewingCachedData,
-           case let .message(id) = target,
-           !renderedTranscriptMessages.contains(where: { $0.renderID == id }) {
-            completeInitialRestore(.unavailable, request: request)
-            hasCompletedInitialRestore = true
-            pendingInitialRestoreToken = nil
-            restoreSettlementTask = nil
-            return
-        }
+        // A saved row that is not yet among the rendered messages is exactly
+        // the lazy target the bounded settlement below exists for: each
+        // attempt asks the view layer to scroll to the id (materializing or
+        // paging it in), and a row that never arrives ends in a bounded
+        // terminal outcome. (Restores testMissingSavedMessageKeepsBoundedProxyFallback.)
 #if DEBUG
         let startDiagnostic = restoreTargetDiagnostic(target, viewportHeight: viewportHeight)
         logTranscriptScrollSnapshot(

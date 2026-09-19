@@ -412,7 +412,15 @@ private actor RuntimeFakeTransport: HermesGatewayTransport {
         }
     }
 
-    func emit(event: HermesGatewayEvent) { sinkBox.send(event) }
+    func emit(event: HermesGatewayEvent) {
+        // Freshness lives at the transport layer: the production receive loop
+        // only surfaces frames from the active socket, and the runtime no
+        // longer re-gates content frames (P01 lost-terminal resume). Model
+        // that here so events from an obsolete connection generation never
+        // become runtime events.
+        guard event.connectionGeneration == activeIdentifier else { return }
+        sinkBox.send(event)
+    }
     func connectionCount() -> Int { connections }
     func closeCount() -> Int { closes }
     func methods() -> [String] { recordedMethods }

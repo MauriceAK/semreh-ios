@@ -416,11 +416,11 @@ final class GatewayConversationBlockingTests: XCTestCase {
         }
     }
 
-    private func clarifyEvent(sessionID: String, requestID: String, generation: Int = 101) -> HermesGatewayEvent {
+    private func clarifyEvent(sessionID: String, requestID: String, generation: Int = 1) -> HermesGatewayEvent {
         event(sessionID: sessionID, type: "clarify.request", payload: clarifyPayload(requestID: requestID), generation: generation)
     }
 
-    private func expiryEvent(sessionID: String, requestID: String, generation: Int = 101) -> HermesGatewayEvent {
+    private func expiryEvent(sessionID: String, requestID: String, generation: Int = 1) -> HermesGatewayEvent {
         event(sessionID: sessionID, type: "clarify.expire", payload: .object(["request_id": .string(requestID)]), generation: generation)
     }
 
@@ -481,7 +481,7 @@ final class GatewayConversationBlockingTests: XCTestCase {
         sessionID: String,
         type: String,
         payload: JSONValue,
-        generation: Int = 101
+        generation: Int = 1
     ) -> HermesGatewayEvent {
         HermesGatewayEvent(
             method: "event", type: type, sessionID: sessionID, sequence: 1,
@@ -514,7 +514,7 @@ private final class BlockingFakeTransport: HermesGatewayTransport, @unchecked Se
     private var sink: (@Sendable (HermesGatewayEvent) -> Void)?
     private var callsValue: [Call] = []
     private var connected = false
-    private var generation = 100
+    private var generation = 0
     private var resumeResponse: JSONValue?
     private var clarifyResponse: JSONValue = .object(["status": .string("ok")])
     private var approvalResponse: JSONValue = .object(["resolved": .number(1)])
