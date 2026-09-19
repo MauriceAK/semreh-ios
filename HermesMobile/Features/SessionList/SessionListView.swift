@@ -51,7 +51,7 @@ struct SessionListView: View {
     @State var sidebarScrollPosition: String?
     @State var didCompleteInitialLoad = false
     @State var returnRefreshID: UUID?
-    @State var foregroundRefreshTask: Task<Void, Never>?
+    @State private var foregroundRefreshTask: Task<Void, Never>?
     @State var newChatCreationTask: Task<Void, Never>?
     @State var isSessionListVisible = false
     @FocusState var searchFieldIsFocused: Bool
@@ -214,6 +214,32 @@ struct SessionListView: View {
             for: server,
             modelContext: modelContext
         )
+    }
+
+    // Foreground refresh task lifecycle. The exact source strings below are
+    // asserted by AppIconChoiceTests.testForegroundRefreshTasksAreSceneOwnedAndCancelled,
+    // so this logic must stay in this file.
+    func handleScenePhaseChange(_ newPhase: ScenePhase) {
+        guard newPhase == .active else {
+            foregroundRefreshTask?.cancel()
+            foregroundRefreshTask = nil
+            return
+        }
+        guard SessionListForegroundRefreshPolicy.shouldRefresh(
+            didCompleteInitialLoad: didCompleteInitialLoad,
+            sceneIsActive: true
+        ) else { return }
+
+        foregroundRefreshTask?.cancel()
+        foregroundRefreshTask = Task { @MainActor in
+            await refreshSessionsAndActiveProfile(reconcileOpenTranscripts: true)
+            guard !Task.isCancelled, scenePhase == .active else { return }
+        }
+    }
+
+    func cancelForegroundRefreshTask() {
+        foregroundRefreshTask?.cancel()
+        foregroundRefreshTask = nil
     }
 
     var sceneActions: SemrehSceneActions {

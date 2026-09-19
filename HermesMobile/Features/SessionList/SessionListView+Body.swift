@@ -156,27 +156,12 @@ extension SessionListView {
                 didCompleteInitialLoad = true
             }
             .onChange(of: scenePhase) { _, newPhase in
-                guard newPhase == .active else {
-                    foregroundRefreshTask?.cancel()
-                    foregroundRefreshTask = nil
-                    return
-                }
-                guard SessionListForegroundRefreshPolicy.shouldRefresh(
-                    didCompleteInitialLoad: didCompleteInitialLoad,
-                    sceneIsActive: true
-                ) else { return }
-
-                foregroundRefreshTask?.cancel()
-                foregroundRefreshTask = Task { @MainActor in
-                    await refreshSessionsAndActiveProfile(reconcileOpenTranscripts: true)
-                    guard !Task.isCancelled, scenePhase == .active else { return }
-                }
+                handleScenePhaseChange(newPhase)
             }
             .onDisappear {
                 isSessionListVisible = false
                 viewModel.invalidateGatewayObservation()
-                foregroundRefreshTask?.cancel()
-                foregroundRefreshTask = nil
+                cancelForegroundRefreshTask()
                 newChatCreationTask?.cancel()
                 newChatCreationTask = nil
             }
