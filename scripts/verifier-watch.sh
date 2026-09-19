@@ -1,11 +1,11 @@
 #!/bin/bash
-# Semreh verifier queue watcher — runs on the Mac mini (cron every 10 min).
-# Prints one line: IDLE | BUSY: PR #N | CLAIM: N
-# Hermes's scheduler reads the output; on CLAIM it starts a Solo session
-# with verifier-runbook.md against that PR.
+# Semreh verifier queue watcher — runs on the Mac (cron every 10 min via the
+# lane wrapper watch-run.sh). Prints one line: IDLE | BUSY: PR #N | CLAIM: N
+# The lane wrapper reads the output; on CLAIM it starts a Codex verifier
+# session with verifier-runbook.md against that PR.
 set -euo pipefail
 
-REPO="${SEMR_REP:-MauriceAK/semreh-ios}"
+REPO="${SEMREH_REPO:-MauriceAK/semreh-ios}"
 
 verifying=$(gh pr list --repo "$REPO" --label verifying --json number \
   --jq '.[].number' 2>/dev/null | head -1 || true)

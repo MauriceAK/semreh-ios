@@ -5,10 +5,11 @@ Written for a Solo-piloted agent to read cold, mid-task.
 
 ## Prerequisites (one-time, human or mini agent)
 
-- Xcode installed, signed in with the Apple Developer account; automatic
-  signing working (bundle `com.mauricekenon.semreh`).
+- Xcode installed. Signed Debug simulator builds work without an Apple
+  account sign-in (verified). Bundle `com.maurice.semreh`.
 - Repo cloned, `master` builds clean in Xcode.
-- One warm simulator: **iPhone 17** (kept booted between runs).
+- One warm simulator: **iPhone Air** (the only iPhone sim on this Mac;
+  kept booted between runs).
 - `gh` authenticated.
 
 ## 0. Claim a PR
@@ -19,7 +20,7 @@ Written for a Solo-piloted agent to read cold, mid-task.
 
 ## 1. Doctor (read-only, run first)
 
-- `xcrun simctl list devices | grep "iPhone 17"` — booted, not busy.
+- `xcrun simctl list devices | grep "iPhone Air"` — booted, not busy.
 - `git status --porcelain` — clean except the PR branch.
 - If anything looks off, stop and report; do not force through.
 
@@ -33,7 +34,7 @@ xcodebuild build \
   -project HermesMobile.xcodeproj \
   -scheme HermesMobile \
   -configuration Debug \
-  -destination 'platform=iOS Simulator,name=iPhone 17' \
+  -destination 'platform=iOS Simulator,name=iPhone Air' \
   -derivedDataPath DerivedData-verify
 ```
 
@@ -41,10 +42,10 @@ Install + launch:
 
 ```
 xcrun simctl install booted <path-to>/HermesMobile.app
-xcrun simctl launch booted com.mauricekenon.semreh
+xcrun simctl launch booted com.maurice.semreh
 ```
 
-Teardown afterwards: `xcrun simctl terminate booted com.jacobmoore.semreh`
+Teardown afterwards: `xcrun simctl terminate booted com.maurice.semreh`
 and uninstall the app. Never kill by process name.
 
 ## 3. Drive
