@@ -4,8 +4,8 @@ import UIKit
 
 @MainActor
 struct SessionListView: View {
-    private static let searchChromeIconVisualSize: CGFloat = 36
-    private static let searchChromeIconHitTarget: CGFloat = 44
+    static let searchChromeIconVisualSize: CGFloat = 36
+    static let searchChromeIconHitTarget: CGFloat = 44
 
     @Bindable var authManager: AuthManager
     let server: URL
