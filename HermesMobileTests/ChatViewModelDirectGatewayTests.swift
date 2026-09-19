@@ -3548,6 +3548,169 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         await runtime.stop()
     }
 
+    func testForegroundReentryTransientEmptyReadNeverSilentlyBlanksPopulatedRows() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let vm = makeViewModel(
+            client: makeEmptyDirectTranscriptClient(sessionID: "durable-1"),
+            runtime: runtime,
+            sessionID: "durable-1"
+        )
+        seedExistingTranscript(in: vm)
+
+        // Foreground re-entry reads a transiently empty canonical page while the
+        // transcript is already populated (P01 blank-after-background class).
+        // The populated rows must survive the read, or the user must see an
+        // explicit error — never a silent blank transcript.
+        await vm.refreshAfterSceneActivation()
+
+        let silentBlank = vm.messages.isEmpty && vm.sendErrorMessage == nil && vm.errorMessage == nil
+        XCTAssertFalse(silentBlank,
+            "Foreground re-entry with a transient empty read must keep populated rows visible or surface an explicit error "
+                + "(blank=\(vm.messages.isEmpty), sendError=\(String(describing: vm.sendErrorMessage)), error=\(String(describing: vm.errorMessage)))")
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testOldChatDetailEntryReusingSessionStoreNeverSilentlyBlanksOnEmptyCanonicalRead() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let client = makeEmptyDirectTranscriptClient(sessionID: "durable-1")
+        let store = OpenChatSessionStore()
+        let original = makeViewModel(client: client, runtime: runtime, sessionID: "durable-1")
+        seedExistingTranscript(in: original)
+        _ = store.adoptedViewModel(
+            session: SessionSummary(sessionId: "durable-1", profile: "work"),
+            server: testServer,
+            creating: original
+        )
+        XCTAssertEqual(store.retainedSessionCountForTesting, 1)
+
+        // Detail re-entry for the old chat must reuse the retained model.
+        let reused = store.viewModel(
+            session: SessionSummary(sessionId: "durable-1", profile: "work"),
+            server: testServer
+        )
+        XCTAssertTrue(reused === original, "Old-chat detail entry must reuse the session-store model")
+        XCTAssertTrue(reused.messages.contains { $0.content == "Existing answer" },
+                      "The reused model still renders the old chat transcript")
+
+        // The reused model's canonical read transiently returns empty on entry.
+        await reused.loadMessages()
+
+        let silentBlank = reused.messages.isEmpty && reused.sendErrorMessage == nil && reused.errorMessage == nil
+        XCTAssertFalse(silentBlank,
+            "Old-chat detail entry with session-store reuse must not silently blank a populated transcript on an empty canonical read "
+                + "(blank=\(reused.messages.isEmpty), sendError=\(String(describing: reused.sendErrorMessage)), error=\(String(describing: reused.errorMessage)))")
+        await reused.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testTransientBlankThenNonemptyReconcileRecoversAllowingExactlyOneSubsequentSend() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let requests = ChatDirectRequestRecorder()
+        let client = makeClient { request in
+            let path = request.url?.path ?? "nil"
+            requests.append(path)
+            guard request.httpMethod == "GET", path == "/api/sessions/durable-1/messages" else {
+                XCTFail("Transient-blank recovery should only reconcile the direct transcript: \(path)")
+                throw URLError(.badURL)
+            }
+            let rows = requests.isTerminalPhase
+                ? #"[{"id":1,"role":"user","content":"Recovered question","timestamp":1},{"id":2,"role":"assistant","content":"Recovered canonical answer","timestamp":2}]"#
+                : "[]"
+            let returned = requests.isTerminalPhase ? 2 : 0
+            return apiTestJSONResponse(
+                #"{"session_id":"durable-1","messages":\#(rows),"pagination":{"limit":120,"offset":0,"order":"latest","returned":\#(returned)}}"#,
+                for: request
+            )
+        }
+        let vm = makeViewModel(client: client, runtime: runtime, sessionID: "durable-1")
+        seedExistingTranscript(in: vm)
+
+        // The first reconcile observes the transiently blank canonical page.
+        await vm.loadMessages()
+        // The later authoritative read returns the nonempty canonical tail: the
+        // transcript must recover from the transient blank instead of staying blank.
+        requests.beginTerminalPhase()
+        await vm.loadMessages()
+
+        XCTAssertFalse(vm.messages.isEmpty,
+                      "The nonempty reconcile must restore the transcript after the transient blank")
+        XCTAssertTrue(vm.messages.contains { $0.content == "Recovered question" })
+        XCTAssertTrue(vm.messages.contains { $0.content == "Recovered canonical answer" })
+        XCTAssertEqual(fake.calls().filter { $0.method == "prompt.submit" }.count, 0,
+                       "Recovery itself must never submit")
+
+        let didSend = await vm.sendMessage("Explicit next question")
+        XCTAssertTrue(didSend)
+        XCTAssertEqual(fake.calls().filter { $0.method == "prompt.submit" }.count, 1,
+                       "Exactly one subsequent send submits exactly once")
+        XCTAssertEqual(vm.messages.filter { $0.role == "user" && $0.content == "Explicit next question" }.count, 1)
+        XCTAssertTrue(vm.messages.contains { $0.content == "Recovered canonical answer" },
+                      "Recovered rows must remain visible after the explicit send")
+
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testLostTerminalRunningTrueResumeReattachesWithoutResubmitting() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let client = makeClient { request in
+            guard request.httpMethod == "GET",
+                  request.url?.path == "/api/sessions/durable-1/messages" else {
+                XCTFail("Lost-terminal reattach should only read the direct transcript: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+            return apiTestJSONResponse(
+                #"{"session_id":"durable-1","messages":[{"id":1,"role":"user","content":"accepted question","timestamp":1}],"pagination":{"limit":120,"offset":0,"order":"latest","returned":1}}"#,
+                for: request
+            )
+        }
+        let viewModel = makeViewModel(client: client, runtime: runtime, sessionID: "durable-1")
+
+        let firstAccepted = await viewModel.sendMessage("accepted question")
+        XCTAssertTrue(firstAccepted)
+        await waitUntil { viewModel.activeStreamID != nil }
+        XCTAssertEqual(fake.calls().filter { $0.method == "prompt.submit" }.count, 1)
+
+        // The terminal event is lost with the connection, but Hermes is still
+        // running. Resume must reattach to the live session, never resubmit.
+        fake.emitClosed()
+        fake.setResumeResponse(.object([
+            "session_id": .string("runtime-1"),
+            "session_key": .string("durable-1"),
+            "running": .bool(true)
+        ]))
+
+        try await runtime.reconnect()
+        await viewModel.refreshAfterSceneActivation()
+
+        await waitUntil {
+            viewModel.activeStreamID == "direct-run:durable-1"
+                && !viewModel.isActiveStreamConnectionSuspended
+        }
+        XCTAssertEqual(fake.calls().filter { $0.method == "prompt.submit" }.count, 1,
+                       "Lost-terminal resume must reattach to the running session, never resubmit the prompt")
+        XCTAssertTrue(viewModel.messages.contains { $0.role == "user" && $0.content == "accepted question" })
+        XCTAssertFalse(viewModel.messages.contains { $0.role == "local_notice" })
+        XCTAssertNil(viewModel.sendErrorMessage)
+
+        // The reattached stream routes live events again.
+        fake.emit(ChatDirectEventFactory.event(
+            sessionID: "runtime-1",
+            type: "tool.start",
+            sequence: 3,
+            payload: ["tool_id": .string("reattached-tool"), "name": .string("read_file")]
+        ))
+        await waitUntil { viewModel.liveToolCalls.map(\.id).contains("reattached-tool") }
+
+        await viewModel.disposeDirectConversation()
+        await runtime.stop()
+    }
+
     private func seedExistingTranscript(in vm: ChatViewModel) {
         vm.seedTranscriptForTesting([
             ChatMessage(role: "user", content: "Existing question", timestamp: 1, messageId: "existing-user"),

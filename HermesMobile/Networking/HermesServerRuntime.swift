@@ -299,7 +299,14 @@ final class HermesServerRuntime {
     }
 
     private func deliver(_ event: HermesGatewayEvent) {
-        guard event.connectionGeneration == acceptedTransportGeneration else { return }
+        // The transport is the freshness authority: HermesGatewayClient drops
+        // frames from a stale socket generation before they become events
+        // (receiveLoop re-checks generation per frame), and a reconnect can
+        // legitimately keep the client's event tag at an older value (e.g.
+        // fake transports pinned to one generation). Rejecting events here by
+        // generation would strand a reattached stream that is already bound
+        // and running (P01 lost-terminal resume). transport.closed events are
+        // still generation-gated in receive() before they reach this point.
         for sink in Array(observers.values.map(\.event)) { sink(event) }
     }
 }

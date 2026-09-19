@@ -331,6 +331,12 @@ final class ChatViewModel {
     private(set) var isLoading = false
     private(set) var isLoadingOlderMessages = false
     private(set) var isStartingChat = false
+    /// True only while a foreground scene re-entry performs its canonical
+    /// transcript read (refreshAfterSceneActivation). The transient-empty
+    /// protection keys on this exact re-entry window instead of every
+    /// same-session empty page, so ordinary idle refreshes keep the
+    /// authoritative-empty semantics.
+    private(set) var isForegroundReentryRead = false
     /// True while a recorded voice note is being transcribed, uploaded, and sent.
     /// Spans all three steps so the composer can show progress and disable input.
     private(set) var isSendingVoiceNote = false
@@ -1723,14 +1729,21 @@ final class ChatViewModel {
         // canonical transcript read is still temporarily empty.  Do not turn
         // a populated, same-session transcript into the empty-state view during
         // that bounded send window; the later canonical tail owns the eventual
-        // replacement.  This is deliberately narrower than a generic empty
-        // page fallback: a different canonical session, an explicit clear, or
-        // an ordinary refresh still applies the empty page authoritatively.
+        // replacement.  The same transient race hits foreground re-entry and
+        // old-chat detail reuse (P01): an empty canonical page for the session
+        // already on screen must never silently blank populated rows.  The
+        // protection is keyed to those exact transient windows only — never
+        // to every same-session empty page.  An ordinary idle refresh, an
+        // ambiguous-delivery resume (its empty canonical page is what drops
+        // the unconfirmed optimistic ghost), a different canonical session,
+        // an explicit clear, or a genuinely empty transcript still applies
+        // authoritatively.
         if page.messages.isEmpty,
-           isStartingChat,
            !messages.isEmpty,
-           page.sessionID == sendTranscriptSessionID,
-           (directHistoryID == nil || directHistoryID == page.sessionID) {
+           (directHistoryID == nil || directHistoryID == page.sessionID),
+           (isStartingChat && page.sessionID == sendTranscriptSessionID)
+               || ((isForegroundReentryRead || wasReusedFromOpenSessionStore)
+                   && page.sessionID == canonicalSessionID) {
             return
         }
         let renderedCache = cacheFirstMessagePlaceholder != nil
@@ -4575,6 +4588,8 @@ final class ChatViewModel {
            !isStartingChat,
            !isEditingMessage,
            !isRegeneratingMessage {
+            isForegroundReentryRead = true
+            defer { isForegroundReentryRead = false }
             await loadMessages(modelContext: modelContext)
             guard !Task.isCancelled else { return }
         }
