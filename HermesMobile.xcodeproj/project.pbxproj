@@ -7,6 +7,15 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		814BBCCF6E3422CE7EDB4254 /* SessionListActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FAE828EC51BD9F87EB50E8C /* SessionListActions.swift */; };
+		E6E3A8EAEA9415264CB97E10 /* SessionListState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B24A12A6666A5029EBFD47A /* SessionListState.swift */; };
+		01AFAA007B61440A23B9F06D /* SessionListUtilityViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A39745F18FD3347BA4AEA0E0 /* SessionListUtilityViews.swift */; };
+		E678FC45B73234EB905ED3A1 /* SessionListFilterViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = BAB612CCA6591C401D5B6B16 /* SessionListFilterViews.swift */; };
+		20475FF71FF39442CAC75E01 /* SessionListRowViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D4839D9F7A13BB31274E156 /* SessionListRowViews.swift */; };
+		0C2341FC74119EA4B57F9A16 /* SessionListMenus.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7817C942EF4FF1A1E1CB2FE3 /* SessionListMenus.swift */; };
+		466F6CD6F6527C460E414144 /* ScheduledSessionsComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 73161443CDA7F56BBBDE8E7B /* ScheduledSessionsComponents.swift */; };
+		DE530802218298B256E3EC42 /* SessionListSkeleton.swift in Sources */ = {isa = PBXBuildFile; fileRef = F5793C50B72392AABB0D39A6 /* SessionListSkeleton.swift */; };
+		32E310C6E45AD8077072DC21 /* SessionListViewExtensions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C1F433656C909C785E1C24B /* SessionListViewExtensions.swift */; };
 		E91400000000000000000002 /* HostedBotGroup.swift in Sources */ = {isa = PBXBuildFile; fileRef = E91400000000000000000001 /* HostedBotGroup.swift */; };
 		E91400000000000000000004 /* HostedBotGroupTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E91400000000000000000003 /* HostedBotGroupTests.swift */; };
 		E91300000000000000000002 /* BirdAvatarIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = E91300000000000000000001 /* BirdAvatarIdentity.swift */; };
@@ -166,7 +175,6 @@
 		C05100000000000000000004 /* ChatTranscriptSupportingViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = C05100000000000000000014 /* ChatTranscriptSupportingViews.swift */; };
 		1A2B3C4D5E6F7000000000D0 /* SessionRowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F7000000000D2 /* SessionRowView.swift */; };
 		1A2B3C4D5E6F7000000000D1 /* SessionListViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F7000000000D3 /* SessionListViewModel.swift */; };
-		A04300000000000000000001 /* SessionListComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = A04300000000000000000011 /* SessionListComponents.swift */; };
 		A10900000000000000000001 /* SessionNavigationState.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10900000000000000000011 /* SessionNavigationState.swift */; };
 		A04300000000000000000002 /* SessionListActionConfirmations.swift in Sources */ = {isa = PBXBuildFile; fileRef = A04300000000000000000012 /* SessionListActionConfirmations.swift */; };
 		A04300000000000000000003 /* SessionMutator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A04300000000000000000013 /* SessionMutator.swift */; };
@@ -429,6 +437,15 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		6FAE828EC51BD9F87EB50E8C /* SessionListActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListActions.swift; sourceTree = "<group>"; };
+		4B24A12A6666A5029EBFD47A /* SessionListState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListState.swift; sourceTree = "<group>"; };
+		A39745F18FD3347BA4AEA0E0 /* SessionListUtilityViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListUtilityViews.swift; sourceTree = "<group>"; };
+		BAB612CCA6591C401D5B6B16 /* SessionListFilterViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListFilterViews.swift; sourceTree = "<group>"; };
+		0D4839D9F7A13BB31274E156 /* SessionListRowViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListRowViews.swift; sourceTree = "<group>"; };
+		7817C942EF4FF1A1E1CB2FE3 /* SessionListMenus.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListMenus.swift; sourceTree = "<group>"; };
+		73161443CDA7F56BBBDE8E7B /* ScheduledSessionsComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScheduledSessionsComponents.swift; sourceTree = "<group>"; };
+		F5793C50B72392AABB0D39A6 /* SessionListSkeleton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListSkeleton.swift; sourceTree = "<group>"; };
+		1C1F433656C909C785E1C24B /* SessionListViewExtensions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListViewExtensions.swift; sourceTree = "<group>"; };
 		E91400000000000000000001 /* HostedBotGroup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostedBotGroup.swift; sourceTree = "<group>"; };
 		E91400000000000000000003 /* HostedBotGroupTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostedBotGroupTests.swift; sourceTree = "<group>"; };
 		E91300000000000000000001 /* BirdAvatarIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BirdAvatarIdentity.swift; sourceTree = "<group>"; };
@@ -580,7 +597,6 @@
 		C05100000000000000000014 /* ChatTranscriptSupportingViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatTranscriptSupportingViews.swift; sourceTree = "<group>"; };
 		1A2B3C4D5E6F7000000000D2 /* SessionRowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionRowView.swift; sourceTree = "<group>"; };
 		1A2B3C4D5E6F7000000000D3 /* SessionListViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListViewModel.swift; sourceTree = "<group>"; };
-		A04300000000000000000011 /* SessionListComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListComponents.swift; sourceTree = "<group>"; };
 		A10900000000000000000011 /* SessionNavigationState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionNavigationState.swift; sourceTree = "<group>"; };
 		A04300000000000000000012 /* SessionListActionConfirmations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListActionConfirmations.swift; sourceTree = "<group>"; };
 		A04300000000000000000013 /* SessionMutator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionMutator.swift; sourceTree = "<group>"; };
@@ -1209,9 +1225,17 @@
 			isa = PBXGroup;
 			children = (
 				1A2B3C4D5E6F7000000000B7 /* SessionListView.swift */,
+				6FAE828EC51BD9F87EB50E8C /* SessionListActions.swift */,
+				4B24A12A6666A5029EBFD47A /* SessionListState.swift */,
+				A39745F18FD3347BA4AEA0E0 /* SessionListUtilityViews.swift */,
+				BAB612CCA6591C401D5B6B16 /* SessionListFilterViews.swift */,
+				0D4839D9F7A13BB31274E156 /* SessionListRowViews.swift */,
+				7817C942EF4FF1A1E1CB2FE3 /* SessionListMenus.swift */,
+				73161443CDA7F56BBBDE8E7B /* ScheduledSessionsComponents.swift */,
+				F5793C50B72392AABB0D39A6 /* SessionListSkeleton.swift */,
+				1C1F433656C909C785E1C24B /* SessionListViewExtensions.swift */,
 				1A2B3C4D5E6F7000000000D2 /* SessionRowView.swift */,
 				1A2B3C4D5E6F7000000000D3 /* SessionListViewModel.swift */,
-				A04300000000000000000011 /* SessionListComponents.swift */,
 				A10900000000000000000011 /* SessionNavigationState.swift */,
 				A04300000000000000000012 /* SessionListActionConfirmations.swift */,
 				A04300000000000000000013 /* SessionMutator.swift */,
@@ -1810,6 +1834,15 @@
 				C09500000000000000000001 /* AdaptiveGlassModifier.swift in Sources */,
 				C09500000000000000000005 /* AdaptiveGlassDebugFixture.swift in Sources */,
 					1A2B3C4D5E6F7000000000A7 /* SessionListView.swift in Sources */,
+				814BBCCF6E3422CE7EDB4254 /* SessionListActions.swift in Sources */,
+				E6E3A8EAEA9415264CB97E10 /* SessionListState.swift in Sources */,
+				01AFAA007B61440A23B9F06D /* SessionListUtilityViews.swift in Sources */,
+				E678FC45B73234EB905ED3A1 /* SessionListFilterViews.swift in Sources */,
+				20475FF71FF39442CAC75E01 /* SessionListRowViews.swift in Sources */,
+				0C2341FC74119EA4B57F9A16 /* SessionListMenus.swift in Sources */,
+				466F6CD6F6527C460E414144 /* ScheduledSessionsComponents.swift in Sources */,
+				DE530802218298B256E3EC42 /* SessionListSkeleton.swift in Sources */,
+				32E310C6E45AD8077072DC21 /* SessionListViewExtensions.swift in Sources */,
 					1A2B3C4D5E6F7000000000AF /* ChatView.swift in Sources */,
 					C05100000000000000000001 /* ChatTranscriptView.swift in Sources */,
 					C05100000000000000000002 /* ChatMessageActions.swift in Sources */,
@@ -1873,7 +1906,6 @@
 				C0FF000000000000000000A1 /* CustomHeader.swift in Sources */,
 				1A2B3C4D5E6F7000000000D0 /* SessionRowView.swift in Sources */,
 				1A2B3C4D5E6F7000000000D1 /* SessionListViewModel.swift in Sources */,
-				A04300000000000000000001 /* SessionListComponents.swift in Sources */,
 				A10900000000000000000001 /* SessionNavigationState.swift in Sources */,
 				A04300000000000000000002 /* SessionListActionConfirmations.swift in Sources */,
 				A04300000000000000000003 /* SessionMutator.swift in Sources */,
