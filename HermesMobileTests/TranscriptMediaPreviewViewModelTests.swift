@@ -153,7 +153,7 @@ final class TranscriptMediaPreviewViewModelTests: XCTestCase {
         XCTAssertEqual(recorder.requestCount, 1)
     }
 
-    func testLoadLocalPDFUsesMediaEndpointAndExposesPreparedPDFDocument() async throws {
+    func testLoadLocalPDFUsesManagedFileAndExposesPreparedPDFDocument() async throws {
         let recorder = TranscriptMediaPreviewRequestRecorder()
         let pdfData = UIGraphicsPDFRenderer(bounds: CGRect(x: 0, y: 0, width: 320, height: 480)).pdfData { context in
             context.beginPage()
@@ -161,8 +161,8 @@ final class TranscriptMediaPreviewViewModelTests: XCTestCase {
         }
         let client = makeClient { request in
             recorder.record(request)
-            XCTAssertEqual(request.url?.path, "/api/media")
-            return self.response(statusCode: 200, data: pdfData, for: request)
+            XCTAssertEqual(request.url?.path, "/api/files/read")
+            return try self.managedFileResponse(data: pdfData, mimeType: "application/pdf", path: "/tmp/report.pdf", for: request)
         }
         let viewModel = TranscriptMediaPreviewViewModel(
             server: Self.baseURL,
@@ -180,13 +180,13 @@ final class TranscriptMediaPreviewViewModelTests: XCTestCase {
         XCTAssertEqual(recorder.requestCount, 1)
     }
 
-    func testLoadLocalMarkdownUsesMediaEndpointAndDecodesText() async throws {
+    func testLoadLocalMarkdownUsesManagedFileAndDecodesText() async throws {
         let recorder = TranscriptMediaPreviewRequestRecorder()
         let markdown = "# Report\n\nReadable prose."
         let client = makeClient { request in
             recorder.record(request)
-            XCTAssertEqual(request.url?.path, "/api/media")
-            return self.response(statusCode: 200, data: Data(markdown.utf8), for: request)
+            XCTAssertEqual(request.url?.path, "/api/files/read")
+            return try self.managedFileResponse(data: Data(markdown.utf8), mimeType: "text/markdown", path: "/tmp/report.markdown", for: request)
         }
         let viewModel = TranscriptMediaPreviewViewModel(
             server: Self.baseURL,
@@ -251,7 +251,7 @@ final class TranscriptMediaPreviewViewModelTests: XCTestCase {
         XCTAssertEqual(recorder.requestCount, 0)
     }
 
-    func testLoadLocalVideoUsesMediaEndpointAndCreatesPlayableFileURL() async throws {
+    func testLoadLocalVideoUsesManagedFileAndCreatesPlayableFileURL() async throws {
         let recorder = TranscriptMediaPreviewRequestRecorder()
         let videoData = Data("video-bytes".utf8)
         let mediaPath = "/tmp/generated/movie.mp4"
@@ -259,8 +259,8 @@ final class TranscriptMediaPreviewViewModelTests: XCTestCase {
         let client = makeClient { request in
             recorder.record(request)
             XCTAssertEqual(request.httpMethod, "GET")
-            XCTAssertEqual(request.url?.path, "/api/media")
-            return self.response(statusCode: 200, data: videoData, for: request)
+            XCTAssertEqual(request.url?.path, "/api/files/read")
+            return try self.managedFileResponse(data: videoData, mimeType: "video/mp4", path: mediaPath, for: request)
         }
         let viewModel = TranscriptMediaPreviewViewModel(
             server: Self.baseURL,
@@ -293,7 +293,6 @@ final class TranscriptMediaPreviewViewModelTests: XCTestCase {
         XCTAssertTrue(payload.isVideo)
 
         let queryItems = queryItems(for: try XCTUnwrap(recorder.firstURL))
-        XCTAssertEqual(queryItems["session_id"], sessionID)
         XCTAssertEqual(queryItems["path"], mediaPath)
         XCTAssertEqual(recorder.requestCount, 1)
 
@@ -303,11 +302,18 @@ final class TranscriptMediaPreviewViewModelTests: XCTestCase {
         XCTAssertFalse(viewModel.canSaveMediaToPhotos)
     }
 
-    func testLoadLocalVideoWithoutSessionIDDoesNotRequestMediaEndpoint() async {
+    func testLoadLocalVideoDoesNotRequireChatSessionForManagedFileRead() async throws {
         let recorder = TranscriptMediaPreviewRequestRecorder()
+        let videoData = Data("video-without-session".utf8)
         let client = makeClient { request in
             recorder.record(request)
-            return self.response(statusCode: 200, data: Data(), for: request)
+            XCTAssertEqual(request.url?.path, "/api/files/read")
+            return try self.managedFileResponse(
+                data: videoData,
+                mimeType: "video/quicktime",
+                path: "/tmp/generated/movie.mov",
+                for: request
+            )
         }
         let viewModel = TranscriptMediaPreviewViewModel(
             server: Self.baseURL,
@@ -320,9 +326,56 @@ final class TranscriptMediaPreviewViewModelTests: XCTestCase {
 
         XCTAssertFalse(viewModel.isLoading)
         XCTAssertNil(viewModel.previewData)
-        XCTAssertNil(viewModel.videoFileURL)
-        XCTAssertNotNil(viewModel.errorMessage)
-        XCTAssertNotNil(viewModel.lastError)
+        let videoURL = try XCTUnwrap(viewModel.videoFileURL)
+        XCTAssertEqual(try Data(contentsOf: videoURL), videoData)
+        XCTAssertNil(viewModel.errorMessage)
+        XCTAssertNil(viewModel.lastError)
+        XCTAssertEqual(recorder.requestCount, 1)
+        viewModel.cleanupTemporaryFiles()
+    }
+
+    func testLoadLocalAudioUsesManagedFileAndRetainsOriginalBytes() async throws {
+        let recorder = TranscriptMediaPreviewRequestRecorder()
+        let audioData = Self.wavData()
+        let mediaPath = "/tmp/generated/clip.wav"
+        let client = makeClient { request in
+            recorder.record(request)
+            XCTAssertEqual(request.url?.path, "/api/files/read")
+            return try self.managedFileResponse(data: audioData, mimeType: "audio/wav", path: mediaPath, for: request)
+        }
+        let viewModel = TranscriptMediaPreviewViewModel(
+            server: Self.baseURL,
+            sessionID: "session-123",
+            reference: .init(rawReference: mediaPath),
+            apiClient: client
+        )
+
+        await viewModel.load()
+
+        XCTAssertEqual(viewModel.audioData, audioData)
+        XCTAssertEqual(viewModel.originalByteCount, audioData.count)
+        XCTAssertTrue(viewModel.canExportMedia)
+        XCTAssertNil(viewModel.errorMessage)
+        XCTAssertEqual(recorder.requestCount, 1)
+    }
+
+    func testRelativeLocalNonImageIsRejectedWithoutRequest() async {
+        let recorder = TranscriptMediaPreviewRequestRecorder()
+        let client = makeClient { request in
+            recorder.record(request)
+            return self.response(statusCode: 200, data: Data(), for: request)
+        }
+        let viewModel = TranscriptMediaPreviewViewModel(
+            server: Self.baseURL,
+            sessionID: "session-123",
+            reference: .init(rawReference: "generated/report.pdf"),
+            apiClient: client
+        )
+
+        await viewModel.load()
+
+        XCTAssertTrue(viewModel.errorMessage?.localizedCaseInsensitiveContains("absolute server path") == true)
+        XCTAssertNil(viewModel.pdfDocument)
         XCTAssertEqual(recorder.requestCount, 0)
     }
 
@@ -526,6 +579,22 @@ final class TranscriptMediaPreviewViewModelTests: XCTestCase {
             )!,
             data
         )
+    }
+
+    private func managedFileResponse(
+        data: Data,
+        mimeType: String,
+        path: String,
+        for request: URLRequest
+    ) throws -> (HTTPURLResponse, Data) {
+        let body = try JSONSerialization.data(withJSONObject: [
+            "data_url": "data:\(mimeType);base64,\(data.base64EncodedString())",
+            "mime_type": mimeType,
+            "name": URL(fileURLWithPath: path).lastPathComponent,
+            "path": path,
+            "size": data.count
+        ])
+        return response(statusCode: 200, data: body, contentType: "application/json", for: request)
     }
 
     private func queryItems(for url: URL) -> [String: String] {

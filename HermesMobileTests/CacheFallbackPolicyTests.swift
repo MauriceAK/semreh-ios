@@ -109,7 +109,7 @@ final class CacheFallbackPolicyTests: XCTestCase {
         )
         XCTAssertNotEqual(
             CacheFallbackPolicy.sendBannerMessage(for: error),
-            "Could not connect to the server. Check that hermes-webui is running and the tunnel is connected."
+            "Could not connect to the server. Check that Hermes is running and the tunnel is connected."
         )
     }
 }

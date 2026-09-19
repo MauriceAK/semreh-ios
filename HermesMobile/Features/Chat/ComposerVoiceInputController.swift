@@ -39,6 +39,9 @@ final class ComposerVoiceInputController {
     private let logger = Logger.hermesVoiceInput
 
     @ObservationIgnored var apiClient: APIClient?
+    @ObservationIgnored var profileName = "default"
+    @ObservationIgnored var currentProfile: (() -> String)?
+    private var recordingProfileName = "default"
     @ObservationIgnored var providerPreference = ComposerSTTProviderPreference.defaultValue
     @ObservationIgnored var locale = Locale.current
 
@@ -52,6 +55,15 @@ final class ComposerVoiceInputController {
 
     var isListening: Bool {
         state == .listening || state == .serverListening || state == .transcribing
+    }
+
+    static func profileScope(selected: String?, session: String?) -> String {
+        for value in [selected, session] {
+            if let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty {
+                return value
+            }
+        }
+        return "default"
     }
 
     var isRequestingPermission: Bool {
@@ -96,12 +108,14 @@ final class ComposerVoiceInputController {
         guard state == .idle else { return }
 
         logger.info("Voice input start requested")
+        recordingProfileName = Self.profileScope(selected: profileName, session: nil)
         errorMessage = nil
         liveTranscript = ""
         suppressNextRecognitionError = false
         cancelServerTranscription()
         discardServerRecording()
-        draftUpdateSession.begin(baseDraft: currentDraft)
+        draftUpdateSession.begin(baseDraft: currentDraft, profile: recordingProfileName,
+                                 currentProfile: currentProfile)
         self.updateDraft = updateDraft
         state = .requestingPermission
 
@@ -375,7 +389,8 @@ final class ComposerVoiceInputController {
             let audioData = try Data(contentsOf: recordingURL)
             let response = try await apiClient.transcribeAudio(
                 data: audioData,
-                filename: recordingURL.lastPathComponent
+                mimeType: "audio/wav",
+                profile: recordingProfileName
             )
 
             guard isActiveTranscription(transcriptionID), !Task.isCancelled else {
@@ -909,9 +924,14 @@ enum ComposerVoiceDraftComposer {
 struct ComposerVoiceDraftUpdateSession {
     private var baseDraft = ""
     private var acceptsUpdates = false
+    private var profile: String?
+    private var currentProfile: (() -> String)?
 
-    mutating func begin(baseDraft: String) {
+    mutating func begin(baseDraft: String, profile: String? = nil,
+                        currentProfile: (() -> String)? = nil) {
         self.baseDraft = baseDraft
+        self.profile = profile
+        self.currentProfile = currentProfile
         acceptsUpdates = true
     }
 
@@ -921,6 +941,11 @@ struct ComposerVoiceDraftUpdateSession {
 
     func composedDraft(for transcript: String) -> String? {
         guard acceptsUpdates else {
+            return nil
+        }
+        // Read the live model scope at the synchronous commit boundary, not a
+        // SwiftUI snapshot whose onChange cancellation may still be queued.
+        if let profile, let currentProfile, currentProfile() != profile {
             return nil
         }
 

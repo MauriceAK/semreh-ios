@@ -4,15 +4,17 @@ struct OnboardingView: View {
     @Bindable var authManager: AuthManager
     @State private var viewModel: OnboardingViewModel
     @State private var currentPage: Int
-    @State private var hasCopiedAgentPrompt = false
-    @State private var hasBypassedCopyReminder = false
-    @State private var isShowingCopyReminder = false
+    @State private var showsSetupHelp = false
+    @AppStorage(AppTheme.storageKey) private var appThemeRawValue = AppTheme.system.rawValue
+    @AppStorage(AppAccent.storageKey) private var appAccentRawValue = AppAccent.defaultValue.rawValue
     @FocusState private var focusedField: OnboardingConnectField?
     @Environment(\.colorScheme) private var colorScheme
-    @Environment(\.appColorPalette) private var palette
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    private let hasSavedServer: Bool
 
     init(authManager: AuthManager, savedServer: URL? = nil) {
         self.authManager = authManager
+        self.hasSavedServer = savedServer != nil
         // A known server means a re-login, not first-run setup: skip the
         // intro pager and land on the connect page with the server filled in.
         _viewModel = State(
@@ -25,7 +27,7 @@ struct OnboardingView: View {
             )
         )
         _currentPage = State(
-            initialValue: savedServer == nil ? 0 : OnboardingFlowPolicy.connectPageIndex
+            initialValue: OnboardingFlowPolicy.initialPage(hasSavedServer: savedServer != nil)
         )
     }
 
@@ -37,31 +39,36 @@ struct OnboardingView: View {
         !viewModel.serverURLString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    private var selectedTheme: AppTheme {
+        AppTheme.storedValue(appThemeRawValue)
+    }
+
+    private var selectedAccent: AppAccent {
+        AppAccent.storedValue(appAccentRawValue)
+    }
+
+    private var onboardingColorScheme: ColorScheme {
+        selectedTheme.colorScheme ?? colorScheme
+    }
+
     var body: some View {
         ZStack {
             SemrehBackdrop()
                 .ignoresSafeArea()
 
             VStack(spacing: 0) {
+                topBar
+
                 TabView(selection: $currentPage) {
                     OnboardingWelcomePage()
-                        .tag(0)
-
-                    OnboardingFeaturesPage()
-                        .tag(1)
-
-                    OnboardingAgentPromptPage(hasCopiedAgentPrompt: $hasCopiedAgentPrompt)
-                        .tag(2)
-
-                    OnboardingTailscalePage()
-                        .tag(3)
+                        .tag(OnboardingFlowPolicy.welcomePageIndex)
 
                     OnboardingConnectPage(
                         viewModel: viewModel,
                         authManager: authManager,
                         focusedField: $focusedField
                     )
-                    .tag(4)
+                    .tag(OnboardingFlowPolicy.connectPageIndex)
                 }
                 .tabViewStyle(.page(indexDisplayMode: .never))
 
@@ -71,22 +78,67 @@ struct OnboardingView: View {
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if isEditingConnectionField {
                 keyboardActionBar
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .transition(
+                        reduceMotion
+                            ? .identity
+                            : .move(edge: .bottom).combined(with: .opacity)
+                    )
             }
         }
-        .animation(.easeInOut(duration: 0.18), value: isEditingConnectionField)
+        .animation(
+            reduceMotion ? nil : .easeInOut(duration: 0.18),
+            value: isEditingConnectionField
+        )
         .onChange(of: currentPage) { oldPage, newPage in
             handlePageChange(from: oldPage, to: newPage)
         }
-        .alert("Copy the setup prompt first", isPresented: $isShowingCopyReminder) {
-            Button("Stay Here", role: .cancel) {}
-            Button("Continue Anyway") {
-                hasBypassedCopyReminder = true
-                advanceToNextPage()
+        .sheet(isPresented: $showsSetupHelp) {
+            NavigationStack {
+                OnboardingAgentPromptPage()
+                    .background(SemrehBackdrop())
+                    .navigationTitle("Connection help")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") { showsSetupHelp = false }
+                        }
+                    }
             }
-        } message: {
-            Text("Copy the agent setup prompt on your desktop before continuing so Hermes Web UI and Tailscale are configured correctly.")
         }
+        // Onboarding intentionally stays on Semreh's cream/charcoal palette,
+        // including for users upgrading from a legacy named palette. The
+        // selected accent and appearance are still the real persisted settings.
+        .environment(\.appColorPalette, .semreh)
+        .environment(\.appAccent, selectedAccent)
+        .preferredColorScheme(selectedTheme.colorScheme)
+    }
+
+    private var topBar: some View {
+        HStack {
+            if OnboardingFlowPolicy.shouldShowBackButton(
+                for: currentPage,
+                hasSavedServer: hasSavedServer
+            ) {
+                Button(action: goBack) {
+                    Label("Back", systemImage: "chevron.left")
+                        .font(.subheadline.weight(.semibold))
+                        .frame(minWidth: 44, minHeight: 44)
+                }
+                .foregroundStyle(
+                    OnboardingTheme.primaryText(
+                        for: onboardingColorScheme,
+                        palette: .semreh
+                    ).opacity(0.86)
+                )
+                .buttonStyle(.plain)
+                .accessibilityHint("Returns to the previous onboarding step.")
+            }
+
+            Spacer(minLength: 0)
+        }
+        .frame(height: 52)
+        .padding(.horizontal, 24)
+        .accessibilityElement(children: .contain)
     }
 
     private var bottomBar: some View {
@@ -108,36 +160,31 @@ struct OnboardingView: View {
                 .buttonStyle(OnboardingPrimaryButtonStyle())
                 .accessibilityLabel(OnboardingFlowPolicy.primaryButtonTitle(for: currentPage))
 
-                if OnboardingFlowPolicy.showsServerShortcut(for: currentPage) {
-                    Button("Already have a server?") {
-                        jumpToConnectPage()
-                    }
-                    .font(.footnote.weight(.medium))
-                    .foregroundStyle(OnboardingTheme.secondaryText(for: colorScheme, palette: palette))
-                    .buttonStyle(.plain)
-                    .accessibilityHint("Skips setup and opens the connect screen.")
+            }
+
+            if currentPage == OnboardingFlowPolicy.connectPageIndex && !isEditingConnectionField {
+                Button("Need help connecting?") {
+                    focusedField = nil
+                    showsSetupHelp = true
                 }
+                .font(SemrehTypography.label)
+                .foregroundStyle(
+                    OnboardingTheme.secondaryText(
+                        for: onboardingColorScheme,
+                        palette: .semreh
+                    )
+                )
+                .buttonStyle(.plain)
+                .frame(minHeight: 44)
+                .accessibilityHint("Opens optional guidance for your existing Hermes server.")
             }
         }
         .padding(.horizontal, 24)
         .padding(.top, 12)
         .padding(.bottom, 12)
-        .background {
-            OnboardingTheme.panel(for: colorScheme)
-                .opacity(colorScheme == .dark ? 0.84 : 0.94)
-                .overlay(alignment: .top) {
-                    LinearGradient(
-                        colors: [
-                            .clear,
-                            OnboardingTheme.action(for: colorScheme).opacity(0.08)
-                        ],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                    .frame(height: 34)
-                    .offset(y: -34)
-                }
-        }
+        .background(
+            SemrehVisualTheme.canvas(for: onboardingColorScheme, palette: .semreh)
+        )
     }
 
     private var keyboardActionBar: some View {
@@ -186,50 +233,46 @@ struct OnboardingView: View {
     }
 
     private func handlePrimaryAction() {
-        if OnboardingFlowPolicy.shouldShowCopyReminder(
-            page: currentPage,
-            hasCopiedAgentPrompt: hasCopiedAgentPrompt,
-            hasBypassedCopyReminder: hasBypassedCopyReminder
-        ) {
-            isShowingCopyReminder = true
-            return
-        }
-
         if currentPage < OnboardingFlowPolicy.connectPageIndex {
             advanceToNextPage()
         }
     }
 
-    private func handlePageChange(from oldPage: Int, to newPage: Int) {
+    private func handlePageChange(from _: Int, to newPage: Int) {
         if OnboardingFlowPolicy.shouldClearConnectFocusWhenLeavingPage(newPage) {
             focusedField = nil
         }
-
-        guard OnboardingFlowPolicy.shouldInterceptForwardNavigationFromAgentPrompt(
-            from: oldPage,
-            to: newPage,
-            hasCopiedAgentPrompt: hasCopiedAgentPrompt,
-            hasBypassedCopyReminder: hasBypassedCopyReminder
-        ) else {
-            return
-        }
-
-        isShowingCopyReminder = true
-        currentPage = oldPage
     }
 
     private func advanceToNextPage() {
         guard currentPage < OnboardingFlowPolicy.connectPageIndex else { return }
-        withAnimation(.easeInOut(duration: 0.3)) {
-            currentPage += 1
+        let nextPage = currentPage + 1
+        if reduceMotion {
+            currentPage = nextPage
+        } else {
+            withAnimation(.easeInOut(duration: 0.3)) {
+                currentPage = nextPage
+            }
         }
     }
 
-    private func jumpToConnectPage() {
-        withAnimation(.easeInOut(duration: 0.3)) {
-            currentPage = OnboardingFlowPolicy.connectPageIndex
+    private func goBack() {
+        guard let previousPage = OnboardingFlowPolicy.previousPage(
+            for: currentPage,
+            hasSavedServer: hasSavedServer
+        ) else {
+            return
+        }
+
+        if reduceMotion {
+            currentPage = previousPage
+        } else {
+            withAnimation(.easeInOut(duration: 0.3)) {
+                currentPage = previousPage
+            }
         }
     }
+
 }
 
 #Preview {

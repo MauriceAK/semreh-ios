@@ -5,6 +5,16 @@ import UserNotifications
 import UIKit
 #endif
 
+/// One rounded type hierarchy for the shell and conversation UI. AppFont owns
+/// font availability, semantic scaling and the separate monospaced code role.
+enum SemrehTypography {
+    static let title = AppFont.largeTitle(weight: .bold)
+    static let heading = AppFont.title2(weight: .semibold)
+    static let body = AppFont.body()
+    static let label = AppFont.subheadline(weight: .semibold)
+    static let caption = AppFont.caption()
+}
+
 enum AppColorPalette: String, CaseIterable, Sendable {
     /// Legacy Goku palette retained for users who explicitly chose Goku Light/Dark.
     case goku
@@ -18,6 +28,12 @@ enum AppColorPalette: String, CaseIterable, Sendable {
 
 enum AppTheme: String, CaseIterable, Identifiable {
     case system
+    /// Semreh's cream/charcoal light appearance. The older `light` case below
+    /// remains the Goku Light value for persisted-settings compatibility.
+    case semrehLight
+    /// Semreh's cream/charcoal dark appearance. The older `dark` case below
+    /// remains the Goku Dark value for persisted-settings compatibility.
+    case semrehDark
     case light
     case dark
     case chatgpt
@@ -33,6 +49,10 @@ enum AppTheme: String, CaseIterable, Identifiable {
         switch self {
         case .system:
             String(localized: "Semreh")
+        case .semrehLight:
+            String(localized: "Light")
+        case .semrehDark:
+            String(localized: "Dark")
         case .light:
             String(localized: "Goku Light")
         case .dark:
@@ -50,9 +70,9 @@ enum AppTheme: String, CaseIterable, Identifiable {
 
     var colorScheme: ColorScheme? {
         switch self {
-        case .light:
+        case .semrehLight, .light:
             .light
-        case .dark:
+        case .semrehDark, .dark:
             .dark
         case .system, .chatgpt, .midnight, .forest, .sand:
             nil
@@ -61,7 +81,7 @@ enum AppTheme: String, CaseIterable, Identifiable {
 
     var palette: AppColorPalette {
         switch self {
-        case .system:
+        case .system, .semrehLight, .semrehDark:
             .semreh
         case .light, .dark:
             .goku
@@ -434,6 +454,15 @@ enum ChatActiveRunStatusKind: Equatable {
 
 struct ChatActiveRunStatusPresentation: Equatable {
     let kind: ChatActiveRunStatusKind
+    /// Wall-clock start of the run when the presentation represents a live run
+    /// (`.active` only). The view renders it as a self-updating "working for X"
+    /// timer. Nil keeps the pill label-only (starting/recovery/cancelling ids).
+    let activeRunStartedAt: Date?
+
+    init(kind: ChatActiveRunStatusKind, activeRunStartedAt: Date? = nil) {
+        self.kind = kind
+        self.activeRunStartedAt = activeRunStartedAt
+    }
 
     var label: String {
         kind.label
@@ -444,6 +473,47 @@ struct ChatActiveRunStatusPresentation: Equatable {
     }
 }
 
+/// Visibility policy for the in-app elapsed readout on the floating active-run
+/// pill (item 4 of the 2026-09-18 app-chat UX scope).
+///
+/// P04 suppressed this pill for the entire duration of a streamed run ("the
+/// transcript activity rows and composer Stop control already expose the
+/// running state"). The user asked for a Telegram-like "working for X"
+/// readout, so the pill comes back behind a deliberately conservative gate:
+///
+/// - hidden for the first `pillVisibilityThreshold` seconds of a near-bottom
+///   run (short turns keep the quiet P04 behavior),
+/// - shown once the run is visibly long, and
+/// - shown immediately, even below the threshold, when the reader has scrolled
+///   away from the bottom — the composer's Stop row is then off-screen, so the
+///   pill is the only run readout left.
+///
+/// A run without a recorded start (nothing to count from — e.g. a gateway-
+/// resumed run that never emitted an observed `message.start` in this process)
+/// stays hidden.
+enum ChatActiveRunElapsedPolicy {
+    static let pillVisibilityThreshold: TimeInterval = 10
+
+    /// Pure threshold crossing. The chat view schedules exactly one re-eval on
+    /// it so a quiet near-bottom stretch (long tool, no stream events) can still
+    /// surface the pill without a continuous 1 Hz ticker.
+    static func hasPassedVisibilityThreshold(activeRunStartedAt: Date?, now: Date) -> Bool {
+        guard let activeRunStartedAt else { return false }
+        return now.timeIntervalSince(activeRunStartedAt) >= pillVisibilityThreshold
+    }
+
+    /// The visibility matrix. `hasPassedElapsedThreshold` is the crossing above;
+    /// `isScrolledNearBottom` is the transcript's live scroll state.
+    static func shouldShowActiveRunPill(
+        activeRunStartedAt: Date?,
+        hasPassedElapsedThreshold: Bool,
+        isScrolledNearBottom: Bool
+    ) -> Bool {
+        guard activeRunStartedAt != nil else { return false }
+        return hasPassedElapsedThreshold || !isScrolledNearBottom
+    }
+}
+
 enum ChatActiveRunStatusPolicy {
     static func presentation(
         isStartingChat: Bool,
@@ -451,7 +521,9 @@ enum ChatActiveRunStatusPolicy {
         activeStreamRecoveryState: ActiveStreamRecoveryState,
         isCancellingStream: Bool,
         isScrolledNearBottom: Bool,
-        isEstablishingConnection: Bool = false
+        isEstablishingConnection: Bool = false,
+        activeRunStartedAt: Date? = nil,
+        hasActiveRunPassedElapsedThreshold: Bool = false
     ) -> ChatActiveRunStatusPresentation? {
         if isCancellingStream {
             return ChatActiveRunStatusPresentation(kind: .stopping)
@@ -472,8 +544,21 @@ enum ChatActiveRunStatusPolicy {
         }
 
         if hasActiveStream {
-            guard !isScrolledNearBottom else { return nil }
-            return ChatActiveRunStatusPresentation(kind: .active)
+            // P04 suppressed this pill for the whole stream; item 4 (2026-09-18
+            // scope) restores it behind the conservative elapsed/scroll gate
+            // documented on `ChatActiveRunElapsedPolicy`: short near-bottom runs
+            // stay quiet, long runs and scrolled-away readers get "working for X".
+            guard ChatActiveRunElapsedPolicy.shouldShowActiveRunPill(
+                activeRunStartedAt: activeRunStartedAt,
+                hasPassedElapsedThreshold: hasActiveRunPassedElapsedThreshold,
+                isScrolledNearBottom: isScrolledNearBottom
+            ) else {
+                return nil
+            }
+            return ChatActiveRunStatusPresentation(
+                kind: .active,
+                activeRunStartedAt: activeRunStartedAt
+            )
         }
 
         if isEstablishingConnection {
@@ -531,12 +616,15 @@ enum ResponseCompletionNotificationPolicy {
 struct ResponseCompletionNotificationRequest: Equatable {
     static let title = String(localized: "Semreh response complete")
     static let body = String(localized: "The assistant finished responding.")
+    /// Payload key read back by `ResponseCompletionNotificationDelegate` on tap
+    /// (item 4 tap-through). The wire value stays exactly as previously shipped.
+    static let sessionIDUserInfoKey = "session_id"
 
     let sessionID: String?
 
     var userInfo: [String: String] {
         guard let sessionID, !sessionID.isEmpty else { return [:] }
-        return ["session_id": sessionID]
+        return [Self.sessionIDUserInfoKey: sessionID]
     }
 }
 

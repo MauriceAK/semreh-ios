@@ -7,10 +7,10 @@ struct MemoryView: View {
     @State private var viewModel: MemoryViewModel
     @State private var editingSection: MemorySection?
 
-    init(server: URL, onAPIError: @escaping (Error) -> Void) {
+    init(server: URL, profile: String, onAPIError: @escaping (Error) -> Void) {
         self.server = server
         self.onAPIError = onAPIError
-        _viewModel = State(initialValue: MemoryViewModel(server: server))
+        _viewModel = State(initialValue: MemoryViewModel(server: server, profile: profile))
     }
 
     var body: some View {
@@ -29,7 +29,7 @@ struct MemoryView: View {
                             Label("Refresh", systemImage: "arrow.clockwise")
                         }
                     }
-                    .disabled(viewModel.isLoading)
+                    .disabled(viewModel.isLoading || viewModel.isSaving || editingSection != nil)
                 }
             }
             .sheet(item: $editingSection) { section in
@@ -69,20 +69,39 @@ struct MemoryView: View {
             ProgressView("Loading memory...")
         } else {
             List {
+                Section {
+                    Text("These are the selected profile’s built-in memory documents. Saving does not enable memory or change an external provider. Changes are not guaranteed to enter an already-running session.")
+                    Text("Saves check the current server copy, but Hermes does not provide atomic conflict detection. Another writer can still change the file during a save.")
+                    if let scope = viewModel.scope {
+                        Text("Profile: \(scope.profile)")
+                        Text(scope.memoryEnabled ? "Built-in notes: enabled" : "Built-in notes: disabled")
+                        Text(scope.userEnabled ? "Built-in user profile: enabled" : "Built-in user profile: disabled")
+                        if let provider = scope.externalProvider, !provider.isEmpty {
+                            Text("External provider: \(provider). Its records are not edited here.")
+                        }
+                    }
+                    if viewModel.hasUnconfirmedSave {
+                        Text("A save is unconfirmed. Refresh before editing again.").foregroundStyle(.orange)
+                    }
+                    if let error = viewModel.errorMessage {
+                        Text(error).foregroundStyle(.red)
+                    }
+                }
                 ForEach(MemorySection.allCases) { section in
                     Section {
-                        MemorySectionContent(
-                            section: section,
-                            content: viewModel.content(for: section)
-                        )
-                            .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16))
+                        if let error = viewModel.sectionErrors[section.rawValue] {
+                            Text(error).foregroundStyle(.secondary)
+                        } else {
+                            MemorySectionContent(section: section, content: viewModel.content(for: section))
+                                .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16))
+                        }
                     } header: {
                         MemorySectionHeader(
                             section: section,
                             modifiedAt: viewModel.modifiedAt(for: section),
-                            isEditingDisabled: viewModel.isSaving
+                            isEditingDisabled: !viewModel.canEdit(section)
                         ) {
-                            viewModel.clearActionError()
+                            viewModel.beginEditing(section)
                             editingSection = section
                         }
                     }
@@ -99,6 +118,11 @@ struct MemoryView: View {
                             detail: viewModel.projectContextDetail,
                             isShadowed: viewModel.isProjectContextShadowed
                         )
+                    }
+                } else {
+                    Section("Project Context") {
+                        Text("Effective project-context discovery is not available through this editor yet. Hermes may still load workspace context; this screen does not claim which files were injected.")
+                            .foregroundStyle(.secondary)
                     }
                 }
             }

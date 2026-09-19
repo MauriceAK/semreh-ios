@@ -5,7 +5,9 @@ import SwiftData
 struct ControlView: View {
     @Bindable var authManager: AuthManager
     let server: URL
+    let projectsEnabled: Bool
     let isActive: Bool
+    let showsConnectionRows: Bool
     let onNestedDestinationVisibilityChanged: (Bool) -> Void
 
     @Environment(\.modelContext) private var modelContext
@@ -47,12 +49,16 @@ struct ControlView: View {
     init(
         authManager: AuthManager,
         server: URL,
+        projectsEnabled: Bool = true,
         isActive: Bool = true,
+        showsConnectionRows: Bool = true,
         onNestedDestinationVisibilityChanged: @escaping (Bool) -> Void = { _ in }
     ) {
         self.authManager = authManager
         self.server = server
+        self.projectsEnabled = projectsEnabled
         self.isActive = isActive
+        self.showsConnectionRows = showsConnectionRows
         self.onNestedDestinationVisibilityChanged = onNestedDestinationVisibilityChanged
         _viewModel = State(initialValue: SessionListViewModel(server: server))
         _showsCliSessions = AppStorage(
@@ -94,32 +100,36 @@ struct ControlView: View {
                     }
                 )
 
-                Section("Session history") {
-                    Button {
-                        navigationState.select(.archived)
-                    } label: {
-                        Label("Archived Sessions", systemImage: "archivebox")
-                    }
-                }
-
-                Section("Connection") {
-                    Button {
-                        navigationState.select(.settings(nil))
-                    } label: {
-                        Label("Settings", systemImage: "gearshape")
+                if showsConnectionRows {
+                    Section("Session history") {
+                        Button {
+                            navigationState.select(.archived)
+                        } label: {
+                            Label("Archived Sessions", systemImage: "archivebox")
+                        }
                     }
 
-                    Button {
-                        navigationState.select(.settings(.servers))
-                    } label: {
-                        Label("Manage Servers", systemImage: "server.rack")
+                    Section("Connection") {
+                        Button {
+                            navigationState.select(.settings(nil))
+                        } label: {
+                            Label("Settings", systemImage: "gearshape")
+                        }
+
+                        Button {
+                            navigationState.select(.settings(.servers))
+                        } label: {
+                            Label("Manage Servers", systemImage: "server.rack")
+                        }
                     }
                 }
             }
             .listStyle(.insetGrouped)
-            .contentMargins(.top, 108, for: .scrollContent)
+            .contentMargins(.top, 8, for: .scrollContent)
             .scrollContentBackground(.hidden)
             .background(SemrehBackdrop().ignoresSafeArea())
+            .navigationTitle(showsConnectionRows ? "" : "Tools")
+            .navigationBarTitleDisplayMode(.inline)
             .navigationDestination(item: $navigationState.destination) { destination in
                 utilityDestination(destination)
             }
@@ -207,7 +217,7 @@ struct ControlView: View {
             memory: showsMemorySection,
             insights: showsInsightsSection,
             activeProfile: showsActiveProfileSection,
-            projects: showsProjectsSection
+            projects: showsProjectsSection && projectsEnabled
         )
     }
 
@@ -226,15 +236,19 @@ struct ControlView: View {
         case .settings(let scrollTo):
             SettingsView(authManager: authManager, server: server, initialScrollTarget: scrollTo)
         case .tasks:
-            TasksView(server: server, onAPIError: authManager.handleAPIError)
+            TasksView(server: server, profile: viewModel.activeProfileName ?? "default", onAPIError: authManager.handleAPIError)
+                .id(viewModel.activeProfileName ?? "default")
         case .kanban:
             KanbanView(server: server, onAPIError: authManager.handleAPIError)
         case .skills:
-            SkillsView(server: server, onAPIError: authManager.handleAPIError)
+            SkillsView(server: server, profile: viewModel.activeProfileName ?? "default", onAPIError: authManager.handleAPIError)
+                .id(viewModel.activeProfileName ?? "default")
         case .memory:
-            MemoryView(server: server, onAPIError: authManager.handleAPIError)
+            MemoryView(server: server, profile: viewModel.activeProfileName ?? "default", onAPIError: authManager.handleAPIError)
+                .id(viewModel.activeProfileName ?? "default")
         case .insights:
-            InsightsView(server: server, onAPIError: authManager.handleAPIError)
+            InsightsView(server: server, profile: viewModel.activeProfileName ?? "default", onAPIError: authManager.handleAPIError)
+                .id(viewModel.activeProfileName ?? "default")
         case .archived:
             ArchivedSessionsView(server: server, onAPIError: authManager.handleAPIError)
         case .scheduled:
@@ -260,16 +274,20 @@ struct ControlView: View {
             duplicate: { _ in },
             move: { _, _ in },
             createProject: { _ in },
-            refreshProjects: { Task { await viewModel.loadProjects() } },
-            export: { _, _ in }
+            refreshProjects: {
+                guard projectsEnabled else { return }
+                Task { await viewModel.loadProjects() }
+            },
+            export: { _, _ in },
+            projectsEnabled: projectsEnabled
         )
     }
 
     private func loadSidebarData() async {
-        async let sessions: Bool = viewModel.load(modelContext: modelContext)
-        async let profile: Void = viewModel.loadActiveProfile()
-        async let projects: Void = viewModel.loadProjects()
-        _ = await (sessions, profile, projects)
+        await SidebarLoadOrdering.run(
+            resolveActiveProfile: { await viewModel.loadActiveProfile() },
+            loadSessions: { _ = await viewModel.load(modelContext: modelContext) }
+        )
     }
 
 }

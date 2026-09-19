@@ -1,0 +1,3 @@
+name: semreh-blocking-fixture
+version: "0.1.0"
+description: "Disposable no-op approval and empty-secret callback fixture for Semreh verification."

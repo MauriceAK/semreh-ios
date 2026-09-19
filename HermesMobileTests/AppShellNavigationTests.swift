@@ -3,11 +3,143 @@ import XCTest
 
 @MainActor
 final class AppShellNavigationTests: XCTestCase {
+    func testBirdTabProvidesOutlineAndFilledTemplateArtwork() {
+        let outline = BirdTabIcon.image
+        let filled = BirdTabIcon.selectedImage
+        for image in [outline, filled] {
+            XCTAssertEqual(image.size.width, 25, accuracy: 0.1)
+            XCTAssertEqual(image.size.height, 25, accuracy: 0.1)
+            XCTAssertEqual(image.renderingMode, .alwaysTemplate)
+            XCTAssertNotNil(image.cgImage)
+        }
+
+        XCTAssertLessThan(alphaAtCenter(of: outline), 32, "The inactive bird should remain an outline.")
+        XCTAssertGreaterThan(alphaAtCenter(of: filled), 223, "The selected bird should fill its body silhouette.")
+    }
+
+    func testPrimaryTabSymbolsUseOutlineWhenInactiveAndFillWhenSelected() {
+        XCTAssertEqual(AppShellSurface.sessions.tabBarSystemImage(isSelected: false), "bubble.left.and.bubble.right")
+        XCTAssertEqual(AppShellSurface.sessions.tabBarSystemImage(isSelected: true), "bubble.left.and.bubble.right.fill")
+        XCTAssertEqual(AppShellSurface.you.tabBarSystemImage(isSelected: false), "clock")
+        XCTAssertEqual(AppShellSurface.you.tabBarSystemImage(isSelected: true), "clock.fill")
+    }
+
+    private func alphaAtCenter(of image: UIImage, file: StaticString = #filePath, line: UInt = #line) -> UInt8 {
+        guard let cgImage = image.cgImage else {
+            XCTFail("The tab icon did not produce a CGImage.", file: file, line: line)
+            return 0
+        }
+
+        let width = cgImage.width
+        let height = cgImage.height
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        guard let context = CGContext(
+            data: &pixels,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: width * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            XCTFail("Could not create a bitmap context for the tab icon.", file: file, line: line)
+            return 0
+        }
+
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+        let centerIndex = ((height / 2) * width + width / 2) * 4 + 3
+        return pixels[centerIndex]
+    }
+
+    func testRootSettingsActionUsesOneGearDestination() {
+        XCTAssertEqual(AppShellSettingsAction.systemImage, "gearshape")
+        XCTAssertEqual(AppShellSettingsAction.accessibilityLabel, "Settings")
+    }
+
+    func testToolsDestinationOmitsSettingsAndServerLoopRows() {
+        let tools = ControlView(
+            authManager: AuthManager(),
+            server: URL(staticString: "https://example.test"),
+            showsConnectionRows: false
+        )
+        XCTAssertFalse(tools.showsConnectionRows)
+    }
+
+    func testBotProfileRoutesKeepExactProfileForChatAndSessionsFilter() throws {
+        let profile = ProfileSummary(
+            name: " research ",
+            path: nil,
+            isDefault: true,
+            isActive: true,
+            gatewayRunning: true,
+            model: "model-a",
+            provider: "provider-a",
+            hasEnv: true,
+            skillCount: 3
+        )
+        let name = try XCTUnwrap(profile.normalizedName)
+
+        let chatRequest = NewChatRequest(profileName: name)
+        let filterRequest = SessionFilterRequest(profileName: "  \(name)  ")
+
+        XCTAssertEqual(chatRequest.profileName, name)
+        XCTAssertEqual(filterRequest.profileName, name)
+        XCTAssertNotEqual(chatRequest.id, filterRequest.id)
+        XCTAssertTrue(SessionShellFilter.matches(
+            SessionSummary(sessionId: "session-1", profile: name),
+            bot: filterRequest.profileName,
+            pinnedOnly: false
+        ))
+    }
+
+    func testSessionFilterRequestRejectsNoProfileMutationAndSupportsRepeatRoutes() {
+        let first = SessionFilterRequest(profileName: "work")
+        let second = SessionFilterRequest(profileName: "work")
+
+        XCTAssertEqual(first.profileName, second.profileName)
+        XCTAssertNotEqual(first.id, second.id)
+        XCTAssertEqual(NewChatRequest(profileName: first.profileName).profileName, "work")
+    }
+
+    func testProfileHistoryRouteClearsConflictingSessionFilters() throws {
+        let route = try XCTUnwrap(
+            SessionFilterRoutePolicy.profileHistoryRoute(profileName: "  research ")
+        )
+
+        XCTAssertEqual(route.profileName, "research")
+        XCTAssertFalse(route.pinnedOnly)
+        XCTAssertFalse(route.scheduledHistoryOnly)
+        XCTAssertNil(route.projectID)
+        XCTAssertEqual(route.searchText, "")
+    }
+
+    func testProfileHistoryRouteRejectsBlankProfileNames() {
+        XCTAssertNil(SessionFilterRoutePolicy.profileHistoryRoute(profileName: "  \n"))
+    }
+
+    func testSessionDepartureResetsButIntentionalIncomingRoutesDoNot() {
+        XCTAssertTrue(AppShellSessionReturnPolicy.resetsOnDeparture(from: .sessions, to: .control))
+        XCTAssertTrue(AppShellSessionReturnPolicy.resetsOnDeparture(from: .sessions, to: .you))
+        XCTAssertFalse(AppShellSessionReturnPolicy.resetsOnDeparture(from: .control, to: .sessions))
+        XCTAssertFalse(AppShellSessionReturnPolicy.resetsOnDeparture(from: .you, to: .sessions))
+        XCTAssertFalse(AppShellSessionReturnPolicy.resetsOnDeparture(from: .sessions, to: .sessions))
+    }
+
+    func testEmptyShellProjectsHideButSelectionKeepsClearFilterReachable() {
+        XCTAssertFalse(AppShellOrganizerPolicy.showsProjects(isShell: true, hasProjects: false, hasSelection: false))
+        XCTAssertTrue(AppShellOrganizerPolicy.showsProjects(isShell: true, hasProjects: true, hasSelection: false))
+        XCTAssertTrue(AppShellOrganizerPolicy.showsProjects(isShell: true, hasProjects: false, hasSelection: true))
+        XCTAssertTrue(AppShellOrganizerPolicy.showsProjects(isShell: false, hasProjects: false, hasSelection: false))
+    }
+
+    func testPrimaryTabsSeparateBotConfigurationFromSessionsAndActivity() {
+        XCTAssertEqual(AppShellSurface.primaryTabs, [.control, .sessions, .you])
+    }
     func testPrimarySurfacesHaveStableOrderAndLabels() {
-        XCTAssertEqual(AppShellSurface.allCases, [.sessions, .control, .you])
+        XCTAssertEqual(AppShellSurface.allCases, [.control, .sessions, .you])
         XCTAssertEqual(AppShellSurface.sessions.title, "Sessions")
-        XCTAssertEqual(AppShellSurface.control.title, "Control")
-        XCTAssertEqual(AppShellSurface.you.title, "You")
+        XCTAssertEqual(AppShellSurface.control.title, "Bots")
+        XCTAssertEqual(AppShellSurface.you.title, "Activity")
     }
 
     func testOnlySessionsOffersTheShellPrimaryAction() {
@@ -16,9 +148,156 @@ final class AppShellNavigationTests: XCTestCase {
         XCTAssertFalse(AppShellSurface.you.showsPrimaryAction)
     }
 
-    func testControlUsesTheProductTitleAndDoesNotUseAppleControlCenterName() {
-        XCTAssertEqual(AppShellSurface.control.title, "Control")
-        XCTAssertNotEqual(AppShellSurface.control.title, "Control Center")
+    func testSessionBotAndPinFiltersIntersectWithoutChangingMissingProfileMeaning() throws {
+        let rows = try JSONDecoder().decode([SessionSummary].self, from: Data(#"[{"id":"1","profile":"research","pinned":true},{"id":"2","profile":"default","pinned":false},{"id":"3","pinned":true}]"#.utf8))
+        XCTAssertEqual(rows.filter { SessionShellFilter.matches($0, bot: nil, pinnedOnly: false) }.count, 3)
+        XCTAssertEqual(rows.filter { SessionShellFilter.matches($0, bot: nil, pinnedOnly: true) }.count, 2)
+        XCTAssertEqual(rows.filter { SessionShellFilter.matches($0, bot: "research", pinnedOnly: true) }.count, 1)
+        XCTAssertEqual(rows.filter { SessionShellFilter.matches($0, bot: "default", pinnedOnly: true) }.count, 0)
+    }
+
+    func testBotCatalogDropsMissingAndDuplicateNormalizedNames() throws {
+        let data = Data(#"[{"name":"default"},{"name":" default "},{"name":""},{},{"name":"research"}]"#.utf8)
+        let profiles = try JSONDecoder().decode([ProfileSummary].self, from: data)
+        let unique = AppShellBotCatalog.uniqueProfiles(profiles)
+        XCTAssertEqual(unique.compactMap(\.normalizedName), ["default", "research"])
+        XCTAssertEqual(unique.first?.name, "default")
+    }
+
+    func testShellLoadRejectsCancelledReplacedDepartedAndOtherServerResponses() {
+        let server = URL(staticString: "https://one.example.test")
+        let request = AppShellLoadIdentity(server: server)
+        let reentered = AppShellLoadIdentity(server: server)
+        XCTAssertTrue(request.accepts(current: request, cancelled: false))
+        XCTAssertFalse(request.accepts(current: request, cancelled: true))
+        XCTAssertFalse(request.accepts(current: nil, cancelled: false))
+        XCTAssertFalse(request.accepts(current: reentered, cancelled: false))
+        XCTAssertTrue(reentered.accepts(current: reentered, cancelled: false))
+        XCTAssertFalse(request.accepts(
+            current: AppShellLoadIdentity(server: URL(staticString: "https://two.example.test")),
+            cancelled: false
+        ))
+    }
+
+    func testActivityScopeUsesInventoryDefaultWhenCurrentIsAbsent() throws {
+        let data = Data(#"{"profiles":[{"name":"research"},{"name":"configured-default","isDefault":true}]}"#.utf8)
+        let inventory = try JSONDecoder().decode(ProfilesResponse.self, from: data)
+        XCTAssertEqual(AppShellActivityScope.resolve(current: nil, inventory: inventory), "configured-default")
+        XCTAssertEqual(AppShellActivityScope.resolve(current: "  ", inventory: inventory), "configured-default")
+        XCTAssertEqual(AppShellActivityScope.resolve(current: "running", inventory: inventory), "running")
+    }
+
+    func testActivityScopeWithNoCurrentOrInventoryProfileIsUnavailable() {
+        let inventory = ProfilesResponse(profiles: [], active: nil, singleProfileMode: nil)
+        XCTAssertNil(AppShellActivityScope.resolve(current: nil, inventory: inventory))
+        XCTAssertNil(AppShellActivityScope.resolve(current: nil, inventory: nil))
+    }
+
+    func testLegacySurfaceRawValuesRemainStableForExistingRoutes() {
+        XCTAssertEqual(AppShellSurface.sessions.rawValue, "sessions")
+        XCTAssertEqual(AppShellSurface.control.rawValue, "control")
+        XCTAssertEqual(AppShellSurface.you.rawValue, "you")
+    }
+
+    func testProductionSessionsAndControlEnableTheLocalOrganizer() {
+        XCTAssertTrue(AppShellOrganizerPolicy.projectsEnabled)
+    }
+
+    func testShellSessionsShowsOnlyOrganizerWhenEnabledAndVisible() throws {
+        let visibility = try XCTUnwrap(
+            SessionListUtilityRowsVisibilityPolicy.visibleSections(
+                usesShellChrome: true,
+                projectsEnabled: true,
+                isSearchingSessions: false,
+                userVisibility: .showAll
+            )
+        )
+
+        XCTAssertEqual(
+            visibility,
+            SidebarSectionVisibility(
+                tasks: false,
+                kanban: false,
+                skills: false,
+                memory: false,
+                insights: false,
+                activeProfile: false,
+                projects: true
+            )
+        )
+    }
+
+    func testShellSessionsHidesOrganizerWhenDisabledHiddenOrSearching() {
+        var projectsHidden = SidebarSectionVisibility.showAll
+        projectsHidden.projects = false
+
+        XCTAssertNil(
+            SessionListUtilityRowsVisibilityPolicy.visibleSections(
+                usesShellChrome: true,
+                projectsEnabled: false,
+                isSearchingSessions: false,
+                userVisibility: .showAll
+            )
+        )
+        XCTAssertNil(
+            SessionListUtilityRowsVisibilityPolicy.visibleSections(
+                usesShellChrome: true,
+                projectsEnabled: true,
+                isSearchingSessions: false,
+                userVisibility: projectsHidden
+            )
+        )
+        XCTAssertNil(
+            SessionListUtilityRowsVisibilityPolicy.visibleSections(
+                usesShellChrome: true,
+                projectsEnabled: true,
+                isSearchingSessions: true,
+                userVisibility: .showAll
+            )
+        )
+    }
+
+    func testNonShellUtilityRowsPreserveUserVisibilityUnlessSearching() {
+        let userVisibility = SidebarSectionVisibility(
+            tasks: true,
+            kanban: false,
+            skills: true,
+            memory: false,
+            insights: true,
+            activeProfile: true,
+            projects: false
+        )
+
+        XCTAssertEqual(
+            SessionListUtilityRowsVisibilityPolicy.visibleSections(
+                usesShellChrome: false,
+                projectsEnabled: true,
+                isSearchingSessions: false,
+                userVisibility: userVisibility
+            ),
+            userVisibility
+        )
+        var organizerDisabledVisibility = userVisibility
+        organizerDisabledVisibility.projects = false
+        var projectsVisible = userVisibility
+        projectsVisible.projects = true
+        XCTAssertEqual(
+            SessionListUtilityRowsVisibilityPolicy.visibleSections(
+                usesShellChrome: false,
+                projectsEnabled: false,
+                isSearchingSessions: false,
+                userVisibility: projectsVisible
+            ),
+            organizerDisabledVisibility
+        )
+        XCTAssertNil(
+            SessionListUtilityRowsVisibilityPolicy.visibleSections(
+                usesShellChrome: false,
+                projectsEnabled: true,
+                isSearchingSessions: true,
+                userVisibility: userVisibility
+            )
+        )
     }
 
     func testNestedControlDestinationHidesBothShellBarsAndResetsOnReentry() {
@@ -110,115 +389,6 @@ final class AppShellNavigationTests: XCTestCase {
         XCTAssertFalse(shell.showsSectionHeader)
     }
 
-    func testCapsuleMotionProvidesResponsiveIgnitionAndCriticallyDampedProgression() {
-        let start = Date(timeIntervalSinceReferenceDate: 0)
-        let motion = AppShellCapsuleMotion(start: 0, target: 2, startedAt: start)
-
-        XCTAssertEqual(motion.position(at: start), 0, accuracy: 0.001)
-        XCTAssertEqual(motion.position(at: start.addingTimeInterval(0.06)) / 2, 0.32, accuracy: 0.08)
-        XCTAssertEqual(motion.position(at: start.addingTimeInterval(0.14)) / 2, 0.70, accuracy: 0.08)
-        XCTAssertEqual(motion.position(at: start.addingTimeInterval(0.22)) / 2, 0.94, accuracy: 0.08)
-        XCTAssertEqual(motion.position(at: start.addingTimeInterval(0.28)) / 2, 1.0, accuracy: 0.001)
-    }
-
-    func testCapsuleMotionFormsAnAsymmetricBridgeAndSettlesSmoothly() {
-        let start = Date(timeIntervalSinceReferenceDate: 0)
-        let motion = AppShellCapsuleMotion(start: 0, target: 1, startedAt: start)
-        let tabWidth: CGFloat = 100
-
-        let midpoint = motion.frame(at: start.addingTimeInterval(0.12), tabWidth: tabWidth)
-        XCTAssertGreaterThan(midpoint.width, tabWidth * 1.25)
-        XCTAssertGreaterThan(midpoint.right - (midpoint.left + tabWidth), 0)
-
-        let settled = motion.frame(at: start.addingTimeInterval(0.28), tabWidth: tabWidth)
-        XCTAssertTrue(settled.isSettled)
-        XCTAssertEqual(settled.width, tabWidth, accuracy: 0.01)
-        XCTAssertEqual(motion.position(at: start.addingTimeInterval(0.28)), 1, accuracy: 0.001)
-    }
-
-    func testCapsuleMotionRetargetsContinuouslyAndReduceMotionCanSettleImmediately() {
-        let start = Date(timeIntervalSinceReferenceDate: 0)
-        let motion = AppShellCapsuleMotion(start: 0, target: 2, startedAt: start)
-        let interruptionTime = start.addingTimeInterval(0.12)
-        let current = motion.position(at: interruptionTime)
-        let currentDeformation = motion.deformation(at: interruptionTime)
-        let retargeted = motion.retargeted(to: 1, at: interruptionTime)
-
-        XCTAssertEqual(retargeted.start, current, accuracy: 0.001)
-        XCTAssertEqual(retargeted.initialDeformation, currentDeformation, accuracy: 0.001)
-        XCTAssertEqual(retargeted.position(at: interruptionTime), current, accuracy: 0.001)
-        XCTAssertEqual(retargeted.frame(at: interruptionTime, tabWidth: 100).travel, 0, accuracy: 0.001)
-
-        let reduceMotion = AppShellCapsuleMotion(settledAt: 1)
-        let immediate = reduceMotion.frame(at: start, tabWidth: 100)
-        XCTAssertEqual(reduceMotion.position(at: start), 1, accuracy: 0.001)
-        XCTAssertEqual(immediate.width, 100, accuracy: 0.001)
-    }
-
-    func testCapsuleMotionNormalReversePreservesTheRenderedFrameAtRetarget() {
-        let start = Date(timeIntervalSinceReferenceDate: 0)
-        let motion = AppShellCapsuleMotion(start: 0, target: 2, startedAt: start)
-        let retargetTime = start.addingTimeInterval(0.12)
-        let before = motion.frame(at: retargetTime, tabWidth: 100)
-        let reversed = motion.retargeted(to: 1, at: retargetTime)
-        let after = reversed.frame(at: retargetTime, tabWidth: 100)
-
-        assertRenderedFramesMatch(before, after)
-    }
-
-    func testCapsuleMotionRapidRepeatedRetargetPreservesEachRenderedFrame() {
-        let start = Date(timeIntervalSinceReferenceDate: 0)
-        let motion = AppShellCapsuleMotion(start: 0, target: 2, startedAt: start)
-        let firstRetargetTime = start.addingTimeInterval(0.10)
-        let first = motion.retargeted(to: 1, at: firstRetargetTime)
-        let secondRetargetTime = firstRetargetTime.addingTimeInterval(0.05)
-        let before = first.frame(at: secondRetargetTime, tabWidth: 100)
-        let second = first.retargeted(to: 0, at: secondRetargetTime)
-        let after = second.frame(at: secondRetargetTime, tabWidth: 100)
-
-        assertRenderedFramesMatch(before, after)
-    }
-
-    func testCapsuleMotionReconcilesAnExternalSurfaceChange() {
-        let start = Date(timeIntervalSinceReferenceDate: 0)
-        let motion = AppShellCapsuleMotion(start: 0, target: 0, startedAt: start)
-
-        let reconciled = motion.reconciled(
-            to: 2,
-            reduceMotion: false,
-            at: start.addingTimeInterval(1)
-        )
-
-        XCTAssertEqual(reconciled.start, 0, accuracy: 0.001)
-        XCTAssertEqual(reconciled.target, 2, accuracy: 0.001)
-        XCTAssertEqual(reconciled.position(at: start.addingTimeInterval(1)), 0, accuracy: 0.001)
-    }
-
-    func testCapsuleMotionReconciliationDoesNotRestartMatchingInternalTarget() {
-        let start = Date(timeIntervalSinceReferenceDate: 0)
-        let motion = AppShellCapsuleMotion(start: 0, target: 2, startedAt: start)
-        let date = start.addingTimeInterval(0.12)
-
-        let reconciled = motion.reconciled(to: 2, reduceMotion: false, at: date)
-
-        XCTAssertEqual(reconciled, motion)
-    }
-
-    func testCapsuleMotionSettlesWhenReduceMotionTurnsOnMidGlide() {
-        let start = Date(timeIntervalSinceReferenceDate: 0)
-        let motion = AppShellCapsuleMotion(start: 0, target: 2, startedAt: start)
-
-        let settled = motion.reconciled(
-            to: 2,
-            reduceMotion: true,
-            at: start.addingTimeInterval(0.12)
-        )
-
-        XCTAssertEqual(settled.start, 2, accuracy: 0.001)
-        XCTAssertEqual(settled.target, 2, accuracy: 0.001)
-        XCTAssertEqual(settled.position(at: start.addingTimeInterval(0.12)), 2, accuracy: 0.001)
-    }
-
     private static var noopActions: SessionListRowActions {
         SessionListRowActions(
             retryLoad: {},
@@ -235,29 +405,4 @@ final class AppShellNavigationTests: XCTestCase {
         )
     }
 
-    private func assertRenderedFramesMatch(
-        _ before: AppShellCapsuleMotionFrame,
-        _ after: AppShellCapsuleMotionFrame,
-        file: StaticString = #filePath,
-        line: UInt = #line
-    ) {
-        XCTAssertEqual(after.left, before.left, accuracy: 0.001, file: file, line: line)
-        XCTAssertEqual(after.right, before.right, accuracy: 0.001, file: file, line: line)
-        XCTAssertEqual(after.width, before.width, accuracy: 0.001, file: file, line: line)
-        XCTAssertEqual(
-            after.center,
-            before.center,
-            accuracy: 0.001,
-            file: file,
-            line: line
-        )
-        XCTAssertEqual(after.position, before.position, accuracy: 0.001, file: file, line: line)
-        XCTAssertEqual(
-            after.highlight,
-            before.highlight,
-            accuracy: 0.001,
-            file: file,
-            line: line
-        )
-    }
 }

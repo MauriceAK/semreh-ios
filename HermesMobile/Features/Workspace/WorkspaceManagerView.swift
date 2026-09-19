@@ -1,8 +1,7 @@
 import SwiftUI
 
-/// Workspace-registry management sheet (issue #22): add, rename, reorder, and
-/// remove registered workspaces. Removal only unregisters a path from the
-/// server's list — it never deletes files — and is confirmation-gated.
+/// Device-local workspace bookmark management. Paths remain references only:
+/// this sheet never creates, moves, verifies, or deletes server files.
 struct WorkspaceManagerView: View {
     @State private var viewModel: WorkspaceRegistryViewModel
 
@@ -15,8 +14,8 @@ struct WorkspaceManagerView: View {
     @State private var renameTargetPath: String?
     @State private var renameText = ""
 
-    init(server: URL, onRegistryChanged: @escaping () async -> Void) {
-        _viewModel = State(initialValue: WorkspaceRegistryViewModel(server: server))
+    init(server: URL, profile: String, onRegistryChanged: @escaping () async -> Void) {
+        _viewModel = State(initialValue: WorkspaceRegistryViewModel(server: server, profile: profile))
         self.onRegistryChanged = onRegistryChanged
     }
 
@@ -33,14 +32,6 @@ struct WorkspaceManagerView: View {
                         Label(errorMessage, systemImage: "exclamationmark.triangle")
                             .font(.footnote)
                             .foregroundStyle(.red)
-                    }
-                }
-
-                if viewModel.managementUnavailable {
-                    Section {
-                        Text("Workspace management isn't available on this server.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
                     }
                 }
 
@@ -67,7 +58,7 @@ struct WorkspaceManagerView: View {
                             viewModel.requestRemoval(of: viewModel.rows[index])
                         }
                     } footer: {
-                        Text("Removing a workspace only unregisters its path from the server's list. No files are deleted.")
+                        Text("Bookmarks are saved on this device. Removing one does not delete files or change Hermes.")
                     }
                 } else if !viewModel.isLoading {
                     ContentUnavailableView {
@@ -148,7 +139,7 @@ struct WorkspaceManagerView: View {
                     viewModel.cancelPendingRemoval()
                 }
             } message: { _ in
-                Text("Removing a workspace only unregisters its path from the server's list. No files are deleted.")
+                Text("Removing this device-local bookmark does not delete files or change Hermes.")
             }
             .onDisappear {
                 guard viewModel.didMutateRegistry else { return }
@@ -214,15 +205,13 @@ struct WorkspaceManagerView: View {
     }
 }
 
-/// Add-workspace form: path (with server suggestions), optional display name,
-/// and an opt-in "create the folder" flag mirroring the web UI's Add Space.
+/// Adds a device-local path bookmark. The path is not verified or created.
 private struct WorkspaceAddSheet: View {
     let viewModel: WorkspaceRegistryViewModel
 
     @Environment(\.dismiss) private var dismiss
     @State private var path = ""
     @State private var name = ""
-    @State private var createIfMissing = false
     @State private var suggestions: [String] = []
     @State private var isSubmitting = false
 
@@ -236,9 +225,8 @@ private struct WorkspaceAddSheet: View {
 
                     TextField("Name (optional)", text: $name)
 
-                    Toggle("Create the folder if it doesn't exist", isOn: $createIfMissing)
                 } footer: {
-                    Text("Suggestions are limited to trusted workspace roots from the server.")
+                    Text("This saves a bookmark only. It does not verify or create the folder on the Hermes host.")
                 }
 
                 if let errorMessage = viewModel.errorMessage {
@@ -311,7 +299,7 @@ private struct WorkspaceAddSheet: View {
         guard !trimmedPath.isEmpty, !isSubmitting else { return }
         isSubmitting = true
         Task { @MainActor in
-            let succeeded = await viewModel.addWorkspace(path: trimmedPath, name: name, create: createIfMissing)
+            let succeeded = await viewModel.addWorkspace(path: trimmedPath, name: name)
             isSubmitting = false
             if succeeded {
                 dismiss()

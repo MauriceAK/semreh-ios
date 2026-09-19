@@ -2,6 +2,23 @@ import XCTest
 @testable import HermesMobile
 
 final class SessionNavigationStateTests: XCTestCase {
+    @MainActor
+    func testSidebarLoadResolvesProfileBeforeSessionsAndProjects() async {
+        var events: [String] = []
+
+        await SidebarLoadOrdering.run(
+            resolveActiveProfile: {
+                events.append("profile-started")
+                try? await Task.sleep(nanoseconds: 20_000_000)
+                events.append("profile-finished")
+            },
+            loadSessions: { events.append("sessions") },
+            loadProjects: { events.append("projects") }
+        )
+
+        XCTAssertEqual(events, ["profile-started", "profile-finished", "sessions", "projects"])
+    }
+
     func testSelectingSessionUpdatesDestinationAndRestorationID() {
         let session = SessionSummary(sessionId: "session-1", title: "One")
         var state = SessionNavigationState()
@@ -40,6 +57,29 @@ final class SessionNavigationStateTests: XCTestCase {
 
         XCTAssertNil(state.destination)
         XCTAssertEqual(state.lastSelectedSessionID, "session-1")
+    }
+
+    func testExplicitBackIsIdempotentAndBlocksLateRestoreUntilReselect() {
+        let saved = SessionSummary(sessionId: "saved", title: "Saved")
+        var state = SessionNavigationState()
+        state.select(saved)
+
+        // A custom Back control can receive a second tap during the pop
+        // transition. Repeated clears must stay harmless while preserving the
+        // remembered chat for a future cold launch.
+        state.clearDestination()
+        state.clearDestination()
+        state.restoreIfNeeded(from: [saved])
+        state.reconcileAuthoritativeSelection(from: [saved])
+
+        XCTAssertNil(state.destination)
+        XCTAssertEqual(state.lastSelectedSessionID, saved.sessionId)
+
+        // A deliberate new selection starts a new visible route and clears the
+        // explicit-dismiss guard, so normal navigation remains available.
+        let replacement = SessionSummary(sessionId: "replacement", title: "Replacement")
+        state.select(replacement)
+        XCTAssertEqual(state.destination, .session(replacement))
     }
 
     func testRestoreSkipsWhileDeepLinkIsPendingAndKeepsStoredSelection() {
@@ -155,6 +195,65 @@ final class SessionNavigationStateTests: XCTestCase {
         XCTAssertEqual(restoreIndices.count, 2)
         XCTAssertLessThan(try! XCTUnwrap(restoreIndices.first), refreshFinishIndex)
         XCTAssertGreaterThan(try! XCTUnwrap(restoreIndices.last), refreshFinishIndex)
+    }
+
+    @MainActor
+    func testDelayedAuthoritativeRestoreDoesNotReopenDismissedChatButColdRestoreAndReselectWork() async {
+        let saved = SessionSummary(sessionId: "saved", title: "Saved")
+        var state = SessionNavigationState(lastSelectedSessionID: saved.sessionId)
+        var refreshResume: CheckedContinuation<Void, Never>?
+        var restorePasses = 0
+        let refreshSuspended = expectation(description: "refresh is suspended")
+        let optimisticRestoreFinished = expectation(description: "optimistic restore finished")
+
+        let loadTask = Task { @MainActor in
+            await SessionListInitialLoad.run(
+                resolvePendingDeepLink: {},
+                refreshSessionsAndActiveProfile: {
+                    await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                        refreshResume = continuation
+                        refreshSuspended.fulfill()
+                    }
+                },
+                restoreLastSelectedSession: { clearsMissingSelection in
+                    restorePasses += 1
+                    if clearsMissingSelection {
+                        state.reconcileAuthoritativeSelection(from: [saved])
+                    } else {
+                        state.restoreIfNeeded(
+                            from: [saved],
+                            clearsMissingSelection: false
+                        )
+                        optimisticRestoreFinished.fulfill()
+                    }
+                }
+            )
+        }
+
+        await fulfillment(of: [refreshSuspended, optimisticRestoreFinished], timeout: 1)
+        XCTAssertEqual(state.destination, .session(saved))
+
+        state.clearDestination()
+        XCTAssertNil(state.destination)
+        XCTAssertEqual(state.lastSelectedSessionID, saved.sessionId)
+
+        guard let refreshResume else {
+            return XCTFail("The delayed refresh must expose its resume gate")
+        }
+        refreshResume.resume()
+        await loadTask.value
+
+        XCTAssertEqual(restorePasses, 2)
+        XCTAssertNil(state.destination)
+        XCTAssertEqual(state.lastSelectedSessionID, saved.sessionId)
+
+        var coldState = SessionNavigationState(lastSelectedSessionID: state.lastSelectedSessionID)
+        coldState.restoreIfNeeded(from: [saved])
+        XCTAssertEqual(coldState.destination, .session(saved))
+
+        coldState.clearDestination()
+        coldState.select(saved)
+        XCTAssertEqual(coldState.destination, .session(saved))
     }
 
     func testInitialRestoreIsOptimisticBeforeRefreshAndAuthoritativeAfterward() async {
@@ -388,6 +487,49 @@ final class SessionNavigationStateTests: XCTestCase {
 
         state.select(SessionSummary(sessionId: "ordinary-session"))
         XCTAssertTrue(state.destination?.loadsInitialMessages == true)
+    }
+
+    func testLocalDraftNewChatCompletesWithoutDurableID() {
+        let route = PendingNewChatRoute(initialDraft: "direct draft", autoStartsVoiceInput: true)
+        let draft = SessionSummary(sessionId: nil, title: "New Chat", profile: "default")
+        var state = SessionNavigationState(lastSelectedSessionID: "previous-session")
+
+        XCTAssertTrue(state.beginNewChatCreation(route))
+        XCTAssertTrue(state.completeNewChatCreation(draft, for: route))
+
+        XCTAssertFalse(state.isCreatingNewChat)
+        XCTAssertEqual(state.destination, .newChat(session: draft, route: route))
+        XCTAssertFalse(state.destination?.loadsInitialMessages == true)
+        XCTAssertNil(state.selectedSessionID)
+        XCTAssertEqual(state.lastSelectedSessionID, "previous-session")
+    }
+
+    func testLocalDraftNewChatRejectsStaleRouteWithoutClearingPendingCreation() {
+        let pending = PendingNewChatRoute(initialDraft: "pending")
+        let stale = PendingNewChatRoute(initialDraft: "stale")
+        let draft = SessionSummary(sessionId: nil, title: "New Chat")
+        var state = SessionNavigationState(lastSelectedSessionID: "previous-session")
+
+        XCTAssertTrue(state.beginNewChatCreation(pending))
+        XCTAssertFalse(state.completeNewChatCreation(draft, for: stale))
+
+        XCTAssertTrue(state.isCreatingNewChat)
+        XCTAssertNil(state.destination)
+        XCTAssertEqual(state.lastSelectedSessionID, "previous-session")
+    }
+
+    func testCancelledLocalDraftNewChatRejectsCompletionAfterCancellation() {
+        let route = PendingNewChatRoute(initialDraft: "cancelled")
+        let draft = SessionSummary(sessionId: nil, title: "New Chat")
+        var state = SessionNavigationState(lastSelectedSessionID: "previous-session")
+
+        XCTAssertTrue(state.beginNewChatCreation(route))
+        state.cancelNewChatCreation(for: route)
+        XCTAssertFalse(state.completeNewChatCreation(draft, for: route))
+
+        XCTAssertFalse(state.isCreatingNewChat)
+        XCTAssertNil(state.destination)
+        XCTAssertEqual(state.lastSelectedSessionID, "previous-session")
     }
 
     func testExternalNewChatRequestsDrainSharedImportBeforeAppIntentAfterCreation() {

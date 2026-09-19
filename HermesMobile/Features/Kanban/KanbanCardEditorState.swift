@@ -433,6 +433,17 @@ final class KanbanCardEditorState: Identifiable {
     }
 
     private func isDefinitiveWriteFailure(_ error: Error) -> Bool {
+        if let directError = error as? DirectKanbanError {
+            switch directError {
+            case .createStatusMismatch:
+                return false
+            case .pluginUnavailable,
+                 .unsupportedOperation,
+                 .createStatusNotRepresentable,
+                 .tenantMutationNotSupported:
+                return true
+            }
+        }
         guard let apiError = error as? APIError else { return false }
         switch apiError {
         case .unauthorized, .invalidServerURL:

@@ -83,6 +83,89 @@ struct ChatMessageActionMenu: View {
     }
 }
 
+enum AssistantResponseActionPolicy {
+    /// Derives one stable row ID per transcript update. While a stream is active,
+    /// ignore assistant rows after the current user turn so the previous
+    /// completed response retains Copy until the new answer settles.
+    static func latestCompletedAssistantRenderID(
+        in transcriptMessages: [TranscriptMessage],
+        hasActiveStream: Bool,
+        streamingAssistantMessageID: String?
+    ) -> String? {
+        let activeMessageID = hasActiveStream ? streamingAssistantMessageID : nil
+
+        if hasActiveStream,
+           let activeUserTurnStart = transcriptMessages.lastIndex(where: {
+               TranscriptTurnClassifier.isUserTurnBoundary($0.message)
+           }) {
+            return transcriptMessages[..<activeUserTurnStart]
+                .reversed()
+                .first(where: { isCopyableAssistant($0, excluding: activeMessageID) })?
+                .renderID
+        }
+
+        return transcriptMessages.reversed()
+            .first(where: { isCopyableAssistant($0, excluding: activeMessageID) })?
+            .renderID
+    }
+
+    static func shouldShowPersistentCopy(
+        context: MessageActionContext?,
+        messageRole: String?,
+        isStreaming: Bool,
+        isLatestCompletedAssistant: Bool
+    ) -> Bool {
+        guard let context else { return false }
+        return context.role == .assistant &&
+            messageRole == "assistant" &&
+            !isStreaming &&
+            isLatestCompletedAssistant
+    }
+
+    private static func isCopyableAssistant(
+        _ transcriptMessage: TranscriptMessage,
+        excluding streamingAssistantMessageID: String?
+    ) -> Bool {
+        let message = transcriptMessage.message
+        let isStreamingMessage = streamingAssistantMessageID.map {
+            message.messageId == $0
+        } ?? false
+        return message.role == "assistant" &&
+            ChatMarkerMessageClassifier.classify(message) == nil &&
+            !isStreamingMessage &&
+            !(message.content ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+}
+
+/// A compact persistent action shown only under a completed assistant reply.
+/// It reuses the transcript's existing copy callback and introduces no new
+/// response feedback or backend behavior.
+struct AssistantResponseActionRow: View {
+    let context: MessageActionContext
+    let onCopy: (MessageActionContext) -> Void
+
+    var body: some View {
+        HStack {
+            Button {
+                onCopy(context)
+            } label: {
+                Label("Copy", systemImage: "doc.on.doc")
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
+                    .frame(minHeight: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("assistant-response-copy")
+
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.leading, 2)
+        .padding(.top, 2)
+    }
+}
+
 struct SelectableTextPresentationView: View {
     let selection: SelectableTextPresentation
 

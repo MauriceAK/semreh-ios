@@ -1,83 +1,10 @@
 import Foundation
 
-struct ChatStartResponse: Decodable, Equatable {
-    let streamId: String?
-    let sessionId: String?
-    let error: String?
-}
-
-struct ChatCancelResponse: Decodable, Equatable {
-    let ok: Bool?
-    let cancelled: Bool?
-    let streamId: String?
-    let error: String?
-}
-
-struct ChatStreamStatusResponse: Decodable, Equatable {
-    let active: Bool?
-    let streamId: String?
-    let replayAvailable: Bool?
-    let journal: RunJournalStatus?
-}
-
-/// The server's run-journal summary, surfaced on `/api/chat/stream/status` so a
-/// reconciled Live Activity can be finalized with the run's real outcome (#267).
-/// Every field is optional: the `journal` block is absent when the server has no
-/// summary for a stream, and `terminalState`'s vocabulary may grow upstream — so
-/// we decode tolerantly and never crash on an unknown value.
-struct RunJournalStatus: Decodable, Equatable {
-    /// Whether the server logged a genuine terminal event for the run. Decoded to
-    /// mirror the journal payload shape (#267 acceptance criterion named both
-    /// fields); outcome mapping reads `terminalState` only. Kept because it is not
-    /// redundant with `terminalState`: a run the server force-marks
-    /// `"lost-worker-bookkeeping"` reports `terminal == false`, so this stays
-    /// available for any future consumer that must tell a real terminal event from
-    /// a bookkeeping one.
-    let terminal: Bool?
-    let terminalState: String?
-}
-
-struct ChatSteerResponse: Decodable, Equatable {
-    let accepted: Bool?
-    let fallback: String?
-    let streamId: String?
-    let error: String?
-}
-
-struct BtwStartResponse: Decodable, Equatable {
-    let streamId: String?
-    let sessionId: String?
-    let parentSessionId: String?
-    let error: String?
-}
-
-struct BackgroundStartResponse: Decodable, Equatable {
-    let taskId: String?
-    let streamId: String?
-    let sessionId: String?
-    let error: String?
-}
-
-struct BackgroundStatusResponse: Decodable, Equatable {
-    let results: [BackgroundResult]?
-}
-
-struct BackgroundResult: Decodable, Equatable {
-    let taskId: String?
-    let prompt: String?
-    let answer: String?
-    let completedAt: Double?
-}
-
 struct ModelsResponse: Decodable, Equatable {
     let groups: [JSONValue]?
     let models: [JSONValue]?
     let defaultModel: String?
     let activeProvider: String?
-}
-
-struct CommandsResponse: Decodable, Equatable {
-    let commands: [AgentCommand]?
 }
 
 struct AgentCommand: Decodable, Equatable, Identifiable, Sendable {
@@ -167,6 +94,8 @@ struct ProvidersResponse: Decodable, Equatable {
 /// `env_file`, `env_var`, `config_yaml`, `oauth`, `none` — plus `env`, `config`,
 /// and `token` from the live-auth fallback probe. Unknown values are kept verbatim.
 struct ProviderSummary: Decodable, Equatable, Sendable {
+    /// Stock picker inventory hint; never a successful model-request claim.
+    let credentialsAvailable: Bool?
     let id: String?
     let displayName: String?
     let hasKey: Bool?
@@ -184,6 +113,7 @@ struct ProviderSummary: Decodable, Equatable, Sendable {
     let modelsTotal: Int?
 
     enum CodingKeys: String, CodingKey {
+        case credentialsAvailable
         case id
         case displayName
         case hasKey
@@ -212,8 +142,10 @@ struct ProviderSummary: Decodable, Equatable, Sendable {
         keySource: String? = nil,
         authError: String? = nil,
         models: [ProviderModel]? = nil,
-        modelsTotal: Int? = nil
+        modelsTotal: Int? = nil,
+        credentialsAvailable: Bool? = nil
     ) {
+        self.credentialsAvailable = credentialsAvailable
         self.id = id
         self.displayName = displayName
         self.hasKey = hasKey
@@ -231,6 +163,7 @@ struct ProviderSummary: Decodable, Equatable, Sendable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        credentialsAvailable = container.decodeLossyBoolIfPresent(forKey: .credentialsAvailable)
         id = container.decodeLossyStringIfPresent(forKey: .id)
         displayName = container.decodeLossyStringIfPresent(forKey: .displayName)
         hasKey = container.decodeLossyBoolIfPresent(forKey: .hasKey)
@@ -278,190 +211,78 @@ struct ProviderModel: Decodable, Equatable, Sendable {
     }
 }
 
-/// `GET /api/settings` (the saved-settings body `POST /api/settings` echoes the
-/// same shape back). The server returns ~75 keys; we decode only the ones with
-/// a consumer or near-term use (#19). Every field is optional and lossy-decoded
-/// — servers omit keys freely and we never crash on an unexpected shape.
-struct SettingsResponse: Decodable, Equatable {
-    let botName: String?
-    let webuiVersion: String?
-    let agentVersion: String?
-    let theme: String?
-    let checkForUpdates: Bool?
-    let showCliSessions: Bool?
-    let showClaudeCodeSessions: Bool?
-    let maxTokens: Int?
-    let maxTokensEffective: Int?
-    let authEnabled: Bool?
-    let passwordAuthEnabled: Bool?
-    let passkeysEnabled: Bool?
-    let passwordlessEnabled: Bool?
-
-    private enum CodingKeys: String, CodingKey {
-        case botName
-        case webuiVersion
-        case agentVersion
-        case theme
-        case checkForUpdates
-        case showCliSessions
-        case showClaudeCodeSessions
-        case maxTokens
-        case maxTokensEffective
-        case authEnabled
-        case passwordAuthEnabled
-        case passkeysEnabled
-        case passwordlessEnabled
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        botName = container.decodeLossyStringIfPresent(forKey: .botName)
-        webuiVersion = container.decodeLossyStringIfPresent(forKey: .webuiVersion)
-        agentVersion = container.decodeLossyStringIfPresent(forKey: .agentVersion)
-        theme = container.decodeLossyStringIfPresent(forKey: .theme)
-        checkForUpdates = container.decodeLossyBoolIfPresent(forKey: .checkForUpdates)
-        showCliSessions = container.decodeLossyBoolIfPresent(forKey: .showCliSessions)
-        showClaudeCodeSessions = container.decodeLossyBoolIfPresent(forKey: .showClaudeCodeSessions)
-        maxTokens = container.decodeLossyIntIfPresent(forKey: .maxTokens)
-        maxTokensEffective = container.decodeLossyIntIfPresent(forKey: .maxTokensEffective)
-        authEnabled = container.decodeLossyBoolIfPresent(forKey: .authEnabled)
-        passwordAuthEnabled = container.decodeLossyBoolIfPresent(forKey: .passwordAuthEnabled)
-        passkeysEnabled = container.decodeLossyBoolIfPresent(forKey: .passkeysEnabled)
-        passwordlessEnabled = container.decodeLossyBoolIfPresent(forKey: .passwordlessEnabled)
-    }
-}
-
-struct DefaultModelResponse: Decodable, Equatable {
-    let ok: Bool?
-    let model: String?
-}
-
-/// `GET /api/updates/check`. Every field is optional: older servers, the
-/// `{ "disabled": true }` opt-out payload, and failed/`stale_check` responses
-/// all omit different keys, and we never crash on a shape we don't expect.
+/// Stock `GET /api/hermes/update/check`. Fields remain optional so an additive
+/// server response never makes Settings unusable.
 struct UpdatesCheckResponse: Decodable, Equatable {
-    let webui: UpdateTargetInfo?
-    let agent: UpdateTargetInfo?
-    let checkedAt: Double?
-    let disabled: Bool?
+    let installMethod: String?
+    let currentVersion: String?
+    let behind: Int?
+    let updateAvailable: Bool?
+    let canApply: Bool?
+    let updateCommand: String?
+    let message: String?
+    let commits: [HermesUpdateCommit]?
 }
 
-struct UpdateTargetInfo: Decodable, Equatable {
-    let name: String?
-    let behind: Int?
-    let currentSha: String?
-    let latestSha: String?
-    let branch: String?
-    let repoUrl: String?
-    let compareUrl: String?
-    let error: String?
-    let staleCheck: Bool?
+struct HermesUpdateCommit: Decodable, Equatable {
+    let sha: String?
+    let summary: String?
+    let author: String?
+    let at: Int?
 }
 
 extension UpdatesCheckResponse {
-    /// What the Settings screen should show for the webui repo. `.unavailable`
-    /// means "show the version only, no indicator" — the server turned the check
-    /// off, errored, returned a stale result, or omitted the webui block.
-    enum WebUIUpdateState: Equatable {
+    enum UpdateState: Equatable {
         case upToDate
-        case updateAvailable(behind: Int)
+        case updateAvailable(behind: Int?)
+        case managed(message: String?)
         case unavailable
     }
 
-    /// The fully-distinguished result of a *manual* (forced) update check (#308).
-    /// Unlike `webuiUpdateState`, this keeps `disabled` and `error` apart so the
-    /// "Check for updates" popup can word each case for the user — the passive
-    /// inline note treats both as "no indicator" and collapses them together.
     enum ForcedCheckOutcome: Equatable {
-        case updateAvailable(behind: Int)
+        case updateAvailable(behind: Int?)
         case upToDate
-        /// Update checks are turned off on this server (`{ "disabled": true }`).
-        case disabled
-        /// The check failed, returned a stale result, or omitted the webui block.
+        case managed(message: String?)
         case error
     }
 
     var forcedCheckOutcome: ForcedCheckOutcome {
-        if disabled == true {
-            return .disabled
+        if canApply == false {
+            return .managed(message: message)
         }
-
-        guard let webui else {
-            return .error
+        guard canApply == true else { return .error }
+        if updateAvailable == true || behind.map({ $0 != 0 }) == true {
+            return .updateAvailable(behind: behind.flatMap { $0 > 0 ? $0 : nil })
         }
-
-        if webui.error != nil || webui.staleCheck == true {
-            return .error
-        }
-
-        if let behind = webui.behind, behind > 0 {
-            return .updateAvailable(behind: behind)
-        }
-
-        return .upToDate
+        if behind == 0 { return .upToDate }
+        return .error
     }
 
-    /// The passive inline indicator's coarser view of the same check. Derived from
-    /// `forcedCheckOutcome` so the two never drift: both "off" and "errored"
-    /// collapse to `.unavailable` (show the version only, with no indicator).
-    var webuiUpdateState: WebUIUpdateState {
+    var updateState: UpdateState {
         switch forcedCheckOutcome {
         case let .updateAvailable(behind):
             return .updateAvailable(behind: behind)
         case .upToDate:
             return .upToDate
-        case .disabled, .error:
+        case let .managed(message):
+            return .managed(message: message)
+        case .error:
             return .unavailable
         }
     }
 }
 
-/// `POST /api/updates/apply`. Tolerant: every field is optional because the
-/// server returns a different mix of keys per outcome — success (`ok`,
-/// `restart_scheduled`), restart-blocked (`restart_blocked` + active counts),
-/// merge conflict (`conflict`), diverged history (`diverged`), or a generic
-/// failure — and may add more over time. We never crash on an unexpected shape.
+/// Stock `POST /api/hermes/update` acknowledgement. `ok` does not mean the
+/// background action completed; only a returned action ID can be monitored.
 struct UpdatesApplyResponse: Decodable, Equatable {
     let ok: Bool?
     let message: String?
-    let target: String?
-    let conflict: Bool?
-    let diverged: Bool?
-    let restartBlocked: Bool?
-    let restartScheduled: Bool?
-    let stashConflict: Bool?
-    let activeStreams: Int?
-    let activeRuns: Int?
+    let error: String?
+    let actionId: String?
+    let alreadyRunning: Bool?
 }
 
 extension UpdatesApplyResponse {
-    /// How the Settings screen should react to an apply attempt.
-    enum Outcome: Equatable {
-        /// Server accepted the update and is restarting; poll until it returns.
-        case applying
-        /// Active chat/agent work blocked the restart. Not a failure — surface
-        /// the server's message and let the user retry once work finishes.
-        case restartBlocked
-        /// The update could not be applied (merge conflict, diverged history,
-        /// unreachable remote, or a generic `ok: false`).
-        case failed
-    }
-
-    var outcome: Outcome {
-        // A restart-blocked response always carries `ok: false`, so check the
-        // blocked flag first to avoid mislabelling it as a hard failure.
-        if restartBlocked == true {
-            return .restartBlocked
-        }
-
-        if ok == true {
-            return .applying
-        }
-
-        return .failed
-    }
-
-    /// The server's human-readable message, or `fallback` when it omitted one.
     func displayMessage(default fallback: String) -> String {
         guard let trimmed = message?.trimmingCharacters(in: .whitespacesAndNewlines),
               !trimmed.isEmpty
@@ -470,6 +291,50 @@ extension UpdatesApplyResponse {
         }
 
         return trimmed
+    }
+}
+
+enum HermesUpdateStart: Equatable {
+    case monitor(actionID: String)
+    case refused
+    case unknown
+
+    static func evaluate(_ response: UpdatesApplyResponse) -> Self {
+        if response.ok == false { return .refused }
+        guard response.ok == true,
+              let actionID = response.actionId,
+              !actionID.isEmpty else { return .unknown }
+        return .monitor(actionID: actionID)
+    }
+}
+
+struct HermesUpdateStatusResponse: Decodable, Equatable {
+    let running: Bool?
+    let exitCode: Int?
+    let actionId: String?
+    let receipt: HermesUpdateReceiptSummary?
+    // Deliberately do not decode `lines`: update output can contain sensitive data.
+}
+
+struct HermesUpdateReceiptSummary: Decodable, Equatable {
+    let outcome: String?
+    let postVersion: String?
+}
+
+enum HermesUpdateCompletion: Equatable {
+    case waiting
+    case succeeded
+    case unknown
+
+    static func evaluate(
+        expectedActionID: String,
+        status: HermesUpdateStatusResponse,
+        isCancelled: Bool = false
+    ) -> Self {
+        guard !isCancelled else { return .unknown }
+        guard status.running == false else { return .waiting }
+        guard status.actionId == expectedActionID else { return .unknown }
+        return status.exitCode == 0 ? .succeeded : .unknown
     }
 }
 
@@ -577,12 +442,6 @@ struct ProfilesResponse: Decodable, Equatable {
     }
 }
 
-struct ProfileCreateResponse: Decodable, Equatable {
-    let ok: Bool?
-    let profile: ProfileSummary?
-    let error: String?
-}
-
 /// Mirrors the upstream profile-name rule (`^[a-z0-9][a-z0-9_-]{0,63}$`) so the
 /// create form can validate before hitting the server.
 enum ProfileNameRules {
@@ -601,14 +460,6 @@ enum ProfileNameRules {
     static func isValidBaseURL(_ value: String) -> Bool {
         value.hasPrefix("http://") || value.hasPrefix("https://")
     }
-}
-
-struct ProfileSwitchResponse: Decodable, Equatable {
-    let profiles: [ProfileSummary]?
-    let active: String?
-    let defaultModel: String?
-    let defaultWorkspace: String?
-    let error: String?
 }
 
 struct ProfileSummary: Decodable, Equatable, Hashable, Identifiable, Sendable {

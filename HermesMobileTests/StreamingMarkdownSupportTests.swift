@@ -1,6 +1,174 @@
 import XCTest
 @testable import HermesMobile
 
+final class ReasoningDisplayTextTests: XCTestCase {
+    func testReasoningBlockDefaultsToCompletedStaticPresentation() {
+        XCTAssertFalse(ReasoningBlockView(text: "Actual reasoning").isActive)
+        XCTAssertFalse(ReasoningDisplayText.shouldAnimateShine(isActive: false, reduceMotion: false))
+    }
+
+    func testReasoningShineOnlyRunsForActiveReasoningWhenMotionIsAllowed() {
+        XCTAssertTrue(ReasoningDisplayText.shouldAnimateShine(isActive: true, reduceMotion: false))
+        XCTAssertFalse(ReasoningDisplayText.shouldAnimateShine(isActive: true, reduceMotion: true))
+        XCTAssertFalse(ReasoningDisplayText.shouldAnimateShine(isActive: false, reduceMotion: true))
+    }
+
+    func testSummaryPreservesPlainText() {
+        XCTAssertEqual(ReasoningDisplayText.summary("Checking the available sources."), "Checking the available sources.")
+    }
+
+    func testSummaryRendersMarkdownInsteadOfShowingSourceMarkers() {
+        XCTAssertEqual(
+            ReasoningDisplayText.summary("# Searching Reddit\n\nFound **compensation sources** and [interviews](https://example.test)."),
+            "Found compensation sources and interviews."
+        )
+    }
+
+    func testSummaryUsesLatestMeaningfulActivityFromTheBoundedTail() {
+        let earlierHistory = String(repeating: "Older reasoning note.\n", count: 40)
+        let source = earlierHistory + "◉_◉ computing...\n\n**Latest status**"
+
+        XCTAssertEqual(ReasoningDisplayText.latestActivity(in: source), "Latest status")
+    }
+
+    func testSummaryBoundsTheLatestLineFromItsTail() {
+        XCTAssertEqual(
+            ReasoningDisplayText.summary("Prior status\n\n12345 67890", maximumCharacters: 8),
+            "…5 67890"
+        )
+        XCTAssertEqual(ReasoningDisplayText.summary("Latest meaningful status\n\n# "), "Latest meaningful status")
+    }
+
+    func testSummaryHidesIncompleteStreamingMarkdownDelimiter() {
+        XCTAssertEqual(ReasoningDisplayText.summary("**Searching the latest sources"), "Searching the latest sources")
+    }
+
+    func testSummaryNeverBecomesEmptyForMarkerOnlyInput() {
+        XCTAssertEqual(ReasoningDisplayText.summary("`"), "Thinking…")
+        XCTAssertEqual(ReasoningDisplayText.summary("```"), "Thinking…")
+        XCTAssertEqual(ReasoningDisplayText.summary("`search term`"), "search term")
+    }
+
+    func testCompletedSpinnerOnlyReasoningDoesNotLeaveTrailingDisclosure() {
+        let spinnerOnly = ReasoningDisplayText.presentation(for: "◉_◉ computing...")
+
+        XCTAssertTrue(ReasoningDisplayText.shouldDisplayDisclosure(
+            isActive: true,
+            rawText: "◉_◉ computing...",
+            latestActivity: spinnerOnly.latestActivity,
+            markdownSource: nil
+        ))
+        XCTAssertFalse(ReasoningDisplayText.shouldDisplayDisclosure(
+            isActive: false,
+            rawText: "◉_◉ computing...",
+            latestActivity: spinnerOnly.latestActivity,
+            markdownSource: spinnerOnly.markdownSource
+        ))
+
+        let meaningfulHistory = ReasoningDisplayText.presentation(for: "Checked the matching transcript row.")
+        XCTAssertTrue(ReasoningDisplayText.shouldDisplayDisclosure(
+            isActive: false,
+            rawText: "Checked the matching transcript row.",
+            latestActivity: meaningfulHistory.latestActivity,
+            markdownSource: nil
+        ), "completed meaningful reasoning remains available as history")
+        XCTAssertFalse(ReasoningDisplayText.shouldDisplayDisclosure(
+            isActive: true,
+            rawText: " \n ",
+            latestActivity: nil,
+            markdownSource: nil
+        ), "blank payloads have no disclosure body or header to expand")
+    }
+
+    func testPresentationRemovesOnlyVerifiedSpinnerTokensOutsideCode() {
+        let source = """
+        **Searching** ◉_◉ computing...
+        `◉_◉ analyzing...` and ◉_◉ custom note
+        ```swift
+        let status = "ಠ_ಠ cogitating..."
+        ```
+        (¬_¬) custom emoticon remains
+        """
+
+        let presentation = ReasoningDisplayText.presentation(for: source)
+
+        XCTAssertEqual(
+            presentation.markdownSource,
+            """
+            **Searching**
+            `◉_◉ analyzing...` and ◉_◉ custom note
+            ```swift
+            let status = "ಠ_ಠ cogitating..."
+            ```
+            (¬_¬) custom emoticon remains
+            """
+        )
+        XCTAssertEqual(presentation.latestActivity, "(¬_¬) custom emoticon remains")
+    }
+
+    func testPresentationPreservesMarkdownForExpandedReasoning() {
+        let source = "**Bold** and `inline code`\n\n- First item\n- Second item"
+
+        XCTAssertEqual(ReasoningDisplayText.markdownSource(source), source)
+    }
+
+    func testMissingEmptyAndSpinnerOnlyReasoningHaveNoExpandedMarkdown() {
+        for source in ["", " \n \t", "◉_◉ computing...", "ಠ_ಠ brainstorming..."] {
+            let presentation = ReasoningDisplayText.presentation(for: source)
+            XCTAssertNil(presentation.markdownSource, "unexpected Markdown for \(source)")
+            XCTAssertNil(presentation.latestActivity, "unexpected summary for \(source)")
+            XCTAssertEqual(ReasoningDisplayText.summary(source), "Thinking…")
+        }
+    }
+}
+
+final class ToolActivityGroupPresentationTests: XCTestCase {
+    func testCollapsedActivityUsesTheLatestActionAndItsState() {
+        let group = ToolCallGroup(
+            anchorMessageID: "assistant-1",
+            toolCalls: [
+                ToolCall(name: "terminal", preview: nil, args: nil, isCompleted: true),
+                ToolCall(name: "read_file", preview: nil, args: nil, isCompleted: false)
+            ]
+        )
+
+        XCTAssertEqual(ToolActivityGroupPresentation.title(for: group), "Read file")
+        XCTAssertEqual(ToolActivityGroupPresentation.icon(for: group), "book")
+        XCTAssertEqual(ToolActivityGroupPresentation.status(for: group), "Running")
+    }
+
+    func testCompletedActivityUsesOnlyTheLatestRealDuration() {
+        let group = ToolCallGroup(
+            anchorMessageID: "assistant-1",
+            toolCalls: [
+                ToolCall(name: "terminal", preview: nil, args: nil, duration: 88, isCompleted: true),
+                ToolCall(name: "read_file", preview: nil, args: nil, duration: 1.24, isCompleted: true)
+            ]
+        )
+
+        XCTAssertEqual(ToolActivityGroupPresentation.status(for: group), "Worked for 1.2s")
+    }
+
+    func testMissingOrInvalidDurationNeverProducesAnEstimatedDuration() {
+        for duration in [Double?.none, .some(.nan), .some(-1)] {
+            let group = ToolCallGroup(
+                anchorMessageID: "assistant-1",
+                toolCalls: [
+                    ToolCall(
+                        name: "terminal",
+                        preview: nil,
+                        args: nil,
+                        duration: duration,
+                        isCompleted: true
+                    )
+                ]
+            )
+
+            XCTAssertEqual(ToolActivityGroupPresentation.status(for: group), "Completed")
+        }
+    }
+}
+
 final class StreamingMarkdownBlockSplitterTests: XCTestCase {
     func testShortTextStaysInActiveMarkdown() {
         let text = "Hello from Hermes."

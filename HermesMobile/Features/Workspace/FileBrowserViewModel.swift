@@ -85,13 +85,15 @@ final class FileBrowserViewModel {
         lastRequestedPath = path
         loadRevision += 1
         let revision = loadRevision
+        defer { if revision == loadRevision { isLoading = false } }
         isLoading = true
         errorMessage = nil
         lastError = nil
 
         do {
-            let response = try await apiClient.directoryList(sessionID: sessionID, path: path)
-            guard revision == loadRevision else { return }
+            let response = try await apiClient.directWorkspaceDirectory(
+                sessionID: sessionID, profile: session.profile ?? "default", path: path)
+            guard revision == loadRevision, !Task.isCancelled else { return }
             currentPath = response.path ?? path
             entries = response.entries ?? []
         } catch {

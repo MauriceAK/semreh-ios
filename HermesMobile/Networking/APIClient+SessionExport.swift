@@ -1,9 +1,6 @@
 import Foundation
 
-/// Formats accepted by `GET /api/session/export?format=…`. The server defaults
-/// to JSON when the param is absent, but the app always sends it explicitly.
-/// HTML is the self-contained human-readable transcript (best for sharing);
-/// JSON is the machine-readable session dump (pairs with a future import).
+/// Stock exports JSON; HTML is a self-contained local presentation of that export.
 enum SessionExportFormat: String, CaseIterable {
     case html
     case json
@@ -19,43 +16,128 @@ struct SessionExportFile: Equatable {
 }
 
 extension APIClient {
-    /// Downloads a session transcript via `GET /api/session/export`
-    /// (`session_id` + `format` query params). The response is a file download
-    /// (`text/html` or `application/json`), not a JSON envelope, so this
-    /// bypasses the decoding `send()` helper like transcribe/TTS do.
-    ///
-    /// The filename comes from the server's `Content-Disposition` header
-    /// (upstream sends `attachment; filename="hermes-<sid>.<ext>"`); if that
-    /// header is missing or unparsable, it falls back to a sanitized
-    /// `<title-or-id>.<ext>`. Errors reuse `sendData`'s mapping: 401 →
-    /// `.unauthorized`, other non-2xx (400 missing param, 404 unknown/foreign-
-    /// profile session) → `.http` carrying the server's error body.
+    /// Bound stock's streaming JSON before decoding/rendering; never silently truncate.
     func exportSession(
         id: String,
         format: SessionExportFormat,
-        fallbackTitle: String? = nil
+        fallbackTitle: String? = nil,
+        profile: String,
+        maximumBytes: Int = 20 * 1_024 * 1_024
     ) async throws -> SessionExportFile {
-        let (data, response) = try await sendDataReturningResponse(
-            endpoint: .exportSession(sessionID: id, format: format),
-            method: "GET",
-            encodedBody: nil,
-            // The 2xx response is a file download (text/html or
-            // application/json), so don't claim we only accept JSON.
-            accept: "*/*"
-        )
-
+        var components = URLComponents()
+        components.path = "/api/sessions/\(id)/export"
+        components.queryItems = [URLQueryItem(name: "profile", value: profile)]
+        guard !id.isEmpty, id != ".", id != "..", !id.contains("/"), !id.contains("\\"),
+              id.rangeOfCharacter(from: .controlCharacters) == nil,
+              !profile.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let relative = components.string, let url = URL(string: relative, relativeTo: baseURL) else {
+            throw SessionExportError.invalidResponse
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        customHeaderProvider().apply(to: &request)
+        let data: Data
+        data = try await boundedSameOriginDirectData(
+            for: request, maximumBytes: maximumBytes
+        ).0
+        try Task.checkCancellation()
+        let rendering = Task.detached {
+            guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  object["id"] as? String == id,
+                  (object["profile"] as? String ?? profile) == profile,
+                  object["messages"] is [[String: Any]] else { throw SessionExportError.invalidResponse }
+            return format == .json ? data : try SessionExportFile.html(from: object)
+        }
+        let output = try await withTaskCancellationHandler {
+            try await rendering.value
+        } onCancel: { rendering.cancel() }
         let filename = SessionExportFile.filename(
-            contentDisposition: response.value(forHTTPHeaderField: "Content-Disposition"),
+            contentDisposition: nil,
             fallbackTitle: fallbackTitle,
             sessionID: id,
             format: format
         )
 
-        return SessionExportFile(data: data, filename: filename)
+        try Task.checkCancellation()
+        return SessionExportFile(data: output, filename: filename)
+    }
+}
+
+enum SessionExportError: LocalizedError {
+    case invalidResponse, tooLarge
+    var errorDescription: String? {
+        switch self {
+        case .invalidResponse: "Hermes returned an invalid session export."
+        case .tooLarge: "The HTML export exceeds the 40 MiB size limit. Export JSON instead."
+        }
     }
 }
 
 extension SessionExportFile {
+    static func write(_ data: Data, to url: URL) async throws {
+        let writer = Task.detached {
+            try Task.checkCancellation()
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try data.write(to: url, options: .atomic)
+            try Task.checkCancellation()
+        }
+        try await withTaskCancellationHandler {
+            try await writer.value
+        } onCancel: { writer.cancel() }
+    }
+
+    static func html(from object: [String: Any], maximumBytes: Int = 40 * 1_024 * 1_024) throws -> Data {
+        var output = Data()
+        func append(_ text: String) throws {
+            let bytes = Data(text.utf8)
+            guard bytes.count <= maximumBytes - output.count else { throw SessionExportError.tooLarge }
+            output.append(bytes)
+        }
+        func escaped(_ text: String) throws {
+            var pending = ""
+            for scalar in text.unicodeScalars {
+                switch scalar {
+                case "&": pending += "&amp;"
+                case "<": pending += "&lt;"
+                case ">": pending += "&gt;"
+                case "\"": pending += "&quot;"
+                case "'": pending += "&#39;"
+                default: pending.unicodeScalars.append(scalar)
+                }
+                if pending.utf8.count >= 4096 {
+                    try Task.checkCancellation()
+                    try append(pending)
+                    pending.removeAll(keepingCapacity: true)
+                }
+            }
+            try append(pending)
+        }
+        func json(_ value: Any) throws -> String {
+            String(decoding: try JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys]), as: UTF8.self)
+        }
+        try append("<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src 'unsafe-inline'\"><title>Session export</title><style>body{font:16px system-ui;max-width:900px;margin:24px auto;padding:0 16px}pre{white-space:pre-wrap;overflow-wrap:anywhere}section{border-top:1px solid #888;padding:12px 0}</style></head><body><h1>")
+        try escaped(object["title"] as? String ?? "Session export")
+        try append("</h1><details><summary>Session metadata</summary><pre>")
+        var metadata = object
+        metadata.removeValue(forKey: "messages")
+        try escaped(json(metadata))
+        try append("</pre></details>")
+        for message in object["messages"] as? [[String: Any]] ?? [] {
+            try Task.checkCancellation()
+            try append("<section><h2>")
+            try escaped(message["role"] as? String ?? "Message")
+            try append("</h2><pre>")
+            if let content = message["content"] as? String { try escaped(content) }
+            else if let content = message["content"] { try escaped(json(["content": content])) }
+            try append("</pre><details><summary>Complete message and tool metadata</summary><pre>")
+            try escaped(json(message))
+            try append("</pre></details></section>")
+        }
+        try append("</body></html>")
+        return output
+    }
     /// Derives the filename to offer in the share sheet.
     ///
     /// Preference order:

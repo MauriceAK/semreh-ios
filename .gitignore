@@ -61,3 +61,6 @@ vendor/bundle/
 
 # Local session-handoff state (read at session start, overwritten at wrap-up; not tracked)
 /CURRENT.md
+
+# Local Python verification bytecode
+scripts/__pycache__/

@@ -102,14 +102,6 @@ final class LocalizationCatalogTests: XCTestCase {
         }
     }
 
-    func testGitBranchPlaceholderUsesSemrehBrand() throws {
-        let sourceURL = resourceURL("HermesMobile/Features/Workspace/GitBranchPickerView.swift")
-        let source = try String(contentsOf: sourceURL, encoding: .utf8)
-
-        XCTAssertTrue(source.contains("semreh/my-feature"))
-        XCTAssertFalse(source.localizedCaseInsensitiveContains("hermex/my-feature"))
-    }
-
     func testAppShortcutPhrasesHaveDedicatedCatalogEntries() throws {
         let url = resourceURL("HermesMobile/Resources/AppShortcuts.xcstrings")
         let data = try Data(contentsOf: url)

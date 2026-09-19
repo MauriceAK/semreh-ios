@@ -7,9 +7,206 @@ import UniformTypeIdentifiers
 @testable import HermesMobile
 
 final class SessionListMutationTests: XCTestCase {
+    @MainActor
+    func testOldProfileSidebarFailureCannotReplaceNewProfileRowsOrErrorState() async throws {
+        let oldLoadStarted = expectation(description: "old profile sidebar load started")
+        let releaseOldLoad = DispatchSemaphore(value: 0)
+        let server = try XCTUnwrap(URL(string: "https://example.test"))
+        let organizer = LocalOrganizerStore(
+            defaults: UserDefaults(suiteName: "SessionListMutationTests.\(UUID().uuidString)")!
+        )
+        _ = try organizer.createGroup(name: "Default project", color: nil, server: server, profile: "default")
+        _ = try organizer.createGroup(name: "Work project", color: nil, server: server, profile: "work")
+        let viewModel = try makeViewModel(organizerStore: organizer) { request in
+            switch request.url?.path {
+            case "/api/profiles":
+                return apiTestJSONResponse(
+                    #"{"profiles":[{"name":"default","is_active":true},{"name":"work"}],"active":"default","single_profile_mode":false}"#,
+                    for: request
+                )
+            case "/api/profiles/sessions":
+                let profile = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?
+                    .queryItems?.first(where: { $0.name == "profile" })?.value
+                if profile == "default" {
+                    oldLoadStarted.fulfill()
+                    _ = releaseOldLoad.wait(timeout: .now() + 2)
+                    let response = try XCTUnwrap(HTTPURLResponse(
+                        url: try XCTUnwrap(request.url), statusCode: 500,
+                        httpVersion: nil, headerFields: ["Content-Type": "application/json"]
+                    ))
+                    return (response, Data(#"{"error":"stale default failure"}"#.utf8))
+                }
+                XCTAssertEqual(profile, "work")
+                return apiTestJSONResponse(
+                    #"{"sessions":[{"id":"work-row","title":"Work only","profile":"work","archived":false}]}"#,
+                    for: request
+                )
+            default:
+                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+        }
+
+        await viewModel.loadActiveProfile()
+        let oldLoad = Task { @MainActor in await viewModel.load() }
+        await fulfillment(of: [oldLoadStarted], timeout: 1)
+        let work = try XCTUnwrap(viewModel.profileOptions.first(where: { $0.name == "work" }))
+        let switched = await viewModel.switchActiveProfile(work)
+        let workLoaded = await viewModel.load()
+        releaseOldLoad.signal()
+        let oldLoaded = await oldLoad.value
+
+        XCTAssertTrue(switched)
+        XCTAssertTrue(workLoaded)
+        XCTAssertFalse(oldLoaded)
+        XCTAssertEqual(viewModel.activeProfileName, "work")
+        XCTAssertEqual(viewModel.sessions.compactMap(\.sessionId), ["work-row"])
+        XCTAssertEqual(viewModel.projects.compactMap(\.name), ["Work project"])
+        XCTAssertNil(viewModel.errorMessage)
+        XCTAssertNil(viewModel.sessionLoadError)
+        XCTAssertNil(viewModel.lastError)
+    }
+
+    @MainActor
+    func testExportCleansOwnedWrittenFileWhenCancelledOrProfileChangesDuringWrite() async throws {
+        for cancel in [false, true] {
+            let written = expectation(description: "owned file written")
+            let gate = SessionExportWriterGate()
+            let viewModel = try makeViewModel {
+                apiTestJSONResponse(#"{"id":"export-row","messages":[]}"#, for: $0)
+            }
+            let task = Task { @MainActor in
+                await viewModel.export(SessionSummary(sessionId: "export-row", title: "Fixture"), format: .json) { data, url in
+                    try await SessionExportFile.write(data, to: url)
+                    await gate.hold(url, written: written)
+                }
+            }
+            await fulfillment(of: [written], timeout: 2)
+            let writtenURL = await gate.url
+            let url = try XCTUnwrap(writtenURL)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+            if cancel { task.cancel() }
+            else {
+                let profile = try JSONDecoder().decode(ProfileSummary.self, from: Data(#"{"name":"other"}"#.utf8))
+                let switched = await viewModel.switchActiveProfile(profile)
+                XCTAssertTrue(switched)
+            }
+            await gate.release()
+            let result = await task.value
+            XCTAssertNil(result)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: url.deletingLastPathComponent().path))
+            XCTAssertNil(viewModel.actionErrorMessage)
+        }
+    }
+
+    @MainActor
+    func testExportUsesRowsExplicitProfileAndPublishesCompleteJSONFile() async throws {
+        let payload = #"{"id":"export-row","messages":[{"role":"tool","content":"fixture output"}],"fixture":true}"#
+        let viewModel = try makeViewModel { request in
+            XCTAssertEqual(request.url?.path, "/api/sessions/export-row/export")
+            XCTAssertEqual(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems,
+                           [URLQueryItem(name: "profile", value: "work")])
+            return apiTestJSONResponse(payload, for: request)
+        }
+        let row = SessionSummary(sessionId: "export-row", title: "Export fixture", profile: "work")
+        let result = await viewModel.export(row, format: .json)
+        let url = try XCTUnwrap(result)
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        XCTAssertEqual(try Data(contentsOf: url), Data(payload.utf8))
+        XCTAssertEqual(url.lastPathComponent, "Export fixture.json")
+        XCTAssertNil(viewModel.actionErrorMessage)
+    }
+
+    @MainActor
+    func testExportDoesNotPublishAfterProfileSwitchOrCancellation() async throws {
+        for cancel in [false, true] {
+            let started = expectation(description: "export started")
+            let release = DispatchSemaphore(value: 0)
+            let viewModel = try makeViewModel { request in
+                started.fulfill()
+                release.wait()
+                return apiTestJSONResponse(#"{"id":"export-row","messages":[]}"#, for: request)
+            }
+            let task = Task { @MainActor in
+                await viewModel.export(SessionSummary(sessionId: "export-row", title: "Fixture"), format: .json)
+            }
+            await fulfillment(of: [started], timeout: 2)
+            if cancel { task.cancel() }
+            else {
+                let profile = try JSONDecoder().decode(ProfileSummary.self, from: Data(#"{"name":"other"}"#.utf8))
+                let switched = await viewModel.switchActiveProfile(profile)
+                XCTAssertTrue(switched)
+            }
+            release.signal()
+            let result = await task.value
+            XCTAssertNil(result)
+            XCTAssertNil(viewModel.actionErrorMessage)
+        }
+    }
+
+    @MainActor
+    func testStockProfileRefreshPreservesExplicitLocalSelectionAndRefreshesMetadata() async throws {
+        var readCount = 0
+        let viewModel = try makeViewModel { request in
+            XCTAssertEqual(request.httpMethod, "GET")
+            switch request.url?.path {
+            case "/api/profiles/active":
+                return apiTestJSONResponse(#"{"current":"default","active":"default"}"#, for: request)
+            case "/api/profiles":
+                readCount += 1
+                return apiTestJSONResponse("""
+                {"profiles":[{"name":"default","is_default":true},
+                             {"name":"work","is_default":false,"model":"fixture-\(readCount)","provider":"custom"}]}
+                """, for: request)
+            default:
+                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+        }
+        await viewModel.loadActiveProfile()
+        let work = try XCTUnwrap(viewModel.profileOptions.first { $0.name == "work" })
+        let switched = await viewModel.switchActiveProfile(work)
+        XCTAssertTrue(switched)
+        await viewModel.loadActiveProfile()
+        XCTAssertEqual(readCount, 2)
+        XCTAssertEqual(viewModel.activeProfileName, "work")
+        XCTAssertEqual(viewModel.activeProfileModel, "fixture-2")
+        XCTAssertEqual(viewModel.activeProfileProvider, "custom")
+        XCTAssertNil(viewModel.activeProfileErrorMessage)
+    }
+
+    @MainActor
+    func testStockProfileMissingSelectionDoesNotSilentlyRetargetLocalConversation() async throws {
+        var reads = 0
+        let viewModel = try makeViewModel { request in
+            XCTAssertEqual(request.httpMethod, "GET")
+            switch request.url?.path {
+            case "/api/profiles/active":
+                return apiTestJSONResponse(#"{"current":"default","active":"default"}"#, for: request)
+            case "/api/profiles":
+                reads += 1
+                return apiTestJSONResponse(reads == 1
+                    ? "{\"profiles\":[{\"name\":\"default\",\"is_default\":true},{\"name\":\"work\"}]}"
+                    : "{\"profiles\":[{\"name\":\"default\",\"is_default\":true}]}", for: request)
+            default:
+                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+        }
+        await viewModel.loadActiveProfile()
+        let work = try XCTUnwrap(viewModel.profileOptions.first { $0.name == "work" })
+        let switched = await viewModel.switchActiveProfile(work)
+        XCTAssertTrue(switched)
+        await viewModel.loadActiveProfile()
+        XCTAssertEqual(viewModel.activeProfileName, "work")
+        XCTAssertEqual(viewModel.profileOptions.count, 1)
+        XCTAssertNil(viewModel.activeProfileModel)
+    }
+
     override func tearDown() {
         MockURLProtocol.requestHandler = nil
-        OverlappingDeleteURLProtocol.reset()
+        ArchivedCountGateURLProtocol.reset()
+        MetadataOverlayURLProtocol.reset()
         super.tearDown()
     }
 
@@ -33,9 +230,60 @@ final class SessionListMutationTests: XCTestCase {
     }
 
     @MainActor
+    func testListRefreshLoadsOneServerPreviewMapAcrossProfiles() async throws {
+        let context = try makeContext()
+        let server = try XCTUnwrap(URL(string: "https://example.test"))
+        let cachedAt = Date(timeIntervalSince1970: 1_790_000_000)
+        for (profile, sessionID, text) in [
+            ("default", "default-row", "Default latest answer"),
+            ("maurice", "maurice-row", "Maurice latest answer")
+        ] {
+            try CacheStore.cacheMessages(
+                [ChatMessage(role: "assistant", content: text, timestamp: 100, messageId: "message-\(profile)")],
+                serverURL: server,
+                sessionID: "direct:7:\(profile):\(sessionID)",
+                previewIdentity: CachedSessionPreviewIdentity(profile: profile, sessionID: sessionID),
+                in: context,
+                cachedAt: cachedAt
+            )
+        }
+
+        let viewModel = try makeViewModel { request in
+            switch request.url?.path {
+            case "/api/profiles/sessions":
+                return apiTestJSONResponse(
+                    #"{"sessions":[{"session_id":"default-row","profile":"default","archived":false},{"session_id":"maurice-row","profile":"maurice","archived":false}]}"#,
+                    for: request
+                )
+            case "/api/sessions":
+                return apiTestJSONResponse(#"{"sessions":[],"total":0,"limit":0,"offset":0}"#, for: request)
+            default:
+                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+        }
+
+        let loaded = await viewModel.load(modelContext: context)
+        XCTAssertTrue(loaded)
+        XCTAssertEqual(
+            viewModel.cachedSessionPreviews[CachedSessionPreviewIdentity(profile: "default", sessionID: "default-row")]?.text,
+            "Default latest answer"
+        )
+        XCTAssertEqual(
+            viewModel.cachedSessionPreviews[CachedSessionPreviewIdentity(profile: "maurice", sessionID: "maurice-row")]?.text,
+            "Maurice latest answer"
+        )
+    }
+
+    @MainActor
     func testLoadFallsBackToCachedSessionsForNetworkTimeout() async throws {
         let context = try makeContext()
         let serverURL = try XCTUnwrap(URL(string: "https://example.test"))
+        let organizer = LocalOrganizerStore(defaults: UserDefaults(suiteName: "SessionListMutationTests.cacheGroups.\(UUID().uuidString)")!)
+        let group = try organizer.createGroup(name: "One", color: nil, server: serverURL, profile: "default")
+        let groupID = try XCTUnwrap(group.projectId)
+        try organizer.assignSession("cached-project-one", toGroup: groupID, server: serverURL, profile: "default")
+        try organizer.assignSession("cached-subagent", toGroup: groupID, server: serverURL, profile: "default")
         let otherServerURL = try XCTUnwrap(URL(string: "https://other.example.test"))
         try CacheStore.cacheSessions(
             [
@@ -44,21 +292,21 @@ final class SessionListMutationTests: XCTestCase {
                     title: "Cached project one",
                     archived: false,
                     projectId: "project-1",
-                    profile: "work"
+                    profile: "default"
                 ),
                 SessionSummary(
                     sessionId: "cached-project-two",
                     title: "Cached project two",
                     archived: false,
                     projectId: "project-2",
-                    profile: "work"
+                    profile: "default"
                 ),
                 SessionSummary(
                     sessionId: "cached-subagent",
                     title: "Cached delegated work",
                     archived: false,
                     projectId: "project-1",
-                    profile: "work",
+                    profile: "default",
                     sourceTag: "subagent",
                     readOnly: true
                 )
@@ -73,8 +321,8 @@ final class SessionListMutationTests: XCTestCase {
             serverURL: otherServerURL,
             in: context
         )
-        let viewModel = try makeViewModel { request in
-            XCTAssertEqual(request.url?.path, "/api/sessions")
+        let viewModel = try makeViewModel(organizerStore: organizer) { request in
+            XCTAssertEqual(request.url?.path, "/api/profiles/sessions")
             throw URLError(.timedOut)
         }
 
@@ -87,7 +335,7 @@ final class SessionListMutationTests: XCTestCase {
         XCTAssertEqual(
             viewModel.visibleSessions(
                 searchText: "",
-                selectedProjectID: "project-1",
+                selectedProjectID: groupID,
                 automatedVisibility: AutomatedSessionVisibility(showsCron: true, showsCli: true)
             ).compactMap(\.sessionId),
             ["cached-project-one"]
@@ -95,7 +343,7 @@ final class SessionListMutationTests: XCTestCase {
         XCTAssertEqual(
             Set(viewModel.visibleSessions(
                 searchText: "",
-                selectedProjectID: "project-1",
+                selectedProjectID: groupID,
                 automatedVisibility: .showAll
             ).compactMap(\.sessionId)),
             Set(["cached-project-one", "cached-subagent"])
@@ -109,7 +357,7 @@ final class SessionListMutationTests: XCTestCase {
     func testLoadSurfacesNetworkTimeoutWhenCacheIsEmpty() async throws {
         let context = try makeContext()
         let viewModel = try makeViewModel { request in
-            XCTAssertEqual(request.url?.path, "/api/sessions")
+            XCTAssertEqual(request.url?.path, "/api/profiles/sessions")
             throw URLError(.timedOut)
         }
 
@@ -119,7 +367,7 @@ final class SessionListMutationTests: XCTestCase {
         XCTAssertFalse(viewModel.isViewingCachedData)
         XCTAssertEqual(
             viewModel.errorMessage,
-            "The server did not respond in time. Check that the Mac is awake, hermes-webui is running, and the tunnel is connected."
+            "The server did not respond in time. Check that the Mac is awake, Hermes is running, and the tunnel is connected."
         )
         XCTAssertNotNil(viewModel.lastError)
     }
@@ -129,7 +377,7 @@ final class SessionListMutationTests: XCTestCase {
         let context = try makeContext()
         let viewModel = try makeViewModel { request in
             switch request.url?.path {
-            case "/api/sessions":
+            case "/api/profiles/sessions":
                 throw URLError(.timedOut)
             case "/api/sessions/search":
                 let response = HTTPURLResponse(
@@ -150,7 +398,7 @@ final class SessionListMutationTests: XCTestCase {
         XCTAssertTrue(CacheFallbackPolicy.shouldUseCache(for: sessionLoadError))
         XCTAssertEqual(
             viewModel.errorMessage,
-            "The server did not respond in time. Check that the Mac is awake, hermes-webui is running, and the tunnel is connected."
+            "The server did not respond in time. Check that the Mac is awake, Hermes is running, and the tunnel is connected."
         )
 
         await viewModel.searchSessions(query: "later", debounceNanoseconds: 0)
@@ -159,7 +407,7 @@ final class SessionListMutationTests: XCTestCase {
         XCTAssertTrue(CacheFallbackPolicy.shouldUseCache(for: try XCTUnwrap(viewModel.sessionLoadError)))
         XCTAssertEqual(
             viewModel.errorMessage,
-            "The server did not respond in time. Check that the Mac is awake, hermes-webui is running, and the tunnel is connected."
+            "The server did not respond in time. Check that the Mac is awake, Hermes is running, and the tunnel is connected."
         )
     }
 
@@ -170,7 +418,7 @@ final class SessionListMutationTests: XCTestCase {
         configuration.protocolClasses = [OutOfOrderSessionURLProtocol.self]
         let server = try XCTUnwrap(URL(string: "https://example.test"))
         let client = APIClient(baseURL: server, session: URLSession(configuration: configuration))
-        let viewModel = SessionListViewModel(server: server, client: client)
+            let viewModel = SessionListViewModel(server: server, client: client)
 
         let firstLoad = Task { await viewModel.load() }
         try await Task.sleep(nanoseconds: 20_000_000)
@@ -196,11 +444,11 @@ final class SessionListMutationTests: XCTestCase {
         let requestStarted = expectation(description: "session request started")
         let allowResponse = DispatchSemaphore(value: 0)
         let viewModel = try makeViewModel { request in
-            XCTAssertEqual(request.url?.path, "/api/sessions")
+            XCTAssertEqual(request.url?.path, "/api/profiles/sessions")
             requestStarted.fulfill()
             allowResponse.wait()
             return apiTestJSONResponse(
-                #"{"sessions":[{"session_id":"fresh-session","title":"Fresh response","archived":false}]}"#,
+                #"{"sessions":[{"id":"fresh-session","title":"Fresh response","archived":false}]}"#,
                 for: request
             )
         }
@@ -232,12 +480,12 @@ final class SessionListMutationTests: XCTestCase {
             in: context
         )
         let viewModel = try makeViewModel { request in
-            XCTAssertEqual(request.url?.path, "/api/sessions")
+            XCTAssertEqual(request.url?.path, "/api/profiles/sessions")
             return apiTestJSONResponse("""
             {
               "sessions": [
                 {
-                  "session_id": "fresh-session",
+                  "id": "fresh-session",
                   "title": "Fresh planning",
                   "archived": false,
                   "project_id": "project-1",
@@ -251,7 +499,7 @@ final class SessionListMutationTests: XCTestCase {
         await viewModel.load(modelContext: context)
 
         XCTAssertEqual(viewModel.sessions.compactMap(\.sessionId), ["fresh-session"])
-        XCTAssertEqual(viewModel.sessions.first?.projectId, "project-1")
+        XCTAssertNil(viewModel.sessions.first?.projectId)
         XCTAssertEqual(viewModel.sessions.first?.profile, "work")
         XCTAssertFalse(viewModel.isViewingCachedData)
         XCTAssertNil(viewModel.errorMessage)
@@ -266,57 +514,57 @@ final class SessionListMutationTests: XCTestCase {
         let context = try makeContext()
         let serverURL = try XCTUnwrap(URL(string: "https://example.test"))
         let viewModel = try makeViewModel { request in
-            XCTAssertEqual(request.url?.path, "/api/sessions")
+            XCTAssertEqual(request.url?.path, "/api/profiles/sessions")
             return apiTestJSONResponse("""
             {
               "sessions": [
                 {
-                  "session_id": "empty-placeholder",
+                  "id": "empty-placeholder",
                   "title": "Untitled Session",
                   "message_count": 0,
                   "archived": false
                 },
                 {
-                  "session_id": "empty-placeholder-missing-count",
+                  "id": "empty-placeholder-missing-count",
                   "title": "Untitled Session",
                   "archived": false
                 },
                 {
-                  "session_id": "contentful-untitled",
+                  "id": "contentful-untitled",
                   "title": "Untitled Session",
                   "message_count": 2,
                   "archived": false
                 },
                 {
-                  "session_id": "recent-untitled",
+                  "id": "recent-untitled",
                   "title": "Untitled",
                   "message_count": 0,
                   "last_message_at": 1770000000,
                   "archived": false
                 },
                 {
-                  "session_id": "streaming-untitled",
+                  "id": "streaming-untitled",
                   "title": "Untitled",
                   "message_count": 0,
                   "active_stream_id": "stream-123",
                   "archived": false
                 },
                 {
-                  "session_id": "pending-untitled",
+                  "id": "pending-untitled",
                   "title": "Untitled",
                   "message_count": 0,
                   "has_pending_user_message": true,
                   "archived": false
                 },
                 {
-                  "session_id": "worktree-untitled",
+                  "id": "worktree-untitled",
                   "title": "Untitled",
                   "message_count": 0,
                   "worktree_path": "/tmp/hermes-worktree",
                   "archived": false
                 },
                 {
-                  "session_id": "named-empty",
+                  "id": "named-empty",
                   "title": "Planning",
                   "message_count": 0,
                   "archived": false
@@ -330,9 +578,6 @@ final class SessionListMutationTests: XCTestCase {
 
         let expectedIDs = [
             "contentful-untitled",
-            "streaming-untitled",
-            "pending-untitled",
-            "worktree-untitled",
             "named-empty"
         ]
         let loadedIDs = viewModel.sessions.compactMap(\.sessionId)
@@ -356,7 +601,7 @@ final class SessionListMutationTests: XCTestCase {
             in: context
         )
         let viewModel = try makeViewModel { request in
-            XCTAssertEqual(request.url?.path, "/api/sessions")
+            XCTAssertEqual(request.url?.path, "/api/profiles/sessions")
             let response = HTTPURLResponse(
                 url: try XCTUnwrap(request.url),
                 statusCode: 500,
@@ -370,7 +615,7 @@ final class SessionListMutationTests: XCTestCase {
 
         XCTAssertTrue(viewModel.sessions.isEmpty)
         XCTAssertFalse(viewModel.isViewingCachedData)
-        XCTAssertEqual(viewModel.errorMessage, "The Hermes server hit an internal error. Check the server logs, then try again.")
+        XCTAssertEqual(viewModel.errorMessage, "Hermes returned HTTP 500.")
         XCTAssertNotNil(viewModel.lastError)
     }
 
@@ -384,7 +629,7 @@ final class SessionListMutationTests: XCTestCase {
             in: context
         )
         let viewModel = try makeViewModel { request in
-            XCTAssertEqual(request.url?.path, "/api/sessions")
+            XCTAssertEqual(request.url?.path, "/api/profiles/sessions")
             let response = HTTPURLResponse(
                 url: try XCTUnwrap(request.url),
                 statusCode: 500,
@@ -401,62 +646,25 @@ final class SessionListMutationTests: XCTestCase {
 
         XCTAssertTrue(viewModel.sessions.isEmpty)
         XCTAssertFalse(viewModel.isViewingCachedData)
-        XCTAssertEqual(viewModel.errorMessage, "The Hermes server hit an internal error. Check the server logs, then try again.")
+        XCTAssertEqual(viewModel.errorMessage, "Hermes returned HTTP 500.")
     }
 
     @MainActor
     func testCreateSessionReturnsEmptyPlaceholderWithoutInsertingIntoSessionList() async throws {
         let context = try makeContext()
         let serverURL = try XCTUnwrap(URL(string: "https://example.test"))
-        var requestedPaths: [String] = []
         let viewModel = try makeViewModel { request in
-            let path = request.url?.path
-            requestedPaths.append(path ?? "nil")
-
-            switch path {
-            case "/api/workspaces":
-                return apiTestJSONResponse("""
-                {
-                  "workspaces": [
-                    {"path": "/tmp/workspace", "name": "Workspace"}
-                  ],
-                  "last": "/tmp/workspace"
-                }
-                """, for: request)
-            case "/api/session/new":
-                let body = try XCTUnwrap(apiTestJSONBody(from: request))
-                XCTAssertEqual(body["workspace"] as? String, "/tmp/workspace")
-                XCTAssertNil(body["model"] as? String)
-                XCTAssertNil(body["model_provider"] as? String)
-                XCTAssertNil(body["profile"] as? String)
-
-                return apiTestJSONResponse("""
-                {
-                  "session": {
-                    "session_id": "new-123",
-                    "title": "Untitled Session",
-                    "workspace": "/tmp/workspace",
-                    "updated_at": 1770000000,
-                    "last_message_at": 1770000000,
-                    "archived": false
-                  }
-                }
-                """, for: request)
-            case "/api/sessions":
-                XCTFail("New-chat creation should not block on a full session-list reload.")
-                throw URLError(.badURL)
-            default:
-                XCTFail("Unexpected request path: \(path ?? "nil")")
-                throw URLError(.badURL)
-            }
+            XCTFail("New Chat must not issue a request: \(request.url?.path ?? "nil")")
+            throw URLError(.badURL)
         }
 
         let created = await viewModel.createSession(modelContext: context)
 
-        XCTAssertEqual(created?.sessionId, "new-123")
+        XCTAssertNil(created?.sessionId)
+        XCTAssertEqual(created?.title, "New Chat")
+        XCTAssertEqual(created?.profile, "default")
         XCTAssertTrue(viewModel.sessions.isEmpty)
         XCTAssertTrue(try CacheStore.cachedSessions(serverURL: serverURL, in: context).isEmpty)
-        XCTAssertEqual(requestedPaths, ["/api/workspaces", "/api/session/new"])
         XCTAssertFalse(viewModel.isCreatingSession)
         XCTAssertNil(viewModel.actionErrorMessage)
         XCTAssertNil(viewModel.lastError)
@@ -467,42 +675,17 @@ final class SessionListMutationTests: XCTestCase {
         let context = try makeContext()
         let serverURL = try XCTUnwrap(URL(string: "https://example.test"))
         let viewModel = try makeViewModel { request in
-            switch request.url?.path {
-            case "/api/workspaces":
-                return apiTestJSONResponse("""
-                {
-                  "workspaces": [
-                    {"path": "/tmp/workspace", "name": "Workspace"}
-                  ],
-                  "last": "/tmp/workspace"
-                }
-                """, for: request)
-            case "/api/session/new":
-                return apiTestJSONResponse("""
-                {
-                  "session": {
-                    "session_id": "worktree-new",
-                    "title": "Untitled Session",
-                    "workspace": "/tmp/workspace",
-                    "worktree_path": "/tmp/hermes-worktree",
-                    "archived": false
-                  }
-                }
-                """, for: request)
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
-            }
+            XCTFail("New Chat must not issue a request: \(request.url?.path ?? "nil")")
+            throw URLError(.badURL)
         }
 
         let created = await viewModel.createSession(modelContext: context)
 
-        XCTAssertEqual(created?.sessionId, "worktree-new")
-        XCTAssertEqual(viewModel.sessions.compactMap(\.sessionId), ["worktree-new"])
-        XCTAssertEqual(
-            try CacheStore.cachedSessions(serverURL: serverURL, in: context).compactMap(\.sessionId),
-            ["worktree-new"]
-        )
+        XCTAssertNil(created?.sessionId)
+        XCTAssertEqual(created?.title, "New Chat")
+        XCTAssertEqual(created?.profile, "default")
+        XCTAssertTrue(viewModel.sessions.isEmpty)
+        XCTAssertTrue(try CacheStore.cachedSessions(serverURL: serverURL, in: context).isEmpty)
     }
 
     @MainActor
@@ -643,19 +826,6 @@ final class SessionListMutationTests: XCTestCase {
                   ]
                 }
                 """, for: request)
-            case "/api/profile/switch":
-                let body = try XCTUnwrap(apiTestJSONBody(from: request))
-                XCTAssertEqual(body["name"] as? String, "work")
-                return apiTestJSONResponse("""
-                {
-                  "active": "work",
-                  "default_model": "claude-sonnet-4-5",
-                  "profiles": [
-                    {"name": "default", "model": "gpt-5", "provider": "openai"},
-                    {"name": "work", "is_active": true, "model": "claude-sonnet-4-5", "provider": "anthropic"}
-                  ]
-                }
-                """, for: request)
             default:
                 XCTFail("Unexpected request path: \(path)")
                 throw URLError(.badURL)
@@ -667,7 +837,7 @@ final class SessionListMutationTests: XCTestCase {
         let didSwitch = await viewModel.switchActiveProfile(workProfile)
 
         XCTAssertTrue(didSwitch)
-        XCTAssertEqual(requestedPaths, ["/api/profiles", "/api/profile/switch"])
+        XCTAssertEqual(requestedPaths, ["/api/profiles"])
         XCTAssertEqual(viewModel.activeProfileName, "work")
         XCTAssertEqual(viewModel.activeProfileDisplayName, "work")
         XCTAssertEqual(viewModel.activeProfileModel, "claude-sonnet-4-5")
@@ -679,7 +849,7 @@ final class SessionListMutationTests: XCTestCase {
     }
 
     @MainActor
-    func testSwitchActiveProfileFailureKeepsExistingProfileState() async throws {
+    func testSwitchActiveProfileUpdatesLocalProfileWithoutServerMutation() async throws {
         let viewModel = try makeViewModel { request in
             switch request.url?.path {
             case "/api/profiles":
@@ -692,14 +862,6 @@ final class SessionListMutationTests: XCTestCase {
                   ]
                 }
                 """, for: request)
-            case "/api/profile/switch":
-                let response = HTTPURLResponse(
-                    url: try XCTUnwrap(request.url),
-                    statusCode: 500,
-                    httpVersion: nil,
-                    headerFields: ["Content-Type": "application/json"]
-                )
-                return (try XCTUnwrap(response), Data(#"{"error":"switch failed"}"#.utf8))
             default:
                 XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
                 throw URLError(.badURL)
@@ -710,21 +872,21 @@ final class SessionListMutationTests: XCTestCase {
         let workProfile = try XCTUnwrap(viewModel.profileOptions.first { $0.normalizedName == "work" })
         let didSwitch = await viewModel.switchActiveProfile(workProfile)
 
-        XCTAssertFalse(didSwitch)
-        XCTAssertEqual(viewModel.activeProfileName, "default")
-        XCTAssertEqual(viewModel.activeProfileDisplayName, "Default")
-        XCTAssertEqual(viewModel.activeProfileModel, "gpt-5")
+        XCTAssertTrue(didSwitch)
+        XCTAssertEqual(viewModel.activeProfileName, "work")
+        XCTAssertEqual(viewModel.activeProfileDisplayName, "work")
+        XCTAssertEqual(viewModel.activeProfileModel, "claude-sonnet-4-5")
         XCTAssertFalse(viewModel.isSwitchingActiveProfile)
         XCTAssertNil(viewModel.switchingActiveProfileName)
-        XCTAssertNotNil(viewModel.activeProfileErrorMessage)
-        XCTAssertNotNil(viewModel.lastError)
+        XCTAssertNil(viewModel.activeProfileErrorMessage)
+        XCTAssertNil(viewModel.lastError)
     }
 
     @MainActor
     func testLoadActiveProfileFailureDoesNotOverwriteSessionListState() async throws {
         let viewModel = try makeViewModel { request in
             switch request.url?.path {
-            case "/api/sessions":
+            case "/api/profiles/sessions":
                 return apiTestJSONResponse(self.sessionListJSON(forLoadCount: 1), for: request)
             case "/api/profiles":
                 let response = HTTPURLResponse(
@@ -753,139 +915,101 @@ final class SessionListMutationTests: XCTestCase {
     }
 
     @MainActor
-    func testInactiveActiveStreamStatusReloadsSessionsToClearStreamingIndicator() async throws {
-        var loadCount = 0
-        var requestPaths: [String] = []
+    func testActiveMonitorFallbackReloadsThroughScopedDirectListWithoutStreamStatus() async throws {
+        var paths: [String] = []
         let viewModel = try makeViewModel { request in
-            let path = request.url?.path ?? "nil"
-            requestPaths.append(path)
-
-            switch path {
-            case "/api/sessions":
-                loadCount += 1
-                let activeStreamIDField = loadCount == 1 ? #","active_stream_id":"stream-123""# : ""
-                return apiTestJSONResponse("""
-                {
-                  "sessions": [
-                    {
-                      "session_id": "session-streaming",
-                      "title": "Streaming work",
-                      "archived": false\(activeStreamIDField)
-                    }
-                  ]
-                }
-                """, for: request)
-            case "/api/chat/stream/status":
-                let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
-                let streamID = components?.queryItems?.first { $0.name == "stream_id" }?.value
-                XCTAssertEqual(streamID, "stream-123")
-                return apiTestJSONResponse(
-                    #"{"active":false,"stream_id":"stream-123"}"#,
-                    for: request
-                )
-            default:
-                XCTFail("Unexpected request path: \(path)")
-                throw URLError(.badURL)
-            }
+            paths.append(request.url?.path ?? "")
+            XCTAssertEqual(request.httpMethod, "GET")
+            XCTAssertEqual(request.url?.path, "/api/profiles/sessions")
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems
+            XCTAssertEqual(query?.first { $0.name == "profile" }?.value, "default")
+            return apiTestJSONResponse(#"{"sessions":[{"id":"session-streaming","title":"Updated direct row","archived":false}]}"#, for: request)
         }
-
-        await viewModel.load()
-        XCTAssertEqual(viewModel.sessions.first?.activeStreamId, "stream-123")
-
-        let refreshResult = await viewModel.refreshActiveSessionStatesIfNeeded(streamIDs: ["stream-123"])
-
-        XCTAssertEqual(refreshResult, .reloaded)
-        XCTAssertNil(viewModel.sessions.first?.activeStreamId)
-        XCTAssertEqual(requestPaths, ["/api/sessions", "/api/chat/stream/status", "/api/sessions"])
+        let result = await viewModel.refreshActiveSessionStatesIfNeeded()
+        XCTAssertEqual(result, .reloaded)
+        XCTAssertEqual(paths, ["/api/profiles/sessions"])
+        XCTAssertEqual(viewModel.sessions.first?.title, "Updated direct row")
     }
 
     @MainActor
-    func testActiveStreamStatusDoesNotReloadSessionsWhileStillActive() async throws {
-        var loadCount = 0
-        var statusCount = 0
-        let viewModel = try makeViewModel { request in
-            switch request.url?.path {
-            case "/api/sessions":
-                loadCount += 1
-                return apiTestJSONResponse("""
-                {
-                  "sessions": [
-                    {
-                      "session_id": "session-streaming",
-                      "title": "Streaming work",
-                      "archived": false,
-                      "active_stream_id": "stream-123"
-                    }
-                  ]
-                }
-                """, for: request)
-            case "/api/chat/stream/status":
-                statusCount += 1
-                return apiTestJSONResponse(
-                    #"{"active":true,"stream_id":"stream-123"}"#,
-                    for: request
-                )
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
-            }
+    func testActiveMonitorDefersWhileSidebarEditingOrDestructiveActionPending() async throws {
+        let viewModel = try makeViewModel { _ in
+            XCTFail("Blocked monitor must not issue a list or stream-status request")
+            throw URLError(.badURL)
         }
-
-        await viewModel.load()
-        let refreshResult = await viewModel.refreshActiveSessionStatesIfNeeded(streamIDs: ["stream-123"])
-
-        XCTAssertEqual(refreshResult, .unchanged)
-        XCTAssertEqual(loadCount, 1)
-        XCTAssertEqual(statusCount, 1)
-        XCTAssertEqual(viewModel.sessions.first?.activeStreamId, "stream-123")
+        viewModel.setSidebarEditing(true)
+        let editing = await viewModel.refreshActiveSessionStatesIfNeeded()
+        XCTAssertEqual(editing, .unchanged)
+        viewModel.setSidebarEditing(false)
+        viewModel.setSidebarDestructiveActionPending(true)
+        let pending = await viewModel.refreshActiveSessionStatesIfNeeded()
+        XCTAssertEqual(pending, .unchanged)
+        XCTAssertNil(viewModel.lastError)
     }
 
     @MainActor
-    func testActiveStreamStatusUnauthorizedIsPreservedForAuthHandling() async throws {
+    func testActiveMonitorDirectUnauthorizedIsPreservedForAuthHandling() async throws {
         let viewModel = try makeViewModel { request in
-            switch request.url?.path {
-            case "/api/chat/stream/status":
-                let response = HTTPURLResponse(
-                    url: try XCTUnwrap(request.url),
-                    statusCode: 401,
-                    httpVersion: nil,
-                    headerFields: ["Content-Type": "application/json"]
-                )
-                return (try XCTUnwrap(response), Data(#"{"error":"unauthorized"}"#.utf8))
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
-            }
+            XCTAssertEqual(request.url?.path, "/api/profiles/sessions")
+            let response = try XCTUnwrap(HTTPURLResponse(url: request.url!, statusCode: 401,
+                httpVersion: nil, headerFields: ["Content-Type": "application/json"]))
+            // Stock dashboard_auth/middleware.py uses this structured code;
+            // a generic unauthorized response must not imply cookie expiry.
+            return (response, Data(#"{"error":"unauthenticated"}"#.utf8))
         }
-
-        let refreshResult = await viewModel.refreshActiveSessionStatesIfNeeded(streamIDs: ["stream-123"])
-
-        XCTAssertEqual(refreshResult, .failed)
-        guard let lastError = viewModel.lastError,
-              case APIError.unauthorized = lastError
-        else {
-            XCTFail("Expected unauthorized lastError, got \(String(describing: viewModel.lastError))")
-            return
-        }
+        let result = await viewModel.refreshActiveSessionStatesIfNeeded()
+        XCTAssertEqual(result, .failed)
+        XCTAssertEqual(viewModel.lastError as? DirectHermesAuthError, .sessionExpired)
     }
 
     @MainActor
-    func testDeleteRemovesRowBeforeServerAcknowledgementAndKeepsItGoneAfterSuccess() async throws {
+    func testCancelledActiveMonitorMakesNoRequest() async throws {
+        let viewModel = try makeViewModel { _ in
+            XCTFail("Cancelled monitor must not issue a request")
+            throw URLError(.badURL)
+        }
+        let task = Task { @MainActor in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await viewModel.refreshActiveSessionStatesIfNeeded()
+        }
+        let result = await task.value
+        XCTAssertEqual(result, .unchanged)
+        XCTAssertNil(viewModel.lastError)
+    }
+
+    @MainActor
+    func testActiveMonitorGenericUnauthorizedDoesNotClaimSessionExpiry() async throws {
+        let viewModel = try makeViewModel { request in
+            XCTAssertEqual(request.url?.path, "/api/profiles/sessions")
+            let response = try XCTUnwrap(HTTPURLResponse(url: request.url!, statusCode: 401,
+                httpVersion: nil, headerFields: ["Content-Type": "application/json"]))
+            return (response, Data(#"{"error":"unauthorized"}"#.utf8))
+        }
+        let result = await viewModel.refreshActiveSessionStatesIfNeeded()
+        XCTAssertEqual(result, .failed)
+        XCTAssertEqual(viewModel.lastError as? DirectHermesRequestError,
+            .http(statusCode: 401, reason: .unauthorized))
+        XCTAssertNil(viewModel.lastError as? DirectHermesAuthError)
+    }
+
+    @MainActor
+    func testDeleteUsesExactStoredIDAndProfileOnSharedRuntimeAndKeepsOptimisticRowGone() async throws {
         let mutationStarted = expectation(description: "delete request started")
-        let releaseMutation = DispatchSemaphore(value: 0)
+        let transport = SessionDeleteTransport(result: .success, onRequest: { mutationStarted.fulfill() })
+        let runtime = try HermesServerRuntime(origin: URL(string: "https://example.test")!) { _ in transport }
         var sessionLoadCount = 0
-        let viewModel = try makeViewModel { request in
+        let viewModel = try makeViewModel(gatewayRuntimeProvider: { _ in runtime }) { request in
             switch request.url?.path {
-            case "/api/sessions":
+            case "/api/profiles/sessions":
                 sessionLoadCount += 1
                 let body = sessionLoadCount == 1
-                    ? #"{"sessions":[{"session_id":"delete-me","title":"Delete me","archived":false},{"session_id":"keep-me","title":"Keep me","archived":false}]}"#
-                    : #"{"sessions":[{"session_id":"keep-me","title":"Keep me","archived":false}]}"#
+                    ? #"{"sessions":[{"id":"delete-me","title":"Delete me","profile":"default","archived":false},{"id":"keep-me","title":"Keep me","profile":"default","archived":false}]}"#
+                    : #"{"sessions":[{"id":"keep-me","title":"Keep me","archived":false}]}"#
                 return apiTestJSONResponse(body, for: request)
-            case "/api/session/delete":
-                mutationStarted.fulfill()
-                releaseMutation.wait()
-                return apiTestJSONResponse(#"{"ok":true}"#, for: request)
+            case "/api/sessions/delete-me":
+                XCTAssertEqual(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems,
+                               [URLQueryItem(name: "profile", value: "default")])
+                return apiTestJSONResponse(#"{"id":"delete-me","profile":"default"}"#, for: request)
             default:
                 XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
                 throw URLError(.badURL)
@@ -900,26 +1024,30 @@ final class SessionListMutationTests: XCTestCase {
         await fulfillment(of: [mutationStarted], timeout: 2)
 
         XCTAssertEqual(viewModel.sessions.compactMap(\.sessionId), ["keep-me"])
-        XCTAssertTrue(viewModel.isMutating(session))
-
-        releaseMutation.signal()
         let didDelete = await deleteTask.value
         XCTAssertTrue(didDelete)
         XCTAssertFalse(viewModel.isMutating(session))
         XCTAssertEqual(viewModel.sessions.compactMap(\.sessionId), ["keep-me"])
+        XCTAssertEqual(transport.deleteFields(), [
+            "profile": .string("default"),
+            "session_id": .string("delete-me")
+        ])
+        XCTAssertEqual(transport.methods(), ["session.delete"])
     }
 
     @MainActor
-    func testDeleteFailureRestoresTheExactRowAndOrder() async throws {
+    func testDeleteActiveAttachmentRefusalRestoresExactRowAndIsActionable() async throws {
+        let transport = SessionDeleteTransport(result: .activeRefusal)
+        let runtime = try HermesServerRuntime(origin: URL(string: "https://example.test")!) { _ in transport }
         var sessionLoadCount = 0
-        let viewModel = try makeViewModel { request in
+        let viewModel = try makeViewModel(gatewayRuntimeProvider: { _ in runtime }) { request in
             switch request.url?.path {
-            case "/api/sessions":
+            case "/api/profiles/sessions":
                 sessionLoadCount += 1
                 XCTAssertEqual(sessionLoadCount, 1)
-                return apiTestJSONResponse(#"{"sessions":[{"session_id":"first","title":"First","archived":false},{"session_id":"delete-me","title":"Delete me","archived":false},{"session_id":"last","title":"Last","archived":false}]}"#, for: request)
-            case "/api/session/delete":
-                return apiTestJSONResponse(#"{"ok":false,"error":"delete refused"}"#, for: request)
+                return apiTestJSONResponse(#"{"sessions":[{"id":"first","title":"First","profile":"default","archived":false},{"id":"delete-me","title":"Delete me","profile":"default","archived":false},{"id":"last","title":"Last","profile":"default","archived":false}]}"#, for: request)
+            case "/api/sessions/delete-me":
+                return apiTestJSONResponse(#"{"id":"delete-me","profile":"default"}"#, for: request)
             default:
                 XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
                 throw URLError(.badURL)
@@ -933,75 +1061,174 @@ final class SessionListMutationTests: XCTestCase {
 
         XCTAssertFalse(didDelete)
         XCTAssertEqual(viewModel.sessions, before)
-        XCTAssertEqual(viewModel.actionErrorMessage, "delete refused")
+        XCTAssertEqual(viewModel.actionErrorMessage, "This session is open in Hermes, so it can't be deleted. Close it there, then try again.")
         XCTAssertFalse(viewModel.isMutating(session))
     }
 
     @MainActor
-    func testDeleteFailureAfterOverlappingCanonicalRefreshRestoresLatestCanonicalRow() async throws {
-        let mutationStarted = expectation(description: "delete request started")
-        let overlappingLoadStarted = expectation(description: "overlapping canonical load started")
-        OverlappingDeleteURLProtocol.configure(
-            onMutationStarted: { mutationStarted.fulfill() },
-            onOverlappingLoadStarted: { overlappingLoadStarted.fulfill() }
-        )
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [OverlappingDeleteURLProtocol.self]
-        let server = try XCTUnwrap(URL(string: "https://example.test"))
-        let client = APIClient(baseURL: server, session: URLSession(configuration: configuration))
-        let viewModel = SessionListViewModel(server: server, client: client)
-
+    func testDeletePreflightIdentityMismatchNeverDispatches() async throws {
+        let transport = SessionDeleteTransport(result: .success)
+        let runtime = try HermesServerRuntime(origin: URL(string: "https://example.test")!) { _ in transport }
+        let viewModel = try makeViewModel(gatewayRuntimeProvider: { _ in runtime }) { request in
+            if request.url?.path == "/api/profiles/sessions" {
+                return apiTestJSONResponse(#"{"sessions":[{"id":"delete-me","title":"Delete me","profile":"default","archived":false}]}"#, for: request)
+            }
+            return apiTestJSONResponse(#"{"id":"different-session","profile":"default"}"#, for: request)
+        }
         await viewModel.load()
-        let session = try XCTUnwrap(viewModel.sessions.first(where: { $0.sessionId == "delete-me" }))
-        let deleteTask = Task { @MainActor in await viewModel.delete(session) }
-        await fulfillment(of: [mutationStarted], timeout: 2)
-
-        let overlappingLoadTask = Task { @MainActor in await viewModel.load() }
-        await fulfillment(of: [overlappingLoadStarted], timeout: 2)
-        XCTAssertNil(viewModel.sessions.first(where: { $0.sessionId == "delete-me" }))
-        let overlappingLoadSucceeded = await overlappingLoadTask.value
-        XCTAssertTrue(overlappingLoadSucceeded)
-
-        let deleteSucceeded = await deleteTask.value
-        XCTAssertFalse(deleteSucceeded)
-        XCTAssertEqual(
-            viewModel.sessions.first(where: { $0.sessionId == "delete-me" })?.title,
-            "Canonical latest"
-        )
+        let session = try XCTUnwrap(viewModel.sessions.first)
+        let deleted = await viewModel.delete(session)
+        XCTAssertFalse(deleted)
+        XCTAssertEqual(viewModel.sessions, [session])
+        XCTAssertTrue(transport.methods().isEmpty)
+        XCTAssertEqual(viewModel.actionErrorMessage, "Hermes returned a different session than the requested link.")
     }
 
     @MainActor
-    func testPinArchiveMoveAndDeleteCallServerMutationThenReloadSessions() async throws {
+    func testDeleteMismatchedAcknowledgementIsUnknownAndNeverRepeated() async throws {
+        let transport = SessionDeleteTransport(result: .mismatchedAcknowledgement)
+        let runtime = try HermesServerRuntime(origin: URL(string: "https://example.test")!) { _ in transport }
+        let viewModel = try makeViewModel(gatewayRuntimeProvider: { _ in runtime }) { request in
+            if request.url?.path == "/api/profiles/sessions" {
+                return apiTestJSONResponse(#"{"sessions":[{"id":"delete-me","title":"Delete me","profile":"default","archived":false}]}"#, for: request)
+            }
+            return apiTestJSONResponse(#"{"id":"delete-me","profile":"default"}"#, for: request)
+        }
+        await viewModel.load()
+        let session = try XCTUnwrap(viewModel.sessions.first)
+        let firstDelete = await viewModel.delete(session)
+        XCTAssertFalse(firstDelete)
+        XCTAssertEqual(viewModel.sessions, [session])
+        let repeatedDelete = await viewModel.delete(session)
+        XCTAssertFalse(repeatedDelete)
+        XCTAssertEqual(transport.methods(), ["session.delete"])
+        XCTAssertTrue(viewModel.actionErrorMessage?.contains("may have deleted") == true)
+    }
+
+    @MainActor
+    func testDeleteTransportFailureIsAmbiguousAndNeverAutomaticallyRetried() async throws {
+        let transport = SessionDeleteTransport(result: .transportFailure)
+        let runtime = try HermesServerRuntime(origin: URL(string: "https://example.test")!) { _ in transport }
+        let viewModel = try makeViewModel(gatewayRuntimeProvider: { _ in runtime }) { request in
+            if request.url?.path == "/api/profiles/sessions" {
+                return apiTestJSONResponse(#"{"sessions":[{"id":"delete-me","title":"Delete me","profile":"default","archived":false}]}"#, for: request)
+            }
+            return apiTestJSONResponse(#"{"id":"delete-me","profile":"default"}"#, for: request)
+        }
+        await viewModel.load()
+        let session = try XCTUnwrap(viewModel.sessions.first)
+        let firstDelete = await viewModel.delete(session)
+        let repeatedDelete = await viewModel.delete(session)
+        XCTAssertFalse(firstDelete)
+        XCTAssertFalse(repeatedDelete)
+        XCTAssertEqual(transport.methods(), ["session.delete"])
+    }
+
+    @MainActor
+    func testDeleteProfileSwitchDuringPreflightRestoresRowWithoutDispatch() async throws {
+        let preflightStarted = expectation(description: "delete preflight started")
+        let releasePreflight = DispatchSemaphore(value: 0)
+        let transport = SessionDeleteTransport(result: .success)
+        let runtime = try HermesServerRuntime(origin: URL(string: "https://example.test")!) { _ in transport }
+        let viewModel = try makeViewModel(gatewayRuntimeProvider: { _ in runtime }) { request in
+            switch request.url?.path {
+            case "/api/profiles/sessions":
+                return apiTestJSONResponse(#"{"sessions":[{"id":"delete-me","title":"Delete me","profile":"default","archived":false}]}"#, for: request)
+            case "/api/sessions/delete-me":
+                preflightStarted.fulfill()
+                releasePreflight.wait()
+                return apiTestJSONResponse(#"{"id":"delete-me","profile":"default"}"#, for: request)
+            default:
+                throw URLError(.badURL)
+            }
+        }
+        await viewModel.load()
+        let session = try XCTUnwrap(viewModel.sessions.first)
+        let task = Task { @MainActor in await viewModel.delete(session) }
+        await fulfillment(of: [preflightStarted], timeout: 2)
+        let work = try JSONDecoder().decode(ProfileSummary.self, from: Data(#"{"name":"work"}"#.utf8))
+        let switched = await viewModel.switchActiveProfile(work)
+        XCTAssertTrue(switched)
+        releasePreflight.signal()
+        let deleted = await task.value
+        XCTAssertFalse(deleted)
+        XCTAssertEqual(viewModel.sessions, [session])
+        XCTAssertTrue(transport.methods().isEmpty)
+        XCTAssertNil(viewModel.actionErrorMessage)
+    }
+
+    @MainActor
+    func testConfirmedDeleteAfterProfileSwitchDoesNotTombstoneReplacementProfile() async throws {
+        let requestStarted = expectation(description: "delete dispatched")
+        let releaseResponse = DispatchSemaphore(value: 0)
+        let transport = SessionDeleteTransport(
+            result: .success,
+            onRequest: { requestStarted.fulfill() },
+            responseGate: releaseResponse
+        )
+        let runtime = try HermesServerRuntime(origin: URL(string: "https://example.test")!) { _ in transport }
+        let viewModel = try makeViewModel(gatewayRuntimeProvider: { _ in runtime }) { request in
+            if request.url?.path == "/api/profiles/sessions" {
+                let profile = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?
+                    .queryItems?.first(where: { $0.name == "profile" })?.value ?? "default"
+                return apiTestJSONResponse("{\"sessions\":[{\"id\":\"delete-me\",\"title\":\"Delete me\",\"profile\":\"\(profile)\",\"archived\":false}]}", for: request)
+            }
+            return apiTestJSONResponse(#"{"id":"delete-me","profile":"default"}"#, for: request)
+        }
+        await viewModel.load()
+        let session = try XCTUnwrap(viewModel.sessions.first)
+        let task = Task { @MainActor in await viewModel.delete(session) }
+        await fulfillment(of: [requestStarted], timeout: 2)
+        let work = try JSONDecoder().decode(ProfileSummary.self, from: Data(#"{"name":"work"}"#.utf8))
+        _ = await viewModel.switchActiveProfile(work)
+        releaseResponse.signal()
+        let deleted = await task.value
+        XCTAssertFalse(deleted)
+        let loaded = await viewModel.load()
+        XCTAssertTrue(loaded)
+        XCTAssertEqual(viewModel.sessions.first?.profile, "work")
+        XCTAssertEqual(viewModel.sessions.first?.sessionId, "delete-me")
+    }
+
+    @MainActor
+    func testPinArchiveUseDirectReadbackWhileLocalMoveAvoidsLegacyRoute() async throws {
         var loadCount = 0
         var mutationPaths: [String] = []
-        let viewModel = try makeViewModel { request in
+        var detailCount = 0
+        let deleteTransport = SessionDeleteTransport(result: .success, expectedID: "session-abc")
+        let runtime = try HermesServerRuntime(origin: URL(string: "https://example.test")!) { _ in deleteTransport }
+        let organizer = LocalOrganizerStore(defaults: UserDefaults(suiteName: "SessionListMutationTests.pinArchive.\(UUID().uuidString)")!)
+        let project = try organizer.createGroup(name: "Local", color: nil, server: URL(string: "https://example.test")!, profile: "default")
+        let viewModel = try makeViewModel(gatewayRuntimeProvider: { _ in runtime }, organizerStore: organizer) { request in
             switch request.url?.path {
-            case "/api/sessions":
+            case "/api/profiles/sessions":
                 loadCount += 1
                 return apiTestJSONResponse(self.sessionListJSON(forLoadCount: loadCount), for: request)
-            case "/api/session/pin":
-                mutationPaths.append("/api/session/pin")
-                let body = try XCTUnwrap(apiTestJSONBody(from: request))
-                XCTAssertEqual(body["session_id"] as? String, "session-abc")
-                XCTAssertEqual(body["pinned"] as? Bool, true)
-                return apiTestJSONResponse(#"{"ok": true}"#, for: request)
-            case "/api/session/archive":
-                mutationPaths.append("/api/session/archive")
-                let body = try XCTUnwrap(apiTestJSONBody(from: request))
-                XCTAssertEqual(body["session_id"] as? String, "session-abc")
-                XCTAssertEqual(body["archived"] as? Bool, true)
-                return apiTestJSONResponse(#"{"ok": true}"#, for: request)
-            case "/api/session/move":
-                mutationPaths.append("/api/session/move")
-                let body = try XCTUnwrap(apiTestJSONBody(from: request))
-                XCTAssertEqual(body["session_id"] as? String, "session-abc")
-                XCTAssertEqual(body["project_id"] as? String, "project-1")
-                return apiTestJSONResponse(#"{"ok": true}"#, for: request)
-            case "/api/session/delete":
-                mutationPaths.append("/api/session/delete")
-                let body = try XCTUnwrap(apiTestJSONBody(from: request))
-                XCTAssertEqual(body["session_id"] as? String, "session-abc")
-                return apiTestJSONResponse(#"{"ok": true}"#, for: request)
+            case "/api/sessions/session-abc":
+                if request.httpMethod == "PATCH" {
+                    let body = try XCTUnwrap(apiTestJSONBody(from: request))
+                    XCTAssertEqual(body["profile"] as? String, "default")
+                    mutationPaths.append("PATCH /api/sessions/session-abc")
+                    if body["pinned"] != nil {
+                        XCTAssertEqual(body["pinned"] as? Bool, true)
+                    } else {
+                        XCTAssertEqual(body["archived"] as? Bool, true)
+                    }
+                    return apiTestJSONResponse(
+                        body["pinned"] != nil
+                            ? #"{"ok":true,"pinned":true}"#
+                            : #"{"ok":true,"archived":true}"#,
+                        for: request
+                    )
+                }
+                detailCount += 1
+                mutationPaths.append("GET /api/sessions/session-abc")
+                return apiTestJSONResponse(
+                    detailCount == 1
+                        ? #"{"id":"session-abc","title":"Planning","profile":"default","pinned":1,"archived":0}"#
+                        : #"{"id":"session-abc","title":"Planning","profile":"default","pinned":1,"archived":1}"#,
+                    for: request
+                )
             default:
                 XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
                 throw URLError(.badURL)
@@ -1019,46 +1246,55 @@ final class SessionListMutationTests: XCTestCase {
         XCTAssertTrue(didArchive)
         XCTAssertTrue(viewModel.sessions.isEmpty)
 
-        await viewModel.move(session, to: "project-1")
-        XCTAssertEqual(viewModel.sessions.first?.projectId, "project-1")
+        await viewModel.move(session, to: project.projectId)
+        XCTAssertEqual(try organizer.groupID(forSession: "session-abc", server: URL(string: "https://example.test")!, profile: "default"), project.projectId)
 
         let didDelete = await viewModel.delete(session)
         XCTAssertTrue(didDelete)
         XCTAssertTrue(viewModel.sessions.isEmpty)
 
-        XCTAssertEqual(loadCount, 5)
+        XCTAssertEqual(loadCount, 2, "Local assignment does not reload the server session list")
         XCTAssertEqual(
             mutationPaths,
-            ["/api/session/pin", "/api/session/archive", "/api/session/move", "/api/session/delete"]
+            [
+                "PATCH /api/sessions/session-abc",
+                "GET /api/sessions/session-abc",
+                "PATCH /api/sessions/session-abc",
+                "GET /api/sessions/session-abc",
+                "GET /api/sessions/session-abc"
+            ]
         )
+        XCTAssertEqual(deleteTransport.methods(), ["session.delete"])
         XCTAssertNil(viewModel.actionErrorMessage)
         XCTAssertNil(viewModel.lastError)
     }
 
+    @MainActor
     func testSessionMutatorDuplicateBranchesThenLoadsReturnedSession() async throws {
         var requestedPaths: [String] = []
+        let transport = SessionDuplicateTransport()
+        let runtime = try HermesServerRuntime(origin: URL(string: "https://example.test")!) { sink in
+            transport.installSink(sink)
+            return transport
+        }
         let client = try makeClient { request in
             let path = request.url?.path ?? "nil"
             requestedPaths.append(path)
 
             switch path {
-            case "/api/session/branch":
-                let body = try XCTUnwrap(apiTestJSONBody(from: request))
-                XCTAssertEqual(body["session_id"] as? String, "session-abc")
-                XCTAssertEqual(body["title"] as? String, "Planning (copy)")
-                return apiTestJSONResponse(#"{"session_id":"copy-123"}"#, for: request)
-            case "/api/session":
-                XCTAssertEqual(request.url?.query?.contains("session_id=copy-123"), true)
+            case "/api/sessions/session-abc/messages":
                 return apiTestJSONResponse(
-                    """
-                    {
-                      "session": {
-                        "session_id": "copy-123",
-                        "title": "Planning (copy)",
-                        "archived": false
-                      }
-                    }
-                    """,
+                    #"{"session_id":"session-abc","messages":[],"pagination":{"returned":0}}"#,
+                    for: request
+                )
+            case "/api/sessions/copy-123/messages":
+                return apiTestJSONResponse(
+                    #"{"session_id":"copy-123","messages":[],"pagination":{"returned":0}}"#,
+                    for: request
+                )
+            case "/api/sessions/copy-123":
+                return apiTestJSONResponse(
+                    #"{"id":"copy-123","profile":"work","title":"Planning (copy)","archived":0}"#,
                     for: request
                 )
             default:
@@ -1069,13 +1305,24 @@ final class SessionListMutationTests: XCTestCase {
 
         let result = try await SessionMutator(client: client).duplicate(
             sessionID: "session-abc",
-            title: "Planning (copy)"
+            title: "Planning (copy)",
+            profile: "work",
+            runtime: runtime
         )
 
-        XCTAssertEqual(requestedPaths, ["/api/session/branch", "/api/session"])
+        XCTAssertEqual(requestedPaths, [
+            "/api/sessions/session-abc/messages",
+            "/api/sessions/copy-123/messages",
+            "/api/sessions/copy-123"
+        ])
+        XCTAssertEqual(transport.methods(), ["session.resume", "session.branch"])
+        XCTAssertEqual(transport.branchFields()["name"], .string("Planning (copy)"))
+        XCTAssertEqual(transport.branchFields()["profile"], .string("work"))
         XCTAssertEqual(result.session?.sessionId, "copy-123")
         XCTAssertEqual(result.session?.title, "Planning (copy)")
+        XCTAssertEqual(result.createdSessionID, "copy-123")
         XCTAssertNil(result.errorMessage)
+        await runtime.stop()
     }
 
     @MainActor
@@ -1084,21 +1331,28 @@ final class SessionListMutationTests: XCTestCase {
         let requestCounts = LockedSessionMutationRequestCounts()
         let viewModel = try makeViewModel { request in
             switch request.url?.path {
-            case "/api/sessions":
+            case "/api/profiles/sessions":
                 let currentLoadCount = requestCounts.incrementLoadCount()
                 return apiTestJSONResponse(self.sessionListJSON(forLoadCount: currentLoadCount), for: request)
-            case "/api/session/pin":
-                let body = try XCTUnwrap(apiTestJSONBody(from: request))
-                XCTAssertEqual(body["session_id"] as? String, "session-abc")
+            case "/api/sessions/session-abc":
+                if request.httpMethod == "PATCH" {
+                    let body = try XCTUnwrap(apiTestJSONBody(from: request))
+                    XCTAssertEqual(body["profile"] as? String, "default")
+                    XCTAssertEqual(body["pinned"] as? Bool, true)
 
-                let currentPinRequestCount = requestCounts.incrementPinRequestCount()
+                    let currentPinRequestCount = requestCounts.incrementPinRequestCount()
 
-                if currentPinRequestCount == 1 {
-                    firstPinRequestStarted.fulfill()
-                    Thread.sleep(forTimeInterval: 0.2)
+                    if currentPinRequestCount == 1 {
+                        firstPinRequestStarted.fulfill()
+                        Thread.sleep(forTimeInterval: 0.2)
+                    }
+
+                    return apiTestJSONResponse(#"{"ok": true, "pinned": true}"#, for: request)
                 }
-
-                return apiTestJSONResponse(#"{"ok": true}"#, for: request)
+                return apiTestJSONResponse(
+                    #"{"id":"session-abc","title":"Planning","profile":"default","pinned":1,"archived":0}"#,
+                    for: request
+                )
             default:
                 XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
                 throw URLError(.badURL)
@@ -1134,8 +1388,134 @@ final class SessionListMutationTests: XCTestCase {
         XCTAssertTrue(didPin)
         XCTAssertFalse(didSkipDuplicatePin)
         XCTAssertEqual(finalCounts.pinRequestCount, 1)
-        XCTAssertEqual(finalCounts.loadCount, 2)
+        XCTAssertEqual(finalCounts.loadCount, 1)
         XCTAssertFalse(viewModel.isMutating(session))
+        XCTAssertNil(viewModel.actionErrorMessage)
+        XCTAssertNil(viewModel.lastError)
+    }
+
+    @MainActor
+    func testDirectMetadataMutationIsDiscardedAfterProfileSwitch() async throws {
+        let patchStarted = expectation(description: "direct metadata patch started")
+        let releasePatch = DispatchSemaphore(value: 0)
+        let client = try makeClient { request in
+            switch request.url?.path {
+            case "/api/profiles":
+                return apiTestJSONResponse(
+                    #"{"profiles":[{"name":"default","is_default":true},{"name":"work"}],"active":"default","single_profile_mode":false}"#,
+                    for: request
+                )
+            case "/api/profiles/sessions":
+                return apiTestJSONResponse(
+                    #"{"sessions":[{"id":"session-abc","title":"Planning","profile":"default","pinned":false,"archived":false}]}"#,
+                    for: request
+                )
+            case "/api/sessions":
+                let query = Dictionary(uniqueKeysWithValues: (URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+                XCTAssertEqual(query["profile"], "default")
+                XCTAssertEqual(query["limit"], "0")
+                XCTAssertEqual(query["offset"], "0")
+                XCTAssertEqual(query["archived"], "only")
+                return apiTestJSONResponse(#"{"sessions":[],"total":0,"limit":0,"offset":0}"#, for: request)
+            case "/api/sessions/session-abc":
+                if request.httpMethod == "PATCH" {
+                    patchStarted.fulfill()
+                    _ = releasePatch.wait(timeout: .now() + 2)
+                    return apiTestJSONResponse(#"{"ok":true,"pinned":true}"#, for: request)
+                }
+                return apiTestJSONResponse(
+                    #"{"id":"session-abc","title":"Planning","profile":"default","pinned":1,"archived":0}"#,
+                    for: request
+                )
+            default:
+                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+        }
+        let server = try XCTUnwrap(URL(string: "https://example.test"))
+        let viewModel = SessionListViewModel(server: server, client: client)
+        await viewModel.loadActiveProfile()
+        let loaded = await viewModel.load()
+        XCTAssertTrue(loaded)
+        let session = try XCTUnwrap(viewModel.sessions.first)
+
+        let mutation = Task { @MainActor in
+            await viewModel.setPinned(true, for: session)
+        }
+        await fulfillment(of: [patchStarted], timeout: 1)
+        let work = try XCTUnwrap(viewModel.profileOptions.first(where: { $0.name == "work" }))
+        let switched = await viewModel.switchActiveProfile(work)
+        XCTAssertTrue(switched)
+        let `default` = try XCTUnwrap(viewModel.profileOptions.first(where: { $0.name == "default" }))
+        let switchedBack = await viewModel.switchActiveProfile(`default`)
+        XCTAssertTrue(switchedBack)
+        releasePatch.signal()
+
+        let mutationSucceeded = await mutation.value
+        XCTAssertFalse(mutationSucceeded)
+        XCTAssertEqual(viewModel.sessions.first?.pinned, false)
+        XCTAssertNil(viewModel.actionErrorMessage)
+        XCTAssertNil(viewModel.lastError)
+    }
+
+    @MainActor
+    func testDirectMetadataFailureAfterProfileSwitchDoesNotPublishStaleError() async throws {
+        let patchStarted = expectation(description: "direct metadata patch started")
+        let releasePatch = DispatchSemaphore(value: 0)
+        let client = try makeClient { request in
+            switch request.url?.path {
+            case "/api/profiles":
+                return apiTestJSONResponse(
+                    #"{"profiles":[{"name":"default","is_default":true},{"name":"work"}],"active":"default","single_profile_mode":false}"#,
+                    for: request
+                )
+            case "/api/profiles/sessions":
+                return apiTestJSONResponse(
+                    #"{"sessions":[{"id":"session-abc","title":"Planning","profile":"default","pinned":false,"archived":false}]}"#,
+                    for: request
+                )
+            case "/api/sessions":
+                let query = Dictionary(uniqueKeysWithValues: (URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+                XCTAssertEqual(query["profile"], "default")
+                XCTAssertEqual(query["limit"], "0")
+                XCTAssertEqual(query["offset"], "0")
+                XCTAssertEqual(query["archived"], "only")
+                return apiTestJSONResponse(#"{"sessions":[],"total":0,"limit":0,"offset":0}"#, for: request)
+            case "/api/sessions/session-abc":
+                patchStarted.fulfill()
+                _ = releasePatch.wait(timeout: .now() + 2)
+                let response = try XCTUnwrap(
+                    HTTPURLResponse(
+                        url: try XCTUnwrap(request.url),
+                        statusCode: 500,
+                        httpVersion: nil,
+                        headerFields: ["Content-Type": "application/json"]
+                    )
+                )
+                return (response, Data(#"{"error":"old profile write failed"}"#.utf8))
+            default:
+                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+        }
+        let server = try XCTUnwrap(URL(string: "https://example.test"))
+        let viewModel = SessionListViewModel(server: server, client: client)
+        await viewModel.loadActiveProfile()
+        let loaded = await viewModel.load()
+        XCTAssertTrue(loaded)
+        let session = try XCTUnwrap(viewModel.sessions.first)
+
+        let mutation = Task { @MainActor in
+            await viewModel.setPinned(true, for: session)
+        }
+        await fulfillment(of: [patchStarted], timeout: 1)
+        let work = try XCTUnwrap(viewModel.profileOptions.first(where: { $0.name == "work" }))
+        let switched = await viewModel.switchActiveProfile(work)
+        XCTAssertTrue(switched)
+        releasePatch.signal()
+
+        let mutationSucceeded = await mutation.value
+        XCTAssertFalse(mutationSucceeded)
         XCTAssertNil(viewModel.actionErrorMessage)
         XCTAssertNil(viewModel.lastError)
     }
@@ -1150,21 +1530,19 @@ final class SessionListMutationTests: XCTestCase {
             requestedPaths.append(path)
 
             switch path {
-            case "/api/sessions":
+            case "/api/profiles/sessions":
                 return apiTestJSONResponse(self.sessionListJSON(forLoadCount: 1), for: request)
-            case "/api/session/rename":
-                let body = try XCTUnwrap(apiTestJSONBody(from: request))
-                XCTAssertEqual(body["session_id"] as? String, "session-abc")
-                XCTAssertEqual(body["title"] as? String, "Launch Notes")
-                return apiTestJSONResponse("""
-                {
-                  "ok": true,
-                  "session": {
-                    "session_id": "session-abc",
-                    "title": "Launch Notes"
-                  }
+            case "/api/sessions/session-abc":
+                if request.httpMethod == "GET" {
+                    return apiTestJSONResponse(
+                        #"{"id":"session-abc","title":"Launch Notes","profile":"default","archived":0}"#,
+                        for: request
+                    )
                 }
-                """, for: request)
+                let body = try XCTUnwrap(apiTestJSONBody(from: request))
+                XCTAssertEqual(body["profile"] as? String, "default")
+                XCTAssertEqual(body["title"] as? String, "Launch Notes")
+                return apiTestJSONResponse(#"{"ok":true,"title":"Launch Notes"}"#, for: request)
             default:
                 XCTFail("Unexpected request path: \(path)")
                 throw URLError(.badURL)
@@ -1177,7 +1555,10 @@ final class SessionListMutationTests: XCTestCase {
         let cachedSessions = try CacheStore.cachedSessions(serverURL: server, in: context)
 
         XCTAssertTrue(didRename)
-        XCTAssertEqual(requestedPaths, ["/api/sessions", "/api/session/rename"])
+        XCTAssertEqual(
+            requestedPaths,
+            ["/api/profiles/sessions", "/api/sessions/session-abc", "/api/sessions/session-abc"]
+        )
         XCTAssertEqual(viewModel.sessions.first?.title, "Launch Notes")
         XCTAssertEqual(viewModel.sessions.first?.workspace, session.workspace)
         XCTAssertEqual(cachedSessions.first?.title, "Launch Notes")
@@ -1215,9 +1596,9 @@ final class SessionListMutationTests: XCTestCase {
             requestedPaths.append(path)
 
             switch path {
-            case "/api/sessions":
+            case "/api/profiles/sessions":
                 return apiTestJSONResponse(self.sessionListJSON(forLoadCount: 1), for: request)
-            case "/api/session/rename":
+            case "/api/sessions/session-abc":
                 let response = HTTPURLResponse(
                     url: try XCTUnwrap(request.url),
                     statusCode: 500,
@@ -1237,7 +1618,7 @@ final class SessionListMutationTests: XCTestCase {
         let didRename = await viewModel.rename(session, to: "Launch Notes")
 
         XCTAssertFalse(didRename)
-        XCTAssertEqual(requestedPaths, ["/api/sessions", "/api/session/rename"])
+        XCTAssertEqual(requestedPaths, ["/api/profiles/sessions", "/api/sessions/session-abc"])
         XCTAssertEqual(viewModel.sessions, beforeSessions)
         XCTAssertEqual(viewModel.sessions.first?.title, "Planning")
         XCTAssertNotNil(viewModel.actionErrorMessage)
@@ -1270,653 +1651,172 @@ final class SessionListMutationTests: XCTestCase {
 
         XCTAssertFalse(didRename)
         XCTAssertTrue(viewModel.isViewingCachedData)
-        XCTAssertEqual(requestedPaths, ["/api/sessions"])
+        XCTAssertEqual(requestedPaths, ["/api/profiles/sessions"])
         XCTAssertEqual(viewModel.sessions.first?.title, "Cached Planning")
         XCTAssertEqual(viewModel.actionErrorMessage, "Reconnect to the server to rename a session.")
         XCTAssertFalse(viewModel.isRenamingSession)
     }
 
-    func testCreateProjectThenMovesSessionAndUpdatesLocalLists() async throws {
-        var loadCount = 0
-        var requestedPaths: [String] = []
-        let viewModel = try await makeViewModel { request in
-            let path = request.url?.path
-            requestedPaths.append(path ?? "")
-
-            switch path {
-            case "/api/sessions":
-                loadCount += 1
-                if loadCount == 1 {
-                    return apiTestJSONResponse(self.sessionListJSON(forLoadCount: 1), for: request)
-                }
-
-                return apiTestJSONResponse("""
-                {
-                  "sessions": [
-                    {
-                      "session_id": "session-abc",
-                      "title": "Planning",
-                      "project_id": "project-new",
-                      "archived": false
-                    }
-                  ]
-                }
-                """, for: request)
-            case "/api/projects/create":
-                let body = try XCTUnwrap(apiTestJSONBody(from: request))
-                XCTAssertEqual(body["name"] as? String, "Client Work")
-                XCTAssertEqual(body["color"] as? String, "#7cb9ff")
-                return apiTestJSONResponse("""
-                {
-                  "ok": true,
-                  "project": {
-                    "project_id": "project-new",
-                    "name": "Client Work",
-                    "color": "#7cb9ff",
-                    "created_at": 1770000000
-                  }
-                }
-                """, for: request)
-            case "/api/session/move":
-                let body = try XCTUnwrap(apiTestJSONBody(from: request))
-                XCTAssertEqual(body["session_id"] as? String, "session-abc")
-                XCTAssertEqual(body["project_id"] as? String, "project-new")
-                return apiTestJSONResponse(#"{"ok": true}"#, for: request)
-            default:
-                XCTFail("Unexpected request path: \(path ?? "nil")")
-                throw URLError(.badURL)
-            }
+    @MainActor
+    func testOfflineFallbackDropsLegacyLivenessAndEmptyPlaceholderRetention() async throws {
+        let context = try makeContext()
+        let server = try XCTUnwrap(URL(string: "https://example.test"))
+        try CacheStore.cacheSessions(
+            [
+                SessionSummary(
+                    sessionId: "cached-conversation",
+                    title: "Cached conversation",
+                    messageCount: 2,
+                    activeStreamId: "removed-webui-stream",
+                    isStreaming: true,
+                    hasPendingUserMessage: true,
+                    pendingStartedAt: 1_770_000_001
+                ),
+                SessionSummary(
+                    sessionId: "empty-placeholder",
+                    title: "Untitled",
+                    messageCount: 0,
+                    isStreaming: true,
+                    hasPendingUserMessage: true,
+                    pendingStartedAt: 1_770_000_002
+                )
+            ],
+            serverURL: server,
+            in: context,
+            cachedAt: Date()
+        )
+        let viewModel = try makeViewModel { request in
+            XCTAssertEqual(request.url?.path, "/api/profiles/sessions")
+            throw URLError(.notConnectedToInternet)
         }
 
-        await viewModel.load()
-        let session = try await MainActor.run {
-            try XCTUnwrap(viewModel.sessions.first)
-        }
-        let didMove = await viewModel.createProject(
-            named: "  Client Work  ",
-            color: "#7cb9ff",
-            moving: session
-        )
+        await viewModel.load(modelContext: context)
 
-        XCTAssertTrue(didMove)
-        let projectIDs = await MainActor.run { viewModel.projects.compactMap(\.projectId) }
-        let projectName = await MainActor.run { viewModel.projects.first?.name }
-        let movedProjectID = await MainActor.run { viewModel.sessions.first?.projectId }
-        let isCreatingProject = await MainActor.run { viewModel.isCreatingProject }
-        let isMovingSession = await MainActor.run { viewModel.isMovingSession }
-        let actionErrorMessage = await MainActor.run { viewModel.actionErrorMessage }
-        let lastError = await MainActor.run { viewModel.lastError }
-
-        XCTAssertEqual(projectIDs, ["project-new"])
-        XCTAssertEqual(projectName, "Client Work")
-        XCTAssertEqual(movedProjectID, "project-new")
-        XCTAssertEqual(
-            requestedPaths,
-            ["/api/sessions", "/api/projects/create", "/api/session/move", "/api/sessions"]
-        )
-        XCTAssertFalse(isCreatingProject)
-        XCTAssertFalse(isMovingSession)
-        XCTAssertNil(actionErrorMessage)
-        XCTAssertNil(lastError)
+        XCTAssertTrue(viewModel.isViewingCachedData)
+        XCTAssertEqual(viewModel.sessions.compactMap(\.sessionId), ["cached-conversation"])
+        let restored = try XCTUnwrap(viewModel.sessions.first)
+        XCTAssertFalse(SessionRowView.isActiveStreaming(restored))
+        XCTAssertEqual(MessagesSessionRowFormatter.rowState(for: restored), .idle)
+        XCTAssertNotEqual(MessagesSessionRowFormatter.previewText(for: restored), "Streaming response…")
+        XCTAssertNotEqual(MessagesSessionRowFormatter.previewText(for: restored), "Waiting for your message…")
     }
 
-    func testCreateProjectBlocksBlankNameBeforeNetworkRequest() async throws {
-        let viewModel = try await makeViewModel { request in
-            XCTFail("Blank project names should not make network requests: \(request.url?.path ?? "nil")")
-            throw URLError(.badURL)
-        }
-        let session = try makeSessionSummary(
+    @MainActor
+    func testDirectPinAndArchiveAreBlockedForCachedOfflineData() async throws {
+        let context = try makeContext()
+        let server = try XCTUnwrap(URL(string: "https://example.test"))
+        let cachedSession = try makeSessionSummary(
             id: "session-abc",
-            title: "Planning",
+            title: "Cached Planning",
             pinned: false,
             archived: false
         )
-
-        let didMove = await viewModel.createProject(
-            named: "  ",
-            color: "#7cb9ff",
-            moving: session
-        )
-
-        XCTAssertFalse(didMove)
-        let actionErrorMessage = await MainActor.run { viewModel.actionErrorMessage }
-        let lastError = await MainActor.run { viewModel.lastError }
-        let isCreatingProject = await MainActor.run { viewModel.isCreatingProject }
-        let isMovingSession = await MainActor.run { viewModel.isMovingSession }
-
-        XCTAssertEqual(actionErrorMessage, "Enter a project name.")
-        XCTAssertNil(lastError)
-        XCTAssertFalse(isCreatingProject)
-        XCTAssertFalse(isMovingSession)
-    }
-
-    func testCreateProjectMoveFailureKeepsSessionUnmovedAndShowsError() async throws {
-        var loadCount = 0
-        let viewModel = try await makeViewModel { request in
-            switch request.url?.path {
-            case "/api/sessions":
-                loadCount += 1
-                XCTAssertEqual(loadCount, 1)
-                return apiTestJSONResponse(self.sessionListJSON(forLoadCount: 1), for: request)
-            case "/api/projects/create":
-                return apiTestJSONResponse("""
-                {
-                  "ok": true,
-                  "project": {
-                    "project_id": "project-new",
-                    "name": "Client Work",
-                    "color": "#7cb9ff"
-                  }
-                }
-                """, for: request)
-            case "/api/session/move":
-                let response = HTTPURLResponse(
-                    url: try XCTUnwrap(request.url),
-                    statusCode: 500,
-                    httpVersion: nil,
-                    headerFields: ["Content-Type": "application/json"]
-                )
-                return (try XCTUnwrap(response), Data(#"{"error":"move failed"}"#.utf8))
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
-            }
+        try CacheStore.cacheSession(cachedSession, serverURL: server, in: context)
+        var requestCount = 0
+        let viewModel = try makeViewModel { request in
+            requestCount += 1
+            XCTAssertEqual(request.url?.path, "/api/profiles/sessions")
+            throw URLError(.notConnectedToInternet)
         }
 
-        await viewModel.load()
-        let before = await MainActor.run { viewModel.sessions }
-        let session = try XCTUnwrap(before.first)
-        let didMove = await viewModel.createProject(
-            named: "Client Work",
-            color: "#7cb9ff",
-            moving: session
-        )
+        await viewModel.load(modelContext: context)
+        let session = try XCTUnwrap(viewModel.sessions.first)
+        let didPin = await viewModel.setPinned(true, for: session)
+        let didArchive = await viewModel.archive(session)
 
-        XCTAssertFalse(didMove)
-        XCTAssertEqual(loadCount, 1)
-        let sessions = await MainActor.run { viewModel.sessions }
-        let projectIDs = await MainActor.run { viewModel.projects.compactMap(\.projectId) }
-        let actionErrorMessage = await MainActor.run { viewModel.actionErrorMessage }
-        let lastError = await MainActor.run { viewModel.lastError }
-        let isCreatingProject = await MainActor.run { viewModel.isCreatingProject }
-        let isMovingSession = await MainActor.run { viewModel.isMovingSession }
-
-        XCTAssertEqual(sessions, before)
-        XCTAssertEqual(projectIDs, ["project-new"])
-        XCTAssertNotNil(actionErrorMessage)
-        XCTAssertNotNil(lastError)
-        XCTAssertFalse(isCreatingProject)
-        XCTAssertFalse(isMovingSession)
+        XCTAssertFalse(didPin)
+        XCTAssertFalse(didArchive)
+        XCTAssertEqual(requestCount, 1)
+        XCTAssertTrue(viewModel.isViewingCachedData)
+        XCTAssertTrue(viewModel.actionErrorMessage?.contains("Reconnect") == true)
     }
 
-    func testCreateEmptyProjectCreatesProjectWithoutMovingAnySession() async throws {
-        var loadCount = 0
-        var requestedPaths: [String] = []
-        let viewModel = try await makeViewModel { request in
-            let path = request.url?.path
-            requestedPaths.append(path ?? "")
-
-            switch path {
-            case "/api/sessions":
-                loadCount += 1
-                return apiTestJSONResponse(self.sessionListJSON(forLoadCount: 1), for: request)
-            case "/api/projects/create":
-                let body = try XCTUnwrap(apiTestJSONBody(from: request))
-                XCTAssertEqual(body["name"] as? String, "Client Work")
-                XCTAssertEqual(body["color"] as? String, "#7cb9ff")
-                return apiTestJSONResponse("""
-                {
-                  "ok": true,
-                  "project": {
-                    "project_id": "project-new",
-                    "name": "Client Work",
-                    "color": "#7cb9ff",
-                    "created_at": 1770000000
-                  }
-                }
-                """, for: request)
-            case "/api/session/move":
-                XCTFail("createEmptyProject must not move any session")
-                throw URLError(.badURL)
-            default:
-                XCTFail("Unexpected request path: \(path ?? "nil")")
+    @MainActor
+    func testLocalProjectCRUDMoveAndUnassignNeverUsesProjectRoutes() async throws {
+        let suite = "SessionListMutationTests.localCRUD.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = LocalOrganizerStore(defaults: defaults)
+        var paths: [String] = []
+        let viewModel = try makeViewModel(organizerStore: store) { request in
+            paths.append(request.url?.path ?? "")
+            guard request.url?.path == "/api/profiles/sessions" else {
+                XCTFail("Local organizer must not use project routes")
                 throw URLError(.badURL)
             }
+            return apiTestJSONResponse(self.sessionListJSON(forLoadCount: 1), for: request)
         }
-
         await viewModel.load()
-        let didCreate = await viewModel.createEmptyProject(
-            named: "  Client Work  ",
-            color: "#7cb9ff"
-        )
-
-        XCTAssertTrue(didCreate)
-        let projectIDs = await MainActor.run { viewModel.projects.compactMap(\.projectId) }
-        let projectName = await MainActor.run { viewModel.projects.first?.name }
-        let sessionProjectID = await MainActor.run { viewModel.sessions.first?.projectId }
-        let isCreatingProject = await MainActor.run { viewModel.isCreatingProject }
-        let isMovingSession = await MainActor.run { viewModel.isMovingSession }
-        let actionErrorMessage = await MainActor.run { viewModel.actionErrorMessage }
-        let lastError = await MainActor.run { viewModel.lastError }
-
-        XCTAssertEqual(projectIDs, ["project-new"])
-        XCTAssertEqual(projectName, "Client Work")
-        // The existing session stays unassigned: no move request was made.
-        XCTAssertNil(sessionProjectID)
-        XCTAssertFalse(requestedPaths.contains("/api/session/move"))
-        XCTAssertEqual(
-            requestedPaths,
-            ["/api/sessions", "/api/projects/create", "/api/sessions"]
-        )
-        XCTAssertFalse(isCreatingProject)
-        XCTAssertFalse(isMovingSession)
-        XCTAssertNil(actionErrorMessage)
-        XCTAssertNil(lastError)
+        let session = try XCTUnwrap(viewModel.sessions.first)
+        let created = await viewModel.createProject(named: " Client Work ", color: "#7cb9ff", moving: session)
+        XCTAssertTrue(created)
+        let project = try XCTUnwrap(viewModel.projects.first)
+        XCTAssertEqual(viewModel.sessions.first?.projectId, project.projectId)
+        let renamed = await viewModel.rename(project, named: "Archive", color: "#f5c542")
+        XCTAssertTrue(renamed)
+        await viewModel.move(session, to: nil)
+        XCTAssertNil(viewModel.sessions.first?.projectId)
+        let deleted = await viewModel.delete(try XCTUnwrap(viewModel.projects.first))
+        XCTAssertTrue(deleted)
+        XCTAssertTrue(viewModel.projects.isEmpty)
+        XCTAssertEqual(paths, ["/api/profiles/sessions"])
     }
 
-    func testCreateEmptyProjectBlocksBlankNameBeforeNetworkRequest() async throws {
-        let viewModel = try await makeViewModel { request in
-            XCTFail("Blank project names should not make network requests: \(request.url?.path ?? "nil")")
+    @MainActor
+    func testLocalProjectInvalidAndCorruptStoresDoNotMutateNetworkOrBytes() async throws {
+        let suite = "SessionListMutationTests.corrupt.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let corrupt = Data("not-json".utf8)
+        defaults.set(corrupt, forKey: "localOrganizer.v1")
+        let store = LocalOrganizerStore(defaults: defaults)
+        let viewModel = try makeViewModel(organizerStore: store) { request in
+            XCTFail("Organizer validation must not use network: \(request.url?.path ?? "nil")")
             throw URLError(.badURL)
         }
-
-        let didCreate = await viewModel.createEmptyProject(
-            named: "   ",
-            color: "#7cb9ff"
-        )
-
-        XCTAssertFalse(didCreate)
-        let actionErrorMessage = await MainActor.run { viewModel.actionErrorMessage }
-        let lastError = await MainActor.run { viewModel.lastError }
-        let isCreatingProject = await MainActor.run { viewModel.isCreatingProject }
-
-        XCTAssertEqual(actionErrorMessage, "Enter a project name.")
-        XCTAssertNil(lastError)
-        XCTAssertFalse(isCreatingProject)
+        let session = try makeSessionSummary(id: "session-abc", title: "Planning", pinned: false, archived: false)
+        let blank = await viewModel.createProject(named: "   ", color: "#7cb9ff", moving: session)
+        let corruptCreate = await viewModel.createEmptyProject(named: "No overwrite", color: "#7cb9ff")
+        XCTAssertFalse(blank)
+        XCTAssertFalse(corruptCreate)
+        XCTAssertNotNil(viewModel.actionErrorMessage)
+        XCTAssertEqual(defaults.data(forKey: "localOrganizer.v1"), corrupt)
     }
 
-    func testCreateEmptyProjectMissingProjectInResponseShowsError() async throws {
-        var requestedPaths: [String] = []
-        let viewModel = try await makeViewModel { request in
-            let path = request.url?.path
-            requestedPaths.append(path ?? "")
-
-            switch path {
-            case "/api/projects/create":
-                return apiTestJSONResponse(#"{"ok": true}"#, for: request)
-            default:
-                XCTFail("Unexpected request path: \(path ?? "nil")")
-                throw URLError(.badURL)
-            }
+    @MainActor
+    func testFreshAndFailedRefreshPreserveLocalGrouping() async throws {
+        let suite = "SessionListMutationTests.refresh.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = LocalOrganizerStore(defaults: defaults)
+        let server = URL(string: "https://example.test")!
+        let group = try store.createGroup(name: "Local", color: nil, server: server, profile: "default")
+        try store.assignSession("session-abc", toGroup: try XCTUnwrap(group.projectId), server: server, profile: "default")
+        let context = try makeContext()
+        var load = 0
+        let viewModel = try makeViewModel(organizerStore: store) { request in
+            guard request.url?.path == "/api/profiles/sessions" else { throw URLError(.badURL) }
+            load += 1
+            if load == 3 { throw URLError(.notConnectedToInternet) }
+            return apiTestJSONResponse(self.sessionListJSON(forLoadCount: load), for: request)
         }
-
-        let didCreate = await viewModel.createEmptyProject(
-            named: "Client Work",
-            color: "#7cb9ff"
-        )
-
-        XCTAssertFalse(didCreate)
-        let projectIDs = await MainActor.run { viewModel.projects.compactMap(\.projectId) }
-        let actionErrorMessage = await MainActor.run { viewModel.actionErrorMessage }
-        let isCreatingProject = await MainActor.run { viewModel.isCreatingProject }
-
-        XCTAssertEqual(requestedPaths, ["/api/projects/create"])
-        XCTAssertTrue(projectIDs.isEmpty)
-        XCTAssertEqual(actionErrorMessage, "The server did not return the new project.")
-        XCTAssertFalse(isCreatingProject)
+        await viewModel.load(modelContext: context)
+        await viewModel.load(modelContext: context)
+        XCTAssertEqual(viewModel.projects.map(\.name), ["Local"])
+        XCTAssertEqual(viewModel.sessions.first?.projectId, group.projectId)
+        await viewModel.load(modelContext: context)
+        XCTAssertEqual(viewModel.projects.map(\.name), ["Local"])
+        XCTAssertEqual(viewModel.sessions.first?.projectId, group.projectId)
     }
-
-    func testCreateEmptyProjectNetworkFailureSetsError() async throws {
-        var requestedPaths: [String] = []
-        let viewModel = try await makeViewModel { request in
-            let path = request.url?.path
-            requestedPaths.append(path ?? "")
-
-            switch path {
-            case "/api/projects/create":
-                let response = HTTPURLResponse(
-                    url: try XCTUnwrap(request.url),
-                    statusCode: 500,
-                    httpVersion: nil,
-                    headerFields: ["Content-Type": "application/json"]
-                )
-                return (try XCTUnwrap(response), Data(#"{"error":"server boom"}"#.utf8))
-            default:
-                XCTFail("Unexpected request path: \(path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
-
-        let didCreate = await viewModel.createEmptyProject(
-            named: "Client Work",
-            color: "#7cb9ff"
-        )
-
-        XCTAssertFalse(didCreate)
-        let projectIDs = await MainActor.run { viewModel.projects.compactMap(\.projectId) }
-        let actionErrorMessage = await MainActor.run { viewModel.actionErrorMessage }
-        let lastError = await MainActor.run { viewModel.lastError }
-        let isCreatingProject = await MainActor.run { viewModel.isCreatingProject }
-
-        XCTAssertEqual(requestedPaths, ["/api/projects/create"])
-        XCTAssertTrue(projectIDs.isEmpty)
-        XCTAssertNotNil(actionErrorMessage)
-        XCTAssertNotNil(lastError)
-        XCTAssertFalse(isCreatingProject)
-    }
-
-    func testRenameProjectUpdatesLocalProject() async throws {
-        var requestedPaths: [String] = []
-        let viewModel = try await makeViewModel { request in
-            let path = request.url?.path
-            requestedPaths.append(path ?? "")
-
-            switch path {
-            case "/api/projects":
-                return apiTestJSONResponse("""
-                {
-                  "projects": [
-                    {
-                      "project_id": "project-1",
-                      "name": "Client Work",
-                      "color": "#7cb9ff"
-                    }
-                  ]
-                }
-                """, for: request)
-            case "/api/projects/rename":
-                let body = try XCTUnwrap(apiTestJSONBody(from: request))
-                XCTAssertEqual(body["project_id"] as? String, "project-1")
-                XCTAssertEqual(body["name"] as? String, "Client Archive")
-                XCTAssertEqual(body["color"] as? String, "#f5c542")
-                return apiTestJSONResponse("""
-                {
-                  "ok": true,
-                  "project": {
-                    "project_id": "project-1",
-                    "name": "Client Archive",
-                    "color": "#f5c542"
-                  }
-                }
-                """, for: request)
-            default:
-                XCTFail("Unexpected request path: \(path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
-
-        await viewModel.loadProjects()
-        let project = try await MainActor.run {
-            try XCTUnwrap(viewModel.projects.first)
-        }
-        let didRename = await viewModel.rename(project, named: "  Client Archive  ", color: "#f5c542")
-        let projects = await MainActor.run { viewModel.projects }
-        let isRenamingProject = await MainActor.run { viewModel.isRenamingProject }
-        let actionErrorMessage = await MainActor.run { viewModel.actionErrorMessage }
-        let lastError = await MainActor.run { viewModel.lastError }
-
-        XCTAssertTrue(didRename)
-        XCTAssertEqual(projects.count, 1)
-        XCTAssertEqual(projects.first?.projectId, "project-1")
-        XCTAssertEqual(projects.first?.name, "Client Archive")
-        XCTAssertEqual(projects.first?.color, "#f5c542")
-        XCTAssertEqual(requestedPaths, ["/api/projects", "/api/projects/rename"])
-        XCTAssertFalse(isRenamingProject)
-        XCTAssertNil(actionErrorMessage)
-        XCTAssertNil(lastError)
-    }
-
-    func testRenameProjectBlocksBlankNameBeforeNetworkRequest() async throws {
-        var requestedPaths: [String] = []
-        let viewModel = try await makeViewModel { request in
-            let path = request.url?.path
-            requestedPaths.append(path ?? "")
-
-            switch path {
-            case "/api/projects":
-                return apiTestJSONResponse("""
-                {
-                  "projects": [
-                    {
-                      "project_id": "project-1",
-                      "name": "Client Work",
-                      "color": "#7cb9ff"
-                    }
-                  ]
-                }
-                """, for: request)
-            default:
-                XCTFail("Blank project names should not make rename requests: \(path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
-
-        await viewModel.loadProjects()
-        let project = try await MainActor.run {
-            try XCTUnwrap(viewModel.projects.first)
-        }
-        let didRename = await viewModel.rename(project, named: "  ", color: "#7cb9ff")
-        let actionErrorMessage = await MainActor.run { viewModel.actionErrorMessage }
-        let lastError = await MainActor.run { viewModel.lastError }
-        let isRenamingProject = await MainActor.run { viewModel.isRenamingProject }
-
-        XCTAssertFalse(didRename)
-        XCTAssertEqual(requestedPaths, ["/api/projects"])
-        XCTAssertEqual(actionErrorMessage, "Enter a project name.")
-        XCTAssertNil(lastError)
-        XCTAssertFalse(isRenamingProject)
-    }
-
-    func testRenameProjectFailureKeepsProject() async throws {
-        var requestedPaths: [String] = []
-        let viewModel = try await makeViewModel { request in
-            let path = request.url?.path
-            requestedPaths.append(path ?? "")
-
-            switch path {
-            case "/api/projects":
-                return apiTestJSONResponse("""
-                {
-                  "projects": [
-                    {
-                      "project_id": "project-1",
-                      "name": "Client Work",
-                      "color": "#7cb9ff"
-                    }
-                  ]
-                }
-                """, for: request)
-            case "/api/projects/rename":
-                let response = HTTPURLResponse(
-                    url: try XCTUnwrap(request.url),
-                    statusCode: 500,
-                    httpVersion: nil,
-                    headerFields: ["Content-Type": "application/json"]
-                )
-                return (try XCTUnwrap(response), Data(#"{"error":"rename failed"}"#.utf8))
-            default:
-                XCTFail("Unexpected request path: \(path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
-
-        await viewModel.loadProjects()
-        let beforeProjects = await MainActor.run { viewModel.projects }
-        let project = try XCTUnwrap(beforeProjects.first)
-        let didRename = await viewModel.rename(project, named: "Client Archive", color: "#f5c542")
-        let projects = await MainActor.run { viewModel.projects }
-        let actionErrorMessage = await MainActor.run { viewModel.actionErrorMessage }
-        let lastError = await MainActor.run { viewModel.lastError }
-        let isRenamingProject = await MainActor.run { viewModel.isRenamingProject }
-
-        XCTAssertFalse(didRename)
-        XCTAssertEqual(requestedPaths, ["/api/projects", "/api/projects/rename"])
-        XCTAssertEqual(projects, beforeProjects)
-        XCTAssertNotNil(actionErrorMessage)
-        XCTAssertNotNil(lastError)
-        XCTAssertFalse(isRenamingProject)
-    }
-
-    func testDeleteProjectRemovesProjectAndReloadsUnassignedSessions() async throws {
-        var sessionLoadCount = 0
-        var requestedPaths: [String] = []
-        let viewModel = try await makeViewModel { request in
-            let path = request.url?.path
-            requestedPaths.append(path ?? "")
-
-            switch path {
-            case "/api/sessions":
-                sessionLoadCount += 1
-                if sessionLoadCount == 1 {
-                    return apiTestJSONResponse("""
-                    {
-                      "sessions": [
-                        {
-                          "session_id": "session-abc",
-                          "title": "Planning",
-                          "project_id": "project-1",
-                          "archived": false
-                        }
-                      ]
-                    }
-                    """, for: request)
-                }
-
-                return apiTestJSONResponse("""
-                {
-                  "sessions": [
-                    {
-                      "session_id": "session-abc",
-                      "title": "Planning",
-                      "project_id": null,
-                      "archived": false
-                    }
-                  ]
-                }
-                """, for: request)
-            case "/api/projects":
-                return apiTestJSONResponse("""
-                {
-                  "projects": [
-                    {
-                      "project_id": "project-1",
-                      "name": "Client Work",
-                      "color": "#7cb9ff"
-                    }
-                  ]
-                }
-                """, for: request)
-            case "/api/projects/delete":
-                let body = try XCTUnwrap(apiTestJSONBody(from: request))
-                XCTAssertEqual(body["project_id"] as? String, "project-1")
-                return apiTestJSONResponse(#"{"ok": true}"#, for: request)
-            default:
-                XCTFail("Unexpected request path: \(path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
-
-        await viewModel.load()
-        await viewModel.loadProjects()
-        let project = try await MainActor.run {
-            try XCTUnwrap(viewModel.projects.first)
-        }
-        let didDelete = await viewModel.delete(project)
-        let projectIDs = await MainActor.run { viewModel.projects.compactMap(\.projectId) }
-        let sessionProjectID = await MainActor.run { viewModel.sessions.first?.projectId }
-        let isDeletingProject = await MainActor.run { viewModel.isDeletingProject }
-        let actionErrorMessage = await MainActor.run { viewModel.actionErrorMessage }
-        let lastError = await MainActor.run { viewModel.lastError }
-
-        XCTAssertTrue(didDelete)
-        XCTAssertEqual(projectIDs, [])
-        XCTAssertNil(sessionProjectID)
-        XCTAssertFalse(isDeletingProject)
-        XCTAssertNil(actionErrorMessage)
-        XCTAssertNil(lastError)
-        XCTAssertEqual(
-            requestedPaths,
-            ["/api/sessions", "/api/projects", "/api/projects/delete", "/api/sessions"]
-        )
-    }
-
-    func testDeleteProjectFailureKeepsProjectAndSessions() async throws {
-        var sessionLoadCount = 0
-        let viewModel = try await makeViewModel { request in
-            switch request.url?.path {
-            case "/api/sessions":
-                sessionLoadCount += 1
-                XCTAssertEqual(sessionLoadCount, 1)
-                return apiTestJSONResponse("""
-                {
-                  "sessions": [
-                    {
-                      "session_id": "session-abc",
-                      "title": "Planning",
-                      "project_id": "project-1",
-                      "archived": false
-                    }
-                  ]
-                }
-                """, for: request)
-            case "/api/projects":
-                return apiTestJSONResponse("""
-                {
-                  "projects": [
-                    {
-                      "project_id": "project-1",
-                      "name": "Client Work",
-                      "color": "#7cb9ff"
-                    }
-                  ]
-                }
-                """, for: request)
-            case "/api/projects/delete":
-                let response = HTTPURLResponse(
-                    url: try XCTUnwrap(request.url),
-                    statusCode: 500,
-                    httpVersion: nil,
-                    headerFields: ["Content-Type": "application/json"]
-                )
-                return (try XCTUnwrap(response), Data(#"{"error":"delete failed"}"#.utf8))
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
-
-        await viewModel.load()
-        await viewModel.loadProjects()
-        let project = try await MainActor.run {
-            try XCTUnwrap(viewModel.projects.first)
-        }
-        let beforeSessions = await MainActor.run { viewModel.sessions }
-        let beforeProjects = await MainActor.run { viewModel.projects }
-        let didDelete = await viewModel.delete(project)
-        let sessions = await MainActor.run { viewModel.sessions }
-        let projects = await MainActor.run { viewModel.projects }
-        let actionErrorMessage = await MainActor.run { viewModel.actionErrorMessage }
-        let lastError = await MainActor.run { viewModel.lastError }
-        let isDeletingProject = await MainActor.run { viewModel.isDeletingProject }
-
-        XCTAssertFalse(didDelete)
-        XCTAssertEqual(sessionLoadCount, 1)
-        XCTAssertEqual(sessions, beforeSessions)
-        XCTAssertEqual(projects, beforeProjects)
-        XCTAssertNotNil(actionErrorMessage)
-        XCTAssertNotNil(lastError)
-        XCTAssertFalse(isDeletingProject)
-    }
-
     @MainActor
     func testMutationErrorSurfacesMessageWithoutReloadingOrCorruptingSessions() async throws {
         var loadCount = 0
         let viewModel = try makeViewModel { request in
             switch request.url?.path {
-            case "/api/sessions":
+            case "/api/profiles/sessions":
                 loadCount += 1
                 return apiTestJSONResponse(self.sessionListJSON(forLoadCount: 1), for: request)
-            case "/api/session/archive":
+            case "/api/sessions/session-abc":
                 let response = HTTPURLResponse(
                     url: try XCTUnwrap(request.url),
                     statusCode: 500,
@@ -1942,28 +1842,21 @@ final class SessionListMutationTests: XCTestCase {
     }
 
     @MainActor
-    func testSuccessfulMutationReturnsFalseWhenFollowUpReloadFails() async throws {
+    func testSuccessfulDirectMutationDoesNotDependOnSidebarReload() async throws {
         var loadCount = 0
         let viewModel = try makeViewModel { request in
             switch request.url?.path {
-            case "/api/sessions":
+            case "/api/profiles/sessions":
                 loadCount += 1
-                if loadCount == 1 {
-                    return apiTestJSONResponse(self.sessionListJSON(forLoadCount: 1), for: request)
+                return apiTestJSONResponse(self.sessionListJSON(forLoadCount: 1), for: request)
+            case "/api/sessions/session-abc":
+                if request.httpMethod == "PATCH" {
+                    return apiTestJSONResponse(#"{"ok":true,"archived":true}"#, for: request)
                 }
-
-                let response = HTTPURLResponse(
-                    url: try XCTUnwrap(request.url),
-                    statusCode: 500,
-                    httpVersion: nil,
-                    headerFields: ["Content-Type": "application/json"]
+                return apiTestJSONResponse(
+                    #"{"id":"session-abc","title":"Planning","profile":"default","pinned":0,"archived":1}"#,
+                    for: request
                 )
-                return (try XCTUnwrap(response), Data(#"{"error":"reload failed"}"#.utf8))
-            case "/api/session/archive":
-                let body = try XCTUnwrap(apiTestJSONBody(from: request))
-                XCTAssertEqual(body["session_id"] as? String, "session-abc")
-                XCTAssertEqual(body["archived"] as? Bool, true)
-                return apiTestJSONResponse(#"{"ok": true}"#, for: request)
             default:
                 XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
                 throw URLError(.badURL)
@@ -1974,11 +1867,71 @@ final class SessionListMutationTests: XCTestCase {
         let before = viewModel.sessions
         let didArchive = await viewModel.archive(try XCTUnwrap(viewModel.sessions.first))
 
-        XCTAssertFalse(didArchive)
-        XCTAssertEqual(loadCount, 2)
-        XCTAssertEqual(viewModel.sessions, before)
-        XCTAssertNotNil(viewModel.lastError)
-        XCTAssertNotNil(viewModel.sessionLoadError)
+        XCTAssertTrue(didArchive)
+        XCTAssertEqual(loadCount, 1)
+        XCTAssertNotEqual(viewModel.sessions, before)
+        XCTAssertTrue(viewModel.sessions.isEmpty)
+        XCTAssertNil(viewModel.lastError)
+    }
+
+    @MainActor
+    func testConfirmedMetadataOverlaysAnInFlightStaleSidebarLoadThenConverges() async throws {
+        let staleLoadStarted = expectation(description: "stale sidebar load started")
+        MetadataOverlayURLProtocol.configure(.pin) {
+            staleLoadStarted.fulfill()
+        }
+        let viewModel = try makeMetadataOverlayViewModel()
+
+        let loaded = await viewModel.load()
+        XCTAssertTrue(loaded)
+        let session = try XCTUnwrap(viewModel.sessions.first)
+        let staleLoad = Task { @MainActor in await viewModel.load() }
+        await fulfillment(of: [staleLoadStarted], timeout: 1)
+
+        let didPin = await viewModel.setPinned(true, for: session)
+        XCTAssertTrue(didPin)
+        MetadataOverlayURLProtocol.releaseStaleLoad()
+        let staleLoadSucceeded = await staleLoad.value
+        XCTAssertTrue(staleLoadSucceeded)
+        XCTAssertEqual(viewModel.sessions.first?.pinned, true)
+
+        // This request starts after confirmation, so its raw canonical value
+        // is authoritative and clears the older overlay.
+        _ = await viewModel.load()
+        XCTAssertEqual(viewModel.sessions.first?.pinned, false)
+        XCTAssertEqual(viewModel.sessions.first?.title, "External Edit")
+        XCTAssertEqual(MetadataOverlayURLProtocol.listRequestCount, 3)
+    }
+
+    @MainActor
+    func testSequentialDirectMetadataOverlaysAccumulateWithoutClobberingFreshFields() async throws {
+        let staleLoadStarted = expectation(description: "stale sequential load started")
+        MetadataOverlayURLProtocol.configure(.sequential) {
+            staleLoadStarted.fulfill()
+        }
+        let viewModel = try makeMetadataOverlayViewModel()
+
+        let loaded = await viewModel.load()
+        XCTAssertTrue(loaded)
+        let session = try XCTUnwrap(viewModel.sessions.first)
+        let staleLoad = Task { @MainActor in await viewModel.load() }
+        await fulfillment(of: [staleLoadStarted], timeout: 1)
+        let didPin = await viewModel.setPinned(true, for: session)
+        XCTAssertTrue(didPin)
+        let didRename = await viewModel.rename(session, to: "Launch Notes")
+        XCTAssertTrue(didRename)
+        MetadataOverlayURLProtocol.releaseStaleLoad()
+        let staleLoadSucceeded = await staleLoad.value
+        XCTAssertTrue(staleLoadSucceeded)
+
+        XCTAssertEqual(viewModel.sessions.first?.title, "Launch Notes")
+        XCTAssertEqual(viewModel.sessions.first?.pinned, true)
+        XCTAssertEqual(viewModel.sessions.first?.workspace, "fresh-workspace")
+        _ = await viewModel.load()
+        XCTAssertEqual(viewModel.sessions.first?.title, "External Edit")
+        XCTAssertEqual(viewModel.sessions.first?.pinned, false)
+        XCTAssertEqual(viewModel.sessions.first?.workspace, "fresh-workspace")
+        XCTAssertEqual(MetadataOverlayURLProtocol.listRequestCount, 3)
     }
 
     @MainActor
@@ -1987,18 +1940,22 @@ final class SessionListMutationTests: XCTestCase {
         let viewModel = try makeArchivedViewModel { request in
             switch request.url?.path {
             case "/api/sessions":
-                // The archived screen must opt in to archived rows — without
-                // include_archived=1 the server returns none (issue #17).
                 let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
                 let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
-                XCTAssertEqual(query["include_archived"], "1")
-                return apiTestJSONResponse(self.archivedSessionListJSON(), for: request)
-            case "/api/session/archive":
+                XCTAssertEqual(query["profile"], "default")
+                XCTAssertEqual(query["limit"], "100")
+                XCTAssertEqual(query["offset"], "0")
+                XCTAssertEqual(query["archived"], "only")
+                return apiTestJSONResponse(#"{"sessions":[{"id":"session-abc","title":"Planning","profile":"default","archived":true},{"id":"session-def","title":"Later","profile":"default","archived":true}],"total":2}"#, for: request)
+            case "/api/sessions/session-abc":
                 archiveRequestCount += 1
-                let body = try XCTUnwrap(apiTestJSONBody(from: request))
-                XCTAssertEqual(body["session_id"] as? String, "session-abc")
-                XCTAssertEqual(body["archived"] as? Bool, false)
-                return apiTestJSONResponse(#"{"ok": true}"#, for: request)
+                if request.httpMethod == "PATCH" {
+                    let body = try XCTUnwrap(apiTestJSONBody(from: request))
+                    XCTAssertEqual(body["profile"] as? String, "default")
+                    XCTAssertEqual(body["archived"] as? Bool, false)
+                    return apiTestJSONResponse(#"{"ok": true, "archived": false}"#, for: request)
+                }
+                return apiTestJSONResponse(#"{"id":"session-abc","profile":"default","archived":0}"#, for: request)
             default:
                 XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
                 throw URLError(.badURL)
@@ -2014,7 +1971,7 @@ final class SessionListMutationTests: XCTestCase {
         XCTAssertTrue(didUnarchive)
         XCTAssertFalse(didSkipDuplicateUnarchive)
         XCTAssertEqual(viewModel.sessions.compactMap(\.sessionId), ["session-def"])
-        XCTAssertEqual(archiveRequestCount, 1)
+        XCTAssertEqual(archiveRequestCount, 2)
         XCTAssertFalse(viewModel.isUnarchiving)
         XCTAssertNil(viewModel.actionErrorMessage)
     }
@@ -2024,13 +1981,13 @@ final class SessionListMutationTests: XCTestCase {
         let viewModel = try makeArchivedViewModel { request in
             switch request.url?.path {
             case "/api/sessions":
-                // The archived screen must opt in to archived rows — without
-                // include_archived=1 the server returns none (issue #17).
                 let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
                 let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
-                XCTAssertEqual(query["include_archived"], "1")
-                return apiTestJSONResponse(self.archivedSessionListJSON(), for: request)
-            case "/api/session/archive":
+                XCTAssertEqual(query["profile"], "default")
+                XCTAssertEqual(query["limit"], "100")
+                XCTAssertEqual(query["archived"], "only")
+                return apiTestJSONResponse(#"{"sessions":[{"id":"session-abc","title":"Planning","profile":"default","archived":true},{"id":"session-def","title":"Later","profile":"default","archived":true}],"total":2}"#, for: request)
+            case "/api/sessions/session-abc":
                 let response = HTTPURLResponse(
                     url: try XCTUnwrap(request.url),
                     statusCode: 500,
@@ -2063,8 +2020,12 @@ final class SessionListMutationTests: XCTestCase {
         let viewModel = try makeArchivedViewModel { request in
             switch request.url?.path {
             case "/api/sessions":
-                return apiTestJSONResponse(self.archivedSessionListJSON(), for: request)
-            case "/api/session/archive":
+                let query = Dictionary(uniqueKeysWithValues: (URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+                XCTAssertEqual(query["profile"], "default")
+                XCTAssertEqual(query["limit"], "100")
+                XCTAssertEqual(query["archived"], "only")
+                return apiTestJSONResponse(#"{"sessions":[{"id":"session-abc","title":"Planning","profile":"default","archived":true}],"total":1}"#, for: request)
+            case "/api/sessions/session-abc":
                 let response = HTTPURLResponse(
                     url: try XCTUnwrap(request.url),
                     statusCode: 400,
@@ -2084,11 +2045,7 @@ final class SessionListMutationTests: XCTestCase {
 
         XCTAssertFalse(didUnarchive)
         XCTAssertEqual(viewModel.sessions, before)
-        let actionErrorMessage = try XCTUnwrap(viewModel.actionErrorMessage)
-        XCTAssertTrue(
-            actionErrorMessage.contains(serverMessage),
-            "Expected the server's message in: \(actionErrorMessage)"
-        )
+        XCTAssertEqual(viewModel.actionErrorMessage, "Hermes returned HTTP 400.")
     }
 
     @MainActor
@@ -2096,8 +2053,8 @@ final class SessionListMutationTests: XCTestCase {
         let viewModel = try makeArchivedViewModel { request in
             switch request.url?.path {
             case "/api/sessions":
-                return apiTestJSONResponse(self.archivedSessionListJSON(), for: request)
-            case "/api/session/archive":
+                return apiTestJSONResponse(#"{"sessions":[{"id":"session-abc","title":"Planning","profile":"default","archived":true}],"total":1}"#, for: request)
+            case "/api/sessions/session-abc":
                 return apiTestJSONResponse(#"{"ok": false, "error": "Session not writable"}"#, for: request)
             default:
                 XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
@@ -2111,7 +2068,7 @@ final class SessionListMutationTests: XCTestCase {
 
         XCTAssertFalse(didUnarchive)
         XCTAssertEqual(viewModel.sessions, before)
-        XCTAssertEqual(viewModel.actionErrorMessage, "Session not writable")
+        XCTAssertEqual(viewModel.actionErrorMessage, "Hermes rejected the session change.")
     }
 
     @MainActor
@@ -2122,8 +2079,8 @@ final class SessionListMutationTests: XCTestCase {
         let viewModel = try makeArchivedViewModel { request in
             switch request.url?.path {
             case "/api/sessions":
-                return apiTestJSONResponse(self.archivedSessionListJSON(), for: request)
-            case "/api/session/archive":
+                return apiTestJSONResponse(#"{"sessions":[{"id":"session-abc","title":"Planning","profile":"default","archived":true}],"total":1}"#, for: request)
+            case "/api/sessions/session-abc":
                 return apiTestJSONResponse(#"{"ok": false}"#, for: request)
             default:
                 XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
@@ -2142,35 +2099,300 @@ final class SessionListMutationTests: XCTestCase {
     }
 
     @MainActor
-    func testLoadStoresArchivedCountFromResponseForArchivedEntry() async throws {
-        let viewModel = try makeViewModel { request in
-            XCTAssertEqual(request.url?.path, "/api/sessions")
-            XCTAssertNil(request.url?.query)
-            return apiTestJSONResponse("""
-            {
-              "sessions": [
-                {
-                  "session_id": "session-abc",
-                  "title": "Planning",
-                  "archived": false
-                }
-              ],
-              "archived_count": 8
+    func testDirectLoadRestoresArchivedCountFromArchiveOnlyTotal() async throws {
+        var countRequests = 0
+        let viewModel = try makeViewModel(handlesArchivedCount: false) { request in
+            switch request.url?.path {
+            case "/api/profiles/sessions":
+                let query = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.queryItems
+                XCTAssertEqual(query?.first(where: { $0.name == "profile" })?.value, "default")
+                XCTAssertEqual(query?.first(where: { $0.name == "limit" })?.value, "500")
+                return apiTestJSONResponse(
+                    #"{"sessions":[{"id":"session-abc","title":"Planning","profile":"default","archived":false}],"total":1}"#,
+                    for: request
+                )
+            case "/api/sessions":
+                countRequests += 1
+                let query = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.queryItems
+                let values = Dictionary(uniqueKeysWithValues: (query ?? []).map { ($0.name, $0.value ?? "") })
+                XCTAssertEqual(values["profile"], "default")
+                XCTAssertEqual(values["limit"], "0")
+                XCTAssertEqual(values["offset"], "0")
+                XCTAssertEqual(values["order"], "recent")
+                XCTAssertEqual(values["archived"], "only")
+                return apiTestJSONResponse(#"{"sessions":[],"total":3,"limit":0,"offset":0}"#, for: request)
+            default:
+                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
             }
-            """, for: request)
         }
 
-        XCTAssertNil(viewModel.archivedCount)
+        let loaded = await viewModel.load()
 
-        await viewModel.load()
-
-        XCTAssertEqual(viewModel.archivedCount, 8)
+        XCTAssertTrue(loaded)
+        XCTAssertEqual(viewModel.archivedCount, 3)
+        XCTAssertEqual(countRequests, 1)
         XCTAssertEqual(viewModel.sessions.compactMap(\.sessionId), ["session-abc"])
     }
 
     @MainActor
+    func testArchivedCountFailureKeepsVisibleRowsAndUsesSanitizedNonBlockingError() async throws {
+        let viewModel = try makeViewModel(handlesArchivedCount: false) { request in
+            switch request.url?.path {
+            case "/api/profiles/sessions":
+                return apiTestJSONResponse(
+                    #"{"sessions":[{"id":"session-abc","title":"Planning","profile":"default","archived":false}],"total":1}"#,
+                    for: request
+                )
+            case "/api/sessions":
+                let response = HTTPURLResponse(
+                    url: try XCTUnwrap(request.url),
+                    statusCode: 500,
+                    httpVersion: nil,
+                    headerFields: ["Content-Type": "application/json"]
+                )
+                return (try XCTUnwrap(response), Data(#"{"error":"private count detail"}"#.utf8))
+            default:
+                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+        }
+
+        let loaded = await viewModel.load()
+
+        XCTAssertTrue(loaded)
+        XCTAssertEqual(viewModel.sessions.compactMap(\.sessionId), ["session-abc"])
+        XCTAssertNil(viewModel.archivedCount)
+        XCTAssertEqual(viewModel.errorMessage, "Hermes returned HTTP 500.")
+        XCTAssertFalse(viewModel.errorMessage?.contains("private count detail") == true)
+        XCTAssertNotNil(viewModel.lastError)
+    }
+
+    @MainActor
+    func testArchivedCountDoesNotCrossAnActiveProfileEpoch() async throws {
+        let countStarted = expectation(description: "default archived count started")
+        ArchivedCountGateURLProtocol.configure {
+            countStarted.fulfill()
+        }
+        let viewModel = try makeArchivedCountGateViewModel()
+        let workProfile = try JSONDecoder().decode(
+            ProfileSummary.self,
+            from: Data(#"{"name":"work"}"#.utf8)
+        )
+
+        let defaultLoad = Task { @MainActor in await viewModel.load() }
+        await fulfillment(of: [countStarted], timeout: 1)
+
+        let switched = await viewModel.switchActiveProfile(workProfile)
+        XCTAssertTrue(switched)
+        let workLoaded = await viewModel.load()
+        XCTAssertTrue(workLoaded)
+        XCTAssertEqual(viewModel.activeProfileName, "work")
+        XCTAssertEqual(viewModel.archivedCount, 7)
+
+        // The old default-profile count completes after the active profile has
+        // changed; it must not overwrite work's count.
+        ArchivedCountGateURLProtocol.releaseCount()
+        let defaultLoaded = await defaultLoad.value
+        XCTAssertTrue(defaultLoaded)
+        XCTAssertEqual(viewModel.archivedCount, 7)
+        XCTAssertEqual(ArchivedCountGateURLProtocol.countProfiles, ["default", "work"])
+    }
+
+    @MainActor
+    func testCancelledArchivedCountDoesNotPublishErrorOrCount() async throws {
+        let countStarted = expectation(description: "archived count started")
+        ArchivedCountGateURLProtocol.configure {
+            countStarted.fulfill()
+        }
+        let viewModel = try makeArchivedCountGateViewModel()
+
+        let loadTask = Task { @MainActor in await viewModel.load() }
+        await fulfillment(of: [countStarted], timeout: 1)
+        loadTask.cancel()
+        ArchivedCountGateURLProtocol.releaseCount()
+
+        let loaded = await loadTask.value
+        XCTAssertTrue(loaded)
+        XCTAssertEqual(viewModel.sessions.compactMap(\.sessionId), ["default-session"])
+        XCTAssertNil(viewModel.archivedCount)
+        XCTAssertNil(viewModel.errorMessage)
+        XCTAssertNil(viewModel.lastError)
+    }
+
+    @MainActor
+    func testArchivedCountZeroCanBecomePositiveOnExplicitRefresh() async throws {
+        var countRequests = 0
+        let viewModel = try makeViewModel(handlesArchivedCount: false) { request in
+            switch request.url?.path {
+            case "/api/profiles/sessions":
+                return apiTestJSONResponse(
+                    #"{"sessions":[{"id":"session-abc","title":"Planning","profile":"default","archived":false}],"total":1}"#,
+                    for: request
+                )
+            case "/api/sessions":
+                countRequests += 1
+                let total = countRequests == 1 ? 0 : 5
+                return apiTestJSONResponse(#"{"sessions":[],"total":\#(total),"limit":0,"offset":0}"#, for: request)
+            default:
+                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+        }
+
+        let firstLoaded = await viewModel.load()
+        XCTAssertTrue(firstLoaded)
+        XCTAssertEqual(viewModel.archivedCount, 0)
+        await viewModel.refreshArchivedCountForProfile("default")
+
+        XCTAssertEqual(viewModel.archivedCount, 5)
+        XCTAssertNil(viewModel.lastError)
+        XCTAssertEqual(countRequests, 2)
+    }
+
+    @MainActor
+    func testArchivedCountFailurePreservesPriorSameProfileCount() async throws {
+        var listRequests = 0
+        var countRequests = 0
+        let viewModel = try makeViewModel(handlesArchivedCount: false) { request in
+            switch request.url?.path {
+            case "/api/profiles/sessions":
+                listRequests += 1
+                return apiTestJSONResponse(
+                    #"{"sessions":[{"id":"session-abc","title":"Planning","profile":"default","archived":false}],"total":1}"#,
+                    for: request
+                )
+            case "/api/sessions":
+                countRequests += 1
+                if countRequests == 1 {
+                    return apiTestJSONResponse(#"{"sessions":[],"total":3,"limit":0,"offset":0}"#, for: request)
+                }
+                let response = HTTPURLResponse(
+                    url: try XCTUnwrap(request.url),
+                    statusCode: 503,
+                    httpVersion: nil,
+                    headerFields: ["Content-Type": "application/json"]
+                )
+                return (try XCTUnwrap(response), Data(#"{"error":"private count detail"}"#.utf8))
+            default:
+                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+        }
+
+        let firstLoaded = await viewModel.load()
+        XCTAssertTrue(firstLoaded)
+        XCTAssertEqual(viewModel.archivedCount, 3)
+        let secondLoaded = await viewModel.load()
+        XCTAssertTrue(secondLoaded)
+
+        XCTAssertEqual(viewModel.archivedCount, 3)
+        XCTAssertNotNil(viewModel.lastError)
+        XCTAssertEqual(listRequests, 2)
+        XCTAssertEqual(countRequests, 2)
+    }
+
+    @MainActor
+    func testInvalidArchivedCountIsSanitizedAndDoesNotPublishNegativeValue() async throws {
+        let viewModel = try makeViewModel(handlesArchivedCount: false) { request in
+            switch request.url?.path {
+            case "/api/profiles/sessions":
+                return apiTestJSONResponse(
+                    #"{"sessions":[{"id":"session-abc","title":"Planning","profile":"default","archived":false}],"total":1}"#,
+                    for: request
+                )
+            case "/api/sessions":
+                return apiTestJSONResponse(#"{"sessions":[],"total":-1,"limit":0,"offset":0}"#, for: request)
+            default:
+                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+        }
+
+        let loaded = await viewModel.load()
+        XCTAssertTrue(loaded)
+
+        XCTAssertNil(viewModel.archivedCount)
+        XCTAssertEqual(viewModel.errorMessage, "Hermes did not return a valid archived session count.")
+        XCTAssertNotNil(viewModel.lastError)
+    }
+
+    @MainActor
+    func testMissingArchivedCountIsSanitizedWithoutDiscardingRows() async throws {
+        let viewModel = try makeViewModel(handlesArchivedCount: false) { request in
+            switch request.url?.path {
+            case "/api/profiles/sessions":
+                return apiTestJSONResponse(
+                    #"{"sessions":[{"id":"session-abc","title":"Planning","profile":"default","archived":false}],"total":1}"#,
+                    for: request
+                )
+            case "/api/sessions":
+                return apiTestJSONResponse(#"{"sessions":[],"limit":0,"offset":0}"#, for: request)
+            default:
+                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+        }
+
+        let loaded = await viewModel.load()
+        XCTAssertTrue(loaded)
+        XCTAssertEqual(viewModel.sessions.compactMap(\.sessionId), ["session-abc"])
+        XCTAssertNil(viewModel.archivedCount)
+        XCTAssertEqual(viewModel.errorMessage, "Hermes did not return a valid archived session count.")
+    }
+
+    @MainActor
+    func testNewerSameProfileArchivedCountWinsOverOlderPendingRequest() async throws {
+        let countStarted = expectation(description: "first archived count started")
+        ArchivedCountGateURLProtocol.configure {
+            countStarted.fulfill()
+        }
+        let viewModel = try makeArchivedCountGateViewModel()
+
+        let olderLoad = Task { @MainActor in await viewModel.load() }
+        await fulfillment(of: [countStarted], timeout: 1)
+        let newerLoaded = await viewModel.load()
+        XCTAssertTrue(newerLoaded)
+        XCTAssertEqual(viewModel.archivedCount, 4)
+
+        ArchivedCountGateURLProtocol.releaseCount()
+        let olderLoaded = await olderLoad.value
+        XCTAssertTrue(olderLoaded)
+        XCTAssertEqual(viewModel.archivedCount, 4)
+        XCTAssertEqual(ArchivedCountGateURLProtocol.countProfiles, ["default", "default"])
+    }
+
+    @MainActor
+    func testProfileSwitchClearsArchivedCountBeforeNewProfileFetch() async throws {
+        let countStarted = expectation(description: "default archived count started")
+        ArchivedCountGateURLProtocol.configure {
+            countStarted.fulfill()
+        }
+        let viewModel = try makeArchivedCountGateViewModel()
+        let workProfile = try JSONDecoder().decode(
+            ProfileSummary.self,
+            from: Data(#"{"name":"work"}"#.utf8)
+        )
+
+        let initialLoad = Task { @MainActor in await viewModel.load() }
+        await fulfillment(of: [countStarted], timeout: 1)
+        ArchivedCountGateURLProtocol.releaseCount()
+        let initialLoaded = await initialLoad.value
+        XCTAssertTrue(initialLoaded)
+        XCTAssertEqual(viewModel.archivedCount, 4)
+
+        let switched = await viewModel.switchActiveProfile(workProfile)
+        XCTAssertTrue(switched)
+        XCTAssertNil(viewModel.archivedCount)
+    }
+
+    @MainActor
     func testDuplicateBranchesWithCopyTitleLoadsDetailAndInsertsWhenReloadOmitsCopy() async throws {
-        var branchCount = 0
+        let transport = SessionDuplicateTransport(profile: "default")
+        let runtime = try HermesServerRuntime(origin: URL(string: "https://example.test")!) { sink in
+            transport.installSink(sink)
+            return transport
+        }
         var didRequestDuplicatedDetail = false
         let source = try makeSessionSummary(
             id: "session-abc",
@@ -2178,45 +2400,30 @@ final class SessionListMutationTests: XCTestCase {
             pinned: false,
             archived: false
         )
-        let viewModel = try makeViewModel { request in
+        let viewModel = try makeViewModel(gatewayRuntimeProvider: { _ in runtime }) { request in
             switch request.url?.path {
-            case "/api/session/branch":
-                branchCount += 1
-                let body = try XCTUnwrap(apiTestJSONBody(from: request))
-                XCTAssertEqual(body["session_id"] as? String, "session-abc")
-                XCTAssertEqual(body["title"] as? String, "Planning (copy)")
-
-                if branchCount == 1 {
-                    return apiTestJSONResponse("""
-                    {
-                      "session_id": "copy-123",
-                      "parent_session_id": "session-abc"
-                    }
-                    """, for: request)
-                }
-
-                return apiTestJSONResponse("""
-                {
-                  "error": "copy failed"
-                }
-                """, for: request)
-            case "/api/session":
+            case "/api/sessions/session-abc/messages":
+                return apiTestJSONResponse(
+                    #"{"session_id":"session-abc","messages":[],"pagination":{"returned":0}}"#,
+                    for: request
+                )
+            case "/api/sessions/copy-123/messages":
+                return apiTestJSONResponse(
+                    #"{"session_id":"copy-123","messages":[],"pagination":{"returned":0}}"#,
+                    for: request
+                )
+            case "/api/sessions/copy-123":
                 didRequestDuplicatedDetail = true
-                return apiTestJSONResponse("""
-                {
-                  "session": {
-                    "session_id": "copy-123",
-                    "title": "Planning (copy)",
-                    "archived": false
-                  }
-                }
-                """, for: request)
-            case "/api/sessions":
+                return apiTestJSONResponse(
+                    #"{"id":"copy-123","profile":"default","title":"Planning (copy)","archived":0}"#,
+                    for: request
+                )
+            case "/api/profiles/sessions":
                 return apiTestJSONResponse("""
                 {
                   "sessions": [
                     {
-                      "session_id": "session-abc",
+                      "id": "session-abc",
                       "title": "Planning",
                       "archived": false
                     }
@@ -2230,46 +2437,251 @@ final class SessionListMutationTests: XCTestCase {
         }
 
         let duplicated = await viewModel.duplicate(source)
-        let missingID = await viewModel.duplicate(source)
 
         XCTAssertTrue(didRequestDuplicatedDetail)
+        XCTAssertEqual(transport.methods(), ["session.resume", "session.branch"])
+        XCTAssertEqual(transport.branchFields()["name"], .string("Planning (copy)"))
         XCTAssertEqual(duplicated?.sessionId, "copy-123")
         XCTAssertEqual(viewModel.sessions.compactMap(\.sessionId), ["copy-123", "session-abc"])
-        XCTAssertNil(missingID)
-        XCTAssertEqual(viewModel.actionErrorMessage, "copy failed")
+        XCTAssertNil(viewModel.actionErrorMessage)
+        await runtime.stop()
+    }
+
+    @MainActor
+    func testDuplicateUnknownOutcomeBlocksSecondBranchAfterTemporaryControllerInvalidates() async throws {
+        let transport = SessionDuplicateTransport(
+            profile: "default",
+            branchError: .timeout(method: "session.branch", requestID: "lost-ack")
+        )
+        let runtime = try HermesServerRuntime(origin: URL(string: "https://example.test")!) { sink in
+            transport.installSink(sink)
+            return transport
+        }
+        let source = SessionSummary(sessionId: "session-abc", title: "Planning")
+        let viewModel = try makeViewModel(gatewayRuntimeProvider: { _ in runtime }) { request in
+            guard request.url?.path == "/api/sessions/session-abc/messages" else {
+                XCTFail("Unexpected request: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+            return apiTestJSONResponse(
+                #"{"session_id":"session-abc","messages":[],"pagination":{"returned":0}}"#,
+                for: request
+            )
+        }
+
+        let first = await viewModel.duplicate(source)
+        let second = await viewModel.duplicate(source)
+        XCTAssertNil(first)
+        XCTAssertNil(second)
+
+        XCTAssertEqual(transport.methods().filter { $0 == "session.branch" }.count, 1)
+        XCTAssertTrue(viewModel.actionErrorMessage?.contains("another duplicate is blocked") == true)
+        await runtime.stop()
+    }
+
+    @MainActor
+    func testDuplicateRunningSourceRefusesWithoutBranch() async throws {
+        let transport = SessionDuplicateTransport(profile: "default", running: true)
+        let runtime = try HermesServerRuntime(origin: URL(string: "https://example.test")!) { sink in
+            transport.installSink(sink); return transport
+        }
+        let viewModel = try makeViewModel(gatewayRuntimeProvider: { _ in runtime }) { request in
+            XCTAssertEqual(request.url?.path, "/api/sessions/session-abc/messages")
+            return apiTestJSONResponse(
+                #"{"session_id":"session-abc","messages":[],"pagination":{"returned":0}}"#,
+                for: request
+            )
+        }
+
+        let result = await viewModel.duplicate(SessionSummary(sessionId: "session-abc", title: "Planning"))
+
+        XCTAssertNil(result)
+        XCTAssertFalse(transport.methods().contains("session.branch"))
+        XCTAssertTrue(viewModel.actionErrorMessage?.contains("still responding") == true)
+        await runtime.stop()
+    }
+
+    @MainActor
+    func testKnownChildDetailFailureRecoversExactListRowWithoutRebranch() async throws {
+        let transport = SessionDuplicateTransport(profile: "default")
+        let runtime = try HermesServerRuntime(origin: URL(string: "https://example.test")!) { sink in
+            transport.installSink(sink); return transport
+        }
+        let viewModel = try makeViewModel(gatewayRuntimeProvider: { _ in runtime }) { request in
+            switch request.url?.path {
+            case "/api/sessions/session-abc/messages", "/api/sessions/copy-123/messages":
+                let id = request.url!.path.contains("copy-123") ? "copy-123" : "session-abc"
+                return apiTestJSONResponse(
+                    #"{"session_id":"\#(id)","messages":[],"pagination":{"returned":0}}"#,
+                    for: request
+                )
+            case "/api/sessions/copy-123":
+                throw URLError(.networkConnectionLost)
+            case "/api/profiles/sessions":
+                return apiTestJSONResponse(
+                    #"{"sessions":[{"id":"copy-123","profile":"default","title":"Planning (copy)"},{"id":"session-abc","profile":"default","title":"Planning"}]}"#,
+                    for: request
+                )
+            default:
+                XCTFail("Unexpected request: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+        }
+
+        let result = await viewModel.duplicate(SessionSummary(sessionId: "session-abc", title: "Planning"))
+
+        XCTAssertEqual(result?.sessionId, "copy-123")
+        XCTAssertEqual(transport.methods().filter { $0 == "session.branch" }.count, 1)
+        XCTAssertNil(viewModel.actionErrorMessage)
+        await runtime.stop()
+    }
+
+    @MainActor
+    func testProfileSwitchDuringKnownChildDetailFailureKeepsOriginalScopeBlocked() async throws {
+        let detailStarted = expectation(description: "child detail started")
+        let releaseDetail = DispatchSemaphore(value: 0)
+        let transport = SessionDuplicateTransport(profile: "default")
+        let runtime = try HermesServerRuntime(origin: URL(string: "https://example.test")!) { sink in
+            transport.installSink(sink); return transport
+        }
+        let viewModel = try makeViewModel(gatewayRuntimeProvider: { _ in runtime }) { request in
+            switch request.url?.path {
+            case "/api/sessions/session-abc/messages", "/api/sessions/copy-123/messages":
+                let id = request.url!.path.contains("copy-123") ? "copy-123" : "session-abc"
+                return apiTestJSONResponse(
+                    #"{"session_id":"\#(id)","messages":[],"pagination":{"returned":0}}"#,
+                    for: request
+                )
+            case "/api/sessions/copy-123":
+                detailStarted.fulfill()
+                guard releaseDetail.wait(timeout: .now() + 2) == .success else {
+                    throw URLError(.timedOut)
+                }
+                throw URLError(.networkConnectionLost)
+            default:
+                XCTFail("Unexpected request: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+        }
+        let source = SessionSummary(sessionId: "session-abc", title: "Planning", profile: "default")
+        let other = try JSONDecoder().decode(ProfileSummary.self, from: Data(#"{"name":"other"}"#.utf8))
+        let original = try JSONDecoder().decode(ProfileSummary.self, from: Data(#"{"name":"default"}"#.utf8))
+
+        let duplicate = Task { @MainActor in await viewModel.duplicate(source) }
+        await fulfillment(of: [detailStarted], timeout: 1)
+        let switchedAway = await viewModel.switchActiveProfile(other)
+        releaseDetail.signal()
+        let staleResult = await duplicate.value
+        XCTAssertTrue(switchedAway)
+        XCTAssertNil(staleResult)
+        XCTAssertNil(viewModel.actionErrorMessage, "The old profile cannot surface an error in the new scope")
+        let switchedBack = await viewModel.switchActiveProfile(original)
+        XCTAssertTrue(switchedBack)
+        let blocked = await viewModel.duplicate(source)
+
+        XCTAssertNil(blocked)
+        XCTAssertEqual(transport.methods().filter { $0 == "session.branch" }.count, 1)
+        XCTAssertTrue(viewModel.actionErrorMessage?.contains("another duplicate is blocked") == true)
+        await runtime.stop()
+    }
+
+    @MainActor
+    func testSidebarDuplicateDoesNotInvalidateOpenControllerOnSharedRuntime() async throws {
+        let transport = SessionDuplicateTransport(profile: "default")
+        let runtime = try HermesServerRuntime(origin: URL(string: "https://example.test")!) { sink in
+            transport.installSink(sink); return transport
+        }
+        let client = try makeClient { request in
+            if Self.isArchivedCountRequest(request) {
+                let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems
+                XCTAssertEqual(request.httpMethod, "GET")
+                XCTAssertEqual(query?.first { $0.name == "profile" }?.value, "default")
+                return apiTestJSONResponse(#"{"sessions":[],"total":0,"limit":0,"offset":0}"#, for: request)
+            }
+            switch request.url?.path {
+            case "/api/sessions/session-abc/messages", "/api/sessions/copy-123/messages":
+                let id = request.url!.path.contains("copy-123") ? "copy-123" : "session-abc"
+                return apiTestJSONResponse(
+                    #"{"session_id":"\#(id)","messages":[],"pagination":{"returned":0}}"#,
+                    for: request
+                )
+            case "/api/sessions/copy-123":
+                return apiTestJSONResponse(
+                    #"{"id":"copy-123","profile":"default","title":"Planning (copy)"}"#,
+                    for: request
+                )
+            case "/api/profiles/sessions":
+                return apiTestJSONResponse(#"{"sessions":[{"id":"session-abc","profile":"default"}]}"#, for: request)
+            default:
+                XCTFail("Unexpected request: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+        }
+        let openController = GatewayConversationController(
+            runtime: runtime, client: client, storedID: "session-abc", profile: "default"
+        )
+        try await openController.open()
+        var delivered = 0
+        let eventDelivered = expectation(description: "open controller still receives events")
+        openController.onEvent = { _ in delivered += 1; eventDelivered.fulfill() }
+        let viewModel = SessionListViewModel(
+            server: URL(string: "https://example.test")!, client: client,
+            gatewayRuntimeProvider: { _ in runtime }
+        )
+
+        let duplicated = await viewModel.duplicate(
+            SessionSummary(sessionId: "session-abc", title: "Planning", profile: "default")
+        )
+        transport.emit(type: "message.start", sessionID: "runtime-parent")
+        await fulfillment(of: [eventDelivered], timeout: 1)
+
+        XCTAssertEqual(duplicated?.sessionId, "copy-123")
+        XCTAssertEqual(delivered, 1)
+        XCTAssertFalse(openController.isDisposed)
+        XCTAssertFalse(transport.methods().contains("session.close"))
+        openController.invalidate()
+        await runtime.stop()
     }
 
     @MainActor
     func testRemoteSessionSearchAppendsLoadedContentMatchesAfterLocalMatchesAndPreservesProjectScope() async throws {
-        let viewModel = try makeViewModel { request in
+        let organizer = LocalOrganizerStore(defaults: UserDefaults(suiteName: "SessionListMutationTests.searchGroups.\(UUID().uuidString)")!)
+        let server = URL(string: "https://example.test")!
+        let firstGroupID = try XCTUnwrap(organizer.createGroup(name: "One", color: nil, server: server, profile: "default").projectId)
+        let secondGroupID = try XCTUnwrap(organizer.createGroup(name: "Two", color: nil, server: server, profile: "default").projectId)
+        for id in ["local-title", "content-project", "archived-session"] {
+            try organizer.assignSession(id, toGroup: firstGroupID, server: server, profile: "default")
+        }
+        try organizer.assignSession("content-other-project", toGroup: secondGroupID, server: server, profile: "default")
+        let viewModel = try makeViewModel(organizerStore: organizer) { request in
             switch request.url?.path {
-            case "/api/sessions":
+            case "/api/profiles/sessions":
                 return apiTestJSONResponse("""
                 {
                   "sessions": [
                     {
-                      "session_id": "local-title",
+                      "id": "local-title",
                       "title": "Needle planning",
                       "project_id": "project-1",
                       "last_message_at": 30,
                       "archived": false
                     },
                     {
-                      "session_id": "content-project",
+                      "id": "content-project",
                       "title": "Budget",
                       "project_id": "project-1",
                       "last_message_at": 20,
                       "archived": false
                     },
                     {
-                      "session_id": "content-other-project",
+                      "id": "content-other-project",
                       "title": "Roadmap",
                       "project_id": "project-2",
                       "last_message_at": 40,
                       "archived": false
                     },
                     {
-                      "session_id": "archived-session",
+                      "id": "archived-session",
                       "title": "Archived",
                       "project_id": "project-1",
                       "archived": true
@@ -2281,38 +2693,54 @@ final class SessionListMutationTests: XCTestCase {
                 let components = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
                 let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
                 XCTAssertEqual(query["q"], "needle")
-                XCTAssertEqual(query["content"], "1")
-                XCTAssertEqual(query["depth"], "5")
+                XCTAssertEqual(query["profile"], "default")
+                XCTAssertEqual(query["limit"], "20")
 
                 return apiTestJSONResponse("""
                 {
-                  "sessions": [
-                    {"session_id": "content-project", "title": "Budget", "match_type": "content"},
-                    {"session_id": "content-other-project", "title": "Roadmap", "match_type": "content"},
-                    {"session_id": "local-title", "title": "Needle planning", "match_type": "content"},
-                    {"session_id": "unknown-session", "title": "Unknown", "match_type": "content"},
-                    {"session_id": "archived-session", "title": "Archived", "match_type": "content"},
-                    {"session_id": "title-only", "title": "Needle remote", "match_type": "title"}
+                  "results": [
+                    {"session_id": "content-project", "lineage_root": "content-project", "snippet": "needle", "role": "user", "archived": false},
+                    {"session_id": "content-other-project", "lineage_root": "content-other-project", "snippet": "needle", "role": "assistant", "archived": false},
+                    {"session_id": "local-title", "lineage_root": "local-title", "snippet": "needle", "role": "user", "archived": false},
+                    {"session_id": "unknown-session", "lineage_root": "unknown-session", "snippet": "needle", "role": "user", "archived": false},
+                    {"session_id": "archived-session", "lineage_root": "archived-session", "snippet": "needle", "role": "user", "archived": true},
+                    {"session_id": "title-only", "lineage_root": "title-only", "snippet": "needle", "role": "user", "archived": false}
                   ],
-                  "query": "needle",
-                  "count": 6
+                  "future_field": true
                 }
                 """, for: request)
+            case "/api/sessions/unknown-session", "/api/sessions/title-only":
+                let url = try XCTUnwrap(request.url)
+                XCTAssertEqual(request.httpMethod, "GET")
+                XCTAssertEqual(
+                    URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
+                        .first(where: { $0.name == "profile" })?.value,
+                    "default"
+                )
+                return (
+                    try XCTUnwrap(HTTPURLResponse(url: url, statusCode: 404, httpVersion: nil, headerFields: nil)),
+                    Data(#"{"detail":"Session not found"}"#.utf8)
+                )
             default:
                 XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
                 throw URLError(.badURL)
             }
         }
 
-        await viewModel.load()
+        try primeSessions([
+            SessionSummary(sessionId: "local-title", title: "Needle planning", lastMessageAt: 30, projectId: "project-1"),
+            SessionSummary(sessionId: "content-project", title: "Budget", lastMessageAt: 20, projectId: "project-1"),
+            SessionSummary(sessionId: "content-other-project", title: "Roadmap", lastMessageAt: 40, projectId: "project-2"),
+            SessionSummary(sessionId: "archived-session", title: "Archived", archived: true, projectId: "project-1")
+        ], in: viewModel)
         await viewModel.searchSessions(query: "needle", debounceNanoseconds: 0)
 
         XCTAssertEqual(
-            viewModel.visibleSessions(searchText: "needle", selectedProjectID: "project-1").compactMap(\.sessionId),
+            viewModel.visibleSessions(searchText: "needle", selectedProjectID: firstGroupID).compactMap(\.sessionId),
             ["local-title", "content-project"]
         )
         XCTAssertEqual(
-            viewModel.visibleSessions(searchText: "needle", selectedProjectID: "project-2").compactMap(\.sessionId),
+            viewModel.visibleSessions(searchText: "needle", selectedProjectID: secondGroupID).compactMap(\.sessionId),
             ["content-other-project"]
         )
         XCTAssertEqual(
@@ -2326,17 +2754,17 @@ final class SessionListMutationTests: XCTestCase {
         let oldSearchStarted = expectation(description: "old search started")
         let viewModel = try makeViewModel { request in
             switch request.url?.path {
-            case "/api/sessions":
+            case "/api/profiles/sessions":
                 return apiTestJSONResponse("""
                 {
                   "sessions": [
                     {
-                      "session_id": "old-content",
+                      "id": "old-content",
                       "title": "First result",
                       "archived": false
                     },
                     {
-                      "session_id": "new-content",
+                      "id": "new-content",
                       "title": "Second result",
                       "archived": false
                     }
@@ -2353,11 +2781,9 @@ final class SessionListMutationTests: XCTestCase {
                     Thread.sleep(forTimeInterval: 0.15)
                     return apiTestJSONResponse("""
                     {
-                      "sessions": [
-                        {"session_id": "old-content", "title": "First result", "match_type": "content"}
-                      ],
-                      "query": "old",
-                      "count": 1
+                      "results": [
+                        {"session_id": "old-content", "lineage_root": "old-content", "snippet": "old", "role": "user", "archived": false}
+                      ]
                     }
                     """, for: request)
                 }
@@ -2365,11 +2791,9 @@ final class SessionListMutationTests: XCTestCase {
                 if searchQuery == "new" {
                     return apiTestJSONResponse("""
                     {
-                      "sessions": [
-                        {"session_id": "new-content", "title": "Second result", "match_type": "content"}
-                      ],
-                      "query": "new",
-                      "count": 1
+                      "results": [
+                        {"session_id": "new-content", "lineage_root": "new-content", "snippet": "new", "role": "user", "archived": false}
+                      ]
                     }
                     """, for: request)
                 }
@@ -2382,7 +2806,10 @@ final class SessionListMutationTests: XCTestCase {
             }
         }
 
-        await viewModel.load()
+        try primeSessions([
+            SessionSummary(sessionId: "old-content", title: "First result"),
+            SessionSummary(sessionId: "new-content", title: "Second result")
+        ], in: viewModel)
         let oldTask = Task {
             await viewModel.searchSessions(query: "old", debounceNanoseconds: 0)
         }
@@ -2607,19 +3034,19 @@ final class SessionListMutationTests: XCTestCase {
     @MainActor
     func testScheduledSessionGroupsSeparatesAndCapsNewestNonArchivedCronSessions() async throws {
         let viewModel = try makeViewModel { request in
-            XCTAssertEqual(request.url?.path, "/api/sessions")
+            XCTAssertEqual(request.url?.path, "/api/profiles/sessions")
             return apiTestJSONResponse("""
             {
               "sessions": [
-                {"session_id":"ordinary","title":"Ordinary","updated_at":50},
-                {"session_id":"cron_1","title":"Scheduled 1","updated_at":10},
-                {"session_id":"cron_2","title":"Scheduled 2","updated_at":20},
-                {"session_id":"cron_3","title":"Scheduled 3","updated_at":30},
-                {"session_id":"cron_4","title":"Scheduled 4","updated_at":40},
-                {"session_id":"cron_5","title":"Scheduled 5","updated_at":50},
-                {"session_id":"cron_6","title":"Scheduled 6","updated_at":60},
-                {"session_id":"cron_7","title":"Scheduled 7","updated_at":70},
-                {"session_id":"cron_archived","title":"Archived scheduled","updated_at":80,"archived":true}
+                {"id":"ordinary","title":"Ordinary","last_active":50},
+                {"id":"cron_1","title":"Scheduled 1","last_active":10},
+                {"id":"cron_2","title":"Scheduled 2","last_active":20},
+                {"id":"cron_3","title":"Scheduled 3","last_active":30},
+                {"id":"cron_4","title":"Scheduled 4","last_active":40},
+                {"id":"cron_5","title":"Scheduled 5","last_active":50},
+                {"id":"cron_6","title":"Scheduled 6","last_active":60},
+                {"id":"cron_7","title":"Scheduled 7","last_active":70},
+                {"id":"cron_archived","title":"Archived scheduled","last_active":80,"archived":true}
               ]
             }
             """, for: request)
@@ -2645,17 +3072,17 @@ final class SessionListMutationTests: XCTestCase {
     @MainActor
     func testScheduledSessionGroupsRespectCronVisibilityAndSearchWithoutCappingMatches() async throws {
         let viewModel = try makeViewModel { request in
-            XCTAssertEqual(request.url?.path, "/api/sessions")
+            XCTAssertEqual(request.url?.path, "/api/profiles/sessions")
             return apiTestJSONResponse("""
             {
               "sessions": [
-                {"session_id":"ordinary","title":"Needle ordinary","updated_at":5},
-                {"session_id":"cron_1","title":"Needle scheduled 1","updated_at":10},
-                {"session_id":"cron_2","title":"Needle scheduled 2","updated_at":20},
-                {"session_id":"cron_3","title":"Needle scheduled 3","updated_at":30},
-                {"session_id":"cron_4","title":"Needle scheduled 4","updated_at":40},
-                {"session_id":"cron_5","title":"Needle scheduled 5","updated_at":50},
-                {"session_id":"cron_6","title":"Needle scheduled 6","updated_at":60}
+                {"id":"ordinary","title":"Needle ordinary","last_active":5},
+                {"id":"cron_1","title":"Needle scheduled 1","last_active":10},
+                {"id":"cron_2","title":"Needle scheduled 2","last_active":20},
+                {"id":"cron_3","title":"Needle scheduled 3","last_active":30},
+                {"id":"cron_4","title":"Needle scheduled 4","last_active":40},
+                {"id":"cron_5","title":"Needle scheduled 5","last_active":50},
+                {"id":"cron_6","title":"Needle scheduled 6","last_active":60}
               ]
             }
             """, for: request)
@@ -2688,24 +3115,34 @@ final class SessionListMutationTests: XCTestCase {
 
     @MainActor
     func testScheduledSessionGroupsApplyProjectFilterToScheduledAndOrdinaryRows() async throws {
-        let viewModel = try makeViewModel { request in
-            XCTAssertEqual(request.url?.path, "/api/sessions")
+        let organizer = LocalOrganizerStore(defaults: UserDefaults(suiteName: "SessionListMutationTests.scheduledGroups.\(UUID().uuidString)")!)
+        let server = URL(string: "https://example.test")!
+        let groupID = try XCTUnwrap(organizer.createGroup(name: "One", color: nil, server: server, profile: "default").projectId)
+        try organizer.assignSession("ordinary-1", toGroup: groupID, server: server, profile: "default")
+        try organizer.assignSession("cron_1", toGroup: groupID, server: server, profile: "default")
+        let viewModel = try makeViewModel(organizerStore: organizer) { request in
+            XCTAssertEqual(request.url?.path, "/api/profiles/sessions")
             return apiTestJSONResponse("""
             {
               "sessions": [
-                {"session_id":"ordinary-1","title":"Ordinary one","project_id":"project-1"},
-                {"session_id":"ordinary-2","title":"Ordinary two","project_id":"project-2"},
-                {"session_id":"cron_1","title":"Scheduled one","project_id":"project-1"},
-                {"session_id":"cron_2","title":"Scheduled two","project_id":"project-2"}
+                {"id":"ordinary-1","title":"Ordinary one","project_id":"project-1"},
+                {"id":"ordinary-2","title":"Ordinary two","project_id":"project-2"},
+                {"id":"cron_1","title":"Scheduled one","project_id":"project-1"},
+                {"id":"cron_2","title":"Scheduled two","project_id":"project-2"}
               ]
             }
             """, for: request)
         }
 
-        await viewModel.load()
+        try primeSessions([
+            SessionSummary(sessionId: "ordinary-1", title: "Ordinary one", projectId: "project-1"),
+            SessionSummary(sessionId: "ordinary-2", title: "Ordinary two", projectId: "project-2"),
+            SessionSummary(sessionId: "cron_1", title: "Scheduled one", projectId: "project-1"),
+            SessionSummary(sessionId: "cron_2", title: "Scheduled two", projectId: "project-2")
+        ], in: viewModel)
         let groups = viewModel.scheduledSessionGroups(
             searchText: "",
-            selectedProjectID: "project-1"
+            selectedProjectID: groupID
         )
 
         XCTAssertEqual(groups.ordinary.compactMap(\.sessionId), ["ordinary-1"])
@@ -2718,21 +3155,27 @@ final class SessionListMutationTests: XCTestCase {
     @MainActor
     func testVisibleSessionsFiltersCronAndCliIndependently() async throws {
         let viewModel = try makeViewModel { request in
-            XCTAssertEqual(request.url?.path, "/api/sessions")
+            XCTAssertEqual(request.url?.path, "/api/profiles/sessions")
             return apiTestJSONResponse("""
             {
               "sessions": [
-                {"session_id": "normal-1", "title": "Normal one", "last_message_at": 50, "archived": false},
-                {"session_id": "cron_job_1", "title": "Nightly digest", "last_message_at": 40, "archived": false},
-                {"session_id": "tagged-cron", "title": "Tagged cron", "source_tag": "cron", "last_message_at": 30, "archived": false},
-                {"session_id": "cli-1", "title": "CLI import", "is_cli_session": true, "last_message_at": 20, "archived": false},
-                {"session_id": "normal-2", "title": "Normal two", "last_message_at": 10, "archived": false}
+                {"id": "normal-1", "title": "Normal one", "last_message_at": 50, "archived": false},
+                {"id": "cron_job_1", "title": "Nightly digest", "last_message_at": 40, "archived": false},
+                {"id": "tagged-cron", "title": "Tagged cron", "source_tag": "cron", "last_message_at": 30, "archived": false},
+                {"id": "cli-1", "title": "CLI import", "is_cli_session": true, "last_message_at": 20, "archived": false},
+                {"id": "normal-2", "title": "Normal two", "last_message_at": 10, "archived": false}
               ]
             }
             """, for: request)
         }
 
-        await viewModel.load()
+        try primeSessions([
+            SessionSummary(sessionId: "normal-1", title: "Normal one", lastMessageAt: 50),
+            SessionSummary(sessionId: "cron_job_1", title: "Nightly digest", lastMessageAt: 40),
+            SessionSummary(sessionId: "tagged-cron", title: "Tagged cron", lastMessageAt: 30, sourceTag: "cron"),
+            SessionSummary(sessionId: "cli-1", title: "CLI import", lastMessageAt: 20, isCliSession: true),
+            SessionSummary(sessionId: "normal-2", title: "Normal two", lastMessageAt: 10)
+        ], in: viewModel)
 
         // Default keeps every row.
         XCTAssertEqual(
@@ -2773,28 +3216,32 @@ final class SessionListMutationTests: XCTestCase {
 
     @MainActor
     func testVisibleSessionsFiltersSubagentsAcrossSearchAndProjects() async throws {
-        let viewModel = try makeViewModel { request in
+        let organizer = LocalOrganizerStore(defaults: UserDefaults(suiteName: "SessionListMutationTests.subagentGroups.\(UUID().uuidString)")!)
+        let server = URL(string: "https://example.test")!
+        let groupID = try XCTUnwrap(organizer.createGroup(name: "One", color: nil, server: server, profile: "default").projectId)
+        for id in ["normal-p1", "subagent-p1", "fork-p1"] {
+            try organizer.assignSession(id, toGroup: groupID, server: server, profile: "default")
+        }
+        let viewModel = try makeViewModel(organizerStore: organizer) { request in
             switch request.url?.path {
-            case "/api/sessions":
+            case "/api/profiles/sessions":
                 return apiTestJSONResponse("""
                 {
                   "sessions": [
-                    {"session_id": "normal-p1", "title": "Planning", "project_id": "p1", "last_message_at": 40},
-                    {"session_id": "subagent-p1", "title": "Delegated research", "project_id": "p1", "source_tag": "subagent", "read_only": true, "last_message_at": 30},
-                    {"session_id": "fork-p1", "title": "Ordinary fork", "project_id": "p1", "parent_session_id": "normal-p1", "relationship_type": "fork", "last_message_at": 20},
-                    {"session_id": "normal-p2", "title": "Other project", "project_id": "p2", "last_message_at": 10}
+                    {"id": "normal-p1", "title": "Planning", "project_id": "p1", "last_message_at": 40},
+                    {"id": "subagent-p1", "title": "Delegated research", "project_id": "p1", "source_tag": "subagent", "read_only": true, "last_message_at": 30},
+                    {"id": "fork-p1", "title": "Ordinary fork", "project_id": "p1", "parent_session_id": "normal-p1", "relationship_type": "fork", "last_message_at": 20},
+                    {"id": "normal-p2", "title": "Other project", "project_id": "p2", "last_message_at": 10}
                   ]
                 }
                 """, for: request)
             case "/api/sessions/search":
                 return apiTestJSONResponse("""
                 {
-                  "sessions": [
-                    {"session_id": "subagent-p1", "title": "Delegated research", "match_type": "content"},
-                    {"session_id": "normal-p2", "title": "Other project", "match_type": "content"}
-                  ],
-                  "query": "needle",
-                  "count": 2
+                  "results": [
+                    {"session_id": "subagent-p1", "lineage_root": "subagent-p1", "snippet": "needle", "role": "user", "archived": false},
+                    {"session_id": "normal-p2", "lineage_root": "normal-p2", "snippet": "needle", "role": "assistant", "archived": false}
+                  ]
                 }
                 """, for: request)
             default:
@@ -2803,7 +3250,12 @@ final class SessionListMutationTests: XCTestCase {
             }
         }
 
-        await viewModel.load()
+        try primeSessions([
+            SessionSummary(sessionId: "normal-p1", title: "Planning", lastMessageAt: 40, projectId: "p1"),
+            SessionSummary(sessionId: "subagent-p1", title: "Delegated research", lastMessageAt: 30, projectId: "p1", sourceTag: "subagent", readOnly: true),
+            SessionSummary(sessionId: "fork-p1", title: "Ordinary fork", lastMessageAt: 20, projectId: "p1", parentSessionId: "normal-p1", relationshipType: "fork"),
+            SessionSummary(sessionId: "normal-p2", title: "Other project", lastMessageAt: 10, projectId: "p2")
+        ], in: viewModel)
         let hidden = AutomatedSessionVisibility(showsCron: true, showsCli: true)
         let shown = AutomatedSessionVisibility(
             showsCron: true,
@@ -2814,7 +3266,7 @@ final class SessionListMutationTests: XCTestCase {
         XCTAssertEqual(
             viewModel.visibleSessions(
                 searchText: "",
-                selectedProjectID: "p1",
+                selectedProjectID: groupID,
                 automatedVisibility: hidden
             ).compactMap(\.sessionId),
             ["normal-p1", "fork-p1"]
@@ -2822,7 +3274,7 @@ final class SessionListMutationTests: XCTestCase {
         XCTAssertEqual(
             viewModel.visibleSessions(
                 searchText: "",
-                selectedProjectID: "p1",
+                selectedProjectID: groupID,
                 automatedVisibility: shown
             ).compactMap(\.sessionId),
             ["normal-p1", "subagent-p1", "fork-p1"]
@@ -2848,14 +3300,14 @@ final class SessionListMutationTests: XCTestCase {
         XCTAssertTrue(
             viewModel.visibleSessions(
                 searchText: "needle",
-                selectedProjectID: "p1",
+                selectedProjectID: groupID,
                 automatedVisibility: hidden
             ).isEmpty
         )
         XCTAssertEqual(
             viewModel.visibleSessions(
                 searchText: "needle",
-                selectedProjectID: "p1",
+                selectedProjectID: groupID,
                 automatedVisibility: shown
             ).compactMap(\.sessionId),
             ["subagent-p1"]
@@ -2864,28 +3316,32 @@ final class SessionListMutationTests: XCTestCase {
 
     @MainActor
     func testVisibleSessionsFiltersClaudeCodeAcrossSearchAndProjects() async throws {
-        let viewModel = try makeViewModel { request in
+        let organizer = LocalOrganizerStore(defaults: UserDefaults(suiteName: "SessionListMutationTests.claudeGroups.\(UUID().uuidString)")!)
+        let server = URL(string: "https://example.test")!
+        let groupID = try XCTUnwrap(organizer.createGroup(name: "One", color: nil, server: server, profile: "default").projectId)
+        for id in ["normal-p1", "claude-p1", "cli-p1"] {
+            try organizer.assignSession(id, toGroup: groupID, server: server, profile: "default")
+        }
+        let viewModel = try makeViewModel(organizerStore: organizer) { request in
             switch request.url?.path {
-            case "/api/sessions":
+            case "/api/profiles/sessions":
                 return apiTestJSONResponse("""
                 {
                   "sessions": [
-                    {"session_id": "normal-p1", "title": "Planning", "project_id": "p1", "last_message_at": 40},
-                    {"session_id": "claude-p1", "title": "Imported transcript", "project_id": "p1", "source_tag": "claude_code", "raw_source": "claude_code", "is_cli_session": true, "read_only": true, "last_message_at": 30},
-                    {"session_id": "cli-p1", "title": "Terminal chat", "project_id": "p1", "source_tag": "cli", "is_cli_session": true, "last_message_at": 20},
-                    {"session_id": "normal-p2", "title": "Other project", "project_id": "p2", "last_message_at": 10}
+                    {"id": "normal-p1", "title": "Planning", "project_id": "p1", "last_message_at": 40},
+                    {"id": "claude-p1", "title": "Imported transcript", "project_id": "p1", "source_tag": "claude_code", "raw_source": "claude_code", "is_cli_session": true, "read_only": true, "last_message_at": 30},
+                    {"id": "cli-p1", "title": "Terminal chat", "project_id": "p1", "source_tag": "cli", "is_cli_session": true, "last_message_at": 20},
+                    {"id": "normal-p2", "title": "Other project", "project_id": "p2", "last_message_at": 10}
                   ]
                 }
                 """, for: request)
             case "/api/sessions/search":
                 return apiTestJSONResponse("""
                 {
-                  "sessions": [
-                    {"session_id": "claude-p1", "title": "Imported transcript", "match_type": "content"},
-                    {"session_id": "cli-p1", "title": "Terminal chat", "match_type": "content"}
-                  ],
-                  "query": "needle",
-                  "count": 2
+                  "results": [
+                    {"session_id": "claude-p1", "lineage_root": "claude-p1", "snippet": "needle", "role": "user", "archived": false},
+                    {"session_id": "cli-p1", "lineage_root": "cli-p1", "snippet": "needle", "role": "assistant", "archived": false}
+                  ]
                 }
                 """, for: request)
             default:
@@ -2894,7 +3350,12 @@ final class SessionListMutationTests: XCTestCase {
             }
         }
 
-        await viewModel.load()
+        try primeSessions([
+            SessionSummary(sessionId: "normal-p1", title: "Planning", lastMessageAt: 40, projectId: "p1"),
+            SessionSummary(sessionId: "claude-p1", title: "Imported transcript", lastMessageAt: 30, projectId: "p1", isCliSession: true, sourceTag: "claude_code", rawSource: "claude_code", readOnly: true),
+            SessionSummary(sessionId: "cli-p1", title: "Terminal chat", lastMessageAt: 20, projectId: "p1", isCliSession: true, sourceTag: "cli"),
+            SessionSummary(sessionId: "normal-p2", title: "Other project", lastMessageAt: 10, projectId: "p2")
+        ], in: viewModel)
         let hidden = AutomatedSessionVisibility(
             showsCron: true,
             showsCli: true,
@@ -2904,7 +3365,7 @@ final class SessionListMutationTests: XCTestCase {
         XCTAssertEqual(
             viewModel.visibleSessions(
                 searchText: "",
-                selectedProjectID: "p1",
+                selectedProjectID: groupID,
                 automatedVisibility: hidden
             ).compactMap(\.sessionId),
             ["normal-p1", "cli-p1"]
@@ -2915,7 +3376,7 @@ final class SessionListMutationTests: XCTestCase {
         XCTAssertEqual(
             viewModel.visibleSessions(
                 searchText: "needle",
-                selectedProjectID: "p1",
+                selectedProjectID: groupID,
                 automatedVisibility: hidden
             ).compactMap(\.sessionId),
             ["cli-p1"]
@@ -2924,11 +3385,66 @@ final class SessionListMutationTests: XCTestCase {
 
     @MainActor
     private func makeViewModel(
+        handlesArchivedCount: Bool = true,
+        gatewayRuntimeProvider: SessionListViewModel.GatewayRuntimeProvider? = nil,
+        organizerStore: LocalOrganizerStore? = nil,
         handler: @escaping (URLRequest) throws -> (HTTPURLResponse, Data)
     ) throws -> SessionListViewModel {
         let server = try XCTUnwrap(URL(string: "https://example.test"))
-        let client = try makeClient(server: server, handler: handler)
+        let client = try makeClient(server: server) { request in
+            if handlesArchivedCount, Self.isArchivedCountRequest(request) {
+                let components = try XCTUnwrap(URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false))
+                let query = Dictionary(uniqueKeysWithValues: (components.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+                XCTAssertEqual(request.httpMethod, "GET")
+                XCTAssertFalse(query["profile", default: ""].isEmpty)
+                XCTAssertEqual(query["limit"], "0")
+                XCTAssertEqual(query["offset"], "0")
+                XCTAssertEqual(query["order"], "recent")
+                XCTAssertEqual(query["archived"], "only")
+                return apiTestJSONResponse(#"{"sessions":[],"total":0,"limit":0,"offset":0}"#, for: request)
+            }
+            return try handler(request)
+        }
 
+        let isolatedOrganizer = organizerStore ?? LocalOrganizerStore(
+            defaults: UserDefaults(suiteName: "SessionListMutationTests.\(UUID().uuidString)")!
+        )
+        return SessionListViewModel(
+            server: server,
+            client: client,
+            gatewayRuntimeProvider: gatewayRuntimeProvider,
+            organizerStore: isolatedOrganizer
+        )
+    }
+
+    private static func isArchivedCountRequest(_ request: URLRequest) -> Bool {
+        guard request.url?.path == "/api/sessions" else { return false }
+        let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems
+        let values = Dictionary(uniqueKeysWithValues: (query ?? []).map { ($0.name, $0.value ?? "") })
+        return values["limit"] == "0" && values["archived"] == "only"
+    }
+
+    @MainActor
+    private func makeMetadataOverlayViewModel() throws -> SessionListViewModel {
+        let server = try XCTUnwrap(URL(string: "https://example.test"))
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MetadataOverlayURLProtocol.self]
+        let client = APIClient(
+            baseURL: server,
+            session: URLSession(configuration: configuration)
+        )
+        return SessionListViewModel(server: server, client: client)
+    }
+
+    @MainActor
+    private func makeArchivedCountGateViewModel() throws -> SessionListViewModel {
+        let server = try XCTUnwrap(URL(string: "https://example.test"))
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ArchivedCountGateURLProtocol.self]
+        let client = APIClient(
+            baseURL: server,
+            session: URLSession(configuration: configuration)
+        )
         return SessionListViewModel(server: server, client: client)
     }
 
@@ -2956,9 +3472,18 @@ final class SessionListMutationTests: XCTestCase {
         let container = try ModelContainer(
             for: CachedSession.self,
             CachedMessage.self,
+            CachedSessionPreviewRecord.self,
             configurations: configuration
         )
         return ModelContext(container)
+    }
+
+    @MainActor
+    private func primeSessions(_ sessions: [SessionSummary], in viewModel: SessionListViewModel) throws {
+        let context = try makeContext()
+        let server = try XCTUnwrap(URL(string: "https://example.test"))
+        try CacheStore.cacheSessions(sessions, serverURL: server, in: context)
+        viewModel.prepareInitialCachedSessions(modelContext: context)
     }
 
     @MainActor
@@ -2983,7 +3508,7 @@ final class SessionListMutationTests: XCTestCase {
             {
               "sessions": [
                 {
-                  "session_id": "session-abc",
+                  "id": "session-abc",
                   "title": "Planning",
                   "pinned": true,
                   "archived": false
@@ -2996,7 +3521,7 @@ final class SessionListMutationTests: XCTestCase {
             {
               "sessions": [
                 {
-                  "session_id": "session-abc",
+                  "id": "session-abc",
                   "title": "Planning",
                   "pinned": true,
                   "archived": true
@@ -3009,7 +3534,7 @@ final class SessionListMutationTests: XCTestCase {
             {
               "sessions": [
                 {
-                  "session_id": "session-abc",
+                  "id": "session-abc",
                   "title": "Planning",
                   "project_id": "project-1",
                   "archived": false
@@ -3028,7 +3553,7 @@ final class SessionListMutationTests: XCTestCase {
             {
               "sessions": [
                 {
-                  "session_id": "session-abc",
+                  "id": "session-abc",
                   "title": "Planning",
                   "pinned": false,
                   "archived": false
@@ -3085,6 +3610,27 @@ final class SessionListMutationTests: XCTestCase {
     }
 }
 
+private actor SessionExportWriterGate {
+    private(set) var url: URL?
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var released = false
+
+    func hold(_ url: URL, written: XCTestExpectation) async {
+        self.url = url
+        await withCheckedContinuation { continuation in
+            if released { continuation.resume() }
+            else { self.continuation = continuation }
+            written.fulfill()
+        }
+    }
+
+    func release() {
+        released = true
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
 private final class LockedSessionMutationRequestCounts {
     private let lock = NSLock()
     private var loadRequestCount = 0
@@ -3114,6 +3660,261 @@ private final class LockedSessionMutationRequestCounts {
     }
 }
 
+private final class ArchivedCountGateURLProtocol: URLProtocol {
+    private static let lock = NSLock()
+    private static var onFirstCountStarted: (() -> Void)?
+    private static var countContinuation: CheckedContinuation<Void, Never>?
+    private static var releaseRequested = false
+    private static var profiles: [String] = []
+    private var loadingTask: Task<Void, Never>?
+
+    static var countProfiles: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return profiles
+    }
+
+    static func configure(onFirstCountStarted: @escaping () -> Void) {
+        lock.lock()
+        Self.onFirstCountStarted = onFirstCountStarted
+        countContinuation = nil
+        releaseRequested = false
+        profiles = []
+        lock.unlock()
+    }
+
+    static func reset() {
+        lock.lock()
+        let continuation = countContinuation
+        countContinuation = nil
+        releaseRequested = false
+        onFirstCountStarted = nil
+        profiles = []
+        lock.unlock()
+        continuation?.resume()
+    }
+
+    static func releaseCount() {
+        lock.lock()
+        let continuation = countContinuation
+        countContinuation = nil
+        if continuation == nil {
+            releaseRequested = true
+        }
+        lock.unlock()
+        continuation?.resume()
+    }
+
+    private static func waitForRelease() async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if releaseRequested {
+                releaseRequested = false
+                lock.unlock()
+                continuation.resume()
+            } else {
+                countContinuation = continuation
+                lock.unlock()
+            }
+        }
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let url = request.url else { return }
+        let path = url.path
+        let profile = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+            .queryItems?
+            .first(where: { $0.name == "profile" })?.value ?? "default"
+        let responseBody: String
+        let shouldHold: Bool
+        let startedCallback: (() -> Void)?
+
+        Self.lock.lock()
+        switch path {
+        case "/api/profiles/sessions":
+            shouldHold = false
+            startedCallback = nil
+            responseBody = #"{"sessions":[{"id":"\#(profile)-session","title":"Planning","profile":"\#(profile)","archived":false}],"total":1}"#
+        case "/api/sessions":
+            Self.profiles.append(profile)
+            shouldHold = Self.profiles.count == 1
+            startedCallback = shouldHold ? Self.onFirstCountStarted : nil
+            responseBody = profile == "work"
+                ? #"{"sessions":[],"total":7,"limit":0,"offset":0}"#
+                : #"{"sessions":[],"total":4,"limit":0,"offset":0}"#
+        default:
+            shouldHold = false
+            startedCallback = nil
+            responseBody = #"{}"#
+        }
+        Self.lock.unlock()
+
+        startedCallback?()
+        loadingTask = Task { [weak self] in
+            guard let self else { return }
+            if shouldHold {
+                await Self.waitForRelease()
+            }
+            guard !Task.isCancelled else { return }
+            let response = HTTPURLResponse(
+                url: url,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: Data(responseBody.utf8))
+            client?.urlProtocolDidFinishLoading(self)
+        }
+    }
+
+    override func stopLoading() {
+        loadingTask?.cancel()
+    }
+}
+
+private final class MetadataOverlayURLProtocol: URLProtocol {
+    enum Scenario {
+        case pin
+        case sequential
+    }
+
+    private static let lock = NSLock()
+    private static var scenario: Scenario = .pin
+    private static var listCount = 0
+    private static var patchCount = 0
+    private static var staleLoadContinuation: CheckedContinuation<Void, Never>?
+    private static var releaseRequested = false
+    private static var staleLoadStarted: (() -> Void)?
+    private var loadingTask: Task<Void, Never>?
+
+    static var listRequestCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return listCount
+    }
+
+    static func configure(_ scenario: Scenario, onStaleLoadStarted: @escaping () -> Void) {
+        lock.lock()
+        self.scenario = scenario
+        listCount = 0
+        patchCount = 0
+        staleLoadContinuation = nil
+        releaseRequested = false
+        staleLoadStarted = onStaleLoadStarted
+        lock.unlock()
+    }
+
+    static func reset() {
+        lock.lock()
+        let continuation = staleLoadContinuation
+        staleLoadContinuation = nil
+        releaseRequested = false
+        staleLoadStarted = nil
+        listCount = 0
+        patchCount = 0
+        lock.unlock()
+        continuation?.resume()
+    }
+
+    static func releaseStaleLoad() {
+        lock.lock()
+        let continuation = staleLoadContinuation
+        staleLoadContinuation = nil
+        if continuation == nil {
+            releaseRequested = true
+        }
+        lock.unlock()
+        continuation?.resume()
+    }
+
+    private static func waitForRelease() async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if releaseRequested {
+                releaseRequested = false
+                lock.unlock()
+                continuation.resume()
+            } else {
+                staleLoadContinuation = continuation
+                lock.unlock()
+            }
+        }
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let url = request.url else { return }
+        let path = url.path
+        let method = request.httpMethod ?? "GET"
+        let responseBody: String
+        let shouldHold: Bool
+        let startedCallback: (() -> Void)?
+
+        Self.lock.lock()
+        switch path {
+        case "/api/profiles/sessions":
+            Self.listCount += 1
+            shouldHold = Self.listCount == 2
+            startedCallback = shouldHold ? Self.staleLoadStarted : nil
+            if Self.listCount == 1 || Self.listCount == 2 {
+                responseBody = #"{"sessions":[{"id":"session-abc","title":"Planning","profile":"default","pinned":false,"archived":false,"cwd":"fresh-workspace"}],"total":1}"#
+            } else {
+                responseBody = #"{"sessions":[{"id":"session-abc","title":"External Edit","profile":"default","pinned":false,"archived":false,"cwd":"fresh-workspace"}],"total":1}"#
+            }
+        case "/api/sessions/session-abc":
+            shouldHold = false
+            startedCallback = nil
+            if method == "PATCH" {
+                Self.patchCount += 1
+                if Self.patchCount == 1 {
+                    responseBody = #"{"ok":true,"pinned":true}"#
+                } else {
+                    responseBody = #"{"ok":true,"title":"Launch Notes"}"#
+                }
+            } else if Self.scenario == .pin {
+                responseBody = #"{"id":"session-abc","title":"Planning","profile":"default","pinned":1,"archived":0,"cwd":"fresh-workspace"}"#
+            } else {
+                responseBody = #"{"id":"session-abc","title":"Launch Notes","profile":"default","pinned":1,"archived":0,"cwd":"fresh-workspace"}"#
+            }
+        default:
+            shouldHold = false
+            startedCallback = nil
+            responseBody = #"{}"#
+        }
+        Self.lock.unlock()
+
+        startedCallback?()
+        loadingTask = Task { [weak self] in
+            guard let self else { return }
+            if shouldHold {
+                await Self.waitForRelease()
+            }
+            guard !Task.isCancelled else { return }
+            let response = HTTPURLResponse(
+                url: url,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: Data(responseBody.utf8))
+            client?.urlProtocolDidFinishLoading(self)
+        }
+    }
+
+    override func stopLoading() {
+        loadingTask?.cancel()
+    }
+}
+
 private final class OutOfOrderSessionURLProtocol: URLProtocol {
     private static let lock = NSLock()
     private static var nextOrdinal = 0
@@ -3136,21 +3937,35 @@ private final class OutOfOrderSessionURLProtocol: URLProtocol {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
+        guard let url = request.url else { return }
+        let isVisibleList = url.path == "/api/profiles/sessions"
+        let ordinal: Int?
         Self.lock.lock()
-        Self.nextOrdinal += 1
-        let ordinal = Self.nextOrdinal
+        if isVisibleList {
+            Self.nextOrdinal += 1
+            ordinal = Self.nextOrdinal
+        } else {
+            ordinal = nil
+        }
         Self.lock.unlock()
 
         loadingTask = Task { [weak self] in
-            guard let self, let url = request.url else { return }
-            try? await Task.sleep(nanoseconds: ordinal == 1 ? 200_000_000 : 10_000_000)
+            guard let self else { return }
+            if let ordinal {
+                try? await Task.sleep(nanoseconds: ordinal == 1 ? 200_000_000 : 10_000_000)
+            }
             guard !Task.isCancelled else { return }
 
-            let title = ordinal == 1 ? "Stale result" : "Fresh result"
-            let sessionID = ordinal == 1 ? "old" : "new"
-            let data = Data("""
-            {"sessions":[{"session_id":"\(sessionID)","title":"\(title)"}]}
-            """.utf8)
+            let data: Data
+            if let ordinal {
+                let title = ordinal == 1 ? "Stale result" : "Fresh result"
+                let sessionID = ordinal == 1 ? "old" : "new"
+                data = Data("""
+                {"sessions":[{"id":"\(sessionID)","title":"\(title)"}]}
+                """.utf8)
+            } else {
+                data = Data(#"{"sessions":[],"total":0,"limit":0,"offset":0}"#.utf8)
+            }
             let response = HTTPURLResponse(
                 url: url,
                 statusCode: 200,
@@ -3168,82 +3983,139 @@ private final class OutOfOrderSessionURLProtocol: URLProtocol {
     }
 }
 
-private final class OverlappingDeleteURLProtocol: URLProtocol {
-    private static let lock = NSLock()
-    private static var sessionLoadCount = 0
-    private static var onMutationStarted: (() -> Void)?
-    private static var onOverlappingLoadStarted: (() -> Void)?
-    private var loadingTask: Task<Void, Never>?
+private final class SessionDeleteTransport: HermesGatewayTransport, @unchecked Sendable {
+    enum Result { case success, activeRefusal, mismatchedAcknowledgement, transportFailure }
 
-    static func configure(
-        onMutationStarted: @escaping () -> Void,
-        onOverlappingLoadStarted: @escaping () -> Void
+    private let lock = NSLock()
+    private let result: Result
+    private let expectedID: String
+    private let onRequest: (() -> Void)?
+    private let responseGate: DispatchSemaphore?
+    private var generation = 0
+    private var recorded: [(String, JSONValue?)] = []
+
+    init(
+        result: Result,
+        expectedID: String = "delete-me",
+        onRequest: (() -> Void)? = nil,
+        responseGate: DispatchSemaphore? = nil
     ) {
-        lock.lock()
-        sessionLoadCount = 0
-        self.onMutationStarted = onMutationStarted
-        self.onOverlappingLoadStarted = onOverlappingLoadStarted
-        lock.unlock()
+        self.result = result
+        self.expectedID = expectedID
+        self.onRequest = onRequest
+        self.responseGate = responseGate
     }
 
-    static func reset() {
-        lock.lock()
-        sessionLoadCount = 0
-        onMutationStarted = nil
-        onOverlappingLoadStarted = nil
-        lock.unlock()
+    func connect() async throws { lock.withLock { generation += 1 } }
+    func close() async { }
+    func connectionIdentifier() async -> Int? { lock.withLock { generation } }
+
+    func request(method: String, params: JSONValue?, timeout: Duration?) async throws -> JSONValue? {
+        lock.withLock { recorded.append((method, params)) }
+        onRequest?()
+        responseGate?.wait()
+        switch result {
+        case .success:
+            return .object(["deleted": .string(expectedID)])
+        case .activeRefusal:
+            throw HermesGatewayError.server(
+                code: 4023, message: "cannot delete an active session", data: nil,
+                method: method, requestID: "delete-1", server: nil
+            )
+        case .mismatchedAcknowledgement:
+            return .object(["deleted": .string("different-session")])
+        case .transportFailure:
+            throw HermesGatewayError.closed
+        }
     }
 
-    override class func canInit(with request: URLRequest) -> Bool { true }
+    func methods() -> [String] { lock.withLock { recorded.map(\.0) } }
 
-    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    func deleteFields() -> [String: JSONValue] {
+        lock.withLock {
+            guard let params = recorded.first?.1, case .object(let fields) = params else { return [:] }
+            return fields
+        }
+    }
+}
 
-    override func startLoading() {
-        guard let url = request.url else { return }
-        let path = url.path
-        let responseBody: String
-        let delayNanoseconds: UInt64
+private final class SessionDuplicateTransport: HermesGatewayTransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private var sink: (@Sendable (HermesGatewayEvent) -> Void)?
+    private var recorded: [(String, JSONValue?)] = []
+    private var generation = 0
+    private var sequence = 0
+    private let parentID: String
+    private let childID: String
+    private let profile: String
+    private let branchError: HermesGatewayError?
+    private let running: Bool
 
-        Self.lock.lock()
-        switch path {
-        case "/api/sessions":
-            Self.sessionLoadCount += 1
-            if Self.sessionLoadCount == 1 {
-                responseBody = #"{"sessions":[{"session_id":"delete-me","title":"Before delete","archived":false},{"session_id":"keep-me","title":"Keep me","archived":false}]}"#
-            } else {
-                Self.onOverlappingLoadStarted?()
-                responseBody = #"{"sessions":[{"session_id":"delete-me","title":"Canonical latest","archived":false},{"session_id":"keep-me","title":"Keep me","archived":false}]}"#
-            }
-            delayNanoseconds = 0
-        case "/api/session/delete":
-            Self.onMutationStarted?()
-            responseBody = #"{"ok":false,"error":"delete refused"}"#
-            delayNanoseconds = 100_000_000
+    init(
+        parentID: String = "session-abc",
+        childID: String = "copy-123",
+        profile: String = "work",
+        running: Bool = false,
+        branchError: HermesGatewayError? = nil
+    ) {
+        self.parentID = parentID
+        self.childID = childID
+        self.profile = profile
+        self.running = running
+        self.branchError = branchError
+    }
+
+    func installSink(_ sink: @escaping @Sendable (HermesGatewayEvent) -> Void) {
+        lock.withLock { self.sink = sink }
+    }
+
+    func connect() async throws { lock.withLock { generation += 1 } }
+    func close() async { }
+    func connectionIdentifier() async -> Int? { lock.withLock { generation } }
+
+    func request(method: String, params: JSONValue?, timeout: Duration?) async throws -> JSONValue? {
+        lock.withLock { recorded.append((method, params)) }
+        switch method {
+        case "session.resume":
+            return .object([
+                "session_id": .string("runtime-parent"),
+                "session_key": .string(parentID),
+                "running": .bool(running),
+                "info": .object(["profile_name": .string(profile)])
+            ])
+        case "session.branch":
+            if let branchError { throw branchError }
+            return .object([
+                "session_id": .string("runtime-child"),
+                "stored_session_id": .string(childID),
+                "session_key": .string(childID),
+                "parent": .string(parentID),
+                "message_count": .number(2),
+                "info": .object(["profile_name": .string(profile)])
+            ])
         default:
-            responseBody = #"{}"#
-            delayNanoseconds = 0
-        }
-        Self.lock.unlock()
-
-        loadingTask = Task { [weak self] in
-            guard let self else { return }
-            if delayNanoseconds > 0 {
-                try? await Task.sleep(nanoseconds: delayNanoseconds)
-            }
-            guard !Task.isCancelled else { return }
-            let response = HTTPURLResponse(
-                url: url,
-                statusCode: 200,
-                httpVersion: "HTTP/1.1",
-                headerFields: ["Content-Type": "application/json"]
-            )!
-            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-            client?.urlProtocol(self, didLoad: Data(responseBody.utf8))
-            client?.urlProtocolDidFinishLoading(self)
+            throw DirectSessionError.invalidResponse
         }
     }
 
-    override func stopLoading() {
-        loadingTask?.cancel()
+    func methods() -> [String] { lock.withLock { recorded.map(\.0) } }
+
+    func branchFields() -> [String: JSONValue] {
+        lock.withLock {
+            guard let params = recorded.first(where: { $0.0 == "session.branch" })?.1,
+                  case .object(let fields) = params else { return [:] }
+            return fields
+        }
+    }
+
+    func emit(type: String, sessionID: String) {
+        let delivery = lock.withLock { () -> ((@Sendable (HermesGatewayEvent) -> Void)?, HermesGatewayEvent) in
+            sequence += 1
+            return (sink, HermesGatewayEvent(
+                method: "event", type: type, sessionID: sessionID, sequence: sequence,
+                payload: .object([:]), params: nil, connectionGeneration: generation
+            ))
+        }
+        delivery.0?(delivery.1)
     }
 }

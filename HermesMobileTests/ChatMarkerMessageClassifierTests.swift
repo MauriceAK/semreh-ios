@@ -128,6 +128,24 @@ final class ChatMarkerMessageClassifierTests: XCTestCase {
         XCTAssertEqual(body, "1. First task\n2. Second task")
     }
 
+    func testCardBodyPreservesMarkdownTaskListAfterMarker() {
+        let source = """
+        [Your active task list was preserved across context compression]
+        ## Follow-up
+        - [ ] **Check** the `message_id` anchor
+        - [x] Keep completed work visible
+        """
+
+        XCTAssertEqual(
+            ChatMarkerMessageClassifier.cardBody(for: .preservedTaskList, content: source),
+            """
+            ## Follow-up
+            - [ ] **Check** the `message_id` anchor
+            - [x] Keep completed work visible
+            """
+        )
+    }
+
     func testCardBodyKeepsCompactionTextIntact() {
         let body = ChatMarkerMessageClassifier.cardBody(
             for: .contextCompaction,
@@ -140,5 +158,32 @@ final class ChatMarkerMessageClassifierTests: XCTestCase {
 
     private func makeMessage(role: String?, content: String?) -> ChatMessage {
         ChatMessage(role: role, content: content, timestamp: nil, messageId: "test-id")
+    }
+}
+
+final class MarkerMessageCardPresentationTests: XCTestCase {
+    func testLatestTaskSummaryRemovesMarkdownCheckboxButKeepsMeaningfulText() {
+        XCTAssertEqual(
+            MarkerMessageCardPresentation.latestTaskSummary(in: "## Follow-up\n- [ ] Inspect the fixture\n- [x] **Keep** completed work visible"),
+            "Keep completed work visible"
+        )
+        XCTAssertEqual(
+            MarkerMessageCardPresentation.latestTaskSummary(in: "1. [ ] **Review** the `message_id` anchor"),
+            "Review the message_id anchor"
+        )
+    }
+
+    func testLatestTaskSummaryRemovesUpstreamCurrentTaskMarker() {
+        XCTAssertEqual(
+            MarkerMessageCardPresentation.latestTaskSummary(in: "- [>] Run the `build-v4` check"),
+            "Run the build-v4 check"
+        )
+    }
+
+    func testLatestTaskSummaryDoesNotStripCheckboxTextAwayFromLeadingSyntax() {
+        XCTAssertEqual(
+            MarkerMessageCardPresentation.latestTaskSummary(in: "Compare the `[x]` state with the server."),
+            "Compare the [x] state with the server."
+        )
     }
 }

@@ -112,7 +112,7 @@ final class InMemoryKeychainStore: KeychainStoring {
 // Test double: mutable counters are only ever touched serially (each call is
 // awaited before the next), so unchecked Sendable conformance is safe here.
 final class MockAuthAPIClient: AuthAPIClient, @unchecked Sendable {
-    /// How `logout()` should behave, so tests can exercise sign-out against an
+    /// How `directLogout()` should behave, so tests can exercise sign-out against an
     /// unreachable (`fail`) or hung (`hang`) server, not just a happy path.
     enum LogoutBehavior {
         case succeed
@@ -121,46 +121,78 @@ final class MockAuthAPIClient: AuthAPIClient, @unchecked Sendable {
     }
 
     private let authStatusResponse: AuthStatusResponse
-    private let loginResponse: LoginResponse
+    private let directStatusOverride: DirectHermesStatusResponse?
+    private let directProvidersOverride: DirectHermesAuthProvidersResponse?
+    private let directLoginResponse: DirectHermesPasswordLoginResponse
     private let logoutBehavior: LogoutBehavior
+    private let protectedProbeError: Error?
     private(set) var loginPasswords: [String] = []
+    private(set) var loginUsernames: [String] = []
     private(set) var logoutCallCount = 0
+    private(set) var protectedProbeCallCount = 0
 
     init(
         authStatus: AuthStatusResponse,
         loginResponse: LoginResponse = LoginResponse(ok: true, message: nil, error: nil),
-        logoutBehavior: LogoutBehavior = .succeed
+        logoutBehavior: LogoutBehavior = .succeed,
+        directStatus: DirectHermesStatusResponse? = nil,
+        directProviders: DirectHermesAuthProvidersResponse? = nil,
+        protectedProbeError: Error? = nil
     ) {
         self.authStatusResponse = authStatus
-        self.loginResponse = loginResponse
+        self.directStatusOverride = directStatus
+        self.directProvidersOverride = directProviders
+        self.directLoginResponse = DirectHermesPasswordLoginResponse(
+            ok: loginResponse.ok,
+            next: nil
+        )
         self.logoutBehavior = logoutBehavior
+        self.protectedProbeError = protectedProbeError
     }
 
-    func health() async throws -> HealthResponse {
-        HealthResponse(status: "ok", sessions: nil, activeStreams: nil, uptimeSeconds: nil)
+    func directStatus() async throws -> DirectHermesStatusResponse {
+        if let directStatusOverride { return directStatusOverride }
+        return DirectHermesStatusResponse(
+            version: nil,
+            releaseDate: nil,
+            authRequired: authStatusResponse.authEnabled,
+            authProviders: authStatusResponse.authEnabled == true ? ["basic"] : nil,
+            authFlows: nil,
+            overall: nil
+        )
     }
 
-    func authStatus() async throws -> AuthStatusResponse {
-        authStatusResponse
+    func directProviders() async throws -> DirectHermesAuthProvidersResponse {
+        if let directProvidersOverride { return directProvidersOverride }
+        return DirectHermesAuthProvidersResponse(
+            providers: authStatusResponse.authEnabled == true
+                ? [DirectHermesAuthProvider(name: "basic", displayName: nil, supportsPassword: authStatusResponse.passwordAuthEnabled != false)]
+                : []
+        )
     }
 
-    func login(password: String) async throws -> LoginResponse {
+    func directPasswordLogin(username: String, password: String, provider: String) async throws -> DirectHermesPasswordLoginResponse {
+        loginUsernames.append(username)
         loginPasswords.append(password)
-        return loginResponse
+        return directLoginResponse
     }
 
-    func logout() async throws -> LoginResponse {
+    func directProtectedProbe() async throws {
+        protectedProbeCallCount += 1
+        if let protectedProbeError { throw protectedProbeError }
+    }
+
+    func directLogout() async throws {
         logoutCallCount += 1
         switch logoutBehavior {
         case .succeed:
-            return LoginResponse(ok: true, message: nil, error: nil)
+            return
         case .fail(let error):
             throw error
         case .hang:
             // Block until the caller's timeout cancels this task, mimicking a
             // server that accepts the connection but never responds.
             try await Task.sleep(for: .seconds(3600))
-            return LoginResponse(ok: true, message: nil, error: nil)
         }
     }
 }

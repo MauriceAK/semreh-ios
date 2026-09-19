@@ -39,7 +39,7 @@ enum CacheFallbackPolicy {
     }
 
     /// Only a real missing host or a gateway-level outage should lecture about
-    /// hermes-webui / the tunnel.
+    /// the Hermes server or tunnel.
     static func shouldAnnounceAsServerOutage(_ error: Error) -> Bool {
         switch classified(error) {
         case .url(let code):

@@ -9,6 +9,12 @@ struct MessagesSessionRowView: View {
     let session: SessionSummary
     let isViewingCachedData: Bool
     var server: URL? = nil
+    /// Supplied only when an existing local transcript cache has a message for
+    /// the row. It may lag other clients. The stock list preview is the first
+    /// user message, so it is intentionally not inferred from SessionSummary.
+    var latestMessagePreview: String? = nil
+    /// A true message timestamp, not the session list's last-active heartbeat.
+    var latestMessageTimestamp: Double? = nil
     var liveOwnerSessionIDs: Set<String> = []
 
     private var resolvedLiveOwnerSessionIDs: Set<String> {
@@ -31,6 +37,7 @@ struct MessagesSessionRowView: View {
     private var previewText: String {
         MessagesSessionRowFormatter.previewText(
             for: session,
+            latestMessagePreview: latestMessagePreview,
             isViewingCachedData: isViewingCachedData,
             liveOwnerSessionIDs: resolvedLiveOwnerSessionIDs,
             isUnread: isUnread
@@ -44,23 +51,25 @@ struct MessagesSessionRowView: View {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text(SessionRowView.displayTitle(for: session))
-                        .font(.system(size: 17, weight: .semibold, design: .rounded))
+                        .font(AppFont.body(weight: .medium))
                         .foregroundStyle(.primary)
                         .lineLimit(1)
                         .truncationMode(.tail)
 
                     Spacer(minLength: 0)
 
-                    Text(relativeDate)
-                        .font(.system(size: 14, weight: .regular, design: .rounded))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
+                    if let relativeDate {
+                        Text(relativeDate)
+                            .font(AppFont.footnote())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
                 }
 
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(previewText)
-                        .font(.system(size: 15, weight: .regular, design: .rounded))
+                        .font(AppFont.subheadline())
                         .foregroundStyle(.secondary)
                         .lineLimit(dynamicTypeSize.isAccessibilitySize ? 3 : 2)
                         .truncationMode(.tail)
@@ -95,7 +104,7 @@ struct MessagesSessionRowView: View {
 
     private var avatarWithStatusIndicator: some View {
         ZStack(alignment: .bottomTrailing) {
-            SessionAvatarView(session: session)
+            SessionAvatarView(session: session, server: server)
 
             switch rowState {
             case .live:
@@ -117,18 +126,19 @@ struct MessagesSessionRowView: View {
         .frame(width: 44, height: 44)
     }
 
-    private var relativeDate: String {
-        let timestamp = session.lastMessageAt ?? session.updatedAt ?? session.createdAt
-        guard let timestamp, timestamp > 0 else { return "—" }
+    private var relativeDate: String? {
+        guard let latestMessageTimestamp, latestMessageTimestamp > 0 else { return nil }
 
-        return MessagesSessionDateFormatter.shared.localizedString(
-            for: Date(timeIntervalSince1970: timestamp),
-            relativeTo: Date()
+        return MessagesSessionDateFormatter.localizedString(
+            for: Date(timeIntervalSince1970: latestMessageTimestamp)
         )
     }
 
     private var accessibilitySummary: String {
-        var values = [SessionRowView.displayTitle(for: session), previewText, relativeDate]
+        var values = [SessionRowView.displayTitle(for: session), previewText]
+        if let relativeDate {
+            values.append(relativeDate)
+        }
         if rowState == .live {
             values.append("Live")
         } else if rowState == .unread {
@@ -143,8 +153,20 @@ struct MessagesSessionRowView: View {
 
 private struct SessionAvatarView: View {
     let session: SessionSummary
+    let server: URL?
 
+    @ViewBuilder
     var body: some View {
+        if let identity = BirdAvatarIdentity(server: server, profile: session.profile) {
+            BirdAvatarView(identity: identity)
+                .frame(width: 44, height: 44)
+                .accessibilityHidden(true)
+        } else {
+            fallbackAvatar
+        }
+    }
+
+    private var fallbackAvatar: some View {
         ZStack {
             Circle()
                 .fill(
@@ -254,6 +276,7 @@ enum MessagesSessionRowFormatter {
     /// repeated metadata strings.
     static func previewText(
         for session: SessionSummary,
+        latestMessagePreview: String? = nil,
         isViewingCachedData: Bool = false,
         liveOwnerSessionIDs: Set<String> = [],
         isUnread: Bool = false
@@ -264,6 +287,10 @@ enum MessagesSessionRowFormatter {
         }
         if session.hasPendingUserMessage == true {
             return "Waiting for your message…"
+        }
+
+        if let latestMessagePreview = normalizedLatestMessagePreview(latestMessagePreview) {
+            return latestMessagePreview
         }
 
         if isUnread {
@@ -320,6 +347,19 @@ enum MessagesSessionRowFormatter {
         return parts.joined(separator: " · ")
     }
 
+    /// Keeps the Messages row focused on a real message when one is supplied;
+    /// the metadata fallbacks below remain useful context until a verified
+    /// latest-message source is available for every row.
+    static func normalizedLatestMessagePreview(_ rawPreview: String?) -> String? {
+        guard let rawPreview else { return nil }
+        let compact = rawPreview.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        guard !compact.isEmpty else { return nil }
+
+        let maximumCharacters = 240
+        guard compact.count > maximumCharacters else { return compact }
+        return String(compact.prefix(maximumCharacters - 1)).trimmingCharacters(in: .whitespaces) + "…"
+    }
+
     static func normalizedWorkspace(_ rawWorkspace: String?) -> String? {
         guard let workspace = rawWorkspace?.trimmingCharacters(in: .whitespacesAndNewlines),
               !workspace.isEmpty
@@ -342,12 +382,36 @@ enum MessagesSessionRowFormatter {
     }
 }
 
-private enum MessagesSessionDateFormatter {
-    static let shared: RelativeDateTimeFormatter = {
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .full
-        return formatter
-    }()
+enum MessagesSessionDateFormatter {
+    static func localizedString(
+        for date: Date,
+        relativeTo now: Date = Date(),
+        calendar: Calendar = .current,
+        locale: Locale = .current
+    ) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.locale = locale
+        formatter.timeZone = calendar.timeZone
+
+        if calendar.isDate(date, inSameDayAs: now) {
+            formatter.dateStyle = .none
+            formatter.timeStyle = .short
+            return formatter.string(from: date)
+        }
+
+        if let yesterday = calendar.date(byAdding: .day, value: -1, to: now),
+           calendar.isDate(date, inSameDayAs: yesterday) {
+            return String(localized: "Yesterday", locale: locale)
+        }
+
+        let dateTemplate = calendar.component(.year, from: date)
+            == calendar.component(.year, from: now)
+            ? "MMMd"
+            : "yMMMd"
+        formatter.setLocalizedDateFormatFromTemplate(dateTemplate)
+        return formatter.string(from: date)
+    }
 }
 
 #Preview {

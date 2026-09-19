@@ -1,6 +1,7 @@
 import SwiftUI
 import UIKit
 import XCTest
+import Observation
 @testable import HermesMobile
 
 final class MarkdownMathRendererTests: XCTestCase {
@@ -627,6 +628,98 @@ final class MarkdownMathRendererTests: XCTestCase {
             updateSource.contains("MarkdownCodeHighlighter.highlightedCode"),
             "Completed syntax highlighting must not parse and color code synchronously on MainActor."
         )
+    }
+
+    @MainActor
+    func testMountedStreamingRendererShrinksAfterRapidTerminalReplacement() async throws {
+        let longMarkdown = (0..<36).map { index in
+            "## Research section \(index)\n\nEvidence paragraph \(index) with enough words to wrap at phone width."
+        }.joined(separator: "\n\n")
+        let supersededTerminal = (0..<8).map { index in
+            "Superseded terminal section \(index) that must not remain rendered."
+        }.joined(separator: "\n\n")
+        let finalGuardrail = "Search stopped after reaching the tool-use limit."
+        let model = MountedMarkdownRendererModel(content: longMarkdown, isStreaming: true)
+        let fixture = MountedMarkdownRendererFixture(model: model, width: 340)
+        defer { fixture.tearDown() }
+
+        await fixture.settle()
+        let longHeight = fixture.height()
+
+        model.content = supersededTerminal
+        model.content = finalGuardrail
+        model.isStreaming = false
+        try await Task.sleep(for: .seconds(StreamingTextFadeDefaults.framePauseDelay + 0.2))
+        await fixture.settle()
+        let settledHeight = fixture.height()
+
+        let baseline = MountedMarkdownRendererFixture(
+            model: MountedMarkdownRendererModel(content: finalGuardrail, isStreaming: false),
+            width: 340
+        )
+        defer { baseline.tearDown() }
+        await baseline.settle()
+        let baselineHeight = baseline.height()
+
+        XCTAssertEqual(model.content, finalGuardrail)
+        XCTAssertGreaterThan(longHeight, baselineHeight)
+        XCTAssertEqual(settledHeight, baselineHeight, accuracy: 2)
+    }
+}
+
+@MainActor
+@Observable
+private final class MountedMarkdownRendererModel {
+    var content: String
+    var isStreaming: Bool
+
+    init(content: String, isStreaming: Bool) {
+        self.content = content
+        self.isStreaming = isStreaming
+    }
+}
+
+private struct MountedMarkdownRendererRoot: View {
+    let model: MountedMarkdownRendererModel
+
+    var body: some View {
+        MarkdownRenderer(content: model.content, isStreaming: model.isStreaming)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+@MainActor
+private final class MountedMarkdownRendererFixture {
+    private let width: CGFloat
+    private let window: UIWindow
+    private let hostingController: UIHostingController<MountedMarkdownRendererRoot>
+
+    init(model: MountedMarkdownRendererModel, width: CGFloat) {
+        self.width = width
+        hostingController = UIHostingController(rootView: MountedMarkdownRendererRoot(model: model))
+        window = UIWindow(frame: CGRect(x: 0, y: 0, width: width, height: 900))
+        window.rootViewController = hostingController
+        window.isHidden = false
+        hostingController.view.frame = window.bounds
+        hostingController.view.layoutIfNeeded()
+    }
+
+    func height() -> CGFloat {
+        hostingController.sizeThatFits(
+            in: CGSize(width: width, height: UIView.layoutFittingCompressedSize.height)
+        ).height
+    }
+
+    func settle() async {
+        await Task.yield()
+        hostingController.view.setNeedsLayout()
+        hostingController.view.layoutIfNeeded()
+        await Task.yield()
+    }
+
+    func tearDown() {
+        window.isHidden = true
+        window.rootViewController = nil
     }
 }
 

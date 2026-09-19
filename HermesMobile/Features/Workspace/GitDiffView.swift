@@ -9,7 +9,8 @@ struct GitDiffView: View {
     @State private var diff: GitDiff?
     @State private var isLoading = false
     @State private var errorMessage: String?
-    @State private var hasLoaded = false
+    @State private var staged: Bool
+    @State private var readGeneration = 0
     @State private var collapsedHunks: Set<Int> = []
     @Environment(\.dismiss) private var dismiss
 
@@ -18,22 +19,32 @@ struct GitDiffView: View {
         self.file = file
         self.apiClient = APIClient(baseURL: server)
         self.onAPIError = onAPIError
+        self._staged = State(initialValue: file.preferredDiffKind == "staged")
     }
 
     var body: some View {
         NavigationStack {
-            content
+            VStack(spacing: 0) {
+                Picker("Changes", selection: $staged) {
+                    Text("Unstaged").tag(false)
+                    Text("Staged").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .padding()
+                if file.unstaged == nil {
+                    Text("Detailed file flags are unavailable. Select staged or unstaged changes explicitly.")
+                        .font(.caption).foregroundStyle(.secondary).padding(.horizontal)
+                }
+                content
+            }
                 .adaptiveReadableScrollContent(maxWidth: AdaptiveReadableContentWidth.workspace)
                 .navigationTitle(file.displayPath)
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } }
                 }
-                .task {
-                    guard !hasLoaded else { return }
-                    hasLoaded = true
-                    await load()
-                }
+                .task(id: staged) { await load() }
+                .onDisappear { readGeneration += 1 }
         }
         .presentationDetents([.medium, .large])
         .adaptivePagePresentation()
@@ -144,19 +155,29 @@ struct GitDiffView: View {
     }
 
     private func load() async {
+        readGeneration += 1
+        let generation = readGeneration
+        let requestedStaged = staged
+        defer { if generation == readGeneration { isLoading = false } }
         guard let sessionID = session.sessionId else {
             errorMessage = String(localized: "Session ID is missing.")
             return
         }
         isLoading = true
+        diff = nil
+        collapsedHunks.removeAll()
         errorMessage = nil
         do {
-            diff = try await apiClient.gitDiff(
+            let response = try await apiClient.directGitDiff(
                 sessionID: sessionID,
+                profile: session.profile ?? "default",
                 path: file.displayPath,
-                kind: file.preferredDiffKind
-            ).diff
+                staged: requestedStaged
+            )
+            guard generation == readGeneration, !Task.isCancelled, requestedStaged == staged else { return }
+            diff = response.diff
         } catch {
+            guard generation == readGeneration, !Task.isCancelled, requestedStaged == staged else { return }
             errorMessage = error.localizedDescription
             onAPIError(error)
         }

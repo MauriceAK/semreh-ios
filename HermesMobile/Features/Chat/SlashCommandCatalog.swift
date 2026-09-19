@@ -58,14 +58,6 @@ enum SlashCommandCatalog {
             handler: .serverSide(.title)
         ),
         SlashCommand(
-            name: "personality",
-            description: String(localized: "Set the session personality"),
-            argHint: String(localized: "name"),
-            noEcho: false,
-            handler: .serverSide(.personality),
-            subArgs: .personalities
-        ),
-        SlashCommand(
             name: "skills",
             description: String(localized: "Search available skills"),
             argHint: String(localized: "query"),

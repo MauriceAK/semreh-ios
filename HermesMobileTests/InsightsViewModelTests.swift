@@ -81,22 +81,24 @@ final class InsightsViewModelTests: XCTestCase {
     }
 
     @MainActor
-    func testLoadFallsBackToLocalAnalyticsWhenServerInsightsFails() async throws {
+    func testLoadAggregatesBoundedDirectProfileInventory() async throws {
         let now = Date().timeIntervalSince1970
         let sessions = try decodeSessions([
             sessionJSON(title: "Recent", createdAt: now - 60, messageCount: 4, inputTokens: 10, outputTokens: 20, estimatedCost: 0.12),
             sessionJSON(title: "Older", createdAt: now - 3_600, messageCount: 2, inputTokens: 5, outputTokens: 7, estimatedCost: 0.03)
         ])
         let client = StubInsightsClient(
-            insightsResult: .failure(StubInsightsError()),
-            sessionsResult: .success(SessionsResponse(sessions: sessions, cliCount: nil, archivedCount: nil, serverTime: nil, serverTz: nil))
+            result: .success(DirectHermesSessionPage(
+                sessions: sessions, total: 501, limit: 500, offset: 0,
+                profileTotals: ["work": 501], errors: nil
+            ))
         )
-        let viewModel = InsightsViewModel(client: client)
+        let viewModel = InsightsViewModel(client: client, profile: "work")
         viewModel.selectedTimeframe = .last7Days
 
         await viewModel.load()
 
-        XCTAssertEqual(client.requestedDays, [7])
+        XCTAssertEqual(client.requests, [.init(profile: "work", limit: 500, offset: 0)])
         XCTAssertEqual(viewModel.dataSource, .localFallback)
         XCTAssertEqual(viewModel.sessionCount, 2)
         XCTAssertEqual(viewModel.totalMessages, 6)
@@ -107,55 +109,53 @@ final class InsightsViewModelTests: XCTestCase {
         XCTAssertNil(viewModel.totalCacheReadTokens)
         XCTAssertNil(viewModel.totalCacheHitPercent)
         XCTAssertNil(viewModel.errorMessage)
-        XCTAssertEqual(viewModel.fallbackReason, "Server insights unavailable")
+        XCTAssertNil(viewModel.fallbackReason)
+        XCTAssertEqual(viewModel.sourceDescription, "Source: newest 2 of 501 direct session metadata rows in the selected profile.")
     }
 
     @MainActor
-    func testLoadUsesServerInsightsWhenAvailable() async throws {
-        let client = StubInsightsClient(
-            insightsResult: .success(try decodeInsights("""
-            {
-              "period_days": 30,
-              "total_sessions": 5,
-              "total_messages": 13,
-              "total_input_tokens": 100,
-              "total_output_tokens": 250,
-              "total_tokens": 350,
-              "total_cost": 0.42,
-              "total_cache_read_tokens": 80,
-              "total_cache_hit_percent": 64.2
-            }
-            """)),
-            sessionsResult: .failure(StubInsightsError())
-        )
+    func testInitialDirectInventoryFailureDoesNotRetryLegacyInsightsOrSessions() async {
+        let client = StubInsightsClient(result: .failure(StubInsightsError()))
         let viewModel = InsightsViewModel(client: client)
 
         await viewModel.load()
 
-        XCTAssertEqual(client.requestedDays, [30])
-        XCTAssertEqual(viewModel.dataSource, .server)
-        XCTAssertEqual(viewModel.periodDays, 30)
-        XCTAssertEqual(viewModel.sessionCount, 5)
-        XCTAssertEqual(viewModel.totalMessages, 13)
-        XCTAssertEqual(viewModel.totalInputTokens, 100)
-        XCTAssertEqual(viewModel.totalOutputTokens, 250)
-        XCTAssertEqual(viewModel.totalTokens, 350)
-        XCTAssertEqual(viewModel.estimatedCost, 0.42, accuracy: 0.0001)
-        XCTAssertEqual(viewModel.totalCacheReadTokens, 80)
-        XCTAssertEqual(try XCTUnwrap(viewModel.totalCacheHitPercent), 64.2, accuracy: 0.0001)
-        XCTAssertTrue(viewModel.sessions.isEmpty)
+        XCTAssertEqual(client.requests.count, 1)
+        XCTAssertEqual(viewModel.errorMessage, "Server insights unavailable")
+        XCTAssertFalse(viewModel.hasLoadedAnalytics)
+    }
+
+    @MainActor
+    func testProfileReadErrorRefusesRowsAndFullPageWithoutTotalIsLabeledPartial() async throws {
+        let row = try decodeSessions([sessionJSON(title: "Do not publish")])
+        let failed = StubInsightsClient(result: .success(DirectHermesSessionPage(
+            sessions: row, total: 1, limit: 500, offset: 0, profileTotals: nil,
+            errors: [.init(profile: "work", error: "unavailable")]
+        )))
+        let failedViewModel = InsightsViewModel(client: failed, profile: "work")
+        await failedViewModel.load()
+        XCTAssertTrue(failedViewModel.sessions.isEmpty)
+        XCTAssertEqual(failedViewModel.errorMessage, "Hermes could not read the selected profile's session metadata.")
+
+        let fullPage = Array(repeating: row[0], count: 500)
+        let bounded = StubInsightsClient(result: .success(DirectHermesSessionPage(
+            sessions: fullPage, total: nil, limit: 500, offset: 0, profileTotals: nil, errors: []
+        )))
+        let boundedViewModel = InsightsViewModel(client: bounded, profile: "work")
+        await boundedViewModel.load()
+        XCTAssertEqual(
+            boundedViewModel.sourceDescription,
+            "Source: newest 500 direct session metadata rows in the selected profile; more may exist."
+        )
     }
 
     @MainActor
     func testLoadKeepsExistingAnalyticsVisibleWhileTimeframeRefreshes() async throws {
         let client = DelayedInsightsClient(
-            firstResponse: try decodeInsights("""
-            {
-              "period_days": 30,
-              "total_sessions": 5,
-              "total_tokens": 350
-            }
-            """)
+            firstResponse: DirectHermesSessionPage(
+                sessions: try decodeSessions([sessionJSON(title: "Initial", createdAt: Date().timeIntervalSince1970, inputTokens: 100, outputTokens: 250)]),
+                total: 1, limit: 500, offset: 0, profileTotals: nil, errors: nil
+            )
         )
         let viewModel = InsightsViewModel(client: client)
 
@@ -171,13 +171,10 @@ final class InsightsViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.totalTokens, 350)
         XCTAssertEqual(viewModel.periodTitle, "Last 30 Days")
 
-        client.completePendingRequest(with: .success(try decodeInsights("""
-        {
-          "period_days": 7,
-          "total_sessions": 2,
-          "total_tokens": 125
-        }
-        """)))
+        client.completePendingRequest(with: .success(DirectHermesSessionPage(
+            sessions: try decodeSessions([sessionJSON(title: "Refreshed", createdAt: Date().timeIntervalSince1970, inputTokens: 50, outputTokens: 75)]),
+            total: 1, limit: 500, offset: 0, profileTotals: nil, errors: nil
+        )))
         await refreshTask.value
 
         XCTAssertEqual(viewModel.totalTokens, 125)
@@ -234,22 +231,17 @@ final class InsightsViewModelTests: XCTestCase {
 }
 
 private final class StubInsightsClient: InsightsDataClient {
-    private let insightsResult: Result<InsightsResponse, Error>
-    private let sessionsResult: Result<SessionsResponse, Error>
-    private(set) var requestedDays: [Int] = []
+    struct Request: Equatable { let profile: String; let limit: Int; let offset: Int }
+    private let result: Result<DirectHermesSessionPage, Error>
+    private(set) var requests: [Request] = []
 
-    init(insightsResult: Result<InsightsResponse, Error>, sessionsResult: Result<SessionsResponse, Error>) {
-        self.insightsResult = insightsResult
-        self.sessionsResult = sessionsResult
+    init(result: Result<DirectHermesSessionPage, Error>) {
+        self.result = result
     }
 
-    func insights(days: Int) async throws -> InsightsResponse {
-        requestedDays.append(days)
-        return try insightsResult.get()
-    }
-
-    func sessions() async throws -> SessionsResponse {
-        try sessionsResult.get()
+    func insightSessions(profile: String, limit: Int, offset: Int) async throws -> DirectHermesSessionPage {
+        requests.append(.init(profile: profile, limit: limit, offset: offset))
+        return try result.get()
     }
 }
 
@@ -261,14 +253,14 @@ private struct StubInsightsError: LocalizedError {
 
 @MainActor
 private final class DelayedInsightsClient: InsightsDataClient {
-    private var firstResponse: InsightsResponse?
-    private var pendingContinuation: CheckedContinuation<InsightsResponse, Error>?
+    private var firstResponse: DirectHermesSessionPage?
+    private var pendingContinuation: CheckedContinuation<DirectHermesSessionPage, Error>?
 
-    init(firstResponse: InsightsResponse) {
+    init(firstResponse: DirectHermesSessionPage) {
         self.firstResponse = firstResponse
     }
 
-    func insights(days: Int) async throws -> InsightsResponse {
+    func insightSessions(profile: String, limit: Int, offset: Int) async throws -> DirectHermesSessionPage {
         if let response = firstResponse {
             firstResponse = nil
             return response
@@ -279,17 +271,13 @@ private final class DelayedInsightsClient: InsightsDataClient {
         }
     }
 
-    func sessions() async throws -> SessionsResponse {
-        throw StubInsightsError()
-    }
-
     func waitForPendingRequest() async {
         while pendingContinuation == nil {
             await Task.yield()
         }
     }
 
-    func completePendingRequest(with result: Result<InsightsResponse, Error>) {
+    func completePendingRequest(with result: Result<DirectHermesSessionPage, Error>) {
         pendingContinuation?.resume(with: result)
         pendingContinuation = nil
     }

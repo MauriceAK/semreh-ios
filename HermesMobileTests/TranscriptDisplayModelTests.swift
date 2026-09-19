@@ -6,6 +6,46 @@ import UIKit
 import UniformTypeIdentifiers
 @testable import HermesMobile
 
+final class OutgoingInsertionLedgerTests: XCTestCase {
+    func testFirstEmptyTranscriptSendAndLaterSendsEachClaimOnce() {
+        let scope = UUID()
+        let ledger = OutgoingInsertionLedger()
+        ledger.mount(scope: scope, through: 0)
+        let first = OutgoingInsertionEvent(scope: scope, messageID: "local-1", sequence: 1)
+        XCTAssertTrue(ledger.claim(first, messageID: "local-1", role: "user", allowed: true))
+        XCTAssertFalse(ledger.claim(first, messageID: "local-1", role: "user", allowed: true))
+        let next = OutgoingInsertionEvent(scope: scope, messageID: "local-2", sequence: 2)
+        XCTAssertTrue(ledger.claim(next, messageID: "local-2", role: "user", allowed: true))
+    }
+
+    func testHistoricalReentryCanonicalReplacementAndOtherScopesNeverAnimate() {
+        let scope = UUID()
+        let event = OutgoingInsertionEvent(scope: scope, messageID: "local-1", sequence: 1)
+        let ledger = OutgoingInsertionLedger()
+        XCTAssertFalse(ledger.isEligible(event, messageID: "local-1", role: "user", allowed: true))
+        ledger.mount(scope: scope, through: 0)
+        XCTAssertFalse(ledger.isEligible(event, messageID: "canonical-1", role: "user", allowed: true))
+        XCTAssertFalse(ledger.isEligible(event, messageID: "local-1", role: "assistant", allowed: true))
+        XCTAssertFalse(ledger.isEligible(event, messageID: "local-1", role: "user", allowed: false))
+        ledger.unmount()
+        ledger.mount(scope: scope, through: 1)
+        XCTAssertFalse(ledger.isEligible(event, messageID: "local-1", role: "user", allowed: true))
+        ledger.mount(scope: UUID(), through: 0)
+        XCTAssertFalse(ledger.isEligible(event, messageID: "local-1", role: "user", allowed: true))
+    }
+
+    func testRestoreOrReadingEarlierDiscardsPendingEventWithoutBlockingLaterSend() {
+        let scope = UUID()
+        let ledger = OutgoingInsertionLedger()
+        ledger.mount(scope: scope, through: 0)
+        let old = OutgoingInsertionEvent(scope: scope, messageID: "local-1", sequence: 1)
+        ledger.discardPending(through: 1)
+        XCTAssertFalse(ledger.isEligible(old, messageID: "local-1", role: "user", allowed: true))
+        let next = OutgoingInsertionEvent(scope: scope, messageID: "local-2", sequence: 2)
+        XCTAssertTrue(ledger.claim(next, messageID: "local-2", role: "user", allowed: true))
+    }
+}
+
 final class TranscriptMessageTests: XCTestCase {
     func testAttachmentImageCacheSeparatesSamePathAcrossServerSessionNamespaces() async throws {
         let cache = AttachmentImageCache()
@@ -66,6 +106,149 @@ final class TranscriptMessageTests: XCTestCase {
 
         XCTAssertEqual(transcriptMessages.map(\.loadedIndex), [0, 1, 3])
         XCTAssertEqual(transcriptMessages.map(\.message.id), ["u1", "a1", "a2"])
+    }
+
+    func testToolHeavyTurnRenderSequenceDropsEmptyRowsWithoutAccessories() {
+        var messages = [
+            ChatMessage(role: "user", content: "Research this", timestamp: 1, messageId: "u1")
+        ]
+        for index in 0..<68 {
+            let toolID = "tool-\(index)"
+            messages.append(ChatMessage(
+                role: "assistant",
+                content: "",
+                timestamp: Double(index * 2 + 2),
+                messageId: "a-\(index)",
+                toolCalls: [
+                    .object([
+                        "id": .string(toolID),
+                        "type": .string("function"),
+                        "function": .object([
+                            "name": .string("web_search"),
+                            "arguments": .string("{}")
+                        ])
+                    ])
+                ]
+            ))
+            messages.append(ChatMessage(
+                role: "tool",
+                content: "result \(index)",
+                timestamp: Double(index * 2 + 3),
+                messageId: "result-\(index)",
+                toolCallId: toolID
+            ))
+        }
+        messages.append(ChatMessage(
+            role: "assistant",
+            content: "Search stopped after reaching the tool-use limit.",
+            timestamp: 200,
+            messageId: "final"
+        ))
+
+        let transcript = ChatViewModel.transcriptMessages(from: messages)
+        let groups = ToolCallGroup.groups(
+            persistedToolCalls: [],
+            messages: messages,
+            messageOffset: 0
+        )
+        let rendered = ChatTranscriptRenderSequence.filtering(
+            transcript,
+            showsThinkingAndToolCards: true,
+            compressionAfterRenderID: nil,
+            reasoningGroupsForAnchor: { _ in [] },
+            toolCallGroupsForAnchor: { anchorID in
+                groups.filter { $0.anchorMessageID == anchorID }
+            },
+            liveAccessoryAnchorIDs: []
+        ) { message in
+            message.content?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        }
+
+        XCTAssertEqual(groups.count, 1)
+        XCTAssertEqual(groups.first?.anchorMessageID, "a-0")
+        XCTAssertEqual(groups.first?.toolCalls.count, 68)
+        XCTAssertEqual(transcript.count, 70, "Tool result rows are filtered, but every empty assistant row remains.")
+        XCTAssertEqual(rendered.map(\.anchorID), ["u1", "a-0", "final"])
+        XCTAssertEqual(
+            transcript.count - rendered.count,
+            67,
+            "Accessory-free empty assistants must not become LazyVStack children that contribute outer spacing."
+        )
+    }
+
+    func testRenderSequencePreservesEmptyAccessoryAndCompressionAnchors() throws {
+        let messages = [
+            ChatMessage(role: "assistant", content: "", timestamp: 1, messageId: "reasoning-anchor"),
+            ChatMessage(role: "assistant", content: "", timestamp: 2, messageId: "compression-anchor"),
+            ChatMessage(role: "assistant", content: "", timestamp: 3, messageId: "empty")
+        ]
+        let transcript = ChatViewModel.transcriptMessages(from: messages)
+        let compressionRenderID = try XCTUnwrap(
+            transcript.first { $0.anchorID == "compression-anchor" }?.renderID
+        )
+
+        let rendered = ChatTranscriptRenderSequence.filtering(
+            transcript,
+            showsThinkingAndToolCards: true,
+            compressionAfterRenderID: compressionRenderID,
+            reasoningGroupsForAnchor: { _ in [] },
+            toolCallGroupsForAnchor: { _ in [] },
+            liveAccessoryAnchorIDs: ["reasoning-anchor"],
+            shouldRenderMessage: { _ in false }
+        )
+
+        XCTAssertEqual(rendered.map(\.anchorID), ["reasoning-anchor", "compression-anchor"])
+        XCTAssertEqual(
+            rendered.last?.anchorID,
+            "compression-anchor",
+            "An empty filtered tail must not become the latest scroll target."
+        )
+    }
+
+    func testDirectTranscriptProjectsAttachmentRefsWithoutMutatingRawMessage() {
+        let rawContent = "Inspect these\n@image:/home/images/upload.jpg\n@file:notes.txt"
+        let message = ChatMessage(role: "user", content: rawContent, timestamp: 1, messageId: "u1")
+
+        let legacy = ChatViewModel.transcriptMessages(from: [message])
+        XCTAssertNil(legacy[0].attachmentDisplayContent)
+
+        let direct = ChatViewModel.transcriptMessages(
+            from: [message],
+            hidingStreamingAssistantID: nil,
+            preferDurableIDs: true
+        )
+        XCTAssertEqual(direct[0].attachmentDisplayContent, "Inspect these")
+        XCTAssertEqual(direct[0].message.content, rawContent)
+    }
+
+    func testDirectTranscriptProjectsStructuredTextPartAndPreservesAttachmentOnlyEmptyText() {
+        let structured = ChatMessage(
+            role: "user",
+            content: "Caption\n@image:/home/images/upload.jpg",
+            timestamp: 1,
+            messageId: "u1",
+            contentParts: [
+                .object([
+                    "type": .string("text"),
+                    "text": .string("Caption\n@image:/home/images/upload.jpg")
+                ]),
+                .object(["type": .string("image")])
+            ]
+        )
+        let attachmentOnly = ChatMessage(
+            role: "user",
+            content: "@image:/home/images/upload.jpg",
+            timestamp: 2,
+            messageId: "u2"
+        )
+
+        let transcript = ChatViewModel.transcriptMessages(
+            from: [structured, attachmentOnly],
+            hidingStreamingAssistantID: nil,
+            preferDurableIDs: true
+        )
+        XCTAssertEqual(transcript[0].attachmentDisplayContent, "Caption")
+        XCTAssertEqual(transcript[1].attachmentDisplayContent, "")
     }
 
     func testTranscriptMessagesCanHideActiveStreamingAssistantTurn() {
@@ -244,6 +427,11 @@ final class TranscriptMessageTests: XCTestCase {
         XCTAssertEqual(groups.count, 1)
         XCTAssertEqual(groups.first?.anchorMessageID, "a3")
         XCTAssertEqual(groups.first?.text, "First thought.\n\nSecond thought.\n\nThird thought.")
+        // Segmented-thinking spec change (2026-09-18, user-requested): each
+        // reasoning arrival stays a discrete segment for the expanded Thinking
+        // view; `text` above remains the canonical joined form for collapse
+        // summaries and echo handling.
+        XCTAssertEqual(groups.first?.segments, ["First thought.", "Second thought.", "Third thought."])
     }
 
     func testReasoningDisplayGroupsCollapseExactServerEnvelopeOnFinalAnchor() throws {
@@ -257,6 +445,16 @@ final class TranscriptMessageTests: XCTestCase {
 
         XCTAssertEqual(groups.count, 1)
         XCTAssertEqual(groups.first?.anchorMessageID, "a3")
+        // Segmented-thinking spec change (2026-09-18, user-requested): the
+        // envelope keeps one segment per assistant reasoning arrival, in order.
+        XCTAssertEqual(
+            groups.first?.segments,
+            [
+                "Inspecting the canonical session identity.",
+                "Comparing WebUI and official Hermes transport behavior.",
+                "Synthesizing the verified findings."
+            ]
+        )
     }
 
     func testReasoningDisplayGroupsDeduplicateNormalizedTextInFirstSeenOrder() {
@@ -270,6 +468,10 @@ final class TranscriptMessageTests: XCTestCase {
         let group = ChatViewModel.reasoningDisplayGroups(messages: messages, archivedGroups: []).first
 
         XCTAssertEqual(group?.text, "First   thought.\n\nSecond thought.")
+        // Segmented-thinking spec change (2026-09-18, user-requested): the
+        // normalized-duplicate arrival is skipped; surviving segments keep
+        // first-seen order and their original (untrimmed-inner) text.
+        XCTAssertEqual(group?.segments, ["First   thought.", "Second thought."])
     }
 
     func testReasoningDisplayGroupsDoNotCrossUserTurns() {
@@ -284,6 +486,9 @@ final class TranscriptMessageTests: XCTestCase {
 
         XCTAssertEqual(groups.map(\.anchorMessageID), ["a1", "a2"])
         XCTAssertEqual(groups.map(\.text), ["First thought.", "Second thought."])
+        // Segmented-thinking spec change (2026-09-18, user-requested): each
+        // turn's group keeps its own single arrival as one segment.
+        XCTAssertEqual(groups.map(\.segments), [["First thought."], ["Second thought."]])
     }
 
     func testReasoningDisplayGroupsKeepRepeatedNoIDUserPromptsAsSeparateTurns() {
@@ -298,6 +503,9 @@ final class TranscriptMessageTests: XCTestCase {
 
         XCTAssertEqual(groups.map(\.anchorMessageID), ["a1", "a2"])
         XCTAssertEqual(groups.map(\.text), ["First thought.", "Second thought."])
+        // Segmented-thinking spec change (2026-09-18, user-requested): repeated
+        // no-ID prompts stay separate turns, each with one segment.
+        XCTAssertEqual(groups.map(\.segments), [["First thought."], ["Second thought."]])
     }
 
     func testReasoningDisplayGroupsAggregateArchivedAndMessageDerivedReasoning() {
@@ -312,6 +520,10 @@ final class TranscriptMessageTests: XCTestCase {
         XCTAssertEqual(groups.count, 1)
         XCTAssertEqual(groups.first?.anchorMessageID, "a2")
         XCTAssertEqual(groups.first?.text, "Archived thought.\n\nMessage-derived thought.")
+        // Segmented-thinking spec change (2026-09-18, user-requested): archived
+        // and message-derived arrivals remain separate segments in first-seen
+        // order.
+        XCTAssertEqual(groups.first?.segments, ["Archived thought.", "Message-derived thought."])
     }
 
     func testReasoningDisplayGroupIDIsStableAcrossMessageOffsets() {
@@ -333,7 +545,13 @@ final class TranscriptMessageTests: XCTestCase {
             encoding: .utf8
         )
 
-        XCTAssertTrue(source.contains("liveReasoningText: liveReasoningText"))
+        XCTAssertTrue(source.contains(
+            "let groups = Self.reasoningDisplayGroups(\n" +
+            "            messages: messages,\n" +
+            "            messageOffset: messagesOffset,\n" +
+            "            archivedGroups: completedReasoningGroups\n" +
+            "        )"
+        ))
         XCTAssertTrue(source.contains("archivedGroups: completedReasoningGroups"))
         XCTAssertFalse(source.contains("reasoningDisplayGroups(messages: messages, liveReasoningText:"))
     }
@@ -380,7 +598,7 @@ final class TranscriptMessageTests: XCTestCase {
         let source = try String(contentsOf: sourceURL, encoding: .utf8)
         let flushStart = try XCTUnwrap(source.range(of: "private func flushAssistantTokens"))
         let flushEnd = try XCTUnwrap(
-            source.range(of: "private func deduplicatedReplayToken", range: flushStart.upperBound..<source.endIndex)
+            source.range(of: "private func flushPinnedLocalNoticesToTranscript", range: flushStart.upperBound..<source.endIndex)
         )
         let flushSource = String(source[flushStart.lowerBound..<flushEnd.lowerBound])
 
@@ -457,7 +675,7 @@ final class TranscriptMessageTests: XCTestCase {
         let source = try String(contentsOf: sourceURL, encoding: .utf8)
         let appendStart = try XCTUnwrap(source.range(of: "private func appendAssistantToken"))
         let appendEnd = try XCTUnwrap(
-            source.range(of: "private func deduplicatedReplayToken", range: appendStart.upperBound..<source.endIndex)
+            source.range(of: "private func flushPinnedLocalNoticesToTranscript", range: appendStart.upperBound..<source.endIndex)
         )
         let hotPath = String(source[appendStart.lowerBound..<appendEnd.lowerBound])
 
@@ -480,12 +698,120 @@ final class TranscriptMessageTests: XCTestCase {
             source.range(of: "private func compressionReferenceCardView", range: contentStart.upperBound..<source.endIndex)
         )
         let scrollContent = source[contentStart.lowerBound..<contentEnd.lowerBound]
+        let constructionLines = scrollContent.split(separator: "\n").map { line in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            return trimmed.hasPrefix("return ") ? String(trimmed.dropFirst(7)) : trimmed
+        }
 
         XCTAssertTrue(
-            scrollContent.contains("\n        LazyVStack(spacing: transcriptMessageSpacing)"),
+            constructionLines.contains { $0.hasPrefix("LazyVStack(spacing: transcriptMessageSpacing)") },
             "Long conversations must lazily instantiate transcript rows instead of building the full history eagerly."
         )
-        XCTAssertFalse(scrollContent.contains("\n        VStack(spacing: transcriptMessageSpacing)"))
+        XCTAssertFalse(constructionLines.contains { $0.hasPrefix("VStack(spacing: transcriptMessageSpacing)") })
+    }
+}
+
+final class AssistantResponseActionPolicyTests: XCTestCase {
+    func testCopyStaysOnPriorCompletedResponseUntilStreamingReplyCompletes() throws {
+        let priorAssistant = row(role: "assistant", content: "Prior answer", id: "a1", index: 1)
+        let currentPartial = row(role: "assistant", content: "Draft", id: "a2", index: 3)
+        let activeTranscript = [
+            row(role: "user", content: "First question", id: "u1", index: 0),
+            priorAssistant,
+            row(role: "user", content: "Second question", id: "u2", index: 2),
+            currentPartial
+        ]
+
+        let activeLatest = AssistantResponseActionPolicy.latestCompletedAssistantRenderID(
+            in: activeTranscript,
+            hasActiveStream: true,
+            streamingAssistantMessageID: "a2"
+        )
+        XCTAssertEqual(activeLatest, priorAssistant.renderID)
+
+        let priorContext = try XCTUnwrap(MessageActionContext(
+            message: priorAssistant.message,
+            visibleIndex: priorAssistant.loadedIndex,
+            messagesOffset: nil
+        ))
+        let partialContext = try XCTUnwrap(MessageActionContext(
+            message: currentPartial.message,
+            visibleIndex: currentPartial.loadedIndex,
+            messagesOffset: nil
+        ))
+        XCTAssertTrue(AssistantResponseActionPolicy.shouldShowPersistentCopy(
+            context: priorContext,
+            messageRole: priorAssistant.message.role,
+            isStreaming: false,
+            isLatestCompletedAssistant: activeLatest == priorAssistant.renderID
+        ))
+        XCTAssertFalse(AssistantResponseActionPolicy.shouldShowPersistentCopy(
+            context: partialContext,
+            messageRole: currentPartial.message.role,
+            isStreaming: true,
+            isLatestCompletedAssistant: activeLatest == currentPartial.renderID
+        ))
+
+        let finalAssistant = row(role: "assistant", content: "Final answer", id: "a2", index: 3)
+        let completedTranscript = Array(activeTranscript.dropLast()) + [finalAssistant]
+        let completedLatest = AssistantResponseActionPolicy.latestCompletedAssistantRenderID(
+            in: completedTranscript,
+            hasActiveStream: false,
+            streamingAssistantMessageID: "a2" // A stale ID after completion must not hide the final response.
+        )
+        XCTAssertEqual(completedLatest, finalAssistant.renderID)
+
+        let finalContext = try XCTUnwrap(MessageActionContext(
+            message: finalAssistant.message,
+            visibleIndex: finalAssistant.loadedIndex,
+            messagesOffset: nil
+        ))
+        XCTAssertFalse(AssistantResponseActionPolicy.shouldShowPersistentCopy(
+            context: priorContext,
+            messageRole: priorAssistant.message.role,
+            isStreaming: false,
+            isLatestCompletedAssistant: completedLatest == priorAssistant.renderID
+        ))
+        XCTAssertTrue(AssistantResponseActionPolicy.shouldShowPersistentCopy(
+            context: finalContext,
+            messageRole: finalAssistant.message.role,
+            isStreaming: false,
+            isLatestCompletedAssistant: completedLatest == finalAssistant.renderID
+        ))
+    }
+
+    func testNonResponseAssistantMarkerDoesNotDisplaceLatestCopyAction() {
+        let answer = row(role: "assistant", content: "Keep this copy action", id: "a1", index: 0)
+        let marker = row(
+            role: "assistant",
+            content: "[Context compaction] Summary",
+            id: "marker",
+            index: 1
+        )
+
+        XCTAssertEqual(
+            AssistantResponseActionPolicy.latestCompletedAssistantRenderID(
+                in: [answer, marker],
+                hasActiveStream: false,
+                streamingAssistantMessageID: nil
+            ),
+            answer.renderID
+        )
+    }
+
+    private func row(role: String, content: String, id: String, index: Int) -> TranscriptMessage {
+        let message = ChatMessage(
+            role: role,
+            content: content,
+            timestamp: Double(index),
+            messageId: id
+        )
+        return TranscriptMessage(
+            loadedIndex: index,
+            renderID: id,
+            anchorID: id,
+            message: message
+        )
     }
 }
 
@@ -763,7 +1089,7 @@ final class ChatActiveRunStatusPolicyTests: XCTestCase {
         ))
     }
 
-    func testStatusShowsActiveRunWhenScrolledAwayFromBottom() {
+    func testGenericActiveRunDoesNotAddFloatingStatusWhenScrolledAway() {
         let presentation = ChatActiveRunStatusPolicy.presentation(
             isStartingChat: false,
             hasActiveStream: true,
@@ -772,8 +1098,7 @@ final class ChatActiveRunStatusPolicyTests: XCTestCase {
             isScrolledNearBottom: false
         )
 
-        XCTAssertEqual(presentation?.kind, .active)
-        XCTAssertEqual(presentation?.label, "Hermes is working")
+        XCTAssertNil(presentation)
     }
 
     func testStatusShowsStartingBeforeStreamIDExists() {
@@ -882,6 +1207,124 @@ final class ChatActiveRunStatusPolicyTests: XCTestCase {
         )
 
         XCTAssertEqual(presentation?.kind, .reconnecting)
+    }
+
+    // MARK: Item 4 — elapsed readout on the active-run pill
+
+    func testActiveRunPillStaysHiddenNearBottomBeforeElapsedThreshold() {
+        let startedAt = Date(timeIntervalSince1970: 1_000)
+
+        XCTAssertNil(ChatActiveRunStatusPolicy.presentation(
+            isStartingChat: false,
+            hasActiveStream: true,
+            activeStreamRecoveryState: .idle,
+            isCancellingStream: false,
+            isScrolledNearBottom: true,
+            activeRunStartedAt: startedAt,
+            hasActiveRunPassedElapsedThreshold: false
+        ))
+    }
+
+    func testActiveRunPillShowsNearBottomAfterElapsedThreshold() {
+        let startedAt = Date(timeIntervalSince1970: 1_000)
+        let presentation = ChatActiveRunStatusPolicy.presentation(
+            isStartingChat: false,
+            hasActiveStream: true,
+            activeStreamRecoveryState: .idle,
+            isCancellingStream: false,
+            isScrolledNearBottom: true,
+            activeRunStartedAt: startedAt,
+            hasActiveRunPassedElapsedThreshold: true
+        )
+
+        XCTAssertEqual(presentation?.kind, .active)
+        XCTAssertEqual(presentation?.activeRunStartedAt, startedAt)
+        XCTAssertEqual(presentation?.label, "Hermes is working")
+    }
+
+    func testActiveRunPillShowsWhenReaderScrolledAwayEvenBeforeThreshold() {
+        let startedAt = Date(timeIntervalSince1970: 1_000)
+        let presentation = ChatActiveRunStatusPolicy.presentation(
+            isStartingChat: false,
+            hasActiveStream: true,
+            activeStreamRecoveryState: .idle,
+            isCancellingStream: false,
+            isScrolledNearBottom: false,
+            activeRunStartedAt: startedAt,
+            hasActiveRunPassedElapsedThreshold: false
+        )
+
+        XCTAssertEqual(presentation?.kind, .active)
+        XCTAssertEqual(presentation?.activeRunStartedAt, startedAt)
+    }
+
+    func testActiveRunPillStaysHiddenWithoutARecordedStart() {
+        let presentation = ChatActiveRunStatusPolicy.presentation(
+            isStartingChat: false,
+            hasActiveStream: true,
+            activeStreamRecoveryState: .idle,
+            isCancellingStream: false,
+            isScrolledNearBottom: false,
+            hasActiveRunPassedElapsedThreshold: true
+        )
+
+        XCTAssertNil(presentation)
+    }
+}
+
+final class ChatActiveRunElapsedPolicyTests: XCTestCase {
+    private let startedAt = Date(timeIntervalSince1970: 100)
+
+    func testVisibilityThresholdCrossesAtTenSeconds() {
+        XCTAssertFalse(ChatActiveRunElapsedPolicy.hasPassedVisibilityThreshold(
+            activeRunStartedAt: startedAt,
+            now: startedAt.addingTimeInterval(9.99)
+        ))
+        XCTAssertTrue(ChatActiveRunElapsedPolicy.hasPassedVisibilityThreshold(
+            activeRunStartedAt: startedAt,
+            now: startedAt.addingTimeInterval(10)
+        ))
+        XCTAssertTrue(ChatActiveRunElapsedPolicy.hasPassedVisibilityThreshold(
+            activeRunStartedAt: startedAt,
+            now: startedAt.addingTimeInterval(45)
+        ))
+    }
+
+    func testVisibilityThresholdNeedsARecordedStart() {
+        XCTAssertFalse(ChatActiveRunElapsedPolicy.hasPassedVisibilityThreshold(
+            activeRunStartedAt: nil,
+            now: startedAt
+        ))
+    }
+
+    func testPillMatrixAcrossStartThresholdAndScroll() {
+        // No start recorded: hidden in every scroll/threshold combination.
+        XCTAssertFalse(ChatActiveRunElapsedPolicy.shouldShowActiveRunPill(
+            activeRunStartedAt: nil, hasPassedElapsedThreshold: true, isScrolledNearBottom: true
+        ))
+        XCTAssertFalse(ChatActiveRunElapsedPolicy.shouldShowActiveRunPill(
+            activeRunStartedAt: nil, hasPassedElapsedThreshold: true, isScrolledNearBottom: false
+        ))
+
+        // Near bottom, below threshold: the one deliberately quiet live case (P04 path).
+        XCTAssertFalse(ChatActiveRunElapsedPolicy.shouldShowActiveRunPill(
+            activeRunStartedAt: startedAt, hasPassedElapsedThreshold: false, isScrolledNearBottom: true
+        ))
+
+        // A long near-bottom run, or any run the reader scrolled away from, shows.
+        XCTAssertTrue(ChatActiveRunElapsedPolicy.shouldShowActiveRunPill(
+            activeRunStartedAt: startedAt, hasPassedElapsedThreshold: true, isScrolledNearBottom: true
+        ))
+        XCTAssertTrue(ChatActiveRunElapsedPolicy.shouldShowActiveRunPill(
+            activeRunStartedAt: startedAt, hasPassedElapsedThreshold: false, isScrolledNearBottom: false
+        ))
+        XCTAssertTrue(ChatActiveRunElapsedPolicy.shouldShowActiveRunPill(
+            activeRunStartedAt: startedAt, hasPassedElapsedThreshold: true, isScrolledNearBottom: false
+        ))
+    }
+
+    func testThresholdMatchesProductionValue() {
+        XCTAssertEqual(ChatActiveRunElapsedPolicy.pillVisibilityThreshold, 10)
     }
 }
 

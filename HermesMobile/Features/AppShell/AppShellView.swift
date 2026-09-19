@@ -1,42 +1,122 @@
 import SwiftUI
 
-/// The three primary surfaces in the Semreh mobile shell.
+/// Keep native tab roots mounted; reveal only their content without animating
+/// navigation state, destroying scroll identity, or fading through a blank frame.
+private struct ShellTabReveal: ViewModifier {
+    let isSelected: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(isSelected || reduceMotion ? 1 : 0.92)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: isSelected)
+    }
+}
+
+/// Raw values remain stable for existing routes; labels describe the actual destinations.
 enum AppShellSurface: String, CaseIterable, Hashable, Identifiable {
-    case sessions
-    case control
-    case you
-
+    case control, sessions, you
+    static let primaryTabs: [Self] = [.control, .sessions, .you]
     var id: String { rawValue }
-
     var title: String {
         switch self {
-        case .sessions:
-            "Sessions"
-        case .control:
-            "Control"
-        case .you:
-            "You"
+        case .sessions: "Sessions"
+        case .control: "Bots"
+        case .you: "Activity"
         }
     }
-
     var systemImage: String {
         switch self {
-        case .sessions:
-            "bubble.left.and.bubble.right.fill"
-        case .control:
-            "slider.horizontal.3"
-        case .you:
-            "person.crop.circle.fill"
+        case .sessions: "bubble.left.and.bubble.right"
+        case .control: "sparkles"
+        case .you: "clock"
         }
     }
-
-    var showsPrimaryAction: Bool {
-        switch self {
-        case .sessions:
-            true
-        case .control, .you:
-            false
+    /// Explicitly select the filled SF Symbol variant for the active system-icon tab.
+    /// Bots uses its custom bird artwork, which has separate outline and filled images.
+    func tabBarSystemImage(isSelected: Bool) -> String {
+        guard isSelected else { return systemImage }
+        return switch self {
+        case .control: systemImage
+        case .sessions: "bubble.left.and.bubble.right.fill"
+        case .you: "clock.fill"
         }
+    }
+    var showsPrimaryAction: Bool { self == .sessions }
+}
+
+enum AppShellOrganizerPolicy {
+    static let projectsEnabled = true
+
+    static func showsProjects(isShell: Bool, hasProjects: Bool, hasSelection: Bool) -> Bool {
+        !isShell || hasProjects || hasSelection
+    }
+}
+
+enum AppShellSessionReturnPolicy {
+    static func resetsOnDeparture(from previous: AppShellSurface, to next: AppShellSurface) -> Bool {
+        previous == .sessions && next != .sessions
+    }
+}
+
+enum AppShellSettingsAction {
+    static let systemImage = "gearshape"
+    static let accessibilityLabel = "Settings"
+}
+
+enum SessionShellFilter {
+    /// Applies the shell's existing local filters without changing the
+    /// server/session model. Cron rows are history here; this does not imply
+    /// that a job is currently scheduled or running.
+    static func matches(
+        _ session: SessionSummary,
+        bot: String?,
+        pinnedOnly: Bool,
+        scheduledHistoryOnly: Bool = false,
+        projectID: String? = nil
+    ) -> Bool {
+        (bot == nil || session.profile == bot)
+            && (!pinnedOnly || session.pinned == true)
+            && (!scheduledHistoryOnly || session.isCronSession)
+            && (projectID == nil || session.projectId == projectID)
+    }
+}
+
+/// A one-shot route from Bot details to the Sessions tab. The profile name is
+/// a filter only; it never changes the server's active/default profile.
+struct SessionFilterRequest: Equatable {
+    let id: UUID
+    let profileName: String
+
+    init(profileName: String) {
+        self.id = UUID()
+        self.profileName = profileName.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+struct SessionFilterRouteState: Equatable {
+    let profileName: String
+    let pinnedOnly: Bool
+    let scheduledHistoryOnly: Bool
+    let projectID: String?
+    let searchText: String
+}
+
+enum SessionFilterRoutePolicy {
+    /// "View sessions" is a fresh profile-history route. Clear unrelated
+    /// Sessions controls so a previous visit cannot silently narrow the
+    /// requested profile by pin, schedule, project, or search state.
+    static func profileHistoryRoute(profileName: String) -> SessionFilterRouteState? {
+        let normalizedProfileName = profileName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedProfileName.isEmpty else { return nil }
+
+        return SessionFilterRouteState(
+            profileName: normalizedProfileName,
+            pinnedOnly: false,
+            scheduledHistoryOnly: false,
+            projectID: nil,
+            searchText: ""
+        )
     }
 }
 
@@ -48,138 +128,474 @@ struct AppShellView: View {
     @Binding var pendingSharedImport: SharedImport?
     @Binding var pendingDeepLinkedSessionID: String?
     @Binding var pendingNewChatRequest: NewChatRequest?
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
     @State private var isSessionConversationPresented = false
-    @State private var isControlDestinationPresented = false
-    @State private var controlSurfaceVisitID = 0
+    @State private var showsSettings = false
+    @State private var showsBotPicker = false
+    @State private var pendingSessionFilterRequest: SessionFilterRequest? = nil
     @State private var sessionSurfaceVisitID = 0
-    @State private var capsuleMotion: AppShellCapsuleMotion
-
-    init(
-        authManager: AuthManager,
-        server: URL,
-        selectedSurface: Binding<AppShellSurface>,
-        pendingSharedImport: Binding<SharedImport?>,
-        pendingDeepLinkedSessionID: Binding<String?>,
-        pendingNewChatRequest: Binding<NewChatRequest?>
-    ) {
-        self.authManager = authManager
-        self.server = server
-        self._selectedSurface = selectedSurface
-        self._pendingSharedImport = pendingSharedImport
-        self._pendingDeepLinkedSessionID = pendingDeepLinkedSessionID
-        self._pendingNewChatRequest = pendingNewChatRequest
-        let initialIndex = CGFloat(AppShellSurface.allCases.firstIndex(of: selectedSurface.wrappedValue) ?? 0)
-        self._capsuleMotion = State(initialValue: AppShellCapsuleMotion(settledAt: initialIndex))
-    }
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.appColorPalette) private var palette
 
     var body: some View {
-        surfaceContent
-            .safeAreaInset(edge: .top, spacing: 0) {
-                if AppShellChromePolicy.showsTopBar(
-                    surface: selectedSurface,
-                    isSessionConversationPresented: isSessionConversationPresented,
-                    isControlDestinationPresented: isControlDestinationPresented
-                ) {
-                    AppShellTopBar(
-                        surface: selectedSurface,
-                        onPrimaryAction: handlePrimaryAction
-                    )
+        // Keep each tab's identity stable while explicitly resetting the Sessions
+        // conversation when leaving that tab; drafts remain owned by their chat.
+        TabView(selection: $selectedSurface) {
+            NavigationStack {
+                AppShellBotsView(
+                    server: server,
+                    onAPIError: authManager.handleAPIError,
+                    onViewSessions: { name in
+                        pendingSessionFilterRequest = SessionFilterRequest(profileName: name)
+                        selectedSurface = .sessions
+                    }
+                ) { name in
+                    pendingNewChatRequest = NewChatRequest(profileName: name)
+                    selectedSurface = .sessions
                 }
-            }
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                if AppShellChromePolicy.showsBottomBar(
-                    isConversationPresented: isSessionConversationPresented,
-                    isControlDestinationPresented: isControlDestinationPresented
-                ) {
-                    AppShellBottomBar(
-                        selection: $selectedSurface,
-                        motion: capsuleMotion,
-                        onSelect: selectSurface
-                    )
+                .navigationTitle("Bots")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) { accountButton }
                 }
+                .toolbarBackground(SemrehVisualTheme.canvas(for: colorScheme, palette: palette), for: .navigationBar)
+                .toolbarBackground(.visible, for: .navigationBar)
             }
-            .onChange(of: selectedSurface) { oldValue, newValue in
-                guard oldValue != newValue else { return }
-                capsuleMotion = capsuleMotion.reconciled(
-                    to: surfaceIndex(newValue),
-                    reduceMotion: reduceMotion,
-                    at: Date()
-                )
-                isControlDestinationPresented = false
-                controlSurfaceVisitID += 1
-                if newValue == .sessions {
-                    sessionSurfaceVisitID += 1
-                }
+            .modifier(ShellTabReveal(isSelected: selectedSurface == .control))
+            .tabItem {
+                Image(uiImage: selectedSurface == .control ? BirdTabIcon.selectedImage : BirdTabIcon.image)
+                    .accessibilityLabel("Bots")
             }
-            .onChange(of: reduceMotion) { _, isEnabled in
-                guard isEnabled else { return }
-                capsuleMotion = capsuleMotion.reconciled(
-                    to: surfaceIndex(selectedSurface),
-                    reduceMotion: true,
-                    at: Date()
-                )
-            }
-    }
+            .tag(AppShellSurface.control)
 
-    @ViewBuilder
-    private var surfaceContent: some View {
-        switch selectedSurface {
-        case .sessions:
             SessionListView(
                 authManager: authManager,
                 server: server,
+                projectsEnabled: AppShellOrganizerPolicy.projectsEnabled,
                 pendingSharedImport: $pendingSharedImport,
                 pendingDeepLinkedSessionID: $pendingDeepLinkedSessionID,
                 requestedNewChat: $pendingNewChatRequest,
+                requestedSessionFilter: $pendingSessionFilterRequest,
                 usesShellChrome: true,
                 shellSurfaceVisitID: sessionSurfaceVisitID,
-                onConversationVisibilityChanged: { isPresented in
-                    // This state owns the shell safe area. Keep it synchronous
-                    // while New Chat transfers a focused composer.
-                    isSessionConversationPresented = isPresented
-                }
+                onConversationVisibilityChanged: { isSessionConversationPresented = $0 },
+                onNewChat: { showsBotPicker = true },
+                onAccount: { showsSettings = true }
             )
+            .modifier(ShellTabReveal(isSelected: selectedSurface == .sessions))
+            .toolbar(isSessionConversationPresented ? .hidden : .visible, for: .tabBar)
+            .tabItem {
+                Image(systemName: AppShellSurface.sessions.tabBarSystemImage(isSelected: selectedSurface == .sessions))
+                    .accessibilityLabel("Sessions")
+                    .environment(\.symbolVariants, .none)
+            }
+            .tag(AppShellSurface.sessions)
 
-        case .control:
-            ControlView(
-                authManager: authManager,
-                server: server,
-                isActive: selectedSurface == .control,
-                onNestedDestinationVisibilityChanged: { isPresented in
-                    isControlDestinationPresented = isPresented
+            NavigationStack {
+                AppShellActivityView(server: server, onAPIError: authManager.handleAPIError)
+                    .navigationTitle("Activity")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar { ToolbarItem(placement: .topBarTrailing) { accountButton } }
+                    .toolbarBackground(SemrehVisualTheme.canvas(for: colorScheme, palette: palette), for: .navigationBar)
+                    .toolbarBackground(.visible, for: .navigationBar)
+            }
+            .modifier(ShellTabReveal(isSelected: selectedSurface == .you))
+            .tabItem {
+                Image(systemName: AppShellSurface.you.tabBarSystemImage(isSelected: selectedSurface == .you))
+                    .accessibilityLabel("Activity")
+                    .environment(\.symbolVariants, .none)
+            }
+            .tag(AppShellSurface.you)
+        }
+        .onChange(of: selectedSurface) { oldValue, newValue in
+            // Reset the inactive stack on departure, not on return: a bot or
+            // external link can still deliberately open a new conversation.
+            if AppShellSessionReturnPolicy.resetsOnDeparture(from: oldValue, to: newValue) {
+                sessionSurfaceVisitID += 1
+                isSessionConversationPresented = false
+            }
+        }
+        .sheet(isPresented: $showsBotPicker) {
+            NavigationStack {
+                AppShellBotsView(server: server, onAPIError: authManager.handleAPIError) { name in
+                    showsBotPicker = false
+                    pendingNewChatRequest = NewChatRequest(profileName: name)
+                    selectedSurface = .sessions
                 }
-            )
-            .id(controlSurfaceVisitID)
+                .navigationTitle("New chat")
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { showsBotPicker = false }
+                    }
+                }
+            }
+        }
+        .sheet(isPresented: $showsSettings) {
+            VStack(spacing: 0) {
+                HStack {
+                    Spacer()
+                    Button("Done") { showsSettings = false }
+                }
+                .padding()
+                .background(SemrehVisualTheme.canvas(for: colorScheme, palette: palette))
 
-        case .you:
-            YouView(authManager: authManager, server: server)
+                YouView(authManager: authManager, server: server)
+                    .clipped()
+            }
+            .background(SemrehVisualTheme.canvas(for: colorScheme, palette: palette).ignoresSafeArea())
+            .presentationBackground(SemrehVisualTheme.canvas(for: colorScheme, palette: palette))
         }
     }
 
-    private func handlePrimaryAction() {
-        switch selectedSurface {
-        case .sessions:
-            pendingNewChatRequest = NewChatRequest()
-        case .control, .you:
-            break
+    private var accountButton: some View {
+        Button { showsSettings = true } label: {
+            Image(systemName: AppShellSettingsAction.systemImage)
+        }
+        .accessibilityLabel(AppShellSettingsAction.accessibilityLabel)
+    }
+}
+
+/// Existing server profiles only. Choosing one starts a new profile-bound chat;
+/// it never changes the startup default or the identity of an open conversation.
+private struct AppShellBotsView: View {
+    let server: URL
+    let onAPIError: (Error) -> Void
+    let onViewSessions: ((String) -> Void)?
+    let onOpenChat: (String) -> Void
+    @State private var profiles: [ProfileSummary] = []
+    @State private var isLoading = true
+    @State private var loadFailed = false
+    @State private var loadIdentity: AppShellLoadIdentity?
+    @State private var selectedProfileForDetails: ProfileSummary?
+
+    init(
+        server: URL,
+        onAPIError: @escaping (Error) -> Void,
+        onViewSessions: ((String) -> Void)? = nil,
+        onOpenChat: @escaping (String) -> Void
+    ) {
+        self.server = server
+        self.onAPIError = onAPIError
+        self.onViewSessions = onViewSessions
+        self.onOpenChat = onOpenChat
+    }
+
+    var body: some View {
+        List {
+            Section("Your Team") {
+                if isLoading && profiles.isEmpty {
+                    ProgressView("Loading bots")
+                } else if loadFailed && profiles.isEmpty {
+                    Text("Bots couldn’t be loaded.").foregroundStyle(.secondary)
+                    Button("Retry") { Task { await load() } }
+                } else if profiles.isEmpty {
+                    Text("No server profiles are available.").foregroundStyle(.secondary)
+                } else {
+                    ForEach(profiles, id: \.normalizedName) { profile in
+                        if let name = profile.normalizedName {
+                            botProfileRow(profile, name: name)
+                        }
+                    }
+                }
+            }
+            .listRowBackground(Color.clear)
+        }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .background { SemrehBackdrop().ignoresSafeArea() }
+        .task(id: server) { await load() }
+        .onDisappear {
+            loadIdentity = nil
+            isLoading = false
+        }
+        .refreshable { await load() }
+        .sheet(item: $selectedProfileForDetails) { profile in
+            NavigationStack {
+                AppShellBotDetailsView(
+                    profile: profile,
+                    onNewChat: {
+                        selectedProfileForDetails = nil
+                        if let name = profile.normalizedName {
+                            onOpenChat(name)
+                        }
+                    },
+                    onViewSessions: onViewSessions.map { handler in
+                        {
+                            selectedProfileForDetails = nil
+                            if let name = profile.normalizedName {
+                                handler(name)
+                            }
+                        }
+                    }
+                )
+            }
         }
     }
 
-    private func selectSurface(_ surface: AppShellSurface) {
-        guard surface != selectedSurface else { return }
+    private func botProfileRow(_ profile: ProfileSummary, name: String) -> some View {
+        HStack(spacing: 10) {
+            Button { onOpenChat(name) } label: {
+                HStack(spacing: 14) {
+                    if let identity = BirdAvatarIdentity(server: server, profile: name) {
+                        BirdAvatarView(identity: identity)
+                            .frame(width: 48, height: 48)
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(profile.displayName)
+                            .font(SemrehTypography.label)
+                            .multilineTextAlignment(.leading)
+                        if let model = profile.model, !model.isEmpty {
+                            Text(model)
+                                .font(SemrehTypography.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                        }
+                    }
+                    Spacer(minLength: 0)
+                    Image(systemName: "bubble.left").accessibilityHidden(true)
+                }
+                .padding(.vertical, 4)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Chat with \(profile.displayName)")
+            .accessibilityIdentifier("bot-profile:\(name)")
 
-        let now = Date()
-        let target = surfaceIndex(surface)
-        capsuleMotion = reduceMotion
-            ? AppShellCapsuleMotion(settledAt: target)
-            : capsuleMotion.retargeted(to: target, at: now)
-        selectedSurface = surface
+            Button {
+                selectedProfileForDetails = profile
+            } label: {
+                Image(systemName: "info.circle")
+                    .font(.body.weight(.semibold))
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("View details for \(profile.displayName)")
+            .accessibilityHint("Shows read-only profile information.")
+            .accessibilityIdentifier("bot-profile-info:\(name)")
+        }
     }
 
-    private func surfaceIndex(_ surface: AppShellSurface) -> CGFloat {
-        CGFloat(AppShellSurface.allCases.firstIndex(of: surface) ?? 0)
+    @MainActor private func load() async {
+        let request = AppShellLoadIdentity(server: server)
+        loadIdentity = request
+        isLoading = true
+        loadFailed = false
+        defer {
+            if loadIdentity == request { isLoading = false }
+        }
+        do {
+            let response = try await APIClient(baseURL: server).directProfiles()
+            guard request.accepts(current: loadIdentity, cancelled: Task.isCancelled) else { return }
+            profiles = AppShellBotCatalog.uniqueProfiles(response.profiles ?? [])
+        } catch {
+            guard request.accepts(current: loadIdentity, cancelled: Task.isCancelled) else { return }
+            loadFailed = true
+            onAPIError(error)
+        }
+    }
+}
+
+private struct AppShellBotDetailsView: View {
+    let profile: ProfileSummary
+    let onNewChat: () -> Void
+    let onViewSessions: (() -> Void)?
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        List {
+            Section("Profile") {
+                AppShellBotMetadataRow(title: "Name", value: profile.displayName)
+                if let provider = nonEmpty(profile.provider) {
+                    AppShellBotMetadataRow(title: "Provider", value: provider)
+                }
+                if let model = nonEmpty(profile.model) {
+                    AppShellBotMetadataRow(title: "Model", value: model)
+                }
+            }
+
+            if !profileStatusRows.isEmpty {
+                Section("Available metadata") {
+                    ForEach(profileStatusRows) { row in
+                        AppShellBotMetadataRow(title: row.title, value: row.value)
+                    }
+                }
+            }
+
+            Section {
+                Button("New chat", systemImage: "square.and.pencil", action: onNewChat)
+                    .accessibilityIdentifier("bot-details-new-chat")
+                if let onViewSessions {
+                    Button("View sessions", systemImage: "bubble.left.and.bubble.right", action: onViewSessions)
+                        .accessibilityIdentifier("bot-details-view-sessions")
+                }
+            } footer: {
+                Text("This profile view is read-only. Server defaults and active profiles are managed in Settings.")
+            }
+        }
+        .navigationTitle(profile.displayName)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("Done") { dismiss() }
+            }
+        }
+        .scrollContentBackground(.hidden)
+        .background { SemrehBackdrop().ignoresSafeArea() }
+    }
+
+    private var profileStatusRows: [AppShellBotMetadataItem] {
+        var rows: [AppShellBotMetadataItem] = []
+        if let gatewayRunning = profile.gatewayRunning {
+            rows.append(AppShellBotMetadataItem(title: "Gateway", value: gatewayRunning ? "Running" : "Stopped"))
+        }
+        if let hasEnv = profile.hasEnv {
+            rows.append(AppShellBotMetadataItem(title: "Environment", value: hasEnv ? "Configured" : "Not configured"))
+        }
+        if let skillCount = profile.skillCount {
+            rows.append(AppShellBotMetadataItem(title: "Skills", value: String(skillCount)))
+        }
+        if profile.isDefault == true {
+            rows.append(AppShellBotMetadataItem(title: "Server default", value: "Yes"))
+        }
+        if profile.isActive == true {
+            rows.append(AppShellBotMetadataItem(title: "Active profile", value: "Yes"))
+        }
+        return rows
+    }
+
+    private func nonEmpty(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
+private struct AppShellBotMetadataItem: Identifiable {
+    let title: String
+    let value: String
+
+    var id: String { title }
+}
+
+private struct AppShellBotMetadataRow: View {
+    let title: String
+    let value: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(title)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 12)
+            Text(value)
+                .multilineTextAlignment(.trailing)
+                .textSelection(.enabled)
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
+private struct AppShellActivityView: View {
+    let server: URL
+    let onAPIError: (Error) -> Void
+    @State private var profileName: String?
+    @State private var isLoading = true
+    @State private var loadFailed = false
+    @State private var loadIdentity: AppShellLoadIdentity?
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.appColorPalette) private var palette
+
+    var body: some View {
+        Group {
+            if isLoading && profileName == nil {
+                ProgressView("Loading activity").frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let profileName {
+                TasksView(server: server, profile: profileName, onAPIError: onAPIError)
+                    .id(profileName)
+                    .safeAreaInset(edge: .top, spacing: 0) {
+                        Text("Scheduled work · Profile: \(profileName)")
+                            .font(SemrehTypography.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 20)
+                            .padding(.vertical, 8)
+                            .background(SemrehVisualTheme.canvas(for: colorScheme, palette: palette))
+                    }
+            } else {
+                ContentUnavailableView {
+                    Label("Activity unavailable", systemImage: "clock")
+                } description: {
+                    Text(loadFailed ? "Activity couldn’t be loaded." : "No server profile is available for scheduled work.")
+                } actions: {
+                    Button("Retry") { Task { await load() } }
+                }
+            }
+        }
+        .scrollContentBackground(.hidden)
+        .background { SemrehBackdrop().ignoresSafeArea() }
+        .task(id: server) { await load() }
+        .onDisappear {
+            loadIdentity = nil
+            isLoading = false
+        }
+        .refreshable { await load() }
+    }
+
+    @MainActor private func load() async {
+        let request = AppShellLoadIdentity(server: server)
+        loadIdentity = request
+        isLoading = true
+        loadFailed = false
+        defer {
+            if loadIdentity == request { isLoading = false }
+        }
+        do {
+            let client = APIClient(baseURL: server)
+            let response = try await client.directActiveProfile()
+            guard request.accepts(current: loadIdentity, cancelled: Task.isCancelled) else { return }
+            if let current = AppShellActivityScope.resolve(current: response.current, inventory: nil) {
+                profileName = current
+            } else {
+                let inventory = try await client.directProfiles()
+                guard request.accepts(current: loadIdentity, cancelled: Task.isCancelled) else { return }
+                profileName = AppShellActivityScope.resolve(current: nil, inventory: inventory)
+            }
+        } catch {
+            guard request.accepts(current: loadIdentity, cancelled: Task.isCancelled) else { return }
+            loadFailed = true
+            onAPIError(error)
+        }
+    }
+}
+
+/// Scheduling remains available without a running gateway profile; inventory
+/// fallback selects a read scope, never the server's active/startup profile.
+enum AppShellActivityScope {
+    static func resolve(current: String?, inventory: ProfilesResponse?) -> String? {
+        if let name = current?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
+            return name
+        }
+        return inventory?.effectiveDefaultProfileName
+    }
+}
+
+/// Every load has both a server and a unique generation. Cancelled, replaced,
+/// and departed-screen responses cannot update the current presentation.
+struct AppShellLoadIdentity: Equatable {
+    let server: URL
+    let generation = UUID()
+
+    func accepts(current: Self?, cancelled: Bool) -> Bool {
+        !cancelled && current == self
+    }
+}
+
+enum AppShellBotCatalog {
+    static func uniqueProfiles(_ profiles: [ProfileSummary]) -> [ProfileSummary] {
+        var names = Set<String>()
+        return profiles.filter { profile in
+            guard let name = profile.normalizedName else { return false }
+            return names.insert(name).inserted
+        }
     }
 }
 
@@ -220,440 +636,4 @@ struct ControlNavigationState: Equatable {
     mutating func resetForSurfaceDeactivation() {
         destination = nil
     }
-}
-
-private struct AppShellTopBar: View {
-    let surface: AppShellSurface
-    let onPrimaryAction: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 12) {
-                Spacer(minLength: 0)
-
-                if surface.showsPrimaryAction {
-                    AppShellCircularButton(
-                        systemImage: "plus",
-                        accessibilityLabel: "New session",
-                        action: onPrimaryAction
-                    )
-                }
-            }
-            .frame(minHeight: 48)
-
-            Text(surface.title)
-                .font(.system(size: 36, weight: .bold, design: .rounded))
-                .foregroundStyle(.primary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(.horizontal, 20)
-        .padding(.top, 10)
-        .padding(.bottom, 14)
-        .background {
-            LinearGradient(
-                colors: [
-                    Color(.systemBackground).opacity(0.96),
-                    Color(.systemBackground).opacity(0.76),
-                    .clear
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .ignoresSafeArea(edges: .top)
-        }
-    }
-}
-
-private struct AppShellCircularButton: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
-
-    let systemImage: String
-    let accessibilityLabel: String
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            Image(systemName: systemImage)
-                .font(.system(size: 22, weight: .medium))
-                .frame(width: 48, height: 48)
-                .contentShape(Circle())
-        }
-        .buttonStyle(AppShellCircularButtonStyle(reduceMotion: reduceMotion))
-        .adaptiveGlass(
-            .regular,
-            isInteractive: true,
-            fallbackMaterial: reduceTransparency ? .regularMaterial : .ultraThinMaterial,
-            in: Circle()
-        )
-        .accessibilityLabel(accessibilityLabel)
-    }
-}
-
-private struct AppShellCircularButtonStyle: ButtonStyle {
-    let reduceMotion: Bool
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .scaleEffect(reduceMotion ? 1 : (configuration.isPressed ? 0.93 : 1))
-            .opacity(configuration.isPressed ? 0.78 : 1)
-            .animation(
-                reduceMotion ? nil : .easeOut(duration: 0.14),
-                value: configuration.isPressed
-            )
-    }
-}
-
-struct AppShellBottomBar: View {
-    @Binding var selection: AppShellSurface
-    let motion: AppShellCapsuleMotion
-    let onSelect: (AppShellSurface) -> Void
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    var body: some View {
-        AdaptiveGlassContainer(spacing: 12) {
-            ZStack(alignment: .leading) {
-                AppShellSelectionCapsule(motion: motion, reduceMotion: reduceMotion)
-
-                HStack(spacing: AppShellBottomBarMotion.tabSpacing) {
-                    ForEach(AppShellSurface.allCases) { surface in
-                        AppShellTabButton(
-                            surface: surface,
-                            isSelected: selection == surface,
-                            reduceMotion: reduceMotion
-                        ) { onSelect(surface) }
-                    }
-                }
-            }
-            .padding(6)
-            .frame(maxWidth: 390)
-            .frame(height: 76)
-            .adaptiveGlass(
-                .regular,
-                isInteractive: false,
-                fallbackMaterial: .ultraThinMaterial,
-                in: Capsule()
-            )
-        }
-        .padding(.horizontal, 16)
-        .padding(.top, 8)
-        .padding(.bottom, 7)
-        .background(Color.clear)
-    }
-}
-
-private enum AppShellBottomBarMotion {
-    static let tabSpacing: CGFloat = 6
-    static let glideDuration: Double = 0.28
-
-    static func animation(reduceMotion: Bool) -> Animation? {
-        reduceMotion ? nil : .timingCurve(0.20, 0.85, 0.20, 1.0, duration: glideDuration)
-    }
-}
-
-private struct AppShellSelectionCapsule: View {
-    let motion: AppShellCapsuleMotion
-    let reduceMotion: Bool
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
-
-    var body: some View {
-        GeometryReader { proxy in
-            let tabWidth = (proxy.size.width - AppShellBottomBarMotion.tabSpacing * 2) / 3
-            TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: reduceMotion)) { context in
-                let frame = motion.frame(at: context.date, tabWidth: tabWidth)
-                let inFlightHighlight = reduceTransparency
-                    ? 0.16
-                    : frame.highlight
-
-                Capsule()
-                    .adaptiveGlass(
-                        .regular,
-                        isInteractive: false,
-                        tint: reduceTransparency ? nil : Color.white.opacity(0.16),
-                        fallbackMaterial: reduceTransparency ? .regularMaterial : .ultraThinMaterial,
-                        in: Capsule()
-                    )
-                    .overlay {
-                        Capsule()
-                            .stroke(
-                                LinearGradient(
-                                    colors: [
-                                        Color.white.opacity(reduceTransparency ? 0.34 : inFlightHighlight),
-                                        Color.white.opacity(0.06),
-                                        Color.white.opacity(reduceTransparency ? 0.28 : inFlightHighlight * 0.78)
-                                    ],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                ),
-                                lineWidth: 1.25
-                            )
-                    }
-                    .overlay {
-                        Capsule()
-                            .fill(
-                                LinearGradient(
-                                    colors: [
-                                        Color.white.opacity(reduceTransparency ? 0.14 : inFlightHighlight * 0.82),
-                                        .clear,
-                                        Color.white.opacity(reduceTransparency ? 0.06 : inFlightHighlight * 0.30)
-                                    ],
-                                    startPoint: .top,
-                                    endPoint: .bottom
-                                )
-                            )
-                    }
-                    .shadow(
-                        color: Color.white.opacity(reduceTransparency ? 0 : 0.14),
-                        radius: 2,
-                        y: 1
-                    )
-                    .frame(width: frame.width, height: 64)
-                    .offset(x: frame.left)
-            }
-        }
-        .allowsHitTesting(false)
-    }
-}
-
-struct AppShellCapsuleMotionFrame: Equatable {
-    let left: CGFloat
-    let right: CGFloat
-    let width: CGFloat
-    let center: CGFloat
-    let position: CGFloat
-    let travel: CGFloat
-    let highlight: CGFloat
-    let isSettled: Bool
-}
-
-struct AppShellCapsuleMotion: Equatable {
-    let start: CGFloat
-    let target: CGFloat
-    let startedAt: Date
-    let initialDeformation: CGFloat
-    let initialLeftPull: CGFloat
-    let initialRightPull: CGFloat
-    let initialCompression: CGFloat
-    let initialHighlight: CGFloat
-
-    static let travelDuration: TimeInterval = AppShellBottomBarMotion.glideDuration
-    static let settleDuration: TimeInterval = 0.0
-    static let totalDuration: TimeInterval = travelDuration + settleDuration
-    static let retargetBlendDuration: TimeInterval = 0.10
-
-    init(
-        start: CGFloat,
-        target: CGFloat,
-        startedAt: Date,
-        initialDeformation: CGFloat = 0,
-        initialLeftPull: CGFloat = 0,
-        initialRightPull: CGFloat = 0,
-        initialCompression: CGFloat = 0,
-        initialHighlight: CGFloat = 0.14
-    ) {
-        self.start = start
-        self.target = target
-        self.startedAt = startedAt
-        self.initialDeformation = initialDeformation
-        self.initialLeftPull = initialLeftPull
-        self.initialRightPull = initialRightPull
-        self.initialCompression = initialCompression
-        self.initialHighlight = initialHighlight
-    }
-
-    init(settledAt position: CGFloat) {
-        self.init(start: position, target: position, startedAt: Date())
-    }
-
-    func retargeted(to newTarget: CGFloat, at date: Date) -> Self {
-        let currentDeformation = deformation(at: date)
-        let currentDirection: CGFloat = target >= start ? 1 : -1
-        let directionBlend = directionBlend(at: date)
-        let desiredLeftPull = currentDirection > 0 ? 0.09 * currentDeformation : 0.26 * currentDeformation
-        let desiredRightPull = currentDirection > 0 ? 0.26 * currentDeformation : 0.09 * currentDeformation
-        let currentLeftPull = interpolated(initialLeftPull, toward: desiredLeftPull, by: directionBlend)
-        let currentRightPull = interpolated(initialRightPull, toward: desiredRightPull, by: directionBlend)
-        return Self(
-            start: position(at: date),
-            target: newTarget,
-            startedAt: date,
-            initialDeformation: currentDeformation,
-            initialLeftPull: currentLeftPull,
-            initialRightPull: currentRightPull,
-            initialCompression: 0,
-            initialHighlight: highlight(at: date)
-        )
-    }
-
-    func reconciled(to newTarget: CGFloat, reduceMotion: Bool, at date: Date) -> Self {
-        if reduceMotion {
-            return Self(start: newTarget, target: newTarget, startedAt: date)
-        }
-        guard target != newTarget else { return self }
-        return retargeted(to: newTarget, at: date)
-    }
-
-    func travelProgress(at date: Date) -> CGFloat {
-        guard start != target else { return 1 }
-        return min(max(date.timeIntervalSince(startedAt) / Self.travelDuration, 0), 1)
-    }
-
-    func position(at date: Date) -> CGFloat {
-        let progress = travelProgress(at: date)
-        let easedProgress = cubicProgress(progress)
-        return start + (target - start) * easedProgress
-    }
-
-    func deformation(at date: Date) -> CGFloat {
-        guard start != target else { return 0 }
-        let elapsed = max(0, date.timeIntervalSince(startedAt))
-        let localProgress = min(max(elapsed / Self.travelDuration, 0), 1)
-        let progress = travelProgress(at: date)
-        let activeDeformation = sin(.pi * pow(progress, 0.82))
-        return max(initialDeformation * (1 - localProgress), activeDeformation)
-    }
-
-    func frame(at date: Date, tabWidth: CGFloat) -> AppShellCapsuleMotionFrame {
-        let elapsed = max(0, date.timeIntervalSince(startedAt))
-        let linearProgress = travelProgress(at: date)
-        let normalizedPosition = position(at: date)
-        let direction: CGFloat = target >= start ? 1 : -1
-        let deformation = deformation(at: date)
-        let directionBlend = directionBlend(at: date)
-        let desiredLeftPull = direction > 0 ? 0.09 * deformation : 0.26 * deformation
-        let desiredRightPull = direction > 0 ? 0.26 * deformation : 0.09 * deformation
-        let leftPull = tabWidth * interpolated(initialLeftPull, toward: desiredLeftPull, by: directionBlend)
-        let rightPull = tabWidth * interpolated(initialRightPull, toward: desiredRightPull, by: directionBlend)
-        let travel = normalizedPosition * (tabWidth + AppShellBottomBarMotion.tabSpacing)
-        let left = travel - leftPull
-        let right = travel + tabWidth + rightPull
-        let width = right - left
-        let highlight = interpolated(
-            initialHighlight,
-            toward: 0.14 + 0.22 * sin(.pi * pow(linearProgress, 0.82)),
-            by: directionBlend
-        )
-        return AppShellCapsuleMotionFrame(
-            left: left,
-            right: right,
-            width: width,
-            center: left + width / 2,
-            position: normalizedPosition,
-            travel: linearProgress,
-            highlight: highlight,
-            isSettled: elapsed >= Self.totalDuration
-        )
-    }
-
-    private func highlight(at date: Date) -> CGFloat {
-        let blend = directionBlend(at: date)
-        let progress = travelProgress(at: date)
-        return interpolated(
-            initialHighlight,
-            toward: 0.14 + 0.22 * sin(.pi * pow(progress, 0.82)),
-            by: blend
-        )
-    }
-
-    private func directionBlend(at date: Date) -> CGFloat {
-        let elapsed = max(0, date.timeIntervalSince(startedAt))
-        return min(max(elapsed / Self.retargetBlendDuration, 0), 1)
-    }
-
-    private func settleCompression(at date: Date) -> CGFloat {
-        0
-    }
-
-    private func interpolated(_ initial: CGFloat, toward target: CGFloat, by progress: CGFloat) -> CGFloat {
-        initial + (target - initial) * progress
-    }
-
-    private func cubicProgress(_ progress: CGFloat) -> CGFloat {
-        // Fast, immediate takeoff matching touch and haptics, followed by
-        // a smooth, critically damped deceleration into the target slot.
-        let firstControl: CGFloat = 0.52
-        let secondControl: CGFloat = 1.0
-        let inverse = 1 - progress
-        return 3 * inverse * inverse * progress * firstControl
-            + 3 * inverse * progress * progress * secondControl
-            + progress * progress * progress
-    }
-}
-
-private struct AppShellTabButton: View {
-    let surface: AppShellSurface
-    let isSelected: Bool
-    let reduceMotion: Bool
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            VStack(spacing: 4) {
-                Image(systemName: surface.systemImage)
-                    .font(.system(size: 20, weight: isSelected ? .semibold : .medium))
-                    .scaleEffect(reduceMotion ? 1.0 : (isSelected ? 1.05 : 1.0))
-                Text(surface.title)
-                    .font(.caption.weight(isSelected ? .semibold : .medium))
-            }
-            .foregroundStyle(isSelected ? .primary : .secondary)
-            .frame(maxWidth: .infinity)
-            .frame(height: 64)
-            .contentShape(Capsule())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(surface.title)
-        .accessibilityAddTraits(isSelected ? .isSelected : [])
-        .animation(AppShellBottomBarMotion.animation(reduceMotion: reduceMotion), value: isSelected)
-    }
-}
-
-struct TeamsActionPlaceholderView: View {
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationStack {
-            VStack(spacing: 18) {
-                Image(systemName: "person.2.wave.2")
-                    .font(.system(size: 42, weight: .semibold))
-                    .foregroundStyle(SemrehVisualTheme.energy())
-                    .frame(width: 84, height: 84)
-                    .background(SemrehVisualTheme.energy().opacity(0.14), in: Circle())
-
-                Text("Team setup is next")
-                    .font(.title2.weight(.bold))
-
-                Text("The Teams room is ready as a placeholder. The plus action will later add a teammate or Hermes agent.")
-                    .font(.body)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 24)
-
-                Button("Done") {
-                    dismiss()
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(SemrehVisualTheme.energy())
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .padding(24)
-            .background(SemrehBackdrop().ignoresSafeArea())
-            .navigationTitle("Teams")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") { dismiss() }
-                }
-            }
-        }
-    }
-}
-
-#Preview {
-    AppShellBottomBar(
-        selection: .constant(.sessions),
-        motion: AppShellCapsuleMotion(settledAt: 0),
-        onSelect: { _ in }
-    )
-        .padding()
-        .background(Color.black)
 }

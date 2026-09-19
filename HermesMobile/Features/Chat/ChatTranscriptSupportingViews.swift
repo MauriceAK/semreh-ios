@@ -11,13 +11,20 @@ struct ChatScrollMetrics: Equatable {
 struct ChatScrollObserver: UIViewRepresentable {
     let isStreaming: Bool
     let onMetrics: @MainActor (ChatScrollMetrics) -> Void
+    var onContentSizeChange: @MainActor (CGSize) -> Void = { _ in }
+    var onScrollViewReady: @MainActor (UIScrollView?) -> Void = { _ in }
 
     private var metricContext: MetricContext {
         MetricContext(isStreaming: isStreaming)
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(metricContext: metricContext, onMetrics: onMetrics)
+        Coordinator(
+            metricContext: metricContext,
+            onMetrics: onMetrics,
+            onContentSizeChange: onContentSizeChange,
+            onScrollViewReady: onScrollViewReady
+        )
     }
 
     func makeUIView(context: Context) -> ObserverView {
@@ -26,6 +33,8 @@ struct ChatScrollObserver: UIViewRepresentable {
 
     func updateUIView(_ uiView: ObserverView, context: Context) {
         context.coordinator.onMetrics = onMetrics
+        context.coordinator.onContentSizeChange = onContentSizeChange
+        context.coordinator.onScrollViewReady = onScrollViewReady
         uiView.coordinator = context.coordinator
         context.coordinator.updateMetricContext(metricContext)
 
@@ -81,20 +90,27 @@ struct ChatScrollObserver: UIViewRepresentable {
         }
 
         var onMetrics: @MainActor (ChatScrollMetrics) -> Void
+        var onContentSizeChange: @MainActor (CGSize) -> Void
+        var onScrollViewReady: @MainActor (UIScrollView?) -> Void
 
         private weak var scrollView: UIScrollView?
         private var observations: [NSKeyValueObservation] = []
         private var metricContext: MetricContext
         private var lastMetrics: ChatScrollMetrics?
+        private var lastReportedContentSize: CGSize?
         private var pendingMetrics: ChatScrollMetrics?
         private var hasScheduledMetricDelivery = false
 
         init(
             metricContext: MetricContext,
-            onMetrics: @escaping @MainActor (ChatScrollMetrics) -> Void
+            onMetrics: @escaping @MainActor (ChatScrollMetrics) -> Void,
+            onContentSizeChange: @escaping @MainActor (CGSize) -> Void,
+            onScrollViewReady: @escaping @MainActor (UIScrollView?) -> Void
         ) {
             self.metricContext = metricContext
             self.onMetrics = onMetrics
+            self.onContentSizeChange = onContentSizeChange
+            self.onScrollViewReady = onScrollViewReady
         }
 
         func updateMetricContext(_ newContext: MetricContext) {
@@ -108,19 +124,26 @@ struct ChatScrollObserver: UIViewRepresentable {
             guard let scrollView = enclosingScrollView(for: view) else { return }
 
             guard scrollView !== self.scrollView else {
+                onScrollViewReady(scrollView)
                 reportMetrics(delivery: delivery)
                 return
             }
 
             observations.removeAll()
             lastMetrics = nil
+            lastReportedContentSize = scrollView.contentSize
             self.scrollView = scrollView
+            onScrollViewReady(scrollView)
+            // Establish the app-facing baseline before observing later growth;
+            // this snapshot is not itself a follow request.
+            onContentSizeChange(scrollView.contentSize)
 
             observations = [
                 scrollView.observe(\.contentOffset, options: [.new]) { [weak self] _, _ in
                     Self.reportObservedMetrics(for: self)
                 },
                 scrollView.observe(\.contentSize, options: [.new]) { [weak self] _, _ in
+                    Self.reportObservedContentSize(for: self)
                     Self.reportObservedMetrics(for: self)
                 }
             ]
@@ -133,7 +156,9 @@ struct ChatScrollObserver: UIViewRepresentable {
             lastMetrics = nil
             pendingMetrics = nil
             hasScheduledMetricDelivery = false
+            lastReportedContentSize = nil
             scrollView = nil
+            onScrollViewReady(nil)
         }
 
         func reportMetrics(delivery: MetricDelivery) {
@@ -206,6 +231,30 @@ struct ChatScrollObserver: UIViewRepresentable {
             MainActor.assumeIsolated {
                 coordinator?.reportMetrics(delivery: .deferred)
             }
+        }
+
+        nonisolated private static func reportObservedContentSize(for coordinator: Coordinator?) {
+            guard Thread.isMainThread else {
+                DispatchQueue.main.async { [weak coordinator] in
+                    MainActor.assumeIsolated {
+                        coordinator?.reportContentSizeIfChanged()
+                    }
+                }
+                return
+            }
+
+            MainActor.assumeIsolated {
+                coordinator?.reportContentSizeIfChanged()
+            }
+        }
+
+        private func reportContentSizeIfChanged() {
+            guard let scrollView,
+                  scrollView.contentSize != lastReportedContentSize
+            else { return }
+
+            lastReportedContentSize = scrollView.contentSize
+            onContentSizeChange(scrollView.contentSize)
         }
 
         private func enclosingScrollView(for view: UIView) -> UIScrollView? {
@@ -414,41 +463,13 @@ final class ChatVerticalScrollAxisGuardView: UIView {
 }
 
 struct AssistantTypingIndicatorView: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.colorScheme) private var colorScheme
-    @State private var isBreathing = false
-
     var body: some View {
-        Circle()
-            .fill(dotColor)
-            .frame(width: 16, height: 16)
-            .scaleEffect(reduceMotion ? 1 : (isBreathing ? 1.16 : 0.86))
-            .opacity(reduceMotion ? 0.75 : (isBreathing ? 0.95 : 0.55))
+        Text("Thinking")
+            .font(AppFont.subheadline())
+            .modifier(ReasoningTextShineModifier(isActive: true))
             .padding(.leading, 4)
             .padding(.vertical, 8)
             .accessibilityLabel("Semreh is preparing a response")
-            .onAppear {
-                updateBreathingAnimation()
-            }
-            .onChange(of: reduceMotion) {
-                updateBreathingAnimation()
-            }
-    }
-
-    private var dotColor: Color {
-        colorScheme == .dark ? Color.white.opacity(0.92) : Color.black.opacity(0.78)
-    }
-
-    private func updateBreathingAnimation() {
-        guard let animation = ChatMotion.typingIndicator(reduceMotion: reduceMotion) else {
-            isBreathing = false
-            return
-        }
-
-        isBreathing = false
-        withAnimation(animation) {
-            isBreathing = true
-        }
     }
 }
 
@@ -529,137 +550,20 @@ struct StreamRecoveryStatusView: View {
 }
 
 struct ChatTranscriptLoadingSkeletonView: View {
-    private let rows = ChatTranscriptSkeletonRowConfiguration.loadingRows
-
     var body: some View {
-        ScrollView {
-            VStack(spacing: 12) {
-                ForEach(rows) { row in
-                    ChatTranscriptLoadingSkeletonRow(configuration: row)
-                }
+        VStack(spacing: 10) {
+            ProgressView()
+                .controlSize(.regular)
+                .tint(.secondary)
 
-                Color.clear
-                    .frame(height: 1)
-                    .accessibilityHidden(true)
-            }
-            .padding(.horizontal)
-            .padding(.top, 16)
+            Text("Loading conversation…")
+                .font(AppFont.body())
+                .foregroundStyle(.secondary)
         }
-        .scrollDisabled(true)
-        .allowsHitTesting(false)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Loading messages")
+        .accessibilityLabel("Loading conversation")
     }
-}
-
-private struct ChatTranscriptLoadingSkeletonRow: View {
-    let configuration: ChatTranscriptSkeletonRowConfiguration
-
-    var body: some View {
-        switch configuration.role {
-        case .assistant:
-            assistantRow
-        case .user:
-            userRow
-        }
-    }
-
-    private var assistantRow: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ForEach(configuration.lines) { line in
-                skeletonLine(line)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 4)
-        .redacted(reason: .placeholder)
-        .accessibilityHidden(true)
-    }
-
-    private var userRow: some View {
-        HStack(alignment: .bottom, spacing: 0) {
-            Spacer(minLength: 48)
-
-            VStack(alignment: .trailing, spacing: 8) {
-                ForEach(configuration.lines) { line in
-                    skeletonLine(line)
-                }
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .background(Color(.secondarySystemFill))
-            .foregroundStyle(.primary)
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        }
-        .redacted(reason: .placeholder)
-        .accessibilityHidden(true)
-    }
-
-    private func skeletonLine(_ line: ChatTranscriptSkeletonLine) -> some View {
-        Text(verbatim: line.text)
-            .font(.body)
-            .lineLimit(1)
-            .frame(maxWidth: line.maxWidth, alignment: configuration.role == .user ? .trailing : .leading)
-    }
-}
-
-private struct ChatTranscriptSkeletonRowConfiguration: Identifiable {
-    enum Role {
-        case assistant
-        case user
-    }
-
-    let id: String
-    let role: Role
-    let lines: [ChatTranscriptSkeletonLine]
-
-    static let loadingRows: [ChatTranscriptSkeletonRowConfiguration] = [
-        ChatTranscriptSkeletonRowConfiguration(
-            id: "assistant-intro",
-            role: .assistant,
-            lines: [
-                ChatTranscriptSkeletonLine(id: "a1", text: "Reviewing the latest project context and open tasks.", maxWidth: 320),
-                ChatTranscriptSkeletonLine(id: "a2", text: "Checking recent sessions before continuing.", maxWidth: 260)
-            ]
-        ),
-        ChatTranscriptSkeletonRowConfiguration(
-            id: "user-question",
-            role: .user,
-            lines: [
-                ChatTranscriptSkeletonLine(id: "u1", text: "Summarize the changes from the last run.", maxWidth: 280)
-            ]
-        ),
-        ChatTranscriptSkeletonRowConfiguration(
-            id: "assistant-response",
-            role: .assistant,
-            lines: [
-                ChatTranscriptSkeletonLine(id: "a3", text: "The current branch has focused UI polish in progress.", maxWidth: 330),
-                ChatTranscriptSkeletonLine(id: "a4", text: "Validation is queued after the loading states are updated.", maxWidth: 300),
-                ChatTranscriptSkeletonLine(id: "a5", text: "No server changes are required for this slice.", maxWidth: 240)
-            ]
-        ),
-        ChatTranscriptSkeletonRowConfiguration(
-            id: "user-followup",
-            role: .user,
-            lines: [
-                ChatTranscriptSkeletonLine(id: "u2", text: "Keep the existing empty and error states.", maxWidth: 260)
-            ]
-        ),
-        ChatTranscriptSkeletonRowConfiguration(
-            id: "assistant-outro",
-            role: .assistant,
-            lines: [
-                ChatTranscriptSkeletonLine(id: "a6", text: "Using static placeholders that match the transcript rhythm.", maxWidth: 340),
-                ChatTranscriptSkeletonLine(id: "a7", text: "Rows are noninteractive while data loads.", maxWidth: 245)
-            ]
-        )
-    ]
-}
-
-private struct ChatTranscriptSkeletonLine: Identifiable {
-    let id: String
-    let text: String
-    let maxWidth: CGFloat
 }
 
 struct ChatOfflineCacheBanner: View {

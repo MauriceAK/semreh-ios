@@ -53,10 +53,6 @@ struct GitBranchPickerButton: View {
                     showsPicker = false
                     onSelect(target)
                 },
-                onCreate: { target in
-                    showsPicker = false
-                    onCreate(target)
-                },
                 onRefresh: onRefresh
             )
             .frame(minWidth: 300, idealWidth: 360, maxWidth: 400, minHeight: 260, idealHeight: 360, maxHeight: 480)
@@ -65,29 +61,18 @@ struct GitBranchPickerButton: View {
     }
 }
 
-private struct GitBranchPickerSheet: View {
+struct GitBranchPickerSheet: View {
     let branches: GitBranches?
     let currentBranch: String
     let isLoading: Bool
     let isSwitching: Bool
     let onSelect: (GitCheckoutTarget) -> Void
-    let onCreate: (GitCheckoutTarget) -> Void
     let onRefresh: () -> Void
 
     @State private var searchText = ""
-    @State private var showsCreatePrompt = false
-    @State private var newBranchName = ""
 
     private var localBranches: [GitBranchRef] {
         filtered(branches?.local ?? [])
-    }
-
-    private var remoteBranches: [GitBranchRef] {
-        filtered(branches?.remote ?? []).filter { $0.name?.hasSuffix("/HEAD") != true }
-    }
-
-    private var canCreate: Bool {
-        !newBranchName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     var body: some View {
@@ -99,23 +84,7 @@ private struct GitBranchPickerSheet: View {
                     }
                 }
 
-                if !remoteBranches.isEmpty {
-                    Section("Remote") {
-                        ForEach(remoteBranches, id: \.name) { branch in
-                            branchButton(branch, mode: .remote)
-                        }
-                    }
-                }
-
                 Section {
-                    Button {
-                        newBranchName = ""
-                        showsCreatePrompt = true
-                    } label: {
-                        Label("New branch...", systemImage: "plus")
-                    }
-                    .disabled(isSwitching)
-
                     Button(action: onRefresh) {
                         Label(
                             isSwitching ? "Switching..." : (isLoading ? "Refreshing..." : "Reload branch list"),
@@ -132,20 +101,6 @@ private struct GitBranchPickerSheet: View {
             .overlay {
                 if isLoading, branches == nil { ProgressView() }
             }
-        }
-        .alert("New Branch", isPresented: $showsCreatePrompt) {
-            TextField("semreh/my-feature", text: $newBranchName)
-            Button("Cancel", role: .cancel) {}
-            Button("Create") {
-                let name = newBranchName.trimmingCharacters(in: .whitespacesAndNewlines)
-                // Alert action buttons ignore `.disabled` at runtime, so guard here to
-                // avoid sending an empty branch name to the server (which 400s).
-                guard !name.isEmpty else { return }
-                onCreate(GitCheckoutTarget(ref: currentBranch, mode: .local, newBranch: name))
-            }
-            .disabled(!canCreate)
-        } message: {
-            Text("Create the branch from the current HEAD and switch to it.")
         }
     }
 

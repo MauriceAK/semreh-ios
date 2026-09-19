@@ -1,12 +1,5 @@
 import Foundation
 
-struct HealthResponse: Decodable {
-    let status: String?
-    let sessions: Int?
-    let activeStreams: Int?
-    let uptimeSeconds: Double?
-}
-
 struct AuthStatusResponse: Decodable {
     let authEnabled: Bool?
     let loggedIn: Bool?

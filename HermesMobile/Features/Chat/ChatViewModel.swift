@@ -3,6 +3,9 @@ import AVFoundation
 import MediaPlayer
 import Observation
 import SwiftData
+#if DEBUG
+import OSLog
+#endif
 
 enum ListenPlaybackPhase: Equatable {
     case idle
@@ -47,6 +50,20 @@ struct ListenNowPlayingSnapshot: Equatable {
     let elapsedTime: TimeInterval
     let speed: ListenPlaybackSpeed
     let isPlaying: Bool
+}
+
+private enum DirectAttachmentSendFailure: Error {
+    case staging(id: UUID, filename: String, error: DirectGatewayAttachmentStageError)
+
+    var filename: String {
+        if case .staging(_, let filename, _) = self { return filename }
+        return "Attachment"
+    }
+
+    var error: DirectGatewayAttachmentStageError {
+        if case .staging(_, _, let error) = self { return error }
+        preconditionFailure("unreachable")
+    }
 }
 
 @MainActor
@@ -163,6 +180,22 @@ struct ClarificationPromptState: Equatable, Identifiable {
     let sessionID: String
     let pending: PendingClarification
     let pendingCount: Int
+    let gatewayIdentity: GatewayBlockingPromptIdentity?
+    let gatewayCancelOnly: Bool
+
+    init(
+        sessionID: String,
+        pending: PendingClarification,
+        pendingCount: Int,
+        gatewayIdentity: GatewayBlockingPromptIdentity? = nil,
+        gatewayCancelOnly: Bool = false
+    ) {
+        self.sessionID = sessionID
+        self.pending = pending
+        self.pendingCount = pendingCount
+        self.gatewayIdentity = gatewayIdentity
+        self.gatewayCancelOnly = gatewayCancelOnly
+    }
 
     var question: String {
         pending.displayQuestion
@@ -173,53 +206,39 @@ struct ClarificationPromptState: Equatable, Identifiable {
     }
 }
 
-struct NativeAuthPromptState: Equatable, Identifiable {
-    let contextID: String
-    let ownerSessionID: String
-    let streamID: String
-    var components: [NativeAuthWireComponent]
-    var state: NativeAuthWireState?
-
-    var id: String { contextID }
-
-    var inputComponents: [NativeAuthWireComponent] {
-        components.filter { [.identifier, .secret, .oneTimeCode, .recoveryCode].contains($0.kind) }
-    }
-
-    var submitComponent: NativeAuthWireComponent? {
-        components.first { $0.kind == .submit }
-    }
-}
-
-private struct PendingNativeAuthSubmission: Equatable {
-    let ownerSessionID: String
-    let streamID: String
-    let contextID: String
-    let component: NativeAuthWireComponent
-    let actionHandle: String
-    let envelope: NativeAuthWireEnvelope
-}
-
-private extension NativeAuthWireStatus {
-    var nativeAuthOrder: Int {
-        switch self {
-        case .available: 0
-        case .focused: 1
-        case .awaitingBrowser: 2
-        case .completed, .cancelled, .blocked, .unavailable: 3
-        }
-    }
-
-    var isTerminalNativeAuthStatus: Bool {
-        switch self {
-        case .completed, .cancelled, .blocked, .unavailable: true
-        case .available, .focused, .awaitingBrowser: false
-        }
-    }
-}
 
 struct ProfileSwitchOutcome: Equatable {
     let session: SessionSummary?
+}
+
+struct DirectAttachmentRecoveryTarget: Equatable {
+    let server: URL
+    let sessionID: String
+    let profile: String
+    let runtimeID: String
+    let markerToken: UUID?
+}
+
+struct DirectPromptDeliveryRecoveryTarget: Equatable {
+    let server: URL
+    let sessionID: String
+    let profile: String
+    let markerToken: UUID
+}
+
+/// A direct branch owns an already-bound child controller. Consumers must
+/// retain this handoff instead of constructing a new ChatViewModel from only
+/// the summary, which would resume the child a second time.
+struct DirectBranchHandoff: Equatable {
+    let session: SessionSummary
+    let viewModel: ChatViewModel
+    let origin: URL
+    let profile: String
+    let identity: UUID
+
+    static func == (lhs: DirectBranchHandoff, rhs: DirectBranchHandoff) -> Bool {
+        lhs.identity == rhs.identity
+    }
 }
 
 struct ChatPollingIntervals: Equatable {
@@ -234,6 +253,18 @@ struct ChatPollingIntervals: Equatable {
     )
 }
 
+private struct DirectBackgroundAttempt {
+    let prompt: String
+    let sessionID: String
+    let profile: String
+    var taskID: String?
+}
+
+private enum DirectBackgroundAttemptResolution: Equatable {
+    case completed
+    case unknown
+}
+
 enum ActiveStreamRecoveryState: Equatable {
     case idle
     case checking
@@ -243,14 +274,31 @@ enum ActiveStreamRecoveryState: Equatable {
 @MainActor
 @Observable
 final class ChatViewModel {
+#if DEBUG
+    private static let olderLoadOutcomeLogger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "HermesMobile",
+        category: "TranscriptActivationRecovery"
+    )
+#endif
     nonisolated private static let messagePageLimit = 50
+    private static let directAmbiguousPromptDeliveryMessage =
+        "Semreh cannot confirm the previous send. It was not resent; check the latest conversation before allowing a different message."
+    private static let directConfirmedPromptCleanupMessage =
+        "Hermes accepted the previous message, but Semreh could not clear its local safety record. It was not resent."
+    private static let directPromptRecoveryFailureMessage =
+        "The latest conversation could not be checked. The previous message may still appear, and no message was resent."
     @ObservationIgnored private var incrementalTranscriptMessageIndex: Int?
     @ObservationIgnored private var streamingAssistantMessageIndex: Int?
     @ObservationIgnored private var messageLoadGeneration = 0
+    @ObservationIgnored private var contextUsageRevision = 0
     /// Monotonic invalidation key for transcript-rendering data. ChatView uses
     /// this instead of comparing every message/string when unrelated composer
     /// state changes cause the parent view to be reevaluated.
     private(set) var transcriptRenderRevision = 0
+
+    let outgoingInsertionScope = UUID()
+    @ObservationIgnored private var outgoingInsertionSequence: UInt64 = 0
+    private(set) var outgoingInsertionEvent: OutgoingInsertionEvent?
 
     @ObservationIgnored private(set) var messages: [ChatMessage] = [] {
         didSet {
@@ -283,6 +331,12 @@ final class ChatViewModel {
     private(set) var isLoading = false
     private(set) var isLoadingOlderMessages = false
     private(set) var isStartingChat = false
+    /// True only while a foreground scene re-entry performs its canonical
+    /// transcript read (refreshAfterSceneActivation). The transient-empty
+    /// protection keys on this exact re-entry window instead of every
+    /// same-session empty page, so ordinary idle refreshes keep the
+    /// authoritative-empty semantics.
+    private(set) var isForegroundReentryRead = false
     /// True while a recorded voice note is being transcribed, uploaded, and sent.
     /// Spans all three steps so the composer can show progress and disable input.
     private(set) var isSendingVoiceNote = false
@@ -292,7 +346,12 @@ final class ChatViewModel {
     private(set) var isCompressingSession = false
     private(set) var isCancellingStream = false
     private(set) var isViewingCachedData = false
-    var activeStreamID: String? { streamCoordinator.activeStreamID }
+    var activeStreamID: String? {
+        guard usesDirectGateway else { return nil }
+        guard !directInvalidated, let controller = directConversation, controller.runState != .idle else { return nil }
+        // UI liveness identity only; never a persisted gateway runtime ID.
+        return controller.storedID.map { "direct-run:\($0)" } ?? "direct-draft-run"
+    }
     private(set) var wasReusedFromOpenSessionStore = false
 
     var hasPreservedLiveRun: Bool {
@@ -310,7 +369,7 @@ final class ChatViewModel {
     private(set) var savedFollowingLatest = true
     private var savedVisibleMessageID: String?
     private let restoreStore: TranscriptRestoreStore
-    private let liveRunBookmarkStore: LiveRunBookmarkStore
+    private let localOrganizerStore: LocalOrganizerStore
 
     var transcriptRestoreTarget: ChatTranscriptRestoreTarget {
         ChatTranscriptRestorePolicy.target(
@@ -328,8 +387,8 @@ final class ChatViewModel {
             isVisiblySlow: isConnectionVisiblySlow
         )
     }
-    var activeStreamRecoveryState: ActiveStreamRecoveryState { streamCoordinator.recoveryState }
-    var liveTokensPerSecond: Double? { streamCoordinator.liveTokensPerSecond }
+    var activeStreamRecoveryState: ActiveStreamRecoveryState { .idle }
+    var liveTokensPerSecond: Double? { nil }
     private(set) var errorMessage: String?
     private(set) var sendErrorMessage: String?
     private(set) var messageActionErrorMessage: String?
@@ -433,13 +492,17 @@ final class ChatViewModel {
         let offset = max(0, messagesOffset)
         let transcriptMessage = TranscriptMessage(
             loadedIndex: loadedIndex,
-            renderID: "transcript:\(offset + loadedIndex)",
+            renderID: Self.transcriptRenderID(for: message, absoluteIndex: offset + loadedIndex,
+                                               preferDurableID: usesDirectGateway),
             anchorID: TranscriptTurnClassifier.anchorID(
                 for: message,
                 at: loadedIndex,
                 messageOffset: messagesOffset
             ),
-            message: message
+            message: message,
+            attachmentDisplayContent: usesDirectGateway
+                ? Self.directAttachmentDisplayContent(for: message)
+                : nil
         )
 
         if let rowIndex = displayedTranscriptRowIndexByLoadedIndex[loadedIndex],
@@ -468,7 +531,9 @@ final class ChatViewModel {
 #endif
         displayedTranscriptMessages = Self.transcriptMessages(
             from: messages,
-            messageOffset: messagesOffset
+            messageOffset: messagesOffset,
+            hidingStreamingAssistantID: nil,
+            preferDurableIDs: usesDirectGateway
         )
         displayedTranscriptRowIndexByLoadedIndex = Dictionary(
             uniqueKeysWithValues: displayedTranscriptMessages.enumerated().map { rowIndex, message in
@@ -532,6 +597,10 @@ final class ChatViewModel {
             transcriptRenderRevision &+= 1
         }
     }
+    /// Assistant rows finalized by `message.interim` during the active turn.
+    /// Hermes may later complete with either the same reply (which should
+    /// reconcile in place) or a distinct post-tool reply (which must append).
+    @ObservationIgnored private var sealedInterimAssistantMessageIDs: Set<String> = []
     private(set) var toolCallAnchorMessageID: String? {
         didSet { transcriptRenderRevision &+= 1 }
     }
@@ -549,34 +618,33 @@ final class ChatViewModel {
         }
     }
     private(set) var hasOlderMessages = false
-    private(set) var contextWindowSnapshot: ContextWindowSnapshot?
+    private(set) var contextWindowSnapshot: ContextWindowSnapshot? {
+        didSet { contextUsageRevision &+= 1 }
+    }
     private(set) var responseCompletionHapticTrigger = 0
     private(set) var responseCompletionNeedsTranscriptRefresh = false
     private(set) var modelCatalogGroups: [ModelCatalogGroup] = []
+    private var directModelOptions: DirectHermesModelOptions?
+    private var directSessionReasoningSupported = false
+    private(set) var isReasoningChangeDeferred = false
+    @ObservationIgnored private var directReasoningRefreshTask: Task<Void, Never>?
     private(set) var agentCommands: [AgentCommand] = []
     private(set) var workspaceRoots: [WorkspaceRoot] = []
     private(set) var workspaceSuggestions: [String] = []
-    private(set) var personalitySuggestions: [String] = ["none"]
     private(set) var skillSlashSuggestions: [SkillSlashSuggestion] = []
+    private var isSubmittingDirectSkill = false
     private(set) var profileOptions: [ProfileSummary] = []
     private(set) var isSingleProfileMode = false
     private(set) var selectedProfileName: String?
     private(set) var selectedReasoningEffort: String?
     /// Raw per-session override; nil means this session inherits the profile value.
     private(set) var sessionReasoningEffort: String?
-    /// Model-aware effort vocabulary (`supported_efforts` from `GET /api/reasoning`).
-    /// `nil` on older servers → the composer falls back to the static list (issue #18).
+    /// Model-aware effort vocabulary reported by the direct Hermes configuration.
     private(set) var supportedReasoningEfforts: [String]?
     /// `supports_reasoning_effort`; `false` hides the composer effort control.
     private(set) var supportsReasoningEffort: Bool?
-    /// `session_scoped_reasoning`; only an explicit `true` authorizes a
-    /// session-bearing effort POST. `nil` preserves legacy global behavior.
+    /// Only an explicit `true` authorizes a session-scoped effort change.
     private(set) var sessionScopedReasoning: Bool?
-    /// Drops out-of-order `GET /api/reasoning` responses after rapid model switches
-    /// so the gating never reflects a stale model (upstream #3750 class of bug).
-    private var reasoningGatingFetchToken = 0
-    /// Drops an effort-write response after a newer effort selection starts.
-    private var reasoningSelectionToken = 0
     /// Shared configuration mutation generation. Model and reasoning writes are
     /// optimistic, so a late response must never roll back a newer visible choice.
     private var composerConfigurationMutationToken = 0
@@ -587,58 +655,218 @@ final class ChatViewModel {
         )
     }
     var selectedReasoningSelection: String? {
+        if usesDirectGateway, canonicalSessionID != nil { return selectedReasoningEffort }
         guard sessionScopedReasoning == true else { return selectedReasoningEffort }
         return sessionReasoningEffort ?? ReasoningEffortOption.inheritID
+    }
+    var allowsReasoningInheritance: Bool {
+        usesDirectGateway ? canonicalSessionID == nil : sessionScopedReasoning == true
+    }
+    var allowsReasoningChangesWhileStreaming: Bool {
+        usesDirectGateway && directSessionReasoningSupported
     }
     private(set) var isLoadingComposerConfiguration = false
     private(set) var isUpdatingComposerConfiguration = false
     private(set) var composerConfigurationErrorMessage: String?
     var pendingAttachments: [PendingAttachment] { attachmentCoordinator.pendingAttachments }
-    var isUploadingAttachment: Bool { attachmentCoordinator.isUploadingAttachment }
-    var attachmentUploadCount: Int { attachmentCoordinator.uploadInFlightCount }
-    var attachmentUploadGeneration: Int { attachmentCoordinator.uploadStartGeneration }
-    var uploadAttachmentErrorMessage: String? { attachmentCoordinator.uploadAttachmentErrorMessage }
+    private(set) var directPendingAttachments: [DirectPendingAttachment] = []
+    var directPendingAttachmentDisplayItems: [ComposerAttachmentDisplayItem] {
+        directPendingAttachments.map { ComposerAttachmentDisplayItem(direct: $0) }
+    }
+    private(set) var isPreparingDirectAttachment = false
+    private(set) var directAttachmentPreparationErrorMessage: String?
+    var isUploadingAttachment: Bool {
+        isPreparingDirectAttachment
+    }
+    var attachmentUploadCount: Int {
+        directAttachmentPreparationCount
+    }
+    var attachmentUploadGeneration: Int {
+        directAttachmentPreparationStartGeneration
+    }
+    var uploadAttachmentErrorMessage: String? {
+        if let attachmentRecoveryErrorMessage { return attachmentRecoveryErrorMessage }
+        if attachmentRecoveryNeedsReset {
+            return attachmentRecoveryIsBusy
+                ? String(localized: "Resetting unresolved attachment delivery…")
+                : String(localized: "An attachment delivery is unresolved. Saved chat history is kept; reset the pending upload before continuing.")
+        }
+        return directAttachmentPreparationErrorMessage
+    }
+    var attachmentRecoveryNeedsReset: Bool {
+        usesDirectGateway && directConversation?.attachmentRecoveryNeedsReset == true
+    }
+    var attachmentRecoveryIsBusy: Bool {
+        usesDirectGateway && directConversation?.attachmentRecoveryIsBusy == true
+    }
+    var directConversationHasPromptDeliveryUncertainty: Bool {
+        usesDirectGateway && directConversation?.hasAmbiguousPromptDelivery == true
+    }
+    var directPromptDeliverySafetyRecordUnavailable: Bool {
+        usesDirectGateway && !directInvalidated
+            && directConversation?.hasAmbiguousPromptDelivery == true
+            && directConversation?.promptDeliveryUncertaintyToken == nil
+    }
+    var directBranchIdentity: (origin: URL, profile: String, sessionID: String)? {
+        guard usesDirectGateway,
+              !directInvalidated,
+              let controller = directConversation,
+              !controller.isDisposed,
+              let controllerSessionID = controller.storedID,
+              let binding = controller.binding,
+              !controllerSessionID.isEmpty,
+              binding.storedID == controllerSessionID,
+              binding.profile == controller.profile,
+              !binding.runtimeID.isEmpty,
+              canonicalSessionID == controllerSessionID,
+              controller.runtimeOrigin == server,
+              controller.profile == (Self.nonEmpty(currentProfile) ?? "default") else {
+            return nil
+        }
+        return (
+            origin: controller.runtimeOrigin,
+            profile: controller.profile,
+            sessionID: controllerSessionID
+        )
+    }
+    var directPromptDeliveryHasConfirmedAcceptance: Bool {
+        usesDirectGateway && directConversation?.promptDeliveryUncertaintyHasConfirmedAcceptance == true
+    }
+    private func promptDeliveryWarning(for controller: GatewayConversationController?) -> String {
+        controller?.promptDeliveryUncertaintyHasConfirmedAcceptance == true
+            ? Self.directConfirmedPromptCleanupMessage
+            : Self.directAmbiguousPromptDeliveryMessage
+    }
+    var directAttachmentRecoveryTarget: DirectAttachmentRecoveryTarget? {
+        guard usesDirectGateway,
+              let controller = directConversation,
+              controller.attachmentRecoveryNeedsReset,
+              let sessionID = controller.storedID,
+              !sessionID.isEmpty,
+              let runtimeID = controller.binding?.runtimeID,
+              !runtimeID.isEmpty else { return nil }
+        return DirectAttachmentRecoveryTarget(
+            server: server,
+            sessionID: sessionID,
+            profile: controller.profile,
+            runtimeID: runtimeID,
+            markerToken: controller.unresolvedAttachmentMarkerToken
+        )
+    }
+    var directPromptDeliveryRecoveryTarget: DirectPromptDeliveryRecoveryTarget? {
+        guard usesDirectGateway,
+              !directInvalidated,
+              !promptDeliveryRecoveryIsBusy,
+              !isStartingChat,
+              !isUpdatingComposerConfiguration,
+              activeStreamID == nil,
+              !attachmentRecoveryIsBusy,
+              let controller = directConversation,
+              controller.hasAmbiguousPromptDelivery,
+              controller.runState == .idle || controller.runState == .deliveryUnknown,
+              let sessionID = controller.storedID,
+              sessionID == canonicalSessionID,
+              controller.profile == (Self.nonEmpty(currentProfile) ?? "default"),
+              let markerToken = controller.promptDeliveryUncertaintyToken else { return nil }
+        return DirectPromptDeliveryRecoveryTarget(
+            server: server,
+            sessionID: sessionID,
+            profile: controller.profile,
+            markerToken: markerToken
+        )
+    }
     var localAttachmentPreviews: [String: [String: Data]] { attachmentCoordinator.localAttachmentPreviews }
     private(set) var pinnedLocalNotices: [String] = []
-    var approvalPrompt: ApprovalPromptState? { pendingActionCoordinator.approvalPrompt }
-    var isRespondingToApproval: Bool { pendingActionCoordinator.isRespondingToApproval }
-    var approvalErrorMessage: String? { pendingActionCoordinator.approvalErrorMessage }
-    var isSessionApprovalBypassEnabled: Bool { pendingActionCoordinator.isSessionApprovalBypassEnabled }
-    var clarificationPrompt: ClarificationPromptState? { pendingActionCoordinator.clarificationPrompt }
-    var isRespondingToClarification: Bool { pendingActionCoordinator.isRespondingToClarification }
-    var clarificationErrorMessage: String? { pendingActionCoordinator.clarificationErrorMessage }
-    private(set) var nativeAuthPrompt: NativeAuthPromptState?
-    private(set) var nativeAuthErrorMessage: String?
-    private var quarantinedNativeAuthContextIDs = Set<String>()
-    private var quarantinedNativeAuthStreamIDs = Set<String>()
-    private var nativeAuthStateOrderByContextID: [String: Int] = [:]
-    private var bufferedNativeAuthStates: [
-        String: (streamID: String, state: NativeAuthWireState)
-    ] = [:]
-    private var pendingNativeAuthSubmission: PendingNativeAuthSubmission?
-    private var nativeAuthRequestGeneration = 0
-    private var isNativeAuthRequestInFlight = false
-    #if DEBUG
-    private var nativeAuthE2EAutoSubmitController: NativeAuthE2EAutoSubmitController?
-    var hasPendingNativeAuthSubmissionForTesting: Bool {
-        pendingNativeAuthSubmission != nil
+    /// Direct Hermes blocking prompts are projections of the live controller;
+    /// do not copy them into a second VM-owned queue that can outlive a rebind.
+    var pendingApprovalPrompt: GatewayApprovalPrompt? {
+        usesDirectGateway ? directConversation?.pendingApprovalPrompt : nil
     }
-    #endif
-    var nativeAuthCanRetrySubmission: Bool {
-        guard let prompt = nativeAuthPrompt, let pendingNativeAuthSubmission else { return false }
-        return pendingNativeAuthSubmission.ownerSessionID == prompt.ownerSessionID
-            && pendingNativeAuthSubmission.streamID == prompt.streamID
-            && pendingNativeAuthSubmission.contextID == prompt.contextID
+    var pendingSecretPrompt: GatewaySecretPrompt? {
+        usesDirectGateway ? directConversation?.pendingSecretPrompt : nil
     }
-    private(set) var websiteLoginPrompt: WebsiteLoginRequest?
-    private(set) var websiteLoginErrorMessage: String?
-    private var resolvedWebsiteLoginRequestIDs = Set<String>()
+    var pendingSudoPrompt: GatewaySudoPrompt? {
+        usesDirectGateway ? directConversation?.pendingSudoPrompt : nil
+    }
+    var blockingInteractionResponseInFlight: Bool {
+        usesDirectGateway && directConversation?.blockingInteractionResponseInFlight == true
+    }
+    var blockingInteractionErrorMessage: String? {
+        guard usesDirectGateway,
+              let identity = directBlockingInteractionErrorIdentity,
+              let message = directBlockingInteractionErrorMessage else { return nil }
+        let displayedIdentities = [
+            pendingApprovalPrompt?.identity,
+            pendingSecretPrompt?.identity,
+            pendingSudoPrompt?.identity
+        ].compactMap { $0 }
+        return displayedIdentities.contains(identity) ? message : nil
+    }
+    func blockingInteractionErrorMessage(for identity: GatewayBlockingPromptIdentity) -> String? {
+        guard usesDirectGateway,
+              directBlockingInteractionErrorIdentity == identity else { return nil }
+        return directBlockingInteractionErrorMessage
+    }
+    var clarificationPrompt: ClarificationPromptState? {
+        directClarificationPrompt
+    }
+    var isRespondingToClarification: Bool {
+        isRespondingToDirectClarification
+    }
+    var clarificationErrorMessage: String? {
+        directClarificationErrorMessage
+    }
     private(set) var currentGoal: SubmittedGoal?
     private(set) var isSubmittingGoal = false
     private(set) var goalErrorMessage: String?
     private(set) var hasActivatedGoalCommand = false
+    private var directGoalStatusEventKeys: Set<String> = []
 
-    private let sessionID: String?
+    private var sessionID: String?
+    var usesDirectGateway: Bool { gatewayRuntimeProvider != nil }
+    @ObservationIgnored private let gatewayRuntimeProvider: (@MainActor (APIClient) async throws -> HermesServerRuntime)?
+    @ObservationIgnored private let directAttachmentPreparer: (@Sendable (Data, String, Data?) async throws -> DirectPendingAttachment)?
+    @ObservationIgnored private let directAttachmentRecoveryMarkerStore: any DirectGatewayAttachmentRecoveryMarkerStoreProtocol
+    @ObservationIgnored private let promptUncertaintyStore: any DirectPromptDeliveryUncertaintyStoreProtocol
+    private var directConversation: GatewayConversationController?
+    private var directRuntime: HermesServerRuntime?
+    @ObservationIgnored private var directAttachmentTask: Task<GatewayConversationController, Error>?
+    @ObservationIgnored private var contextUsageSnapshotTask: Task<Void, Never>?
+    @ObservationIgnored private var contextUsageSnapshotTaskOwner: UUID?
+    private var directInvalidated = false
+    private var directVisible = false
+    private var directLiveActivityRun: (owner: UUID, sessionID: String, profile: String)?
+    /// Wall-clock start of the currently active direct run. Surfaced to the chat
+    /// as the floating "working for X" pill (item 4 of the 2026-09-18 app-chat
+    /// scope). Set whenever the gateway starts a response; cleared on terminal
+    /// handling and whenever the owned run ends. Nil means "no elapsed readout"
+    /// (e.g. a run resumed from the gateway that never emitted an observed
+    /// `message.start` in this process).
+    private(set) var activeRunStartedAt: Date?
+    private(set) var directClarificationPrompt: ClarificationPromptState? = nil
+    private(set) var isRespondingToDirectClarification = false
+    private(set) var directClarificationErrorMessage: String? = nil
+    private(set) var directBlockingInteractionErrorMessage: String? = nil
+    private var directBlockingInteractionErrorIdentity: GatewayBlockingPromptIdentity?
+    private var directClarificationOwnedSendError: String?
+    private var directAttachmentSelectionGeneration = 0
+    private var directAttachmentPreparationStartGeneration = 0
+    private var directAttachmentPreparationCount = 0
+    private var attachmentRecoveryErrorMessage: String?
+    private(set) var promptDeliveryRecoveryIsBusy = false
+    private var directComposerIsEditing = false
+    private var directOlderOffset = 0
+    private var directHistoryID: String?
+    /// Session identity captured for the narrow resume-before-send window.
+    /// This must not follow a controller's later canonical-ID adoption: an
+    /// empty page for a newly adopted session must still replace old rows.
+    private var sendTranscriptSessionID: String?
+#if DEBUG
+    private var performanceLabStreamingTurnInFlight = false
+#endif
+    private var directResponseComplete = false
+    private var directModelContext: ModelContext?
+    var onDirectCanonicalID: ((String) -> Void)?
     var hasServerBackedSession: Bool {
         guard let sessionID else { return false }
         return !sessionID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -650,11 +878,7 @@ final class ChatViewModel {
     private let isCLISession: Bool
     private let server: URL
     let client: APIClient
-    private let streamCoordinator: ChatStreamCoordinator
-    private let pendingActionCoordinator: ChatPendingActionCoordinator
     private let attachmentCoordinator: ChatAttachmentCoordinator
-    private let btwStreamClient: SSEStreamingClient
-    private let sessionEventStreamCoordinator: SessionEventStreamCoordinator
     private let liveActivityManager: any AgentLiveActivityManaging
     private let speechSynthesizerFactory: () -> any ChatSpeechSynthesizing
     private let listenAudioSession: any ListenAudioSessionControlling
@@ -687,7 +911,7 @@ final class ChatViewModel {
     // `activeListeningUtteranceID`: a stale finish callback from a superseded player
     // must not clear the new listen state or deactivate the session.
     private var activeListenPlayerID: ObjectIdentifier?
-    // In-flight `POST /api/tts` fetch for the Listen action. Cancelled by
+    // In-flight `POST /api/audio/speak` fetch for the Listen action. Cancelled by
     // `stopListening()`; exposed (read-only) so tests can await the async
     // server-first path deterministically.
     @ObservationIgnored private(set) var listenPreparationTask: Task<Void, Never>?
@@ -703,44 +927,32 @@ final class ChatViewModel {
     private(set) var listenPlaybackSpeed: ListenPlaybackSpeed
     @ObservationIgnored private var listenPlaybackTicker: Timer?
     private var showsLiveActivityResponseExcerpts: Bool
-    private var hasCompletedCurrentResponse: Bool { streamCoordinator.hasCompletedCurrentResponse }
-    private var isStreamConnectionSuspended: Bool { streamCoordinator.isConnectionSuspended }
-    var isActiveStreamConnectionSuspended: Bool { streamCoordinator.isConnectionSuspended }
-    private var hasLoadedPersonalitySuggestions = false
-    private var isLoadingPersonalitySuggestions = false
+    private var isStreamConnectionSuspended: Bool { usesDirectGateway && directRuntime?.state == .disconnected }
+    var isActiveStreamConnectionSuspended: Bool { isStreamConnectionSuspended }
     private var hasLoadedSkillSlashSuggestions = false
     private var isLoadingSkillSlashSuggestions = false
     private var queuedSlashMessages: [QueuedSlashMessage] = []
     private var isDrainingQueuedSlashMessage = false
-    private var activeBtwStreamID: String?
+    private var activeBtwAttemptID: UUID?
+    private var activeBtwTaskID: String?
+    private var activeBtwProfile: String?
     private var activeBtwMessageID: String?
     private var activeBtwQuestion: String?
     private var activeBtwAnswer = ""
-    private var backgroundPromptsByTaskID: [String: String] = [:]
-    @ObservationIgnored private var backgroundPollTask: Task<Void, Never>?
-    @ObservationIgnored private var sessionEventReconcileTask: Task<Void, Never>?
-    @ObservationIgnored private var didStartSessionEventSync = false
-    @ObservationIgnored private var streamStatusWatchTask: Task<Void, Never>?
-    private var isRefreshingCompletedResponseTitle = false
-    private var isActiveStreamReplayConnection: Bool { streamCoordinator.isReplayConnection }
-    private var activeStreamReplayMatchedPrefixLength = 0
-    private var activeStreamReplayMatchedInterimLength = 0
-    private var activeStreamReplayMatchedReasoningLength = 0
-    private var activeStreamReplayToolMatchIndex = 0
-    private var activeStreamReplayPendingToolMatchIndex: Int?
-    private var latestServerLoadHadAssistantResponseAfterLatestUser = false
-    private var needsComposerConfigurationReload = false
-    private var pendingExplicitModelPick = false
+    /// Local BTW cards are history-independent presentation owned only by the
+    /// exact canonical conversation/profile that created them.
+    private var btwLocalRowScopes: [String: (sessionID: String, profile: String)] = [:]
+    private var directBackgroundAttempts: [UUID: DirectBackgroundAttempt] = [:]
+    private var directBackgroundStartsInFlight: Set<UUID> = []
+    private var directBackgroundResolutions: [UUID: DirectBackgroundAttemptResolution] = [:]
+    /// Background result cards, like BTW cards, are history-independent local
+    /// presentation owned by one exact canonical conversation and profile.
+    private var backgroundLocalRowScopes: [String: (sessionID: String, profile: String)] = [:]
 
     init(
         session: SessionSummary,
         server: URL,
         client: APIClient? = nil,
-        streamClient: SSEStreamingClient? = nil,
-        approvalStreamClient: SSEStreamingClient? = nil,
-        clarifyStreamClient: SSEStreamingClient? = nil,
-        btwStreamClient: SSEStreamingClient? = nil,
-        sessionEventStreamClient: SSEStreamingClient? = nil,
         liveActivityManager: (any AgentLiveActivityManaging)? = nil,
         showsLiveActivityResponseExcerpts: Bool = false,
         pollingIntervals: ChatPollingIntervals = .standard,
@@ -751,7 +963,12 @@ final class ChatViewModel {
         listenAudioSession: (any ListenAudioSessionControlling)? = nil,
         listenRemoteControlCenter: (any ListenRemoteControlControlling)? = nil,
         serverTTSAudioPlayerFactory: (@MainActor (Data) throws -> any ListenAudioPlaying)? = nil,
-        userDefaults: UserDefaults = .standard
+        userDefaults: UserDefaults = .standard,
+        gatewayRuntimeProvider: (@MainActor (APIClient) async throws -> HermesServerRuntime)? = nil,
+        directAttachmentPreparer: (@Sendable (Data, String, Data?) async throws -> DirectPendingAttachment)? = nil,
+        directAttachmentRecoveryMarkerStore: any DirectGatewayAttachmentRecoveryMarkerStoreProtocol = DirectGatewayAttachmentRecoveryMarkerStore(),
+        promptUncertaintyStore: any DirectPromptDeliveryUncertaintyStoreProtocol = DirectPromptDeliveryUncertaintyStore(),
+        initialDirectConversation: GatewayConversationController? = nil
     ) {
         sessionID = session.sessionId
         currentWorkspace = session.workspace
@@ -761,39 +978,16 @@ final class ChatViewModel {
         sessionReasoningEffort = Self.nonEmpty(session.reasoningEffort)
         isCLISession = session.isCliSession == true
         self.server = server
-        #if DEBUG
-        self.nativeAuthE2EAutoSubmitController = NativeAuthE2EAutoSubmitController.processController(
-            serverURL: server
-        )
-        #endif
+        self.gatewayRuntimeProvider = gatewayRuntimeProvider
+        self.directAttachmentPreparer = directAttachmentPreparer
+        self.directAttachmentRecoveryMarkerStore = directAttachmentRecoveryMarkerStore
+        self.promptUncertaintyStore = promptUncertaintyStore
+        self.directConversation = initialDirectConversation
+        self.directRuntime = initialDirectConversation?.sharedRuntime
         let resolvedClient = client ?? APIClient(baseURL: server)
-        let resolvedStreamClient = streamClient ?? OfficialHermesStreamClient(
-            client: resolvedClient,
-            serverURL: server
-        )
         let resolvedLiveActivityManager = liveActivityManager ?? AgentLiveActivityManager.shared
         self.client = resolvedClient
-        self.streamCoordinator = ChatStreamCoordinator(
-            client: resolvedClient,
-            streamClient: resolvedStreamClient,
-            liveActivityManager: resolvedLiveActivityManager,
-            showsLiveActivityResponseExcerpts: showsLiveActivityResponseExcerpts
-        )
-        self.pendingActionCoordinator = ChatPendingActionCoordinator(
-            client: resolvedClient,
-            approvalStreamClient: approvalStreamClient ?? SSEClient(allowedServerURL: server),
-            clarifyStreamClient: clarifyStreamClient ?? SSEClient(allowedServerURL: server),
-            pollingIntervals: pollingIntervals
-        )
         self.attachmentCoordinator = ChatAttachmentCoordinator(client: resolvedClient)
-        self.btwStreamClient = btwStreamClient ?? SSEClient(allowedServerURL: server)
-        self.sessionEventStreamCoordinator = SessionEventStreamCoordinator(
-            server: server,
-            sessionID: session.sessionId ?? "",
-            profile: session.profile,
-            streamClient: sessionEventStreamClient ?? SSEClient(allowedServerURL: server),
-            userDefaults: userDefaults
-        )
         self.liveActivityManager = resolvedLiveActivityManager
         self.showsLiveActivityResponseExcerpts = showsLiveActivityResponseExcerpts
         self.pollingIntervals = pollingIntervals
@@ -805,49 +999,1343 @@ final class ChatViewModel {
         self.listenRemoteControlCenter = listenRemoteControlCenter ?? ListenRemoteControlController()
         self.userDefaults = userDefaults
         self.restoreStore = TranscriptRestoreStore(defaults: userDefaults)
-        self.liveRunBookmarkStore = LiveRunBookmarkStore(defaults: userDefaults)
+        self.localOrganizerStore = LocalOrganizerStore(defaults: userDefaults)
         let restorePoint = restoreStore.load(server: server, sessionID: session.sessionId ?? session.id)
         savedFollowingLatest = restorePoint.followingLatest
         savedVisibleMessageID = restorePoint.visibleMessageID
-        if let bookmark = liveRunBookmarkStore.load(server: server, sessionID: session.sessionId ?? session.id),
-           bookmark.streamID == session.activeStreamId {
-            liveReasoningText = bookmark.liveReasoningText
-            streamingAssistantMessageID = bookmark.streamingAssistantMessageID
-            liveToolCalls = bookmark.liveToolCalls
-            streamCoordinator.restoreLastEventID(bookmark.lastEventID)
-        }
         self.listenPlaybackSpeed = ListenPlaybackSpeed.stored(in: userDefaults)
         self.serverTTSAudioPlayerFactory = serverTTSAudioPlayerFactory
             ?? { try ServerTTSAudioPlayer(data: $0) }
         displayTitle = Self.displayTitle(from: session.title)
-        self.sessionEventStreamCoordinator.onSnapshot = { [weak self] snapshot in
-            self?.applySessionEventSnapshot(snapshot) ?? false
-        }
-        self.sessionEventStreamCoordinator.onEvent = { [weak self] event in
-            self?.handleSessionEvent(event)
-        }
-        self.streamCoordinator.attach(delegate: self)
-        self.pendingActionCoordinator.delegate = self
         self.attachmentCoordinator.delegate = self
-        streamCoordinator.adoptKnownLiveStreamIfNeeded(session.activeStreamId)
+        if let initialDirectConversation {
+            configureDirectConversation(initialDirectConversation)
+        }
     }
 
     deinit {
-        backgroundPollTask?.cancel()
-        sessionEventReconcileTask?.cancel()
-        streamStatusWatchTask?.cancel()
+        directReasoningRefreshTask?.cancel()
         pendingStreamingScrollTriggerTask?.cancel()
         pendingStreamingContentFlushTask?.cancel()
         connectionVisibilityTask?.cancel()
         listenPreparationTask?.cancel()
+        contextUsageSnapshotTask?.cancel()
         listenPlaybackTicker?.invalidate()
+    }
+
+    // MARK: - Direct Hermes native bridge
+
+    private func loadDirectComposerConfiguration() async {
+        guard !directInvalidated, !isLoadingComposerConfiguration else { return }
+        let profile = requestProfileName ?? "default"
+        let mutation = composerConfigurationMutationToken
+        isLoadingComposerConfiguration = true
+        composerConfigurationErrorMessage = nil
+        defer { isLoadingComposerConfiguration = false }
+        do {
+            async let inventory = client.directModelOptions(profile: profile)
+            async let profiles = client.directProfiles()
+            let (options, availableProfiles) = try await (inventory, profiles)
+            guard !directInvalidated, profile == (requestProfileName ?? "default"),
+                  mutation == composerConfigurationMutationToken else { return }
+            directModelOptions = options
+            modelCatalogGroups = options.catalogGroups
+            profileOptions = availableProfiles.profiles ?? []
+            isSingleProfileMode = availableProfiles.singleProfileMode ?? false
+            selectedProfileName = profile
+            await refreshWorkspaceRoots()
+            // The catalog reports profile defaults, not this stored chat's
+            // effective configuration. Only a new local draft inherits them.
+            if canonicalSessionID == nil, currentModel == nil {
+                currentModel = Self.nonEmpty(options.model)
+                currentModelProvider = Self.nonEmpty(options.provider)
+            }
+            applyDirectReasoningGating()
+            if canonicalSessionID != nil { try await loadDirectSessionReasoning() }
+        } catch {
+            guard !directInvalidated, profile == (requestProfileName ?? "default"),
+                  mutation == composerConfigurationMutationToken else { return }
+            if canonicalSessionID != nil {
+                directSessionReasoningSupported = false
+                isReasoningChangeDeferred = false
+                applyDirectReasoningGating()
+            }
+            lastError = error
+            composerConfigurationErrorMessage = "Hermes chat settings could not be loaded. Your draft was preserved."
+        }
+    }
+
+    private func loadDirectSessionReasoning() async throws {
+        guard !directInvalidated, let expectedID = canonicalSessionID else { return }
+        let mutation = composerConfigurationMutationToken
+        do {
+            let controller = try await ensureDirectConversation()
+            let configuration = try await controller.reasoningConfiguration()
+            guard !directInvalidated, !Task.isCancelled, expectedID == canonicalSessionID,
+                  mutation == composerConfigurationMutationToken else { return }
+            applyDirectReasoningConfiguration(configuration)
+        } catch {
+            guard !directInvalidated, !Task.isCancelled, expectedID == canonicalSessionID,
+                  mutation == composerConfigurationMutationToken else { return }
+            directSessionReasoningSupported = false
+            isReasoningChangeDeferred = false
+            applyDirectReasoningGating()
+            throw error
+        }
+    }
+
+    private func applyDirectReasoningConfiguration(_ configuration: GatewayConversationController.ReasoningConfiguration) {
+        directSessionReasoningSupported = configuration.supportsSessionChanges
+        selectedReasoningEffort = configuration.effort
+        sessionReasoningEffort = configuration.effort
+        isReasoningChangeDeferred = configuration.deferred
+        applyDirectReasoningGating()
+    }
+
+    private func applyDirectSessionInfo(_ payload: JSONValue?) {
+        guard !directInvalidated else { return }
+        let fields = payload?.gatewayFields ?? [:]
+        if let model = Self.nonEmpty(fields["model"]?.gatewayString) { currentModel = model }
+        if let provider = Self.nonEmpty(fields["provider"]?.gatewayString) { currentModelProvider = provider }
+        if let cwd = Self.nonEmpty(fields["cwd"]?.gatewayString) { currentWorkspace = cwd }
+        // Older metadata must not replace an in-flight optimistic selection.
+        if !isUpdatingComposerConfiguration, directConversation?.pendingReasoningEffort == nil {
+            if let effort = fields["reasoning_effort"]?.gatewayString {
+                selectedReasoningEffort = Self.nonEmpty(effort)
+                sessionReasoningEffort = selectedReasoningEffort
+            }
+            if case .bool(let deferred) = fields["reasoning_deferred"] {
+                isReasoningChangeDeferred = deferred
+            }
+        }
+        applyDirectReasoningGating()
+    }
+
+    private func selectDirectSessionReasoning(_ effort: String) async -> Bool {
+        guard !directInvalidated, !isViewingCachedData, !isUpdatingComposerConfiguration,
+              directSessionReasoningSupported, supportsReasoningEffort == true,
+              supportedReasoningEfforts?.contains(effort) == true,
+              let expectedID = canonicalSessionID else { return false }
+        guard effort != selectedReasoningSelection else { return false }
+        let previousEffort = selectedReasoningEffort
+        let previousOverride = sessionReasoningEffort
+        let previousDeferred = isReasoningChangeDeferred
+        composerConfigurationMutationToken &+= 1
+        let mutation = composerConfigurationMutationToken
+        selectedReasoningEffort = effort
+        sessionReasoningEffort = effort
+        isUpdatingComposerConfiguration = true
+        composerConfigurationErrorMessage = nil
+        lastError = nil
+        defer {
+            if mutation == composerConfigurationMutationToken { isUpdatingComposerConfiguration = false }
+        }
+        do {
+            let controller = try await ensureDirectConversation()
+            let configuration = try await controller.setReasoningEffort(effort)
+            guard !directInvalidated, expectedID == canonicalSessionID,
+                  mutation == composerConfigurationMutationToken else { return false }
+            applyDirectReasoningConfiguration(configuration)
+            return true
+        } catch {
+            guard !directInvalidated, expectedID == canonicalSessionID,
+                  mutation == composerConfigurationMutationToken else { return false }
+            selectedReasoningEffort = previousEffort
+            sessionReasoningEffort = previousOverride
+            isReasoningChangeDeferred = previousDeferred
+            // A lost acknowledgement can be ambiguous. Never retry the write;
+            // require a fresh settings read before another selection.
+            directSessionReasoningSupported = false
+            applyDirectReasoningGating()
+            lastError = error
+            composerConfigurationErrorMessage = "Reasoning could not be confirmed. Reload chat settings before trying again."
+            return false
+        }
+    }
+
+    private func applyDirectReasoningGating() {
+        let capability = directModelOptions?.providers?.first { $0.slug == currentModelProvider }?
+            .capabilities?[currentModel ?? ""]
+        // These are the pinned create-time parser's levels, not a claim that
+        // every provider implements every level without coercion.
+        supportedReasoningEfforts = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+            .filter { $0 != "none" || capability?.canDisableReasoning != false }
+        let configurable = canonicalSessionID == nil || directSessionReasoningSupported
+        supportsReasoningEffort = capability?.reasoning == true && configurable
+        sessionScopedReasoning = configurable
+    }
+
+    private func canConfigureDirectDraft() -> Bool {
+        guard !directInvalidated, !isViewingCachedData, !isUpdatingComposerConfiguration,
+              activeStreamID == nil else {
+            composerConfigurationErrorMessage = "Wait until this chat is idle and connected to change its settings."
+            return false
+        }
+        guard canonicalSessionID == nil else {
+            composerConfigurationErrorMessage = "Model and workspace changes on an existing direct chat are not available yet. Choose them in New Chat before its first send."
+            return false
+        }
+        composerConfigurationErrorMessage = nil
+        return true
+    }
+
+    private func ensureDirectConversation() async throws -> GatewayConversationController {
+        guard !directInvalidated, let gatewayRuntimeProvider else { throw DirectSessionError.stopped }
+        if let directConversation { return directConversation }
+        if let directAttachmentTask { return try await directAttachmentTask.value }
+        let task = Task { @MainActor [weak self] in
+            guard let self else { throw DirectSessionError.stopped }
+            let runtime = try await gatewayRuntimeProvider(self.client)
+            guard !self.directInvalidated else { throw DirectSessionError.stopped }
+            let controller = GatewayConversationController(
+                runtime: runtime,
+                client: self.client,
+                storedID: self.canonicalSessionID,
+                profile: Self.nonEmpty(self.currentProfile) ?? "default",
+                recoveryMarkerStore: self.directAttachmentRecoveryMarkerStore,
+                promptUncertaintyStore: self.promptUncertaintyStore
+            )
+            self.directRuntime = runtime
+            self.directConversation = controller
+            self.configureDirectConversation(controller)
+            return controller
+        }
+        directAttachmentTask = task
+        defer { directAttachmentTask = nil }
+        return try await task.value
+    }
+
+    private func configureDirectConversation(_ controller: GatewayConversationController) {
+        controller.isVisible = directVisible
+        controller.isEditing = directComposerIsEditing
+        controller.onRecoveredIdle = { [weak self, weak controller] recoveredID in
+            guard let self, let controller,
+                  !self.directInvalidated, self.directConversation === controller,
+                  controller.storedID == recoveredID, self.canonicalSessionID == recoveredID,
+                  self.directHistoryID == recoveredID,
+                  let ownedRun = self.directLiveActivityRun,
+                  ownedRun.sessionID == recoveredID, ownedRun.profile == controller.profile else { return }
+            self.endDirectLiveActivity(status: .ended, activity: String(localized: "No longer running"))
+        }
+        controller.onBinding = { [weak self, weak controller] binding in
+            guard let self, let controller,
+                  !self.directInvalidated,
+                  self.directConversation === controller else { return }
+            self.adoptDirectID(binding.storedID)
+        }
+        controller.onCanonicalID = { [weak self, weak controller] id in
+            guard let self, let controller,
+                  !self.directInvalidated,
+                  self.directConversation === controller else { return }
+            self.adoptDirectID(id)
+        }
+        controller.onResume = { [weak self, weak controller] result in
+            guard let self, let controller,
+                  !self.directInvalidated,
+                  self.directConversation === controller,
+                  controller.storedID == self.canonicalSessionID else { return }
+            self.applyDirectSessionInfo(result?.gatewayFields["info"])
+            self.syncDirectClarificationPrompt()
+            self.directBlockingInteractionErrorMessage = nil
+            self.directBlockingInteractionErrorIdentity = nil
+            if controller.hasAmbiguousPromptDelivery {
+                self.sendErrorMessage = self.promptDeliveryWarning(for: controller)
+            }
+        }
+        controller.onReasoningConfiguration = { [weak self, weak controller] configuration in
+            guard let self, let controller,
+                  !self.directInvalidated,
+                  self.directConversation === controller,
+                  controller.storedID == self.canonicalSessionID else { return }
+            self.applyDirectReasoningConfiguration(configuration)
+        }
+        controller.onTranscript = { [weak self, weak controller] page, older in
+            guard let self, let controller,
+                  !self.directInvalidated,
+                  self.directConversation === controller else { return }
+            self.applyDirectTranscript(page, older: older)
+        }
+        controller.onEvent = { [weak self, weak controller] event in
+            guard let self, let controller,
+                  !self.directInvalidated,
+                  self.directConversation === controller else { return }
+            let previousPrompt = self.directClarificationPrompt
+            self.applyDirectEvent(event,
+                suppressUnwatermarkedContent: controller.suppressesColdResumedContent)
+            if event.type == "clarify.request",
+               let currentPrompt = controller.pendingBlockingPrompt,
+               previousPrompt?.gatewayIdentity != currentPrompt.identity {
+                self.clearDirectClarificationOwnedSendError()
+                self.directClarificationErrorMessage = nil
+            } else if event.type == "clarify.expire",
+                      let requestID = event.payload?.gatewayFields["request_id"]?.gatewayString,
+                      previousPrompt?.pending.clarifyId == requestID {
+                let message = "That clarification expired before it was answered."
+                self.directClarificationErrorMessage = message
+                self.setDirectClarificationSendError(message)
+            }
+            self.syncDirectClarificationPrompt()
+            if event.type == "message.complete",
+               controller.runState == .idle,
+               !controller.hasAmbiguousPromptDelivery {
+                self.drainQueuedSlashMessageIfIdle()
+            }
+        }
+        controller.onBtwOutcome = { [weak self, weak controller] outcome in
+            guard let self, let controller,
+                  !self.directInvalidated,
+                  self.directConversation === controller,
+                  controller.profile == self.activeBtwProfile else { return }
+            self.applyDirectBtwOutcome(outcome)
+        }
+        controller.onBackgroundOutcome = { [weak self, weak controller] outcome in
+            guard let self, let controller,
+                  !self.directInvalidated,
+                  self.directConversation === controller else { return }
+            self.applyDirectBackgroundOutcome(outcome, controller: controller)
+        }
+        controller.onError = { [weak self, weak controller] error in
+            guard let self, let controller,
+                  !self.directInvalidated,
+                  self.directConversation === controller else { return }
+            if let blockingError = error as? GatewayBlockingError {
+                let message = self.directClarificationMessage(for: blockingError)
+                self.directClarificationErrorMessage = message
+                if self.directClarificationPrompt == nil {
+                    self.setDirectClarificationSendError(message)
+                }
+                return
+            }
+            self.lastError = error
+            self.sendErrorMessage = "The Hermes connection needs attention. No message was automatically resent."
+        }
+    }
+
+    /// Branches a direct Hermes conversation and transfers the already-bound
+    /// child controller to a new ChatViewModel. The optional name is rejected
+    /// explicitly until the controller seam carries the stock name field;
+    /// it is never silently discarded.
+    func branchDirectConversation(name: String = "") async -> SlashCommandExecutionResult {
+        guard usesDirectGateway else {
+            return .unsupported(friendlyMessage: "Branching is not available outside direct Hermes mode.")
+        }
+        guard name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return .unsupported(friendlyMessage: "Named direct branches are not available yet.")
+        }
+        guard !directInvalidated, !isViewingCachedData, !isStartingChat,
+              activeStreamID == nil else {
+            return .unsupported(friendlyMessage: "Wait for the current response to finish before branching.")
+        }
+
+        let expectedProfile = Self.nonEmpty(currentProfile) ?? "default"
+        var detachedChild: GatewayConversationController?
+        var detachedChildViewModel: ChatViewModel?
+        do {
+            let parent = try await ensureDirectConversation()
+            guard !directInvalidated,
+                  directConversation === parent,
+                  parent.profile == expectedProfile,
+                  parent.runtimeOrigin == server,
+                  parent.runState == .idle else {
+                throw DirectSessionError.ambiguousPrompt
+            }
+            try await parent.open()
+            guard !directInvalidated,
+                  directConversation === parent,
+                  parent.profile == expectedProfile,
+                  parent.runtimeOrigin == server,
+                  parent.runState == .idle,
+                  let expectedParentBinding = parent.binding,
+                  let expectedParentID = parent.storedID,
+                  expectedParentID == canonicalSessionID else {
+                throw DirectSessionError.staleOperation
+            }
+            let expectedParentCanonicalID = canonicalSessionID
+            let expectedParentRuntime = parent.sharedRuntime
+            func parentScopeIsCurrent() -> Bool {
+                !directInvalidated &&
+                    directConversation === parent &&
+                    parent.binding == expectedParentBinding &&
+                    parent.storedID == expectedParentID &&
+                    canonicalSessionID == expectedParentCanonicalID &&
+                    parent.profile == expectedProfile &&
+                    parent.runtimeOrigin == server &&
+                    parent.sharedRuntime === expectedParentRuntime &&
+                    directRuntime === expectedParentRuntime
+            }
+
+            let child = try await parent.branch()
+            detachedChild = child
+            guard parentScopeIsCurrent() else {
+                throw DirectSessionError.staleOperation
+            }
+            guard child.profile == expectedProfile,
+                  child.runtimeOrigin == server,
+                  child.sharedRuntime === parent.sharedRuntime,
+                  let childID = child.storedID,
+                  !childID.isEmpty else {
+                throw DirectSessionBranchError.invalidResponse
+            }
+
+            // Detail is the authoritative summary used by the session store;
+            // do not synthesize sidebar metadata from the branch RPC.
+            let summary = try await client.directSessionDetail(
+                sessionID: childID,
+                profile: expectedProfile
+            )
+            guard summary.sessionId == childID,
+                  summary.profile == expectedProfile else {
+                throw DirectHermesRESTError.profileMismatch
+            }
+            guard !directInvalidated,
+                  parentScopeIsCurrent(),
+                  parent.sharedRuntime === child.sharedRuntime else {
+                throw DirectSessionError.staleOperation
+            }
+
+            let childViewModel = ChatViewModel(
+                session: summary,
+                server: server,
+                client: client,
+                liveActivityManager: liveActivityManager,
+                showsLiveActivityResponseExcerpts: showsLiveActivityResponseExcerpts,
+                pollingIntervals: pollingIntervals,
+                userDefaults: userDefaults,
+                gatewayRuntimeProvider: gatewayRuntimeProvider,
+                directAttachmentPreparer: directAttachmentPreparer,
+                directAttachmentRecoveryMarkerStore: directAttachmentRecoveryMarkerStore,
+                promptUncertaintyStore: promptUncertaintyStore,
+                initialDirectConversation: child
+            )
+            detachedChildViewModel = childViewModel
+
+            // The controller performed its branch-time verification; refresh
+            // once after callback wiring so the child VM owns its transcript.
+            try await child.refresh()
+            guard !childViewModel.directInvalidated,
+                  childViewModel.directConversation === child,
+                  child.storedID == childID,
+                  parentScopeIsCurrent() else {
+                throw DirectSessionError.staleOperation
+            }
+
+            let handoff = DirectBranchHandoff(
+                session: summary,
+                viewModel: childViewModel,
+                origin: server,
+                profile: expectedProfile,
+                identity: UUID()
+            )
+            return .openedDirectBranch(handoff)
+        } catch {
+            if let detachedChildViewModel {
+                detachedChildViewModel.invalidateDirectConversation()
+                await detachedChildViewModel.disposeDirectConversation()
+            } else if let detachedChild {
+                detachedChild.invalidate()
+                try? await detachedChild.dispose()
+            }
+            lastError = error
+            return .unsupported(friendlyMessage: "The direct Hermes branch could not be opened safely.")
+        }
+    }
+
+    private func adoptDirectID(_ id: String) {
+        guard !directInvalidated, sessionID != id else { return }
+        sessionID = id
+        applyDirectReasoningGating()
+        onDirectCanonicalID?(id)
+    }
+
+    func invalidateDirectConversation() {
+        guard usesDirectGateway else { return }
+        failActiveBtwAttempt(String(localized: "The Hermes connection changed before the side question finished."))
+        failDirectBackgroundAttempts()
+        btwLocalRowScopes.removeAll()
+        backgroundLocalRowScopes.removeAll()
+        directInvalidated = true
+        sendTranscriptSessionID = nil
+        directReasoningRefreshTask?.cancel()
+        cancelContextUsageSnapshotTask()
+        directSessionReasoningSupported = false
+        isReasoningChangeDeferred = false
+        directClarificationPrompt = nil
+        directClarificationErrorMessage = nil
+        directClarificationOwnedSendError = nil
+        isRespondingToDirectClarification = false
+        directBlockingInteractionErrorMessage = nil
+        directBlockingInteractionErrorIdentity = nil
+        clearDirectPendingAttachments()
+        directConversation?.invalidate()
+        directAttachmentTask?.cancel()
+        stopSessionEventSync()
+        cleanupPollingTasks()
+        resetPendingStreamingContentBuffers()
+        if directConversation?.runState != .idle { liveActivityManager.markStale() }
+    }
+
+    func setDirectComposerEditing(_ editing: Bool) {
+        directComposerIsEditing = editing
+        directConversation?.isEditing = editing
+    }
+
+    func disposeDirectConversation() async {
+        guard usesDirectGateway else { return }
+        invalidateDirectConversation()
+        do { try await directConversation?.dispose() }
+        catch {
+            lastError = error
+            sendErrorMessage = "The unused Hermes draft could not be confirmed closed."
+        }
+        directConversation = nil
+        directRuntime = nil
+    }
+
+    @ObservationIgnored private var directLoadWaitOwner: UUID?
+
+    private func cancelContextUsageSnapshotTask() {
+        contextUsageSnapshotTask?.cancel()
+        contextUsageSnapshotTask = nil
+        contextUsageSnapshotTaskOwner = nil
+    }
+
+    private func scheduleContextUsageSnapshot(
+        for controller: GatewayConversationController,
+        loadGeneration: Int,
+        requestedSessionID: String?,
+        requestedProfile: String?
+    ) {
+        cancelContextUsageSnapshotTask()
+        let owner = UUID()
+        let usageRevision = contextUsageRevision
+        contextUsageSnapshotTaskOwner = owner
+        contextUsageSnapshotTask = Task { @MainActor [weak self, controller] in
+            defer {
+                if let self, self.contextUsageSnapshotTaskOwner == owner {
+                    self.contextUsageSnapshotTask = nil
+                    self.contextUsageSnapshotTaskOwner = nil
+                }
+            }
+
+            guard let usage = try? await controller.contextUsageSnapshot(),
+                  !Task.isCancelled,
+                  let self,
+                  self.contextUsageSnapshotTaskOwner == owner,
+                  self.messageLoadGeneration == loadGeneration,
+                  self.contextUsageRevision == usageRevision,
+                  !self.directInvalidated,
+                  self.directConversation === controller,
+                  self.canonicalSessionID == requestedSessionID,
+                  self.requestProfileName == requestedProfile,
+                  controller.runState == .idle else { return }
+            self.contextWindowSnapshot = usage
+        }
+    }
+
+    private func loadDirectMessages(modelContext: ModelContext?) async {
+        guard !directInvalidated else { return }
+        messageLoadGeneration &+= 1
+        cancelContextUsageSnapshotTask()
+        let generation = messageLoadGeneration
+        let requestedID = canonicalSessionID
+        let requestedProfile = requestProfileName
+        let modelContext = modelContext ?? directModelContext
+        directModelContext = modelContext
+        let waitOwner = UUID()
+        directLoadWaitOwner = waitOwner
+        beginConnectionWaitIfNeeded()
+        if let sessionID, messages.isEmpty, let modelContext {
+            _ = renderCachedMessagesBeforeReload(sessionID: sessionID, modelContext: modelContext)
+        }
+        let initialMessages = messages
+        errorMessage = nil
+        cacheErrorMessage = nil
+        lastError = nil
+        defer {
+            if directLoadWaitOwner == waitOwner {
+                directLoadWaitOwner = nil
+                endConnectionWait()
+            }
+        }
+        do {
+            let wasAttached = directConversation?.binding != nil
+            let controller = try await ensureDirectConversation()
+            // open/resume already performs one canonical read. A warm idle
+            // refresh needs another; never overwrite an active streamed turn.
+            try await controller.open()
+            if wasAttached, controller.runState == .idle { try await controller.refresh() }
+            guard messageLoadGeneration == generation, !directInvalidated,
+                  requestedProfile == requestProfileName else { return }
+            // Usage ticks are emitted while a run is active. Cold-restored and
+            // already-idle chats need one explicit snapshot so controls do not
+            // misleadingly present context as unavailable until the next send.
+            // This optional telemetry must not extend the transcript's loading
+            // or connection-wait window.
+            if controller.runState == .idle {
+                scheduleContextUsageSnapshot(
+                    for: controller,
+                    loadGeneration: generation,
+                    requestedSessionID: canonicalSessionID,
+                    requestedProfile: requestedProfile
+                )
+            }
+            errorMessage = nil
+        } catch DirectSessionError.staleOperation {
+            // A newer turn/read owns presentation; this is not a load failure.
+        } catch {
+            guard !Task.isCancelled, messageLoadGeneration == generation, !directInvalidated,
+                  requestedID == canonicalSessionID, requestedProfile == requestProfileName else { return }
+            lastError = error
+            // Only a real cache adoption is offline presentation. Auth/server errors
+            // must not turn a retained online transcript into purported cached data.
+            let useCache: Bool
+            if let gatewayError = error as? HermesGatewayError {
+                switch gatewayError {
+                case .closed, .notConnected, .timeout:
+                    useCache = true
+                case .transport(let operation):
+                    // These are exact local failure codes emitted by our client,
+                    // not server text. Encoding failures are not connectivity loss.
+                    useCache = operation == "WebSocket receive failed" || operation == "WebSocket send failed"
+                default:
+                    useCache = false
+                }
+            } else if case DirectHermesRequestError.http(let status, _) = error {
+                useCache = CacheFallbackPolicy.shouldUseCache(for: APIError.http(statusCode: status, body: nil))
+            } else {
+                useCache = CacheFallbackPolicy.shouldUseCache(for: error)
+            }
+            if useCache, !hasPreservedLiveRun, messages == initialMessages, let requestedID, let modelContext {
+                do {
+                    let cached = try CacheStore.cachedMessages(serverURL: server,
+                        sessionID: transcriptCacheID(requestedID), in: modelContext,
+                        limit: Self.messagePageLimit)
+                    if !cached.isEmpty {
+                        withBatchedTranscriptDerivedState {
+                            messages = cached
+                            messagesOffset = 0
+                        }
+                        hasOlderMessages = false
+                        isViewingCachedData = true
+                        clearCacheFirstMessagePlaceholder()
+                        errorMessage = nil
+                        return
+                    }
+                } catch { cacheErrorMessage = error.localizedDescription }
+            }
+            revertCacheFirstPlaceholderIfNeeded()
+            isViewingCachedData = false
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func loadOlderDirectMessages(modelContext: ModelContext?) async -> Bool {
+#if DEBUG
+        // One content-free result per invocation. -1 means refresh was never
+        // dispatched; no session IDs, row IDs, errors, or response bodies log.
+        let diagnosticCountBefore = messages.count
+        var diagnosticRequestedOffset = -1
+        var diagnosticOutcome = "guard_rejected"
+        defer {
+            Self.olderLoadOutcomeLogger.debug("""
+                event=older_loader_outcome reason=\(diagnosticOutcome, privacy: .public) \
+                requestedOffset=\(diagnosticRequestedOffset, privacy: .public) \
+                messagesBefore=\(diagnosticCountBefore, privacy: .public) messagesAfter=\(self.messages.count, privacy: .public)
+                """)
+        }
+#endif
+        guard !directInvalidated, !isLoadingOlderMessages, hasOlderMessages,
+              directConversation != nil else {
+#if DEBUG
+            diagnosticOutcome = directInvalidated ? "guard_invalidated"
+                : isLoadingOlderMessages ? "guard_already_loading"
+                : !hasOlderMessages ? "guard_no_older_messages"
+                : "guard_missing_controller"
+#endif
+            return false
+        }
+        directModelContext = modelContext ?? directModelContext
+        isLoadingOlderMessages = true
+        defer { isLoadingOlderMessages = false }
+        let count = messages.count
+        do {
+            let controller = try await ensureDirectConversation()
+            let anchor = controller.runState == .idle ? nil : messages.first?.messageId
+            guard controller.runState == .idle || anchor != nil else {
+#if DEBUG
+                diagnosticOutcome = "guard_active_without_anchor"
+#endif
+                return false
+            }
+#if DEBUG
+            diagnosticRequestedOffset = directOlderOffset
+#endif
+            try await controller.refresh(limit: 120, offset: directOlderOffset, olderAnchorID: anchor)
+#if DEBUG
+            diagnosticOutcome = messages.count > count ? "refresh_count_increased" : "refresh_no_count_increase"
+#endif
+            return messages.count > count
+        } catch GatewayConversationController.OlderPageError.canonicalChanged {
+            // An active turn keeps its live identity. Terminal/reconnect owns
+            // canonical revalidation; never retry this as a different page.
+#if DEBUG
+            diagnosticOutcome = "canonical_changed"
+#endif
+            return false
+        } catch DirectSessionError.staleOperation {
+            // A newer tail/rebind won the race. Its cursor is authoritative;
+            // leave the current rows in place and allow another explicit page.
+#if DEBUG
+            diagnosticOutcome = "stale_operation"
+#endif
+            return false
+        } catch {
+#if DEBUG
+            diagnosticOutcome = "other_error"
+#endif
+            lastError = error; errorMessage = "Could not load older messages."; return false
+        }
+    }
+
+    private func applyDirectTranscript(_ page: DirectHermesTranscriptPage, older: Bool) {
+        if older {
+            // Paging expands only the existing durable history. It must not
+            // reset the transient live tail, tool/reasoning groups, or timers.
+            guard directHistoryID == page.sessionID else { return }
+            streamingAssistantMessageIndex = nil
+            withBatchedTranscriptDerivedState {
+                messages = Self.prependingOlderMessages(page.messages, to: messages)
+            }
+            let knownToolIDs = Set(completedToolCallGroups.flatMap { $0.toolCalls.map(\.id) } + liveToolCalls.map(\.id))
+            let olderGroups = ToolCallGroup.groups(persistedToolCalls: [], messages: messages, messageOffset: 0)
+                .compactMap { group -> ToolCallGroup? in
+                    let newTools = group.toolCalls.filter { !knownToolIDs.contains($0.id) }
+                    guard !newTools.isEmpty else { return nil }
+                    return ToolCallGroup(id: group.id, anchorMessageID: group.anchorMessageID, toolCalls: newTools)
+                }
+            var retainedGroups = completedToolCallGroups
+            var prependedGroups: [ToolCallGroup] = []
+            for group in olderGroups {
+                if let index = retainedGroups.firstIndex(where: { $0.anchorMessageID == group.anchorMessageID }) {
+                    let existing = retainedGroups[index]
+                    retainedGroups[index] = ToolCallGroup(id: existing.id,
+                        anchorMessageID: existing.anchorMessageID, toolCalls: group.toolCalls + existing.toolCalls)
+                } else {
+                    prependedGroups.append(group)
+                }
+            }
+            setCompletedToolCallGroups(prependedGroups + retainedGroups)
+            let returned = page.pagination?.returned ?? page.messages.count
+            directOlderOffset = (page.pagination?.offset ?? directOlderOffset) + returned
+            hasOlderMessages = returned >= (page.pagination?.limit ?? 120)
+            cacheCurrentMessages(sessionID: page.sessionID, modelContext: directModelContext)
+            return
+        }
+        // `sendDirectMessage` resumes an existing durable session before it
+        // stages the new prompt.  Hermes can acknowledge that resume while its
+        // canonical transcript read is still temporarily empty.  Do not turn
+        // a populated, same-session transcript into the empty-state view during
+        // that bounded send window; the later canonical tail owns the eventual
+        // replacement.  The same transient race hits foreground re-entry and
+        // old-chat detail reuse (P01): an empty canonical page for the session
+        // already on screen must never silently blank populated rows.  The
+        // protection is keyed to those exact transient windows only — never
+        // to every same-session empty page.  An ordinary idle refresh, an
+        // ambiguous-delivery resume (its empty canonical page is what drops
+        // the unconfirmed optimistic ghost), a different canonical session,
+        // an explicit clear, or a genuinely empty transcript still applies
+        // authoritatively.
+        if page.messages.isEmpty,
+           !messages.isEmpty,
+           (directHistoryID == nil || directHistoryID == page.sessionID),
+           (isStartingChat && page.sessionID == sendTranscriptSessionID)
+               || ((isForegroundReentryRead || wasReusedFromOpenSessionStore)
+                   && page.sessionID == canonicalSessionID) {
+            return
+        }
+        let renderedCache = cacheFirstMessagePlaceholder != nil
+        flushPendingStreamingContent()
+        resetPendingStreamingContentBuffers()
+        let canonicalChanged = directHistoryID != nil && directHistoryID != page.sessionID
+        let previouslyHadOlder = hasOlderMessages
+        var retainedPrefix: [ChatMessage] = []
+        if !older, directHistoryID == page.sessionID,
+           let firstID = page.messages.first?.messageId,
+           let overlap = messages.firstIndex(where: { $0.messageId == firstID }) {
+            // The REST page owns its suffix, not all previously loaded history.
+            // Only a durable overlap proves continuity. Never union a disjoint
+            // tail, retain optimistic rows, or carry history across a new tip.
+            let prefix = messages[..<overlap]
+            let isCanonicalPrefix = prefix.allSatisfy { message in
+                guard let id = message.messageId else { return false }
+                return !id.isEmpty && !id.hasPrefix("local-")
+            }
+            if isCanonicalPrefix { retainedPrefix = Array(prefix) }
+        }
+        adoptDirectID(page.sessionID)
+        directHistoryID = page.sessionID
+        let profile = directConversation?.profile ?? (Self.nonEmpty(currentProfile) ?? "default")
+        let retainedLocalRows: [ChatMessage]
+        if older {
+            retainedLocalRows = []
+        } else {
+            btwLocalRowScopes = btwLocalRowScopes.filter {
+                $0.value.sessionID == page.sessionID && $0.value.profile == profile
+            }
+            backgroundLocalRowScopes = backgroundLocalRowScopes.filter {
+                $0.value.sessionID == page.sessionID && $0.value.profile == profile
+            }
+            retainedLocalRows = messages.filter { message in
+                guard let id = message.messageId else { return false }
+                let scope = btwLocalRowScopes[id] ?? backgroundLocalRowScopes[id]
+                guard let scope else { return false }
+                return scope.sessionID == page.sessionID && scope.profile == profile
+            }
+        }
+        withBatchedTranscriptDerivedState {
+            let canonicalMessages = older && !canonicalChanged
+                ? Self.prependingOlderMessages(page.messages, to: messages) : retainedPrefix + page.messages
+            let canonicalIDs = Set(canonicalMessages.compactMap(\.messageId))
+            messages = canonicalMessages + retainedLocalRows.filter { row in
+                guard let id = row.messageId else { return false }
+                return !canonicalIDs.contains(id)
+            }
+            // WebUI's forward absolute offset is not the direct backwards cursor.
+            // Stable durable row IDs own transcript identity on this path.
+            messagesOffset = 0
+        }
+        let returned = page.pagination?.returned ?? page.messages.count
+        directOlderOffset = (page.pagination?.offset ?? (older ? directOlderOffset : 0)) + returned + retainedPrefix.count
+        hasOlderMessages = !retainedPrefix.isEmpty ? previouslyHadOlder : returned >= (page.pagination?.limit ?? 120)
+        setCompletedToolCallGroups(ToolCallGroup.groups(persistedToolCalls: [], messages: messages, messageOffset: 0))
+        completedReasoningGroups = []
+        streamingAssistantMessageID = nil
+        streamingAssistantMessageIndex = nil
+        sealedInterimAssistantMessageIDs.removeAll()
+        liveToolCalls = []
+        liveReasoningText = ""
+        reasoningAnchorMessageID = nil
+        toolCallAnchorMessageID = nil
+        clearCacheFirstMessagePlaceholder()
+        if renderedCache { cacheFirstReconcileScrollToken += 1 }
+        isViewingCachedData = false
+        responseCompletionNeedsTranscriptRefresh = false
+        cacheCurrentMessages(sessionID: page.sessionID, modelContext: directModelContext)
+    }
+
+
+    private func sendDirectMessage(
+        _ draft: String,
+        modelContext: ModelContext?,
+        selectedAttachmentIDs: Set<UUID>? = nil,
+        removeSelectedAttachmentsOnAmbiguousDelivery: Bool = true,
+        requiredController: GatewayConversationController? = nil,
+        requiredSessionID: String? = nil,
+        requiredProfile: String? = nil,
+        requiredOrigin: URL? = nil,
+        requiredConnectionGeneration: Int? = nil
+    ) async -> Bool {
+        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, !directInvalidated, !isStartingChat,
+              !isUpdatingComposerConfiguration else { return false }
+        guard !attachmentRecoveryIsBusy else {
+            sendErrorMessage = "Resetting unresolved attachment delivery. Your draft was kept."
+            return false
+        }
+        guard directConversation?.hasAmbiguousPromptDelivery != true else {
+            sendErrorMessage = promptDeliveryWarning(for: directConversation)
+            return false
+        }
+        guard directConversation?.runState == nil || directConversation?.runState == .idle else { return false }
+        if attachmentRecoveryNeedsReset, directPendingAttachments.isEmpty {
+            sendErrorMessage = "An attachment delivery is unresolved. Reset the pending upload before continuing."
+            return false
+        }
+        guard pendingAttachments.isEmpty, !isPreparingDirectAttachment else {
+            sendErrorMessage = "Direct Hermes attachments are not available yet. Your draft was kept."
+            return false
+        }
+        directModelContext = modelContext ?? directModelContext
+        isStartingChat = true
+        // Capture before `open()`: resume may adopt a different canonical
+        // session before its transcript callback arrives.  Only an empty
+        // result for this original session can be the transient read race.
+        sendTranscriptSessionID = canonicalSessionID
+        cancelContextUsageSnapshotTask()
+        sendErrorMessage = nil
+        lastError = nil
+        defer {
+            sendTranscriptSessionID = nil
+            isStartingChat = false
+            OpenChatSessionStore.shared.noteStreamingStateChanged()
+        }
+        let localID = "local-\(UUID().uuidString)"
+        let wasDraft = canonicalSessionID == nil
+        let hasExplicitAttachmentSelection = selectedAttachmentIDs != nil
+        let attachmentIDs = selectedAttachmentIDs ?? Set(directPendingAttachments.map(\.id))
+        let selectionGeneration = directAttachmentSelectionGeneration
+        do {
+            let controller = try await ensureDirectConversation()
+            guard requiredController == nil || directConversation === requiredController,
+                  requiredController == nil || controller === requiredController,
+                  requiredSessionID == nil || controller.storedID == requiredSessionID,
+                  requiredProfile == nil || controller.profile == requiredProfile,
+                  requiredOrigin == nil || controller.sharedRuntime.origin == requiredOrigin,
+                  requiredConnectionGeneration == nil
+                    || controller.sharedRuntime.connectionGeneration == requiredConnectionGeneration else {
+                throw DirectSessionError.staleOperation
+            }
+            // Resume first so its canonical transcript cannot erase this new
+            // optimistic row. Draft open remains completely local.
+            try await controller.open()
+            guard !directInvalidated, controller.runState == .idle,
+                  requiredController == nil || controller === requiredController,
+                  requiredSessionID == nil || controller.storedID == requiredSessionID,
+                  requiredProfile == nil || controller.profile == requiredProfile,
+                  requiredOrigin == nil || controller.sharedRuntime.origin == requiredOrigin,
+                  requiredConnectionGeneration == nil
+                    || controller.sharedRuntime.connectionGeneration == requiredConnectionGeneration,
+                  requiredConnectionGeneration == nil || controller.sharedRuntime.state == .ready else {
+                throw DirectSessionError.ambiguousPrompt
+            }
+            var creation: [String: JSONValue] = [:]
+            if let value = Self.nonEmpty(currentWorkspace) { creation["cwd"] = .string(value) }
+            if let value = Self.nonEmpty(currentModel) { creation["model"] = .string(value) }
+            if let value = Self.nonEmpty(currentModelProvider) { creation["provider"] = .string(value) }
+            if let value = Self.nonEmpty(sessionReasoningEffort) { creation["reasoning_effort"] = .string(value) }
+
+            try await stageDirectAttachments(
+                attachmentIDs: attachmentIDs,
+                selectionGeneration: selectionGeneration,
+                controller: controller,
+                create: creation
+            )
+            try Task.checkCancellation()
+            let currentAttachmentIDs = Set(directPendingAttachments.map(\.id))
+            guard !directInvalidated,
+                  selectionGeneration == directAttachmentSelectionGeneration,
+                  (hasExplicitAttachmentSelection
+                    ? attachmentIDs.isSubset(of: currentAttachmentIDs)
+                    : attachmentIDs == currentAttachmentIDs),
+                  requiredController == nil || controller === requiredController,
+                  requiredSessionID == nil || controller.storedID == requiredSessionID,
+                  requiredProfile == nil || controller.profile == requiredProfile,
+                  requiredOrigin == nil || controller.sharedRuntime.origin == requiredOrigin,
+                  requiredConnectionGeneration == nil
+                    || controller.sharedRuntime.connectionGeneration == requiredConnectionGeneration,
+                  requiredConnectionGeneration == nil || controller.sharedRuntime.state == .ready else {
+                throw DirectSessionError.staleOperation
+            }
+
+            messageLoadGeneration &+= 1
+            archiveLiveReasoningIfNeeded()
+            archiveLiveToolCallsIfNeeded()
+            resetPendingStreamingContentBuffers()
+            streamingAssistantMessageID = nil
+            liveToolCalls = []
+            liveReasoningText = ""
+            reasoningAnchorMessageID = nil
+            toolCallAnchorMessageID = nil
+            directResponseComplete = false
+            outgoingInsertionSequence += 1
+            outgoingInsertionEvent = OutgoingInsertionEvent(
+                scope: outgoingInsertionScope, messageID: localID,
+                sequence: outgoingInsertionSequence
+            )
+            messages.append(ChatMessage(
+                role: "user",
+                content: text,
+                timestamp: Date().timeIntervalSince1970,
+                messageId: localID
+            ))
+            // The protected interval ends at the optimistic insertion.  Any
+            // later empty refresh is no longer the pre-submit race and must
+            // retain the ordinary authoritative-empty semantics.
+            sendTranscriptSessionID = nil
+            let stagedAttachments = directPendingAttachments.filter { attachmentIDs.contains($0.id) }
+            guard stagedAttachments.count == attachmentIDs.count else { throw DirectSessionError.staleOperation }
+            try await controller.submit(text, stagedAttachments: stagedAttachments, create: creation)
+            removeDirectPendingAttachments(ids: attachmentIDs)
+            if wasDraft {
+                // Discover per-session support after acceptance, without holding
+                // up sending or creating another chat merely to read settings.
+                directReasoningRefreshTask?.cancel()
+                directReasoningRefreshTask = Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    do { try await self.loadDirectSessionReasoning() }
+                    catch {
+                        guard !self.directInvalidated, !Task.isCancelled else { return }
+                        self.composerConfigurationErrorMessage = "Session reasoning controls could not be loaded. Open the model picker to reload chat settings."
+                    }
+                }
+            }
+            if let sessionID { cacheCurrentMessages(sessionID: sessionID, modelContext: directModelContext) }
+            return true
+        } catch let failure as DirectAttachmentSendFailure {
+            lastError = failure.error
+            switch failure.error {
+            case .definiteBeforeStage:
+                sendErrorMessage = "\(failure.filename) could not be staged. Your draft was kept."
+            case .unknown:
+                sendErrorMessage = "Staging \(failure.filename) is uncertain. Your draft was kept and will not be retried automatically."
+            }
+            rollbackOptimisticMessage(id: localID)
+            return false
+        } catch is DirectPromptDeliveryUncertaintyError {
+            rollbackOptimisticMessage(id: localID)
+            sendErrorMessage = "Semreh could not save the delivery safety state, so the message was not sent. Your draft was kept."
+            return false
+        } catch is CancellationError {
+            if directConversation?.hasAmbiguousPromptDelivery == true
+                || directConversation?.runState == .deliveryUnknown {
+                if removeSelectedAttachmentsOnAmbiguousDelivery {
+                    removeDirectPendingAttachments(ids: attachmentIDs)
+                }
+                sendErrorMessage = promptDeliveryWarning(for: directConversation)
+                return true
+            }
+            rollbackOptimisticMessage(id: localID)
+            return false
+        } catch {
+            lastError = error
+            if directConversation?.hasAmbiguousPromptDelivery == true
+                || directConversation?.runState == .deliveryUnknown {
+                // Keep the staged row as uncertain. Canonical history is refreshed,
+                // but only explicit local abandonment unlocks a different message.
+                if removeSelectedAttachmentsOnAmbiguousDelivery {
+                    removeDirectPendingAttachments(ids: attachmentIDs)
+                }
+                sendErrorMessage = promptDeliveryWarning(for: directConversation)
+                return true
+            }
+            rollbackOptimisticMessage(id: localID)
+            sendErrorMessage = "Hermes could not accept this message. Your draft was kept."
+            return false
+        }
+    }
+
+    private func stageDirectAttachments(
+        attachmentIDs: Set<UUID>,
+        selectionGeneration: Int,
+        controller: GatewayConversationController,
+        create: [String: JSONValue]
+    ) async throws {
+        guard !attachmentIDs.isEmpty else { return }
+        let snapshot = directPendingAttachments.filter { attachmentIDs.contains($0.id) }
+        guard snapshot.count == attachmentIDs.count else { throw DirectSessionError.staleOperation }
+        var passedCreate = false
+
+        for attachment in snapshot {
+            try Task.checkCancellation()
+            guard !directInvalidated,
+                  selectionGeneration == directAttachmentSelectionGeneration,
+                  directPendingAttachments.contains(where: { $0.id == attachment.id }) else {
+                throw DirectSessionError.staleOperation
+            }
+
+            switch attachment.stageState {
+            case .confirmed:
+                continue
+            case .unknown(let scope):
+                // An earlier request may have reached Hermes without a usable
+                // receipt. The controller deliberately rejects blind restage.
+                throw DirectAttachmentSendFailure.staging(
+                    id: attachment.id,
+                    filename: attachment.displayFilename,
+                    error: .unknown(
+                        kind: attachment.source.kind,
+                        scope: scope,
+                        reason: .priorAttemptUnknown
+                    )
+                )
+            case .pending:
+                do {
+                    let result = try await controller.stageAttachment(
+                        attachment,
+                        create: passedCreate ? [:] : create
+                    )
+                    passedCreate = true
+                    guard !directInvalidated,
+                          selectionGeneration == directAttachmentSelectionGeneration,
+                          let index = directPendingAttachments.firstIndex(where: { $0.id == attachment.id }),
+                          case .pending = directPendingAttachments[index].stageState else {
+                        throw DirectSessionError.staleOperation
+                    }
+                    guard directPendingAttachments[index].confirm(
+                        scope: result.scope,
+                        referenceText: result.receipt.referenceText,
+                        serverDetachPaths: result.receipt.detachPaths
+                    ) else {
+                        throw DirectSessionError.staleOperation
+                    }
+                    // Preserve a confirmed receipt if cancellation arrived
+                    // after the server acknowledged the stage.
+                    try Task.checkCancellation()
+                } catch let error as DirectGatewayAttachmentStageError {
+                    if case .unknown(_, let scope, _) = error,
+                       let index = directPendingAttachments.firstIndex(where: { $0.id == attachment.id }),
+                       case .pending = directPendingAttachments[index].stageState {
+                        _ = directPendingAttachments[index].markUnknown(scope: scope)
+                    }
+                    throw DirectAttachmentSendFailure.staging(
+                        id: attachment.id,
+                        filename: attachment.displayFilename,
+                        error: error
+                    )
+                }
+            }
+        }
+    }
+
+    private func applyDirectEvent(
+        _ event: HermesGatewayEvent,
+        suppressUnwatermarkedContent: Bool = false
+    ) {
+        if event.type == "status.update",
+           event.payload?.gatewayFields["kind"]?.gatewayString == "goal",
+           let text = event.payload?.gatewayFields["text"]?.gatewayString,
+           !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let key = "\(event.connectionGeneration.map { String($0) } ?? "none"):\(event.sequence.map { String($0) } ?? "none"):"
+                + "\(event.sessionID ?? "none"):goal:\(text)"
+            if directGoalStatusEventKeys.insert(key).inserted {
+                appendLocalNoticeMessage(text)
+            }
+        }
+        if event.type == "message.start" {
+            cancelContextUsageSnapshotTask()
+        }
+        if !["message.delta", "thinking.delta", "reasoning.delta"].contains(event.type) {
+            flushPendingStreamingContent()
+        }
+        defer {
+            // A token is not an ownership transition. Avoid invalidating every
+            // sidebar/live-session consumer and rescheduling retention per delta.
+            if ["message.start", "message.complete", "error"].contains(event.type) {
+                OpenChatSessionStore.shared.noteStreamingStateChanged()
+            }
+        }
+        switch GatewayConversationController.presentationEvent(for: event) {
+        case .textDelta(let text):
+            guard !suppressUnwatermarkedContent else { break }
+            _ = appendAssistantToken(text)
+            if showsLiveActivityResponseExcerpts { liveActivityManager.update(.token(text)) }
+        case .interim(let text, let alreadyStreamed):
+            guard !suppressUnwatermarkedContent else { break }
+            _ = appendInterimAssistant(InterimAssistantStreamEvent(text: text, alreadyStreamed: alreadyStreamed))
+            if showsLiveActivityResponseExcerpts { liveActivityManager.update(.interimAssistant(text)) }
+        case .thinkingDelta(let text), .reasoningDelta(let text):
+            guard !suppressUnwatermarkedContent else { break }
+            _ = appendReasoning(text)
+            liveActivityManager.update(.reasoning(text))
+        case .toolStart(let tool):
+            _ = appendToolCall(directToolEvent(tool, completed: false))
+            liveActivityManager.update(.toolStarted(name: tool.name))
+        case .toolComplete(let tool):
+            _ = completeToolCall(directToolEvent(tool, completed: true))
+            liveActivityManager.update(.toolCompleted)
+        case .toolProgress: break // Progress is not a second tool call.
+        case .usage(let usage): contextWindowSnapshot = usage
+        case .terminal(let terminal):
+            flushPendingStreamingContent()
+            if !suppressUnwatermarkedContent, let text = terminal.text, !text.isEmpty {
+                prepareStreamingAssistantForTerminal(text)
+            }
+            if !suppressUnwatermarkedContent, let text = terminal.text, !text.isEmpty,
+               let messageID = streamingAssistantMessageID,
+               let index = streamingAssistantMessagePosition(for: messageID),
+               messages[index].role == "assistant" {
+                let current = messages[index]
+                messages[index] = ChatMessage(role: current.role, content: text,
+                    timestamp: current.timestamp, messageId: current.messageId,
+                    name: current.name, toolCallId: current.toolCallId, toolUseId: current.toolUseId,
+                    toolCalls: current.toolCalls, contentParts: current.contentParts,
+                    reasoning: terminal.reasoning ?? current.reasoning, attachments: current.attachments,
+                    turnTps: terminal.usage?.tokensPerSecond ?? current.turnTps)
+            }
+            if let usage = terminal.usage { contextWindowSnapshot = usage }
+            directResponseComplete = true
+            sealedInterimAssistantMessageIDs.removeAll()
+            responseCompletionHapticTrigger += 1
+            // Terminal handling is the single completion chokepoint (item 4): the
+            // elapsed readout must not survive into an idle composer.
+            activeRunStartedAt = nil
+            if let terminalError = terminal.error {
+                sendErrorMessage = terminalError
+            } else if directConversation?.hasAmbiguousPromptDelivery == true {
+                sendErrorMessage = promptDeliveryWarning(for: directConversation)
+            } else {
+                sendErrorMessage = nil
+            }
+            let cancelled = terminal.status == "cancelled" || terminal.status == "interrupted"
+            endDirectLiveActivity(status: terminal.error != nil ? .failed : (cancelled ? .cancelled : .complete),
+                activity: cancelled ? "Response stopped" : "Response complete", errorSummary: terminal.error)
+        case .control(let raw):
+            if raw.type == "message.start" {
+                archiveDirectLiveTurnBeforeNewStart()
+                isReasoningChangeDeferred = false
+                directResponseComplete = false
+                // Item 4: the elapsed readout starts when the gateway starts the
+                // response, alongside the live-activity run.
+                activeRunStartedAt = Date()
+                streamingAssistantMessageID = nil
+                streamingAssistantMessageIndex = nil
+                if let sessionID {
+                    // A local activity identity is not a gateway runtime ID.
+                    let owner = UUID()
+                    directLiveActivityRun = (owner, sessionID, directConversation?.profile ?? "default")
+                    liveActivityManager.startDirect(owner: owner, sessionID: sessionID, sessionTitle: displayTitle)
+                }
+            } else if raw.type == "session.info" {
+                applyDirectSessionInfo(raw.payload)
+            } else if raw.type == "error" {
+                sendErrorMessage = raw.payload?.gatewayFields["message"]?.gatewayString ?? "Hermes reported an error."
+            } else if ["approval.request", "sudo.request", "secret.request"].contains(raw.type) {
+                // The live controller owns the typed prompt projection. The
+                // overlay observes that projection directly; do not route a
+                // native request through the legacy HTTP error surface.
+            }
+        case .unknown: break
+        }
+    }
+
+    private func endDirectLiveActivity(status: AgentRunActivityStatus, activity: String, errorSummary: String? = nil) {
+        guard let ownedRun = directLiveActivityRun,
+              ownedRun.sessionID == canonicalSessionID,
+              ownedRun.profile == directConversation?.profile else { return }
+        directLiveActivityRun = nil
+        activeRunStartedAt = nil
+        liveActivityManager.endDirect(owner: ownedRun.owner, status: status, activity: activity, errorSummary: errorSummary)
+    }
+
+    private func syncDirectClarificationPrompt() {
+        guard usesDirectGateway else { return }
+        guard let prompt = directConversation?.pendingBlockingPrompt else {
+            directClarificationPrompt = nil
+            return
+        }
+
+        let pending = PendingClarification(
+            clarifyId: prompt.identity.requestID,
+            question: prompt.kind.isCancelOnly ? prompt.displayQuestion : prompt.question,
+            choicesOffered: prompt.kind.isCancelOnly ? [] : prompt.choices,
+            sessionId: prompt.identity.storedID,
+            kind: prompt.kind.rawValue
+        )
+        directClarificationPrompt = ClarificationPromptState(
+            sessionID: prompt.identity.storedID,
+            pending: pending,
+            pendingCount: 1,
+            gatewayIdentity: prompt.identity,
+            gatewayCancelOnly: prompt.kind.isCancelOnly
+        )
+    }
+
+    private func setDirectClarificationSendError(_ message: String) {
+        directClarificationOwnedSendError = message
+        sendErrorMessage = message
+    }
+
+    private func clearDirectClarificationOwnedSendError() {
+        guard let ownedError = directClarificationOwnedSendError else { return }
+        if sendErrorMessage == ownedError {
+            sendErrorMessage = nil
+        }
+        directClarificationOwnedSendError = nil
+    }
+
+    private func directClarificationMessage(for error: GatewayBlockingError) -> String {
+        switch error {
+        case .malformedClarification:
+            return "Hermes sent a clarification request this app cannot safely display."
+        case .unsupportedBatchClarification:
+            return "This multi-question clarification can only be cancelled from this app."
+        case .unsupportedMultiSelectClarification:
+            return "This multi-select clarification can only be cancelled from this app."
+        case .noPendingClarification, .staleClarification:
+            return "That clarification is no longer active."
+        case .invalidClarificationResponse:
+            return "This clarification can only be cancelled."
+        case .responseInFlight:
+            return "A clarification response is already being sent."
+        }
+    }
+
+    /// A direct session can receive the next turn from another client while the
+    /// previous terminal refresh is still in flight (or has failed). Keep the
+    /// previous turn's live cards anchored before resetting the streaming row;
+    /// otherwise the old state is merged into the new turn or rendered as a
+    /// loose bottom card.
+    private func archiveDirectLiveTurnBeforeNewStart() {
+        guard !liveReasoningText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !liveToolCalls.isEmpty
+        else {
+            return
+        }
+
+        let anchorMessageID = directLiveTurnAnchorMessageID()
+        if !directLiveAnchorBelongsToCurrentTurn(reasoningAnchorMessageID) {
+            reasoningAnchorMessageID = anchorMessageID
+        }
+        if !directLiveAnchorBelongsToCurrentTurn(toolCallAnchorMessageID) {
+            toolCallAnchorMessageID = anchorMessageID
+        }
+
+        archiveLiveReasoningIfNeeded()
+        archiveLiveToolCallsIfNeeded()
+        liveReasoningText = ""
+        liveToolCalls = []
+        reasoningAnchorMessageID = nil
+        toolCallAnchorMessageID = nil
+    }
+
+    private func directLiveTurnAnchorMessageID() -> String {
+        let currentTurnAnchors = TranscriptTurnClassifier.currentTurnAssistantAnchorIDs(
+            in: messages,
+            messageOffset: messagesOffset
+        )
+        if let streamingAssistantMessageID,
+           messages.contains(where: { message in
+               message.role == "assistant" && message.messageId == streamingAssistantMessageID
+           }), currentTurnAnchors.contains(streamingAssistantMessageID) {
+            return streamingAssistantMessageID
+        }
+
+        if let currentTurnAnchor = currentTurnAnchors.last {
+            return currentTurnAnchor
+        }
+
+        // Direct live cards are normally created with an assistant row first.
+        // If a reconnect/cache transition left that row unavailable, create a
+        // concrete row before archiving so the old cards cannot become loose
+        // bottom groups.
+        streamingAssistantMessageID = nil
+        streamingAssistantMessageIndex = nil
+        return ensureStreamingAssistantMessage()
+    }
+
+    private func directLiveAnchorBelongsToCurrentTurn(_ anchorMessageID: String?) -> Bool {
+        guard let anchorMessageID else { return false }
+        return TranscriptTurnClassifier.currentTurnAssistantAnchorIDs(
+            in: messages,
+            messageOffset: messagesOffset
+        ).contains(anchorMessageID)
+    }
+
+    private func directToolEvent(_ tool: GatewayConversationController.PresentationTool, completed: Bool) -> ToolStreamEvent {
+        let resultText: String?
+        if case .string(let text) = tool.result { resultText = text }
+        else if let result = tool.result, let data = try? JSONEncoder().encode(result) { resultText = String(data: data, encoding: .utf8) }
+        else { resultText = nil }
+        return ToolStreamEvent(eventType: completed ? "tool_complete" : "tool_start", name: tool.name,
+            preview: tool.error ?? tool.summary ?? resultText, args: tool.args, duration: tool.duration,
+            isError: tool.error != nil, stableID: tool.toolID)
     }
 
     func setShowsLiveActivityResponseExcerpts(_ shows: Bool) {
         guard showsLiveActivityResponseExcerpts != shows else { return }
 
         showsLiveActivityResponseExcerpts = shows
-        streamCoordinator.setShowsLiveActivityResponseExcerpts(shows)
+        if !shows { liveActivityManager.update(.clearResponseExcerpt) }
     }
 
     var showsListenPlaybackBar: Bool {
@@ -858,95 +2346,16 @@ final class ChatViewModel {
         listenPlaybackScrubTime ?? listenPlaybackElapsedTime
     }
 
-    nonisolated static func resetActiveStreamSnapshotsForTesting() {
-        ActiveChatStreamSnapshotStore.shared.removeAll()
-    }
-
+    /// Chat visibility controls reconciliation on the shared direct gateway.
+    /// Merely becoming visible does not create a runtime or open a second stream.
     func startSessionEventSync() {
-        guard !didStartSessionEventSync else { return }
-        didStartSessionEventSync = true
-
-        // Preserve the mature WebUI lifecycle synchronously. Only a configured
-        // official sidecar needs an asynchronous capability decision.
-        guard client.officialContinuityClient != nil else {
-            sessionEventStreamCoordinator.start()
-            return
-        }
-
-        // `/api/sessions/{id}/events` is a community-WebUI journal route, not
-        // part of the official continuity surface. Avoid opening it for an
-        // official session; completed-turn reconciliation uses GET messages.
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            guard await client.continuityTransport() == .webUI else {
-                didStartSessionEventSync = false
-                return
-            }
-            guard didStartSessionEventSync else { return }
-            sessionEventStreamCoordinator.start()
-        }
+        directVisible = true
+        directConversation?.isVisible = true
     }
 
     func stopSessionEventSync() {
-        didStartSessionEventSync = false
-        sessionEventReconcileTask?.cancel()
-        sessionEventReconcileTask = nil
-        sessionEventStreamCoordinator.stop()
-    }
-
-    private func handleSessionEvent(_ event: SSEEvent) {
-        switch event {
-        case .done, .streamEnd, .cancelled, .error, .lostWorkerBookkeeping:
-            scheduleSessionEventReconcile()
-        default:
-            break
-        }
-    }
-
-    private func scheduleSessionEventReconcile() {
-        sessionEventReconcileTask?.cancel()
-        sessionEventReconcileTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 150_000_000)
-            guard !Task.isCancelled, let self else { return }
-            await self.loadMessages()
-        }
-    }
-
-    private func applySessionEventSnapshot(_ snapshot: SessionSummary) -> Bool {
-        let snapshotID = (snapshot.sessionId ?? snapshot.id).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let sessionID, snapshotID == sessionID.trimmingCharacters(in: .whitespacesAndNewlines) else {
-            return false
-        }
-
-        // Snapshots are metadata deltas in the current server contract. Older or
-        // partially populated snapshots may omit fields; absence must not erase
-        // the warm session's known values while transcript reconciliation runs.
-        if let workspace = snapshot.workspace {
-            currentWorkspace = workspace
-        }
-        if let model = snapshot.model {
-            currentModel = model
-        }
-        if let provider = snapshot.modelProvider {
-            currentModelProvider = provider
-        }
-        currentProfile = snapshot.profile ?? currentProfile
-        if let title = snapshot.title {
-            displayTitle = Self.displayTitle(from: title)
-        }
-
-        // A session snapshot is metadata, not an authoritative transcript. Reconcile
-        // the transcript separately and keep the visible/live state until that load
-        // wins its own generation check.
-        if activeStreamID == nil {
-            sessionEventReconcileTask?.cancel()
-            sessionEventReconcileTask = Task { @MainActor [weak self] in
-                try? await Task.sleep(nanoseconds: 150_000_000)
-                guard !Task.isCancelled, let self else { return }
-                await self.loadMessages()
-            }
-        }
-        return true
+        directVisible = false
+        directConversation?.isVisible = false
     }
 
     func markReusedFromOpenSessionStore() {
@@ -1000,19 +2409,6 @@ final class ChatViewModel {
         isLoading = false
     }
 
-    // Test seam: deterministically await the in-flight coalesced scroll-trigger task
-    // so streaming assertions never depend on the real coalescing window elapsing.
-    // No-op when no trigger is pending.
-    func awaitPendingStreamingScrollTriggerForTesting() async {
-        await pendingStreamingScrollTriggerTask?.value
-    }
-
-    private struct ActiveStreamMessageMerge {
-        let messages: [ChatMessage]
-        let streamingAssistantMessageID: String?
-        let usedSnapshotMessagesOffset: Bool
-    }
-
     var selectedModelID: String? {
         currentModel
     }
@@ -1024,6 +2420,8 @@ final class ChatViewModel {
     var selectedWorkspacePath: String? {
         currentWorkspace
     }
+
+    var workspaceOrganizerProfile: String { requestProfileName ?? "default" }
 
     var selectedProfileTitle: String {
         let profileName = selectedProfileName ?? currentProfile
@@ -1160,12 +2558,6 @@ final class ChatViewModel {
         cancelPendingStreamingContentFlush()
         pendingAssistantTextBuffer = ""
         pendingReasoningTextBuffer = ""
-        // Chunks are deduplicated at append time, so the replay matched-prefix
-        // counters can reference unflushed content; dropping the buffers makes them
-        // stale. Reset only the counters — the replay connection may still be live
-        // (e.g. loadOlderMessages pagination mid-catch-up), so dedup must stay armed.
-        activeStreamReplayMatchedPrefixLength = 0
-        activeStreamReplayMatchedReasoningLength = 0
     }
 
     func flushPendingStreamingContent() {
@@ -1188,6 +2580,8 @@ final class ChatViewModel {
         Self.nonEmpty(selectedProfileName) ?? Self.nonEmpty(currentProfile)
     }
 
+    var voiceInputProfileName: String { requestProfileName ?? "default" }
+
     /// The canonical Hermes session ID is the server-provided `session_id`.
     /// `SessionSummary.id` may be a local synthetic fallback and must never be
     /// sent as a session-scoped reasoning identity.
@@ -1195,307 +2589,66 @@ final class ChatViewModel {
         Self.nonEmpty(sessionID)
     }
 
-    private var requestModelProvider: String? {
-        Self.nonEmpty(currentModelProvider)
-    }
-
-    private func explicitModelPickForChatStart() -> Bool {
-        pendingExplicitModelPick && Self.nonEmpty(currentModel) != nil
-    }
-
-    private func completeExplicitModelPickForChatStart(_ explicitModelPick: Bool) {
-        if explicitModelPick {
-            pendingExplicitModelPick = false
-        }
-    }
-
     func loadComposerConfiguration() async {
-        if isLoadingComposerConfiguration {
-            needsComposerConfigurationReload = true
-            return
-        }
-
-        isLoadingComposerConfiguration = true
-        composerConfigurationErrorMessage = nil
-        lastError = nil
-        defer { isLoadingComposerConfiguration = false }
-
-        repeat {
-            needsComposerConfigurationReload = false
-
-            let initialState = composerConfigurationState
-            let result = await ChatComposerConfigLoader(client: client)
-                .loadConfiguration(from: initialState, sessionID: canonicalSessionID)
-
-            guard composerConfigurationState == initialState else {
-                needsComposerConfigurationReload = true
-                continue
-            }
-
-            applyComposerConfigurationState(result.state)
-
-            if let error = result.configurationError {
-                lastError = error
-                composerConfigurationErrorMessage = CacheFallbackPolicy.composerBannerMessage(for: error)
-            }
-        } while needsComposerConfigurationReload
+        await loadDirectComposerConfiguration()
     }
 
-    /// Refreshes the model catalog when a picker opens: refetch `/api/models`
-    /// (so the sheet stops pinning the chat-load-time snapshot), then overlay
-    /// the active provider's live list from `/api/models/live`. Failures are
-    /// silent by design — the picker keeps whatever it already shows.
+    /// Refreshes the direct Hermes inventory when a picker opens.
     func refreshModelCatalogForPickerOpen() async {
-        if let response = try? await client.models() {
-            let groups = response.catalogGroups
-            if !groups.isEmpty {
-                modelCatalogGroups = groups
-            }
-        }
-
-        if let live = try? await client.modelsLive() {
-            modelCatalogGroups = modelCatalogGroups.mergingLiveModels(from: live)
-        }
+        await loadDirectComposerConfiguration()
     }
-
-    private var composerConfigurationState: ChatComposerConfigState {
-        ChatComposerConfigState(
-            currentWorkspace: currentWorkspace,
-            currentModel: currentModel,
-            currentModelProvider: currentModelProvider,
-            currentProfile: currentProfile,
-            selectedProfileName: selectedProfileName,
-            selectedReasoningEffort: selectedReasoningEffort,
-            sessionReasoningEffort: sessionReasoningEffort,
-            supportedReasoningEfforts: supportedReasoningEfforts,
-            supportsReasoningEffort: supportsReasoningEffort,
-            sessionScopedReasoning: sessionScopedReasoning,
-            modelCatalogGroups: modelCatalogGroups,
-            agentCommands: agentCommands,
-            workspaceRoots: workspaceRoots,
-            workspaceSuggestions: workspaceSuggestions,
-            profileOptions: profileOptions,
-            isSingleProfileMode: isSingleProfileMode
-        )
-    }
-
-    private func applyComposerConfigurationState(_ state: ChatComposerConfigState) {
-        currentWorkspace = state.currentWorkspace
-        currentModel = state.currentModel
-        currentModelProvider = state.currentModelProvider
-        currentProfile = state.currentProfile
-        selectedProfileName = state.selectedProfileName
-        selectedReasoningEffort = state.selectedReasoningEffort
-        sessionReasoningEffort = state.sessionReasoningEffort
-        supportedReasoningEfforts = state.supportedReasoningEfforts
-        supportsReasoningEffort = state.supportsReasoningEffort
-        sessionScopedReasoning = state.sessionScopedReasoning
-        modelCatalogGroups = state.modelCatalogGroups
-        agentCommands = state.agentCommands
-        workspaceRoots = state.workspaceRoots
-        workspaceSuggestions = state.workspaceSuggestions
-        profileOptions = state.profileOptions
-        isSingleProfileMode = state.isSingleProfileMode
-    }
-
-    func refreshApprovalBypassState() async {
-        await pendingActionCoordinator.refreshApprovalBypassState()
-    }
-
     @discardableResult
     func selectComposerModel(_ option: ModelCatalogOption) async -> Bool {
-        guard !option.matchesSelection(modelID: currentModel, providerID: currentModelProvider) else {
+        guard canConfigureDirectDraft(),
+              modelCatalogGroups.flatMap(\.models).contains(option),
+              !option.matchesSelection(modelID: currentModel, providerID: currentModelProvider) else {
             return false
         }
-
-        guard !isViewingCachedData else {
-            composerConfigurationErrorMessage = String(localized: "Reconnect to the server to change models.")
-            return false
-        }
-
-        guard activeStreamID == nil else {
-            composerConfigurationErrorMessage = String(localized: "Wait for the current response to finish before changing models.")
-            return false
-        }
-
-        guard let sessionID else {
-            composerConfigurationErrorMessage = String(localized: "The server did not provide a session ID.")
-            return false
-        }
-
-        let previousModel = currentModel
-        let previousProvider = currentModelProvider
-        let previousWorkspace = currentWorkspace
-        let previousPendingExplicitModelPick = pendingExplicitModelPick
         composerConfigurationMutationToken &+= 1
-        let mutationToken = composerConfigurationMutationToken
-
-        // Update the chip immediately. Sending remains disabled for the short
-        // persistence window, while rollback below restores the exact prior
-        // selection if the server rejects the change.
         currentModel = option.id
         currentModelProvider = option.providerID
-        isUpdatingComposerConfiguration = true
-        composerConfigurationErrorMessage = nil
-        lastError = nil
-        defer {
-            if composerConfigurationMutationToken == mutationToken {
-                isUpdatingComposerConfiguration = false
-            }
-        }
-
-        do {
-            let response = try await client.updateSession(
-                id: sessionID,
-                workspace: currentWorkspace,
-                model: option.id,
-                modelProvider: option.providerID
-            )
-
-            guard composerConfigurationMutationToken == mutationToken,
-                  currentModel == option.id,
-                  currentModelProvider == option.providerID
-            else { return false }
-
-            currentModel = response.session?.model ?? option.id
-            currentModelProvider = response.session?.modelProvider ?? option.providerID
-            currentWorkspace = response.session?.workspace ?? currentWorkspace
-            pendingExplicitModelPick = true
-            // Still inside the isUpdatingComposerConfiguration window, so the
-            // effort menu stays disabled until the new model's gating lands —
-            // no interactable flash of the previous model's options (issue #18).
-            await refreshReasoningEffortGating()
-            guard composerConfigurationMutationToken == mutationToken else { return false }
-            return true
-        } catch {
-            guard composerConfigurationMutationToken == mutationToken else { return false }
-            currentModel = previousModel
-            currentModelProvider = previousProvider
-            currentWorkspace = previousWorkspace
-            pendingExplicitModelPick = previousPendingExplicitModelPick
-            lastError = error
-            composerConfigurationErrorMessage = error.localizedDescription
-            return false
-        }
+        sessionReasoningEffort = nil
+        selectedReasoningEffort = nil
+        applyDirectReasoningGating()
+        return true
     }
 
-    /// Re-queries `GET /api/reasoning` for the current model/provider and updates
-    /// the effort gating (issue #18). Failures are silent to the user, but reset
-    /// the gating to the "unknown" fallback (static effort list, control shown) —
-    /// keeping the previous model's gating after a successful model switch could
-    /// hide the control for a model that supports it, or offer efforts the new
-    /// model rejects. If the selected effort is no longer supported, snaps to the
-    /// server's coerced `reasoning_effort`.
-    func refreshReasoningEffortGating() async {
-        guard !isViewingCachedData else { return }
-
-        reasoningGatingFetchToken += 1
-        let token = reasoningGatingFetchToken
-        let expectedSessionID = canonicalSessionID
-        let expectedModel = currentModel
-        let expectedProvider = currentModelProvider
-
-        guard let response = try? await client.reasoning(
-            model: Self.nonEmpty(currentModel),
-            provider: Self.nonEmpty(currentModelProvider),
-            sessionID: Self.nonEmpty(expectedSessionID)
-        ) else {
-            if token == reasoningGatingFetchToken,
-               expectedSessionID == canonicalSessionID,
-               expectedModel == currentModel,
-               expectedProvider == currentModelProvider {
-                supportedReasoningEfforts = nil
-                supportsReasoningEffort = nil
-                sessionScopedReasoning = nil
-            }
-            return
-        }
-
-        guard token == reasoningGatingFetchToken,
-              expectedSessionID == canonicalSessionID,
-              expectedModel == currentModel,
-              expectedProvider == currentModelProvider
-        else { return }
-
-        supportedReasoningEfforts = response.normalizedSupportedEfforts
-        supportsReasoningEffort = response.supportsReasoningEffort
-        sessionScopedReasoning = response.sessionScopedReasoning
-        if response.sessionScopedReasoning == true {
-            // The session-aware endpoint is authoritative, including a nil
-            // override after selecting Default/inherit.
-            sessionReasoningEffort = response.normalizedSessionReasoningEffort
-        } else if let rawEffort = response.normalizedSessionReasoningEffort {
-            sessionReasoningEffort = rawEffort
-        }
-
-        if let selected = Self.nonEmpty(selectedReasoningEffort)?.lowercased(),
-           let supported = supportedReasoningEfforts,
-           !supported.contains(selected),
-           let serverEffort = Self.nonEmpty(response.effectiveEffort) {
-            selectedReasoningEffort = serverEffort
-        }
-    }
-
-    /// Refetches the workspace registry after the manager sheet mutated it
-    /// (issue #22), so the picker reflects adds/removes/renames/reorders.
+    /// Reloads device-local workspace bookmarks after manager changes.
     func refreshWorkspaceRoots() async {
-        guard !isViewingCachedData else { return }
-
+        workspaceRoots = []
+        workspaceSuggestions = []
         do {
-            let response = try await client.workspaces()
-            workspaceRoots = response.workspaces ?? []
+            workspaceRoots = try localOrganizerStore.workspaceBookmarks(
+                server: server, profile: workspaceOrganizerProfile
+            ).map { WorkspaceRoot(path: $0.path, name: $0.name) }
             workspaceSuggestions = workspaceRoots.compactMap(\.path)
         } catch {
             lastError = error
+            composerConfigurationErrorMessage = error.localizedDescription
         }
     }
 
     func loadWorkspaceSuggestions(prefix: String) async {
-        guard !isViewingCachedData else {
-            workspaceSuggestions = workspaceRoots.compactMap(\.path)
-            return
-        }
-
-        do {
-            let response = try await client.workspaceSuggestions(prefix: prefix)
-            workspaceSuggestions = response.suggestions ?? []
-        } catch {
-            lastError = error
-            composerConfigurationErrorMessage = error.localizedDescription
-        }
-    }
-
-    func loadPersonalitySuggestions() async {
-        guard !hasLoadedPersonalitySuggestions else { return }
-        guard !isLoadingPersonalitySuggestions else { return }
-
-        isLoadingPersonalitySuggestions = true
-        defer { isLoadingPersonalitySuggestions = false }
-
-        do {
-            personalitySuggestions = (try await client.personalities()).slashAutocompleteNames
-            hasLoadedPersonalitySuggestions = true
-        } catch {
-            lastError = error
-            composerConfigurationErrorMessage = error.localizedDescription
-            if personalitySuggestions.isEmpty {
-                personalitySuggestions = ["none"]
-            }
+        let value = prefix.trimmingCharacters(in: .whitespacesAndNewlines)
+        workspaceSuggestions = workspaceRoots.compactMap(\.path).filter {
+            value.isEmpty || $0.localizedCaseInsensitiveContains(value)
         }
     }
 
     func loadSkillSlashSuggestions() async {
-        guard !hasLoadedSkillSlashSuggestions else { return }
+        guard usesDirectGateway else { return }
         guard !isLoadingSkillSlashSuggestions else { return }
 
         isLoadingSkillSlashSuggestions = true
         defer { isLoadingSkillSlashSuggestions = false }
 
         do {
-            let response = try await client.skills()
-            skillSlashSuggestions = SlashSkillFormatter.suggestions(from: response.skills ?? [])
-            hasLoadedSkillSlashSuggestions = true
+            let controller = try await ensureDirectConversation()
+            _ = try await directSkillSuggestions(controller: controller, profile: controller.profile,
+                origin: controller.sharedRuntime.origin)
         } catch {
+            guard !Task.isCancelled, !directInvalidated,
+                  (error as? DirectSessionError) != .staleOperation else { return }
             lastError = error
         }
     }
@@ -1504,239 +2657,354 @@ final class ChatViewModel {
     func selectWorkspacePath(_ path: String) async -> Bool {
         let workspace = path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !workspace.isEmpty else { return false }
-
-        guard workspace != currentWorkspace else {
-            return false
-        }
-
-        guard !isViewingCachedData else {
-            composerConfigurationErrorMessage = String(localized: "Reconnect to the server to change workspace.")
-            return false
-        }
-
-        guard activeStreamID == nil else {
-            composerConfigurationErrorMessage = String(localized: "Wait for the current response to finish before changing workspace.")
-            return false
-        }
-
-        guard let sessionID else {
-            composerConfigurationErrorMessage = String(localized: "The server did not provide a session ID.")
-            return false
-        }
-
-        let previousWorkspace = currentWorkspace
+        guard canConfigureDirectDraft(), workspace != currentWorkspace else { return false }
+        composerConfigurationMutationToken &+= 1
         currentWorkspace = workspace
-        isUpdatingComposerConfiguration = true
-        composerConfigurationErrorMessage = nil
-        lastError = nil
-        defer { isUpdatingComposerConfiguration = false }
-
-        do {
-            let response = try await client.updateSession(
-                id: sessionID,
-                workspace: workspace,
-                model: currentModel,
-                modelProvider: currentModelProvider
-            )
-
-            currentWorkspace = response.session?.workspace ?? workspace
-            currentModel = response.session?.model ?? currentModel
-            currentModelProvider = response.session?.modelProvider ?? currentModelProvider
-            return true
-        } catch {
-            currentWorkspace = previousWorkspace
-            lastError = error
-            composerConfigurationErrorMessage = error.localizedDescription
-            return false
-        }
+        return true
     }
 
     func switchProfile(_ profile: ProfileSummary, startNewSession: Bool) async -> ProfileSwitchOutcome? {
-        guard !isViewingCachedData else {
-            composerConfigurationErrorMessage = String(localized: "Reconnect to the server to change profiles.")
+        guard !directInvalidated, !isViewingCachedData, !isUpdatingComposerConfiguration,
+              activeStreamID == nil, let name = profile.normalizedName else { return nil }
+        // A profile owns a different durable namespace. Return a new local
+        // draft; never retarget this controller or change the host profile.
+        guard startNewSession else {
+            composerConfigurationErrorMessage = "Choose New Chat to use a different Hermes profile."
             return nil
         }
-
-        guard activeStreamID == nil else {
-            composerConfigurationErrorMessage = String(localized: "Wait for the current response to finish before changing profiles.")
-            return nil
-        }
-
-        guard let profileName = profile.normalizedName else {
-            composerConfigurationErrorMessage = String(localized: "The server did not provide a profile name.")
-            return nil
-        }
-
-        if !startNewSession, isSelectedProfile(profile) {
-            return nil
-        }
-
-        isUpdatingComposerConfiguration = true
-        composerConfigurationErrorMessage = nil
-        lastError = nil
-        defer { isUpdatingComposerConfiguration = false }
-
-        do {
-            let response = try await client.switchProfile(name: profileName)
-            profileOptions = response.profiles ?? profileOptions
-            selectedProfileName = response.active ?? profileName
-            currentProfile = selectedProfileName
-
-            if let defaultWorkspace = response.defaultWorkspace, !defaultWorkspace.isEmpty {
-                currentWorkspace = defaultWorkspace
-            }
-
-            if let defaultModel = response.defaultModel, !defaultModel.isEmpty {
-                currentModel = defaultModel
-                currentModelProvider = Self.nonEmpty(profile.provider)
-            }
-            pendingExplicitModelPick = false
-
-            await loadComposerConfiguration()
-
-            guard startNewSession else {
-                return ProfileSwitchOutcome(session: nil)
-            }
-
-            let newSessionResponse = try await client.createSession(
-                workspace: currentWorkspace,
-                model: currentModel,
-                modelProvider: requestModelProvider,
-                profile: requestProfileName
+        return ProfileSwitchOutcome(
+            session: SessionSummary(
+                title: "New Chat",
+                createdAt: Date().timeIntervalSince1970,
+                profile: name
             )
-
-            guard let session = newSessionResponse.session else {
-                composerConfigurationErrorMessage = String(localized: "The server did not return the new profile session.")
-                return nil
-            }
-
-            return ProfileSwitchOutcome(session: SessionSummary(from: session))
-        } catch {
-            lastError = error
-            composerConfigurationErrorMessage = error.localizedDescription
-            return nil
-        }
+        )
     }
 
     @discardableResult
     func selectReasoningEffort(_ effort: String) async -> Bool {
         let selectedEffort = effort.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !selectedEffort.isEmpty else { return false }
-
-        let normalizedEffort = selectedEffort.lowercased()
-        let clearsSessionOverride = normalizedEffort == ReasoningEffortOption.inheritID
-        if clearsSessionOverride && sessionScopedReasoning != true {
-            composerConfigurationErrorMessage = String(localized: "Session reasoning inheritance is unavailable on this server.")
+        if canonicalSessionID != nil {
+            return await selectDirectSessionReasoning(selectedEffort.lowercased())
+        }
+        guard canConfigureDirectDraft() else { return false }
+        let normalized = selectedEffort.lowercased()
+        guard normalized == ReasoningEffortOption.inheritID ||
+                (supportsReasoningEffort == true && supportedReasoningEfforts?.contains(normalized) == true) else {
             return false
         }
-
-        guard selectedEffort != selectedReasoningSelection else {
-            return false
-        }
-
-        guard !isViewingCachedData else {
-            composerConfigurationErrorMessage = String(localized: "Reconnect to the server to change reasoning.")
-            return false
-        }
-
-        guard activeStreamID == nil else {
-            composerConfigurationErrorMessage = String(localized: "Wait for the current response to finish before changing reasoning.")
-            return false
-        }
-
-        let previousSelectedReasoningEffort = selectedReasoningEffort
-        let previousSessionReasoningEffort = sessionReasoningEffort
-        let previousSessionScopedReasoning = sessionScopedReasoning
-        let expectedSessionID = canonicalSessionID
-        let expectedModel = currentModel
-        let expectedProvider = currentModelProvider
         composerConfigurationMutationToken &+= 1
-        let mutationToken = composerConfigurationMutationToken
-
-        // Reflect the selection immediately. The composer is disabled only while
-        // persistence is in flight; a failed request restores the prior effective
-        // value and raw session override below.
-        if clearsSessionOverride {
-            sessionReasoningEffort = nil
-        } else if sessionScopedReasoning == true {
-            sessionReasoningEffort = selectedEffort
-        } else {
-            selectedReasoningEffort = selectedEffort
-        }
-
-        isUpdatingComposerConfiguration = true
-        composerConfigurationErrorMessage = nil
-        lastError = nil
-        defer {
-            if composerConfigurationMutationToken == mutationToken {
-                isUpdatingComposerConfiguration = false
-            }
-        }
-
-        reasoningSelectionToken &+= 1
-        let selectionToken = reasoningSelectionToken
-        if sessionScopedReasoning == true && expectedSessionID == nil {
-            if composerConfigurationMutationToken == mutationToken {
-                selectedReasoningEffort = previousSelectedReasoningEffort
-                sessionReasoningEffort = previousSessionReasoningEffort
-                sessionScopedReasoning = previousSessionScopedReasoning
-                composerConfigurationErrorMessage = String(localized: "The server did not provide a session ID.")
-            }
-            return false
-        }
-
-        do {
-            let wireEffort = clearsSessionOverride ? "" : selectedEffort
-            let response = try await client.saveReasoningEffort(
-                wireEffort,
-                sessionID: sessionScopedReasoning == true ? expectedSessionID : nil
-            )
-            guard selectionToken == reasoningSelectionToken,
-                  composerConfigurationMutationToken == mutationToken,
-                  expectedSessionID == canonicalSessionID,
-                  expectedModel == currentModel,
-                  expectedProvider == currentModelProvider
-            else { return false }
-
-            sessionScopedReasoning = response.sessionScopedReasoning ?? sessionScopedReasoning
-            sessionReasoningEffort = response.normalizedSessionReasoningEffort
-                ?? (sessionScopedReasoning == true && !clearsSessionOverride ? wireEffort : nil)
-            selectedReasoningEffort = response.effectiveEffort
-                ?? (clearsSessionOverride ? selectedReasoningEffort : selectedEffort)
-            return true
-        } catch {
-            guard composerConfigurationMutationToken == mutationToken else { return false }
-            selectedReasoningEffort = previousSelectedReasoningEffort
-            sessionReasoningEffort = previousSessionReasoningEffort
-            sessionScopedReasoning = previousSessionScopedReasoning
-            lastError = error
-            composerConfigurationErrorMessage = error.localizedDescription
-            return false
-        }
+        sessionScopedReasoning = true
+        sessionReasoningEffort = normalized == ReasoningEffortOption.inheritID ? nil : normalized
+        selectedReasoningEffort = sessionReasoningEffort
+        return true
     }
 
     func uploadAttachment(data: Data, filename: String, previewData: Data? = nil) async {
-        await attachmentCoordinator.uploadAttachment(data: data, filename: filename, previewData: previewData)
+        guard usesDirectGateway else {
+            directAttachmentPreparationErrorMessage = "Direct Hermes connection is unavailable. The attachment was not uploaded."
+            return
+        }
+        guard !directInvalidated, !isStartingChat else {
+            directAttachmentPreparationErrorMessage = "Wait for the current direct message to finish before adding an attachment."
+            return
+        }
+        guard !attachmentRecoveryNeedsReset, !attachmentRecoveryIsBusy else { return }
+
+        let generation = directAttachmentSelectionGeneration
+        directAttachmentPreparationStartGeneration &+= 1
+        directAttachmentPreparationCount += 1
+        isPreparingDirectAttachment = true
+        directAttachmentPreparationErrorMessage = nil
+        defer {
+            if generation == directAttachmentSelectionGeneration {
+                directAttachmentPreparationCount = max(0, directAttachmentPreparationCount - 1)
+                isPreparingDirectAttachment = directAttachmentPreparationCount > 0
+            }
+        }
+
+        let preparation: Task<DirectPendingAttachment, Error>
+        if let directAttachmentPreparer {
+            preparation = Task {
+                try await directAttachmentPreparer(data, filename, previewData)
+            }
+        } else {
+            preparation = Task.detached(priority: .utility) {
+                () throws -> DirectPendingAttachment in
+                try Task.checkCancellation()
+                let source = try DirectGatewayAttachment(data: data, filename: filename)
+                try Task.checkCancellation()
+                let thumbnail: Data?
+                if source.kind == .image {
+                    thumbnail = ImagePreviewDownsampler.previewData(
+                        from: previewData ?? data,
+                        maxPixelSize: ImagePreviewDownsampler.attachmentMaxPixelSize
+                    )
+                } else {
+                    thumbnail = previewData
+                }
+                try Task.checkCancellation()
+                return DirectPendingAttachment(source: source, thumbnailData: thumbnail)
+            }
+        }
+
+        do {
+            let pending = try await withTaskCancellationHandler(operation: {
+                try await preparation.value
+            }, onCancel: {
+                preparation.cancel()
+            })
+            try Task.checkCancellation()
+            guard generation == directAttachmentSelectionGeneration, !directInvalidated else { return }
+            directPendingAttachments.append(pending)
+        } catch is CancellationError {
+            // Caller cancellation is transient and must not erase earlier files.
+        } catch {
+            guard generation == directAttachmentSelectionGeneration, !directInvalidated else { return }
+            directAttachmentPreparationErrorMessage = directAttachmentPreparationMessage(for: error)
+        }
     }
 
     func clearPendingAttachments() {
-        attachmentCoordinator.clearPendingAttachments()
+        if usesDirectGateway {
+            guard !isStartingChat, !attachmentRecoveryNeedsReset, !attachmentRecoveryIsBusy else {
+                directAttachmentPreparationErrorMessage = "Wait for the current direct message to finish before changing attachments."
+                return
+            }
+            clearDirectPendingAttachments()
+        } else {
+            attachmentCoordinator.clearPendingAttachments()
+        }
     }
 
     func removePendingAttachment(id: UUID) {
-        attachmentCoordinator.removePendingAttachment(id: id)
+        if usesDirectGateway {
+            guard !isStartingChat, !attachmentRecoveryIsBusy else {
+                directAttachmentPreparationErrorMessage = "Wait for the current direct message to finish before changing attachments."
+                return
+            }
+            guard let index = directPendingAttachments.firstIndex(where: { $0.id == id }) else { return }
+            let attachment = directPendingAttachments[index]
+            switch attachment.stageState {
+            case .pending:
+                guard !attachmentRecoveryNeedsReset else { return }
+                directPendingAttachments.remove(at: index)
+                directAttachmentPreparationErrorMessage = nil
+            case .unknown:
+                // An unknown server receipt is never guessed or removed by a
+                // local chip action; the explicit recovery reset owns it.
+                return
+            case .confirmed:
+                if attachment.isGenericFile {
+                    guard directConversation?.runState == nil || directConversation?.runState == .idle else {
+                        directAttachmentPreparationErrorMessage = "Wait for the current direct message to finish before changing attachments."
+                        return
+                    }
+                    // The stock contract has no file.detach route. A confirmed
+                    // file receipt is therefore only a local composer item;
+                    // remove its chip without inventing a server cleanup RPC.
+                    removeDirectPendingAttachments(ids: [id])
+                    directAttachmentPreparationErrorMessage = nil
+                    return
+                }
+                guard let controller = directConversation else { return }
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    do {
+                        try await controller.removeStagedAttachment(attachment)
+                        guard !self.directInvalidated,
+                              self.directConversation === controller,
+                              self.directPendingAttachments.contains(where: { $0.id == id }) else {
+                            return
+                        }
+                        self.removeDirectPendingAttachments(ids: [id])
+                        self.attachmentRecoveryErrorMessage = nil
+                    } catch {
+                        guard !self.directInvalidated,
+                              self.directConversation === controller else { return }
+                        self.lastError = error
+                        self.attachmentRecoveryErrorMessage = "The attachment could not be removed. It was kept safely; try again or reset the pending upload."
+                    }
+                }
+            }
+        } else {
+            attachmentCoordinator.removePendingAttachment(id: id)
+        }
+    }
+
+    /// Clears only the unresolved direct-attachment marker after the user has
+    /// explicitly confirmed the affected live chat reset. The draft and saved
+    /// transcript are intentionally untouched; local staged bytes are dropped
+    /// only after the controller confirms the marker reset.
+    func resetDirectAttachmentRecovery(_ target: DirectAttachmentRecoveryTarget) async -> Bool {
+        guard usesDirectGateway,
+              !directInvalidated,
+              target.server == server,
+              target.sessionID == canonicalSessionID,
+              let controller = directConversation,
+              controller.attachmentRecoveryNeedsReset,
+              controller.storedID == target.sessionID,
+              controller.profile == target.profile,
+              controller.binding?.runtimeID == target.runtimeID,
+              controller.unresolvedAttachmentMarkerToken == target.markerToken else {
+            return false
+        }
+
+        attachmentRecoveryErrorMessage = nil
+
+        do {
+            try await controller.resetPendingAttachments(expectedToken: target.markerToken)
+            guard !directInvalidated,
+                  directConversation === controller,
+                  target.server == server,
+                  target.sessionID == canonicalSessionID,
+                  controller.storedID == target.sessionID,
+                  controller.profile == target.profile,
+                  controller.attachmentRecoveryNeedsReset == false else {
+                return false
+            }
+            discardDirectPendingAttachmentsAfterRecoveryReset()
+            attachmentRecoveryErrorMessage = nil
+            return true
+        } catch {
+            lastError = error
+            attachmentRecoveryErrorMessage = String(localized: "The pending upload could not be reset. Saved chat history was kept; try again.")
+            return false
+        }
+    }
+
+    /// After explicit confirmation, refreshes the canonical conversation and
+    /// removes only the matching local uncertainty barrier. It never resends the
+    /// prior prompt, changes the draft, closes the runtime, or mutates history.
+    func abandonDirectPromptDeliveryUncertainty(_ target: DirectPromptDeliveryRecoveryTarget) async -> Bool {
+        guard usesDirectGateway,
+              !directInvalidated,
+              !promptDeliveryRecoveryIsBusy,
+              target.server == server,
+              target.sessionID == canonicalSessionID,
+              let controller = directConversation,
+              controller.storedID == target.sessionID,
+              controller.profile == target.profile,
+              controller.promptDeliveryUncertaintyToken == target.markerToken else {
+            return false
+        }
+
+        promptDeliveryRecoveryIsBusy = true
+        defer { promptDeliveryRecoveryIsBusy = false }
+        do {
+            try await controller.abandonPromptDeliveryUncertainty(expectedToken: target.markerToken)
+            guard !directInvalidated,
+                  directConversation === controller,
+                  target.server == server,
+                  target.sessionID == canonicalSessionID,
+                  controller.storedID == target.sessionID,
+                  controller.profile == target.profile,
+                  controller.hasAmbiguousPromptDelivery == false else {
+                return false
+            }
+            if sendErrorMessage == Self.directAmbiguousPromptDeliveryMessage
+                || sendErrorMessage == Self.directConfirmedPromptCleanupMessage
+                || sendErrorMessage == Self.directPromptRecoveryFailureMessage {
+                sendErrorMessage = nil
+            }
+            return true
+        } catch {
+            guard !directInvalidated, directConversation === controller else { return false }
+            lastError = error
+            sendErrorMessage = Self.directPromptRecoveryFailureMessage
+            return false
+        }
+    }
+
+    private func removeDirectPendingAttachments(ids: Set<UUID>) {
+        guard !ids.isEmpty else { return }
+        directAttachmentSelectionGeneration &+= 1
+        directPendingAttachments.removeAll { ids.contains($0.id) }
+    }
+
+    private func clearDirectPendingAttachments() {
+        directAttachmentSelectionGeneration &+= 1
+        directAttachmentPreparationCount = 0
+        isPreparingDirectAttachment = false
+        directAttachmentPreparationErrorMessage = nil
+        directPendingAttachments.removeAll { attachment in
+            if case .pending = attachment.stageState { return true }
+            return false
+        }
+    }
+
+    private func discardDirectPendingAttachmentsAfterRecoveryReset() {
+        directAttachmentSelectionGeneration &+= 1
+        directAttachmentPreparationCount = 0
+        isPreparingDirectAttachment = false
+        directAttachmentPreparationErrorMessage = nil
+        directPendingAttachments.removeAll()
+    }
+
+    private func directAttachmentPreparationMessage(for error: Error) -> String {
+        guard let attachmentError = error as? DirectGatewayAttachmentError else {
+            return "The attachment could not be prepared."
+        }
+        switch attachmentError {
+        case .empty:
+            return "The attachment is empty."
+        case .malformed:
+            return "The attachment could not be validated."
+        case .unsupportedType, .unsupportedImageExtension:
+            return "This attachment type is not supported."
+        case .tooLarge:
+            return "This attachment is too large."
+        }
     }
 
     func setUploadAttachmentError(_ message: String?) {
-        attachmentCoordinator.setUploadAttachmentError(message)
+        directAttachmentPreparationErrorMessage = message
     }
 
     func attachmentImageData(path: String) async -> Data? {
-        await attachmentCoordinator.attachmentImageData(path: path)
+        if usesDirectGateway {
+            guard !directInvalidated, let expectedSessionID = canonicalSessionID else { return nil }
+            do {
+                let data = try await client.directReadManagedFile(path: path).data
+                guard !directInvalidated, expectedSessionID == canonicalSessionID else { return nil }
+                let preview = await ImagePreviewDownsampler.previewDataAsync(
+                    from: data,
+                    maxPixelSize: ImagePreviewDownsampler.attachmentMaxPixelSize
+                )
+                guard !directInvalidated, expectedSessionID == canonicalSessionID else { return nil }
+                return preview
+            } catch {
+                return nil
+            }
+        }
+        return nil
     }
 
     func attachmentRawData(path: String) async -> Data? {
-        await attachmentCoordinator.attachmentRawData(path: path)
+        if usesDirectGateway {
+            let trimmedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmedPath.hasPrefix("/"), !directInvalidated,
+                  let expectedSessionID = canonicalSessionID else { return nil }
+            let expectedProfile = directConversation?.profile
+                ?? (Self.nonEmpty(currentProfile) ?? "default")
+            let expectedController = directConversation
+            do {
+                let data = try await client.directReadManagedFile(
+                    path: trimmedPath,
+                    maximumBytes: APIClient.maximumTranscriptionBytes
+                ).data
+                let currentProfile = directConversation?.profile
+                    ?? (Self.nonEmpty(self.currentProfile) ?? "default")
+                guard !directInvalidated, expectedSessionID == canonicalSessionID,
+                      expectedProfile == currentProfile,
+                      directConversation === expectedController else { return nil }
+                return data
+            } catch {
+                return nil
+            }
+        }
+        return nil
     }
 
     func transcriptMediaThumbnailData(for reference: TranscriptMediaReference) async -> Data? {
@@ -1751,200 +3019,7 @@ final class ChatViewModel {
         modelContext: ModelContext? = nil,
         allowApplyDuringLocalStart: Bool = false
     ) async {
-        guard let sessionID else {
-            errorMessage = String(localized: "The server did not provide a session ID.")
-            return
-        }
-
-        messageLoadGeneration &+= 1
-        let generation = messageLoadGeneration
-        let streamIDAtLoadStart = activeStreamID
-        if streamIDAtLoadStart == nil {
-            resetPendingStreamingContentBuffers()
-        }
-        latestServerLoadHadAssistantResponseAfterLatestUser = false
-        let streamLoadPreparation = streamCoordinator.prepareForSessionLoad()
-        beginConnectionWaitIfNeeded()
-        errorMessage = nil
-        cacheErrorMessage = nil
-        lastError = nil
-        defer {
-            if messageLoadGeneration == generation {
-                endConnectionWait()
-            }
-        }
-
-        // Cache-first render (#289): reconcile successful server data against the
-        // transcript that existed *before* an optimistic cache placeholder. A
-        // prepared placeholder may overlap a shifted server page; treating it as
-        // real history would retain stale prefix rows and reset pagination to zero.
-        let isUsingPreparedCachePlaceholder = cacheFirstMessagePlaceholder != nil
-            && messages == cacheFirstMessagePlaceholder
-        let previousMessages = isUsingPreparedCachePlaceholder
-            ? messagesBeforeCacheFirstPlaceholder
-            : messages
-        let previousMessagesOffset = isUsingPreparedCachePlaceholder
-            ? messagesOffsetBeforeCacheFirstPlaceholder
-            : messagesOffset
-        if messages.isEmpty, let modelContext {
-            _ = renderCachedMessagesBeforeReload(
-                sessionID: sessionID,
-                modelContext: modelContext
-            )
-        }
-        let renderedCacheFirst = cacheFirstMessagePlaceholder != nil
-
-        do {
-            let response = try await client.session(
-                id: sessionID,
-                includeMessages: true,
-                messageLimit: Self.messagePageLimit
-            )
-            guard messageLoadGeneration == generation else { return }
-            guard allowApplyDuringLocalStart || (!isStartingChat && !isEditingMessage && !isRegeneratingMessage) else { return }
-            guard streamIDAtLoadStart != nil || activeStreamID == nil else { return }
-            let session = response.session
-            let loadedMessages = session?.messages ?? []
-            let loadedActiveStreamID = session?.activeStreamId?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let reloadedMessages: [ChatMessage]
-            if let modelContext {
-                do {
-                    let cachedMessages = try CacheStore.cachedMessages(
-                        serverURL: server,
-                        sessionID: sessionID,
-                        in: modelContext,
-                        limit: Self.messagePageLimit
-                    )
-                    reloadedMessages = Self.mergingLoadedMessages(
-                        loadedMessages,
-                        withCachedLocalOptimisticMessages: cachedMessages
-                    )
-                } catch {
-                    cacheErrorMessage = error.localizedDescription
-                    reloadedMessages = loadedMessages
-                }
-            } else {
-                reloadedMessages = loadedMessages
-            }
-            applyCompressionAnchorMetadata(from: session)
-            applyReloadedMessages(
-                reloadedMessages,
-                from: session,
-                previousMessages: previousMessages,
-                previousMessagesOffset: previousMessagesOffset
-            )
-            if renderedCacheFirst {
-                // The taller server transcript has now replaced the lighter cache-first
-                // render; signal the view to re-pin to the bottom without a visible jump.
-                cacheFirstReconcileScrollToken += 1
-            }
-            clearCacheFirstMessagePlaceholder()
-            latestServerLoadHadAssistantResponseAfterLatestUser = Self.hasAssistantResponseAfterLatestUser(
-                in: messages
-            )
-            responseCompletionNeedsTranscriptRefresh = false
-            isViewingCachedData = false
-            contextWindowSnapshot = ContextWindowSnapshot(
-                contextLength: session?.contextLength,
-                thresholdTokens: session?.thresholdTokens,
-                lastPromptTokens: session?.lastPromptTokens,
-                inputTokens: session?.inputTokens,
-                outputTokens: session?.outputTokens,
-                estimatedCost: session?.estimatedCost
-            )
-            if let modelContext {
-                do {
-                    try CacheStore.cacheMessages(Self.cacheMessageWindow(from: messages), serverURL: server, sessionID: sessionID, in: modelContext)
-                } catch {
-                    cacheErrorMessage = error.localizedDescription
-                }
-            }
-            if let title = session?.title {
-                displayTitle = Self.displayTitle(from: title)
-            }
-            setCompletedToolCallGroups(ToolCallGroup.groups(
-                persistedToolCalls: session?.toolCalls ?? [],
-                messages: messages,
-                messageOffset: messagesOffset
-            ))
-            let preserveLiveChrome = ChatLiveReconcilePolicy.shouldPreserveLiveRunChrome(
-                loadedActiveStreamID: loadedActiveStreamID,
-                localActiveStreamID: activeStreamID ?? streamIDAtLoadStart
-            )
-            if !preserveLiveChrome {
-                completedReasoningGroups = []
-                liveToolCalls = []
-                liveReasoningText = ""
-                pinnedLocalNotices = []
-                toolCallAnchorMessageID = nil
-                reasoningAnchorMessageID = nil
-                attachmentCoordinator.removeAllLocalPreviews()
-            }
-            streamCoordinator.reconcileSessionLoad(
-                loadedActiveStreamID: loadedActiveStreamID,
-                preparation: streamLoadPreparation,
-                usedCacheFallback: false
-            )
-        } catch {
-            guard messageLoadGeneration == generation else { return }
-            guard allowApplyDuringLocalStart || (!isStartingChat && !isEditingMessage && !isRegeneratingMessage) else { return }
-            guard streamIDAtLoadStart != nil || activeStreamID == nil else { return }
-            lastError = error
-            latestServerLoadHadAssistantResponseAfterLatestUser = false
-            if CacheFallbackPolicy.shouldUseCache(for: error), let modelContext {
-                do {
-                    let cachedMessages = try CacheStore.cachedMessages(
-                        serverURL: server,
-                        sessionID: sessionID,
-                        in: modelContext,
-                        limit: Self.messagePageLimit
-                    )
-                    if !cachedMessages.isEmpty {
-                        clearCompressionAnchorMetadata()
-                        withBatchedTranscriptDerivedState {
-                            messages = cachedMessages
-                            messagesOffset = 0
-                        }
-                        latestServerLoadHadAssistantResponseAfterLatestUser = Self.hasAssistantResponseAfterLatestUser(
-                            in: messages
-                        )
-                        responseCompletionNeedsTranscriptRefresh = false
-                        hasOlderMessages = false
-                        isViewingCachedData = true
-                        contextWindowSnapshot = nil
-                        errorMessage = nil
-                        setCompletedToolCallGroups([])
-                        completedReasoningGroups = []
-                        liveToolCalls = []
-                        liveReasoningText = ""
-                        pinnedLocalNotices = []
-                        toolCallAnchorMessageID = nil
-                        reasoningAnchorMessageID = nil
-                        streamingAssistantMessageID = nil
-                        attachmentCoordinator.removeAllLocalPreviews()
-                        clearCacheFirstMessagePlaceholder()
-                        streamCoordinator.reconcileSessionLoad(
-                            loadedActiveStreamID: nil,
-                            preparation: streamLoadPreparation,
-                            usedCacheFallback: true
-                        )
-                    } else {
-                        revertCacheFirstPlaceholderIfNeeded()
-                        isViewingCachedData = false
-                        errorMessage = error.localizedDescription
-                    }
-                } catch {
-                    revertCacheFirstPlaceholderIfNeeded()
-                    cacheErrorMessage = error.localizedDescription
-                    isViewingCachedData = false
-                    errorMessage = lastError?.localizedDescription
-                }
-            } else {
-                revertCacheFirstPlaceholderIfNeeded()
-                isViewingCachedData = false
-                errorMessage = error.localizedDescription
-            }
-        }
+        await loadDirectMessages(modelContext: modelContext)
     }
 
     /// Performs only the fast, local portion of an existing session's first
@@ -1980,7 +3055,7 @@ final class ChatViewModel {
         do {
             cachedMessages = try CacheStore.cachedMessages(
                 serverURL: server,
-                sessionID: sessionID,
+                sessionID: transcriptCacheID(sessionID),
                 in: modelContext,
                 limit: Self.messagePageLimit
             )
@@ -2032,89 +3107,7 @@ final class ChatViewModel {
 
     @discardableResult
     func loadOlderMessages(modelContext: ModelContext? = nil) async -> Bool {
-        guard let sessionID else {
-            errorMessage = String(localized: "The server did not provide a session ID.")
-            return false
-        }
-
-        guard !isLoadingOlderMessages, hasOlderMessages else {
-            return false
-        }
-
-        guard messagesOffset > 0 else {
-            hasOlderMessages = false
-            return false
-        }
-
-        resetPendingStreamingContentBuffers()
-        let messageBefore = messagesOffset
-        isLoadingOlderMessages = true
-        errorMessage = nil
-        cacheErrorMessage = nil
-        lastError = nil
-        defer { isLoadingOlderMessages = false }
-
-        do {
-            let response = try await client.session(
-                id: sessionID,
-                includeMessages: true,
-                messageLimit: Self.messagePageLimit,
-                messageBefore: messageBefore
-            )
-            guard let session = response.session else {
-                hasOlderMessages = false
-                return false
-            }
-
-            let olderMessages = session.messages ?? []
-            let mergedMessages = Self.prependingOlderMessages(olderMessages, to: messages)
-            let didAddMessages = mergedMessages.count > messages.count
-            applyCompressionAnchorMetadata(from: session)
-            withBatchedTranscriptDerivedState {
-                messages = mergedMessages
-                updateOlderMessagePagination(from: session, loadedMessageCount: mergedMessages.count)
-            }
-            latestServerLoadHadAssistantResponseAfterLatestUser = Self.hasAssistantResponseAfterLatestUser(
-                in: messages
-            )
-            responseCompletionNeedsTranscriptRefresh = false
-            isViewingCachedData = false
-            contextWindowSnapshot = ContextWindowSnapshot(
-                contextLength: session.contextLength,
-                thresholdTokens: session.thresholdTokens,
-                lastPromptTokens: session.lastPromptTokens,
-                inputTokens: session.inputTokens,
-                outputTokens: session.outputTokens,
-                estimatedCost: session.estimatedCost
-            )
-            if let title = session.title {
-                displayTitle = Self.displayTitle(from: title)
-            }
-            currentWorkspace = session.workspace ?? currentWorkspace
-            currentModel = session.model ?? currentModel
-            currentModelProvider = session.modelProvider ?? currentModelProvider
-            currentProfile = session.profile ?? currentProfile
-            setCompletedToolCallGroups(ToolCallGroup.groups(
-                persistedToolCalls: session.toolCalls ?? [],
-                messages: messages,
-                messageOffset: messagesOffset
-            ))
-            completedReasoningGroups = []
-
-            if let modelContext {
-                do {
-                    try CacheStore.cacheMessages(Self.cacheMessageWindow(from: messages), serverURL: server, sessionID: sessionID, in: modelContext)
-                } catch {
-                    cacheErrorMessage = error.localizedDescription
-                }
-            }
-
-            return didAddMessages
-        } catch {
-            lastError = error
-            errorMessage = error.localizedDescription
-            return false
-        }
+        await loadOlderDirectMessages(modelContext: modelContext)
     }
 
     func actionContext(for message: ChatMessage, visibleIndex: Int) -> MessageActionContext? {
@@ -2257,134 +3250,6 @@ final class ChatViewModel {
         return max(0, messageCount - loadedMessageCount)
     }
 
-    nonisolated private static func mergingLoadedMessages(
-        _ loadedMessages: [ChatMessage],
-        withActiveStreamSnapshot snapshot: ActiveChatStreamSnapshot
-    ) -> ActiveStreamMessageMerge {
-        guard !snapshot.messages.isEmpty else {
-            return ActiveStreamMessageMerge(
-                messages: loadedMessages,
-                streamingAssistantMessageID: latestAssistantMessageID(in: loadedMessages),
-                usedSnapshotMessagesOffset: false
-            )
-        }
-
-        guard let snapshotAssistantMessageID = snapshot.streamingAssistantMessageID,
-              let snapshotAssistant = snapshot.messages.first(where: { $0.messageId == snapshotAssistantMessageID })
-        else {
-            if loadedMessages.isEmpty {
-                return ActiveStreamMessageMerge(
-                    messages: snapshot.messages,
-                    streamingAssistantMessageID: latestAssistantMessageID(in: snapshot.messages),
-                    usedSnapshotMessagesOffset: true
-                )
-            }
-
-            return ActiveStreamMessageMerge(
-                messages: loadedMessages,
-                streamingAssistantMessageID: latestAssistantMessageID(in: loadedMessages),
-                usedSnapshotMessagesOffset: false
-            )
-        }
-
-        guard !loadedMessages.isEmpty else {
-            return ActiveStreamMessageMerge(
-                messages: snapshot.messages,
-                streamingAssistantMessageID: snapshotAssistant.messageId,
-                usedSnapshotMessagesOffset: true
-            )
-        }
-
-        var mergedMessages = loadedMessages
-        let latestUserIndex = mergedMessages.lastIndex { $0.role == "user" }
-        let assistantSearchRange: Range<Int>
-        if let latestUserIndex {
-            assistantSearchRange = mergedMessages.index(after: latestUserIndex)..<mergedMessages.endIndex
-        } else {
-            assistantSearchRange = mergedMessages.startIndex..<mergedMessages.endIndex
-        }
-
-        if let assistantIndex = assistantSearchRange.reversed().first(where: { mergedMessages[$0].role == "assistant" }) {
-            let loadedAssistant = mergedMessages[assistantIndex]
-            mergedMessages[assistantIndex] = ChatMessage(
-                role: loadedAssistant.role,
-                content: reconciledActiveStreamContent(
-                    loadedContent: loadedAssistant.content,
-                    snapshotContent: snapshotAssistant.content
-                ),
-                timestamp: loadedAssistant.timestamp ?? snapshotAssistant.timestamp,
-                messageId: loadedAssistant.messageId ?? snapshotAssistant.messageId,
-                name: loadedAssistant.name ?? snapshotAssistant.name,
-                toolCallId: loadedAssistant.toolCallId ?? snapshotAssistant.toolCallId,
-                toolUseId: loadedAssistant.toolUseId ?? snapshotAssistant.toolUseId,
-                toolCalls: loadedAssistant.toolCalls ?? snapshotAssistant.toolCalls,
-                contentParts: loadedAssistant.contentParts ?? snapshotAssistant.contentParts,
-                reasoning: loadedAssistant.reasoning ?? snapshotAssistant.reasoning,
-                attachments: loadedAssistant.attachments ?? snapshotAssistant.attachments,
-                turnTps: loadedAssistant.turnTps ?? snapshotAssistant.turnTps
-            )
-            return ActiveStreamMessageMerge(
-                messages: mergedMessages,
-                streamingAssistantMessageID: mergedMessages[assistantIndex].messageId,
-                usedSnapshotMessagesOffset: false
-            )
-        }
-
-        if !messagesContainEquivalentMessage(mergedMessages, candidate: snapshotAssistant) {
-            mergedMessages.append(snapshotAssistant)
-        }
-
-        return ActiveStreamMessageMerge(
-            messages: mergedMessages,
-            streamingAssistantMessageID: snapshotAssistant.messageId,
-            usedSnapshotMessagesOffset: false
-        )
-    }
-
-    nonisolated private static func reconciledActiveStreamContent(
-        loadedContent: String?,
-        snapshotContent: String?
-    ) -> String? {
-        let loaded = loadedContent ?? ""
-        let snapshot = snapshotContent ?? ""
-
-        if loaded.isEmpty {
-            return snapshotContent
-        }
-
-        if snapshot.isEmpty {
-            return loadedContent
-        }
-
-        if loaded.hasPrefix(snapshot) {
-            return loadedContent
-        }
-
-        if snapshot.hasPrefix(loaded) {
-            return snapshotContent
-        }
-
-        return loadedContent
-    }
-
-    nonisolated private static func messagesContainEquivalentMessage(
-        _ messages: [ChatMessage],
-        candidate: ChatMessage
-    ) -> Bool {
-        if let candidateID = candidate.messageId,
-           messages.contains(where: { $0.messageId == candidateID }) {
-            return true
-        }
-
-        let candidateContent = candidate.content?.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard candidateContent?.isEmpty == false else { return false }
-
-        return messages.contains { message in
-            message.role == candidate.role &&
-                message.content?.trimmingCharacters(in: .whitespacesAndNewlines) == candidateContent
-        }
-    }
-
     nonisolated private static func hasAssistantResponseAfterLatestUser(in messages: [ChatMessage]) -> Bool {
         guard !messages.isEmpty else { return false }
 
@@ -2443,21 +3308,6 @@ final class ChatViewModel {
                 return false
             }
         }
-    }
-
-    nonisolated private static func remappedAnchorMessageID(
-        _ anchorMessageID: String?,
-        from snapshotStreamingAssistantMessageID: String?,
-        to restoredStreamingAssistantMessageID: String?
-    ) -> String? {
-        guard let anchorMessageID,
-              anchorMessageID == snapshotStreamingAssistantMessageID,
-              snapshotStreamingAssistantMessageID != restoredStreamingAssistantMessageID
-        else {
-            return anchorMessageID
-        }
-
-        return restoredStreamingAssistantMessageID ?? anchorMessageID
     }
 
     nonisolated private static func isLocalOptimisticUserMessage(_ message: ChatMessage) -> Bool {
@@ -2524,10 +3374,6 @@ final class ChatViewModel {
         messages.insert(localMessage, at: insertionIndex)
     }
 
-    nonisolated private static func latestAssistantMessageID(in messages: [ChatMessage]) -> String? {
-        messages.last(where: { $0.role == "assistant" })?.messageId
-    }
-
     nonisolated private static func latestAssistantAnchorID(in messages: [ChatMessage], messageOffset: Int?) -> String? {
         guard let index = messages.lastIndex(where: { $0.role == "assistant" }) else {
             return nil
@@ -2576,329 +3422,256 @@ final class ChatViewModel {
         Set((message.attachments ?? []).compactMap(\.identityKey))
     }
 
-    private func prepareForNewResponse() {
-        // A response started locally supersedes any transcript refresh that began
-        // while the chat was idle. Invalidate before the start request awaits so a
-        // delayed `/api/session` response cannot replace optimistic/live rows or
-        // clear the new stream ID.
-        messageLoadGeneration &+= 1
-        endConnectionWait()
-        clearCacheFirstMessagePlaceholder()
-        streamCoordinator.prepareForNewResponse()
-    }
-
     func sendMessage(_ draft: String, modelContext: ModelContext? = nil) async -> Bool {
-        guard !isViewingCachedData else {
-            sendErrorMessage = String(localized: "Reconnect to the server to send a message.")
+        guard usesDirectGateway else {
+            sendErrorMessage = "Direct Hermes connection is unavailable."
             return false
         }
-
-        let message = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !message.isEmpty else { return false }
-
-        guard let sessionID else {
-            sendErrorMessage = String(localized: "The server did not provide a session ID.")
-            return false
-        }
-
-        let localMessageID = "local-\(UUID().uuidString)"
-        let attachmentPreparation = attachmentCoordinator.prepareForSend(localMessageID: localMessageID)
-
-        return await performChatSend(
-            sessionID: sessionID,
-            localMessageID: localMessageID,
-            displayContent: message,
-            messageForAPI: attachmentPreparation.chatMessageText(draft: message),
-            messageAttachments: attachmentPreparation.messageAttachments,
-            apiPayloads: attachmentPreparation.apiPayloads,
-            attachmentsToRestoreOnFailure: attachmentPreparation.attachments,
-            modelContext: modelContext
-        )
+        guard !isSendingVoiceNote else { return false }
+        return await sendDirectMessage(draft, modelContext: modelContext)
     }
 
-    /// Records → transcribes → uploads → sends a server-transcribed voice note
-    /// (Telegram-style). The sent message's text is the transcript and its sole
-    /// attachment is the audio clip, rendered as a playable note by the inline
-    /// audio player. Aborts (toast, no partial send) if transcription fails or
-    /// returns nothing. Returns true only if the chat send started.
     @discardableResult
     func sendVoiceNote(audioData: Data, filename: String, modelContext: ModelContext? = nil) async -> Bool {
-        // Reentrancy guard: bail if a voice note OR a regular chat send is already
-        // in flight. `performChatSend` has no internal guard, so two overlapping
-        // sends would both flip `isStartingChat`/`isSendingVoiceNote` and race their
-        // `defer { … = false }` (clearing the flag while the other still runs, and
-        // firing two concurrent `startChat`s). The UI already blocks this; the guard
-        // keeps a future caller (accessibility shortcut, test harness) safe too.
-        guard !isSendingVoiceNote, !isStartingChat else { return false }
-        guard !isViewingCachedData else {
-            setUploadAttachmentError(String(localized: "Reconnect to the server to send a voice note."))
+        guard usesDirectGateway, !audioData.isEmpty, !isSendingVoiceNote,
+              !isStartingChat, !directInvalidated,
+              !isUpdatingComposerConfiguration else { return false }
+        guard !attachmentRecoveryIsBusy else {
+            sendErrorMessage = "Resetting unresolved attachment delivery. The voice note was not sent."
             return false
         }
-        guard !audioData.isEmpty else { return false }
-        guard let sessionID else {
-            setUploadAttachmentError(String(localized: "The server did not provide a session ID."))
+        guard directConversation?.hasAmbiguousPromptDelivery != true else {
+            sendErrorMessage = promptDeliveryWarning(for: directConversation)
             return false
         }
-
+        guard directConversation?.runState == nil || directConversation?.runState == .idle else {
+            return false
+        }
+        if attachmentRecoveryNeedsReset, directPendingAttachments.isEmpty {
+            sendErrorMessage = "An attachment delivery is unresolved. Reset the pending upload before continuing."
+            return false
+        }
+        guard pendingAttachments.isEmpty, !isPreparingDirectAttachment else {
+            sendErrorMessage = "Wait for attachment preparation to finish before sending the voice note."
+            return false
+        }
+        let expectedProfile = directConversation?.profile
+            ?? (Self.nonEmpty(currentProfile) ?? "default")
+        let expectedSessionID = canonicalSessionID
+        let expectedController = directConversation
+        let selectionGeneration = directAttachmentSelectionGeneration
+        let expectedAttachmentIDs = Set(directPendingAttachments.map(\.id))
         isSendingVoiceNote = true
         setUploadAttachmentError(nil)
         sendErrorMessage = nil
         lastError = nil
         defer { isSendingVoiceNote = false }
 
-        // 1. Transcribe via server STT. Any error or empty transcript aborts the
-        //    whole send — no fallback, no partial message (per the issue).
+        let pending: DirectPendingAttachment
+        do {
+            let source = try await Task.detached(priority: .utility) {
+                try DirectGatewayAttachment.file(data: audioData, filename: filename)
+            }.value
+            try Task.checkCancellation()
+            pending = DirectPendingAttachment(source: source, thumbnailData: audioData)
+        } catch {
+            lastError = error
+            setUploadAttachmentError(directAttachmentPreparationMessage(for: error))
+            return false
+        }
+
+        guard !directInvalidated, expectedSessionID == canonicalSessionID,
+              expectedProfile == (directConversation?.profile
+                ?? (Self.nonEmpty(self.currentProfile) ?? "default")),
+              directConversation === expectedController,
+              selectionGeneration == directAttachmentSelectionGeneration,
+              Set(directPendingAttachments.map(\.id)) == expectedAttachmentIDs else {
+            sendErrorMessage = "The chat changed before the voice note could be sent."
+            return false
+        }
+
         let transcript: String
         do {
-            let response = try await client.transcribeAudio(data: audioData, filename: filename)
-            if let serverError = response.error?.trimmingCharacters(in: .whitespacesAndNewlines),
-               !serverError.isEmpty {
-                setUploadAttachmentError(serverError)
-                return false
-            }
-            let text = (response.transcript ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !text.isEmpty else {
-                setUploadAttachmentError(String(localized: "Couldn't transcribe that voice note. Try recording again."))
-                return false
-            }
-            transcript = text
+            let response = try await client.transcribeAudio(
+                data: audioData,
+                mimeType: pending.mimeType,
+                profile: expectedProfile
+            )
+            transcript = (response.transcript ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !transcript.isEmpty else { throw DirectTranscriptionError.invalidAcknowledgement }
         } catch {
             lastError = error
             setUploadAttachmentError(error.localizedDescription)
             return false
         }
 
-        // 2. Upload the clip as a standalone attachment (kept out of the composer's
-        //    pending list). On failure the coordinator already surfaced the error.
-        guard let pending = await attachmentCoordinator.uploadStandaloneAttachment(
-            data: audioData,
-            filename: filename
-        ) else {
+        let currentProfile = directConversation?.profile
+            ?? (Self.nonEmpty(self.currentProfile) ?? "default")
+        guard !directInvalidated, expectedSessionID == canonicalSessionID,
+              expectedProfile == currentProfile,
+              directConversation === expectedController,
+              selectionGeneration == directAttachmentSelectionGeneration,
+              Set(directPendingAttachments.map(\.id)) == expectedAttachmentIDs else {
+            sendErrorMessage = "The chat changed before the voice note could be sent."
             return false
         }
-
-        // 3. Send a chat message: text = transcript, attachments = [the clip].
-        let messageAttachment = MessageAttachment(
-            name: pending.name,
-            path: pending.path,
-            mime: pending.mime,
-            size: pending.size,
-            isImage: pending.isImage
-        )
-        let localMessageID = "local-\(UUID().uuidString)"
-        // The API message text is the bare transcript — NOT chatMessageText(…),
-        // which would append a "[Attached files: <clip>.m4a]" suffix. That suffix
-        // is the agent's only signal about a non-image attachment (the server
-        // strips attachment metadata before the model call and never embeds audio),
-        // so it makes the agent try to "inspect" / transcribe the clip itself
-        // instead of just answering the transcript. The clip still rides along in
-        // `messageAttachments` / `apiPayloads` purely so the inline player renders
-        // and persists; it's display-only and never reaches the model. (#330)
-        return await performChatSend(
-            sessionID: sessionID,
-            localMessageID: localMessageID,
-            displayContent: transcript,
-            messageForAPI: transcript,
-            messageAttachments: [messageAttachment],
-            apiPayloads: [pending.toJSONValue()],
-            attachmentsToRestoreOnFailure: [],
-            modelContext: modelContext
+        directPendingAttachments.append(pending)
+        return await sendDirectMessage(
+            transcript,
+            modelContext: modelContext,
+            selectedAttachmentIDs: Set([pending.id]),
+            removeSelectedAttachmentsOnAmbiguousDelivery: false
         )
     }
 
-    /// Shared optimistic-append + `startChat` + rollback core used by both the
-    /// text composer (`sendMessage`) and the voice-note flow (`sendVoiceNote`).
-    /// `attachmentsToRestoreOnFailure` is re-staged into the composer if the send
-    /// fails — empty for voice notes, whose clip isn't a composer attachment.
-    private func performChatSend(
-        sessionID: String,
-        localMessageID: String,
-        displayContent: String,
-        messageForAPI: String,
-        messageAttachments: [MessageAttachment],
-        apiPayloads: [JSONValue]?,
-        attachmentsToRestoreOnFailure: [PendingAttachment],
-        modelContext: ModelContext?
-    ) async -> Bool {
-        do {
-            try await client.validateChatAttachments(apiPayloads)
-        } catch {
-            sendErrorMessage = error.localizedDescription
-            lastError = error
-            return false
+    #if DEBUG
+    /// State-only setup for retained legacy renderer/recovery tests. This does not
+    /// submit a prompt or exercise the retired WebUI send endpoint.
+    func seedTranscriptForTesting(_ rows: [ChatMessage], messagesOffset offset: Int = 0) {
+        resetPendingStreamingContentBuffers()
+        withBatchedTranscriptDerivedState {
+            messages = rows
+            messagesOffset = offset
         }
-        isStartingChat = true
-        sendErrorMessage = nil
-        lastError = nil
-        archiveLiveReasoningIfNeeded()
-        archiveLiveToolCallsIfNeeded()
-        liveReasoningText = ""
-        liveToolCalls = []
-        reasoningAnchorMessageID = nil
-        toolCallAnchorMessageID = nil
-        prepareForNewResponse()
-        responseCompletionNeedsTranscriptRefresh = false
-        defer { isStartingChat = false }
-
-        let optimisticMessage = ChatMessage(
-            role: "user",
-            content: displayContent,
-            timestamp: Date().timeIntervalSince1970,
-            messageId: localMessageID,
-            attachments: messageAttachments.isEmpty ? nil : messageAttachments
-        )
-        messages.append(optimisticMessage)
-
-        cacheCurrentMessages(sessionID: sessionID, modelContext: modelContext)
-
-        do {
-            let explicitModelPick = explicitModelPickForChatStart()
-            let response = try await client.startChat(
-                sessionID: sessionID,
-                message: messageForAPI,
-                workspace: currentWorkspace,
-                model: currentModel,
-                modelProvider: requestModelProvider,
-                profile: requestProfileName,
-                explicitModelPick: explicitModelPick,
-                attachments: apiPayloads
-            )
-
-            guard let streamID = response.streamId else {
-                sendErrorMessage = response.error ?? String(localized: "The server did not return a stream ID.")
-                rollbackOptimisticMessage(id: localMessageID)
-                cacheCurrentMessages(sessionID: sessionID, modelContext: modelContext)
-                restorePendingAttachments(attachmentsToRestoreOnFailure)
-                return false
-            }
-
-            completeExplicitModelPickForChatStart(explicitModelPick)
-            messageLoadGeneration &+= 1
-            streamCoordinator.start(streamID: streamID)
-            return true
-        } catch {
-            if let streamID = (error as? APIError)?.activeStreamID {
-                rollbackOptimisticMessage(id: localMessageID)
-                cacheCurrentMessages(sessionID: sessionID, modelContext: modelContext)
-                restorePendingAttachments(attachmentsToRestoreOnFailure)
-                // The existing run may have started outside this view model. Reconcile
-                // the server transcript first so the SSE tokens attach to the persisted
-                // assistant turn instead of creating a second bubble with only the tail.
-                await loadMessages(modelContext: modelContext, allowApplyDuringLocalStart: true)
-                _ = restoreActiveStreamSnapshotIfAvailable(streamID: streamID)
-                streamingAssistantMessageID = TranscriptTurnClassifier
-                    .currentTurnAssistantAnchorIDs(in: messages, messageOffset: messagesOffset)
-                    .first
-                streamCoordinator.start(streamID: streamID)
-                // The server kept the earlier run, not this newly submitted text.
-                // Report an unaccepted send so ChatView restores the draft while
-                // the coordinator reconnects to the existing response.
-                return false
-            }
-            lastError = error
-            sendErrorMessage = CacheFallbackPolicy.sendBannerMessage(for: error)
-            rollbackOptimisticMessage(id: localMessageID)
-            cacheCurrentMessages(sessionID: sessionID, modelContext: modelContext)
-            restorePendingAttachments(attachmentsToRestoreOnFailure)
-            return false
-        }
+        hasOlderMessages = offset > 0
+        streamingAssistantMessageID = nil
+        streamingAssistantMessageIndex = nil
+        sealedInterimAssistantMessageIDs.removeAll()
     }
+
+    /// Transport-neutral renderer seam for pacing tests. This follows the same
+    /// presentation path as shared-runtime events without opening a connection.
+    func handleDirectEventForTesting(_ event: HermesGatewayEvent) {
+        applyDirectEvent(event)
+    }
+
+    @discardableResult
+    func enqueueMessageForTesting(_ text: String) -> Int {
+        enqueueQueuedSlashMessage(text, attachments: [])
+    }
+
+    func drainQueuedMessagesForTesting() {
+        drainQueuedSlashMessageIfIdle()
+    }
+
+    #endif
 
     func submitGoal(args rawArgs: String, modelContext: ModelContext? = nil) async -> Bool {
-        guard !isViewingCachedData else {
-            goalErrorMessage = String(localized: "Reconnect to the server to manage goals.")
-            sendErrorMessage = goalErrorMessage
-            return false
-        }
-
         let args = rawArgs.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !args.isEmpty else { return false }
-
-        guard let sessionID else {
-            goalErrorMessage = String(localized: "The server did not provide a session ID.")
-            sendErrorMessage = goalErrorMessage
-            return false
-        }
-
-        guard activeStreamID == nil else {
-            goalErrorMessage = String(localized: "Wait for the current response to finish before changing goals.")
-            sendErrorMessage = goalErrorMessage
-            return false
-        }
-
+        guard usesDirectGateway, !args.isEmpty, !isSubmittingGoal, !directInvalidated else { return false }
         isSubmittingGoal = true
         goalErrorMessage = nil
-        sendErrorMessage = nil
-        lastError = nil
         defer { isSubmittingGoal = false }
-
         do {
-            let response = try await client.submitGoal(
-                sessionID: sessionID,
-                args: args,
-                workspace: currentWorkspace,
-                model: currentModel,
-                modelProvider: requestModelProvider,
-                profile: requestProfileName
-            )
-
-            currentGoal = response.goal
-
-            if response.ok == false || response.action?.lowercased() == "error" {
-                goalErrorMessage = response.displayMessage ?? String(localized: "Goal request failed.")
-                sendErrorMessage = goalErrorMessage
-                return false
+            let controller = try await ensureDirectConversation()
+            let expectedOrigin = controller.sharedRuntime.origin
+            guard expectedOrigin == server else { throw DirectSessionError.staleOperation }
+            try await controller.open()
+            var creation: [String: JSONValue] = [:]
+            if let value = Self.nonEmpty(currentWorkspace) { creation["cwd"] = .string(value) }
+            if let value = Self.nonEmpty(currentModel) { creation["model"] = .string(value) }
+            if let value = Self.nonEmpty(currentModelProvider) { creation["provider"] = .string(value) }
+            if let value = Self.nonEmpty(sessionReasoningEffort) { creation["reasoning_effort"] = .string(value) }
+            let runningControl = controller.runState == .running
+                && GatewayConversationController.goalControlIsAllowedWhileRunning(args)
+            let goalBinding: GatewaySessionBinding
+            if runningControl, let binding = controller.binding,
+               controller.storedID == binding.storedID, canonicalSessionID == binding.storedID {
+                goalBinding = binding
+            } else {
+                goalBinding = try await controller.prepareGoalSession(create: creation)
+            }
+            let expectedRunState: GatewayConversationController.RunState = runningControl ? .running : .idle
+            // Draft preparation may establish the first connection. Attest the
+            // running profile only after that binding is ready, then keep this
+            // generation fixed through lookup, dispatch and prompt delivery.
+            let connectionGeneration = controller.sharedRuntime.connectionGeneration
+            guard !directInvalidated, directConversation === controller,
+                  controller.sharedRuntime.origin == expectedOrigin,
+                  controller.sharedRuntime.state == .ready,
+                  controller.sharedRuntime.connectionGeneration == connectionGeneration,
+                  goalBinding == controller.binding,
+                  let sessionID = controller.storedID,
+                  sessionID == goalBinding.storedID,
+                  sessionID == canonicalSessionID,
+                  controller.runState == expectedRunState,
+                  !controller.hasAmbiguousPromptDelivery else {
+                throw DirectSessionError.staleOperation
+            }
+            let profile = controller.profile
+            let activeProfile = try await client.directActiveProfile()
+            guard let runningProfile = Self.nonEmpty(activeProfile.current) else {
+                throw DirectGoalError.runningProfileUnavailable
+            }
+            guard runningProfile == profile else {
+                throw DirectGoalError.runningProfileMismatch(selected: profile, current: runningProfile)
+            }
+            guard !directInvalidated, directConversation === controller,
+                  controller.sharedRuntime.origin == expectedOrigin,
+                  controller.sharedRuntime.state == .ready,
+                  controller.sharedRuntime.connectionGeneration == connectionGeneration,
+                  controller.storedID == sessionID, canonicalSessionID == sessionID,
+                  controller.profile == profile, controller.runState == expectedRunState,
+                  !controller.hasAmbiguousPromptDelivery else {
+                throw DirectSessionError.staleOperation
             }
 
-            hasActivatedGoalCommand = true
-
-            guard response.kickoffPromptText != nil else {
-                if let message = response.displayMessage {
-                    appendLocalNoticeMessage(message)
+            let result = try await controller.dispatchGoal(args, profileContext: activeProfile)
+            guard !directInvalidated, directConversation === controller,
+                  controller.sharedRuntime.origin == expectedOrigin,
+                  controller.sharedRuntime.state == .ready,
+                  controller.sharedRuntime.connectionGeneration == connectionGeneration,
+                  controller.storedID == sessionID, canonicalSessionID == sessionID,
+                  controller.profile == profile else {
+                throw DirectGoalError.outcomeUnknown
+            }
+            switch result {
+            case .output(let text):
+                appendLocalAssistantMessage(text)
+                hasActivatedGoalCommand = true
+                return true
+            case .send(let notice, let message, let display):
+                let sent = await sendDirectMessage(
+                    message,
+                    modelContext: modelContext,
+                    selectedAttachmentIDs: [],
+                    requiredController: controller,
+                    requiredSessionID: sessionID,
+                    requiredProfile: profile,
+                    requiredOrigin: expectedOrigin,
+                    requiredConnectionGeneration: connectionGeneration
+                )
+                guard sent, !controller.hasAmbiguousPromptDelivery,
+                      controller.runState != .deliveryUnknown else {
+                    goalErrorMessage = String(localized: "The goal command outcome is unknown. It was not retried; review Hermes before trying again.")
+                    sendErrorMessage = goalErrorMessage
+                    return false
                 }
+                for text in [notice, display].compactMap({ Self.nonEmpty($0) }) {
+                    appendLocalNoticeMessage(text)
+                }
+                hasActivatedGoalCommand = true
                 return true
             }
-
-            return await attachGoalKickoffStream(
-                noticeMessage: response.displayMessage,
-                modelContext: modelContext
-            )
         } catch {
             lastError = error
-            goalErrorMessage = error.localizedDescription
-            sendErrorMessage = goalErrorMessage
-            return false
-        }
-    }
-
-    private func attachGoalKickoffStream(noticeMessage: String?, modelContext: ModelContext?) async -> Bool {
-        await loadMessages(modelContext: modelContext)
-
-        if let errorMessage {
-            goalErrorMessage = errorMessage
-            sendErrorMessage = errorMessage
-            return false
-        }
-
-        guard let streamID = activeStreamID else {
-            if let noticeMessage {
-                appendLocalNoticeMessage(noticeMessage)
+            let message: String
+            if (error as? DirectSessionError) == .staleOperation
+                || (error as? DirectGoalError) == .runningProfileUnavailable {
+                message = String(localized: "The chat or running Hermes profile changed, so the goal command was not sent.")
+            } else if let goalError = error as? DirectGoalError,
+                      case .runningProfileMismatch(_, _) = goalError {
+                message = String(localized: "The selected chat profile is not the profile running Hermes, so the goal command was not sent.")
+            } else if (error as? DirectGoalError) == .outcomeUnknown {
+                message = String(localized: "The goal command outcome is unknown. It was not retried; review Hermes before trying again.")
+            } else {
+                message = error.localizedDescription
             }
-            return true
+            goalErrorMessage = message
+            sendErrorMessage = message
+            return false
         }
-
-        if streamingAssistantMessageID == nil {
-            restoreActiveStreamSnapshotIfAvailable(streamID: streamID)
-        }
-        if streamingAssistantMessageID == nil {
-            streamingAssistantMessageID = Self.latestAssistantMessageID(in: messages)
-        }
-        if let noticeMessage {
-            pinLocalNoticeMessage(noticeMessage)
-        }
-
-        streamCoordinator.start(streamID: streamID)
-        return true
     }
 
     private func rollbackOptimisticMessage(id: String) {
@@ -2910,11 +3683,30 @@ final class ChatViewModel {
         attachmentCoordinator.restorePendingAttachments(attachments)
     }
 
+    private func transcriptCacheID(_ durableID: String) -> String {
+        guard usesDirectGateway else { return durableID }
+        let profile = Self.nonEmpty(currentProfile) ?? "default"
+        return "direct:\(profile.utf8.count):\(profile):\(durableID)"
+    }
+
     private func cacheCurrentMessages(sessionID: String, modelContext: ModelContext?) {
         guard let modelContext else { return }
 
         do {
-            try CacheStore.cacheMessages(Self.cacheMessageWindow(from: messages), serverURL: server, sessionID: sessionID, in: modelContext)
+            let messageWindow = Self.cacheMessageWindow(from: messages)
+            let previewIdentity = usesDirectGateway
+                ? CachedSessionPreviewIdentity(
+                    profile: Self.nonEmpty(currentProfile) ?? "default",
+                    sessionID: sessionID
+                )
+                : nil
+            try CacheStore.cacheMessages(
+                messageWindow,
+                serverURL: server,
+                sessionID: transcriptCacheID(sessionID),
+                previewIdentity: previewIdentity,
+                in: modelContext
+            )
         } catch {
             cacheErrorMessage = error.localizedDescription
         }
@@ -2926,6 +3718,8 @@ final class ChatViewModel {
     }
 
     func clearTranscript() {
+        // An explicit clear always wins over a pending resume reconciliation.
+        sendTranscriptSessionID = nil
         cancelPendingStreamingScrollTrigger()
         resetPendingStreamingContentBuffers()
         clearCompressionAnchorMetadata()
@@ -2939,6 +3733,11 @@ final class ChatViewModel {
         liveToolCalls = []
         liveReasoningText = ""
         pinnedLocalNotices = []
+        btwLocalRowScopes.removeAll()
+        backgroundLocalRowScopes.removeAll()
+        directBackgroundAttempts.removeAll()
+        directBackgroundStartsInFlight.removeAll()
+        directBackgroundResolutions.removeAll()
         streamingAssistantMessageID = nil
         toolCallAnchorMessageID = nil
         reasoningAnchorMessageID = nil
@@ -3040,32 +3839,21 @@ final class ChatViewModel {
     }
 
     private func steerResponseFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
-        let message = args.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !message.isEmpty else {
-            return .unsupported(friendlyMessage: String(localized: "Usage: /steer <message>"))
-        }
-
-        guard let sessionID else {
-            return .unsupported(friendlyMessage: String(localized: "The server did not provide a session ID."))
-        }
-
-        guard activeStreamID != nil else {
-            let sent = await sendMessage(message)
-            return sent ? .executed(message: nil) : .unsupported(friendlyMessage: sendErrorMessage ?? String(localized: "Could not send the steering message."))
-        }
-
-        do {
-            let response = try await client.steerChat(sessionID: sessionID, text: message)
-            if response.accepted == true {
-                return .executed(message: String(localized: "Steering hint delivered."))
+        if usesDirectGateway {
+            do {
+                let controller = try await ensureDirectConversation()
+                let outcome = try await controller.steer(args)
+                switch outcome {
+                case .accepted: return .executed(message: "Steering hint delivered.")
+                case .queued: return .executed(message: "Steering hint queued by Hermes.")
+                case .rejected: return .unsupported(friendlyMessage: "Hermes rejected this steering hint; the current response was not interrupted.")
+                }
+            } catch {
+                lastError = error
+                return .unsupported(friendlyMessage: "Could not deliver the steering hint. The message was not resent.")
             }
-        } catch {
-            lastError = error
         }
-
-        _ = enqueueQueuedSlashMessage(message, attachments: attachmentCoordinator.consumePendingAttachments())
-        await cancelActiveStream()
-        return .executed(message: String(localized: "Steer was unavailable, so the message was queued and the current response was stopped."))
+        return .unsupported(friendlyMessage: "Direct Hermes connection is unavailable.")
     }
 
     private func interruptResponseFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
@@ -3092,7 +3880,7 @@ final class ChatViewModel {
     private func statusMessageFromSlashCommand() -> String {
         let running = activeStreamID == nil ? String(localized: "No") : String(localized: "Yes")
         let queued = queuedSlashMessages.count
-        let backgroundTasks = backgroundPromptsByTaskID.count
+        let backgroundTasks = directBackgroundAttempts.count
         let profile = selectedProfileName ?? currentProfile ?? "default"
         let workspace = currentWorkspace ?? String(localized: "Unknown")
         let model = currentModel ?? String(localized: "Unknown")
@@ -3122,42 +3910,63 @@ final class ChatViewModel {
         guard !question.isEmpty else {
             return .unsupported(friendlyMessage: String(localized: "Usage: /btw <question>"))
         }
-
-        guard let sessionID else {
-            return .unsupported(friendlyMessage: String(localized: "The server did not provide a session ID."))
+        guard usesDirectGateway, !directInvalidated, !isViewingCachedData else {
+            return .unsupported(friendlyMessage: String(localized: "Reconnect to Hermes to ask a side question."))
         }
-
-        guard !isViewingCachedData else {
-            return .unsupported(friendlyMessage: String(localized: "Reconnect to the server to ask a side question."))
-        }
-
-        guard !isCLISession else {
-            return .unsupported(friendlyMessage: String(localized: "/btw is available for WebUI sessions only."))
-        }
-
         guard activeStreamID == nil else {
             return .unsupported(friendlyMessage: String(localized: "Wait for the current response to finish before using /btw."))
         }
-
-        guard activeBtwStreamID == nil else {
+        guard activeBtwAttemptID == nil else {
             return .unsupported(friendlyMessage: String(localized: "Wait for the current /btw answer to finish first."))
         }
 
         do {
-            let response = try await client.startBtw(sessionID: sessionID, question: question)
-            if let error = response.error, !error.isEmpty {
-                return .unsupported(friendlyMessage: error)
+            let controller = try await ensureDirectConversation()
+            try await controller.open()
+            guard !directInvalidated, directConversation === controller else {
+                throw DirectSessionError.staleOperation
+            }
+            guard activeBtwAttemptID == nil else {
+                return .unsupported(friendlyMessage: String(localized: "Wait for the current /btw answer to finish first."))
+            }
+            let attemptID = UUID()
+            let profile = controller.profile
+            activeBtwAttemptID = attemptID
+            activeBtwTaskID = nil
+            activeBtwProfile = profile
+            activeBtwQuestion = question
+            activeBtwAnswer = ""
+            activeBtwMessageID = appendLocalAssistantMessage(Self.btwMessageText(question: question, answer: nil, isLoading: true))
+            if let messageID = activeBtwMessageID,
+               let sessionID = controller.storedID {
+                btwLocalRowScopes[messageID] = (sessionID, profile)
             }
 
-            guard let streamID = response.streamId, !streamID.isEmpty else {
-                return .unsupported(friendlyMessage: String(localized: "The server did not return a /btw stream."))
+            do {
+                let taskID = try await controller.startBtw(question, attemptID: attemptID)
+                // Completion may have arrived while startBtw was awaiting its ACK.
+                if activeBtwAttemptID == attemptID,
+                   !directInvalidated,
+                   directConversation === controller,
+                   activeBtwProfile == profile {
+                    activeBtwTaskID = taskID
+                }
+                return .executed(message: nil)
+            } catch {
+                if activeBtwAttemptID == attemptID {
+                    let unknown = error is DirectBtwError && (error as? DirectBtwError) == .outcomeUnknown
+                    activeBtwAnswer = unknown
+                        ? String(localized: "Outcome unknown. Check Hermes before asking again.")
+                        : String(localized: "The side question was not accepted by Hermes.")
+                    updateActiveBtwMessage(isLoading: false)
+                    clearActiveBtwAttempt()
+                }
+                lastError = error
+                return .unsupported(friendlyMessage: error.localizedDescription)
             }
-
-            startBtwStream(streamID: streamID, question: question)
-            return .executed(message: nil)
         } catch {
             lastError = error
-            return .unsupported(friendlyMessage: error.localizedDescription)
+            return .unsupported(friendlyMessage: String(localized: "Could not start the side question."))
         }
     }
 
@@ -3166,32 +3975,62 @@ final class ChatViewModel {
         guard !prompt.isEmpty else {
             return .unsupported(friendlyMessage: String(localized: "Usage: /background <prompt>"))
         }
-
-        guard let sessionID else {
-            return .unsupported(friendlyMessage: String(localized: "The server did not provide a session ID."))
+        guard usesDirectGateway, !directInvalidated, !isViewingCachedData else {
+            return .unsupported(friendlyMessage: String(localized: "Reconnect to Hermes to start a background task."))
         }
-
-        guard !isViewingCachedData else {
-            return .unsupported(friendlyMessage: String(localized: "Reconnect to the server to start a background task."))
-        }
-
-        guard !isCLISession else {
-            return .unsupported(friendlyMessage: String(localized: "/background is available for WebUI sessions only."))
-        }
-
         do {
-            let response = try await client.startBackground(sessionID: sessionID, prompt: prompt)
-            if let error = response.error, !error.isEmpty {
-                return .unsupported(friendlyMessage: error)
+            let controller = try await ensureDirectConversation()
+            try await controller.open()
+            guard !directInvalidated, directConversation === controller,
+                  let sessionID = controller.storedID,
+                  canonicalSessionID == sessionID else {
+                throw DirectSessionError.staleOperation
             }
-
-            guard let taskID = response.taskId, !taskID.isEmpty else {
-                return .unsupported(friendlyMessage: String(localized: "The server did not return a background task."))
+            let attemptID = UUID()
+            let profile = controller.profile
+            directBackgroundAttempts[attemptID] = DirectBackgroundAttempt(
+                prompt: prompt, sessionID: sessionID, profile: profile, taskID: nil
+            )
+            directBackgroundStartsInFlight.insert(attemptID)
+            do {
+                let taskID = try await controller.startBackground(prompt, attemptID: attemptID)
+                directBackgroundStartsInFlight.remove(attemptID)
+                let resolution = directBackgroundResolutions.removeValue(forKey: attemptID)
+                guard !directInvalidated, directConversation === controller,
+                      canonicalSessionID == sessionID,
+                      controller.storedID == sessionID,
+                      controller.profile == profile else {
+                    directBackgroundAttempts.removeValue(forKey: attemptID)
+                    lastError = DirectBackgroundError.outcomeUnknown
+                    return .unsupported(friendlyMessage: String(localized: "Outcome unknown. Check Hermes before starting the background task again."))
+                }
+                if var attempt = directBackgroundAttempts[attemptID] {
+                    attempt.taskID = taskID
+                    directBackgroundAttempts[attemptID] = attempt
+                } else if resolution != .completed {
+                    lastError = DirectBackgroundError.outcomeUnknown
+                    return .unsupported(friendlyMessage: String(localized: "Outcome unknown. Check Hermes before starting the background task again."))
+                }
+                return .executed(message: String(localized: "Background task started. I'll add the result here when it completes."))
+            } catch {
+                directBackgroundStartsInFlight.remove(attemptID)
+                let wasAlreadyUnknown = directBackgroundResolutions.removeValue(forKey: attemptID) == .unknown
+                let unknown = wasAlreadyUnknown || (error as? DirectBackgroundError) == .outcomeUnknown
+                let attempt = directBackgroundAttempts.removeValue(forKey: attemptID)
+                if let attempt, unknown {
+                    appendDirectBackgroundResult(
+                        prompt: attempt.prompt,
+                        answer: String(localized: "Outcome unknown. Check Hermes before starting it again."),
+                        sessionID: attempt.sessionID,
+                        profile: attempt.profile
+                    )
+                }
+                lastError = error
+                let message = unknown
+                    ? String(localized: "Outcome unknown. Check Hermes before starting the background task again.")
+                    : error.localizedDescription
+                return .unsupported(friendlyMessage: message)
             }
-
-            backgroundPromptsByTaskID[taskID] = prompt
-            startBackgroundPollingIfNeeded(parentSessionID: sessionID)
-            return .executed(message: String(localized: "Background task started. I'll add the result here when it completes."))
         } catch {
             lastError = error
             return .unsupported(friendlyMessage: error.localizedDescription)
@@ -3205,689 +4044,197 @@ final class ChatViewModel {
     }
 
     private func switchModelFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
-        let requestedModel = args.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !requestedModel.isEmpty else {
-            return .unsupported(friendlyMessage: String(localized: "Usage: /model <id>"))
-        }
-
-        guard let sessionID else {
-            return .unsupported(friendlyMessage: String(localized: "The server did not provide a session ID."))
-        }
-
-        guard canRunConfigurationSlashCommand(String(localized: "change models")) else {
-            return .unsupported(friendlyMessage: composerConfigurationErrorMessage ?? String(localized: "Model switching is unavailable."))
-        }
-
-        let match = modelOption(matching: requestedModel)
-
-        isUpdatingComposerConfiguration = true
-        composerConfigurationErrorMessage = nil
-        sendErrorMessage = nil
-        lastError = nil
-        defer { isUpdatingComposerConfiguration = false }
-
-        do {
-            let response = try await client.updateSession(
-                id: sessionID,
-                workspace: currentWorkspace,
-                model: match?.id ?? requestedModel,
-                modelProvider: match?.providerID
-            )
-
-            currentModel = response.session?.model ?? match?.id ?? requestedModel
-            currentModelProvider = response.session?.modelProvider ?? match?.providerID ?? currentModelProvider
-            currentWorkspace = response.session?.workspace ?? currentWorkspace
-            pendingExplicitModelPick = true
-            await refreshReasoningEffortGating()
-            return .executed(message: nil)
-        } catch {
-            lastError = error
-            composerConfigurationErrorMessage = error.localizedDescription
-            return .unsupported(friendlyMessage: error.localizedDescription)
-        }
+        _ = args
+        return .unsupported(friendlyMessage: "Use the model picker in New Chat before sending its first message.")
     }
 
     private func switchWorkspaceFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
-        let requestedWorkspace = args.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !requestedWorkspace.isEmpty else {
-            return .unsupported(friendlyMessage: String(localized: "Usage: /workspace <path>"))
-        }
-
-        guard let sessionID else {
-            return .unsupported(friendlyMessage: String(localized: "The server did not provide a session ID."))
-        }
-
-        guard canRunConfigurationSlashCommand(String(localized: "change workspace")) else {
-            return .unsupported(friendlyMessage: composerConfigurationErrorMessage ?? String(localized: "Workspace switching is unavailable."))
-        }
-
-        let workspace = workspacePath(matching: requestedWorkspace) ?? requestedWorkspace
-
-        isUpdatingComposerConfiguration = true
-        composerConfigurationErrorMessage = nil
-        sendErrorMessage = nil
-        lastError = nil
-        defer { isUpdatingComposerConfiguration = false }
-
-        do {
-            let response = try await client.updateSession(
-                id: sessionID,
-                workspace: workspace,
-                model: currentModel,
-                modelProvider: currentModelProvider
-            )
-
-            currentWorkspace = response.session?.workspace ?? workspace
-            currentModel = response.session?.model ?? currentModel
-            currentModelProvider = response.session?.modelProvider ?? currentModelProvider
-            workspaceSuggestions = workspaceRoots.compactMap(\.path)
-            return .executed(message: nil)
-        } catch {
-            lastError = error
-            composerConfigurationErrorMessage = error.localizedDescription
-            return .unsupported(friendlyMessage: error.localizedDescription)
-        }
+        let changed = await selectWorkspacePath(args)
+        return changed
+            ? .executed(message: nil)
+            : .unsupported(friendlyMessage: composerConfigurationErrorMessage ?? "Workspace was not changed.")
     }
 
     private func switchReasoningFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
-        let reasoning = args.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !reasoning.isEmpty else {
-            let levels = SlashCommandCatalog.availableReasoningLevels(
-                forSupportedEfforts: supportedReasoningEfforts
+        let changed = await selectReasoningEffort(args)
+        return changed
+            ? .executed(message: nil)
+            : .unsupported(
+                friendlyMessage: composerConfigurationErrorMessage
+                    ?? "Use a supported reasoning level in New Chat. Server-wide display changes are not available here."
             )
-            let usage = (["show", "hide"] + levels).joined(separator: "|")
-            return .unsupported(friendlyMessage: String(localized: "Usage: /reasoning \(usage)|inherit"))
-        }
-
-        guard canRunConfigurationSlashCommand(String(localized: "change reasoning")) else {
-            return .unsupported(friendlyMessage: composerConfigurationErrorMessage ?? String(localized: "Reasoning changes are unavailable."))
-        }
-
-        isUpdatingComposerConfiguration = true
-        composerConfigurationErrorMessage = nil
-        sendErrorMessage = nil
-        lastError = nil
-        defer { isUpdatingComposerConfiguration = false }
-
-        reasoningSelectionToken &+= 1
-        let selectionToken = reasoningSelectionToken
-        let expectedSessionID = canonicalSessionID
-        let expectedModel = currentModel
-        let expectedProvider = currentModelProvider
-
-        do {
-            if Self.reasoningDisplayArgs.contains(reasoning) {
-                _ = try await client.saveReasoningDisplay(reasoning)
-            } else if Self.reasoningClearArgs.contains(reasoning) {
-                guard sessionScopedReasoning == true else {
-                    return .unsupported(friendlyMessage: String(localized: "Session reasoning inheritance is unavailable on this server."))
-                }
-                guard let expectedSessionID else {
-                    return .unsupported(friendlyMessage: String(localized: "The server did not provide a session ID."))
-                }
-                let response = try await client.saveReasoningEffort(
-                    "",
-                    sessionID: expectedSessionID
-                )
-                guard selectionToken == reasoningSelectionToken,
-                      expectedSessionID == canonicalSessionID,
-                      expectedModel == currentModel,
-                      expectedProvider == currentModelProvider
-                else {
-                    return .unsupported(
-                        friendlyMessage: composerConfigurationErrorMessage
-                            ?? String(localized: "Reasoning changes are unavailable.")
-                    )
-                }
-
-                sessionScopedReasoning = response.sessionScopedReasoning ?? sessionScopedReasoning
-                sessionReasoningEffort = nil
-                selectedReasoningEffort = response.effectiveEffort ?? selectedReasoningEffort
-            } else if Self.reasoningEffortArgs.contains(reasoning)
-                || supportedReasoningEfforts?.contains(reasoning) == true {
-                if sessionScopedReasoning == true && expectedSessionID == nil {
-                    return .unsupported(friendlyMessage: String(localized: "The server did not provide a session ID."))
-                }
-                let response = try await client.saveReasoningEffort(
-                    reasoning,
-                    sessionID: sessionScopedReasoning == true ? expectedSessionID : nil
-                )
-                guard selectionToken == reasoningSelectionToken,
-                      expectedSessionID == canonicalSessionID,
-                      expectedModel == currentModel,
-                      expectedProvider == currentModelProvider
-                else {
-                    return .unsupported(
-                        friendlyMessage: composerConfigurationErrorMessage
-                            ?? String(localized: "Reasoning changes are unavailable.")
-                    )
-                }
-
-                sessionScopedReasoning = response.sessionScopedReasoning ?? sessionScopedReasoning
-                sessionReasoningEffort = response.normalizedSessionReasoningEffort
-                    ?? (sessionScopedReasoning == true ? reasoning : nil)
-                selectedReasoningEffort = response.effectiveEffort ?? reasoning
-            } else {
-                return .unsupported(friendlyMessage: String(localized: "Unknown reasoning level: \(reasoning)."))
-            }
-            return .executed(message: nil)
-        } catch {
-            lastError = error
-            composerConfigurationErrorMessage = error.localizedDescription
-            return .unsupported(friendlyMessage: error.localizedDescription)
-        }
     }
 
     private func renameSessionFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
-        let title = args.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !title.isEmpty else {
-            return .executed(message: String(localized: "Current title: **\(displayTitle)**\n\nUse `/title <text>` to rename this session."))
-        }
-
-        guard let sessionID else {
-            return .unsupported(friendlyMessage: String(localized: "The server did not provide a session ID."))
-        }
-
-        guard activeStreamID == nil else {
-            return .unsupported(friendlyMessage: String(localized: "Wait for the current response to finish before renaming the session."))
-        }
-
-        lastError = nil
-        sendErrorMessage = nil
-
-        do {
-            let response = try await client.renameSession(id: sessionID, title: title)
-            if let error = response.error {
-                return .unsupported(friendlyMessage: error)
-            }
-            displayTitle = Self.displayTitle(from: response.session?.title ?? title)
-            return .executed(message: String(localized: "Title set to **\(displayTitle)**."))
-        } catch {
-            lastError = error
-            return .unsupported(friendlyMessage: error.localizedDescription)
-        }
+        _ = args
+        return .unsupported(friendlyMessage: String(localized: "/title is not available in direct Hermes mode yet."))
     }
 
     private func setPersonalityFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
-        let requestedPersonality = args.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !requestedPersonality.isEmpty else {
-            return await personalityListMessage()
-        }
-
-        guard let sessionID else {
-            return .unsupported(friendlyMessage: String(localized: "The server did not provide a session ID."))
-        }
-
-        guard activeStreamID == nil else {
-            return .unsupported(friendlyMessage: String(localized: "Wait for the current response to finish before changing personality."))
-        }
-
-        let normalized = requestedPersonality.lowercased()
-        let name = Self.personalityClearArgs.contains(normalized) ? "" : requestedPersonality
-
-        lastError = nil
-        sendErrorMessage = nil
-
-        do {
-            let response = try await client.setPersonality(sessionID: sessionID, name: name)
-            if let error = response.error {
-                return .unsupported(friendlyMessage: error)
-            }
-
-            if name.isEmpty || response.personality == nil {
-                return .executed(message: String(localized: "Personality cleared."))
-            }
-
-            return .executed(message: String(localized: "Personality set to **\(response.personality ?? name)**."))
-        } catch {
-            lastError = error
-            return .unsupported(friendlyMessage: error.localizedDescription)
-        }
-    }
-
-    private func personalityListMessage() async -> SlashCommandExecutionResult {
-        do {
-            let personalities = (try await client.personalities()).personalities ?? []
-            guard !personalities.isEmpty else {
-                return .executed(message: String(localized: "No personalities are configured on the server."))
-            }
-
-            let list = personalities.compactMap { personality -> String? in
-                guard let name = personality.name, !name.isEmpty else { return nil }
-                if let description = personality.description, !description.isEmpty {
-                    return "- **\(name)** - \(description)"
-                }
-                return "- **\(name)**"
-            }
-            .joined(separator: "\n")
-
-            return .executed(message: String(localized: "Available personalities:\n\n\(list)\n\nUse `/personality <name>` or `/personality none`."))
-        } catch {
-            lastError = error
-            return .unsupported(friendlyMessage: error.localizedDescription)
-        }
+        _ = args
+        return .unsupported(friendlyMessage: String(localized: "/personality is temporarily unavailable."))
     }
 
     private func searchSkillsFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
-        do {
-            let suggestions = try await skillSuggestionsForSlashCommand()
-            if let invocation = SlashSkillFormatter.invocation(from: args, suggestions: suggestions) {
-                let sent = await sendMessage(SlashSkillFormatter.messageText(for: invocation))
-                if sent {
+        if usesDirectGateway {
+            guard !isSubmittingDirectSkill else {
+                return .unsupported(friendlyMessage: "Wait for the current skill invocation to finish.")
+            }
+            isSubmittingDirectSkill = true
+            defer { isSubmittingDirectSkill = false }
+            do {
+                let controller = try await ensureDirectConversation()
+                let profile = controller.profile
+                let origin = controller.sharedRuntime.origin
+                let suggestions = try await directSkillSuggestions(
+                    controller: controller, profile: profile, origin: origin
+                )
+                if let invocation = SlashSkillFormatter.invocation(from: args, suggestions: suggestions) {
+                    return .unsupported(friendlyMessage: directSkillInvocationUnavailableMessage)
+                }
+                return .executed(message: SlashSkillFormatter.message(for: suggestions,
+                    query: SlashSkillFormatter.skillQuery(from: args)))
+            } catch {
+                if Task.isCancelled || directInvalidated
+                    || (error as? DirectSessionError) == .staleOperation {
                     return .executed(message: nil)
                 }
-                return .unsupported(friendlyMessage: sendErrorMessage ?? String(localized: "Could not send the skill message."))
+                lastError = error
+                return .unsupported(friendlyMessage: error.localizedDescription)
             }
-
-            return .executed(message: SlashSkillFormatter.message(for: suggestions, query: SlashSkillFormatter.skillQuery(from: args)))
-        } catch {
-            lastError = error
-            return .unsupported(friendlyMessage: error.localizedDescription)
         }
+        return .unsupported(friendlyMessage: "Skills require a direct Hermes connection.")
     }
 
     func executeSkillShortcutCommand(name: String, args: String) async -> SlashCommandExecutionResult? {
-        do {
-            let suggestions = try await skillSuggestionsForSlashCommand()
-            guard let skill = SlashSkillFormatter.skill(named: name, in: suggestions) else {
-                return nil
+        if usesDirectGateway {
+            guard !isSubmittingDirectSkill else {
+                return .unsupported(friendlyMessage: "Wait for the current skill invocation to finish.")
             }
-
-            let message = args.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !message.isEmpty else {
-                return .executed(message: SlashSkillFormatter.detailMessage(for: skill))
+            isSubmittingDirectSkill = true
+            defer { isSubmittingDirectSkill = false }
+            do {
+                let controller = try await ensureDirectConversation()
+                let profile = controller.profile
+                let origin = controller.sharedRuntime.origin
+                let suggestions = try await directSkillSuggestions(
+                    controller: controller, profile: profile, origin: origin
+                )
+                guard let skill = SlashSkillFormatter.skill(named: name, in: suggestions) else { return nil }
+                let message = args.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !message.isEmpty else {
+                    return .executed(message: directSkillDetailMessage(for: skill))
+                }
+                return .unsupported(friendlyMessage: directSkillInvocationUnavailableMessage)
+            } catch {
+                if Task.isCancelled || directInvalidated
+                    || (error as? DirectSessionError) == .staleOperation {
+                    return .executed(message: nil)
+                }
+                lastError = error
+                return .unsupported(friendlyMessage: error.localizedDescription)
             }
-
-            let commandText = "/\(skill.slashName) \(message)"
-            let sent = await sendMessage(commandText)
-            if sent {
-                return .executed(message: nil)
-            }
-            return .unsupported(friendlyMessage: sendErrorMessage ?? String(localized: "Could not send the skill message."))
-        } catch {
-            lastError = error
-            return .unsupported(friendlyMessage: error.localizedDescription)
         }
+        _ = name
+        _ = args
+        return .unsupported(friendlyMessage: "Skills require a direct Hermes connection.")
     }
 
-    private func skillSuggestionsForSlashCommand() async throws -> [SkillSlashSuggestion] {
-        if hasLoadedSkillSlashSuggestions {
-            return skillSlashSuggestions
+    private func directSkillSuggestions(
+        controller: GatewayConversationController,
+        profile: String,
+        origin: URL
+    ) async throws -> [SkillSlashSuggestion] {
+        func requireCurrentScope() throws {
+            try Task.checkCancellation()
+            guard !directInvalidated, directConversation === controller,
+                  controller.profile == profile,
+                  (Self.nonEmpty(currentProfile) ?? "default") == profile,
+                  controller.sharedRuntime.origin == origin,
+                  origin == server else { throw DirectSessionError.staleOperation }
         }
-
-        let response = try await client.skills()
+        try requireCurrentScope()
+        let response: SkillsResponse
+        do { response = try await client.directSkills(profile: profile) }
+        catch {
+            try requireCurrentScope()
+            throw error
+        }
+        try requireCurrentScope()
         let suggestions = SlashSkillFormatter.suggestions(from: response.skills ?? [])
         skillSlashSuggestions = suggestions
         hasLoadedSkillSlashSuggestions = true
         return suggestions
     }
 
+    private var directSkillInvocationUnavailableMessage: String {
+        String(localized: "Skill invocation is temporarily unavailable in direct Hermes mode. You can still browse installed skills with `/skills`.")
+    }
+
+    private func directSkillDetailMessage(for skill: SkillSlashSuggestion) -> String {
+        var lines = ["### `/\(skill.slashName)`", "", "**\(skill.name)**"]
+        if let category = skill.category { lines += ["", "Category: \(category)"] }
+        if let description = skill.description { lines += ["", description] }
+        lines += ["", directSkillInvocationUnavailableMessage]
+        return lines.joined(separator: "\n")
+    }
+
     private func branchSessionFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
-        guard !isViewingCachedData else {
-            return .unsupported(friendlyMessage: String(localized: "Reconnect to the server to fork a conversation."))
-        }
-
-        guard activeStreamID == nil else {
-            return .unsupported(friendlyMessage: String(localized: "Wait for the current response to finish before forking."))
-        }
-
-        guard let sessionID else {
-            return .unsupported(friendlyMessage: String(localized: "The server did not provide a session ID."))
-        }
-
-        let title = args.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        isForkingMessage = true
-        messageActionErrorMessage = nil
-        lastError = nil
-        sendErrorMessage = nil
-        defer { isForkingMessage = false }
-
-        do {
-            let response = try await client.branchSession(
-                id: sessionID,
-                title: title.isEmpty ? nil : title
-            )
-
-            guard let forkedSessionID = response.sessionId else {
-                return .unsupported(
-                    friendlyMessage: response.error ?? String(localized: "The server did not return the forked session ID.")
-                )
-            }
-
-            let forkedResponse = try await client.session(
-                id: forkedSessionID,
-                includeMessages: false,
-                messageLimit: nil
-            )
-
-            guard let forkedSessionDetail = forkedResponse.session else {
-                return .unsupported(friendlyMessage: String(localized: "The server did not return the forked session."))
-            }
-
-            return .openedSession(SessionSummary(from: forkedSessionDetail))
-        } catch {
-            lastError = error
-            return .unsupported(friendlyMessage: error.localizedDescription)
-        }
+        await branchDirectConversation(name: args)
     }
 
     private func createSessionFromSlashCommand() async -> SlashCommandExecutionResult {
-        guard !isViewingCachedData else {
-            return .unsupported(friendlyMessage: String(localized: "Reconnect to the server to start a new session."))
+        .unsupported(friendlyMessage: String(localized: "Use New Chat; direct Hermes creates sessions on first send."))
+    }
+
+    private func compressDirectSessionFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
+        guard !directInvalidated, !isViewingCachedData, !isStartingChat,
+              !isCompressingSession, activeStreamID == nil else {
+            return .unsupported(friendlyMessage: "Wait for the current response to finish before compressing context.")
         }
-
-        guard activeStreamID == nil else {
-            return .unsupported(friendlyMessage: String(localized: "Wait for the current response to finish before starting a new session."))
-        }
-
-        isUpdatingComposerConfiguration = true
-        lastError = nil
-        sendErrorMessage = nil
-        composerConfigurationErrorMessage = nil
-        defer { isUpdatingComposerConfiguration = false }
-
+        let expectedProfile = Self.nonEmpty(currentProfile) ?? "default"
+        isCompressingSession = true
+        defer { isCompressingSession = false }
         do {
-            let response = try await client.createSession(
-                workspace: currentWorkspace,
-                model: currentModel,
-                modelProvider: requestModelProvider,
-                profile: requestProfileName
-            )
-
-            guard let session = response.session else {
-                return .unsupported(friendlyMessage: String(localized: "The server did not return the new session."))
+            let controller = try await ensureDirectConversation()
+            try await controller.open()
+            guard !directInvalidated, directConversation === controller,
+                  controller.profile == expectedProfile, controller.runtimeOrigin == server,
+                  controller.storedID == canonicalSessionID else { throw DirectSessionError.staleOperation }
+            let outcome = try await controller.compress(focusTopic: args)
+            guard !directInvalidated, directConversation === controller,
+                  controller.profile == expectedProfile, controller.runtimeOrigin == server,
+                  controller.storedID == canonicalSessionID else { throw DirectSessionError.staleOperation }
+            switch outcome {
+            case .compressed: return .executed(message: "Context compressed.")
+            case .unchanged: return .executed(message: "No changes from compression.")
+            case .aborted: return .executed(message: "Compression was aborted; context was preserved.")
+            case .lockSkipped: return .executed(message: "Compression was skipped because the session's compression lock was unavailable.")
             }
-
-            return .openedSession(SessionSummary(from: session))
+        } catch DirectSessionCompressionError.outcomeUnknown {
+            return .unsupported(friendlyMessage: "The compression outcome could not be confirmed. It has not been retried; sending and compression are paused for this open chat.")
         } catch {
             lastError = error
-            return .unsupported(friendlyMessage: error.localizedDescription)
+            return .unsupported(friendlyMessage: "Context could not be compressed safely.")
         }
     }
 
     private func compressSessionFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
-        guard !isViewingCachedData else {
-            return .unsupported(friendlyMessage: String(localized: "Reconnect to the server to compress context."))
-        }
-
-        guard activeStreamID == nil else {
-            return .unsupported(friendlyMessage: String(localized: "Wait for the current response to finish before compressing context."))
-        }
-
-        guard let sessionID else {
-            return .unsupported(friendlyMessage: String(localized: "The server did not provide a session ID."))
-        }
-
-        let focusTopic = args.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        isCompressingSession = true
-        lastError = nil
-        sendErrorMessage = nil
-        messageActionErrorMessage = nil
-        defer { isCompressingSession = false }
-
-        do {
-            let response = try await client.compressSession(
-                id: sessionID,
-                focusTopic: focusTopic.isEmpty ? nil : focusTopic
-            )
-
-            if let error = response.error {
-                return .unsupported(friendlyMessage: error)
-            }
-
-            guard let session = response.session else {
-                return .unsupported(friendlyMessage: String(localized: "The server did not return the compressed session."))
-            }
-
-            applyCompressionAnchorMetadata(from: session)
-            withBatchedTranscriptDerivedState {
-                messages = session.messages ?? []
-                updateOlderMessagePagination(from: session, loadedMessageCount: messages.count)
-            }
-            isViewingCachedData = false
-            let snapshot = ContextWindowSnapshot(
-                contextLength: session.contextLength,
-                thresholdTokens: session.thresholdTokens,
-                lastPromptTokens: session.lastPromptTokens,
-                inputTokens: session.inputTokens,
-                outputTokens: session.outputTokens,
-                estimatedCost: session.estimatedCost
-            )
-            contextWindowSnapshot = snapshot.replacingTokensUsed(response.summary?.compressedTokenEstimate)
-            if let title = session.title {
-                displayTitle = Self.displayTitle(from: title)
-            }
-            currentWorkspace = session.workspace ?? currentWorkspace
-            currentModel = session.model ?? currentModel
-            currentModelProvider = session.modelProvider ?? currentModelProvider
-            currentProfile = session.profile ?? currentProfile
-            setCompletedToolCallGroups(ToolCallGroup.groups(
-                persistedToolCalls: session.toolCalls ?? [],
-                messages: messages,
-                messageOffset: messagesOffset
-            ))
-            completedReasoningGroups = []
-            liveToolCalls = []
-            liveReasoningText = ""
-            streamingAssistantMessageID = nil
-            toolCallAnchorMessageID = nil
-            reasoningAnchorMessageID = nil
-            prepareForNewResponse()
-            responseCompletionNeedsTranscriptRefresh = false
-            attachmentCoordinator.removeAllLocalPreviews()
-
-            let headline = response.summary?.headline?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let tokenLine = response.summary?.tokenLine?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let focus = response.focusTopic?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let details = [headline, tokenLine, focus.map { String(localized: "Focus: \($0)") }]
-                .compactMap { value -> String? in
-                    guard let value, !value.isEmpty else { return nil }
-                    return value
-                }
-                .joined(separator: "\n")
-
-            if details.isEmpty {
-                return .executed(message: String(localized: "Context compressed."))
-            }
-
-            return .executed(message: String(localized: "Context compressed.\n\n\(details)"))
-        } catch {
-            lastError = error
-            return .unsupported(friendlyMessage: error.localizedDescription)
-        }
+        await compressDirectSessionFromSlashCommand(args)
     }
 
     private func undoLastExchangeFromSlashCommand() async -> SlashCommandExecutionResult {
-        guard !isViewingCachedData else {
-            return .unsupported(friendlyMessage: String(localized: "Reconnect to the server to undo messages."))
-        }
-
-        guard !isCLISession else {
-            return .unsupported(friendlyMessage: String(localized: "Undo is available for WebUI sessions only."))
-        }
-
-        guard activeStreamID == nil else {
-            return .unsupported(friendlyMessage: String(localized: "Wait for the current response to finish before undoing messages."))
-        }
-
-        guard let sessionID else {
-            return .unsupported(friendlyMessage: String(localized: "The server did not provide a session ID."))
-        }
-
-        lastError = nil
-        sendErrorMessage = nil
-
-        do {
-            let response = try await client.undoSession(id: sessionID)
-            if let error = response.error {
-                return .unsupported(friendlyMessage: error)
-            }
-
-            await loadMessages()
-            if let lastError {
-                return .unsupported(friendlyMessage: lastError.localizedDescription)
-            }
-
-            return .executed(message: nil)
-        } catch {
-            lastError = error
-            return .unsupported(friendlyMessage: error.localizedDescription)
-        }
+        .unsupported(friendlyMessage: String(localized: "Undo is not available in direct Hermes mode yet."))
     }
 
     private func retryLastTurnFromSlashCommand() async -> SlashCommandExecutionResult {
-        guard !isViewingCachedData else {
-            return .unsupported(friendlyMessage: String(localized: "Reconnect to the server to retry messages."))
-        }
-
-        guard !isCLISession else {
-            return .unsupported(friendlyMessage: String(localized: "Retry is available for WebUI sessions only."))
-        }
-
-        guard activeStreamID == nil else {
-            return .unsupported(friendlyMessage: String(localized: "Wait for the current response to finish before retrying messages."))
-        }
-
-        guard let sessionID else {
-            return .unsupported(friendlyMessage: String(localized: "The server did not provide a session ID."))
-        }
-
-        isStartingChat = true
-        lastError = nil
-        sendErrorMessage = nil
-        archiveLiveReasoningIfNeeded()
-        archiveLiveToolCallsIfNeeded()
-        liveReasoningText = ""
-        liveToolCalls = []
-        reasoningAnchorMessageID = nil
-        toolCallAnchorMessageID = nil
-        prepareForNewResponse()
-        responseCompletionNeedsTranscriptRefresh = false
-        defer { isStartingChat = false }
-
-        do {
-            let retryResponse = try await client.retrySession(id: sessionID)
-            if let error = retryResponse.error {
-                return .unsupported(friendlyMessage: error)
-            }
-
-            let lastUserText = retryResponse.lastUserText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            guard !lastUserText.isEmpty else {
-                return .unsupported(friendlyMessage: String(localized: "The server did not return a message to retry."))
-            }
-
-            // Post-retry reload is NOT treated as a cold load (issue #168 non-goal): the
-            // user already has the transcript in view, so keep the raw msg_limit cap and
-            // leave expandRenderable at its default false.
-            let sessionResponse = try await client.session(
-                id: sessionID,
-                includeMessages: true,
-                messageLimit: Self.messagePageLimit
-            )
-            if let session = sessionResponse.session {
-                withBatchedTranscriptDerivedState {
-                    messages = session.messages ?? []
-                    updateOlderMessagePagination(from: session, loadedMessageCount: messages.count)
-                }
-                setCompletedToolCallGroups(ToolCallGroup.groups(
-                    persistedToolCalls: session.toolCalls ?? [],
-                    messages: messages,
-                    messageOffset: messagesOffset
-                ))
-                completedReasoningGroups = []
-            } else {
-                await loadMessages()
-                if let lastError {
-                    return .unsupported(friendlyMessage: lastError.localizedDescription)
-                }
-            }
-
-            liveToolCalls = []
-            liveReasoningText = ""
-            toolCallAnchorMessageID = nil
-            reasoningAnchorMessageID = nil
-            attachmentCoordinator.removeAllLocalPreviews()
-
-            let explicitModelPick = explicitModelPickForChatStart()
-            let chatResponse = try await client.startChat(
-                sessionID: sessionID,
-                message: lastUserText,
-                workspace: currentWorkspace,
-                model: currentModel,
-                modelProvider: requestModelProvider,
-                profile: requestProfileName,
-                explicitModelPick: explicitModelPick
-            )
-
-            guard let streamID = chatResponse.streamId else {
-                return .unsupported(friendlyMessage: chatResponse.error ?? String(localized: "The server did not return a stream ID after retrying."))
-            }
-
-            completeExplicitModelPickForChatStart(explicitModelPick)
-            messages.append(
-                ChatMessage(
-                    role: "user",
-                    content: lastUserText,
-                    timestamp: Date().timeIntervalSince1970,
-                    messageId: "local-\(UUID().uuidString)"
-                )
-            )
-
-            messageLoadGeneration &+= 1
-            streamCoordinator.start(streamID: streamID)
-            return .executed(message: nil)
-        } catch {
-            lastError = error
-            return .unsupported(friendlyMessage: error.localizedDescription)
-        }
+        // Legacy truncate-and-resubmit is retired. Direct retry remains unavailable
+        // until its destructive targeting contract is explicitly resolved.
+        return .unsupported(friendlyMessage: String(localized: "Retry is not available in direct Hermes mode yet."))
     }
 
-    private func canRunConfigurationSlashCommand(_ actionDescription: String) -> Bool {
-        if isViewingCachedData {
-            composerConfigurationErrorMessage = String(localized: "Reconnect to the server to \(actionDescription).")
-            return false
-        }
 
-        if activeStreamID != nil {
-            composerConfigurationErrorMessage = String(localized: "Wait for the current response to finish before you \(actionDescription).")
-            return false
-        }
 
-        return true
-    }
-
-    private func modelOption(matching query: String) -> ModelCatalogOption? {
-        let normalizedQuery = query.lowercased()
-        let options = modelCatalogGroups.flatMap(\.slashAutocompleteModels)
-
-        if let exact = options.first(where: { $0.id.lowercased() == normalizedQuery }) {
-            return exact
-        }
-
-        return options.first {
-            $0.id.lowercased().contains(normalizedQuery) ||
-            $0.displayName.lowercased().contains(normalizedQuery)
-        }
-    }
-
-    private func workspacePath(matching query: String) -> String? {
-        let normalizedQuery = query.lowercased()
-        let roots = workspaceRoots.compactMap { root -> (path: String, name: String?)? in
-            guard let path = root.path, !path.isEmpty else { return nil }
-            return (path, root.name)
-        }
-
-        if let exact = roots.first(where: { $0.path.lowercased() == normalizedQuery }) {
-            return exact.path
-        }
-
-        return roots.first {
-            $0.path.lowercased().contains(normalizedQuery) ||
-            ($0.name?.lowercased().contains(normalizedQuery) == true)
-        }?.path
-    }
 
     @discardableResult
     func appendLocalAssistantMessage(_ text: String) -> String? {
@@ -3947,285 +4294,158 @@ final class ChatViewModel {
     }
 
     func forkFromMessage(_ context: MessageActionContext, modelContext: ModelContext? = nil) async -> SessionSummary? {
-        guard !isViewingCachedData else {
-            messageActionErrorMessage = String(localized: "Reconnect to the server to fork a conversation.")
-            return nil
-        }
-
-        guard activeStreamID == nil else {
-            messageActionErrorMessage = String(localized: "Wait for the current response to finish before forking.")
-            return nil
-        }
-
-        guard let sessionID else {
-            messageActionErrorMessage = String(localized: "The server did not provide a session ID.")
-            return nil
-        }
-
-        isForkingMessage = true
-        messageActionErrorMessage = nil
-        lastError = nil
-        defer { isForkingMessage = false }
-
-        do {
-            let response = try await client.branchSession(
-                id: sessionID,
-                keepCount: context.keepCountThroughMessage
-            )
-
-            guard let forkedSessionID = response.sessionId else {
-                messageActionErrorMessage = response.error ?? String(localized: "The server did not return the forked session ID.")
-                return nil
-            }
-
-            let forkedResponse = try await client.session(
-                id: forkedSessionID,
-                includeMessages: false,
-                messageLimit: nil
-            )
-
-            guard let forkedSessionDetail = forkedResponse.session else {
-                messageActionErrorMessage = String(localized: "The server did not return the forked session.")
-                return nil
-            }
-
-            let forkedSession = SessionSummary(from: forkedSessionDetail)
-            if let modelContext {
-                do {
-                    try CacheStore.cacheSession(forkedSession, serverURL: server, in: modelContext)
-                } catch {
-                    cacheErrorMessage = error.localizedDescription
-                }
-            }
-            return forkedSession
-        } catch {
-            lastError = error
-            messageActionErrorMessage = error.localizedDescription
-            return nil
-        }
+        _ = context
+        _ = modelContext
+        messageActionErrorMessage = String(localized: "Forking is not available in direct Hermes mode yet.")
+        return nil
     }
 
-    /// Edit a user message: truncate to just before the selected message, then send the edited text.
     func editMessage(_ context: MessageActionContext, newText: String, modelContext: ModelContext? = nil) async -> Bool {
-        guard context.role == .user else {
-            messageActionErrorMessage = String(localized: "Only user messages can be edited.")
-            return false
-        }
-
-        guard !isViewingCachedData else {
-            messageActionErrorMessage = String(localized: "Reconnect to the server to edit a message.")
-            return false
-        }
-
-        guard activeStreamID == nil else {
-            messageActionErrorMessage = String(localized: "Wait for the current response to finish before editing.")
-            return false
-        }
-
-        guard let sessionID else {
-            messageActionErrorMessage = String(localized: "The server did not provide a session ID.")
-            return false
-        }
-
-        let editedText = newText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !editedText.isEmpty else {
-            messageActionErrorMessage = String(localized: "The edited message cannot be empty.")
-            return false
-        }
-
-        isEditingMessage = true
-        messageActionErrorMessage = nil
-        lastError = nil
-        defer { isEditingMessage = false }
-
-        do {
-            // Truncate to remove the selected user message and everything after it
-            let truncateResponse = try await client.truncateSession(
-                id: sessionID,
-                keepCount: context.fullHistoryIndex
-            )
-
-            // Update local state from the truncated response
-            if let session = truncateResponse.session {
-                withBatchedTranscriptDerivedState {
-                    messages = session.messages ?? []
-                    updateOlderMessagePagination(from: session, loadedMessageCount: messages.count)
-                }
-                setCompletedToolCallGroups(ToolCallGroup.groups(
-                    persistedToolCalls: session.toolCalls ?? [],
-                    messages: messages,
-                    messageOffset: messagesOffset
-                ))
-                completedReasoningGroups = []
-                liveToolCalls = []
-                liveReasoningText = ""
-                toolCallAnchorMessageID = nil
-                reasoningAnchorMessageID = nil
-
-                if let modelContext {
-                    do {
-                        try CacheStore.cacheMessages(Self.cacheMessageWindow(from: messages), serverURL: server, sessionID: sessionID, in: modelContext)
-                    } catch {
-                        cacheErrorMessage = error.localizedDescription
-                    }
-                }
-            }
-
-            // Now send the edited text through the normal chat flow
-            let explicitModelPick = explicitModelPickForChatStart()
-            prepareForNewResponse()
-            responseCompletionNeedsTranscriptRefresh = false
-            let chatResponse = try await client.startChat(
-                sessionID: sessionID,
-                message: editedText,
-                workspace: currentWorkspace,
-                model: currentModel,
-                modelProvider: requestModelProvider,
-                profile: requestProfileName,
-                explicitModelPick: explicitModelPick
-            )
-
-            guard let streamID = chatResponse.streamId else {
-                messageActionErrorMessage = chatResponse.error ?? String(localized: "The server did not return a stream ID after editing.")
-                return false
-            }
-
-            completeExplicitModelPickForChatStart(explicitModelPick)
-            // Append the optimistic user message
-            messages.append(
-                ChatMessage(
-                    role: "user",
-                    content: editedText,
-                    timestamp: Date().timeIntervalSince1970,
-                    messageId: "local-\(UUID().uuidString)"
-                )
-            )
-
-            messageLoadGeneration &+= 1
-            streamCoordinator.start(streamID: streamID)
-            return true
-        } catch {
-            lastError = error
-            messageActionErrorMessage = error.localizedDescription
-            return false
-        }
+        let text = newText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return false }
+        return await submitDestructiveMessage(
+            context: context,
+            replacementText: text,
+            expectedRole: .user,
+            modelContext: modelContext
+        )
     }
 
     func regenerateAssistantResponse(
         _ context: MessageActionContext,
         modelContext: ModelContext? = nil
     ) async -> Bool {
-        guard context.role == .assistant else {
-            messageActionErrorMessage = String(localized: "Only assistant messages can be regenerated.")
+        await submitDestructiveMessage(
+            context: context,
+            replacementText: nil,
+            expectedRole: .assistant,
+            modelContext: modelContext
+        )
+    }
+
+    private func submitDestructiveMessage(
+        context: MessageActionContext,
+        replacementText: String?,
+        expectedRole: MessageActionContext.Role,
+        modelContext: ModelContext?
+    ) async -> Bool {
+        guard usesDirectGateway, !directInvalidated, !isViewingCachedData,
+              activeStreamID == nil, !isStartingChat, !isEditingMessage,
+              !isRegeneratingMessage, !isUpdatingComposerConfiguration,
+              directPendingAttachments.isEmpty, pendingAttachments.isEmpty,
+              !isPreparingDirectAttachment, !attachmentRecoveryIsBusy else {
+            messageActionErrorMessage = String(localized: "Reconnect, finish the active response, and clear pending attachments before changing history.")
+            return false
+        }
+        guard context.role == expectedRole else {
+            messageActionErrorMessage = String(localized: "That message is no longer a valid history target.")
             return false
         }
 
-        guard !isViewingCachedData else {
-            messageActionErrorMessage = String(localized: "Reconnect to the server to regenerate a response.")
-            return false
-        }
-
-        guard activeStreamID == nil else {
-            messageActionErrorMessage = String(localized: "Wait for the current response to finish before regenerating.")
-            return false
-        }
-
-        guard let sessionID else {
-            messageActionErrorMessage = String(localized: "The server did not provide a session ID.")
-            return false
-        }
-
-        guard let userText = Self.precedingUserMessageText(in: messages, beforeVisibleIndex: context.visibleIndex) else {
-            messageActionErrorMessage = String(localized: "Load older messages before regenerating this response.")
-            return false
-        }
-
-        isRegeneratingMessage = true
+        directModelContext = modelContext ?? directModelContext
+        if expectedRole == .user { isEditingMessage = true }
+        else { isRegeneratingMessage = true }
         messageActionErrorMessage = nil
         lastError = nil
-        stopListening()
-        defer { isRegeneratingMessage = false }
+        defer {
+            isEditingMessage = false
+            isRegeneratingMessage = false
+            OpenChatSessionStore.shared.noteStreamingStateChanged()
+        }
 
         do {
-            let truncateResponse = try await client.truncateSession(
-                id: sessionID,
-                keepCount: context.fullHistoryIndex
-            )
-
-            if let session = truncateResponse.session {
-                withBatchedTranscriptDerivedState {
-                    messages = session.messages ?? []
-                    updateOlderMessagePagination(from: session, loadedMessageCount: messages.count)
-                }
-                setCompletedToolCallGroups(ToolCallGroup.groups(
-                    persistedToolCalls: session.toolCalls ?? [],
-                    messages: messages,
-                    messageOffset: messagesOffset
-                ))
-                completedReasoningGroups = []
-                liveToolCalls = []
-                liveReasoningText = ""
-                toolCallAnchorMessageID = nil
-                reasoningAnchorMessageID = nil
-
-                if let modelContext {
-                    do {
-                        try CacheStore.cacheMessages(Self.cacheMessageWindow(from: messages), serverURL: server, sessionID: sessionID, in: modelContext)
-                    } catch {
-                        cacheErrorMessage = error.localizedDescription
-                    }
-                }
+            let controller = try await ensureDirectConversation()
+            guard controller.runState == .idle,
+                  controller.profile == (requestProfileName ?? "default"),
+                  controller.storedID == canonicalSessionID,
+                  controller.storedID == directHistoryID else {
+                throw DirectSessionError.staleOperation
             }
 
-            let explicitModelPick = explicitModelPickForChatStart()
-            prepareForNewResponse()
-            responseCompletionNeedsTranscriptRefresh = false
-            let chatResponse = try await client.startChat(
-                sessionID: sessionID,
-                message: userText,
-                workspace: currentWorkspace,
-                model: currentModel,
-                modelProvider: requestModelProvider,
-                profile: requestProfileName,
-                explicitModelPick: explicitModelPick
-            )
-
-            guard let streamID = chatResponse.streamId else {
-                messageActionErrorMessage = chatResponse.error ?? String(localized: "The server did not return a stream ID after regenerating.")
-                return false
+            // Re-read the canonical tail immediately before selecting the row.
+            // This detects ordinary stale/mismatched targets, while the approved
+            // stock cross-client check/write race remains explicitly non-atomic.
+            try await controller.refresh()
+            guard controller.runState == .idle,
+                  controller.profile == (requestProfileName ?? "default"),
+                  controller.storedID == canonicalSessionID,
+                  controller.storedID == directHistoryID,
+                  let selectedIndex = messages.firstIndex(where: { $0.messageId == context.messageID }),
+                  messages[selectedIndex].role == (expectedRole == .user ? "user" : "assistant"),
+                  messages[selectedIndex].content == context.copyText else {
+                throw DirectSessionError.staleOperation
             }
 
-            completeExplicitModelPickForChatStart(explicitModelPick)
-            messageLoadGeneration &+= 1
-            streamCoordinator.start(streamID: streamID)
+            let targetIndex: Int
+            let prompt: String
+            if expectedRole == .user {
+                targetIndex = selectedIndex
+                prompt = replacementText ?? ""
+            } else {
+                guard selectedIndex > messages.startIndex,
+                      let origin = messages[..<selectedIndex].lastIndex(where: {
+                          TranscriptTurnClassifier.isUserTurnBoundary($0)
+                      }),
+                      let content = messages[origin].content?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !content.isEmpty else {
+                    throw DirectSessionError.staleOperation
+                }
+                targetIndex = origin
+                prompt = content
+            }
+            guard messages[targetIndex].role == "user",
+                  let rowString = messages[targetIndex].messageId,
+                  rowString == rowString.trimmingCharacters(in: .whitespacesAndNewlines),
+                  let rowID = Int(rowString), rowID > 0,
+                  Double(exactly: rowID) != nil else {
+                throw DirectSessionError.staleOperation
+            }
+
+            let priorUserCount = messages[..<targetIndex].filter {
+                TranscriptTurnClassifier.isUserTurnBoundary($0)
+            }.count
+            let ordinal = hasOlderMessages ? nil : priorUserCount
+            try await controller.submit(
+                prompt,
+                destructiveTarget: .init(
+                    userRowID: rowID,
+                    userOrdinal: ordinal,
+                    permitsEmptyTranscript: priorUserCount == 0 && !hasOlderMessages
+                )
+            )
             return true
         } catch {
             lastError = error
-            messageActionErrorMessage = error.localizedDescription
+            if directConversation?.hasAmbiguousPromptDelivery == true {
+                messageActionErrorMessage = String(localized: "Hermes may have queued or started the replacement. It was not resent; refresh after the run settles before trying again.")
+            } else if case let HermesGatewayError.server(code, _, data, method, _, _) = error,
+                      method == "prompt.submit", code == 4018,
+                      case .number(let segment)? = data?.gatewayFields["segment_ordinal"],
+                      segment < 0 {
+                messageActionErrorMessage = String(localized: "That turn is in the immutable compacted history and cannot be changed from this continuation.")
+            } else if let directError = error as? DirectSessionError,
+                      directError == .staleOperation {
+                messageActionErrorMessage = String(localized: "The conversation changed, so no history was replaced. Review the latest messages and try again.")
+            } else {
+                messageActionErrorMessage = String(localized: "Hermes refused to change this history. No automatic retry was attempted.")
+            }
             return false
         }
     }
 
     @discardableResult
     func cancelActiveStream() async -> Bool {
-        guard activeStreamID != nil else { return false }
-
+        guard !isCancellingStream else { return false }
         isCancellingStream = true
-        sendErrorMessage = nil
-        lastError = nil
         defer { isCancellingStream = false }
-
         do {
-            guard let response = try await streamCoordinator.cancelActiveStream() else { return false }
-            if response.ok == false {
-                sendErrorMessage = response.error ?? String(localized: "The server could not stop the current response.")
-                return false
-            }
-
+            let controller = try await ensureDirectConversation()
+            try await controller.interrupt()
+            OpenChatSessionStore.shared.noteStreamingStateChanged()
             return true
         } catch {
             lastError = error
-            sendErrorMessage = error.localizedDescription
+            sendErrorMessage = "Hermes has not confirmed that the response stopped."
             return false
         }
     }
@@ -4245,7 +4465,7 @@ final class ChatViewModel {
         // Tapping the message that is already listening — fetching server audio or
         // playing on either engine — toggles it off. Matching on `listeningMessageID`
         // alone (not `isSpeaking`) also debounces rapid double-taps: the second tap
-        // stops cleanly instead of firing a second `/api/tts` call into the server's
+        // stops cleanly instead of firing a second `/api/audio/speak` call into the server's
         // ~2 s rate limit or stacking audio (#15).
         if listeningMessageID == context.messageID {
             stopListening()
@@ -4253,7 +4473,7 @@ final class ChatViewModel {
         }
 
         stopListening()
-        // The audio session is NOT activated here: `/api/tts` can be slow or
+        // The audio session is NOT activated here: `/api/audio/speak` can be slow or
         // unreachable, and activating the non-mixable playback session before the
         // fetch would silence other audio while Semreh has nothing to play (review
         // on #35). Activation happens at the two playback-start points instead —
@@ -4262,7 +4482,7 @@ final class ChatViewModel {
         beginListenPlaybackPreparation(for: context)
 
         guard ServerTTSPolicy.shouldUseServerTTS(for: listenText) else {
-            // Over the server's 5000-char request cap: go straight to the on-device
+            // Over the client's 5000-char Listen cap: go straight to the on-device
             // path (chunking is a non-goal of #15).
             clearListenPlaybackState()
             speakWithOnDeviceSynthesizer(listenText)
@@ -4274,6 +4494,7 @@ final class ChatViewModel {
         // synthesizer — no error alert (#15).
         let requestID = UUID()
         activeListenRequestID = requestID
+        let speechProfile = requestProfileName ?? "default"
         listenPreparationTask = Task { [weak self, client] in
             guard !Task.isCancelled else {
                 // Stopped before the fetch began (e.g. a rapid second tap): skip
@@ -4284,8 +4505,7 @@ final class ChatViewModel {
             let audioData: Data?
             do {
                 audioData = try await client.synthesizeSpeech(
-                    text: listenText,
-                    voice: ServerTTSPolicy.defaultVoice
+                    text: listenText, profile: speechProfile
                 )
             } catch {
                 audioData = nil
@@ -4297,6 +4517,10 @@ final class ChatViewModel {
                 return
             }
 
+            guard (self.requestProfileName ?? "default") == speechProfile else {
+                self.finishListening()
+                return
+            }
             if let audioData, self.startServerAudioPlayback(audioData, title: self.listenPlaybackTitle) {
                 return
             }
@@ -4363,42 +4587,10 @@ final class ChatViewModel {
         }
     }
 
-    func suspendStreamForBackground() {
-        suspendActiveStreamConnection()
-    }
-
-    func suspendStreamForNavigation() {
-        suspendActiveStreamConnection()
-    }
-
-    func cancelStreamReconnectRetry() {
-        streamCoordinator.cancelReconnectRetry()
-    }
-
-    func ensureOwnedStreamStatusWatch() {
-        guard streamStatusWatchTask == nil, activeStreamID != nil else { return }
-        streamStatusWatchTask = Task { @MainActor [weak self] in
-            while let self, !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
-                guard !Task.isCancelled else { return }
-                guard self.activeStreamID != nil else { return }
-                await self.recoverStaleActiveStreamIfNeeded()
-            }
-        }
-    }
-
-    func cancelOwnedStreamStatusWatch() {
-        streamStatusWatchTask?.cancel()
-        streamStatusWatchTask = nil
-    }
-
     func cleanupPollingTasks() {
-        stopBackgroundPolling(clearTrackedPrompts: true)
-        pendingActionCoordinator.stopMonitoring(clearPrompt: true)
-    }
-
-    private func suspendActiveStreamConnection() {
-        streamCoordinator.suspendActiveStreamConnection()
+        failDirectBackgroundAttempts()
+        directBackgroundStartsInFlight.removeAll()
+        directBackgroundResolutions.removeAll()
     }
 
     /// Reconciles an open chat when the scene becomes active. A known suspended
@@ -4410,6 +4602,8 @@ final class ChatViewModel {
            !isStartingChat,
            !isEditingMessage,
            !isRegeneratingMessage {
+            isForegroundReentryRead = true
+            defer { isForegroundReentryRead = false }
             await loadMessages(modelContext: modelContext)
             guard !Task.isCancelled else { return }
         }
@@ -4418,236 +4612,222 @@ final class ChatViewModel {
 
     @discardableResult
     func reconnectStreamIfNeeded(modelContext: ModelContext? = nil) async -> Bool {
-        await streamCoordinator.reconnectIfNeeded(modelContext: modelContext)
+        do {
+            let controller = try await ensureDirectConversation()
+            try await controller.open()
+            return activeStreamID != nil
+        } catch { lastError = error; return false }
     }
 
-    func refreshTranscriptIfActiveStreamCompleted(
-        streamID expectedStreamID: String,
-        modelContext: ModelContext? = nil
-    ) async {
-        await streamCoordinator.refreshTranscriptIfCompleted(
-            streamID: expectedStreamID,
-            modelContext: modelContext
+    /// Sends a direct approval only for the identity captured from the
+    /// rendered prompt.
+    func respondToApproval(
+        _ choice: GatewayApprovalChoice,
+        expectedIdentity: GatewayBlockingPromptIdentity
+    ) async throws -> GatewayBlockingResponse {
+        let controller = try directBlockingController(
+            expectedIdentity: expectedIdentity,
+            currentIdentity: pendingApprovalPrompt?.identity
         )
+        directBlockingInteractionErrorMessage = nil
+        directBlockingInteractionErrorIdentity = nil
+        do {
+            let response = try await controller.respondToApproval(
+                choice,
+                expectedIdentity: expectedIdentity
+            )
+            try validateDirectBlockingController(controller, expectedIdentity: expectedIdentity)
+            directBlockingInteractionErrorMessage = nil
+            directBlockingInteractionErrorIdentity = nil
+            return response
+        } catch {
+            recordDirectBlockingError(error, controller: controller, expectedIdentity: expectedIdentity, currentIdentity: pendingApprovalPrompt?.identity)
+            throw error
+        }
     }
 
-    func recoverStaleActiveStreamIfNeeded(
-        now: Date = Date(),
-        modelContext: ModelContext? = nil
-    ) async {
-        await streamCoordinator.recoverStaleStreamIfNeeded(now: now, modelContext: modelContext)
-    }
-
-    private var hasRunningLiveToolCall: Bool {
-        liveToolCalls.contains { !$0.isCompleted }
-    }
-
-    private func saveActiveStreamSnapshotIfNeeded() {
-        guard let sessionID,
-              let activeStreamID,
-              !hasCompletedCurrentResponse
-        else { return }
-
-        ActiveChatStreamSnapshotStore.shared.save(
-            ActiveChatStreamSnapshot(
-                messages: messages,
-                messagesOffset: messagesOffset,
-                displayTitle: displayTitle,
-                completedToolCallGroups: completedToolCallGroups,
-                completedReasoningGroups: completedReasoningGroups,
-                liveToolCalls: liveToolCalls,
-                liveReasoningText: liveReasoningText,
-                activeStreamLastEventID: streamCoordinator.lastEventID,
-                streamingAssistantMessageID: streamingAssistantMessageID,
-                toolCallAnchorMessageID: toolCallAnchorMessageID,
-                reasoningAnchorMessageID: reasoningAnchorMessageID,
-                contextWindowSnapshot: contextWindowSnapshot,
-                localAttachmentPreviews: attachmentCoordinator.localAttachmentPreviews,
-                pinnedLocalNotices: pinnedLocalNotices
-            ),
-            server: server,
-            sessionID: sessionID,
-            streamID: activeStreamID
+    func cancelSecret(
+        expectedIdentity: GatewayBlockingPromptIdentity
+    ) async throws -> GatewayBlockingResponse {
+        let controller = try directBlockingController(
+            expectedIdentity: expectedIdentity,
+            currentIdentity: pendingSecretPrompt?.identity
         )
-        liveRunBookmarkStore.save(
-            LiveRunBookmark(
-                streamID: activeStreamID,
-                lastEventID: streamCoordinator.lastEventID,
-                liveReasoningText: liveReasoningText,
-                streamingAssistantMessageID: streamingAssistantMessageID,
-                liveToolCalls: liveToolCalls
-            ),
-            server: server,
-            sessionID: sessionID
-        )
+        directBlockingInteractionErrorMessage = nil
+        directBlockingInteractionErrorIdentity = nil
+        do {
+            let response = try await controller.cancelSecret(expectedIdentity: expectedIdentity)
+            try validateDirectBlockingController(controller, expectedIdentity: expectedIdentity)
+            directBlockingInteractionErrorMessage = nil
+            directBlockingInteractionErrorIdentity = nil
+            return response
+        } catch {
+            recordDirectBlockingError(error, controller: controller, expectedIdentity: expectedIdentity, currentIdentity: pendingSecretPrompt?.identity)
+            throw error
+        }
     }
 
-    @discardableResult
-    private func restoreActiveStreamSnapshotIfAvailable(streamID: String) -> String? {
-        guard let sessionID,
-              let snapshot = ActiveChatStreamSnapshotStore.shared.snapshot(
-                server: server,
-                sessionID: sessionID,
-                streamID: streamID
-              )
-        else { return nil }
+    func cancelSudo(
+        expectedIdentity: GatewayBlockingPromptIdentity
+    ) async throws -> GatewayBlockingResponse {
+        let controller = try directBlockingController(
+            expectedIdentity: expectedIdentity,
+            currentIdentity: pendingSudoPrompt?.identity
+        )
+        directBlockingInteractionErrorMessage = nil
+        directBlockingInteractionErrorIdentity = nil
+        do {
+            let response = try await controller.cancelSudo(expectedIdentity: expectedIdentity)
+            try validateDirectBlockingController(controller, expectedIdentity: expectedIdentity)
+            directBlockingInteractionErrorMessage = nil
+            directBlockingInteractionErrorIdentity = nil
+            return response
+        } catch {
+            recordDirectBlockingError(error, controller: controller, expectedIdentity: expectedIdentity, currentIdentity: pendingSudoPrompt?.identity)
+            throw error
+        }
+    }
 
-        let merge = Self.mergingLoadedMessages(messages, withActiveStreamSnapshot: snapshot)
-        withBatchedTranscriptDerivedState {
-            messages = merge.messages
-            if merge.usedSnapshotMessagesOffset {
-                messagesOffset = snapshot.messagesOffset
+    private func directBlockingController(
+        expectedIdentity: GatewayBlockingPromptIdentity,
+        currentIdentity: GatewayBlockingPromptIdentity?
+    ) throws -> GatewayConversationController {
+        guard usesDirectGateway,
+              !directInvalidated,
+              directBlockingOriginMatches(expectedIdentity.origin),
+              let controller = directConversation,
+              controller.storedID == expectedIdentity.storedID,
+              controller.profile == expectedIdentity.profile,
+              controller.binding?.runtimeID == expectedIdentity.runtimeID,
+              currentIdentity == expectedIdentity else {
+            throw GatewayBlockingContractError.staleInteraction
+        }
+        return controller
+    }
+
+    private func validateDirectBlockingController(
+        _ controller: GatewayConversationController,
+        expectedIdentity: GatewayBlockingPromptIdentity
+    ) throws {
+        guard !directInvalidated,
+              directConversation === controller,
+              directBlockingOriginMatches(expectedIdentity.origin),
+              controller.storedID == expectedIdentity.storedID,
+              controller.profile == expectedIdentity.profile,
+              controller.binding?.runtimeID == expectedIdentity.runtimeID else {
+            throw GatewayBlockingContractError.staleInteraction
+        }
+    }
+
+    private func directBlockingOriginMatches(_ rawOrigin: String) -> Bool {
+        guard let expected = try? AuthManager.normalizedServerURL(from: rawOrigin),
+              let current = try? AuthManager.normalizedServerURL(from: server.absoluteString) else {
+            return false
+        }
+        return expected == current
+    }
+
+    private func recordDirectBlockingError(
+        _ error: Error,
+        controller: GatewayConversationController,
+        expectedIdentity: GatewayBlockingPromptIdentity,
+        currentIdentity: GatewayBlockingPromptIdentity?
+    ) {
+        guard !directInvalidated,
+              directConversation === controller,
+              currentIdentity == expectedIdentity else { return }
+        directBlockingInteractionErrorMessage = directBlockingErrorMessage(for: error)
+        directBlockingInteractionErrorIdentity = expectedIdentity
+    }
+
+    private func directBlockingErrorMessage(for error: Error) -> String {
+        if let contractError = error as? GatewayBlockingContractError {
+            switch contractError {
+            case .approvalNotResolved:
+                return "Hermes did not confirm that approval. Keep the request open and try again."
+            case .staleInteraction:
+                return "That Hermes request is no longer active."
+            case .malformedApproval, .malformedSecret, .malformedSudo, .unsupportedApprovalChoice, .invalidResponse:
+                return "Hermes sent a blocking request this app cannot safely answer."
             }
         }
-        if merge.usedSnapshotMessagesOffset {
-            hasOlderMessages = snapshot.messagesOffset > 0
+        if let blockingError = error as? GatewayBlockingError,
+           blockingError == .responseInFlight {
+            return "A response is already being delivered."
         }
-        displayTitle = displayTitle.isEmpty ? snapshot.displayTitle : displayTitle
-        setCompletedToolCallGroups(snapshot.completedToolCallGroups)
-        completedReasoningGroups = snapshot.completedReasoningGroups
-        liveToolCalls = snapshot.liveToolCalls
-        liveReasoningText = snapshot.liveReasoningText
-        streamingAssistantMessageID = merge.streamingAssistantMessageID ?? snapshot.streamingAssistantMessageID
-        toolCallAnchorMessageID = Self.remappedAnchorMessageID(
-            snapshot.toolCallAnchorMessageID,
-            from: snapshot.streamingAssistantMessageID,
-            to: streamingAssistantMessageID
-        )
-        reasoningAnchorMessageID = Self.remappedAnchorMessageID(
-            snapshot.reasoningAnchorMessageID,
-            from: snapshot.streamingAssistantMessageID,
-            to: streamingAssistantMessageID
-        )
-        contextWindowSnapshot = contextWindowSnapshot ?? snapshot.contextWindowSnapshot
-        attachmentCoordinator.mergeLocalAttachmentPreviews(snapshot.localAttachmentPreviews)
-        pinnedLocalNotices = snapshot.pinnedLocalNotices
-        scheduleStreamingScrollTrigger()
-        return snapshot.activeStreamLastEventID
-    }
-
-    private func removeActiveStreamSnapshot(streamID: String?) {
-        guard let sessionID,
-              let streamID
-        else { return }
-
-        ActiveChatStreamSnapshotStore.shared.remove(
-            server: server,
-            sessionID: sessionID,
-            streamID: streamID
-        )
-        liveRunBookmarkStore.remove(server: server, sessionID: sessionID)
+        return "The Hermes response could not be delivered. Try again if the request is still shown."
     }
 
     @discardableResult
-    func respondToApproval(_ choice: ApprovalChoice) async -> Bool {
-        await pendingActionCoordinator.respondToApproval(choice)
-    }
-
-    @discardableResult
-    func skipApprovalsForCurrentSession() async -> Bool {
-        await pendingActionCoordinator.skipApprovalsForCurrentSession()
-    }
-
-    func applyApprovalUpdate(_ update: ApprovalPendingResponse, sessionID: String) {
-        pendingActionCoordinator.applyApprovalUpdate(update, sessionID: sessionID)
-    }
-
-    @discardableResult
-    func respondToClarification(_ responseText: String) async -> Bool {
-        await pendingActionCoordinator.respondToClarification(responseText)
-    }
-
-    func applyClarificationUpdate(_ update: ClarificationPendingResponse, sessionID: String) {
-        pendingActionCoordinator.applyClarificationUpdate(update, sessionID: sessionID)
-    }
-
-    @discardableResult
-    func completeWebsiteLogin(requestID: String) async -> Bool {
-        await finishWebsiteLogin(requestID: requestID, result: .completed)
-    }
-
-    @discardableResult
-    func cancelWebsiteLogin(requestID: String) async -> Bool {
-        await finishWebsiteLogin(requestID: requestID, result: .cancelled)
-    }
-
-    @discardableResult
-    func failWebsiteLogin(requestID: String) async -> Bool {
-        await finishWebsiteLogin(requestID: requestID, result: .failed)
-    }
-
-    private func finishWebsiteLogin(requestID: String, result: WebsiteLoginResult) async -> Bool {
-        guard let sessionID,
-              let prompt = websiteLoginPrompt,
-              prompt.requestID == requestID,
-              !requestID.isEmpty
-        else {
-            websiteLoginErrorMessage = String(localized: "This website login request is no longer active.")
+    func respondToDirectClarification(
+        _ responseText: String,
+        expectedIdentity: GatewayBlockingPromptIdentity
+    ) async -> Bool {
+        guard usesDirectGateway,
+              !directInvalidated,
+              !isRespondingToDirectClarification,
+              directClarificationPrompt?.gatewayIdentity == expectedIdentity,
+              let controller = directConversation else {
             return false
         }
 
-        websiteLoginErrorMessage = nil
+        isRespondingToDirectClarification = true
+        directClarificationErrorMessage = nil
+        defer { isRespondingToDirectClarification = false }
+
         do {
-            let response = try await client.finishWebsiteLogin(
-                requestID: requestID,
-                sessionID: sessionID,
-                result: result
+            let response = try await controller.respondToBlockingPrompt(
+                responseText,
+                expectedIdentity: expectedIdentity
             )
-            guard response.requestID == requestID, response.result == result else {
-                websiteLoginErrorMessage = String(localized: "The website login response was not accepted.")
+            guard !directInvalidated else { return false }
+            syncDirectClarificationPrompt()
+            if response == .expired {
+                guard !directInvalidated,
+                      directClarificationPrompt == nil
+                        || directClarificationPrompt?.gatewayIdentity == expectedIdentity else {
+                    return false
+                }
+                let message = "That clarification expired before it was answered."
+                directClarificationErrorMessage = message
+                setDirectClarificationSendError(message)
                 return false
             }
-            resolvedWebsiteLoginRequestIDs.insert(requestID)
-            websiteLoginPrompt = nil
             return true
+        } catch let error as GatewayBlockingError {
+            guard !directInvalidated,
+                  directClarificationPrompt?.gatewayIdentity == expectedIdentity else {
+                return false
+            }
+            directClarificationErrorMessage = directClarificationMessage(for: error)
+            return false
         } catch {
-            websiteLoginErrorMessage = String(localized: "Could not send the website login result. Try again.")
+            guard !directInvalidated,
+                  directClarificationPrompt?.gatewayIdentity == expectedIdentity else {
+                return false
+            }
+            lastError = error
+            directClarificationErrorMessage = "The clarification could not be delivered. No response was retried."
             return false
         }
     }
 
-    private func startBtwStream(streamID: String, question: String) {
-        activeBtwStreamID = streamID
-        activeBtwQuestion = question
-        activeBtwAnswer = ""
-        activeBtwMessageID = appendLocalAssistantMessage(Self.btwMessageText(question: question, answer: nil, isLoading: true))
 
-        btwStreamClient.start(url: client.chatStreamURL(streamID: streamID)) { [weak self] event in
-            self?.handleBtwStreamEvent(event)
-        }
-    }
-
-    private func handleBtwStreamEvent(_ event: SSEEvent) {
-        switch event {
-        case .token(let text):
-            activeBtwAnswer += text
-            updateActiveBtwMessage(isLoading: true)
-        case .interimAssistant(let payload):
-            guard payload.alreadyStreamed != true else { break }
-            let text = payload.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            guard !text.isEmpty else { break }
-            if activeBtwAnswer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                activeBtwAnswer = text
-            } else {
-                activeBtwAnswer += "\n\n\(text)"
-            }
-            updateActiveBtwMessage(isLoading: true)
-        case .done:
+    private func applyDirectBtwOutcome(_ outcome: GatewayConversationController.BtwOutcome) {
+        switch outcome {
+        case .completed(let attemptID, let taskID, let question, let text):
+            guard activeBtwAttemptID == attemptID,
+                  activeBtwTaskID == nil || activeBtwTaskID == taskID,
+                  activeBtwQuestion == question else { return }
+            activeBtwTaskID = taskID
+            activeBtwAnswer = text
             updateActiveBtwMessage(isLoading: false)
-        case .approvalPending, .clarificationPending, .websiteLoginPending, .nativeComponent, .nativeComponentState:
-            break
-        case .streamEnd, .cancelled:
-            finishBtwStream()
-        case .error(let message):
-            activeBtwAnswer = "Error: \(message)"
+            clearActiveBtwAttempt()
+        case .unknown(let attemptID):
+            guard activeBtwAttemptID == attemptID else { return }
+            activeBtwAnswer = String(localized: "Outcome unknown. Check Hermes before asking again.")
             updateActiveBtwMessage(isLoading: false)
-            finishBtwStream()
-        case .transportError(let message):
-            activeBtwAnswer = "Error: \(message)"
-            updateActiveBtwMessage(isLoading: false)
-            finishBtwStream()
-        case .heartbeat, .ignored, .reasoning, .toolStarted, .toolCompleted, .title, .sessionSnapshot, .metering, .pendingSteerLeftover, .lostWorkerBookkeeping:
-            break
+            clearActiveBtwAttempt()
         }
     }
 
@@ -4663,98 +4843,126 @@ final class ChatViewModel {
         )
     }
 
-    private func finishBtwStream() {
-        btwStreamClient.stop()
-        activeBtwStreamID = nil
+    private func clearActiveBtwAttempt() {
+        activeBtwAttemptID = nil
+        activeBtwTaskID = nil
+        activeBtwProfile = nil
         activeBtwMessageID = nil
         activeBtwQuestion = nil
         activeBtwAnswer = ""
     }
 
-    private func stopBackgroundPolling(clearTrackedPrompts: Bool) {
-        backgroundPollTask?.cancel()
-        backgroundPollTask = nil
-        if clearTrackedPrompts {
-            backgroundPromptsByTaskID.removeAll()
+    private func failActiveBtwAttempt(_ message: String) {
+        guard activeBtwAttemptID != nil else { return }
+        activeBtwAnswer = message
+        updateActiveBtwMessage(isLoading: false)
+        clearActiveBtwAttempt()
+    }
+
+    private func applyDirectBackgroundOutcome(
+        _ outcome: GatewayConversationController.BackgroundOutcome,
+        controller: GatewayConversationController
+    ) {
+        switch outcome {
+        case .completed(let attemptID, let taskID, let prompt, let text):
+            guard let attempt = directBackgroundAttempts[attemptID],
+                  attempt.taskID == nil || attempt.taskID == taskID,
+                  attempt.prompt == prompt,
+                  attempt.sessionID == canonicalSessionID,
+                  attempt.sessionID == controller.storedID,
+                  attempt.profile == controller.profile else { return }
+            directBackgroundAttempts.removeValue(forKey: attemptID)
+            if directBackgroundStartsInFlight.contains(attemptID) {
+                directBackgroundResolutions[attemptID] = .completed
+            }
+            appendDirectBackgroundResult(
+                prompt: prompt, answer: text,
+                sessionID: attempt.sessionID, profile: attempt.profile
+            )
+        case .unknown(let attemptID):
+            guard let attempt = directBackgroundAttempts.removeValue(forKey: attemptID) else { return }
+            if directBackgroundStartsInFlight.contains(attemptID) {
+                directBackgroundResolutions[attemptID] = .unknown
+            }
+            appendDirectBackgroundResult(
+                prompt: attempt.prompt,
+                answer: String(localized: "Outcome unknown. Check Hermes before starting it again."),
+                sessionID: attempt.sessionID,
+                profile: attempt.profile
+            )
         }
     }
 
-    private func startBackgroundPollingIfNeeded(parentSessionID: String) {
-        guard backgroundPollTask == nil else { return }
-
-        let pollingInterval = pollingIntervals.backgroundNanoseconds
-        backgroundPollTask = Task { @MainActor [weak self] in
-            pollingLoop: while !Task.isCancelled {
-                do {
-                    guard let self,
-                          !self.backgroundPromptsByTaskID.isEmpty
-                    else { break pollingLoop }
-
-                    do {
-                        let response = try await self.client.backgroundStatus(sessionID: parentSessionID)
-                        self.handleBackgroundResults(response.results ?? [])
-                    } catch {
-                        self.lastError = error
-                    }
-
-                    guard !Task.isCancelled, !self.backgroundPromptsByTaskID.isEmpty else {
-                        break pollingLoop
-                    }
-                }
-
-                try? await Task.sleep(nanoseconds: pollingInterval)
-            }
-
-            if !Task.isCancelled {
-                self?.backgroundPollTask = nil
-            }
-        }
+    private func appendDirectBackgroundResult(
+        prompt: String,
+        answer: String,
+        sessionID: String,
+        profile: String
+    ) {
+        guard !directInvalidated, canonicalSessionID == sessionID,
+              directConversation?.storedID == sessionID,
+              directConversation?.profile == profile,
+              let messageID = appendLocalAssistantMessage(
+                Self.backgroundResultText(prompt: prompt, answer: answer)
+              ) else { return }
+        backgroundLocalRowScopes[messageID] = (sessionID, profile)
     }
 
-    private func handleBackgroundResults(_ results: [BackgroundResult]) {
-        for result in results {
-            let prompt: String
-            if let taskID = result.taskId,
-               let trackedPrompt = backgroundPromptsByTaskID.removeValue(forKey: taskID) {
-                prompt = trackedPrompt
-            } else if let resultPrompt = result.prompt, !resultPrompt.isEmpty {
-                prompt = resultPrompt
-            } else {
-                prompt = "Background task"
-            }
-
-            appendLocalAssistantMessage(
-                Self.backgroundResultText(
-                    prompt: prompt,
-                    answer: result.answer
-                )
+    private func failDirectBackgroundAttempts() {
+        let attempts = directBackgroundAttempts
+        directBackgroundAttempts.removeAll()
+        directBackgroundStartsInFlight.removeAll()
+        directBackgroundResolutions.removeAll()
+        for (_, attempt) in attempts {
+            appendDirectBackgroundResult(
+                prompt: attempt.prompt,
+                answer: String(localized: "Outcome unknown. Check Hermes before starting it again."),
+                sessionID: attempt.sessionID,
+                profile: attempt.profile
             )
         }
     }
 
     @discardableResult
     private func appendInterimAssistant(_ payload: InterimAssistantStreamEvent) -> Bool {
-        guard payload.alreadyStreamed != true else { return false }
-
         let text = payload.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !text.isEmpty else { return false }
 
         flushPendingStreamingContent()
 
+        var didAppend = false
+        if payload.alreadyStreamed != true {
+            didAppend = appendInterimTextIfNeeded(text)
+            flushPendingStreamingContent()
+        } else if streamingAssistantMessageID == nil {
+            // A reconnect can deliver the seal without replaying its deltas.
+            // The interim payload is still the authoritative visible segment.
+            didAppend = appendAssistantToken(text)
+            flushPendingStreamingContent()
+        }
+
+        guard let messageID = streamingAssistantMessageID,
+              let index = streamingAssistantMessagePosition(for: messageID),
+              !(messages[index].content ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return didAppend }
+
+        sealedInterimAssistantMessageIDs.insert(messageID)
+        streamingAssistantMessageID = nil
+        streamingAssistantMessageIndex = nil
+        return true
+    }
+
+    @discardableResult
+    private func appendInterimTextIfNeeded(_ text: String) -> Bool {
+
         if let streamingAssistantMessageID,
            let index = streamingAssistantMessagePosition(for: streamingAssistantMessageID) {
             let existing = messages[index]
             let currentContent = existing.content ?? ""
-            let textToAppend = deduplicatedReplayText(
-                text,
-                existingContent: currentContent,
-                matchedPrefixLength: &activeStreamReplayMatchedInterimLength
-            )
+            let textToAppend = text
             guard !textToAppend.isEmpty else { return false }
 
-            let shouldAppendReplaySuffixDirectly = isActiveStreamReplayConnection && textToAppend != text
             let shouldUseSeparator = currentContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-                && !shouldAppendReplaySuffixDirectly
             let separator = shouldUseSeparator ? "\n\n" : ""
             replaceStreamingMessage(at: index, with: ChatMessage(
                 role: existing.role,
@@ -4774,6 +4982,37 @@ final class ChatViewModel {
         }
 
         return appendAssistantToken(text)
+    }
+
+    private func prepareStreamingAssistantForTerminal(_ terminalText: String) {
+        guard streamingAssistantMessageID == nil,
+              let index = messages.lastIndex(where: { message in
+                  guard let messageID = message.messageId else { return false }
+                  return message.role == "assistant"
+                      && sealedInterimAssistantMessageIDs.contains(messageID)
+              })
+        else {
+            _ = ensureStreamingAssistantMessage()
+            return
+        }
+
+        let interimText = (messages[index].content ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalText = terminalText.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Match pinned Desktop behavior: exact/prefix continuity is a
+        // compatibility heuristic for a terminal that completes the last
+        // sealed segment, not a protocol-level message identity guarantee.
+        let isSameAssistantSegment = !interimText.isEmpty && !finalText.isEmpty
+            && (finalText == interimText
+                || finalText.hasPrefix(interimText)
+                || interimText.hasPrefix(finalText))
+
+        if isSameAssistantSegment {
+            streamingAssistantMessageID = messages[index].messageId
+            streamingAssistantMessageIndex = index
+        } else {
+            _ = ensureStreamingAssistantMessage()
+        }
     }
 
     private func applyCompletedStreamSession(_ completedSession: SessionDetail) {
@@ -4943,18 +5182,10 @@ final class ChatViewModel {
     private func appendReasoning(_ text: String) -> Bool {
         guard !text.isEmpty else { return false }
 
-        // Same append-time dedup contract as appendAssistantToken: return true iff
-        // the event contributed new content, mutate only via the coalesced flush.
+        // Match appendAssistantToken's progress contract: return true for a
+        // nonempty received chunk while deferring mutation to the coalesced flush.
         _ = ensureStreamingAssistantMessage()
-        let effectiveContent = liveReasoningText + pendingReasoningTextBuffer
-        let remainder = deduplicatedReplayText(
-            text,
-            existingContent: effectiveContent,
-            matchedPrefixLength: &activeStreamReplayMatchedReasoningLength
-        )
-        guard !remainder.isEmpty else { return false }
-
-        pendingReasoningTextBuffer.append(remainder)
+        pendingReasoningTextBuffer.append(text)
         scheduleStreamingContentFlush()
         return true
     }
@@ -4963,7 +5194,7 @@ final class ChatViewModel {
     private func flushReasoningChunks() -> Bool {
         guard !pendingReasoningTextBuffer.isEmpty else { return false }
 
-        // Chunks were deduplicated at append time, so flushing is pure concatenation.
+        // Reasoning chunks flush in their received order as one concatenation.
         let appendedText = pendingReasoningTextBuffer
         pendingReasoningTextBuffer = ""
 
@@ -4981,11 +5212,6 @@ final class ChatViewModel {
         let messageID = ensureStreamingAssistantMessage()
         if toolCallAnchorMessageID == nil {
             toolCallAnchorMessageID = messageID
-        }
-
-        if let duplicateReplayIndex = duplicateReplayToolStartIndex(for: payload) {
-            activeStreamReplayPendingToolMatchIndex = duplicateReplayIndex
-            return false
         }
 
         liveToolCalls.append(
@@ -5006,19 +5232,6 @@ final class ChatViewModel {
             toolCallAnchorMessageID = messageID
         }
 
-        if let duplicateReplayIndex = duplicateReplayToolCompletionIndex(for: payload) {
-            let wasAlreadyCompleted = liveToolCalls[duplicateReplayIndex].isCompleted
-            activeStreamReplayToolMatchIndex = duplicateReplayIndex + 1
-            activeStreamReplayPendingToolMatchIndex = nil
-
-            guard !wasAlreadyCompleted else { return false }
-
-            liveToolCalls[duplicateReplayIndex] = liveToolCalls[duplicateReplayIndex].applyingCompletionPayload(payload)
-            return true
-        }
-
-        activeStreamReplayPendingToolMatchIndex = nil
-
         guard let index = liveToolCallCompletionIndex(for: payload) else {
             liveToolCalls.append(
                 ToolCall(
@@ -5038,54 +5251,8 @@ final class ChatViewModel {
         return true
     }
 
-    private func duplicateReplayToolStartIndex(for payload: ToolStreamEvent) -> Int? {
-        guard isActiveStreamReplayConnection else { return nil }
-
-        if let stableIndex = stableReplayToolIndex(for: payload) {
-            return stableIndex
-        }
-
-        guard activeStreamReplayToolMatchIndex < liveToolCalls.count else { return nil }
-
-        let index = activeStreamReplayToolMatchIndex
-        return liveToolCalls[index].matchesReplayToolStart(payload) ? index : nil
-    }
-
-    private func duplicateReplayToolCompletionIndex(for payload: ToolStreamEvent) -> Int? {
-        guard isActiveStreamReplayConnection else { return nil }
-
-        if let stableIndex = stableReplayToolIndex(for: payload) {
-            return stableIndex
-        }
-
-        if let pendingIndex = activeStreamReplayPendingToolMatchIndex,
-           pendingIndex < liveToolCalls.count,
-           liveToolCalls[pendingIndex].matchesReplayToolCompletion(payload) {
-            return pendingIndex
-        }
-
-        guard activeStreamReplayToolMatchIndex < liveToolCalls.count else { return nil }
-
-        let index = activeStreamReplayToolMatchIndex
-        guard liveToolCalls[index].isCompleted,
-              liveToolCalls[index].matchesReplayToolCompletion(payload)
-        else {
-            return nil
-        }
-
-        return index
-    }
-
-    private func stableReplayToolIndex(for payload: ToolStreamEvent) -> Int? {
-        guard let stableID = payload.stableID?.nonEmptyReplayMatchText else { return nil }
-
-        return liveToolCalls.firstIndex { toolCall in
-            toolCall.matchesStableToolID(stableID)
-        }
-    }
-
     private func liveToolCallCompletionIndex(for payload: ToolStreamEvent) -> Int? {
-        if let stableID = payload.stableID?.nonEmptyReplayMatchText,
+        if let stableID = payload.stableID?.nonEmptyToolMatchText,
            let stableIndex = liveToolCalls.lastIndex(where: { toolCall in
                !toolCall.isCompleted && toolCall.matchesStableToolID(stableID)
            }) {
@@ -5101,17 +5268,10 @@ final class ChatViewModel {
     private func appendAssistantToken(_ token: String) -> Bool {
         guard !token.isEmpty else { return false }
 
-        // Dedup at append time against effective content (flushed + pending) so the
-        // return value stays a synchronous progress signal for the reconnect watchdog
-        // while transcript mutation stays batched behind the coalesced flush.
-        let messageID = ensureStreamingAssistantMessage()
-        let flushedContent = streamingAssistantMessagePosition(for: messageID)
-            .flatMap { messages[$0].content } ?? ""
-        let effectiveContent = flushedContent + pendingAssistantTextBuffer
-        let remainder = deduplicatedReplayToken(token, existingContent: effectiveContent)
-        guard !remainder.isEmpty else { return false }
-
-        pendingAssistantTextBuffer.append(remainder)
+        // A nonempty received chunk is a synchronous progress signal for the
+        // watchdog while transcript mutation stays behind the coalesced flush.
+        _ = ensureStreamingAssistantMessage()
+        pendingAssistantTextBuffer.append(token)
         scheduleStreamingContentFlush()
         return true
     }
@@ -5120,10 +5280,8 @@ final class ChatViewModel {
     private func flushAssistantTokens(maxWordUnits: Int? = nil) -> Bool {
         guard !pendingAssistantTextBuffer.isEmpty else { return false }
 
-        // Chunks were deduplicated at append time, so flushing is pure concatenation.
         // A word-unit limit moves only the head of the buffer into the visible
-        // message; the tail stays pending, keeping the replay-dedup invariant that
-        // flushed + pending text is the full received content.
+        // message; the tail stays pending so paced rendering retains received text.
         let pendingText = pendingAssistantTextBuffer
         let appendedContent: String
         if let maxWordUnits {
@@ -5175,115 +5333,6 @@ final class ChatViewModel {
             )
         )
         return true
-    }
-
-    private func deduplicatedReplayToken(_ token: String, existingContent: String) -> String {
-        guard isActiveStreamReplayConnection, !existingContent.isEmpty else {
-            resetActiveStreamReplayTokenState()
-            return token
-        }
-
-        let matchedPrefixLength = min(activeStreamReplayMatchedPrefixLength, existingContent.count)
-        let expectedReplayRemainder = String(existingContent.dropFirst(matchedPrefixLength))
-        if expectedReplayRemainder.hasPrefix(token) {
-            activeStreamReplayMatchedPrefixLength = matchedPrefixLength + token.count
-            if activeStreamReplayMatchedPrefixLength >= existingContent.count {
-                resetActiveStreamReplayTokenState()
-            }
-            return ""
-        }
-
-        if token.hasPrefix(expectedReplayRemainder) {
-            resetActiveStreamReplayTokenState()
-            return String(token.dropFirst(expectedReplayRemainder.count))
-        }
-
-        if existingContent.hasSuffix(token) || existingContent.hasPrefix(token) {
-            resetActiveStreamReplayTokenState()
-            return ""
-        }
-
-        if token.hasPrefix(existingContent) {
-            resetActiveStreamReplayTokenState()
-            return String(token.dropFirst(existingContent.count))
-        }
-
-        let maximumOverlap = min(existingContent.count, token.count)
-        guard maximumOverlap > 0 else {
-            resetActiveStreamReplayTokenState()
-            return token
-        }
-
-        for overlapLength in stride(from: maximumOverlap, through: 1, by: -1) {
-            let contentSuffix = existingContent.suffix(overlapLength)
-            let tokenPrefix = token.prefix(overlapLength)
-            if contentSuffix == tokenPrefix {
-                resetActiveStreamReplayTokenState()
-                return String(token.dropFirst(overlapLength))
-            }
-        }
-
-        resetActiveStreamReplayTokenState()
-        return token
-    }
-
-    private func deduplicatedReplayText(
-        _ text: String,
-        existingContent: String,
-        matchedPrefixLength: inout Int
-    ) -> String {
-        guard isActiveStreamReplayConnection, !existingContent.isEmpty else {
-            matchedPrefixLength = 0
-            return text
-        }
-
-        let matchedLength = min(matchedPrefixLength, existingContent.count)
-        let expectedReplayRemainder = String(existingContent.dropFirst(matchedLength))
-        if expectedReplayRemainder.hasPrefix(text) {
-            matchedPrefixLength = matchedLength + text.count
-            if matchedPrefixLength >= existingContent.count {
-                matchedPrefixLength = 0
-            }
-            return ""
-        }
-
-        if text.hasPrefix(expectedReplayRemainder) {
-            matchedPrefixLength = 0
-            return String(text.dropFirst(expectedReplayRemainder.count))
-        }
-
-        if existingContent.hasSuffix(text) || existingContent.hasPrefix(text) {
-            matchedPrefixLength = 0
-            return ""
-        }
-
-        if text.hasPrefix(existingContent) {
-            matchedPrefixLength = 0
-            return String(text.dropFirst(existingContent.count))
-        }
-
-        let maximumOverlap = min(existingContent.count, text.count)
-        guard maximumOverlap > 0 else {
-            matchedPrefixLength = 0
-            return text
-        }
-
-        for overlapLength in stride(from: maximumOverlap, through: 1, by: -1) {
-            let contentSuffix = existingContent.suffix(overlapLength)
-            let textPrefix = text.prefix(overlapLength)
-            if contentSuffix == textPrefix {
-                matchedPrefixLength = 0
-                return String(text.dropFirst(overlapLength))
-            }
-        }
-
-        matchedPrefixLength = 0
-        return text
-    }
-
-    private func resetActiveStreamReplayTokenState() {
-        streamCoordinator.clearReplayConnection()
-        activeStreamReplayMatchedPrefixLength = 0
     }
 
     private func flushPinnedLocalNoticesToTranscript() {
@@ -5338,37 +5387,6 @@ final class ChatViewModel {
         }
     }
 
-    @discardableResult
-    private func updateTitle(_ payload: TitleStreamEvent) -> Bool {
-        if let payloadSessionID = payload.sessionId, payloadSessionID != sessionID {
-            return false
-        }
-
-        guard let title = payload.title else { return false }
-        applyLiveActivitySessionTitle(title)
-        return true
-    }
-
-    private func refreshCompletedResponseTitleIfNeeded() {
-        guard !isRefreshingCompletedResponseTitle else { return }
-        guard let sessionID else { return }
-
-        isRefreshingCompletedResponseTitle = true
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            defer { isRefreshingCompletedResponseTitle = false }
-
-            do {
-                let response = try await client.session(id: sessionID, includeMessages: false, messageLimit: nil)
-                if let title = response.session?.title {
-                    applyLiveActivitySessionTitle(title)
-                }
-            } catch {
-                // Title refresh is opportunistic; the transcript has already completed successfully.
-            }
-        }
-    }
-
     private func applyLiveActivitySessionTitle(_ title: String) {
         displayTitle = Self.displayTitle(from: title)
         liveActivityManager.update(.sessionTitle(displayTitle))
@@ -5409,7 +5427,7 @@ final class ChatViewModel {
     /// path, kept as the offline/failure fallback for server TTS.
     private func speakWithOnDeviceSynthesizer(_ text: String) {
         // Route speech to the speaker (not the receiver/earpiece) immediately before
-        // speech starts — not when the Listen tap lands — so a slow `/api/tts` fetch
+        // speech starts — not when the Listen tap lands — so a slow `/api/audio/speak` fetch
         // never interrupts other audio while Semreh is silent (review on #35).
         // Released again in `finishListening()` once playback ends. See #252.
         listenAudioSession.activate()
@@ -5619,10 +5637,6 @@ final class ChatViewModel {
         return suffix.replacingOccurrences(of: "gpt-", with: "GPT-", options: [.caseInsensitive])
     }
 
-    private static let reasoningDisplayArgs: Set<String> = ["show", "hide", "on", "off"]
-    private static let reasoningEffortArgs: Set<String> = ["none", "minimal", "low", "medium", "high", "xhigh"]
-    private static let reasoningClearArgs: Set<String> = [ReasoningEffortOption.inheritID, "clear", "default"]
-    private static let personalityClearArgs: Set<String> = ["none", "default", "clear"]
 
     private static func btwMessageText(question: String, answer: String?, isLoading: Bool) -> String {
         let trimmedAnswer = answer?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -5663,7 +5677,6 @@ final class ChatViewModel {
     `/workspace <path>` - Switch this session's workspace.
     `/reasoning <level>` - Set reasoning display or effort.
     `/title <text>` - Rename this session.
-    `/personality <name>` - Set or clear this session's personality.
     `/skills [query]` - Search available skills.
     `/queue <message>` - Queue a message for the next turn.
     `/steer <message>` - Steer the active response.
@@ -5681,708 +5694,8 @@ final class ChatViewModel {
     """)
 }
 
-extension ChatViewModel: ChatPendingActionCoordinatorDelegate {
-    var pendingActionSessionID: String? { sessionID }
-    var pendingActionHasActiveStream: Bool { activeStreamID != nil }
-    var pendingActionIsStreamConnectionSuspended: Bool { isStreamConnectionSuspended }
-
-    func pendingActionCoordinatorWillSubmitAction() {
-        sendErrorMessage = nil
-        lastError = nil
-    }
-
-    func pendingActionCoordinatorDidFailAction(_ error: Error) {
-        lastError = error
-        sendErrorMessage = CacheFallbackPolicy.sendBannerMessage(for: error)
-    }
-}
-
 extension ChatViewModel: ChatAttachmentCoordinatorDelegate {
     var attachmentSessionID: String? { sessionID }
-    var attachmentIsViewingCachedData: Bool { isViewingCachedData }
-
-    func attachmentCoordinatorWillUpload() {
-        lastError = nil
-    }
-
-    func attachmentCoordinatorDidFail(_ error: Error) {
-        lastError = error
-    }
-}
-
-extension ChatViewModel: ChatStreamCoordinatorDelegate {
-    var streamCoordinatorSessionID: String? { sessionID }
-    var streamCoordinatorDisplayTitle: String { displayTitle }
-    var streamCoordinatorHasRunningLiveToolCall: Bool { hasRunningLiveToolCall }
-    var streamCoordinatorHasPendingPrompt: Bool {
-        pendingActionCoordinator.hasPendingPrompt
-    }
-    var streamCoordinatorHasNativeAuthLocalInputPrompt: Bool {
-        nativeAuthPrompt?.inputComponents.isEmpty == false
-    }
-    var streamCoordinatorLatestServerLoadHadAssistantResponseAfterLatestUser: Bool {
-        latestServerLoadHadAssistantResponseAfterLatestUser
-    }
-    var streamCoordinatorStreamingAssistantMessageID: String? {
-        get { streamingAssistantMessageID }
-        set {
-            if newValue == nil {
-                flushPendingStreamingContent()
-            }
-            streamingAssistantMessageID = newValue
-        }
-    }
-
-    func streamCoordinatorLoadMessages(modelContext: ModelContext?) async {
-        await loadMessages(modelContext: modelContext)
-    }
-
-    func streamCoordinatorLatestAssistantMessageID() -> String? {
-        Self.latestAssistantMessageID(in: messages)
-    }
-
-    func streamCoordinatorStartAuxiliaryMonitoring() {
-        pendingActionCoordinator.startMonitoring()
-        OpenChatSessionStore.shared.noteStreamingStateChanged()
-    }
-
-    func streamCoordinatorStopAuxiliaryMonitoring(clearPrompt: Bool) {
-        pendingActionCoordinator.stopMonitoring(clearPrompt: clearPrompt)
-        if activeStreamID == nil {
-            cancelOwnedStreamStatusWatch()
-        }
-        OpenChatSessionStore.shared.noteStreamingStateChanged()
-    }
-
-    func streamCoordinatorSaveSnapshotIfNeeded() {
-        flushPendingStreamingContent()
-        saveActiveStreamSnapshotIfNeeded()
-    }
-
-    @discardableResult
-    func streamCoordinatorRestoreSnapshotIfAvailable(streamID: String) -> String? {
-        restoreActiveStreamSnapshotIfAvailable(streamID: streamID)
-    }
-
-    func streamCoordinatorRemoveSnapshot(streamID: String?) {
-        removeActiveStreamSnapshot(streamID: streamID)
-    }
-
-    func streamCoordinatorFlushPinnedLocalNoticesToTranscript() {
-        flushPinnedLocalNoticesToTranscript()
-    }
-
-    func streamCoordinatorDrainQueuedSlashMessageIfIdle() {
-        drainQueuedSlashMessageIfIdle()
-    }
-
-    func streamCoordinatorRefreshCompletedResponseTitleIfNeeded() {
-        refreshCompletedResponseTitleIfNeeded()
-    }
-
-    func streamCoordinatorDidCompleteCurrentResponse(needsTranscriptRefresh: Bool) {
-        responseCompletionNeedsTranscriptRefresh = needsTranscriptRefresh
-        responseCompletionHapticTrigger += 1
-    }
-
-    func streamCoordinatorDidFinishStream() {
-        flushPendingStreamingContent()
-        responseCompletionNeedsTranscriptRefresh = false
-        // Native auth is a user-owned continuation that can outlive the model
-        // response. Its browser-issued component remains valid until the native
-        // submit/cancel/expiry state arrives; clearing it here makes the secure
-        // overlay disappear at the exact point the user needs to enter values.
-    }
-
-    func streamCoordinatorDidReceiveErrorMessage(_ message: String) {
-        sendErrorMessage = message
-    }
-
-    func streamCoordinatorDidReceiveRecoveryError(_ error: Error) {
-        lastError = error
-        if CacheFallbackPolicy.isTransientBlip(error) {
-            return
-        }
-        sendErrorMessage = CacheFallbackPolicy.sendBannerMessage(for: error)
-    }
-
-    func streamCoordinatorDidStartConnection(isReplay: Bool) {
-        activeStreamReplayMatchedPrefixLength = 0
-        activeStreamReplayMatchedInterimLength = 0
-        activeStreamReplayMatchedReasoningLength = 0
-        activeStreamReplayToolMatchIndex = 0
-        activeStreamReplayPendingToolMatchIndex = nil
-    }
-
-    func streamCoordinatorDidResetRecoveryState() {
-        activeStreamReplayMatchedPrefixLength = 0
-        activeStreamReplayMatchedInterimLength = 0
-        activeStreamReplayMatchedReasoningLength = 0
-        activeStreamReplayToolMatchIndex = 0
-        activeStreamReplayPendingToolMatchIndex = nil
-    }
-
-    @discardableResult
-    func streamCoordinatorAppendToken(_ text: String) -> Bool {
-        appendAssistantToken(text)
-    }
-
-    @discardableResult
-    func streamCoordinatorAppendInterimAssistant(_ payload: InterimAssistantStreamEvent) -> Bool {
-        appendInterimAssistant(payload)
-    }
-
-    @discardableResult
-    func streamCoordinatorAppendReasoning(_ text: String) -> Bool {
-        appendReasoning(text)
-    }
-
-    @discardableResult
-    func streamCoordinatorAppendToolCall(_ payload: ToolStreamEvent) -> Bool {
-        appendToolCall(payload)
-    }
-
-    @discardableResult
-    func streamCoordinatorCompleteToolCall(_ payload: ToolStreamEvent) -> Bool {
-        completeToolCall(payload)
-    }
-
-    @discardableResult
-    func streamCoordinatorUpdateTitle(_ payload: TitleStreamEvent) -> Bool {
-        updateTitle(payload)
-    }
-
-    @discardableResult
-    func streamCoordinatorApplyDone(_ payload: DoneStreamEvent) -> Bool {
-        flushPendingStreamingContent()
-        let currentStreamingAssistantID = streamingAssistantMessageID
-        let hasCompletedTranscript = payload.session?.messages?.isEmpty == false
-        if let completedSession = payload.session {
-            applyCompletedStreamSession(completedSession)
-        }
-        if let usage = payload.usage {
-            contextWindowSnapshot = usage
-        }
-        if let finalTokensPerSecond = payload.usage?.tokensPerSecond,
-           finalTokensPerSecond.isFinite,
-           finalTokensPerSecond > 0,
-           let currentStreamingAssistantID {
-            let currentAssistantIndex = messages.firstIndex(where: { $0.messageId == currentStreamingAssistantID })
-                ?? TranscriptTurnClassifier
-                    .currentTurnAssistantAnchorIDs(in: messages, messageOffset: messagesOffset)
-                    .last
-                    .flatMap { currentAssistantAnchorID in
-                        messages.indices.first { index in
-                            TranscriptTurnClassifier.anchorID(
-                                for: messages[index],
-                                at: index,
-                                messageOffset: messagesOffset
-                            ) == currentAssistantAnchorID
-                        }
-                    }
-            guard let index = currentAssistantIndex else {
-                return hasCompletedTranscript
-            }
-            let message = messages[index]
-            messages[index] = ChatMessage(
-                role: message.role,
-                content: message.content,
-                timestamp: message.timestamp,
-                messageId: message.messageId,
-                name: message.name,
-                toolCallId: message.toolCallId,
-                toolUseId: message.toolUseId,
-                toolCalls: message.toolCalls,
-                contentParts: message.contentParts,
-                reasoning: message.reasoning,
-                attachments: message.attachments,
-                turnTps: finalTokensPerSecond
-            )
-        }
-        return hasCompletedTranscript
-    }
-
-    func streamCoordinatorApplyApprovalUpdate(_ update: ApprovalPendingResponse) {
-        guard let sessionID else { return }
-        applyApprovalUpdate(update, sessionID: sessionID)
-    }
-
-    func streamCoordinatorApplyClarificationUpdate(_ update: ClarificationPendingResponse) {
-        guard let sessionID else { return }
-        applyClarificationUpdate(update, sessionID: sessionID)
-    }
-
-    func streamCoordinatorApplyNativeAuthComponent(_ component: NativeAuthWireComponent) {
-        guard let sessionID, let activeStreamID else { return }
-        guard !quarantinedNativeAuthContextIDs.contains(component.contextID),
-              !quarantinedNativeAuthStreamIDs.contains(activeStreamID)
-        else { return }
-
-        if var prompt = nativeAuthPrompt {
-            guard prompt.contextID == component.contextID else {
-                quarantineNativeAuth(
-                    contextIDs: [prompt.contextID, component.contextID],
-                    streamID: prompt.streamID,
-                    message: String(localized: "The browser sent conflicting authentication requests. Start the browser action again.")
-                )
-                return
-            }
-            guard nativeAuthComponent(component, matches: prompt) else {
-                quarantineNativeAuth(
-                    contextIDs: [component.contextID],
-                    streamID: prompt.streamID,
-                    message: String(localized: "The browser changed this authentication request. Start the browser action again.")
-                )
-                return
-            }
-            if let existing = prompt.components.first(where: { $0.componentID == component.componentID }) {
-                guard existing == component else {
-                    quarantineNativeAuth(
-                        contextIDs: [component.contextID],
-                        streamID: prompt.streamID,
-                        message: String(localized: "The browser changed this authentication request. Start the browser action again.")
-                    )
-                    return
-                }
-                applyBufferedNativeAuthStateIfPossible(contextID: component.contextID)
-                return
-            }
-            guard !prompt.components.contains(where: {
-                $0.field == component.field || $0.actionHandle == component.actionHandle
-            }) else {
-                quarantineNativeAuth(
-                    contextIDs: [component.contextID],
-                    streamID: prompt.streamID,
-                    message: String(localized: "The browser sent conflicting authentication components. Start the browser action again.")
-                )
-                return
-            }
-            prompt.components.append(component)
-            nativeAuthPrompt = prompt
-            nativeAuthRequestGeneration &+= 1
-            nativeAuthErrorMessage = nil
-            applyBufferedNativeAuthStateIfPossible(contextID: component.contextID)
-            scheduleNativeAuthE2EAutoSubmitIfEligible()
-            return
-        }
-
-        nativeAuthPrompt = NativeAuthPromptState(
-            contextID: component.contextID,
-            ownerSessionID: sessionID,
-            streamID: activeStreamID,
-            components: [component],
-            state: nil
-        )
-        nativeAuthRequestGeneration &+= 1
-        nativeAuthErrorMessage = nil
-        applyBufferedNativeAuthStateIfPossible(contextID: component.contextID)
-        scheduleNativeAuthE2EAutoSubmitIfEligible()
-    }
-
-    func streamCoordinatorApplyNativeAuthState(_ state: NativeAuthWireState) {
-        guard sessionID != nil, let activeStreamID else { return }
-        if state.status.isTerminalNativeAuthStatus {
-            bufferedNativeAuthStates[state.contextID] = nil
-            quarantinedNativeAuthContextIDs.insert(state.contextID)
-            if nativeAuthPrompt?.contextID == state.contextID {
-                nativeAuthPrompt = nil
-                pendingNativeAuthSubmission = nil
-                nativeAuthRequestGeneration &+= 1
-            }
-            return
-        }
-        guard !quarantinedNativeAuthContextIDs.contains(state.contextID) else { return }
-        guard var prompt = nativeAuthPrompt else {
-            bufferNativeAuthState(state, streamID: activeStreamID)
-            return
-        }
-        guard prompt.contextID == state.contextID else { return }
-        guard nativeAuthState(state, matches: prompt) else {
-            if !prompt.components.contains(where: { $0.componentID == state.componentID }) {
-                bufferNativeAuthState(state, streamID: activeStreamID)
-            } else {
-                quarantineNativeAuth(
-                    contextIDs: [state.contextID],
-                    streamID: prompt.streamID,
-                    message: String(localized: "The browser sent conflicting authentication state. Start the browser action again.")
-                )
-            }
-            return
-        }
-        bufferedNativeAuthStates[state.contextID] = nil
-
-        let order = state.status.nativeAuthOrder
-        guard order >= (nativeAuthStateOrderByContextID[state.contextID] ?? -1) else { return }
-        if order == nativeAuthStateOrderByContextID[state.contextID], prompt.state != state {
-            quarantineNativeAuth(
-                contextIDs: [state.contextID],
-                streamID: prompt.streamID,
-                message: String(localized: "The browser sent conflicting authentication state. Start the browser action again.")
-            )
-            return
-        }
-        guard prompt.state != state else { return }
-        nativeAuthStateOrderByContextID[state.contextID] = order
-        prompt.state = state
-        nativeAuthPrompt = prompt
-        nativeAuthRequestGeneration &+= 1
-        nativeAuthErrorMessage = nil
-        scheduleNativeAuthE2EAutoSubmitIfEligible()
-    }
-
-    private func scheduleNativeAuthE2EAutoSubmitIfEligible() {
-        #if DEBUG
-        guard let controller = nativeAuthE2EAutoSubmitController else { return }
-        Task { @MainActor [weak self] in
-            guard let self, let prompt = self.nativeAuthPrompt else { return }
-            let contextID = prompt.contextID
-            let attempted = await controller.submitIfEligible(prompt: prompt) { [weak self] values, component, actionHandle in
-                guard let self else { return false }
-                return await self.submitNativeAuth(
-                    values: values,
-                    component: component,
-                    actionHandle: actionHandle
-                )
-            }
-            guard attempted, self.nativeAuthPrompt?.contextID == contextID else { return }
-            // Auto-submit is intentionally never retryable. Success already
-            // terminalized through the production path; an ambiguous/failing
-            // result is also closed here so no envelope or retry state remains.
-            self.terminalizeNativeAuth(contextID: contextID)
-        }
-        #endif
-    }
-
-    #if DEBUG
-    func setNativeAuthE2EAutoSubmitControllerForTesting(_ controller: NativeAuthE2EAutoSubmitController?) {
-        nativeAuthE2EAutoSubmitController = controller
-    }
-    #endif
-
-    @discardableResult
-    func submitNativeAuth(
-        values: [String: String],
-        component: NativeAuthWireComponent,
-        actionHandle: String
-    ) async -> Bool {
-        guard let sessionID, let prompt = nativeAuthPrompt,
-              prompt.ownerSessionID == sessionID,
-              prompt.components.contains(component),
-              component.kind == .submit,
-              component.actionHandle == actionHandle,
-              !component.isExpired,
-              !isNativeAuthRequestInFlight
-        else {
-            nativeAuthErrorMessage = String(localized: "This authentication request is no longer active.")
-            return false
-        }
-
-        let pending: PendingNativeAuthSubmission
-        if let existing = pendingNativeAuthSubmission {
-            guard existing.ownerSessionID == sessionID,
-                  existing.streamID == prompt.streamID,
-                  existing.contextID == prompt.contextID,
-                  existing.component == component,
-                  existing.actionHandle == actionHandle
-            else {
-                quarantineNativeAuth(
-                    contextIDs: [prompt.contextID],
-                    streamID: prompt.streamID,
-                    message: String(localized: "The authentication retry no longer matches the browser request.")
-                )
-                return false
-            }
-            pending = existing
-        } else {
-            let allowedFields = Set(prompt.inputComponents.map(\.field))
-            guard !values.isEmpty,
-                  Set(values.keys).isSubset(of: allowedFields),
-                  values.values.allSatisfy({ !$0.isEmpty })
-            else {
-                nativeAuthErrorMessage = String(localized: "Enter the requested information before continuing.")
-                return false
-            }
-            do {
-                pending = PendingNativeAuthSubmission(
-                    ownerSessionID: sessionID,
-                    streamID: prompt.streamID,
-                    contextID: prompt.contextID,
-                    component: component,
-                    actionHandle: actionHandle,
-                    envelope: try NativeAuthWireEnvelope.encrypt(
-                        component: component,
-                        values: values,
-                        actionHandle: actionHandle
-                    )
-                )
-                pendingNativeAuthSubmission = pending
-            } catch {
-                nativeAuthErrorMessage = String(localized: "Could not prepare the secure authentication request.")
-                return false
-            }
-        }
-
-        let requestGeneration = nativeAuthRequestGeneration
-        isNativeAuthRequestInFlight = true
-        defer { isNativeAuthRequestInFlight = false }
-        do {
-            _ = try await client.submitNativeAuth(
-                sessionID: pending.ownerSessionID,
-                streamID: pending.streamID,
-                envelope: pending.envelope
-            )
-            guard nativeAuthRequestGeneration == requestGeneration,
-                  pendingNativeAuthSubmission == pending,
-                  nativeAuthPrompt?.contextID == pending.contextID
-            else { return false }
-            terminalizeNativeAuth(contextID: pending.contextID)
-            return true
-        } catch let error as NativeAuthControlError {
-            guard nativeAuthRequestGeneration == requestGeneration,
-                  pendingNativeAuthSubmission == pending
-            else { return false }
-            if error.outcome.retryable {
-                nativeAuthErrorMessage = String(localized: "The browser is busy. Retry the same secure request.")
-            } else {
-                quarantineNativeAuth(
-                    contextIDs: [pending.contextID],
-                    streamID: pending.streamID,
-                    message: String(localized: "The browser rejected this authentication request. Start the browser action again.")
-                )
-            }
-            return false
-        } catch {
-            guard nativeAuthRequestGeneration == requestGeneration,
-                  pendingNativeAuthSubmission == pending
-            else { return false }
-            nativeAuthErrorMessage = String(localized: "The result is unknown. Retry sends the same secure request.")
-            return false
-        }
-    }
-
-    @discardableResult
-    func cancelNativeAuth() async -> Bool {
-        guard let sessionID, let prompt = nativeAuthPrompt,
-              prompt.ownerSessionID == sessionID,
-              !isNativeAuthRequestInFlight
-        else { return false }
-        let requestGeneration = nativeAuthRequestGeneration
-        isNativeAuthRequestInFlight = true
-        defer { isNativeAuthRequestInFlight = false }
-        do {
-            _ = try await client.cancelNativeAuth(
-                sessionID: prompt.ownerSessionID,
-                streamID: prompt.streamID,
-                contextID: prompt.contextID
-            )
-            guard nativeAuthRequestGeneration == requestGeneration,
-                  nativeAuthPrompt?.contextID == prompt.contextID
-            else { return false }
-            terminalizeNativeAuth(contextID: prompt.contextID)
-            return true
-        } catch let error as NativeAuthControlError {
-            guard nativeAuthRequestGeneration == requestGeneration else { return false }
-            if error.outcome.retryable {
-                nativeAuthErrorMessage = String(localized: "The browser is busy. Try cancelling again.")
-            } else {
-                quarantineNativeAuth(
-                    contextIDs: [prompt.contextID],
-                    streamID: prompt.streamID,
-                    message: String(localized: "The browser no longer accepts this authentication request.")
-                )
-            }
-            return false
-        } catch {
-            guard nativeAuthRequestGeneration == requestGeneration else { return false }
-            nativeAuthErrorMessage = String(localized: "Could not confirm cancellation. Try again.")
-            return false
-        }
-    }
-
-    private func nativeAuthComponent(
-        _ component: NativeAuthWireComponent,
-        matches prompt: NativeAuthPromptState
-    ) -> Bool {
-        guard prompt.ownerSessionID == sessionID,
-              prompt.streamID == activeStreamID,
-              let anchor = prompt.components.first
-        else { return false }
-        let bindingMatches: Bool
-        switch (component.binding, anchor.binding) {
-        case (nil, nil):
-            bindingMatches = true
-        case let (.some(componentBinding), .some(anchorBinding)):
-            bindingMatches = componentBinding.tabHandle == anchorBinding.tabHandle
-                && componentBinding.frameHandle == anchorBinding.frameHandle
-                && componentBinding.documentGeneration == anchorBinding.documentGeneration
-        default:
-            bindingMatches = false
-        }
-        return component.contextID == anchor.contextID
-            && component.browserSessionID == anchor.browserSessionID
-            && component.providerOrigin == anchor.providerOrigin
-            && component.path == anchor.path
-            && component.runtimePublicKey == anchor.runtimePublicKey
-            && component.keyID == anchor.keyID
-            && component.expiresAt == anchor.expiresAt
-            && bindingMatches
-    }
-
-    private func nativeAuthState(_ state: NativeAuthWireState, matches prompt: NativeAuthPromptState) -> Bool {
-        guard let anchor = prompt.components.first,
-              state.browserSessionID == anchor.browserSessionID,
-              state.providerOrigin == anchor.providerOrigin,
-              state.path == anchor.path
-        else { return false }
-        guard let component = prompt.components.first(where: { $0.componentID == state.componentID }) else {
-            return false
-        }
-        return component.actionHandle == state.actionHandle && component.kind == state.kind
-    }
-
-    private func bufferNativeAuthState(_ state: NativeAuthWireState, streamID: String) {
-        bufferedNativeAuthStates = bufferedNativeAuthStates.filter { $0.value.streamID == streamID }
-        if let existing = bufferedNativeAuthStates[state.contextID] {
-            guard existing.streamID == streamID, existing.state == state else {
-                quarantineNativeAuth(
-                    contextIDs: [state.contextID],
-                    streamID: streamID,
-                    message: String(localized: "The browser sent conflicting authentication state. Start the browser action again.")
-                )
-                return
-            }
-            return
-        }
-        guard bufferedNativeAuthStates.count < 8 else {
-            quarantineNativeAuth(
-                contextIDs: [state.contextID],
-                streamID: streamID,
-                message: String(localized: "The browser sent too many authentication requests. Start the browser action again.")
-            )
-            return
-        }
-        bufferedNativeAuthStates[state.contextID] = (streamID, state)
-    }
-
-    private func applyBufferedNativeAuthStateIfPossible(contextID: String) {
-        guard let buffered = bufferedNativeAuthStates[contextID],
-              let prompt = nativeAuthPrompt,
-              prompt.contextID == contextID,
-              prompt.streamID == buffered.streamID,
-              nativeAuthState(buffered.state, matches: prompt)
-        else { return }
-        bufferedNativeAuthStates[contextID] = nil
-        streamCoordinatorApplyNativeAuthState(buffered.state)
-    }
-
-    private func terminalizeNativeAuth(contextID: String) {
-        quarantinedNativeAuthContextIDs.insert(contextID)
-        nativeAuthStateOrderByContextID[contextID] = nil
-        bufferedNativeAuthStates[contextID] = nil
-        pendingNativeAuthSubmission = nil
-        if nativeAuthPrompt?.contextID == contextID { nativeAuthPrompt = nil }
-        nativeAuthRequestGeneration &+= 1
-        nativeAuthErrorMessage = nil
-    }
-
-    private func quarantineNativeAuth(contextIDs: Set<String>, streamID: String, message: String) {
-        quarantinedNativeAuthContextIDs.formUnion(contextIDs)
-        quarantinedNativeAuthStreamIDs.insert(streamID)
-        for contextID in contextIDs {
-            bufferedNativeAuthStates[contextID] = nil
-        }
-        pendingNativeAuthSubmission = nil
-        nativeAuthPrompt = nil
-        nativeAuthRequestGeneration &+= 1
-        nativeAuthErrorMessage = message
-    }
-
-    func streamCoordinatorApplyWebsiteLogin(_ request: WebsiteLoginRequest) {
-        guard sessionID != nil,
-              !resolvedWebsiteLoginRequestIDs.contains(request.requestID)
-        else { return }
-        websiteLoginErrorMessage = nil
-        websiteLoginPrompt = request
-    }
-
-    @discardableResult
-    func streamCoordinatorEnqueuePendingSteerLeftover(_ text: String) -> Bool {
-        let message = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !message.isEmpty else { return false }
-
-        _ = enqueueQueuedSlashMessage(message, attachments: [])
-        appendLocalNoticeMessage(String(localized: "Steering hint was not consumed before the response ended, so it was queued for the next turn."))
-        return true
-    }
-}
-
-private struct ActiveChatStreamSnapshot: Equatable {
-    let messages: [ChatMessage]
-    let messagesOffset: Int
-    let displayTitle: String
-    let completedToolCallGroups: [ToolCallGroup]
-    let completedReasoningGroups: [ReasoningGroup]
-    let liveToolCalls: [ToolCall]
-    let liveReasoningText: String
-    let activeStreamLastEventID: String?
-    let streamingAssistantMessageID: String?
-    let toolCallAnchorMessageID: String?
-    let reasoningAnchorMessageID: String?
-    let contextWindowSnapshot: ContextWindowSnapshot?
-    let localAttachmentPreviews: [String: [String: Data]]
-    let pinnedLocalNotices: [String]
-}
-
-private struct ActiveChatStreamSnapshotKey: Hashable {
-    let server: String
-    let sessionID: String
-    let streamID: String
-}
-
-private final class ActiveChatStreamSnapshotStore {
-    static let shared = ActiveChatStreamSnapshotStore()
-
-    private let lock = NSLock()
-    private var snapshots: [ActiveChatStreamSnapshotKey: ActiveChatStreamSnapshot] = [:]
-
-    private init() {}
-
-    func save(
-        _ snapshot: ActiveChatStreamSnapshot,
-        server: URL,
-        sessionID: String,
-        streamID: String
-    ) {
-        lock.lock()
-        defer { lock.unlock() }
-        snapshots[key(server: server, sessionID: sessionID, streamID: streamID)] = snapshot
-    }
-
-    func snapshot(server: URL, sessionID: String, streamID: String) -> ActiveChatStreamSnapshot? {
-        lock.lock()
-        defer { lock.unlock() }
-        return snapshots[key(server: server, sessionID: sessionID, streamID: streamID)]
-    }
-
-    func remove(server: URL, sessionID: String, streamID: String) {
-        lock.lock()
-        defer { lock.unlock() }
-        snapshots.removeValue(forKey: key(server: server, sessionID: sessionID, streamID: streamID))
-    }
-
-    func removeAll() {
-        lock.lock()
-        defer { lock.unlock() }
-        snapshots.removeAll()
-    }
-
-    private func key(server: URL, sessionID: String, streamID: String) -> ActiveChatStreamSnapshotKey {
-        ActiveChatStreamSnapshotKey(
-            server: server.absoluteString,
-            sessionID: sessionID,
-            streamID: streamID
-        )
-    }
 }
 
 private struct QueuedSlashMessage {
@@ -6394,11 +5707,16 @@ struct ReasoningGroup: Identifiable, Equatable {
     let id: String
     let anchorMessageID: String?
     let text: String
+    /// Per-arrival reasoning segments retained for the expanded Thinking view.
+    /// `text` stays the canonical joined form (collapse summaries and echo
+    /// stripping keep reading it); rendering walks the segments instead.
+    let segments: [String]
 
-    init(id: String = UUID().uuidString, anchorMessageID: String?, text: String) {
+    init(id: String = UUID().uuidString, anchorMessageID: String?, text: String, segments: [String] = []) {
         self.id = id
         self.anchorMessageID = anchorMessageID
         self.text = text
+        self.segments = segments
     }
 }
 
@@ -6416,11 +5734,88 @@ struct ReasoningGroupAnchorLookup: Equatable {
     }
 }
 
+/// Ephemeral UI evidence of this view model's exact local append. Never persisted
+/// or used as a delivery acknowledgement, routing identity, or scroll request.
+struct OutgoingInsertionEvent: Equatable {
+    let id = UUID()
+    let scope: UUID
+    let messageID: String
+    let sequence: UInt64
+}
+
+/// Main-thread presentation ledger. Consumption deliberately does not publish a
+/// view update: the already-mounted bubble owns its own animation completion.
+final class OutgoingInsertionLedger {
+    private var scope: UUID?
+    private var observedThrough: UInt64 = 0
+    private var consumedThrough: UInt64 = 0
+
+    func mount(scope: UUID?, through sequence: UInt64) {
+        self.scope = scope
+        observedThrough = sequence
+        consumedThrough = sequence
+    }
+
+    func unmount() {
+        scope = nil
+    }
+
+    func discardPending(through sequence: UInt64) {
+        observedThrough = max(observedThrough, sequence)
+    }
+
+    func isEligible(_ event: OutgoingInsertionEvent?, messageID: String,
+                    role: String?, allowed: Bool) -> Bool {
+        guard allowed, role == "user", let event, let scope,
+              event.scope == scope, event.messageID == messageID,
+              event.sequence > observedThrough,
+              event.sequence > consumedThrough else { return false }
+        return true
+    }
+
+    func claim(_ event: OutgoingInsertionEvent?, messageID: String,
+               role: String?, allowed: Bool) -> Bool {
+        guard isEligible(event, messageID: messageID, role: role, allowed: allowed),
+              let event else { return false }
+        consumedThrough = event.sequence
+        return true
+    }
+}
+
+/// Stable identity used by the Direct transcript path. Durable backend IDs
+/// must be namespaced before they become SwiftUI row IDs so they cannot
+/// collide with the legacy position-based transcript IDs.
+enum TranscriptRenderIdentity {
+    static let directPrefix = "transcript:row:"
+
+    static func directID(for canonicalMessageID: String?) -> String? {
+        guard let canonicalMessageID, !canonicalMessageID.isEmpty else { return nil }
+        return "\(directPrefix)\(canonicalMessageID)"
+    }
+}
+
 struct TranscriptMessage: Identifiable, Equatable {
     let loadedIndex: Int
     let renderID: String
     let anchorID: String
     let message: ChatMessage
+    /// Presentation-only direct attachment projection. `message.content` remains
+    /// the canonical raw text for actions, caching, recovery, and persistence.
+    let attachmentDisplayContent: String?
+
+    init(
+        loadedIndex: Int,
+        renderID: String,
+        anchorID: String,
+        message: ChatMessage,
+        attachmentDisplayContent: String? = nil
+    ) {
+        self.loadedIndex = loadedIndex
+        self.renderID = renderID
+        self.anchorID = anchorID
+        self.message = message
+        self.attachmentDisplayContent = attachmentDisplayContent
+    }
 
     var id: String { renderID }
 }
@@ -6576,7 +5971,8 @@ extension ChatViewModel {
     nonisolated static func transcriptMessages(
         from messages: [ChatMessage],
         messageOffset: Int? = nil,
-        hidingStreamingAssistantID streamingAssistantID: String?
+        hidingStreamingAssistantID streamingAssistantID: String?,
+        preferDurableIDs: Bool = false
     ) -> [TranscriptMessage] {
         let offset = max(0, messageOffset ?? 0)
         var transcriptMessages: [TranscriptMessage] = []
@@ -6595,17 +5991,51 @@ extension ChatViewModel {
                 messageOffset: messageOffset
             )
             let absoluteIndex = offset + loadedIndex
-            let renderID = "transcript:\(absoluteIndex)"
+            let renderID = transcriptRenderID(for: message, absoluteIndex: absoluteIndex,
+                                              preferDurableID: preferDurableIDs)
 
             transcriptMessages.append(TranscriptMessage(
                 loadedIndex: loadedIndex,
                 renderID: renderID,
                 anchorID: anchorID,
-                message: message
+                message: message,
+                attachmentDisplayContent: preferDurableIDs
+                    ? directAttachmentDisplayContent(for: message)
+                    : nil
             ))
         }
 
         return transcriptMessages
+    }
+
+    nonisolated private static func directAttachmentDisplayContent(for message: ChatMessage) -> String? {
+        guard message.role == "user" else { return nil }
+
+        let projection: DirectHermesMessageAttachmentProjection?
+        if let parts = message.contentParts {
+            projection = DirectHermesMessageAttachmentProjection.project(userParts: parts)
+        } else if let content = message.content {
+            projection = DirectHermesMessageAttachmentProjection.project(userContent: content)
+        } else {
+            projection = nil
+        }
+
+        guard let projection, !projection.attachments.isEmpty else { return nil }
+        return projection.cleanedText
+    }
+
+    nonisolated private static func transcriptRenderID(
+        for message: ChatMessage, absoluteIndex: Int, preferDurableID: Bool
+    ) -> String {
+        // Direct pages have backwards cursors, not WebUI's stable absolute
+        // offsets. Position-based IDs would retarget scroll anchors on prepend.
+        // Keep legacy identity unchanged until that path is removed in Slice 4.
+        if preferDurableID, let directID = TranscriptRenderIdentity.directID(
+            for: message.messageId
+        ) {
+            return directID
+        }
+        return "transcript:\(absoluteIndex)"
     }
 
     nonisolated static func compressionReferenceCard(
@@ -6769,7 +6199,8 @@ private struct ReasoningDisplayBuilder {
         ReasoningGroup(
             id: "reasoning-turn-\(turnKey)",
             anchorMessageID: anchorMessageID,
-            text: segments.joined(separator: "\n\n")
+            text: segments.joined(separator: "\n\n"),
+            segments: segments
         )
     }
 }
@@ -6777,45 +6208,6 @@ private struct ReasoningDisplayBuilder {
 private extension ToolCall {
     func matchesStableToolID(_ stableID: String) -> Bool {
         id.nonEmptyStableToolID == stableID
-    }
-
-    func matchesReplayToolStart(_ payload: ToolStreamEvent) -> Bool {
-        matchesReplayToolIdentity(payload)
-    }
-
-    func matchesReplayToolCompletion(_ payload: ToolStreamEvent) -> Bool {
-        matchesReplayToolIdentity(payload)
-    }
-
-    private func matchesReplayToolIdentity(_ payload: ToolStreamEvent) -> Bool {
-        if let payloadStableID = payload.stableID?.nonEmptyReplayMatchText,
-           let stableID = id.nonEmptyStableToolID {
-            return stableID == payloadStableID
-        }
-
-        var didCompareStableField = false
-
-        if let payloadName = payload.name?.nonEmptyReplayMatchText {
-            didCompareStableField = true
-            guard name?.nonEmptyReplayMatchText == payloadName else { return false }
-        }
-
-        if let payloadArgs = payload.args {
-            didCompareStableField = true
-            guard args == payloadArgs else { return false }
-        }
-
-        if didCompareStableField {
-            return true
-        }
-
-        guard let payloadPreview = payload.preview?.nonEmptyReplayMatchText,
-              let preview = preview?.nonEmptyReplayMatchText
-        else {
-            return false
-        }
-
-        return preview == payloadPreview
     }
 
     func applyingCompletionPayload(_ payload: ToolStreamEvent) -> ToolCall {
@@ -6833,13 +6225,13 @@ private extension ToolCall {
 }
 
 private extension String {
-    var nonEmptyReplayMatchText: String? {
+    var nonEmptyToolMatchText: String? {
         let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
     }
 
     var nonEmptyStableToolID: String? {
-        guard let stableID = nonEmptyReplayMatchText,
+        guard let stableID = nonEmptyToolMatchText,
               !stableID.hasPrefix("live-tool-"),
               !stableID.hasPrefix("message-tool-"),
               !stableID.hasPrefix("persisted-tool-")
@@ -6874,17 +6266,12 @@ struct SpeechTextNormalizer {
 }
 
 /// Routing policy for the "Listen" action (#15): prefer the server's neural TTS
-/// (`POST /api/tts`, edge engine — no API key needed) and fall back to the
+/// (`POST /api/audio/speak`, configured profile provider/voice) and fall back to the
 /// on-device synthesizer when the server can't serve the request.
 enum ServerTTSPolicy {
-    /// Server-enforced request cap (`400 text too long` above it); longer text
-    /// routes straight to the on-device synthesizer (chunking is a non-goal).
+    /// Client-side Listen cap; longer text routes straight to the on-device
+    /// synthesizer to preserve the existing bounded playback policy.
     static let maximumTextLength = 5000
-    /// The server's own default voice is `zh-CN-XiaoxiaoNeural`, so the client
-    /// must always send an explicit voice. A voice picker is a non-goal of #15;
-    /// this is the issue-specified default (verified live 2026-07-02).
-    static let defaultVoice = "en-US-AriaNeural"
-
     static func shouldUseServerTTS(for text: String) -> Bool {
         text.count <= maximumTextLength
     }
@@ -7057,6 +6444,14 @@ private final class SpeechSynthesizerDelegate: NSObject, AVSpeechSynthesizerDele
 
 #if DEBUG
 extension ChatViewModel {
+    /// Structural reducer coverage only; this does not enable gateway paging during a run.
+    func prependMessagesForTesting(_ olderMessages: [ChatMessage]) {
+        withBatchedTranscriptDerivedState {
+            messages = Self.prependingOlderMessages(olderMessages, to: messages)
+            messagesOffset = max(0, messagesOffset - olderMessages.count)
+        }
+    }
+
     /// Server-free fixture that exercises the exact production ChatView,
     /// transcript rows, Markdown renderer, restoration, and bottom-scroll loop.
     @MainActor
@@ -7084,7 +6479,99 @@ extension ChatViewModel {
         return (session, server, viewModel)
     }
 
-    private func seedPerformanceLab(messageCount: Int) {
+    /// A bounded multi-owner variant of the server-free performance fixture. Each
+    /// owner is a real ChatView/ChatTranscriptView with an independent 10,000-row
+    /// model; this remains presentation evidence, not direct-gateway proof.
+    @MainActor
+    static func makePerformanceLabFixtures(count: Int = 3) -> [(
+        session: SessionSummary,
+        server: URL,
+        viewModel: ChatViewModel
+    )] {
+        precondition(count > 1)
+        return (0..<count).map { index in
+            let server = URL(string: "http://127.0.0.1:9")!
+            let chatNumber = index + 1
+            let session = SessionSummary(
+                sessionId: "semreh-chat-performance-lab-\(chatNumber)",
+                title: "10,000-row performance lab \(chatNumber)"
+            )
+            TranscriptRestoreStore.shared.save(
+                TranscriptRestorePoint(
+                    followingLatest: false,
+                    visibleMessageID: "transcript:20"
+                ),
+                server: server,
+                sessionID: session.sessionId ?? session.id
+            )
+
+            let viewModel = ChatViewModel(session: session, server: server)
+            viewModel.seedPerformanceLab(messageCount: 10_000, conversationIndex: chatNumber)
+            return (session, server, viewModel)
+        }
+    }
+
+    /// Appends one deterministic user/assistant turn in small chunks so the
+    /// multi-chat lab exercises the same rendered transcript while content grows.
+    @MainActor
+    func appendPerformanceLabStreamingTurn() async {
+        guard !messages.isEmpty, !performanceLabStreamingTurnInFlight else { return }
+        performanceLabStreamingTurnInFlight = true
+        let started = ContinuousClock.now
+        let fullRecomputesBefore = transcriptFullRecomputeCountForTesting
+        defer {
+            performanceLabStreamingTurnInFlight = false
+            print("SEMREH_LAB_STREAM elapsed=\(started.duration(to: .now)) rows=\(messages.count) full_recomputes=\(transcriptFullRecomputeCountForTesting - fullRecomputesBefore)")
+        }
+        let sequence = (messages.count - 10_000) / 2 + 1
+        let timestamp = (messages.last?.timestamp ?? 10_000) + 1
+        let assistantID = "perf-stream-message-\(sequence)-assistant"
+        appendStreamingMessage(ChatMessage(
+            role: "user",
+            content: "SEMREH multi-chat streaming prompt \(sequence)",
+            timestamp: timestamp,
+            messageId: "perf-stream-message-\(sequence)-user"
+        ))
+        appendStreamingMessage(ChatMessage(
+            role: "assistant",
+            content: "Streaming turn \(sequence): ",
+            timestamp: timestamp + 0.001,
+            messageId: assistantID
+        ))
+
+        let chunks = [
+            "Streaming turn \(sequence): first chunk. ",
+            "Streaming turn \(sequence): first chunk. second chunk. ",
+            "Streaming turn \(sequence): first chunk. second chunk. final chunk. ",
+            "Streaming turn \(sequence): first chunk. second chunk. final chunk. SEMREH_MULTI_CHAT_STREAM_\(sequence)"
+        ]
+        for chunk in chunks {
+            do {
+                try await Task.sleep(nanoseconds: 80_000_000)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            guard let index = messages.lastIndex(where: { $0.messageId == assistantID }) else { return }
+            let current = messages[index]
+            replaceStreamingMessage(at: index, with: ChatMessage(
+                role: current.role,
+                content: chunk,
+                timestamp: current.timestamp,
+                messageId: current.messageId,
+                name: current.name,
+                toolCallId: current.toolCallId,
+                toolUseId: current.toolUseId,
+                toolCalls: current.toolCalls,
+                contentParts: current.contentParts,
+                reasoning: current.reasoning,
+                attachments: current.attachments,
+                turnTps: current.turnTps
+            ))
+        }
+    }
+
+    private func seedPerformanceLab(messageCount: Int, conversationIndex: Int = 0) {
         precondition(messageCount > 20)
 
         messages = (0..<messageCount).map { index in
@@ -7092,15 +6579,17 @@ extension ChatViewModel {
             let content: String
             if index == messageCount - 1 {
                 content = """
-                ## Deterministic long Markdown tail
+                ## Deterministic long Markdown tail \(conversationIndex)
 
                 This final response exercises the production streaming/Markdown surface after the 10,000-row history.
 
                 ```swift
                 \(String(repeating: "let value = Array(0..<1_000).reduce(0, +)\n", count: 320))
                 ```
+
+                End of 10,000-row conversation\(conversationIndex == 0 ? "" : " \(conversationIndex)").
                 """
-            } else if role == "assistant", index.isMultiple(of: 250) {
+            } else if role == "assistant", index.isMultiple(of: 251) {
                 content = """
                 ### Checkpoint \(index)
 

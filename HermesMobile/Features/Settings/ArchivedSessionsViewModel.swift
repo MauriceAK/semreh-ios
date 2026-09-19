@@ -1,9 +1,25 @@
 import Foundation
 import Observation
 
+private enum ArchivedSessionsViewModelError: LocalizedError {
+    case paginationIncomplete
+    case readbackMismatch
+
+    var errorDescription: String? {
+        switch self {
+        case .paginationIncomplete:
+            return String(localized: "Hermes did not return the complete archived-session collection.")
+        case .readbackMismatch:
+            return String(localized: "Hermes did not confirm that the session was unarchived.")
+        }
+    }
+}
+
 @MainActor
 @Observable
 final class ArchivedSessionsViewModel {
+    private static let pageSize = 100
+
     private(set) var sessions: [SessionSummary] = []
     private(set) var isLoading = false
     private(set) var unarchivingSessionIDs: Set<String> = []
@@ -14,44 +30,132 @@ final class ArchivedSessionsViewModel {
     private(set) var lastError: Error?
 
     private let client: APIClient
+    private let profile: String
+    private var loadGeneration = 0
+    /// Successful unarchives remain hidden from reads that began before the
+    /// confirmation. A fresh authoritative read is allowed to show the row if
+    /// another client archived it again.
+    private var locallyUnarchivedSessionRevisions: [String: Int] = [:]
+    private var archiveMutationRevision = 0
 
     var isUnarchiving: Bool {
         !unarchivingSessionIDs.isEmpty
     }
 
-    init(server: URL, client: APIClient? = nil) {
+    init(server: URL, profile: String = "default", client: APIClient? = nil) {
         self.client = client ?? APIClient(baseURL: server)
+        let trimmedProfile = profile.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.profile = trimmedProfile.isEmpty ? "default" : trimmedProfile
     }
 
     func load() async {
+        loadGeneration &+= 1
+        let generation = loadGeneration
+        let loadRevision = archiveMutationRevision
         isLoading = true
         errorMessage = nil
         actionErrorMessage = nil
         lastError = nil
 
         do {
-            // `include_archived=1` is required — the default response excludes
-            // archived rows entirely, which made this view permanently empty
-            // (issue #17). The merged response keeps the visible rows too; each
-            // row carries an `archived` flag (verified against upstream routes.py
-            // @312d3fab and the live server), so filter client-side.
-            let response = try await client.sessions(includeArchived: true)
-            sessions = (response.sessions ?? []).filter { $0.archived == true }
+            var offset = 0
+            var expectedTotal: Int?
+            var loaded: [SessionSummary] = []
+            var seenIDs: Set<String> = []
+
+            while true {
+                try Task.checkCancellation()
+                let page = try await client.directSingleProfileSessions(
+                    profile: profile,
+                    limit: Self.pageSize,
+                    offset: offset,
+                    order: .recent,
+                    archived: .only
+                )
+                guard generation == loadGeneration else { return }
+                try Task.checkCancellation()
+
+                if let total = page.total {
+                    expectedTotal = max(expectedTotal ?? 0, total)
+                }
+
+                var pageAddedID = false
+                for session in page.sessions where session.archived == true {
+                    let identity = session.id
+                    if seenIDs.insert(identity).inserted {
+                        loaded.append(session)
+                        pageAddedID = true
+                    }
+                }
+
+                let returnedCount = page.sessions.count
+                if returnedCount == 0 {
+                    if let expectedTotal, loaded.count < expectedTotal {
+                        throw ArchivedSessionsViewModelError.paginationIncomplete
+                    }
+                    break
+                }
+
+                if let expectedTotal, loaded.count >= expectedTotal {
+                    break
+                }
+
+                let nextOffset = offset + Self.pageSize
+                let hasMoreByTotal = expectedTotal.map { nextOffset < $0 } ?? false
+                let hasMoreByPageSize = expectedTotal == nil && returnedCount >= Self.pageSize
+                guard hasMoreByTotal || hasMoreByPageSize else { break }
+
+                // Pinned rows may be back-filled past the requested window. A
+                // repeated page means the stock endpoint cannot advance at its
+                // bounded server limit; fail visibly instead of truncating.
+                guard pageAddedID else {
+                    throw ArchivedSessionsViewModelError.paginationIncomplete
+                }
+                offset = nextOffset
+            }
+
+            guard generation == loadGeneration else { return }
+            let pending = unarchivingSessionIDs
+            // A completed read that began after a local unarchive confirmation
+            // is authoritative: it either confirms the row is absent or shows
+            // a later re-archive from another client.
+            let authoritativeTombstoneIDs = locallyUnarchivedSessionRevisions.compactMap { sessionID, revision in
+                revision <= loadRevision ? sessionID : nil
+            }
+            for sessionID in authoritativeTombstoneIDs {
+                locallyUnarchivedSessionRevisions.removeValue(forKey: sessionID)
+            }
+            let hiddenByOlderReads = Set(
+                locallyUnarchivedSessionRevisions.compactMap { sessionID, revision in
+                    revision > loadRevision ? sessionID : nil
+                }
+            )
+            let hidden = pending.union(hiddenByOlderReads)
+            sessions = loaded.filter { !hidden.contains($0.id) }
         } catch {
             // A cancelled load (pull-to-refresh superseding `.task`, or the view
             // disappearing) is not a failure — don't flash an error state.
+            guard generation == loadGeneration else { return }
             if !Self.isCancellationError(error) {
                 lastError = error
                 errorMessage = error.localizedDescription
             }
         }
 
-        isLoading = false
+        if generation == loadGeneration {
+            isLoading = false
+        }
     }
 
     func unarchive(_ session: SessionSummary) async -> Bool {
-        guard let sessionId = Self.nonEmpty(session.sessionId) else {
+        guard let rawSessionID = session.sessionId,
+              let sessionId = Self.nonEmpty(rawSessionID),
+              rawSessionID == sessionId else {
             actionErrorMessage = String(localized: "The server did not provide a session ID.")
+            return false
+        }
+        if let sessionProfile = Self.nonEmpty(session.profile), sessionProfile != profile {
+            actionErrorMessage = String(localized: "This session belongs to a different profile.")
             return false
         }
         guard !unarchivingSessionIDs.contains(sessionId) else {
@@ -70,25 +174,28 @@ final class ArchivedSessionsViewModel {
         }
 
         do {
-            let response = try await client.archiveSession(id: sessionId, archived: false)
-            // Rejections (subagent / read-only CLI sessions) arrive as HTTP 400
-            // and throw above; a 200 body with an `error` field is surfaced too
-            // so the server's own message is always shown (issue #17). An
-            // explicit `ok: false` without an `error` string is still a failure
-            // (matching the `ok != false` guard used across the app) — only a
-            // missing `ok` is treated as success, per tolerant decoding.
-            if let error = Self.nonEmpty(response.error) {
-                restore(removedSession)
-                actionErrorMessage = error
-                return false
+            try Task.checkCancellation()
+            _ = try await client.directMutateSession(
+                sessionID: sessionId,
+                operation: .archived(false),
+                profile: profile
+            )
+            try Task.checkCancellation()
+            let confirmed = try await client.directSessionDetail(
+                sessionID: sessionId,
+                profile: profile
+            )
+            try Task.checkCancellation()
+            guard confirmed.sessionId == sessionId,
+                  confirmed.archived == false,
+                  confirmed.profile == nil || confirmed.profile == profile else {
+                throw ArchivedSessionsViewModelError.readbackMismatch
             }
-            if response.ok == false {
-                restore(removedSession)
-                actionErrorMessage = String(localized: "The server could not unarchive this session.")
-                return false
-            }
+            archiveMutationRevision &+= 1
+            locallyUnarchivedSessionRevisions[sessionId] = archiveMutationRevision
             return true
         } catch {
+            locallyUnarchivedSessionRevisions.removeValue(forKey: sessionId)
             restore(removedSession)
             if !Self.isCancellationError(error) {
                 lastError = error

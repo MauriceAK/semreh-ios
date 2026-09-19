@@ -61,29 +61,62 @@ private struct PendingSessionDeletion {
     var latestCanonicalArchivedCount: Int?
 }
 
-private struct SessionMutationRejectedError: LocalizedError {
-    let message: String
+private enum PendingMetadataField {
+    case title(String)
+    case pinned(Bool)
+    case archived(Bool)
+}
 
-    var errorDescription: String? { message }
+private struct PendingMetadataMutation {
+    var title: PendingMetadataValue<String>?
+    var pinned: PendingMetadataValue<Bool>?
+    var archived: PendingMetadataValue<Bool>?
+}
+
+private struct PendingMetadataValue<Value> {
+    let value: Value
+    let revision: Int
+}
+
+private struct PendingMetadataKey: Hashable {
+    let profile: String
+    let sessionID: String
+}
+
+private struct ArchivedCountResponseError: LocalizedError {
+    var errorDescription: String? {
+        String(localized: "Hermes did not return a valid archived session count.")
+    }
 }
 
 @MainActor
 @Observable
 final class SessionListViewModel {
+    typealias GatewayRuntimeProvider = @MainActor (APIClient) async throws -> HermesServerRuntime
+
     private(set) var sessions: [SessionSummary] = []
     private(set) var isLoading = false
     private(set) var isCreatingSession = false
     private(set) var isCreatingProject = false
     private(set) var isLoadingProjects = false
-    private(set) var isDeletingProject = false
-    private(set) var isRenamingSession = false
-    private(set) var isRenamingProject = false
-    private(set) var isMovingSession = false
+    private(set) var isDeletingProject = false {
+        didSet { sidebarRefreshStateChanged() }
+    }
+    private(set) var isRenamingSession = false {
+        didSet { sidebarRefreshStateChanged() }
+    }
+    private(set) var isRenamingProject = false {
+        didSet { sidebarRefreshStateChanged() }
+    }
+    private(set) var isMovingSession = false {
+        didSet { sidebarRefreshStateChanged() }
+    }
     private(set) var isViewingCachedData = false
     private(set) var projects: [ProjectSummary] = []
     private(set) var errorMessage: String?
     private(set) var actionErrorMessage: String?
     private(set) var cacheErrorMessage: String?
+    private(set) var cachedSessionPreviews: [CachedSessionPreviewIdentity: CachedSessionPreview] = [:]
     private(set) var searchErrorMessage: String?
     private(set) var isSearchingRemoteSessions = false
     private(set) var sessionLoadError: Error?
@@ -95,10 +128,18 @@ final class SessionListViewModel {
     private(set) var profileOptions: [ProfileSummary] = []
     private(set) var isSingleProfileMode = false
     private(set) var isLoadingActiveProfile = false
-    private(set) var isSwitchingActiveProfile = false
+    private(set) var isSwitchingActiveProfile = false {
+        didSet { sidebarRefreshStateChanged() }
+    }
     private(set) var switchingActiveProfileName: String?
     private(set) var activeProfileErrorMessage: String?
-    private(set) var mutatingSessionIDs: Set<String> = []
+    private(set) var mutatingSessionIDs: Set<String> = [] {
+        didSet { sidebarRefreshStateChanged() }
+    }
+    /// Set when a shared gateway event invalidates the durable sidebar list.
+    /// It remains set while an edit or destructive action is in progress so a
+    /// refresh cannot replace the user's working rows underneath them.
+    private(set) var isSidebarDirty = false
     /// Total archived sessions reported by the last successful list load
     /// (`archived_count`, issue #17). nil until a load succeeds or when an older
     /// server omits the field — the Archived entry stays hidden then.
@@ -106,27 +147,66 @@ final class SessionListViewModel {
 
     private(set) var remoteContentSearchSessionIDs: [String] = []
     private var activeRemoteSearchQuery: String?
+    private var activeRemoteSearchProfile: String?
+    private var remoteResolvedRows: [String: SessionSummary] = [:]
+    private var orderedRemoteIDs: [String] = []
+    private var remoteSearchGeneration = 0
 
     private let client: APIClient
     private let sessionMutator: SessionMutator
+    private let organizerStore: LocalOrganizerStore
     private let server: URL
     private var loadGeneration = 0
     /// Monotonic generation of the newest successful canonical `/api/sessions`
     /// response. Optimistic rollbacks never overwrite a newer server result.
     private var successfulLoadGeneration = 0
     private var pendingSessionDeletions: [String: PendingSessionDeletion] = [:]
+    /// Authoritative metadata received after a PATCH but before a later list
+    /// response. It prevents an older overlapping sidebar response from
+    /// erasing a confirmed pin/title/archive change.
+    private var pendingMetadataMutations: [PendingMetadataKey: PendingMetadataMutation] = [:]
+    /// A duplicate may already exist after a dispatched branch loses its ACK,
+    /// or after a known child cannot be read back. Never branch that source
+    /// again blindly during this view-model lifetime.
+    private var duplicateOutcomeUnknownKeys: Set<PendingMetadataKey> = []
+    /// A lost direct-delete acknowledgement must never trigger or permit a blind
+    /// repeat for the same durable session/profile in this view-model lifetime.
+    private var deleteOutcomeUnknownKeys: Set<PendingMetadataKey> = []
+    private var activeProfileEpoch = 0
+    private var activeProfileLoadWaiters: [CheckedContinuation<Void, Never>] = []
+    private var metadataConfirmationRevision = 0
+    private var archivedCountRequestGeneration = 0
     /// Confirmed deletes remain hidden until a later process/session lifecycle;
     /// this prevents an eventually-consistent list response from resurrecting a
     /// row that the delete endpoint already acknowledged.
     private var confirmedSessionDeletionIDs: Set<String> = []
     private var cacheFirstSessionPlaceholder: [SessionSummary]?
     private var sessionsBeforeCacheFirstPlaceholder: [SessionSummary] = []
+    private var localDraftSequence: UInt64 = 0
+    @ObservationIgnored private let gatewayRuntimeProvider: GatewayRuntimeProvider
+    @ObservationIgnored private var observedGatewayRuntime: HermesServerRuntime?
+    @ObservationIgnored private var gatewayObserverID: UUID?
+    @ObservationIgnored private var gatewayObservationGeneration = 0
+    @ObservationIgnored private var gatewayObservationTask: Task<Void, Never>?
+    @ObservationIgnored private var sidebarRefreshTask: Task<Void, Never>?
+    private var gatewayObservationEnabled = false
+    private var sidebarEditing = false
+    private var sidebarDestructiveActionPending = false
 
-    init(server: URL, client: APIClient? = nil) {
+    init(
+        server: URL,
+        client: APIClient? = nil,
+        gatewayRuntimeProvider: GatewayRuntimeProvider? = nil,
+        organizerStore: LocalOrganizerStore? = nil
+    ) {
         self.server = server
         let resolvedClient = client ?? APIClient(baseURL: server)
         self.client = resolvedClient
         self.sessionMutator = SessionMutator(client: resolvedClient)
+        self.organizerStore = organizerStore ?? LocalOrganizerStore()
+        self.gatewayRuntimeProvider = gatewayRuntimeProvider ?? { client in
+            try await OpenChatSessionStore.shared.runtime(for: server, client: client)
+        }
 
         // Sweep exports leaked by a previous app run (view dismissed while a
         // download was in flight, so the share sheet — and its on-dismiss
@@ -136,6 +216,61 @@ final class SessionListViewModel {
         // is presenting. The first-ever init always precedes the first export,
         // so the single sweep can never race an in-flight export.
         _ = Self.sweepLeakedExportsOnce
+    }
+
+    /// Defers invalidation refreshes while the sidebar is editing a row or
+    /// preparing a destructive action. The caller should clear this when the
+    /// edit UI closes; a dirty list then refreshes on the next safe turn.
+    func setSidebarEditing(_ editing: Bool) {
+        sidebarEditing = editing
+        sidebarRefreshStateChanged()
+    }
+
+    func setSidebarDestructiveActionPending(_ pending: Bool) {
+        sidebarDestructiveActionPending = pending
+        sidebarRefreshStateChanged()
+    }
+
+    /// Starts the one observation/connect task for the already-owned shared
+    /// runtime. This is intentionally separate from `load`: the sidebar can
+    /// paint its cache/list without waiting for gateway setup, while the first
+    /// direct gateway event is still observed before any chat is opened.
+    func startGatewayObservation() {
+        gatewayObservationEnabled = true
+        guard gatewayObservationTask == nil else { return }
+
+        if gatewayObserverID == nil {
+            gatewayObservationGeneration &+= 1
+        }
+        let generation = gatewayObservationGeneration
+        gatewayObservationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.establishGatewayObservation(generation: generation)
+            if self.gatewayObservationGeneration == generation {
+                self.gatewayObservationTask = nil
+            }
+        }
+    }
+
+    /// Removes the shared-runtime observer when the owning sidebar surface is
+    /// discarded. Old callbacks are generation-checked and cannot refresh a
+    /// replacement account/profile; a later view must explicitly call
+    /// `startGatewayObservation()` before it reattaches.
+    func invalidateGatewayObservation() {
+        gatewayObservationGeneration &+= 1
+        gatewayObservationEnabled = false
+        loadGeneration &+= 1
+        isLoading = false
+        gatewayObservationTask?.cancel()
+        gatewayObservationTask = nil
+        sidebarRefreshTask?.cancel()
+        sidebarRefreshTask = nil
+        if let gatewayObserverID, let observedGatewayRuntime {
+            observedGatewayRuntime.removeObserver(gatewayObserverID)
+        }
+        gatewayObserverID = nil
+        observedGatewayRuntime = nil
+        isSidebarDirty = false
     }
 
     /// Root temp directory holding one UUID subdirectory per export
@@ -209,12 +344,32 @@ final class SessionListViewModel {
             },
             uniquingKeysWith: { first, _ in first }
         )
-        let remoteMatches = remoteContentSearchSessionIDs.compactMap { sessionID -> SessionSummary? in
+        let remoteMatches = orderedRemoteIDs.compactMap { sessionID -> SessionSummary? in
             guard !localMatchIDs.contains(sessionID) else { return nil }
-            return sessionsByID[sessionID]
+            let candidate = sessionsByID[sessionID] ?? remoteResolvedRows[sessionID]
+            guard let candidate,
+                  candidate.archived != true,
+                  automatedVisibility.shows(candidate),
+                  selectedProjectID == nil || candidate.projectId == selectedProjectID,
+                  !confirmedSessionDeletionIDs.contains(sessionID),
+                  pendingSessionDeletions[sessionID] == nil
+            else { return nil }
+            return candidate
         }
 
+        // Keep the existing transcript/sidebar ordering contract for remote
+        // content matches: the search route determines membership, while the
+        // same recency sort used for local matches determines presentation.
         return sortedLocalMatches + Self.sortedSessions(remoteMatches)
+    }
+
+    /// True when a search result was resolved from Hermes but is not part of
+    /// the canonical sidebar page. Such rows may be opened and have their
+    /// metadata changed, but destructive/legacy-only actions stay unavailable.
+    func isSearchOnlySession(_ session: SessionSummary) -> Bool {
+        guard let sessionID = Self.nonEmpty(session.sessionId) else { return false }
+        return remoteResolvedRows[sessionID] != nil
+            && !sessions.contains { Self.nonEmpty($0.sessionId) == sessionID }
     }
 
     func scheduledSessionGroups(
@@ -239,6 +394,7 @@ final class SessionListViewModel {
     /// Publishes the saved sidebar before any network await so cold-launch
     /// navigation can restore the last selected chat immediately.
     func prepareInitialCachedSessions(modelContext: ModelContext) {
+        refreshCachedSessionPreviews(modelContext: modelContext)
         _ = renderCachedSessionsBeforeReload(modelContext: modelContext)
     }
 
@@ -246,6 +402,11 @@ final class SessionListViewModel {
     func load(modelContext: ModelContext? = nil, animation: Animation? = nil) async -> Bool {
         loadGeneration &+= 1
         let generation = loadGeneration
+        let requestedProfile = Self.nonEmpty(activeProfileName) ?? "default"
+        let requestedProfileEpoch = activeProfileEpoch
+        archivedCountRequestGeneration &+= 1
+        let countRequestGeneration = archivedCountRequestGeneration
+        let requestRevision = metadataConfirmationRevision
         isLoading = true
         errorMessage = nil
         cacheErrorMessage = nil
@@ -254,23 +415,76 @@ final class SessionListViewModel {
         defer {
             if loadGeneration == generation {
                 isLoading = false
+                if isSidebarDirty { sidebarRefreshStateChanged() }
             }
         }
 
+        refreshCachedSessionPreviews(modelContext: modelContext)
         _ = renderCachedSessionsBeforeReload(modelContext: modelContext)
 
         do {
-            let response = try await client.sessions()
-            guard loadGeneration == generation else { return false }
-            let canonicalVisibleSessions = (response.sessions ?? [])
+            let response = try await client.directSessions(
+                profile: requestedProfile,
+                limit: 500,
+                offset: 0,
+                order: .recent
+            )
+            guard !Task.isCancelled,
+                  loadGeneration == generation,
+                  activeProfileEpoch == requestedProfileEpoch,
+                  (Self.nonEmpty(activeProfileName) ?? "default") == requestedProfile
+            else { return false }
+            let rawSessions = response.sessions
+            let assignments: [String: String]
+            do {
+                let organizer = try organizerStore.snapshot(server: server, profile: requestedProfile)
+                projects = organizer.groups
+                assignments = organizer.sessionAssignments
+            } catch {
+                // Local organizer corruption cannot block the canonical Hermes
+                // session list. Preserve the currently rendered local grouping
+                // and surface that organizer writes are unavailable.
+                assignments = Dictionary(uniqueKeysWithValues: sessions.compactMap { session in
+                    guard (Self.nonEmpty(session.profile) ?? requestedProfile) == requestedProfile,
+                          let id = Self.nonEmpty(session.sessionId),
+                          let group = Self.nonEmpty(session.projectId) else { return nil }
+                    return (id, group)
+                })
+                actionErrorMessage = error.localizedDescription
+            }
+            let canonicalVisibleSessions = rawSessions
+                .map { applyingLocalGroup($0, assignments: assignments, profile: requestedProfile) }
+                .map { session -> SessionSummary in
+                    guard let sessionID = Self.nonEmpty(session.sessionId),
+                          let pending = pendingMetadataMutations[
+                              PendingMetadataKey(profile: requestedProfile, sessionID: sessionID)
+                          ]
+                    else { return session }
+                    return applyingPendingMetadata(
+                        session,
+                        pending: pending,
+                        newerThan: requestRevision
+                    )
+                }
                 .filter { $0.archived != true && $0.shouldAppearInSessionList }
             for sessionID in pendingSessionDeletions.keys {
                 pendingSessionDeletions[sessionID]?.latestCanonicalSessions = canonicalVisibleSessions
-                pendingSessionDeletions[sessionID]?.latestCanonicalArchivedCount = response.archivedCount
+                pendingSessionDeletions[sessionID]?.latestCanonicalArchivedCount = archivedCount
             }
             let visibleSessions = sessionsAfterOptimisticDeletions(canonicalVisibleSessions)
             successfulLoadGeneration = generation
-            applySessions(visibleSessions, archivedCount: response.archivedCount, animation: animation)
+            applySessions(visibleSessions, archivedCount: archivedCount, animation: animation)
+            for (key, var pending) in Array(pendingMetadataMutations)
+                where key.profile == requestedProfile {
+                if pending.title?.revision ?? .min <= requestRevision { pending.title = nil }
+                if pending.pinned?.revision ?? .min <= requestRevision { pending.pinned = nil }
+                if pending.archived?.revision ?? .min <= requestRevision { pending.archived = nil }
+                if pending.title == nil, pending.pinned == nil, pending.archived == nil {
+                    pendingMetadataMutations.removeValue(forKey: key)
+                } else {
+                    pendingMetadataMutations[key] = pending
+                }
+            }
             isViewingCachedData = false
             clearCacheFirstSessionPlaceholder()
 
@@ -282,17 +496,34 @@ final class SessionListViewModel {
                 }
             }
 
+            // The profile-aggregate list is the canonical visible-row load, but
+            // its total is not an archive count. Fetch the archive-only total
+            // independently so a count failure cannot discard rows that have
+            // already been applied above.
+            await refreshArchivedCount(
+                profile: requestedProfile,
+                generation: generation,
+                profileEpoch: requestedProfileEpoch,
+                requestGeneration: countRequestGeneration
+            )
+
             return true
         } catch {
-            guard loadGeneration == generation else { return false }
+            guard loadGeneration == generation,
+                  activeProfileEpoch == requestedProfileEpoch,
+                  (Self.nonEmpty(activeProfileName) ?? "default") == requestedProfile
+            else { return false }
             guard !isCancellationError(error) else { return false }
 
             lastError = error
             sessionLoadError = error
             if CacheFallbackPolicy.shouldUseCache(for: error), let modelContext {
                 do {
+                    let profile = Self.nonEmpty(activeProfileName) ?? "default"
+                    let assignments = localAssignments(for: profile)
                     let cachedSessions = sessionsAfterOptimisticDeletions(
                         try CacheStore.cachedSessions(serverURL: server, in: modelContext)
+                            .map { applyingLocalGroup($0, assignments: assignments, profile: profile) }
                             .filter(\.shouldAppearInSessionList)
                     )
                     if !cachedSessions.isEmpty {
@@ -321,6 +552,101 @@ final class SessionListViewModel {
         }
     }
 
+    private func refreshCachedSessionPreviews(modelContext: ModelContext?) {
+        guard let modelContext else {
+            cachedSessionPreviews = [:]
+            return
+        }
+
+        do {
+            cachedSessionPreviews = try CacheStore.cachedSessionPreviews(
+                serverURL: server,
+                in: modelContext
+            )
+        } catch {
+            cachedSessionPreviews = [:]
+            cacheErrorMessage = error.localizedDescription
+        }
+    }
+
+    private func refreshArchivedCount(
+        profile requestedProfile: String,
+        generation: Int,
+        profileEpoch: Int,
+        requestGeneration: Int
+    ) async {
+        guard !Task.isCancelled,
+              loadGeneration == generation,
+              activeProfileEpoch == profileEpoch,
+              archivedCountRequestGeneration == requestGeneration,
+              (Self.nonEmpty(activeProfileName) ?? "default") == requestedProfile
+        else { return }
+
+        do {
+            let response = try await client.directSingleProfileSessions(
+                profile: requestedProfile,
+                limit: 0,
+                offset: 0,
+                order: .recent,
+                archived: .only
+            )
+
+            guard !Task.isCancelled,
+                  loadGeneration == generation,
+                  activeProfileEpoch == profileEpoch,
+                  archivedCountRequestGeneration == requestGeneration,
+                  (Self.nonEmpty(activeProfileName) ?? "default") == requestedProfile
+            else { return }
+
+            guard let total = response.total, total >= 0 else {
+                throw ArchivedCountResponseError()
+            }
+
+            archivedCount = total
+            lastError = nil
+            errorMessage = nil
+            for sessionID in pendingSessionDeletions.keys {
+                pendingSessionDeletions[sessionID]?.latestCanonicalArchivedCount = total
+            }
+        } catch {
+            guard !Task.isCancelled,
+                  loadGeneration == generation,
+                  activeProfileEpoch == profileEpoch,
+                  archivedCountRequestGeneration == requestGeneration,
+                  (Self.nonEmpty(activeProfileName) ?? "default") == requestedProfile,
+                  !isCancellationError(error)
+            else { return }
+
+            // Keep the successful visible-row load successful. This message is
+            // deliberately nonblocking: it is only shown by the existing list
+            // error surface when no rows are available, and never triggers the
+            // cache fallback/retry path for a count-only failure.
+            lastError = error
+            errorMessage = CacheFallbackPolicy.sendBannerMessage(for: error)
+        }
+    }
+
+    /// Refreshes only the archive total after an archive mutation. The
+    /// operation is scoped to the currently selected profile and cannot
+    /// publish after a newer load, profile switch, or cancellation.
+    func refreshArchivedCountForProfile(_ profile: String) async {
+        let requestedProfile = Self.nonEmpty(profile) ?? "default"
+        guard !isViewingCachedData,
+              requestedProfile == (Self.nonEmpty(activeProfileName) ?? "default")
+        else { return }
+
+        archivedCountRequestGeneration &+= 1
+        let requestGeneration = archivedCountRequestGeneration
+        let generation = loadGeneration
+        let profileEpoch = activeProfileEpoch
+        await refreshArchivedCount(
+            profile: requestedProfile,
+            generation: generation,
+            profileEpoch: profileEpoch,
+            requestGeneration: requestGeneration
+        )
+    }
+
     /// Paints the last known sidebar immediately on a cold launch while the live
     /// `/api/sessions` reconcile is in flight. This is an optimistic placeholder,
     /// not offline mode: `isViewingCachedData` stays false unless the request fails.
@@ -328,8 +654,17 @@ final class SessionListViewModel {
         guard sessions.isEmpty, let modelContext else { return false }
 
         do {
+            let profile = Self.nonEmpty(activeProfileName) ?? "default"
+            let assignments: [String: String]
+            do {
+                assignments = try organizerStore.snapshot(server: server, profile: profile).sessionAssignments
+            } catch {
+                assignments = [:]
+                actionErrorMessage = error.localizedDescription
+            }
             let cachedSessions = sessionsAfterOptimisticDeletions(
                 try CacheStore.cachedSessions(serverURL: server, in: modelContext)
+                    .map { applyingLocalGroup($0, assignments: assignments, profile: profile) }
                     .filter(\.shouldAppearInSessionList)
             )
             guard !cachedSessions.isEmpty else { return false }
@@ -359,22 +694,143 @@ final class SessionListViewModel {
         sessionsBeforeCacheFirstPlaceholder = []
     }
 
+    private var sidebarRefreshBlocked: Bool {
+        sidebarEditing || sidebarDestructiveActionPending
+            || isDeletingProject || isRenamingSession || isRenamingProject
+            || isMovingSession || isSwitchingActiveProfile || !mutatingSessionIDs.isEmpty
+    }
+
+    private func sidebarRefreshStateChanged() {
+        guard isSidebarDirty, !sidebarRefreshBlocked else { return }
+        scheduleSidebarRefresh()
+    }
+
+    private func establishGatewayObservation(generation: Int) async {
+        guard gatewayObservationEnabled, generation == gatewayObservationGeneration else { return }
+
+        let runtime: HermesServerRuntime
+        if let observedGatewayRuntime, gatewayObserverID != nil {
+            runtime = observedGatewayRuntime
+        } else {
+            guard let resolved = try? await gatewayRuntimeProvider(client),
+                  gatewayObservationEnabled,
+                  generation == gatewayObservationGeneration,
+                  resolved.origin == server
+            else { return }
+
+            runtime = resolved
+            observedGatewayRuntime = runtime
+            gatewayObserverID = runtime.observe(event: { [weak self] event in
+                guard let self, self.gatewayObservationGeneration == generation else { return }
+                self.receiveGatewayEvent(event)
+            }, recover: { _ in }, ready: { [weak self] in
+                guard let self, self.gatewayObservationEnabled,
+                      self.gatewayObservationGeneration == generation else { return }
+                self.isSidebarDirty = true
+                self.scheduleSidebarRefresh()
+            })
+        }
+
+        do {
+            try await runtime.connect()
+            guard gatewayObservationEnabled, generation == gatewayObservationGeneration else { return }
+        } catch {
+            guard gatewayObservationEnabled, generation == gatewayObservationGeneration else { return }
+            // The shared runtime owns reconnect policy. Keep the observer so a
+            // later explicit start can retry connection without another socket.
+        }
+    }
+
+    private func receiveGatewayEvent(_ event: HermesGatewayEvent) {
+        guard event.method == "event", event.type == "sessions.changed" else { return }
+        isSidebarDirty = true
+        scheduleSidebarRefresh()
+    }
+
+    private func scheduleSidebarRefresh() {
+        guard isSidebarDirty, !sidebarRefreshBlocked else { return }
+        sidebarRefreshTask?.cancel()
+        let observationGeneration = gatewayObservationGeneration
+        sidebarRefreshTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .milliseconds(300))
+                guard let self,
+                      self.gatewayObservationGeneration == observationGeneration,
+                      self.isSidebarDirty,
+                      !self.sidebarRefreshBlocked,
+                      !self.isLoading
+                else { return }
+
+                self.sidebarRefreshTask = nil
+                self.isSidebarDirty = false
+                let refreshed = await self.load()
+                guard self.gatewayObservationEnabled,
+                      self.gatewayObservationGeneration == observationGeneration
+                else { return }
+                if !refreshed {
+                    self.isSidebarDirty = true
+                }
+            } catch {
+                // Cancellation is the normal debounce path. A failed refresh
+                // leaves the dirty bit set for the next safe transition/event.
+                if let self, !Task.isCancelled {
+                    self.sidebarRefreshTask = nil
+                    self.isSidebarDirty = true
+                }
+            }
+        }
+    }
+
     func loadActiveProfile() async {
-        guard !isLoadingActiveProfile else { return }
+        if isLoadingActiveProfile {
+            await withCheckedContinuation { continuation in
+                activeProfileLoadWaiters.append(continuation)
+            }
+            return
+        }
 
         isLoadingActiveProfile = true
         activeProfileErrorMessage = nil
-        defer { isLoadingActiveProfile = false }
+        defer {
+            isLoadingActiveProfile = false
+            let waiters = activeProfileLoadWaiters
+            activeProfileLoadWaiters.removeAll()
+            waiters.forEach { $0.resume() }
+        }
 
         do {
-            let response = try await client.profiles()
-            applyActiveProfile(response)
+            let response = try await client.directProfiles()
+            let inventorySelection = response.active
+                ?? response.profiles?.first(where: { $0.isActive == true })?.normalizedName
+            let runningSelection: String?
+            if locallySelectedProfileName != nil || inventorySelection != nil {
+                // Older compatible servers may still include an authoritative
+                // selection in the inventory response.
+                runningSelection = nil
+            } else {
+                // Stock inventory is only metadata. The running dashboard
+                // identity is `current`, not the sticky future-CLI `active`.
+                runningSelection = try await client.directActiveProfile().current
+            }
+            // Resolve the local selection after every await: a user may have
+            // switched profiles while either request was pending.
+            let scoped = ProfilesResponse(profiles: response.profiles,
+                                          active: locallySelectedProfileName
+                                              ?? inventorySelection
+                                              ?? Self.nonEmpty(runningSelection),
+                                          singleProfileMode: response.singleProfileMode)
+            guard scoped.active != nil else {
+                throw APIError.http(statusCode: -1, body: nil)
+            }
+            applyActiveProfile(scoped)
         } catch {
             guard !isCancellationError(error) else { return }
 
             activeProfileErrorMessage = error.localizedDescription
         }
     }
+
+    private var locallySelectedProfileName: String?
 
     func switchActiveProfile(_ profile: ProfileSummary) async -> Bool {
         guard !isViewingCachedData else {
@@ -387,6 +843,7 @@ final class SessionListViewModel {
             return false
         }
 
+        locallySelectedProfileName = profileName
         guard profileName != activeProfileName else {
             return true
         }
@@ -400,34 +857,20 @@ final class SessionListViewModel {
             switchingActiveProfileName = nil
         }
 
-        do {
-            let response = try await client.switchProfile(name: profileName)
-            if let error = Self.nonEmpty(response.error) {
-                activeProfileErrorMessage = error
-                return false
-            }
-
-            let resolvedName = Self.nonEmpty(response.active) ?? profileName
-            // The switch response has no `single_profile_mode` field; carry the
-            // last known value forward so the switcher visibility doesn't flap.
-            let profileResponse = ProfilesResponse(
-                profiles: response.profiles ?? profileOptions,
-                active: resolvedName,
-                singleProfileMode: isSingleProfileMode
-            )
-            applyActiveProfile(
-                profileResponse,
-                fallbackProfile: profile,
-                fallbackDefaultModel: response.defaultModel
-            )
-            return true
-        } catch {
-            guard !isCancellationError(error) else { return false }
-
-            lastError = error
-            activeProfileErrorMessage = error.localizedDescription
-            return false
-        }
+        // Profile selection is local UI state. The direct sidebar request
+        // carries this profile explicitly; switching must not mutate a global
+        // server/WebUI profile or issue a legacy `/api/profile/switch` call.
+        let profileResponse = ProfilesResponse(
+            profiles: profileOptions,
+            active: profileName,
+            singleProfileMode: isSingleProfileMode
+        )
+        applyActiveProfile(
+            profileResponse,
+            fallbackProfile: profile,
+            fallbackDefaultModel: profile.model
+        )
+        return true
     }
 
     func searchSessions(
@@ -437,9 +880,20 @@ final class SessionListViewModel {
         debounceNanoseconds: UInt64 = 350_000_000
     ) async {
         let query = Self.normalizedSearchQuery(rawQuery)
+        let profile = Self.nonEmpty(activeProfileName) ?? "default"
+        remoteSearchGeneration &+= 1
+        let generation = remoteSearchGeneration
         activeRemoteSearchQuery = query
+        activeRemoteSearchProfile = profile
         remoteContentSearchSessionIDs = []
+        orderedRemoteIDs = []
+        remoteResolvedRows = [:]
         searchErrorMessage = nil
+        defer {
+            if remoteSearchGeneration == generation {
+                isSearchingRemoteSessions = false
+            }
+        }
 
         guard !query.isEmpty, !isViewingCachedData else {
             isSearchingRemoteSessions = false
@@ -451,30 +905,129 @@ final class SessionListViewModel {
                 try await Task.sleep(nanoseconds: debounceNanoseconds)
             }
 
-            guard !Task.isCancelled, activeRemoteSearchQuery == query else { return }
+            guard !Task.isCancelled,
+                  remoteSearchGeneration == generation,
+                  activeRemoteSearchQuery == query,
+                  activeRemoteSearchProfile == profile,
+                  (Self.nonEmpty(activeProfileName) ?? "default") == profile
+            else { return }
 
             isSearchingRemoteSessions = true
-            let response = try await client.searchSessions(query: query, content: content, depth: depth)
+            // The verified stock search route has no content/depth query
+            // flags. `content` remains source-compatible for existing callers;
+            // it controls which returned match kinds are admitted below.
+            _ = depth
+            let response = try await client.directSearchSessions(
+                query: query,
+                profile: profile,
+                limit: 20
+            )
 
-            guard !Task.isCancelled, activeRemoteSearchQuery == query else { return }
+            guard !Task.isCancelled,
+                  remoteSearchGeneration == generation,
+                  activeRemoteSearchQuery == query,
+                  activeRemoteSearchProfile == profile,
+                  (Self.nonEmpty(activeProfileName) ?? "default") == profile
+            else { return }
 
-            remoteContentSearchSessionIDs = contentMatchIDs(from: response.sessions ?? [])
+            let candidateIDs = remoteSearchIDs(
+                from: response.results ?? [],
+                content: content
+            )
+            let assignments = localAssignments(for: profile)
+            var resolvedRows: [String: SessionSummary] = [:]
+            var acceptedIDs: [String] = []
+            var fatalResolutionError: Error?
+            let knownIDs = Set(sessions.compactMap { session -> String? in
+                guard session.archived != true,
+                      (Self.nonEmpty(session.profile) ?? "default") == profile,
+                      let sessionID = Self.nonEmpty(session.sessionId)
+                else { return nil }
+                return sessionID
+            })
+
+            for sessionID in candidateIDs {
+                guard !Task.isCancelled,
+                      remoteSearchGeneration == generation,
+                      activeRemoteSearchQuery == query,
+                      activeRemoteSearchProfile == profile,
+                      (Self.nonEmpty(activeProfileName) ?? "default") == profile
+                else { return }
+                guard !confirmedSessionDeletionIDs.contains(sessionID),
+                      pendingSessionDeletions[sessionID] == nil
+                else { continue }
+
+                if knownIDs.contains(sessionID) {
+                    acceptedIDs.append(sessionID)
+                    continue
+                }
+
+                do {
+                    let resolved = try await client.directSessionDetail(
+                        sessionID: sessionID,
+                        profile: profile
+                    )
+                    guard resolved.sessionId == sessionID,
+                          (Self.nonEmpty(resolved.profile) ?? profile) == profile,
+                          resolved.archived == false
+                    else { continue }
+                    resolvedRows[sessionID] = applyingLocalGroup(
+                        resolved,
+                        assignments: assignments,
+                        profile: profile
+                    )
+                    acceptedIDs.append(sessionID)
+                } catch {
+                    if Self.isSearchResolutionAuthFailure(error) {
+                        throw error
+                    }
+                    if !Self.isSearchResolutionMiss(error) {
+                        fatalResolutionError = error
+                        break
+                    }
+                }
+            }
+
+            guard !Task.isCancelled,
+                  remoteSearchGeneration == generation,
+                  activeRemoteSearchQuery == query,
+                  activeRemoteSearchProfile == profile,
+                  (Self.nonEmpty(activeProfileName) ?? "default") == profile
+            else { return }
+
+            orderedRemoteIDs = acceptedIDs
+            remoteContentSearchSessionIDs = acceptedIDs
+            remoteResolvedRows = resolvedRows
             isSearchingRemoteSessions = false
+            if let fatalResolutionError {
+                lastError = fatalResolutionError
+                searchErrorMessage = fatalResolutionError.localizedDescription
+            }
         } catch {
-            guard activeRemoteSearchQuery == query else { return }
+            guard remoteSearchGeneration == generation,
+                  activeRemoteSearchQuery == query,
+                  activeRemoteSearchProfile == profile,
+                  (Self.nonEmpty(activeProfileName) ?? "default") == profile
+            else { return }
 
             isSearchingRemoteSessions = false
             guard !isCancellationError(error) else { return }
 
             remoteContentSearchSessionIDs = []
+            orderedRemoteIDs = []
+            remoteResolvedRows = [:]
             searchErrorMessage = error.localizedDescription
             lastError = error
         }
     }
 
     func clearSearchResults() {
+        remoteSearchGeneration &+= 1
         activeRemoteSearchQuery = nil
+        activeRemoteSearchProfile = nil
         remoteContentSearchSessionIDs = []
+        orderedRemoteIDs = []
+        remoteResolvedRows = [:]
         searchErrorMessage = nil
         isSearchingRemoteSessions = false
     }
@@ -485,39 +1038,40 @@ final class SessionListViewModel {
 
     @discardableResult
     func refreshActiveSessionStatesIfNeeded(
-        streamIDs rawStreamIDs: [String],
         modelContext: ModelContext? = nil
     ) async -> ActiveSessionStateRefreshResult {
-        guard !isViewingCachedData, !isLoading else { return .unchanged }
-
-        let streamIDs = Self.normalizedStreamIDs(rawStreamIDs)
-        guard !streamIDs.isEmpty else {
-            return await load(modelContext: modelContext) ? .reloaded : loadFailureRefreshResult
-        }
-
-        for streamID in streamIDs {
-            do {
-                let response = try await client.chatStreamStatus(streamID: streamID)
-                guard response.active == false else { continue }
-                return await load(modelContext: modelContext) ? .reloaded : loadFailureRefreshResult
-            } catch {
-                guard !isCancellationError(error) else { return .unchanged }
-                if case APIError.unauthorized = error {
-                    lastError = error
-                    return .failed
-                }
-                continue
-            }
-        }
-
-        return .unchanged
+        guard !Task.isCancelled, !isViewingCachedData, !isLoading,
+              !sidebarRefreshBlocked else { return .unchanged }
+        // Connected direct sessions use the existing coalesced invalidation path.
+        // The slow monitor is only a fallback while gateway observation is unavailable.
+        if gatewayObservationEnabled, gatewayObserverID != nil,
+           let observedGatewayRuntime, observedGatewayRuntime.origin == server,
+           observedGatewayRuntime.state == .ready { return .unchanged }
+        return await load(modelContext: modelContext) ? .reloaded : loadFailureRefreshResult
     }
 
     func loadSessionForDeepLink(id rawSessionID: String, modelContext: ModelContext? = nil) async -> SessionSummary? {
         let sessionID = rawSessionID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !sessionID.isEmpty else { return nil }
+        guard !confirmedSessionDeletionIDs.contains(sessionID),
+              pendingSessionDeletions[sessionID] == nil
+        else { return nil }
 
-        if let loadedSession = sessions.first(where: { $0.sessionId == sessionID }) {
+        let requestedProfile = Self.nonEmpty(activeProfileName) ?? "default"
+        let generation = loadGeneration
+        let requestedServer = server
+        let isCurrentRequest: () -> Bool = { [weak self] in
+            guard let self else { return false }
+            return !Task.isCancelled
+                && self.loadGeneration == generation
+                && self.server == requestedServer
+                && (Self.nonEmpty(self.activeProfileName) ?? "default") == requestedProfile
+        }
+
+        if let loadedSession = sessions.first(where: {
+            $0.sessionId == sessionID
+                && (Self.nonEmpty($0.profile) ?? "default") == requestedProfile
+        }) {
             return loadedSession
         }
 
@@ -527,7 +1081,10 @@ final class SessionListViewModel {
         if let modelContext {
             do {
                 if let cachedSession = try CacheStore.cachedSessions(serverURL: server, in: modelContext)
-                    .first(where: { $0.sessionId == sessionID }) {
+                    .first(where: {
+                        $0.sessionId == sessionID
+                            && (Self.nonEmpty($0.profile) ?? "default") == requestedProfile
+                    }) {
                     return cachedSession
                 }
             } catch {
@@ -536,13 +1093,17 @@ final class SessionListViewModel {
         }
 
         do {
-            let response = try await client.session(id: sessionID, includeMessages: false, messageLimit: nil)
-            guard let sessionDetail = response.session else {
-                actionErrorMessage = String(localized: "The server did not return the linked session.")
-                return nil
-            }
+            let session = try await client.directSessionDetail(
+                sessionID: sessionID,
+                profile: requestedProfile
+            )
+            guard isCurrentRequest(),
+                  session.sessionId == sessionID,
+                  (Self.nonEmpty(session.profile) ?? requestedProfile) == requestedProfile,
+                  !confirmedSessionDeletionIDs.contains(sessionID),
+                  pendingSessionDeletions[sessionID] == nil
+            else { return nil }
 
-            let session = SessionSummary(from: sessionDetail)
             if session.archived != true,
                session.shouldAppearInSessionList,
                !sessions.contains(where: { $0.sessionId == session.sessionId }) {
@@ -559,6 +1120,8 @@ final class SessionListViewModel {
 
             return session
         } catch {
+            guard isCurrentRequest() else { return nil }
+            guard !isCancellationError(error) else { return nil }
             lastError = error
             actionErrorMessage = error.localizedDescription
             return nil
@@ -571,16 +1134,13 @@ final class SessionListViewModel {
         modelContext: ModelContext? = nil,
         animation: Animation? = nil
     ) async -> Bool {
-        guard let sessionId = Self.nonEmpty(session.sessionId) else {
-            actionErrorMessage = String(localized: "The server did not provide a session ID.")
-            return false
-        }
-
-        guard beginSessionMutation(sessionId) else { return false }
-        defer { endSessionMutation(sessionId) }
-
-        return await mutate(modelContext: modelContext, animation: animation) {
-            try await sessionMutator.setPinned(pinned, sessionID: sessionId)
+        await mutateDirectMetadata(
+            session,
+            modelContext: modelContext,
+            animation: animation,
+            field: .pinned(pinned)
+        ) { [sessionMutator] sessionID, profile in
+            try await sessionMutator.setPinned(pinned, sessionID: sessionID, profile: profile)
         }
     }
 
@@ -589,17 +1149,21 @@ final class SessionListViewModel {
         modelContext: ModelContext? = nil,
         animation: Animation? = nil
     ) async -> Bool {
-        guard let sessionId = Self.nonEmpty(session.sessionId) else {
-            actionErrorMessage = String(localized: "The server did not provide a session ID.")
-            return false
+        let profile = Self.nonEmpty(activeProfileName) ?? "default"
+        let profileEpoch = activeProfileEpoch
+        let succeeded = await mutateDirectMetadata(
+            session,
+            modelContext: modelContext,
+            animation: animation,
+            field: .archived(true)
+        ) { [sessionMutator] sessionID, profile in
+            try await sessionMutator.archive(sessionID: sessionID, profile: profile)
         }
-
-        guard beginSessionMutation(sessionId) else { return false }
-        defer { endSessionMutation(sessionId) }
-
-        return await mutate(modelContext: modelContext, animation: animation) {
-            try await sessionMutator.archive(sessionID: sessionId)
-        }
+        guard succeeded, activeProfileEpoch == profileEpoch else { return false }
+        await refreshArchivedCountForProfile(profile)
+        // A count failure does not undo a confirmed archive. A replaced UI
+        // scope must not consume this completion as its own navigation action.
+        return !Task.isCancelled && activeProfileEpoch == profileEpoch
     }
 
     func delete(
@@ -611,11 +1175,28 @@ final class SessionListViewModel {
             actionErrorMessage = String(localized: "Reconnect to the server to delete a session.")
             return false
         }
+        guard !isSearchOnlySession(session) else {
+            actionErrorMessage = String(localized: "This search result cannot be deleted yet.")
+            return false
+        }
 
         guard let sessionId = Self.nonEmpty(session.sessionId) else {
             actionErrorMessage = String(localized: "The server did not provide a session ID.")
             return false
         }
+
+        let profile = Self.nonEmpty(session.profile) ?? Self.nonEmpty(activeProfileName) ?? "default"
+        let activeProfile = Self.nonEmpty(activeProfileName) ?? "default"
+        guard profile == activeProfile else {
+            actionErrorMessage = String(localized: "Switch to this session's profile before deleting it.")
+            return false
+        }
+        let scope = PendingMetadataKey(profile: profile, sessionID: sessionId)
+        guard !deleteOutcomeUnknownKeys.contains(scope) else {
+            actionErrorMessage = DirectSessionDeleteError.outcomeUnknown.localizedDescription
+            return false
+        }
+        let profileEpoch = activeProfileEpoch
 
         guard beginSessionMutation(sessionId) else { return false }
         defer { endSessionMutation(sessionId) }
@@ -640,19 +1221,41 @@ final class SessionListViewModel {
         )
         if let modelContext {
             do {
-                try CacheStore.deleteSession(sessionID: sessionId, serverURL: server, in: modelContext)
+                try CacheStore.deleteSession(
+                    sessionID: sessionId,
+                    serverURL: server,
+                    profile: profile,
+                    in: modelContext
+                )
             } catch {
                 cacheErrorMessage = error.localizedDescription
             }
         }
 
         do {
-            let response = try await sessionMutator.delete(sessionID: sessionId)
-            if response.ok == false {
-                throw SessionMutationRejectedError(
-                    message: Self.nonEmpty(response.error)
-                        ?? String(localized: "The server did not delete the session.")
-                )
+            let runtime = try await gatewayRuntimeProvider(client)
+            guard !Task.isCancelled, activeProfileEpoch == profileEpoch,
+                  (Self.nonEmpty(activeProfileName) ?? "default") == profile else {
+                rollbackPendingSessionDeletion(sessionId, modelContext: modelContext, animation: animation)
+                return false
+            }
+            try await sessionMutator.delete(
+                sessionID: sessionId,
+                profile: profile,
+                runtime: runtime,
+                validateBeforeDispatch: { [weak self] in
+                    guard let self else { return false }
+                    return !Task.isCancelled && self.activeProfileEpoch == profileEpoch
+                        && (Self.nonEmpty(self.activeProfileName) ?? "default") == profile
+                }
+            )
+
+            // The exact delete is confirmed, but a replacement profile must not
+            // inherit this profile's pending state or global row tombstone.
+            guard !Task.isCancelled, activeProfileEpoch == profileEpoch,
+                  (Self.nonEmpty(activeProfileName) ?? "default") == profile else {
+                pendingSessionDeletions.removeValue(forKey: sessionId)
+                return false
             }
 
             // Keep the tombstone active while the follow-up list load runs so an
@@ -660,13 +1263,23 @@ final class SessionListViewModel {
             confirmedSessionDeletionIDs.insert(sessionId)
             _ = await load(modelContext: modelContext, animation: animation)
             pendingSessionDeletions.removeValue(forKey: sessionId)
+            guard !Task.isCancelled, activeProfileEpoch == profileEpoch,
+                  (Self.nonEmpty(activeProfileName) ?? "default") == profile else { return false }
             actionErrorMessage = nil
             lastError = nil
             return true
+        } catch DirectSessionDeleteError.outcomeUnknown {
+            deleteOutcomeUnknownKeys.insert(scope)
+            rollbackPendingSessionDeletion(sessionId, modelContext: modelContext, animation: animation)
+            guard !Task.isCancelled, activeProfileEpoch == profileEpoch,
+                  (Self.nonEmpty(activeProfileName) ?? "default") == profile else { return false }
+            actionErrorMessage = DirectSessionDeleteError.outcomeUnknown.localizedDescription
+            return false
         } catch {
             let wasCancelled = isCancellationError(error)
             rollbackPendingSessionDeletion(sessionId, modelContext: modelContext, animation: animation)
-            guard !wasCancelled else { return false }
+            guard !wasCancelled, activeProfileEpoch == profileEpoch,
+                  (Self.nonEmpty(activeProfileName) ?? "default") == profile else { return false }
 
             lastError = error
             actionErrorMessage = error.localizedDescription
@@ -696,47 +1309,44 @@ final class SessionListViewModel {
         }
 
         isRenamingSession = true
-        actionErrorMessage = nil
-        lastError = nil
         defer { isRenamingSession = false }
-
-        do {
-            let response = try await sessionMutator.rename(sessionID: sessionId, title: title)
-            if let error = Self.nonEmpty(response.error) {
-                actionErrorMessage = error
-                return false
-            }
-
-            let resolvedTitle = Self.nonEmpty(response.session?.title) ?? title
-            let baseSession = sessions.first(where: { $0.sessionId == sessionId }) ?? session
-            let updatedSession = baseSession.replacingTitle(with: resolvedTitle)
-            if let existingIndex = sessions.firstIndex(where: { $0.sessionId == sessionId }) {
-                sessions[existingIndex] = updatedSession
-            }
-
-            if let modelContext {
-                do {
-                    try CacheStore.cacheSession(updatedSession, serverURL: server, in: modelContext)
-                } catch {
-                    cacheErrorMessage = error.localizedDescription
-                }
-            }
-
-            return true
-        } catch {
-            guard !isCancellationError(error) else { return false }
-
-            lastError = error
-            actionErrorMessage = error.localizedDescription
-            return false
+        return await mutateDirectMetadata(
+            session,
+            modelContext: modelContext,
+            animation: nil,
+            field: .title(title)
+        ) { [sessionMutator] sessionID, profile in
+            let response = try await sessionMutator.rename(
+                sessionID: sessionID,
+                title: title,
+                profile: profile
+            )
+            return response.session ?? session
         }
     }
 
     func duplicate(_ session: SessionSummary, modelContext: ModelContext? = nil) async -> SessionSummary? {
+        guard !isSearchOnlySession(session) else {
+            actionErrorMessage = String(localized: "This search result cannot be duplicated yet.")
+            return nil
+        }
         guard let sessionId = Self.nonEmpty(session.sessionId) else {
             actionErrorMessage = String(localized: "The server did not provide a session ID.")
             return nil
         }
+
+        let profile = Self.nonEmpty(session.profile) ?? Self.nonEmpty(activeProfileName) ?? "default"
+        let activeProfile = Self.nonEmpty(activeProfileName) ?? "default"
+        guard profile == activeProfile else {
+            actionErrorMessage = String(localized: "Switch to this session's profile before duplicating it.")
+            return nil
+        }
+        let scope = PendingMetadataKey(profile: profile, sessionID: sessionId)
+        guard !duplicateOutcomeUnknownKeys.contains(scope) else {
+            actionErrorMessage = String(localized: "Hermes may already have duplicated this session. Inspect the session list for the copy; another duplicate is blocked.")
+            return nil
+        }
+        let profileEpoch = activeProfileEpoch
 
         guard beginSessionMutation(sessionId) else { return nil }
         defer { endSessionMutation(sessionId) }
@@ -745,17 +1355,45 @@ final class SessionListViewModel {
         lastError = nil
 
         do {
+            let runtime = try await gatewayRuntimeProvider(client)
+            guard !Task.isCancelled, activeProfileEpoch == profileEpoch,
+                  (Self.nonEmpty(activeProfileName) ?? "default") == profile else { return nil }
             let result = try await sessionMutator.duplicate(
                 sessionID: sessionId,
-                title: duplicateTitle(for: session)
+                title: duplicateTitle(for: session),
+                profile: profile,
+                runtime: runtime
             )
 
+            if result.session == nil, result.createdSessionID != nil {
+                // Record this against the original scope before considering the
+                // currently displayed profile. The child exists even if the UI
+                // switched profiles while its detail read was pending.
+                duplicateOutcomeUnknownKeys.insert(scope)
+            }
+            guard !Task.isCancelled, activeProfileEpoch == profileEpoch,
+                  (Self.nonEmpty(activeProfileName) ?? "default") == profile else { return nil }
+
             guard let duplicatedSession = result.session else {
+                if let childID = result.createdSessionID {
+                    await load(modelContext: modelContext)
+                    guard !Task.isCancelled, activeProfileEpoch == profileEpoch,
+                          (Self.nonEmpty(activeProfileName) ?? "default") == profile else { return nil }
+                    if let recovered = sessions.first(where: {
+                        Self.nonEmpty($0.sessionId) == childID
+                            && (Self.nonEmpty($0.profile) ?? profile) == profile
+                    }) {
+                        duplicateOutcomeUnknownKeys.remove(scope)
+                        return recovered
+                    }
+                }
                 actionErrorMessage = result.errorMessage
                 return nil
             }
 
             await load(modelContext: modelContext)
+            guard !Task.isCancelled, activeProfileEpoch == profileEpoch,
+                  (Self.nonEmpty(activeProfileName) ?? "default") == profile else { return nil }
             if !sessions.contains(where: { $0.sessionId == duplicatedSession.sessionId }) {
                 sessions.insert(duplicatedSession, at: 0)
 
@@ -768,21 +1406,34 @@ final class SessionListViewModel {
                 }
             }
             return duplicatedSession
+        } catch DirectSessionBranchError.outcomeUnknown {
+            duplicateOutcomeUnknownKeys.insert(scope)
+            guard !Task.isCancelled, activeProfileEpoch == profileEpoch,
+                  (Self.nonEmpty(activeProfileName) ?? "default") == profile else { return nil }
+            actionErrorMessage = String(localized: "Hermes may already have duplicated this session. Inspect the session list for the copy; another duplicate is blocked.")
+            return nil
         } catch {
+            guard !Task.isCancelled, activeProfileEpoch == profileEpoch,
+                  (Self.nonEmpty(activeProfileName) ?? "default") == profile else { return nil }
             lastError = error
             actionErrorMessage = error.localizedDescription
             return nil
         }
     }
 
-    /// Downloads the session transcript (`GET /api/session/export`) and writes
+    /// Downloads the scoped stock transcript and writes
     /// it to a unique temp directory so the share sheet can offer it as a file
     /// with a real filename. Returns the file URL, or nil after surfacing the
     /// failure through the standard action-error alert. The caller owns
     /// cleanup of the returned file's parent directory after sharing.
-    func export(_ session: SessionSummary, format: SessionExportFormat) async -> URL? {
+    func export(_ session: SessionSummary, format: SessionExportFormat,
+                writeFile: (@Sendable (Data, URL) async throws -> Void)? = nil) async -> URL? {
         guard !isViewingCachedData else {
             actionErrorMessage = String(localized: "Reconnect to the server to export a session.")
+            return nil
+        }
+        guard !isSearchOnlySession(session) else {
+            actionErrorMessage = String(localized: "This search result cannot be exported yet.")
             return nil
         }
 
@@ -796,6 +1447,8 @@ final class SessionListViewModel {
         // double-tap from firing two exports.
         guard beginSessionMutation(sessionId) else { return nil }
         defer { endSessionMutation(sessionId) }
+        let profileEpoch = activeProfileEpoch
+        let profile = Self.nonEmpty(session.profile) ?? "default"
 
         actionErrorMessage = nil
         lastError = nil
@@ -804,17 +1457,29 @@ final class SessionListViewModel {
             let file = try await client.exportSession(
                 id: sessionId,
                 format: format,
-                fallbackTitle: session.title
+                fallbackTitle: session.title,
+                profile: profile
             )
+
+            try Task.checkCancellation()
+            guard activeProfileEpoch == profileEpoch else { return nil }
 
             let directory = Self.exportsRootDirectory
                 .appendingPathComponent(UUID().uuidString, isDirectory: true)
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-
             let fileURL = directory.appendingPathComponent(file.filename)
-            try file.data.write(to: fileURL, options: .atomic)
-            return fileURL
+            do {
+                if let writeFile { try await writeFile(file.data, fileURL) }
+                else { try await SessionExportFile.write(file.data, to: fileURL) }
+                try Task.checkCancellation()
+                guard activeProfileEpoch == profileEpoch else { throw CancellationError() }
+                return fileURL
+            } catch {
+                // Only this operation's new UUID directory; never sweep other shares.
+                await Task.detached { try? FileManager.default.removeItem(at: directory) }.value
+                throw error
+            }
         } catch {
+            guard activeProfileEpoch == profileEpoch else { return nil }
             guard !isCancellationError(error) else { return nil }
 
             lastError = error
@@ -830,8 +1495,10 @@ final class SessionListViewModel {
         defer { isLoadingProjects = false }
 
         do {
-            let response = try await client.projects()
-            projects = response.projects ?? []
+            projects = try organizerStore.groups(
+                server: server,
+                profile: Self.nonEmpty(activeProfileName) ?? "default"
+            )
         } catch {
             guard !isCancellationError(error) else { return }
 
@@ -841,6 +1508,10 @@ final class SessionListViewModel {
     }
 
     func move(_ session: SessionSummary, to projectID: String?, modelContext: ModelContext? = nil) async {
+        guard !isSearchOnlySession(session) else {
+            actionErrorMessage = String(localized: "This search result cannot be moved yet.")
+            return
+        }
         guard let sessionId = Self.nonEmpty(session.sessionId) else {
             actionErrorMessage = String(localized: "The server did not provide a session ID.")
             return
@@ -852,8 +1523,18 @@ final class SessionListViewModel {
         isMovingSession = true
         defer { isMovingSession = false }
 
-        _ = await mutate(modelContext: modelContext) {
-            try await sessionMutator.move(sessionID: sessionId, to: projectID)
+        do {
+            let profile = Self.nonEmpty(session.profile) ?? Self.nonEmpty(activeProfileName) ?? "default"
+            try organizerStore.assignSession(sessionId, toGroup: projectID, server: server, profile: profile)
+            sessions = sessions.map { candidate in
+                candidate.sessionId == sessionId
+                    && (Self.nonEmpty(candidate.profile) ?? profile) == profile
+                    ? applyingLocalGroup(candidate, groupID: projectID) : candidate
+            }
+            if let modelContext { try? CacheStore.cacheSessions(sessions, serverURL: server, in: modelContext) }
+        } catch {
+            lastError = error
+            actionErrorMessage = error.localizedDescription
         }
     }
 
@@ -866,6 +1547,10 @@ final class SessionListViewModel {
         actionErrorMessage = nil
         lastError = nil
 
+        guard !isSearchOnlySession(session) else {
+            actionErrorMessage = String(localized: "This search result cannot be moved yet.")
+            return false
+        }
         guard let sessionId = session.sessionId else {
             actionErrorMessage = String(localized: "The server did not provide a session ID.")
             return false
@@ -885,20 +1570,22 @@ final class SessionListViewModel {
         }
 
         do {
-            let createResponse = try await client.createProject(name: name, color: color)
-            guard let project = createResponse.project else {
-                actionErrorMessage = createResponse.error ?? String(localized: "The server did not return the new project.")
-                return false
-            }
-
-            guard let projectID = project.projectId, !projectID.isEmpty else {
-                actionErrorMessage = createResponse.error ?? String(localized: "The server did not return the new project ID.")
-                return false
-            }
-
+            let profile = Self.nonEmpty(session.profile) ?? Self.nonEmpty(activeProfileName) ?? "default"
+            let project = try organizerStore.createGroup(name: name, color: color, server: server, profile: profile)
+            guard let projectID = project.projectId else { throw LocalOrganizerStoreError.invalidValue }
             upsertProject(project)
-            try await sessionMutator.move(sessionID: sessionId, to: projectID)
-            await load(modelContext: modelContext)
+            do {
+                try organizerStore.assignSession(sessionId, toGroup: projectID, server: server, profile: profile)
+            } catch {
+                try? organizerStore.deleteGroup(id: projectID, server: server, profile: profile)
+                projects.removeAll { $0.projectId == projectID }
+                throw error
+            }
+            sessions = sessions.map {
+                $0.sessionId == sessionId && (Self.nonEmpty($0.profile) ?? profile) == profile
+                    ? applyingLocalGroup($0, groupID: projectID) : $0
+            }
+            if let modelContext { try? CacheStore.cacheSessions(sessions, serverURL: server, in: modelContext) }
             return true
         } catch {
             guard !isCancellationError(error) else { return false }
@@ -932,19 +1619,9 @@ final class SessionListViewModel {
         defer { isCreatingProject = false }
 
         do {
-            let createResponse = try await client.createProject(name: name, color: color)
-            guard let project = createResponse.project else {
-                actionErrorMessage = createResponse.error ?? String(localized: "The server did not return the new project.")
-                return false
-            }
-
-            guard let projectID = project.projectId, !projectID.isEmpty else {
-                actionErrorMessage = createResponse.error ?? String(localized: "The server did not return the new project ID.")
-                return false
-            }
-
+            let profile = Self.nonEmpty(activeProfileName) ?? "default"
+            let project = try organizerStore.createGroup(name: name, color: color, server: server, profile: profile)
             upsertProject(project)
-            await load(modelContext: modelContext)
             return true
         } catch {
             guard !isCancellationError(error) else { return false }
@@ -967,9 +1644,14 @@ final class SessionListViewModel {
         defer { isDeletingProject = false }
 
         do {
-            _ = try await client.deleteProject(id: projectID)
+            let profile = Self.nonEmpty(activeProfileName) ?? "default"
+            try organizerStore.deleteGroup(id: projectID, server: server, profile: profile)
             projects.removeAll { $0.projectId == projectID }
-            await load(modelContext: modelContext)
+            sessions = sessions.map {
+                $0.projectId == projectID && (Self.nonEmpty($0.profile) ?? profile) == profile
+                    ? applyingLocalGroup($0, groupID: nil) : $0
+            }
+            if let modelContext { try? CacheStore.cacheSessions(sessions, serverURL: server, in: modelContext) }
             return true
         } catch {
             guard !isCancellationError(error) else { return false }
@@ -999,17 +1681,10 @@ final class SessionListViewModel {
         defer { isRenamingProject = false }
 
         do {
-            let response = try await client.renameProject(id: projectID, name: name, color: color)
-            guard let renamedProject = response.project else {
-                actionErrorMessage = response.error ?? String(localized: "The server did not return the renamed project.")
-                return false
-            }
-
-            guard renamedProject.projectId?.isEmpty == false else {
-                actionErrorMessage = response.error ?? String(localized: "The server did not return the renamed project ID.")
-                return false
-            }
-
+            let profile = Self.nonEmpty(activeProfileName) ?? "default"
+            let renamedProject = try organizerStore.renameGroup(
+                id: projectID, name: name, color: color, server: server, profile: profile
+            )
             upsertProject(renamedProject)
             return true
         } catch {
@@ -1021,60 +1696,25 @@ final class SessionListViewModel {
         }
     }
 
-    /// Creates a new session. `profile` pins it to a specific server profile (the "New Chat
-    /// in <Profile>" App Intent, #339); nil keeps the legacy behavior of letting the server
-    /// use its active profile (the "+" button / plain New Chat).
+    /// Opens a local draft. Backend creation is deferred until the first prompt
+    /// is submitted, so opening New Chat performs no workspace/session request.
     func createSession(modelContext: ModelContext? = nil, profile: String? = nil) async -> SessionSummary? {
         isCreatingSession = true
         actionErrorMessage = nil
         lastError = nil
         defer { isCreatingSession = false }
 
-        do {
-            let workspaces = try await client.workspaces()
-            let workspace = workspaces.last ?? workspaces.workspaces?.compactMap(\.path).first
-            let response = try await client.createSession(
-                workspace: workspace,
-                model: nil,
-                modelProvider: nil,
-                profile: Self.nonEmpty(profile)
-            )
-
-            guard let sessionDetail = response.session else {
-                actionErrorMessage = String(localized: "The server did not return the new session.")
-                return nil
-            }
-
-            let newSession = SessionSummary(from: sessionDetail)
-            guard newSession.sessionId?.isEmpty == false else {
-                actionErrorMessage = String(localized: "The server did not return the new session ID.")
-                return nil
-            }
-
-            if newSession.shouldAppearInSessionList {
-                if let existingIndex = sessions.firstIndex(where: { $0.sessionId == newSession.sessionId }) {
-                    sessions[existingIndex] = newSession
-                } else {
-                    sessions.insert(newSession, at: 0)
-                }
-
-                if let modelContext {
-                    do {
-                        try CacheStore.cacheSession(newSession, serverURL: server, in: modelContext)
-                    } catch {
-                        cacheErrorMessage = error.localizedDescription
-                    }
-                }
-            }
-
-            return newSession
-        } catch {
-            guard !isCancellationError(error) else { return nil }
-
-            lastError = error
-            actionErrorMessage = error.localizedDescription
-            return nil
-        }
+        _ = modelContext // Local drafts are deliberately neither cached nor persisted.
+        localDraftSequence &+= 1
+        let timestamp = Date().timeIntervalSince1970
+            + (Double(localDraftSequence) * 0.000001)
+        return SessionSummary(
+            sessionId: nil,
+            title: "New Chat",
+            createdAt: timestamp,
+            updatedAt: timestamp,
+            profile: Self.nonEmpty(profile) ?? Self.nonEmpty(activeProfileName) ?? "default"
+        )
     }
 
     func clearActionError() {
@@ -1094,18 +1734,37 @@ final class SessionListViewModel {
         value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
-    static func activeStreamIDs(in sessions: [SessionSummary]) -> [String] {
-        normalizedStreamIDs(sessions.compactMap(\.activeStreamId))
-    }
-
-    private static func normalizedStreamIDs(_ rawStreamIDs: [String]) -> [String] {
-        Array(Set(rawStreamIDs.compactMap(nonEmpty))).sorted()
-    }
-
     private static func nonEmpty(_ value: String?) -> String? {
         guard let value else { return nil }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func applyingLocalGroup(
+        _ session: SessionSummary,
+        assignments: [String: String],
+        profile: String
+    ) -> SessionSummary {
+        guard (Self.nonEmpty(session.profile) ?? profile) == profile else {
+            return session.withLocalOrganizerGroupID(nil)
+        }
+        guard let sessionID = Self.nonEmpty(session.sessionId) else {
+            return session.withLocalOrganizerGroupID(nil)
+        }
+        return session.withLocalOrganizerGroupID(assignments[sessionID])
+    }
+
+    private func localAssignments(for profile: String) -> [String: String] {
+        do {
+            return try organizerStore.snapshot(server: server, profile: profile).sessionAssignments
+        } catch {
+            actionErrorMessage = error.localizedDescription
+            return [:]
+        }
+    }
+
+    private func applyingLocalGroup(_ session: SessionSummary, groupID: String?) -> SessionSummary {
+        session.withLocalOrganizerGroupID(groupID)
     }
 
     private static func sortedSessions(_ sessions: [SessionSummary]) -> [SessionSummary] {
@@ -1163,20 +1822,19 @@ final class SessionListViewModel {
         }
     }
 
-    private func contentMatchIDs(from sessions: [SessionSummary]) -> [String] {
-        let locallyVisibleSessionIDs = Set(self.sessions.compactMap { session -> String? in
-            guard session.archived != true, let sessionID = session.sessionId, !sessionID.isEmpty else {
-                return nil
-            }
-
-            return sessionID
-        })
+    private func remoteSearchIDs(
+        from results: [DirectHermesSessionSearchResult],
+        content: Bool
+    ) -> [String] {
         var seenSessionIDs = Set<String>()
 
-        return sessions.compactMap { session in
-            guard session.matchType?.lowercased() == "content",
-                  let sessionID = session.sessionId,
-                  locallyVisibleSessionIDs.contains(sessionID),
+        return results.prefix(20).compactMap { result in
+            // The stock route uses a null role for direct session-ID hits. A
+            // content-disabled caller keeps those exact ID matches but drops
+            // FTS message hits; no lineage fallback is safe here.
+            guard content || result.role == nil,
+                  result.archived != true,
+                  let sessionID = Self.nonEmpty(result.sessionID),
                   !seenSessionIDs.contains(sessionID)
             else {
                 return nil
@@ -1185,6 +1843,35 @@ final class SessionListViewModel {
             seenSessionIDs.insert(sessionID)
             return sessionID
         }
+    }
+
+    private static func isSearchResolutionMiss(_ error: Error) -> Bool {
+        if let error = error as? DirectHermesRESTError {
+            switch error {
+            case .invalidSessionID, .missingCanonicalSessionID, .sessionIDMismatch, .profileMismatch:
+                return true
+            }
+        }
+        if case DirectHermesRequestError.http(let statusCode, _) = error {
+            return statusCode == 404
+        }
+        if case APIError.http(let statusCode, _) = error {
+            return statusCode == 404
+        }
+        return false
+    }
+
+    private static func isSearchResolutionAuthFailure(_ error: Error) -> Bool {
+        if error is DirectHermesAuthError {
+            return true
+        }
+        if case APIError.unauthorized = error {
+            return true
+        }
+        if case DirectHermesRequestError.http(let statusCode, _) = error {
+            return statusCode == 401 || statusCode == 403
+        }
+        return false
     }
 
     private func timestamp(for session: SessionSummary) -> Double {
@@ -1293,6 +1980,26 @@ final class SessionListViewModel {
         let profileName = response.effectiveDefaultProfileName
         let profile = response.profile(matching: profileName) ?? fallbackProfile
 
+        if activeProfileName != profileName {
+            activeProfileEpoch &+= 1
+            archivedCountRequestGeneration &+= 1
+            archivedCount = nil
+            // A response for the previous profile must never repopulate a
+            // same-query search after a profile switch.
+            remoteSearchGeneration &+= 1
+            activeRemoteSearchQuery = nil
+            activeRemoteSearchProfile = nil
+            remoteContentSearchSessionIDs = []
+            orderedRemoteIDs = []
+            remoteResolvedRows = [:]
+            isSearchingRemoteSessions = false
+            do {
+                projects = try organizerStore.groups(server: server, profile: Self.nonEmpty(profileName) ?? "default")
+            } catch {
+                projects = []
+                actionErrorMessage = error.localizedDescription
+            }
+        }
         activeProfileName = profileName
         activeProfileDisplayName = response.displayName(for: profileName)
             ?? profile?.displayName
@@ -1318,6 +2025,205 @@ final class SessionListViewModel {
             actionErrorMessage = error.localizedDescription
             return false
         }
+    }
+
+    private func mutateDirectMetadata(
+        _ session: SessionSummary,
+        modelContext: ModelContext?,
+        animation: Animation?,
+        field: PendingMetadataField,
+        operation: (String, String) async throws -> SessionSummary
+    ) async -> Bool {
+        guard !isViewingCachedData else {
+            actionErrorMessage = String(localized: "Reconnect to the server to modify a session.")
+            return false
+        }
+        guard let rawSessionID = session.sessionId,
+              let sessionID = Self.nonEmpty(rawSessionID),
+              rawSessionID == sessionID
+        else {
+            actionErrorMessage = String(localized: "The server did not provide a session ID.")
+            return false
+        }
+
+        let activeProfile = Self.nonEmpty(activeProfileName) ?? "default"
+        let profileEpoch = activeProfileEpoch
+        let sessionProfile = Self.nonEmpty(session.profile) ?? "default"
+        guard activeProfile == sessionProfile else {
+            actionErrorMessage = String(localized: "Switch to this session's profile to modify it.")
+            return false
+        }
+        let searchOnly = isSearchOnlySession(session)
+        let capturedSearchQuery = activeRemoteSearchQuery
+        let capturedSearchProfile = activeRemoteSearchProfile
+        let capturedSearchGeneration = remoteSearchGeneration
+        guard beginSessionMutation(sessionID) else { return false }
+        defer { endSessionMutation(sessionID) }
+
+        actionErrorMessage = nil
+        lastError = nil
+        let capturedServer = server
+
+        do {
+            let authoritative = try await operation(sessionID, activeProfile)
+            guard isCurrentMetadataScope(
+                server: capturedServer,
+                profile: activeProfile,
+                epoch: profileEpoch
+            ),
+                  authoritative.sessionId == sessionID,
+                  (Self.nonEmpty(authoritative.profile) ?? activeProfile) == activeProfile
+            else {
+                return false
+            }
+            if searchOnly,
+               !isCurrentRemoteSearchScope(
+                   query: capturedSearchQuery,
+                   profile: capturedSearchProfile,
+                   generation: capturedSearchGeneration
+               ) {
+                return false
+            }
+
+            let base = sessions.first(where: { $0.sessionId == sessionID }) ?? session
+            let updated = mergedMetadataSession(base, authoritative: authoritative)
+            if searchOnly {
+                if updated.archived == true {
+                    remoteResolvedRows.removeValue(forKey: sessionID)
+                    orderedRemoteIDs.removeAll { $0 == sessionID }
+                    remoteContentSearchSessionIDs.removeAll { $0 == sessionID }
+                } else {
+                    remoteResolvedRows[sessionID] = updated
+                }
+            } else {
+                let pendingKey = PendingMetadataKey(profile: activeProfile, sessionID: sessionID)
+                var pending = pendingMetadataMutations[pendingKey]
+                    ?? PendingMetadataMutation(title: nil, pinned: nil, archived: nil)
+                metadataConfirmationRevision &+= 1
+                let revision = metadataConfirmationRevision
+                switch field {
+                case let .title(title): pending.title = PendingMetadataValue(value: title, revision: revision)
+                case let .pinned(pinned): pending.pinned = PendingMetadataValue(value: pinned, revision: revision)
+                case let .archived(archived): pending.archived = PendingMetadataValue(value: archived, revision: revision)
+                }
+                pendingMetadataMutations[pendingKey] = pending
+            }
+            if updated.archived == true {
+                if !searchOnly {
+                    applySessions(
+                        sessions.filter { $0.sessionId != sessionID },
+                        archivedCount: archivedCount,
+                        animation: animation
+                    )
+                }
+            } else if let index = sessions.firstIndex(where: { $0.sessionId == sessionID }) {
+                var updatedSessions = sessions
+                updatedSessions[index] = updated
+                applySessions(updatedSessions, archivedCount: archivedCount, animation: animation)
+            }
+
+            if let modelContext, !searchOnly {
+                do {
+                    try CacheStore.cacheSession(updated, serverURL: server, in: modelContext)
+                } catch {
+                    cacheErrorMessage = error.localizedDescription
+                }
+            }
+            return true
+        } catch {
+            guard !isCancellationError(error) else { return false }
+            guard isCurrentMetadataScope(
+                server: capturedServer,
+                profile: activeProfile,
+                epoch: profileEpoch
+            ) else { return false }
+            if searchOnly,
+               !isCurrentRemoteSearchScope(
+                   query: capturedSearchQuery,
+                   profile: capturedSearchProfile,
+                   generation: capturedSearchGeneration
+               ) {
+                return false
+            }
+            lastError = error
+            actionErrorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    private func isCurrentMetadataScope(
+        server capturedServer: URL,
+        profile: String,
+        epoch: Int
+    ) -> Bool {
+        !Task.isCancelled
+            && server == capturedServer
+            && (Self.nonEmpty(activeProfileName) ?? "default") == profile
+            && activeProfileEpoch == epoch
+    }
+
+    private func isCurrentRemoteSearchScope(
+        query: String?,
+        profile: String?,
+        generation: Int
+    ) -> Bool {
+        remoteSearchGeneration == generation
+            && activeRemoteSearchQuery == query
+            && activeRemoteSearchProfile == profile
+            && profile == (Self.nonEmpty(activeProfileName) ?? "default")
+    }
+
+    private func applyingPendingMetadata(
+        _ session: SessionSummary,
+        pending: PendingMetadataMutation,
+        newerThan revision: Int
+    ) -> SessionSummary {
+        session.replacingListMetadata(
+            title: pending.title.flatMap { $0.revision > revision ? $0.value : nil } ?? session.title,
+            pinned: pending.pinned.flatMap { $0.revision > revision ? $0.value : nil } ?? session.pinned,
+            archived: pending.archived.flatMap { $0.revision > revision ? $0.value : nil } ?? session.archived
+        )
+    }
+
+    private func mergedMetadataSession(
+        _ local: SessionSummary,
+        authoritative: SessionSummary
+    ) -> SessionSummary {
+        SessionSummary(
+            sessionId: local.sessionId ?? authoritative.sessionId,
+            title: authoritative.title ?? local.title,
+            workspace: authoritative.workspace ?? local.workspace,
+            model: authoritative.model ?? local.model,
+            modelProvider: authoritative.modelProvider ?? local.modelProvider,
+            reasoningEffort: authoritative.reasoningEffort ?? local.reasoningEffort,
+            messageCount: authoritative.messageCount ?? local.messageCount,
+            createdAt: authoritative.createdAt ?? local.createdAt,
+            updatedAt: authoritative.updatedAt ?? local.updatedAt,
+            lastMessageAt: authoritative.lastMessageAt ?? local.lastMessageAt,
+            pinned: authoritative.pinned ?? local.pinned,
+            archived: authoritative.archived ?? local.archived,
+            projectId: local.projectId,
+            profile: authoritative.profile ?? local.profile,
+            inputTokens: authoritative.inputTokens ?? local.inputTokens,
+            outputTokens: authoritative.outputTokens ?? local.outputTokens,
+            estimatedCost: authoritative.estimatedCost ?? local.estimatedCost,
+            activeStreamId: local.activeStreamId,
+            isStreaming: local.isStreaming,
+            isCliSession: authoritative.isCliSession ?? local.isCliSession,
+            userMessageCount: local.userMessageCount,
+            hasPendingUserMessage: local.hasPendingUserMessage,
+            pendingStartedAt: local.pendingStartedAt,
+            worktreePath: local.worktreePath,
+            sourceTag: authoritative.sourceTag ?? local.sourceTag,
+            rawSource: authoritative.rawSource ?? local.rawSource,
+            sessionSource: authoritative.sessionSource ?? local.sessionSource,
+            sourceLabel: authoritative.sourceLabel ?? local.sourceLabel,
+            parentSessionId: authoritative.parentSessionId ?? local.parentSessionId,
+            relationshipType: local.relationshipType,
+            readOnly: authoritative.readOnly ?? local.readOnly,
+            isReadOnly: authoritative.isReadOnly ?? local.isReadOnly,
+            matchType: local.matchType
+        )
     }
 
     private func isCancellationError(_ error: Error) -> Bool {

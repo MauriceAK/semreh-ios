@@ -1,5 +1,30 @@
 # AGENTS.md — working agreement for Semreh
 
+## Active direct-Hermes migration
+
+For the authorized direct-Hermes migration, read `CURRENT.md` when present and
+`docs/migration/semreh_tui_gateway_v3_execution_plan.md`. That binding plan and its
+reference appendix supersede the WebUI backend/API/test-target instructions below
+and in `PROJECT_SPEC.md`/`DEVELOPMENT.md` for migration work. Retain existing product
+behavior unless the migration plan or Maurice explicitly changes its disposition.
+
+The selected product base is `40e30804b75f40ec5b19891c78e88b82d8b06e01`; the Hermes
+contract target is `29112bef099274229cadff79cdff7bf7b99c4b77`. Verify direct contracts
+against an independent pinned clone using the approved Slice 1 separate-folder
+deviation recorded at the top of the migration plan. This is guarded configuration
+separation, not OS-level isolation. No unrestricted tool execution is authorized.
+Never access or test against Maurice's personal Hermes home, checkout, state,
+credentials, service, or gateway. Never alter existing Tailscale routes. The old
+development-server instructions are not authorization to use those targets.
+
+Slice 1 passed at 606b8a5. Maurice authorized Slice 2 in the September 4 Codex
+conversation. Record exact commands, sanitized evidence, and unverified gates.
+Do not start Slice 3 or product redesign/custom features without authorization.
+Keep automated backend work within the existing disposable deterministic fixture
+and bounded tool access; expanded tool/provider access requires reassessment.
+Use one writer per shared responsibility and coordinate Simulator ownership.
+Worker reports do not replace independent verification of high-risk claims.
+
 Semreh is a native SwiftUI iPhone app (Xcode target/scheme `HermesMobile`, App Store
 name `Semreh`) for a self-hosted `hermes-webui` server. `PROJECT_SPEC.md` is the
 product/API source of truth — if a request conflicts with it, stop and ask.

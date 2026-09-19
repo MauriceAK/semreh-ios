@@ -1,0 +1,1151 @@
+# Remaining migration work
+
+## September 14 — current preview and phone-feedback queue
+
+This section is the current user-feedback dispatch ledger; older checkpoints below
+are historical evidence, not current worker status. Root owns this ledger and
+`CURRENT.md` (active lanes, exact candidate, commands and evidence). Decisions live
+in `../prototypes/preview-decisions.md`; existing feature-contract gaps remain in
+`secondary-feature-status.md`. Do not create a competing backlog.
+
+Status meanings: **Queued** = not implemented; **Investigating** = cause/contract
+work; **Implemented / verification pending** = source exists, not accepted;
+**Verified** = named checks passed for an exact candidate; **Integrated** = local
+commit with its stated evidence; **Blocked** = exact missing authority/dependency;
+**Deferred** = deliberately outside the current preview priority. A unit pass is
+not visual, physical-device, or release acceptance. New reports reopen prior gates.
+
+Current integrated app checkpoint: `2814248`, branch `integration/direct-hermes`.
+Preview/recovery batch is committed locally, not pushed. Clean2814248 device build
+installed as Semreh Dev1.0/build8; device readback confirmed on September14.
+Separate Live Activity/widget dirt remains uncommitted and excluded from this
+checkpoint. Native builds included that existing dirt; its local helper checks do
+not establish widget visual acceptance or closed-app delivery.
+Signed unit build `feedback-unit-build-v4` passed; focused
+`feedback-focused-units-v3.xcresult`: **174 passed, 0 failed, 0 skipped**.
+Evidence root: `/Users/maurice/workspace/semreh-slice1-evidence/onboarding-20260914`.
+
+Latest checkpoint: user reconfirmed continued implementation/verification and local
+integration; main/release and remote publishing remain untouched. Long-scroll v4
+failed a title-versus-session-ID accessibility selector, independently diagnosed
+by Sol with mounted transcript/120 rows present. Corrected v5 is assigned to Sol;
+this does not clear the earlier genuine blank-transcript reproduction. Acceptance
+must inspect close/background-return before scroll or accessibility interactions
+can repair rendering, for both active and completed long conversations.
+
+v5 checkpoint: signed selector build passed; UI failed canonical lifecycle observer
+after populated send/ACK. Root inspected both distant-return screenshots: populated
+tail, retracting the verifier's initial blank verdict. Animation/momentum remain
+unproven. P01 source review confirmed recovery could not arm from a fresh view:
+the observed-rows flag was only set inside already-armed evaluation. Luna is fixing
+that specific defect with a regression; it is not yet verified or integrated.
+
+P01 next checkpoint: recovery arming correction implemented; signed production
+long-scroll v6 completed **1 passed / 0 failed**,140.087s, including completed
+response background dwell and exact tail checks without corrective scrolling.
+Visual review, active-response background gate and broader repeated-navigation
+acceptance remain pending. This is not exhaustive reproduction elimination.
+
+P01 active-return checkpoint: signed builds passed; new focused units **93/0**
+(75 scroll-policy,18 marker-classifier). Active-background v1 **1/0**,100.750s:
+background entered7.635s after send before the15s fixture response; full canonical
+baseline+1 then+2 observed while nonforeground;60s dwell; exact returned tail
+passed without scroll. Root inspected populated return captures, which still show
+rounded app-transition edges; settled-frame review remains distinct/pending.
+Unchanged nonempty geometry can leave recovery armed awaiting a fresh sample;
+this run does not establish exhaustive lifecycle safety or momentum/FPS acceptance.
+
+Coherent checkpoint: fresh signed unit build v2 and full suite v2 passed:
+**2,209 executed /14 skipped /0 failed**,34.251s. Prior v1 retained one brittle
+source-string guard failure; corrected guard still requires lazy construction and
+rejects eager construction. Component completion v2 **1/0**,8.158s, after fixing
+its isolated launch recipe; component evidence is not real provider motion.
+Final authenticated shell/onboarding/loading and settled-return visual checks are
+assigned to Sol. Full-unit run reset isolated app auth; subsequent obstructed
+screenshots are invalid evidence, not accepted visuals. No new commit/install yet.
+
+P13 final onboarding v5 **1 passed /0 failed**,112.814s, same signed product
+candidate: real fixture connection, optional personalization and cold appearance
+readback. Prior recipe failures/interruption retained: system deep-link dialog,
+expired fixture auth, Save Password sheet and duplicated tagline identifying
+Personalize as Welcome. Setup now uses fail-closed exact-fixture checks and real
+screen controls. Final same-build shell/controls **2/0**,90.724s, Bots-Tasks
+**1/0**,28.302s, longscroll v7 **1/0**,140.196s. Root reviewed settled v7 post-AX
+capture. Final test commands omitted diagnostics-never; raw result diagnostics are
+quarantined. Only separately reviewed images were selected/audited (75files/0flags).
+
+Integration status for the table: P02–P05, P07, P10 and P13 source changes are
+included in2814248; “verification pending” below refers to remaining acceptance,
+not uncommitted source. P06 was deliberately excluded. P13's real contained login
+and appearance cold-readback are verified; physical QR remains open.
+
+P15 metric capability checkpoint: signed build and opt-in probe **1/0**,97.838s.
+Existing synthetic2×10k presentation lab, one warmup/one measured iteration:
+app CPU20.658953638s, peak physical215665.136kB, absolute physical91982.272kB,
+memory change14041.088kB, navigation signpost total0.741173916s, scrolling signpost
+total2.534600417s. Numeric records verified in feedback-metric-probe-v1.xcresult.
+Requested XCTHitchMetric absent: NO hitch-rate/FPS claim. No regression baseline,
+percentiles, production lifecycle/provider or physical-device performance claim.
+
+| ID / priority | User-visible outcome | Current verified status / owner | Remaining acceptance |
+|---|---|---|---|
+| P01 / top | No blank transcript after long background, reopen, mixed long-chat navigation, or send | **Integrated2814248; scoped verification passed.** Recovery arming defect repaired; completed v6/v7 and active-background v1 passed exact tail checks after60s away. Root reviewed populated settled v7 post-AX image. Earlier background-v5 genuine first-entry blank retained, distinct from longscroll-v5's recipe failure. | Repeated mixed-navigation/cold return, physical-device and reader-position stress remain. Settled post-AX image is not literal first-frame proof; no universal fix claim. |
+| P02 / top | Down-arrow works during momentum and smoothly scrolls even from distant history | **Implemented / verification pending** for distance-independent explicit animation; focused policy passed. Deceleration reliability remains **Investigating**. | New production long-scroll selector + scoped geometry and recording-based row displacement; Reduce Motion immediate; actual arrival before button hides. |
+| P03 / top | Compact Thinking/actions show latest meaningful work and expand cleanly; preserved tasks match; no spinner faces or stale empty Thinking | **Integrated2814248; partially verified.** Focused tests and componentcompletionv2 passed; root inspected rich Thinking/task and completed component screen. Collapsed checkbox syntax polished. Raw meaningful content/code preserved. | Production chronology and completion motion; meaningful activity versus finished placeholder; long history and Reduce Motion. Component-only evidence does not close these gates. |
+| P04 / top | No redundant “Hermes is working” pill or success-reconnect transcript banner | **Implemented / verification pending.** Generic active pill removed; policy passed; earlier reconnect tests passed. Real errors/recovery retained. | Production running/background return without misleading success chrome or changing scroll inset on ordinary active scrolling. |
+| P05 / top | Smooth local send, response streaming, stop/resend and completion actions | **Implemented / verification pending.** Trailing text motion, bottom-aligned multiline composer and latest-completed Copy footer in candidate; focused checks passed. | Motion recordings and immediate local-message visibility, no blank-on-send; historical context-menu Copy and completion reading-position preservation. |
+| P06 / top | Live Activity / Dynamic Island updates or ends when Hermes completes while app is backgrounded | **Local logic partially verified; remote completion blocked on deployment/team decision.** `feedback-liveactivity-units-v1`:24 passed/0 failed/0 skipped. Installed `0af48f0` ignores ActivityKit `context.isStale`; existing dirty widget patch handles it, not installed. Current request uses `pushType:nil`; bounded background runtime cannot guarantee terminal receipt. | Actual stale widget/Dynamic Island rendering and device delivery remain unverified. True closed-app completion needs authenticated ActivityKit token registration/rotation and APNs update/end relay absent from pinned Hermes. Async question sent for relay approval/Apple team; no keys or service deployment. Cold orphan reconciliation also open (direct activities lack streamID). |
+| P07 | Chats rows: two-line latest-message preview; clock today, Yesterday, older date; iMessage-like spacing | **Implemented / verification pending.** Profile-safe server-wide compact cache map wired; migration/isolation/send/completion/date tests passed. | Real list pixels and return refresh. Latest locally received messages only: stock list preview is first user message and heartbeat is not a message timestamp. Unseen remote updates remain a contract/coverage gap. |
+| P08 | Reliable first-tap Back, no unsolicited session reopening, smooth tab/page navigation | Prior baseline integrated; newer long-chat phone reports **reopen verification**. | Repeated short/long conversation changes, first-tap exit, client-side navigation and transition recordings. |
+| P09 | Seamless older-history prefetch/loading, anchor preservation, animated latest return, minimal loading | Prior baseline integrated; paging gate **open** after v6 target not reached within existing bound. | Verify true prepend preserves anchor; distinguish old test distance from density regression without silently loosening assertions; long cached/cold loads. |
+| P10 | Larger/lower centered bird with overlapping glass name, no dropdown; outlined bird tab; no white logo tile | **Implemented / verification pending** in current candidate. Approved bird/color family in baseline; header52pt/down2, outline tab and transparent S in candidate. | Actual light/dark/screens and hit targets; no center drift or header/content hard panel. Experimental bird→S morph remains deferred. |
+| P11 | Clean menus/settings, direct model/reasoning/context controls, supported themes/accents; hide empty projects; unlabeled pins | Substantial baseline integration exists; candidate and reference-based final organization review **pending**. Canonical idle context snapshot is integrated in ancestor `4486357` (confirmed source/history), not a pending unmerged worker patch. | Verify reachable supported controls, context from canonical usage, no useless settings; preserve scheduled-history deletion protections; final reference comparison. |
+| P12 | Bots and Tasks load promptly without blank/black transitions | Baseline `0af48f0` integrated with prior loading/native evidence; new overall performance gate still open. | Repeated reentry, stale/cancelled loads, themed transient frames; no fake “instant” network guarantee. |
+| P13 | Welcome → Connect → optional Personalize, easy first-party Hermes connection | **Implemented / verification pending** for reordered candidate; focused onboarding checks passed previously. Transparent logo/bird entrance in candidate. | Fresh login, failed-login retry, saved-server reauth, actual isolated Hermes connection and physical QR. Manual entry retained; no unverified SSH/automatic installer promise. |
+| P14 | Create/configure bots and real Groups above Your Team | **Investigating / incomplete.** Profile creation exists in Settings; real group DTO foundation only. Safety gaps in clone/config creation identified. | Safe real create/config/readback and group send/stop. Live group execution blocked on explicitly approved disposable two-profile fixture; no personal provider/service use. |
+| P15 | Measured smoothness under many long chats, scrolling, sending, stop, app switching | **Capability probe implementing; not accepted.** Prior20-cycle2×10k lab passed but bypassed external lifecycle; walltimings include XCTest waits. Luna owns opt-in existing-lab XCTest hitch/CPU/memory probe, no product changes. | Installed SDK declares XCTHitchMetric; runtime availability/data unverified. Instruments template limitation does not establish XCTest metric unavailability. Production/device FPS gate remains; no “no drops” claim from screenshots/walltimings. |
+| P16 | Durable implementer → verifier queue → evidence review → integration without user reminders | **Partially implemented/tested.** Night Shift local commit `4e06dbd`, 82 fake controller checks and read-only Luna→Sol automatic handoff passed. Root currently manages native agents. | Fresh app queue/controller integration, durable completion handling and verified continuation. No claim of crashed/ended-chat wake or production unattended readiness. |
+| P17 | Keep phone current and make safe room for verification | **Installed and read back:** clean2814248, Semreh Dev1.0/build8, com.maurice.semreh.dev. Signed generic devicebuildv2 passed; direct install succeeded. No uninstall/datareset or productionapp mutation. | Physical interaction/FPS acceptance remains distinct from successful installation. Initial Xcode destination timeout retained. Drive offload not done; sanitize before upload. |
+| P18 / deferred | Modular navbar, advanced bird customization/morph, cross-machine A2A/WSL, terminal/phone remote control, TestFlight/team release | **Deferred** behind preview reliability; preserve existing candidate work and capability audits. | Separate bounded decisions/authority and feature-specific tests. No WSL instance or release upload authorized by this ledger. |
+
+Current ownership: Luna Max implements, Sol Low independently verifies on the sole
+Simulator/DerivedData lane, root reviews substantial UI/evidence and integrates.
+Native ownership and build identity are always checked in `CURRENT.md` before use.
+All failed/skipped attempts remain retained. Local integration does not imply a
+push, release merge, device installation, or TestFlight upload.
+
+## September 11 — foreground lifecycle stabilization
+
+Night Shift remains paused; bounded native workers and one root-owned Simulator
+lane. Accepted-turn socket loss could leave `.deliveryUnknown` after an explicit
+idle resume. Recovery now permits idle only after canonical refresh, explicit
+`running:false`, and clear prompt ambiguity/in-flight barriers; Stop's internal
+rebind still requires its separate status confirmation.
+
+- [x] Regression reproduced on old controller: 1 expected failure.
+- [x] Controller suite plus view-model explicit-next-send regression: 87 passed,
+  0 failed/skipped. Initial candidate exposed two Stop rebind regressions; both
+  corrected without weakening their assertions.
+- [x] Signed production Simulator against stock Hermes `29112bef`: five isolated
+  phases passed (finish/resend, stop/resend, queued steer/resend, Home/background
+  completion/reopen/resend, process termination/completion/reopen/resend).
+  Away cases prove accepted-but-incomplete state after leaving, durable completion
+  while away, visible recovered answer, and a unique subsequent send.
+- [x] Selector helpers: 61 passed. Separate real protocol stabilization smoke
+  passed interrupt/idle/canonical history/next send.
+- [ ] Physical iPhone acceptance of this new patch; no phone installation yet.
+
+Reproduce UI phases with signed `HermesMobileUIVerification` build-for-testing,
+then `scripts/direct_hermes_ios_smoke.py --slice2-ui --https --stock-backend
+--lifecycle-ui <finish|stop|steer|background|terminate>` and the generated
+`SemrehSlice2LiveUI.xctestrun`, owned Simulator, parallel testing disabled and
+`-collect-test-diagnostics never`. Evidence under the approved evidence root:
+`lifecycle-20260911-fixed-unit-v2.xcresult`, `finish-ui-v3`, and each other
+`lifecycle-20260911-<phase>-ui.xcresult`; all filenames have lifecycle prefix.
+Earlier UI identifier and compilation recipe failures are retained, not product
+failures. Selected exported logs passed known-credential audit. Deterministic
+model responses, not external-provider or long-duration/device performance proof.
+Existing F1 and V1/N1 polish candidates remain separate and unmerged.
+
+### First post-stabilization cleanup
+
+Follow-up September11: removed 247 net production lines of permanently disabled
+active-stream replay machinery from ChatViewModel. The guard was constant false;
+received chunks now enter the same buffers directly, without constructing unused
+effective-content strings. Ordinary tool completion matching, interim sealing,
+and active gateway recovery remain unchanged. Two source-test range delimiters
+were updated; their assertions were preserved. Root-reviewed diff and signed
+focused Simulator unit run: `replay-cleanup-20260911-unit.xcresult`, 294 passed,
+0 failed, 0 skipped (streaming pace, transcript, send, direct gateway, controller,
+event mapping). No repeated real-backend/UI matrix for dead-branch deletion;
+no measured physical performance improvement claimed. Phone build2026091101 is
+the preceding e1176cf baseline, installed/launched successfully, not this cleanup.
+
+Lifecycle fix is committed as `d846514`. The following cleanup removes 387 net
+production lines without changing reachable behavior: 252 lines of zero-caller
+private snapshot/replay helpers and their exclusively owned bookmark state;
+135 lines of unused Endpoint request wrappers, orphan encoder, and obsolete
+`/api/transcribe` representation. Active `/api/audio/transcribe`, media compatibility,
+direct auth/redirect/size policies, and snapshot test-isolation hooks remain.
+One obsolete source-string assertion now checks the actual historical-reasoning
+recompute call instead of the removed snapshot constructor.
+
+Root coherent native batch: `lifecycle-20260911-cleanup-unit-v2.xcresult`,
+2100 passed/0 failed/14 intentional opt-in skips. The first cleanup run's obsolete
+assertion failure remains recorded. Live UI evidence above is from `d846514`;
+deleted paths have no callers, so no redundant full UI matrix was rerun for
+cleanup. No physical-device performance claim, feature removal, or blanket rewrite.
+
+September 8 checkpoint. Binding scope: `semreh_tui_gateway_v3_execution_plan.md`;
+details/evidence: `slice3-tasks.md`, `slice3-verification.md`, `slice4-tasks.md`.
+This is the current dispatch checklist, not a new architecture or acceptance waiver.
+Preserve completed Luna work. Root owns integration, notes and native execution.
+
+## September 9 post-audit queue (latest checkpoint)
+
+User authorized finishing the interim-sealing and cached-liveness patches, native
+and isolated-Hermes verification, then scoped local commits. No push/merge or
+personal-Hermes changes. Existing stabilization build f081956 is installed on the
+phone; these successor patches are not installed or accepted yet.
+
+- [x] A0 — Integrate and verify interim segment sealing and cached legacy-liveness
+  neutralization. Prove the focused regressions fail on the old implementation;
+  run affected native tests, coherent-batch suite and signed real-fixture UI flow.
+  Cache half committed8418bd5; native suite2085/0/14. Heading production UI-v5
+  passed1/0/0 against pinned real Hermes with deterministic model/tool fixture:
+  interim heading, approval, distinct final, idle, unique subsequent user marker,
+  cold relaunch via Sessions, and both messages plus exact marker retained.
+  Earlier UI-v1/v2 fixture/assertion failures and v3 navigation failure retained;
+  v4 hit animation-idle timeout before send; owned Simulator restart and same-build
+  v5 retry passed. No physical-device acceptance or external provider claim.
+  Fixture17tests/helper55tests pass; artifact audit-v2 scanned70files/0flags with
+  explicit private/unselected/unexported exclusions. Signed build-v3 passed.
+- [x] A1 — Preserve the exact configured hostname; retire only the obsolete
+  `www.webui.` rewrite in AuthManager, with auth/registry/credential-origin checks.
+  Integrated 8b0a820: old-code regression fails as expected; 54 focused native
+  tests and one real isolated-Hermes signed Simulator smoke pass. Independent
+  review passed; selected artifact audit 69 files/0 flags (private outputs excluded).
+- [x] A2 — Resolve active profile before sidebar session loading in Sessions and
+  Control. Verify non-default startup and stale-response protection.
+  Integrated 0a59ed0: 145 focused tests and real isolated-Hermes signed UI pass;
+  independent review accepted. Old-method negative control fails3 expected
+  assertions. Corrected UI checks Control profile and Sessions row ownership
+  separately; prior recipe failures remain recorded in pilot v1–v4 evidence.
+- [x] A3 — Restore approved local organizer production entrypoints after A2;
+  verify local CRUD, profile/server scoping and no retired project network route.
+  Integrated 824af8a: 31 focused tests and signed stock-Hermes UI pass, independent
+  review accepted. UI creates in Sessions, renames in Control, verifies persistence
+  after relaunch, then confirms deletion. Focused tests cover server/profile
+  isolation and absence of project-network routes. Initial live test exposed the
+  shell hiding the organizer despite the enabled flag; repaired projects-only
+  visibility preserves other utilities in Control and search/user preferences.
+  Coherent batch: 2095 native tests pass/0fail/0skip, explicitly excluding the14
+  opt-in hosted live tests (A2/A3 relevant live gates executed separately).
+  Helper57tests pass. Selected A3/batch artifact audit74files/0flags; private
+  failed recordings/unselected/compressed outputs excluded. No device install.
+  Pilot v5 timed out waiting for root recipe, without native execution; v6 reused
+  the clean committed patch mechanically, verified and integrated. No duplicate
+  implementation worker. Timings and limitations are in the local Night Shift
+  pilot report; no automatic ended-chat wake-up or unattended-readiness claim.
+- [ ] C1 — Remove proven-dead migration snapshots/bookmarks/polling/no-op state,
+  then unreachable replay paths; preserve active recovery and compatibility.
+  September11 subset complete: zero-caller private snapshot chain removed;
+  shared compatibility types/test helpers and other proposals retained.
+- [x] C2 — Remove unused legacy APIClient request stack and obsolete transcribe
+  endpoint; preserve active direct transport/media behavior.
+- [ ] C3 — Consolidate duplicated bounded direct REST transport policy without
+  changing redirect/auth/size limits or endpoint-specific error semantics.
+- [ ] C4 — Replace repeated full SessionSummary copies with narrow value updates
+  after A0 establishes cached/live field ownership.
+- [ ] C5 — Share marker-file mechanics only; retain separate attachment and
+  prompt-uncertainty identity/recovery policies.
+- [ ] C6 — Consider cohesive playback extraction after dead-path cleanup; do not
+  decompose the conversation controller merely to reduce file size.
+
+A1–A3 and C1–C6 are Sol High source-audit findings/proposals at f081956, not runtime
+verified fixes or an approved blanket rewrite. Root must triage before dispatch.
+Audit covered production composition, auth, transports, persistence and feature
+callers; excluded profiling, native execution and phone acceptance. Cleanup should
+preserve behavior and use focused tests; no performance claim from line counts.
+September10 overnight authority: finish A0, then test the bounded Night Shift
+controller with fake workers and a real dummy handoff before piloting A1–A3.
+C1–C6 may proceed only after those gates pass confidently. Hard end13:45:17UTC;
+two implementation lanes, SolLow default, at most two unsuccessful repair cycles
+per task. No /goal, push, release merge, deployment or personal-Hermes changes.
+Elapsed-time/attempt limits are enforceable; no account-wide token-cap claim.
+September10 overnight run stopped at A0's two-repair-cycle limit. User subsequently
+authorized finishing A0 and wiring the native lane ONLY, then stopping before
+audit pilot. A0 is now verified as above. Standalone controller fake23tests and
+real disposable four-stage calibration passed; no Semreh audit pilot or cleanup
+was launched. All unchecked items remain unverified/deferred.
+
+## September 9 stabilization queue (prior batch)
+
+No redesign/features/private backend patches in this batch. Preserve personal
+pilot and old services. Existing development-helper port18793 now belongs to the
+personal pilot: do not run that helper or evict its listener.
+
+- [x] S0 — Fixture readiness: validate owned source/home/credentials/tool/model
+  routes and baseline startup. Public discovery200 alone is not readiness.
+  Identify compatibility gaps against personal pilot revision before choosing
+  an additional matching-version fixture. No personal state copies.
+- [x] S1 — Stop/terminal state: reproduce and fix missed-terminal
+  cancellation. Verify actual idle, Stop retries and subsequent send without
+  duplicate prompts or weakening delivery-unknown protections.
+- [ ] S2 — Transcript: reproduce interim heading/tools/final response and
+  background catch-up. Compare saved/live content, diagnose blank spacing and
+  thinking preview Markdown. Preserve durable content and blocking controls.
+- [x] S3 — Targeted cleanup report: identify duplicated ownership/state and dead
+  migration paths with exact callers; no broad refactor without demonstrated gain.
+- [ ] S4 — Integrated signed-app fixture run and phone acceptance handoff.
+
+Batch gate: signed integrated build-v4 passed; gap-focused28/0/0 and full-v1
+2076/0/14 passed (opt-in skips, not a live-feature claim). Updated app also passed
+10,000-row scroll-to-bottom UI-v1,1/0/0; final screenshot inspected. This is static
+Simulator navigation, not measured physical-device smoothness. S2's exact personal
+guardrail/background history remains a follow-up, not claimed reproduced; its
+app-side gap/preview fixes are covered. S4 automated checks pass; new phone install
+and user acceptance are not performed in this batch. No personal service changes.
+Final targeted artifact audit-v2 passed104files/0flags/5exported consoles with
+the same private/unselected/opaque exclusions. Repro commands: signed build and
+test-without-building use existing DD/Simulator, parallelNO/jobs2/diagnosticsnever;
+focused identifiers GatewayConversationControllerTests and TranscriptMessageTests.
+Live: ownedvenv python scripts/semreh_stabilization_smoke.py --run --output
+EVIDENCE/<fresh-name>.json. Production UI plan: scripts/direct_hermes_ios_smoke.py
+--slice2-ui --https --stock-backend --stabilization-ui. Exact artifacts named above.
+
+Stabilization evidence checkpoint (uncommitted successor to18f8c78): owned fixture
+validator and live `stabilization-smoke-v1.json` passed send/interrupt/idle/durable
+readback/send-again/owned-close. Baseline pin retains old20s orphan policy; not a
+proof of personal-host background behavior or actual50-search guardrail execution.
+S1 final build-v3 + focused-v3 passed82/0/0, independent review accepted missing
+terminal and canonical-tip rebind/retry with no prompt replay. S2 preview fixes
+and mounted renderer shrink regression passed focused-v2 (87total/0fail); earlier
+v1 had2 genuine preview newline failures, fixed. Gap diagnosis found67 empty
+tool-call rows in68-tool fixture; shared render predicate now integrated, preserving
+tool/reasoning/compression anchors and valid latest-scroll targets; native pending.
+Production Stop/resend UI build-v1/UI-v1 passed1/0/0; root inspected final ACK and
+idle composer screenshot. UI binary predates gap fix. Targeted audit-v1 passed
+84files/0flags/2exported consoles; private personal logs, unselected artifacts and
+unexported compressed/opaque contents excluded. S3 review found no active WebUI
+fallback or worthwhile cleanup expansion; no speculative refactor added.
+
+Worker rubric: named failing case/evidence; explicit files/worktree ownership;
+small fix; focused regression commands with results; changed-flow live evidence
+where relevant; exact revision and remaining gaps. No "done" on authored tests
+alone. One native/fixture owner at a time; ownership may be delegated rather than
+requiring root to drive every check. Full suite once per integrated coherent batch.
+Implementation lanes use separate worktrees; read-only triage may share checkout.
+Feature-driving instructions should map UI entry -> fixture scenario -> observable
+pass condition, reusing existing scripts, not building a new orchestration system.
+
+September 9 personal pilot correction: phone build2026090901 rejected the8443
+endpoint root supplied. This was an app validation mistake, not evidence that a
+separate WebUI backend is required. Auth and shared gateway runtime now accept
+valid non-default HTTPS ports with the existing one-origin-per-hostname policy.
+Saved/in-flight/removed-origin guards prevent cross-port cookie confusion; stale
+unowned-host cookies clear before network access. No Hermes source patch.
+Port build-v2 and focused-v1 passed82/0/0; full-v1 passed2063/0/14. Initial build-v1
+failed3missing password arguments in new tests, corrected. Helper suite passed
+51/0 under ownedvenv; systemPython attempt failed one import (websockets missing).
+Production personal8443 bootstrap UI-v2 passed1/0/0; root inspected screenshot:
+exact8443 URL and “Connection ok. Password required.” visible. UI-v1 failed a
+test backbutton assumption on the expired fixture login screen plus runner75;
+bootstrap test now accepts a visible Connect page and scrolls to reveal status.
+No product change for that harness correction. Signed phonebuild2026090902 passed,
+strict signature check passed, installed over existing SemrehDev without uninstall.
+Targeted audit-v2 passed86files/0flags/4exported consoles; includes selected test
+diagnostics/UI screenshot and devicebuildlog plus mandatory fixturelogs/docs.
+Personal private startup log, unselected artifacts, arbitrary opaque secrets and
+unexported compressed contents excluded. Personal credential fields stayed empty.
+Bootstrap checks public discovery only; personal login, first reply and physical
+background acceptance remain unverified. Additive pilot service/private8443route
+were specifically authorized; pre-existing gateways/routes remain unchanged.
+
+Latest continuation (supersedes historical dispatch below): e7f3d5f is committed;
+successor removes all identified legacy skill/personality/upload/raw/export
+execution paths, adds conservative cold-resume content handling, managed local
+non-image media, generic-file reference guidance and corrupt-marker explanation.
+Focused retirement142/0/0 and corrected recovery1/0/0 passed. Prior full2054/2/14
+found two obsolete reconnect expectations, now updated without removing identity/
+duplicate-send protections. New guidance build-v2 and focused65/0/0 passed;
+current full gate passed2056/0/14. Later isolated wording/comment changes passed
+signed copy-build-v1 and APIError focused18/0/0; no redundant full rerun.
+Signed UI-build-v3 and production UI-v2 passed1/0/0; root inspected both first-run
+guidance and skill screenshots. Strict signing and ordinary launch75260 passed.
+UI-v1 failed a Sessions navigation assertion and runner exit75: screenshot showed
+delayed Save Password over restored prior chat, and the walkthrough was skipped
+by an offscreen-field.exists check. Test now requires visible onboarding, handles
+the exact known password sheet, and returns from restored chat before Sessions.
+UI-build-v2 overlapped three tiny copy/comment writes; final stable UI-build-v3 is
+the authoritative snapshot. No product logic changed for the UI-test correction.
+No physical acceptance or complete host-lifecycle claim yet.
+Final targeted artifact audit-v1:270files/0flags/10exported consoles, selected
+logs/diagnostics/screenshots/receipts plus mandatory migration docs/runtime logs.
+Unselected evidence, arbitrary opaque/OCR and unexported compressed contents are
+not covered. Memory helper/model/validator focused checks22/0 also passed.
+Onboarding decision: preserve five-page/direct-login flow, replace obsolete
+WebUI installer prompt and forced-copy gate with honest existing first-party
+Hermes server guidance. Tailscale recommended, not exclusive authenticated HTTPS.
+No setup execution, new dependency, personal service/route changes or redesign.
+
+Prior checkpoint: `e5cb6d0` direct goals/Cron cleanup, local and unpushed.
+Signed goal build-v7, focused20/0/0, full-v2:2096/0/14 and production goal-status
+UI1/0/0 passed; strict signing and ordinary Simulator launch34982 passed.
+Targeted audit9267files/0flags/9exported consoles. Goal continuation live passed.
+Verified committed batch `e7f3d5f`: skill invocation deferral with browsing retained,
+personality/linked-file disposition and dormant endpoint cleanup. Signed build-v2,
+focused131/0/0 and helper70/0 passed. Full-v1 runner failed before tests; same-build
+full-v2 executed2072/3/14. Three stale legacy error-type expectations corrected;
+signed build-v3, focused auth17/0/0 and full-v3:2075/0/14 now passed.
+Production skill browsing UI1/0/0 passed; screenshot inspected. Real stock compression
+rotation/continuation passed (see lineage row). No physical acceptance.
+TUI-created saved chat readback UI1/0/0 passed through production login/navigation;
+literal stock TUI sent SEMREH_TUI_CROSS_CLIENT_1, returned fixture ACK, exited0,
+and Semreh displayed both saved rows from20260908_212121_02962f. This is saved
+history interoperability, not measured sync latency or shared live streaming.
+Strict signing and ordinary Simulator launch25530 passed. Targeted artifact
+audit-v1:104files/0flags/6exported consoles (selected logs/diagnostics/screenshots
+plus mandatory migration docs/runtime logs; unselected/opaque/OCR excluded).
+Sol Low workers, root integration/review. The
+reconciled `secondary-feature-status.md` owns the per-feature current inventory.
+Do not use the historical checkpoints below as the next dispatch instruction.
+
+- [x] **Kanban direct implementation:** stock `/api/plugins/kanban` REST and
+  ticket-authenticated WebSocket replace old endpoints/SSE. Shared auth/custom
+  headers, redirect refusal, exact board generations and bounded snapshot polling
+  retained. Stock columns/write capability are supplied only when absent; explicit
+  server restrictions remain authoritative. HTTP errors reach retained UI,
+  unrepresentable create status/tenant changes refuse before writes, uncertain
+  created status reconciles without retry. Exact stock response shapes, nested
+  statistics and task ages mapped. Old Kanban HTTP tests/endpoints and unused
+  LDSwiftEventSource package/license removed; retained interaction tests remain.
+- [x] **Kanban owned live contract:** mutation-v1 passed two new unassigned triage
+  tasks, exact body/comment/dependency readback, five authenticated WS events.
+  No dispatch/reassign/specify/decompose; exact temporary board removed and logout
+  confirmed, config hash unchanged. This is not real worker-dispatch acceptance.
+- [x] **Insights direct implementation:** selected-profile direct inventory,
+  newest500 nonarchived rows; existing local message/token/cost/top-session math.
+  Date filtering stays local. Partial/unknown totals labeled; profile read errors
+  cannot publish misleading empty results. No `/api/insights` or legacy fallback.
+  Server-only cache/model/daily/hour breakdowns remain absent as on former local
+  fallback; complete/unlimited historical analytics are not claimed.
+- [x] **Kanban/Insights integrated gate:** full suite2087/0/14 and signing/ordinary
+  launch passed; targeted audit-v1:9221 files/zero flags/six exported test consoles.
+  Covers this batch's selected artifacts plus mandatory docs/runtime logs, not
+  arbitrary opaque/OCR, unselected evidence or unexported compressed contents.
+  Retained failures: build-v1 new async-XCTest and nested-closure compile errors;
+  build-v2 missing explicit return in editor test helper; both corrected.
+  Focused-v1 unconditionally called the asserting JSON-body helper on five valid
+  bodyless requests. Corrected fixture checks required bodies only where defined
+  and explicitly asserts body absence elsewhere; no product assertion weakened.
+  Full-v1:2086/1/14 exposed a test polling every5ms while asserting exactly two
+  reads; a legitimate third tick raced the assertion. A controlled first polling
+  tick and suspended subsequent delay preserve exact count/snapshot assertions.
+  Product code unchanged; build-v5/state-v3/full-v2 passed afterward.
+- [x] **Goal profile check:** Maurice retained goals and approved bounded
+  reproduction before restrictions, not blanket deferral. Original offline import
+  probe failed and touched personal configuration backup during shutdown; original
+  config/backup bytes compared equal in authorized impact check, DB impact not
+  proved. Do not rerun it or claim it proved a goal bug. Replacement zero-Hermes
+  sandbox checks abort before receipt; no new stock imports. Existing-gateway
+  live-v2 passed after HOME containment below: named-profile goal persisted in the
+  default owned DB, absent selected DB; status/pause confirmed. Cleared audit row
+  and runtime close verified; no prompt.submit/model turn. V1 stopped before WS
+  because stock config migration adds only agent:{} and _config_version:39;
+  strict semantic clone check fixed, all other settings still exactly equal.
+  Two owned profiles/wrappers retained: suffixes9ce6a4c3d101 (v1),8f059a8ae784 (v2).
+  They are exclusively under runtime/home/profiles and runtime/home/home/.local/bin;
+  no profile DELETE/process scan. Personal inspection remains outside ongoing scope.
+- [x] **Goal client integration:** root reasonable decision after valid reproduction:
+  allow only session profile == running gateway `current` (never sticky `active`).
+  Refuse mismatch/missing identity before dispatch with specific explanation.
+  Follow stock typed output/send behavior and server-owned continuation; never
+  duplicate auto-loops or retry ambiguous dispatch/kickoff. Render goal status
+  notices, not invented structured state from prose. Sol Low controller/VM lanes;
+  no private Hermes patch or full cross-profile support claim.
+- [x] **Goal/Cron integration checkpoint:** signed build-v7, focused-v3 goal20/0/0,
+  prior directCron/contract/goal focused-v2:31/0/0; production UI-v1:1/0/0 through
+  normal login/new chat/goal status, screenshot independently inspected.
+  Full-v2:2096/0/14, strict signing and ordinary Simulator launch34982 passed.
+  Goal can be the first draft action without a placeholder prompt. Status/pause/
+  clear work during the current turn; set/resume remain idle-only. Menu follows
+  those rules. Profile attestation and subsequent dispatch/kickoff stay bound to
+  one ready connection; uncertain dispatch/create/send is not retried. Server
+  goal notices are local projections, not a fabricated structured status badge.
+  Returned resume display is currently an additive notice alongside the exact
+  model-facing text; presentation polish remains separate.
+  Removed unused health/auth/session-status and legacy Cron endpoint helpers and
+  transport-only tests; direct Cron behavior/tests and presentation DTOs retained.
+  No additional live probe was needed for dead endpoint deletion.
+  Failure history: focused-v1:8/5/0 found status projection and mock ACK issues;
+  its malformed ACK persisted an exact mock uncertainty marker, causing later
+  early refusals/a60s test timeout. Marker moved recoverably to evidence; fresh
+  in-memory stores now reach controller and VM, and the gate is bounded/released.
+  Build-v4 failed a missing test emit helper; corrected. Full-v1:2095/1/14 had an
+  obsolete blanket-goals-unavailable test. Its first adaptation focused-v4:8/1/0
+  omitted a legitimate canonical GET; exact two first-party GETs now asserted.
+  Focused-v5:1/0/0 and final full passed. No unexplained runner retry/stall here.
+  Offline root goal fixture20/0, UI helper47/0. Failed offline-confinement scripts
+  moved out of active scripts into the external evidence folder, recoverable;
+  original incident log remains unshareable and reconstruction is a design marker
+  only, not byte-verified source recovery. No physical acceptance or push/install.
+  Targeted artifact audit-v1:9267 files/zero flags/nine exported test consoles.
+  Selected goal batch artifacts plus mandatory docs/runtime logs only; original
+  incident log, abandoned sandbox artifacts, opaque/OCR and unexported compressed
+  contents are excluded. Goal scope helper now pins the reviewed new config;
+  its offline checks3/0 passed, original live scope receipt remains historical.
+- [x] **Goal server-owned continuation:** `slice4-goal-e2e-v1.json` passed on
+  stock29112bef and exact localhost-only judge configuration. One prompt.submit,
+  two canonical user/assistant pairs, done state with turns_used2, no third turn,
+  exact-owned-goal clear and runtime close; config unchanged after cleanup.
+  Root independently checked local model log order: main1/judge1/main2/judge2,
+  no tool calls. This is live protocol evidence, not app/device acceptance.
+  Owned fixture auxiliary configuration now explicitly custom localhost18792,
+  retries0 and empty fallback; same main-model identity prevents stock main
+  fallback escalation. ConfigSHA d0a13a4e266aaa416e3b025e5fa6029377a1c964f0275712710eb1ab7afba9a8.
+  Backend18939/model18817 replace only validated old fixture PIDs; personal routes
+  and services unchanged. Prior SHA-pinned probes refuse this changed fixture
+  until reviewed; do not relabel historical evidence as this environment.
+- [x] **Owned launcher home containment:** source review found HOME absent despite
+  fixed HERMES_HOME; stock profile creation writes wrappers via Path.home.
+  Added HOME=owned runtime/home/home, AST regression1/0. Root gracefully stopped
+  only validated owned PID70052 and launched the same fixture asPID96233.
+  Actual HOME/HERMES_HOME/TMPDIR verified as owned; model70034/routes unchanged.
+  No profile creation occurred before fixing this. This is configuration
+  separation, not an OS sandbox; no personal service/configuration was changed.
+
+- [x] Retire approved proprietary website-login/native credential-form flow:
+  UI/state/coordinator hooks, SSE events, API methods/endpoints, model/encryption
+  implementation, dedicated contracts/fixtures/tests and project entries removed.
+  Ordinary app login and direct approval/clarification/secret/sudo retained.
+  Caller search and signed build passed; affected classes APIClientChatEndpointTests,
+  SSEClientTests, ChatStreamCoordinatorTests, ChatViewModelStreamingPaceTests,
+  ChatStreamingMotionTests, DirectHermesAuthTests, GatewayConversationBlockingTests
+  passed140/0/0; full-v2 passed2197/0/14. Evidence stem `slice4-login-retirement`.
+  Root fixed one orphan preprocessor directive before compilation; workers parsed
+  all changed Swift files. Full-v1 started no test cases after~2.5minutes; exact
+  owned xcodebuild81066 interrupted73 and retained. One same-build retry passed;
+  no runner root cause inferred. Strict signing and ordinary Simulator launch83957
+  passed. Targeted audit-v1 scanned4872files/0flags, including two exported test
+  consoles and the interrupted staging console. Excludes unselected evidence,
+  arbitrary opaque/OCR and unexported compressed contents. No new backend probe
+  for this dead-flow deletion, no physical-device/new production navigation claim.
+  Historical implementation remains recoverable at306406c. Future plugin lead
+  stays in the existing ideas backlog, not a migration dependency.
+
+September 8 destructive/updater batch verified on `13f07e5` plus scoped diff:
+Maurice approved guarded
+stock edit/regenerate/delete with the documented concurrent-writer limitation
+in the binding plan. Sol Low implementations replace these mutations and the
+Settings updater without a WebUI fallback or private Hermes changes. Root owns
+the compile/test gate. Stock HTTPS probe `slice4-destructive-live-v2.json` passed
+exact edit/regenerate/empty-prefix history, stale-row refusal, attached-delete
+refusal, exact delete acknowledgement/absence and unchanged sibling assertions.
+Its v1 attempt failed at startup because the disposable services were stopped;
+no mutation occurred. Root restarted only the guarded fixture services.
+Evidence stem `slice4-destructive-updater`: signed build-v7, focused-v3
+208/0/0 (changed chat/session classes; updater/controller passed preceding run),
+full-v2 2262/0/14, strict signing and Simulator launch82166 passed.
+Build-v1/v2/v3 exposed test syntax, async-XCTest autoclosures and a removed helper
+still used by retry tests. Focused-v1 290/8/0 and v2 296/2/0 exposed incomplete
+visible-row fixtures, shared mock uncertainty state and a stale-target test still
+running its preceding fake turn. Corrected without dropping assertions. The sole
+confirmed example.test/work/durable-1 marker generated by the first run was moved
+from the owned Simulator into `slice4-destructive-updater-retained-mock-marker.json`;
+recoverable, no real/personal state changed. Full-v1 never started test cases;
+interrupted exact owned xcodebuild and retained exit73. Full-v2 passed after
+build-v7 also closed a reviewed updater post-ACK cancellation/spinner gap; this
+source fix is not an inferred runner fix. No repeated runner stall or causal claim.
+Updater execution, production UI navigation and device acceptance remain open.
+Targeted audit-v1 scanned6465files with zero flags, including four exported
+test consoles and the interrupted staging console. Selected new bundles/logs,
+live evidence and retained mock marker plus mandatory docs/runtime logs only;
+unselected evidence, arbitrary opaque/OCR and unexported compressed contents
+are not covered. Final updater/delete legacy-route search found no remaining
+`/api/updates/*` or `/api/session/delete` app/test consumers.
+
+Git disposition approved September 8: defer/hide unmatched dedicated controls
+(fetch/pull, stash checkout, generated messages, selected/quick commit and the
+existing discard workflow); retain Git viewing and migrate supported actions.
+Stock commit auto-stages all if no index entries exist, and discard removes
+matching untracked files; do not silently adopt those different semantics.
+Agent-driven Git through chat remains available when tools/permissions allow.
+Revisit deferred controls after migration; no new backend dependency. The binding
+plan records this decision. Git batch on206b216 plus scoped diff now replaces
+stage/unstage, clean existing-local switch and push with stock routes, hides the
+deferred controls (including manual commit and new/remote branch checkout), and
+removes legacy Git APIs/endpoints. Stage/unstage sends explicit exact file paths,
+never a nil/all-files body; validation runs before each file dispatch. Partial and
+unknown outcomes are explicit; unknown push requires a successful explicit refresh
+before retry. Push confirmation discloses stock origin/upstream fallback.
+These client checks do not make stock filesystem/Git operations atomic against
+other clients. Root fixed a filename-trimming retarget risk, sanitizer-changing
+branch suffixes and a hidden staging error during review.
+Signed builds-v1/v2/v3 passed; focused-v1:52/0/0; Python harness45/0. Owned stock
+`slice4-git-mutation-live-v1.json` confirms explicit stage/unstage, clean local
+switch and index/worktree readback in a fresh disposable repository, no remote
+operations. Full-v3:2233/0/14 passed; signed UI build-v1 and strict signing passed.
+Production UI navigation results follow below. Evidence stem `slice4-git-controls`;
+no new physical/remote-push acceptance. Retained full-v1:2233/1/14 failed solely
+because LocalizationCatalog required the removed branch-creation placeholder.
+That obsolete test was removed; supported branding and direct behavior retained.
+Full-v2 failed before runner connection with no test cases executed; same-build
+full-v3 passed, without a claimed runner root cause or product fix.
+Production UI-v1 then caught a real missed startup call: direct chats skipped Git
+availability loading. Root enabled the retained direct VM's existing loader;
+UI-build-v2/UI-v2 passed1/0/0, with independently inspected menu/staging screenshots.
+Review also fixed draft/lineage canonical rebinding: preserve the retained Git VM,
+adopt only the store's confirmed target/profile, invalidate stale reads/dispatch,
+retain busy/unknown push barriers, and pass canonical identity to Git child sheets.
+Unit-build-v4/v5 and UI-build-v3 passed; focused-v2:94/0/0; full-v5:2235/0/14.
+The v5 unit rebuild corrected a new test's old-target ID to match its held-read
+fixture before execution; no product assertion was removed. Full-v4 stalled
+before any cases; exact owned runner interrupted73 after about2minutes, retained.
+Same-build full-v5 passed. Final UI-v3 passed1/0/0; both exported screenshots were
+independently inspected, showing the actual supported menu and populated staging
+sheet. Strict signing and ordinary Simulator launch67165 passed. Targeted
+audit-v1:14381files/0flags/10console files (nine exported plus the interrupted
+full-v4 staging console). Only new selected artifacts plus mandatory docs/runtime
+logs; unselected evidence, opaque/OCR and unexported compressed contents excluded.
+These are Simulator navigation/mock canonicalization and disposable stock Git
+mutation checks, not physical-device acceptance or actual remote-push execution.
+
+Reproduce the bounded Git checks using fresh result paths and the existing signed
+HermesMobile / HermesMobileUIVerification schemes on the owned Simulator:
+`python -m unittest scripts/test_direct_hermes_ios_smoke.py scripts/test_direct_hermes_git_mutation_probe.py`;
+focused XCTest classes APIClientGitTests, GitWorkspaceViewModelTests and
+OpenChatSessionStoreTests, then the full HermesMobile XCTest target. The UI run
+file comes from `scripts/direct_hermes_ios_smoke.py --https --stock-backend
+--slice2-ui --slice4-git-ui-session-id 20260908_114848_b18c0d` and targets the
+production login/session/menu test only. All native runs use signing,
+parallel-testing NO and collect-test-diagnostics never.
+
+Immediate acceptance work from the no-drift audit:
+- [x] Direct missed-terminal recovery restores the complete durable answer in controller/VM tests.
+- [x] Full reload on an already-active chat preserves text/cards/anchors and later deltas.
+- [x] Primed cache, completed initial attachment, then warm refresh plus real send and late auth/transport failure preserves live state. Initial attachment serializes send; no claim it can be bypassed.
+- [x] Run current load/export native gate and independently inspect behavioral coverage.
+
+Load/export evidence: `slice4-load-export-build-v3`, `...full-v5`, strict signing,
+Simulator launch99691. Stock HTTPS `slice4-export-live-v1.json`:4rows/8264bytes,
+no session/provider mutations (authentication control POSTs excluded). Probe4/4
+guard tests passed. Native HTML share navigation and physical UI remain unverified.
+Retained failures: full-v1:2366/5/14 (three new fixture setup errors and two old
+WebUI store-refresh fixtures); full-v3:2370/1/14 (warm refresh incorrectly expected
+a blocking spinner). Corrected fixtures without production changes or dropping
+send/recovery guarantees. full-v2/v4 interrupted after runner stalls, exit73;
+no cause established. Owned Simulator restart preceded full-v5 success.
+Targeted artifact audit-v2:14551files/0flags; three exported test consoles plus
+two interrupted-run staging consoles scanned. Unselected/opaque/OCR/unexported
+contents excluded. Audit-v1 rejected nonexistent empty diagnostic directories
+before scanning; v2 selected actual retained artifacts.
+
+Latest duplicate/retirement checkpoint: `slice4-duplicate-retirement-build-v4`
+and `...full-v3`, strict signing and Simulator launch17185. Stock named branch,
+scoped temporary-controller ownership, running refusal, exact-child recovery,
+profile-switch barrier and no blind repeat after ambiguous dispatch have native
+tests. Existing unnamed branch shape remains checked. Stock branch snapshots are
+not atomic across durable/live reads; no stronger external-writer guarantee.
+Unknown duplicate barrier is VM-lifetime only, not persistent cross-relaunch
+idempotency. No new live sidebar/named-copy or physical acceptance claimed.
+Unused sessionEvents URL and ordinary startChat API/endpoint removed; four
+obsolete API protocol test methods and one matrix assertion removed. Direct
+send/recovery/renderer tests retained; SSE/status/Kanban dependency still present.
+Failures retained: build-v1 optional test-field unwrap; build-v2 missing fake
+running parameter; full-v1:2371/1/14 missing normal archived-count fixture.
+Root corrected tests only. full-v2 stalled before recorded cases, interrupted73;
+Simulator restart did not reliably solve it. Same-build full-v3 passed.
+Targeted duplicate/retirement audit-v1:9735files/0flags, two exported consoles
+plus one interrupted-run staging console. Unselected/opaque/OCR/unexported
+contents excluded; no unrelated historical evidence rescan claimed.
+
+## Implementation batches
+
+- [x] **Main-chat coordinator retirement.** Removed ChatStreamCoordinator,
+  ChatViewModel/OpenChatSessionStore legacy coordinator branches, per-chat status
+  timers/watchers and unused LiveActivityReconciler. Deleted unused HTTP cancel/status
+  wrappers, endpoints and DTOs; old executable goal kickoff now refuses without
+  making a request. Root cleaned project memberships. Retained direct rendering,
+  recovery, attachments, prompts, title/cache/TPS and Live Activity lifecycle.
+  Shared event payloads stay in SSEClient while the legacy BTW implementation
+  remains; BTW is already explicitly unavailable in direct mode. Kanban retains
+  its independent SSE client and dependency. Neither unresolved feature is silently
+  considered migrated by this cleanup. All eight pacing/rendering/performance tests
+  retained through a direct event fixture; applicable Live Activity and mixed
+  rendering tests migrated rather than discarded with old SSE injection.
+  Root review found the direct queue lacked the old coordinator's initial drain
+  trigger: queued messages now drain after authoritative completion only while idle
+  and delivery is unambiguous. Production fake-transport callback regression proves
+  one queued submit; explicit failed-drain retry/no-loop regression retained.
+  Focused execution caught/fixed direct interim excerpt forwarding and immediate
+  excerpt clearing when disabled. No app-wide preference or backend changes.
+  Evidence stem `slice4-chat-transport-retirement`: signed build-v6/UI-build-v1,
+  focused-v1:306/5/0 then affected-three-class focused-v2:135/0/0, full-v1:2102/0/14,
+  UI-v1:1/0/0. Normal production login/tabs/new-chat/send reached the owned stock
+  fixture ACK; exported screenshot independently inspected. Strict signing and
+  ordinary Simulator launch6416 passed. No full-suite or UI runner retry needed.
+  Retained build-v1 duplicate actor attribute; v2 async XCTest autoclosure; v3 one
+  old coordinator recovery callback test; v4 removed query helper still needed by
+  direct tests. Root fixed tests; build-v5 passed. Focused-v1's other three failures
+  were old active-ID/LRU assumptions and a forbidden legitimate direct canonical
+  GET in the new queue fixture; corrected without weakening direct assertions.
+  Targeted audit-v1:5425files/0flags/4exported consoles. Selected new artifacts plus
+  mandatory docs/runtime logs; unselected evidence, arbitrary opaque/OCR and
+  unexported compressed contents excluded. Physical acceptance, real cross-client
+  queue behavior, orphan reconciliation and complete WebUI absence remain open.
+
+- [x] **BTW side-question transport and chat SSE retirement.** Shared runtime
+  `prompt.btw` with exact task/session/profile correlation and completion-before-ACK
+  buffering replaces legacy HTTP/BTW SSE. Single active local-only card, explicit
+  unknown outcomes and no automatic ambiguous retry. Removed chat SSE implementation,
+  stream/BTW API wrappers and obsolete tests; retained direct presentation DTOs and
+  all pacing tests. Subsequent `628225f` migrated Kanban to authenticated WS and
+  removed the remaining SSE package/license dependency.
+  Evidence stem `slice4-btw-retirement`: signed build-v3/UI-build-v1; focused-v1
+  101/4/0 caught a missing controller open before BTW dispatch plus a setup-read
+  test assumption. Fixed; focused-v2 stalled before cases, exact runner21468
+  interrupted73 and retained. Same-build focused-v3:82/1/0 exposed one incorrect
+  assistant-vs-local_assistant test role; corrected only the assertion, single-test
+  focused-v4:1/0/0. Integrated full-v1:2070/0/14 passed without retry.
+  Stock `slice4-btw-live-v1.json` passed correlated exact localhost-fixture answer,
+  unchanged canonical transcript and unchanged configuration. Both possible model
+  routes guarded local; no personal provider/tools or actual fork-vs-fallback claim.
+  UI-v1 caught a genuine delayed terminal-refresh race: idle is published before
+  canonical refresh finishes, and refresh could erase the BTW row. BTW rows now
+  retain explicit exact conversation/profile ownership across reconciliation;
+  no arbitrary optimistic rows or cross-tip retention, no canonical paging change.
+  Signed build-v4/focused-v5:79/0/0 includes reconcile/cross-tip regressions.
+  UI also waits actual idle before typing, preserving the existing busy refusal.
+  UI-v2 screenshot showed the correct card but failed the obsolete one-StaticText
+  selector; adjusted test-only question/answer correlation to actual card geometry.
+  UI-v1/v2 both retain selector timeout and subsequent runner exit75; no claim the
+  exit was a diagnosed product crash. UI-build-v3/UI-v3:1/0/0 passed; root inspected
+  the exported correct question/answer screenshot. Removed the unused non-direct
+  HTTP steer fallback and its API/DTO/tests; direct steer unchanged, caller scan0.
+  Unit-build-v5 passed; final full-v3:2070/0/14, strict signing and ordinary launch41961.
+  Full-v2 stalled before cases; exact runner39419 interrupted73 and retained;
+  one same-build full-v3 retry passed. No runner cause inferred or product edit
+  between these attempts. Targeted audit-v1:9901files/0flags/11console logs.
+  Selected new BTW artifacts plus mandatory docs/runtime logs only; unselected
+  evidence, arbitrary opaque/OCR and unexported compressed contents excluded.
+  Physical acceptance remains separate; no new live probe for dead steering removal.
+
+- [x] **Bounded audio implementation batch** (remaining attachment acceptance below). Text/code `file.attach` already exists:
+  close its remaining canonical roundtrip evidence rather than reimplementing.
+  Restore voice-note send using existing transcription and isolated audio staging,
+  preserving typed draft and unrelated pending attachments. Make existing canonical
+  audio players use guarded direct managed-file bytes. Do not guess relative file
+  roots or exercise external audio providers in the deterministic fixture.
+  Audio/background batch now implemented; signed build-v5 and affected focused-v2
+  passed106/0/0. Previous focused-v1:109passed/6failed; real Apple `.m4a` MIME
+  mismatch corrected to `audio/mp4`, plus background fixtures corrected to model
+  method refusal separately from disconnect and use unique task IDs. Earlier
+  build-v1/v2 private-state test access and v3 missing test closure return were
+  corrected; build-v4/v5 passed. Final integrated full-v2:2092/0/14 and UI-v2:1/0/0
+  passed, not whole-migration or physical voice acceptance.
+  Voice send transcribes/stages only its own clip, retains unrelated draft files,
+  blocks paid STT while busy/uncertain, and preserves attachments on ambiguous
+  delivery without resending. Canonical absolute audio refs use managed-file reads;
+  relative refs and actual microphone/provider/device remain unverified.
+  Reuse existing text canonical proof (`slice3-attachment-contract-v2.json`,
+  `slice3-file-picker-canonical-v6.json`); no duplicate probe. Stock outside-cwd
+  `@file` references retain a Context Warning and proceed without automatic text
+  expansion, not a blocked send; model/tool ingestion remains unverified.
+
+- [x] **Direct background tasks.** Shared `prompt.background`
+  supports multiple correlated attempts, completion-before-ACK, exact session/task
+  identity, unknown-on-disconnect/rebind, and no automatic retries. Local cards
+  retain same-session/profile ownership across canonical refresh. Old REST/polling
+  wrappers, endpoints and DTOs removed. Owned stock `slice4-background-live-v1.json`
+  passed two ACK/results, exact fixture replies and unchanged canonical history/
+  config; no external provider/tools. Background UI launcher offline45/0 and
+  probe offline3/0 passed; final UI-v2:1/0/0 and full-v2:2092/0/14 passed.
+  UI-v1 exceeded180s before prompt submission with repeated60s animation-idle
+  waits, not a background contract failure. Bounded AppShell change replaces a
+  perpetual60Hz capsule timeline with finite dates through final settlement;
+  visual motion/retarget/reduce-motion behavior preserved. Motion-v1 caught an
+  endpoint floating-point edge (15pass/1fail); terminal date now advances one
+  representable instant, with current-era and residual-deformation tests. Signed
+  build-v6/v7 and motion-v2:16/0/0 passed. Signed UI-build-v2/UI-v2:1/0/0 passed;
+  root inspected background-card screenshot E724735F-25D9-450F-A968-C43ECD9B6FE7.png.
+  Some idle waits remained; no exclusive root-cause or measured physical
+  performance claim. Full-v1 stalled before cases; exact runner77842 interrupted73,
+  retained, and one same-build full-v2 retry passed2092/0/14. No product edits
+  between full attempts. Strict signing and ordinary Simulator launch passed.
+  Unchanged live evidence reused. Targeted audit-v1:5233files/0flags/8exported
+  consoles; new audio/background artifacts and background-live receipt/log plus
+  mandatory docs/runtime logs. Opaque/OCR/unselected evidence and unexported
+  compressed contents excluded. Ordinary signed launch80371; no phone install.
+
+- [x] **Supported Git controls and deferred-control hiding:** direct explicit-file
+  stage/unstage, clean local switch/push, canonical Git identity and child sheets;
+  old Git API/endpoint retirement. Current signed/native/live/UI checkpoint above.
+  Physical acceptance, real remote push and deferred controls remain distinct.
+
+- [x] **Settings/preferences and unused configuration API retirement:** Settings
+  version/liveness now uses stock status. CLI/Claude visibility remains immediate
+  with explicitly device-local per-server persistence; existing keys, legacy
+  fallback and independent child choice retained without importing/deleting data.
+  Shortcuts profile picker uses existing directProfiles; headers/cache fallback
+  unchanged. Removed unused composer/settings/profile HTTP wrappers, request and
+  clearly orphan response DTOs, endpoint cases and obsolete API tests. Shared
+  presentation types, direct contracts, updater/insights/personality remain.
+  Evidence stem slice4-settings-config-retirement: signed build-v1 passed first
+  attempt; focused-v1 63/0/0; full-v1 2265/0/14; strict signing and Simulator
+  launch23201 passed. Targeted audit-v1:4837files/0flags/2exported consoles;
+  unselected evidence, opaque/OCR and unexported compressed contents excluded.
+  No failed attempts. No new live contract implementation,
+  physical Settings/Siri interaction or full migration acceptance claimed.
+  Local-only preference scope is a documented engineering decision, not a new
+  server feature. Updater migration remains separate; its latest receipt cannot
+  alone prove the requested action completed. Cross-client destructive-action
+  limitation question sent to Maurice; no new waiver inferred without a reply.
+
+- [x] **Legacy composer/workspace-registry retirement:** removed the old composer
+  loader, HTTP configuration selection branches and unused registry APIs/DTOs/
+  endpoints. Existing direct draft choices, per-session reasoning and its pending
+  intent/rollback guards remain; managed file access is unchanged. Removed obsolete
+  HTTP tests, retaining direct composer/controller coverage and adding two direct
+  regressions for draft preservation on inventory failure and stale inventory
+  versus a concurrent workspace choice. Provider-exact label selection is a pure
+  presentation test, not an invented named-model field in stock inventory.
+  Signed build-v3 passed; focused-v1 219/1/0, corrected fixture-only focused-v2
+  1/0/0, then full-v1 2291/0/14. Build-v1 failed an async XCTest autoclosure;
+  build-v2 passed after that syntax fix. Focused failure was an old catalog-route
+  fixture, not a direct product assertion failure. Strict signing and Simulator
+  launch15024 passed. Targeted audit-v1:5264files/0flags/3exported consoles;
+  unselected evidence, opaque/OCR and unexported compressed contents excluded.
+  No changed backend contract/new live probe or physical
+  acceptance claimed. Remaining chat/SSE/native-auth paths are separate work.
+
+- [x] **Legacy pending interaction and dead project API retirement:** removed
+  ChatPendingActionCoordinator, its two SSE/polling owners and old approval/
+  clarification/yolo HTTP methods and UI fallback. Direct identity-bound approval,
+  clarification, secret and sudo behavior unchanged. Removed unreachable Projects
+  CRUD/move API/DTO/endpoint/test surfaces after local organizer migration.
+  Retained background polling cleanup assertion from formerly combined test;
+  pure legacy wire decoder/Endpoint constants remain until their later cleanup.
+  Signed build-v1 passed first attempt; focused-v1 230/0/0. Full-v1 stalled before
+  recorded cases, interrupted exact owned process at139s, terminal73. One same-build
+  full-v2 retry passed2332/0/14 in~30s; no source change or proven cause inferred.
+  Strict signing and Simulator launch2572 passed. Audit-v1:5317files/0flags,
+  two exported consoles plus one interrupted staging console. Unselected/opaque/
+  unexported contents excluded. No new live probe needed for unchanged gateway
+  contracts; not physical acceptance or full legacy chat/SSE removal.
+
+- [x] **Local organizer and provider inventory:** device-local persistent
+  server/profile-scoped groups, assignments and workspace bookmarks; no backend
+  mutations or personal-data import. Cache/live/search overlays retain local
+  organization; corrupt metadata warns without blocking conversation reads.
+  Canonical rekey transfers assignment best-effort while retaining ancestor
+  mapping; later independently reassigned ancestor/tip entries can differ.
+  Bookmarks explicitly do not create/verify remote directories. Provider screen
+  now uses stock scoped model options, not WebUI provider status; availability
+  is not a health check and unavailable credential-source metadata is disclosed.
+  Build-v7 passed; focused-v2 SessionList90/0/0 (other focused checks passed v1);
+  full-v1 2356/0/14, strict signing and Simulator launch90683. Targeted audit-v1:
+  5392files/0flags/3exported consoles; unselected/opaque/unexported contents excluded.
+  No new live provider probe, physical organizer/navigation acceptance or complete
+  migration claim. Old unreachable API wrappers remain for the next deletion batch.
+  Retained failures: build-v1 actor defaults, v2 optional profile, v3 missing
+  ProjectSummary initializer, v4 URLComponents exclusivity, v5 obsolete move-test
+  callers; v6 passed. focused-v1 108/6/0 exposed old server-group fixtures and
+  obsolete move reload count; corrected tests only, then build-v7/focused-v2 passed.
+
+- [x] **Branch UI handoff:** signed production UI-v2 passed1/0/0; root inspected
+  copied-child, independent-child-turn and unchanged-parent screenshots. Existing
+  native controller live-v3 separately proves exact durable row identities.
+  Check cold/warm parent, exact child ownership, no duplicate resume, parent
+  unchanged, rejection cleanup; production `/branch` navigation smoke.
+  First focused run:155pass/2fail. Mock durable ID fixed; successor run interrupted
+  after no result for roughly5minutes (exit73), not accepted. Root also added
+  adopted-child canonical rekey callback and regression assertion.
+- [ ] **Lineage/compression:** complete supported compression and ancestor-to-tip
+  recovery without losing delivery warnings. Root scopes the remaining core gap.
+  Check canonical IDs, scoped markers and conflict handling; real compression
+  required before claiming continuation acceptance.
+  September8 current-stock HTTPS rotation proof passed on pin29112bef:24->22rows,
+  14574->14251tokens, exact parent/child metadata, ancestor-to-tip pages,
+  exactly-once continuation through two cold resumes. Evidence:
+  `slice4-compression-current-stock-v1.json`; no cleanup errors/config changes.
+  Explicit localhost main+auxiliary route only. Native identity/delivery-marker
+  integration and physical acceptance remain separate; do not close on RPC alone.
+- [x] **Continuity-sidecar retirement:** remove callers, old auth/config hooks and
+  implementation while retaining direct credentials/accounts.
+  Check direct login/restore/logout and absence of executable sidecar fallback.
+  Implementation/settings/auth hooks removed, compatibility regression added;
+  integrated focused152/0/0 and successor full suites passed. Source search again
+  finds no OfficialHermesContinuity/continuitySidecar implementation or callers.
+  Old account metadata/keys preserved. Broader WebUI cutover remains separate.
+- [x] **Legacy chat/SSE transport retirement:** main chat coordinator/status polling,
+  BTW/background SSE and remaining Kanban SSE package removed in verified commits
+  `114609f`, `42c3a48`, `2592ee2`, `628225f`.
+- [x] **Remaining legacy secondary branches/helpers:** identified session,
+  skill/personality and attachment/media fallback callers retired; active-caller
+  audit found no additional separate-WebUI network path. Signed current full
+  suite2056/0/14 passed. Stock image `/api/media` retained; absolute non-image
+  media use managed reads. This closes the identified code cleanup, not physical
+  acceptance or every supported feature's live execution gate.
+- [x] **Older history during an active response — implementation:** deterministic
+  native tests now pass; actual-device acceptance remains. Older-page application
+  preserves the live response/tools/reasoning and seeks an exact boundary anchor
+  across at most eight overlapping reads. Missing/unproven anchors leave history
+  intact. Tests cover250new durable rows, stale terminal/turn/binding responses,
+  historical tool visibility and canonical rollover. Idle rollover refreshes the
+  canonical tail/rebinds; active rollover leaves live identity intact. This is a
+  functional improvement, not proof of physical scrolling smoothness.
+- [ ] **Secondary feature migration:** finish supported first-party consumers;
+  use the reconciled feature inventory, not a new side project.
+  Check exact stock request/response and visible behavior; do not invent routes.
+  Skills list/toggle/SKILL.md and active-profile UI propagation authored. Linked
+  files explicitly unavailable pending parity decision; no legacy detail request.
+  Scoped discovery and invocation-refusal tests passed in focused131/0/0.
+  Dormant same-running-profile dispatch code is retained but has no UI caller;
+  it is not shipped invocation support. Production browsing UI1/0/0 passed;
+  screenshot shows the explicit invocation deferral and retained skill description.
+  Blocking finding: same-socket live dispatch-v1 timed out. Stock command.dispatch
+  is inline (not server._LONG_HANDLERS), so its required-secret wait blocks the
+  socket reader from consuming secret.respond. Do not ship/count the new invocation
+  path as verified. Two-socket diagnostic remains unrun and would not validate
+  current app architecture. Resolved: temporarily defer invocation, retain scoped
+  browsing/search/detail, no second app socket/private patch. User approved continued
+  work after this documented reasonable decision. No new upstream PR authorized.
+  Personality deferred/hidden to avoid silently changing session-only semantics
+  to a durable profile default plus hidden history pivot. Linked-file UI deferred
+  and removed; first-party SKILL.md reading retained. These are documented bounded
+  migration dispositions, not an implementation of unsupported parity.
+- [x] **Session conveniences — implementation:** direct search/rename/pin/archive,
+  duplication, local organizer move and guarded deletion have recorded native
+  verification. See secondary-feature-status for exact live evidence/limitations.
+- [ ] **Consolidated device acceptance:** older-history interaction, session
+  conveniences and cache/open/send/scroll feel on the physical iPhone; existing
+  Simulator/protocol evidence does not close this gate.
+- [ ] **Feature disposition inventory:** every remaining visible action migrated
+  or explicitly approved for removal/deferral. Unsupported items listed below.
+
+## Decisions / limitations that implementation workers must not silently resolve
+
+- [x] Disposition approved: in-chat website-login/native credential-form overlays have no equivalent
+  at the stock pin: proprietary `website_login`/`native_component(_state)` SSE
+  and `/api/native-auth/*`, `/api/work/login/*` responses cannot be replaced by
+  unrelated MCP OAuth or secret/sudo. Maurice approved temporary defer/hide;
+  retirement is implemented/native-tested above. Preserve ordinary app login and supported
+  direct blocking prompts. Read-only audit: `tui_gateway/server.py`,
+  `methods_prompt.py`, `methods_tools.py`; app `WebsiteLogin.swift`,
+  `APIClient+Chat.swift` and ChatView overlays. Friend's Telegram website-login
+  plugin is a later unreviewed lead in SEMREH_IDEAS.md, not a migration dependency.
+
+- [x] Legacy named workspace/project registry and moving chats between those
+  projects have no equivalent in the pinned serve contracts. Revised proposal:
+  reuse existing UI with Semreh-owned local persistent groups/bookmarks and chat
+  assignments, separate from disposable cache and scoped by server/profile.
+  Maurice approved local-only organization on September 7; implementation and
+  native verification passed in the checkpoint above. Conversation sync remains separate. No private
+  Hermes patch, sync service, automatic personal-data import or deletion.
+- [ ] Memory parity: source audit found builtin MEMORY/USER supported through
+  selected profile's returned home plus stock-defined memories paths and managed
+  file APIs; SOUL has its dedicated contract. Implemented/native-tested at cd41f5b;
+  owned default-profile MEMORY model adoption now passed in
+  `slice4-memory-adoption-live-v2.json`: exact managed upload/readback, one fresh
+  main-model request containing the benign memory marker, one separate stock
+  title-generation request, and owned session/file cleanup. Root restored exact
+  original config SHA5142fb8c... and disabled-memory validator passed afterward.
+  V1 failed a probe assumption counting title generation as another main request;
+  no product change was needed. Native editor navigation and USER/SOUL adoption
+  are not proved by this MEMORY protocol check. These are not removal candidates.
+  Effective project-context discovery remains open (current UI is read-only).
+- [x] Edit/regenerate release treatment: Maurice accepted guarded stock operations
+  with the residual cross-client race on September 8; native batch still pending.
+- [x] Deletion treatment: same approved stock concurrency limitation; preserve
+  attached-session refusal and exact targeting, without implicitly closing chats.
+- [x] Corrupt/unresolvable delivery-marker recovery UX: exact nil-token ambiguity
+  explains that saved history is readable but this chat cannot safely send,
+  directs to Chats/New Chat. Valid-token canonical-idle recovery remains scoped;
+  no silent/global reset, blind resend or history mutation. Native tests pass.
+- [x] Generic text attachment disposition and media-route correctness; staging
+  is not model receipt. Current native full2056/0/14 covers the exact generic
+  attachment hint and absolute non-image managed-file routing.
+  September8 disposition: retain stock file.attach as a tool-readable file
+  reference, not guaranteed automatic model-context expansion. Pinned stock stages
+  into profile attachments (container-mounted); automatic @file expansion may
+  reject paths outside cwd. Do not infer unusability from our disabled-tool fixture
+  or remove supported attachment transport. Concise generic-file UI guidance added;
+  cross-backend tool-path portability and actual provider ingestion remain unverified.
+  Media provenance correction: stock `/api/media` is an authenticated image-only
+  route with a JSON data_url envelope; preserve the existing image adapter.
+  Local absolute non-image audio/video/PDF/Markdown references now use supported
+  managed-file reads; relative non-image references fail explicitly before network.
+- [ ] Mobile orphan grace / host deployment persistence and physical boundaries.
+  Final read-only review: app cleanup, current-stock compression, literal TUI
+  saved-message readback and MEMORY adoption have scoped evidence; do not repeat
+  them as new gates. Stock default20s remains unacceptable for ordinary iPhone
+  suspension. Select/test a finite grace covering the agreed background interval;
+  do not disable reaping without idle-cleanup/session-cap proof. Personal host
+  service-manager/reboot/crash/awake and persistent route checks require separate
+  deployment authority. Consolidate actual iPhone background/kill/relaunch/socket
+  interruption/canonical catch-up and core cache/open/send/scroll acceptance.
+  Desktop duplication, real remote Git push, cron/provider execution and APNs
+  are not newly invented blockers; their unverified scope stays explicit.
+
+## Integration and acceptance
+
+Latest accepted native product checkpoint: `0d9c6df`,
+`slice4-git-monitor-retirement-full-v3`:2368passed/0failed/14intentional skips.
+Build-v3 plus focused auth-v1:91passed/0failed covers the separately added auth
+negative test. Strict signing and Simulator launch60977 passed.
+`e43a571` adds independently passed stock Git read probe, not new native UI code.
+Load/export is covered by the newer checkpoint above, not those earlier results. Full release
+WebUI-absent, cross-client, recovery and physical gates remain open.
+
+### Historical checkpoint details (not the current dispatch queue)
+
+Earlier integrated snapshot: `slice4-final-batch-full-v1` passed
+2287tests/0fail/14intentional opt-in skips after signed `final-batch-build-v1`.
+This covers journal removal, lineage ACK fixes, direct cancellation/reconnect,
+manual compression mocks, scoped Live Activity idle recovery, profiles/cron reads,
+external-run discovery and task-load freshness. Actual compression and physical
+mobile acceptance remain unverified. The previous full run's lone legacy
+foreground-discovery fixture was migrated to direct behavior assertions, not
+silently deleted. Independent worker review checked the new discovery/freshness
+assertions; root reran the full suite.
+Production branch UI-v1 failed before branch execution because Apple's known
+Save Password sheet obscured restored-chat navigation. Specific Not Now handling
+now preserves navigation assertions; signed UI-build-v2 and UI-v2 passed.
+Evidence: `slice4-branch-production-ui-v2.xcresult` and exported attachments in
+the owned evidence root. Root viewed 7DBFE14B (copied history), 25A7693B (child
+turn), BD9C35F3 (parent). This is Simulator production navigation, not physical
+acceptance. Strict code signing and ordinary app launch64653 also passed.
+
+Next bounded batch: cron pause/resume, startup-default profile writes, and server
+speech synthesis. Reasonable migration decision: Listen uses stock Hermes's
+configured voice; old AriaNeural was an internal hardcoded constant, not a user
+picker. Preserve on-device fallback; remove the obsolete voice request argument
+rather than silently ignoring it. No server configuration/provider activation.
+`slice4-secondary-writes-build-v1` and `full-v1` passed2306/0/14intentional skips.
+This snapshot includes exact scoped task pause/resume, authoritative list-derived
+execution status (pausing a schedule does not interrupt its current run),
+startup-default ACK/readback, and profile-scoped bounded speech audio decoding.
+Mock/native fallback tests passed; actual audio provider activation remains out
+of scope. Bounded live endpoint probes are being prepared, not yet executed.
+
+Successor checkpoint: `slice4-paging-retirement-full-v1` passed2302/0/14.
+Six legacy paging test methods were retired/migrated (including obsolete WebUI
+offset/SSE-only expectations), two direct paging regressions added, and the
+structural prepend/index performance assertion retained. This snapshot does not
+cover the subsequent active-response paging implementation currently in review.
+
+Live probes: `slice4-startup-default-live-v1.json` confirms one same-value default
+POST plus unchanged active/current/config/file state; it does not prove a changed
+default or restart/native-picker behavior. `slice4-cron-mutations-live-v1.json`
+confirms exact scoped pause/resume receipts and readback on one future2099 job,
+then exact owned deletion and empty inventory restoration, zero triggers and
+cleanup errors. Python probe tests passed12/12 and7/7. Audit
+`slice4-secondary-paging-audit-v1.jsonl`:286671files,0flags,170exported consoles;
+known-secret/obviousbearer scope only, not opaque/OCR/quarantined diagnostics.
+
+Active paging integration: `slice4-active-paging-build-v1` and `full-v1` passed
+2311/0/14intentional skips, including the updated profile-create catalog reads.
+Independent reviewer found/fixed moving-tail ordering, missing historical tool
+groups and idle canonical rollover before native verification. Strict signing and
+ordinary Simulator launch91834 passed. Audit-v1:291375files/0flags/171consoles,
+same limited scope above. Subsequent transcription edits are not covered here.
+
+Transcription successor: `slice4-transcription-build-v1` and `full-v1` passed
+2314/0/14intentional skips. Explicit actual chat profile, JSON data URL/WAV or
+MP4 MIME,25MiB pre-upload cap, stock ACK, native fallback and synchronous live-
+profile check at draft insertion. Independent reviewer caught the deferred
+SwiftUI-cancellation race; commit-time scope check and held-result regression
+address it. Signed launch99715 passed. No microphone/device/provider execution
+claim. Existing dormant voice-note upload/send paths remain separate legacy work.
+Targeted transcription artifact audit passed:4766files/0flags/1exported console,
+covering that build, suite and exported diagnostics plus migration docs/runtime
+logs. Older evidence was not rescanned; opaque/OCR/unexported contents excluded.
+
+Edit/regenerate contract re-audit confirms missing public atomic precondition:
+internal DB rewind has expected-row/content guards, public undo wrappers do not
+expose them; no registered session.rewind RPC. TUI retry is undo then resubmit,
+not guarded row-addressed edit. Async user disposition requested; no waiver yet.
+Skills read-only stock probe verified58rows and one SKILL.md; no skill mutations.
+Combined build-and-test attempts twice produced no result and were interrupted;
+separate build-for-testing then test-without-building produced the passing runs.
+Root will use that sequence, retaining the incomplete attempts without attributing
+them to a proven product or infrastructure cause.
+
+- [ ] Cross-client saved messages appear promptly; distinguish actual TUI/Desktop
+  observation from raw protocol smoke.
+- [ ] Remaining recovery/attachment interruption boundaries (see Slice3 evidence).
+- [ ] WebUI-absent cutover; every visible network action has a supported contract.
+- [ ] Full XCTest/direct stock tests, signed app launch and independent review.
+- [ ] Physical iPhone acceptance; performance issues in `performance-followups.md`.
+
+## Cadence
+
+Live stock Git read proof: `slice4-git-read-live-v1.json` passed against the clean
+pinned HTTPS fixture: worktree root, status, full review list, branches and distinct
+staged/unstaged diffs. Five local probe guard tests passed. A unique tiny local
+test repo was moved intact to runtime/tmp after the check (no tree deletion,
+no remotes or server Git mutations). Native session-to-root navigation and Git
+write migration are explicitly not established by this protocol check.
+
+Git/monitor/caller retirement batch: stock Git reads now scope via session profile,
+returned workspace and worktree root; initial screen refresh uses one status
+snapshot. Full review inventory is retained beyond200 files; unknown unstaged
+metadata refuses an unprovable diff rather than stock's misleading all-add fallback.
+Incomplete inventory and failed external refresh block quick commit; Git write
+routes themselves remain legacy/unmigrated and this is not whole Git parity.
+Session-list monitor no longer requests WebUI stream status. Ready observation
+uses existing coalesced gateway invalidation; disconnected fallback is15s (was1s),
+with cache/loading/edit/mutation/cancellation guards. Tests cover ready/no-fetch
+and disconnect/direct refresh. Three remaining ChatVM startChat callers removed;
+edit/regenerate/retry still refuse, and their required product disposition is open.
+Signed build-v2 and full-v3 passed2368/0/14. Full-v2's sole new auth fixture failure
+was corrected to pinned middleware's unauthenticated value, without broadening
+expiry classification. Full-v1 runner option typo failed before testing. One
+additional generic-401 negative test landed after build-v2; build-v3 and dedicated
+SessionListMutation suite passed91/0/0, including that exact added test. Strict
+signing and ordinary Simulator launch60977 passed. Targeted audit-v1 scanned
+9925files/zero flags/three exported consoles, including failed test evidence;
+unselected/opaque/unexported contents are excluded as usual.
+No live Git, production Git UI, physical device, or whole-cutover acceptance claim.
+
+Managed file transport live proof: `slice4-managed-files-live-v1.json` passed on
+the pinned isolated HTTPS gateway: unique 65-byte Markdown multipart upload with
+overwrite=false, exact byte readback, listing and receipt/identity-guarded cleanup.
+Six local probe tests passed; targeted audit-v1 scanned58files/zero flags.
+This does not establish memory-editor adoption, provider ingestion, or native UI.
+Ambiguous upload receipts deliberately leave possible files untouched for review.
+
+Latest native checkpoint: ordinary send fallback retirement, scoped cron mutations,
+and main-model picker passed signed `slice4-send-cron-model-build-v4` and
+`slice4-send-cron-model-full-v2`: 2352 passed, zero failed, 14 intentional skips.
+Strict code signing and Simulator launch46616 passed. Targeted audit-v1 scanned
+9649 files with zero flags and both exported test consoles; unselected evidence,
+opaque secrets and unexported compressed contents remain outside that claim.
+Retained build-v1/v2 compiler errors and full-v1 39 failures were corrected;
+renderer-only setups now explicitly seed state, not the removed WebUI send API.
+Direct send regressions exercise real direct orchestration with mock transport.
+This is not live model/cron execution or physical-device acceptance.
+
+Newly confirmed recovery gap: stock REST returns durable rows, not live partial
+assistant text. `session.resume.inflight` carries that text without an atomic
+event watermark; blindly appending later deltas can duplicate it. Completed
+durable interim assistant rows must not absorb subsequent stream segments.
+September8 delegated decision: after session.resume reports a running turn,
+conservatively show canonical saved history plus a reconnect notice and suppress
+unwatermarked content deltas until terminal canonical refresh. Keep tool/status/
+blocking controls active; locally submitted uninterrupted turns retain streaming.
+No proven warm cursor exists in the current client, so do not infer one from a
+cached prefix. This trades partial reconnect updates for accurate saved messages,
+consistent with the user's no-token-by-token cross-client requirement. Implementation
+and focused verification pending; no duplicated snapshot/unsafe last-row merge.
+Skill activation also remains open: raw skill-content REST omits runtime setup,
+configuration, supporting files and optional shell preprocessing. command.dispatch
+is not profile-bound and resolves executable quick commands/plugins before skills.
+Do not label raw text submission equivalent to TUI skill activation.
+
+Current next cohort: direct file browser/preview and built-in memory/SOUL saves
+are authored and independently reviewed, awaiting native integration alongside
+profile creation. Memory uses managed multipart atomic replacement, never an
+unrestricted filesystem fallback; concurrent writers still have no CAS guard.
+Profile creation preserves confirmed identity across optional configuration
+failure. Retry only repeats captured configuration, not creation. A stock
+best-effort model-assignment failure stays explicitly partial; the app does not
+invent a model-config repair that could retain wrong-provider credentials.
+Native checkpoint now passed: signed build-v3 and full-v2,2338pass/0fail/
+14intentional opt-in skips, strict code signing and ordinary Simulator launch19578.
+Retained failures: build-v1 test raw-string delimiter; full-v1 four multipart
+mock-parser failures (Swift CRLF is one Character, dropLast(2) truncated paths).
+Exact delimiter parser fixed, path/overwrite/filename assertions strengthened;
+product code and existing success/failure assertions not weakened. These checks
+do not prove actual memory/profile writes on stock runtime or physical UI.
+Targeted artifact audit-v1 passed9579files/0flags/2exported consoles across this
+cohort's successful and failed builds/tests plus migration docs/runtime logs.
+No claim for unselected older evidence, opaque/OCR/unexported contents.
+
+Three disjoint implementation workers while root integrates/verifies. Compile and
+targeted checks per batch; full/live gates at meaningful integration checkpoints.
+Do not rerun passed gates merely to reconstruct context. Only one native/build
+owner. Do not edit files while root compiles their shared source snapshot.
+Report code-ready separately from tested and accepted; no percentage increase
+solely because more code was authored. No personal Hermes changes/private patches.

@@ -1,11 +1,31 @@
 import XCTest
+import Observation
 @testable import HermesMobile
 
 @MainActor
 final class OpenChatSessionStoreTests: XCTestCase {
+    func testExistingGitModelLookupDoesNotInvalidateItsObservingView() throws {
+        let server = try XCTUnwrap(URL(string: "https://example.test"))
+        let session = SessionSummary(sessionId: "observed-existing-chat")
+        let store = OpenChatSessionStore()
+        let model = store.viewModel(session: session, server: server)
+        let gitModel = store.gitAvailabilityViewModel(session: session, server: server, chatViewModel: model)
+        let invalidation = XCTestExpectation(description: "LRU touch must not invalidate the view doing the lookup")
+        invalidation.isInverted = true
+
+        withObservationTracking {
+            _ = store.gitAvailabilityViewModel(session: session, server: server, chatViewModel: model)
+        } onChange: {
+            invalidation.fulfill()
+        }
+        for _ in 0..<3 {
+            XCTAssertTrue(store.gitAvailabilityViewModel(session: session, server: server, chatViewModel: model) === gitModel)
+        }
+        XCTAssertEqual(XCTWaiter.wait(for: [invalidation], timeout: 0.01), .completed)
+    }
+
     override func tearDown() {
         OpenChatSessionStore.shared.resetForTesting()
-        ChatViewModel.resetActiveStreamSnapshotsForTesting()
         MockURLProtocol.requestHandler = nil
         super.tearDown()
     }
@@ -51,12 +71,15 @@ final class OpenChatSessionStoreTests: XCTestCase {
     }
 
     @MainActor
-    func testActiveModelsArePreservedWhileIdleModelsAreEvicted() throws {
+    func testActiveModelsArePreservedWhileIdleModelsAreEvicted() async throws {
         let server = try XCTUnwrap(URL(string: "https://example.test"))
         let store = OpenChatSessionStore(
             retentionPolicy: OpenChatSessionStoreRetentionPolicy(maxIdleViewModelsPerServer: 2)
         )
-        let active = try makeViewModel(sessionID: "session-active", activeStreamID: "stream-active")
+        let fixture = try await makeDirectBranchViewModel(
+            session: SessionSummary(sessionId: "session-active"), server: server, running: true
+        )
+        let active = fixture.viewModel
         _ = store.adoptedViewModel(
             session: SessionSummary(sessionId: "session-active"),
             server: server,
@@ -73,7 +96,8 @@ final class OpenChatSessionStoreTests: XCTestCase {
             ["session-active", "session-idle-3", "session-idle-4"]
         )
         XCTAssertEqual(store.liveSessionIDs(for: server), ["session-active"])
-        XCTAssertEqual(store.liveStreamIDs(for: server), ["stream-active"])
+        XCTAssertEqual(store.liveStreamIDs(for: server), [])
+        await fixture.runtime.stop()
     }
 
     @MainActor
@@ -82,9 +106,10 @@ final class OpenChatSessionStoreTests: XCTestCase {
         let store = OpenChatSessionStore(
             retentionPolicy: OpenChatSessionStoreRetentionPolicy(maxIdleViewModelsPerServer: 1)
         )
-        let active = try makeViewModel(sessionID: "session-active", activeStreamID: "stream-active") { request in
-            apiTestJSONResponse("{\"ok\": true}", for: request)
-        }
+        let fixture = try await makeDirectBranchViewModel(
+            session: SessionSummary(sessionId: "session-active"), server: server, running: true
+        )
+        let active = fixture.viewModel
         _ = store.adoptedViewModel(
             session: SessionSummary(sessionId: "session-active"),
             server: server,
@@ -94,14 +119,15 @@ final class OpenChatSessionStoreTests: XCTestCase {
         _ = store.viewModel(session: SessionSummary(sessionId: "session-idle-2"), server: server)
         XCTAssertTrue(store.retainedSessionIDsForTesting(for: server).contains("session-active"))
 
-        // The existing cancellation path clears activeStreamID. The explicit store
-        // notification then makes the now-idle model eligible for deterministic LRU trim.
+        // Direct interruption requires a terminal receipt and idle status before
+        // the owner becomes eligible for deterministic LRU eviction.
         let didCancel = await active.cancelActiveStream()
         XCTAssertTrue(didCancel)
         store.noteStreamingStateChanged()
 
         XCTAssertNil(active.activeStreamID)
         XCTAssertEqual(store.retainedSessionIDsForTesting(for: server), ["session-idle-2"])
+        await fixture.runtime.stop()
     }
 
     @MainActor
@@ -120,26 +146,54 @@ final class OpenChatSessionStoreTests: XCTestCase {
         XCTAssertTrue(store.viewModel(session: SessionSummary(sessionId: "server-b-session"), server: serverB) === serverBModel)
     }
 
+    func testRejectedDirectInterruptKeepsRunningOwnerAndReportsUnconfirmedStop() async throws {
+        let server = try XCTUnwrap(URL(string: "https://example.test"))
+        let fixture = try await makeDirectBranchViewModel(
+            session: SessionSummary(sessionId: "session-active"), server: server,
+            running: true, rejectsInterrupt: true
+        )
+        let activeID = try XCTUnwrap(fixture.viewModel.activeStreamID)
+
+        let cancelled = await fixture.viewModel.cancelActiveStream()
+
+        XCTAssertFalse(cancelled)
+        XCTAssertEqual(fixture.viewModel.activeStreamID, activeID)
+        XCTAssertEqual(fixture.controller.runState, .stopping)
+        XCTAssertEqual(fixture.viewModel.sendErrorMessage, "Hermes has not confirmed that the response stopped.")
+        await fixture.runtime.stop()
+    }
+
+    func testCancelWithoutDirectRuntimeDoesNotUseLegacyHTTPCancel() async throws {
+        let viewModel = try makeViewModel(sessionID: "legacy-fixture", activeStreamID: "legacy-stream") { request in
+            XCTFail("Cancellation must not reach legacy HTTP: \(request.url?.path ?? "nil")")
+            throw URLError(.badURL)
+        }
+
+        let cancelled = await viewModel.cancelActiveStream()
+
+        XCTAssertFalse(cancelled)
+        XCTAssertNil(viewModel.activeStreamID)
+        XCTAssertEqual(viewModel.sendErrorMessage, "Hermes has not confirmed that the response stopped.")
+    }
+
     @MainActor
-    func testEvictionStopsSessionEventSyncBeforeReleasingModel() throws {
+    func testEvictionClearsDirectConversationVisibilityBeforeReleasingModel() async throws {
         let server = try XCTUnwrap(URL(string: "https://example.test"))
         let store = OpenChatSessionStore(
             retentionPolicy: OpenChatSessionStoreRetentionPolicy(maxIdleViewModelsPerServer: 1)
         )
-        let eventClient = SpySSEStreamingClient()
-        let evicted = try makeViewModel(sessionID: "session-evicted", sessionEventStreamClient: eventClient)
+        let session = SessionSummary(sessionId: "session-evicted", profile: "default")
+        let fixture = try await makeDirectBranchViewModel(session: session, server: server)
+        let evicted = fixture.viewModel
         evicted.startSessionEventSync()
-        XCTAssertEqual(eventClient.startedURLs.count, 1)
-        _ = store.adoptedViewModel(
-            session: SessionSummary(sessionId: "session-evicted"),
-            server: server,
-            creating: evicted
-        )
+        XCTAssertTrue(fixture.controller.isVisible)
+        _ = store.adoptedViewModel(session: session, server: server, creating: evicted)
 
         _ = store.viewModel(session: SessionSummary(sessionId: "session-new"), server: server)
 
-        XCTAssertEqual(eventClient.stopCount, 1)
+        XCTAssertFalse(fixture.controller.isVisible)
         XCTAssertEqual(store.retainedSessionIDsForTesting(for: server), ["session-new"])
+        await fixture.runtime.stop()
     }
 
     @MainActor
@@ -196,28 +250,413 @@ final class OpenChatSessionStoreTests: XCTestCase {
     }
 
     @MainActor
-    func testResetClearsRetainedModelsOrderingAndLiveState() throws {
+    func testDirectBranchAdoptionRetainsParentAndReusesBoundChild() async throws {
+        let server = try XCTUnwrap(URL(string: "https://example.test"))
+        let store = OpenChatSessionStore()
+        store.activateGateway(server: server)
+        let parent = store.viewModel(session: SessionSummary(sessionId: "parent"), server: server)
+        let childSession = SessionSummary(sessionId: "child", profile: "default")
+        let childFixture = try await makeDirectBranchViewModel(session: childSession, server: server)
+        let child = childFixture.viewModel
+        defer { Task { await childFixture.runtime.stop() } }
+        let handoff = DirectBranchHandoff(
+            session: childSession,
+            viewModel: child,
+            origin: server,
+            profile: "default",
+            identity: UUID()
+        )
+
+        XCTAssertTrue(store.adoptBranch(handoff) === child)
+        store.releaseUnadoptedBranch(handoff)
+        XCTAssertNotNil(child.directBranchIdentity)
+        XCTAssertTrue(store.viewModel(session: childSession, server: server) === child)
+        XCTAssertTrue(store.viewModel(session: SessionSummary(sessionId: "parent"), server: server) === parent)
+
+        child.onDirectCanonicalID?("child-tip")
+        XCTAssertTrue(store.viewModel(session: SessionSummary(sessionId: "child-tip", profile: "default"), server: server) === child)
+        XCTAssertTrue(store.viewModel(session: childSession, server: server) === child)
+        XCTAssertTrue(store.viewModel(session: SessionSummary(sessionId: "parent"), server: server) === parent)
+    }
+
+    @MainActor
+    func testDirectBranchCollisionRejectsWithoutReplacingExistingOwner() async throws {
+        let server = try XCTUnwrap(URL(string: "https://example.test"))
+        let store = OpenChatSessionStore()
+        store.activateGateway(server: server)
+        let childSession = SessionSummary(sessionId: "collision-child", profile: "work")
+        let incumbent = store.viewModel(session: childSession, server: server)
+        let childFixture = try await makeDirectBranchViewModel(session: childSession, server: server)
+        let child = childFixture.viewModel
+        defer { Task { await childFixture.runtime.stop() } }
+        let handoff = DirectBranchHandoff(
+            session: childSession,
+            viewModel: child,
+            origin: server,
+            profile: "work",
+            identity: UUID()
+        )
+
+        XCTAssertNil(store.adoptBranch(handoff))
+        store.releaseUnadoptedBranch(handoff)
+        XCTAssertNil(child.directBranchIdentity)
+        XCTAssertTrue(store.viewModel(session: childSession, server: server) === incumbent)
+    }
+
+    @MainActor
+    func testDirectBranchRejectsWrongOriginProfileAndReplayedIdentity() async throws {
+        let server = try XCTUnwrap(URL(string: "https://example.test"))
+        let otherServer = try XCTUnwrap(URL(string: "https://other.example.test"))
+        let store = OpenChatSessionStore()
+        store.activateGateway(server: server)
+        let childSession = SessionSummary(sessionId: "scoped-child", profile: "work")
+        let childFixture = try await makeDirectBranchViewModel(session: childSession, server: server)
+        let child = childFixture.viewModel
+        defer { Task { await childFixture.runtime.stop() } }
+        let identity = UUID()
+
+        XCTAssertNil(store.adoptBranch(DirectBranchHandoff(
+            session: childSession,
+            viewModel: child,
+            origin: otherServer,
+            profile: "work",
+            identity: UUID()
+        )))
+        XCTAssertNil(store.adoptBranch(DirectBranchHandoff(
+            session: childSession,
+            viewModel: child,
+            origin: server,
+            profile: "default",
+            identity: UUID()
+        )))
+
+        let accepted = DirectBranchHandoff(
+            session: childSession,
+            viewModel: child,
+            origin: server,
+            profile: "work",
+            identity: identity
+        )
+        XCTAssertTrue(store.adoptBranch(accepted) === child)
+
+        let replayedSession = SessionSummary(sessionId: "another-child", profile: "work")
+        let replayedFixture = try await makeDirectBranchViewModel(
+            session: replayedSession,
+            server: server
+        )
+        defer { Task { await replayedFixture.runtime.stop() } }
+        let replayedForDifferentSession = DirectBranchHandoff(
+            session: replayedSession,
+            viewModel: replayedFixture.viewModel,
+            origin: server,
+            profile: "work",
+            identity: identity
+        )
+        XCTAssertNil(store.adoptBranch(replayedForDifferentSession))
+        XCTAssertTrue(store.viewModel(session: childSession, server: server) === child)
+    }
+
+    @MainActor
+    func testDirectBranchEvictionRemovesOnlyTheBranchOwner() async throws {
+        let server = try XCTUnwrap(URL(string: "https://example.test"))
+        let store = OpenChatSessionStore(
+            retentionPolicy: OpenChatSessionStoreRetentionPolicy(maxIdleViewModelsPerServer: 1)
+        )
+        store.activateGateway(server: server)
+        let childSession = SessionSummary(sessionId: "evicted-child")
+        let childFixture = try await makeDirectBranchViewModel(session: childSession, server: server)
+        let child = childFixture.viewModel
+        defer { Task { await childFixture.runtime.stop() } }
+        XCTAssertNotNil(store.adoptBranch(DirectBranchHandoff(
+            session: childSession,
+            viewModel: child,
+            origin: server,
+            profile: "default",
+            identity: UUID()
+        )))
+        let other = store.viewModel(session: SessionSummary(sessionId: "retained-other"), server: server)
+
+        XCTAssertEqual(store.retainedSessionIDsForTesting(for: server), ["retained-other"])
+        XCTAssertTrue(store.viewModel(session: SessionSummary(sessionId: "retained-other"), server: server) === other)
+    }
+
+    @MainActor
+    func testResetClearsRetainedModelsOrderingAndLiveState() async throws {
         let server = try XCTUnwrap(URL(string: "https://example.test"))
         let store = OpenChatSessionStore(
             retentionPolicy: OpenChatSessionStoreRetentionPolicy(maxIdleViewModelsPerServer: 2)
         )
-        let eventClient = SpySSEStreamingClient()
-        let retained = try makeViewModel(sessionID: "session-reset", sessionEventStreamClient: eventClient)
+        let session = SessionSummary(sessionId: "session-reset", profile: "default")
+        let fixture = try await makeDirectBranchViewModel(session: session, server: server)
+        let retained = fixture.viewModel
         retained.startSessionEventSync()
-        _ = store.adoptedViewModel(
-            session: SessionSummary(sessionId: "session-reset"),
-            server: server,
-            creating: retained
-        )
+        XCTAssertTrue(fixture.controller.isVisible)
+        _ = store.adoptedViewModel(session: session, server: server, creating: retained)
 
         store.resetForTesting()
 
-        XCTAssertEqual(eventClient.stopCount, 1)
+        XCTAssertFalse(fixture.controller.isVisible)
         XCTAssertEqual(store.retainedViewModelCountForTesting(for: server), 0)
         XCTAssertTrue(store.liveSessionIDs(for: server).isEmpty)
         XCTAssertTrue(store.liveStreamIDs(for: server).isEmpty)
         XCTAssertEqual(store.liveOwnershipGeneration, 0)
-        XCTAssertFalse(store.viewModel(session: SessionSummary(sessionId: "session-reset"), server: server) === retained)
+        XCTAssertFalse(store.viewModel(session: session, server: server) === retained)
+        await fixture.runtime.stop()
+    }
+
+    @MainActor
+    func testActivatedGatewaySharesDisconnectedRuntimeWithoutConnecting() async throws {
+        let server = try XCTUnwrap(URL(string: "https://gateway.example.test"))
+        let store = OpenChatSessionStore.shared
+        store.activateGateway(server: server)
+
+        let first = try await store.runtime(for: server, client: APIClient(baseURL: server))
+        let second = try await store.runtime(for: server, client: APIClient(baseURL: server))
+
+        XCTAssertTrue(first === second)
+        XCTAssertEqual(first.state, .disconnected)
+        await first.stop()
+        store.activateGateway(server: nil)
+    }
+
+    @MainActor
+    func testForegroundRecoverySharesOneForceReconnect() async throws {
+        let server = try XCTUnwrap(URL(string: "https://foreground.example.test"))
+        let store = OpenChatSessionStore()
+        let transport = ForegroundRecoveryTransport()
+        let runtime = try makeForegroundRuntime(transport)
+        try await runtime.connect()
+        store.activateGateway(server: server)
+        store.installGatewayRuntimeForTesting(runtime, for: server)
+        await transport.blockConnection(2)
+
+        let first = Task { await store.recoverGatewayOnForeground(for: server) }
+        await transport.waitForConnection(2)
+        let second = Task { await store.recoverGatewayOnForeground(for: server) }
+        await Task.yield()
+        await transport.releaseConnection(2)
+
+        let firstResult = await first.value
+        let secondResult = await second.value
+        let connectionCount = await transport.connectionCount()
+        XCTAssertNil(firstResult)
+        XCTAssertNil(secondResult)
+        XCTAssertEqual(connectionCount, 2)
+        XCTAssertEqual(runtime.state, .ready)
+
+        await runtime.stop()
+        store.activateGateway(server: nil)
+    }
+
+    @MainActor
+    func testForegroundRecoveryReturnsConnectivityFailureAndCanRetry() async throws {
+        let server = try XCTUnwrap(URL(string: "https://foreground-failure.example.test"))
+        let store = OpenChatSessionStore()
+        let transport = ForegroundRecoveryTransport()
+        let runtime = try makeForegroundRuntime(transport)
+        try await runtime.connect()
+        store.activateGateway(server: server)
+        store.installGatewayRuntimeForTesting(runtime, for: server)
+        await transport.failNextConnections(1)
+
+        let failure = await store.recoverGatewayOnForeground(for: server)
+        XCTAssertNotNil(failure)
+        XCTAssertEqual(runtime.state, .disconnected)
+
+        let retryResult = await store.recoverGatewayOnForeground(for: server)
+        XCTAssertNil(retryResult)
+        XCTAssertEqual(runtime.state, .ready)
+        await runtime.stop()
+        store.activateGateway(server: nil)
+    }
+
+    @MainActor
+    func testForegroundRecoveryReplacesReadyButStaleSocket() async throws {
+        let server = try XCTUnwrap(URL(string: "https://foreground-stale.example.test"))
+        let store = OpenChatSessionStore()
+        let transport = ForegroundRecoveryTransport()
+        let runtime = try makeForegroundRuntime(transport)
+        try await runtime.connect()
+        store.activateGateway(server: server)
+        store.installGatewayRuntimeForTesting(runtime, for: server)
+        await transport.markConnectionStale()
+
+        let result = await store.recoverGatewayOnForeground(for: server)
+        let connectionCount = await transport.connectionCount()
+        XCTAssertNil(result)
+        XCTAssertEqual(connectionCount, 2)
+        XCTAssertEqual(runtime.state, .ready)
+        await runtime.stop()
+        store.activateGateway(server: nil)
+    }
+
+    @MainActor
+    func testForegroundRecoveryCannotReviveStoppedOrOldServerRuntime() async throws {
+        let serverA = try XCTUnwrap(URL(string: "https://foreground-a.example.test"))
+        let serverB = try XCTUnwrap(URL(string: "https://foreground-b.example.test"))
+        let store = OpenChatSessionStore()
+        let transport = ForegroundRecoveryTransport()
+        let runtime = try makeForegroundRuntime(transport)
+        try await runtime.connect()
+        store.activateGateway(server: serverA)
+        store.installGatewayRuntimeForTesting(runtime, for: serverA)
+        await runtime.stop()
+
+        let stopped = await store.recoverGatewayOnForeground(for: serverA)
+        let stoppedConnectionCount = await transport.connectionCount()
+        XCTAssertEqual(stopped as? DirectSessionError, .stopped)
+        XCTAssertEqual(stoppedConnectionCount, 1)
+
+        store.activateGateway(server: serverB)
+        let staleResult = await store.recoverGatewayOnForeground(for: serverA)
+        let staleConnectionCount = await transport.connectionCount()
+        XCTAssertNil(staleResult)
+        XCTAssertEqual(staleConnectionCount, 1)
+        store.activateGateway(server: nil)
+    }
+
+    @MainActor
+    func testForegroundRecoveryCannotReviveAfterInFlightServerSwitchOrLogout() async throws {
+        let serverA = try XCTUnwrap(URL(string: "https://foreground-in-flight-a.example.test"))
+        let serverB = try XCTUnwrap(URL(string: "https://foreground-in-flight-b.example.test"))
+
+        for destination in [serverB, nil] as [URL?] {
+            let store = OpenChatSessionStore()
+            let transport = ForegroundRecoveryTransport()
+            let runtime = try makeForegroundRuntime(transport)
+            try await runtime.connect()
+            store.activateGateway(server: serverA)
+            store.installGatewayRuntimeForTesting(runtime, for: serverA)
+            await transport.blockConnection(2)
+
+            let recovery = Task { await store.recoverGatewayOnForeground(for: serverA) }
+            await transport.waitForConnection(2)
+            store.activateGateway(server: destination)
+            // Force reconnect closes the old socket once before connect #2;
+            // wait for the teardown close as well before releasing connect #2.
+            await transport.waitForClose(2)
+            await transport.releaseConnection(2)
+
+            _ = await recovery.value
+            let connectionCount = await transport.connectionCount()
+            XCTAssertEqual(runtime.state, .stopped)
+            XCTAssertEqual(connectionCount, 2)
+            if let destination {
+                let currentRuntime = try await store.runtime(for: destination, client: APIClient(baseURL: destination))
+                XCTAssertTrue(currentRuntime !== runtime)
+            }
+            await runtime.stop()
+            store.activateGateway(server: nil)
+        }
+    }
+
+    private func makeForegroundRuntime(_ transport: ForegroundRecoveryTransport) throws -> HermesServerRuntime {
+        try HermesServerRuntime(origin: URL(string: "https://foreground.example.test")!) { _ in transport }
+    }
+
+    @MainActor
+    func testInactiveAndStaleGatewayOriginsAreRejected() async throws {
+        let serverA = try XCTUnwrap(URL(string: "https://gateway-a.example.test"))
+        let serverB = try XCTUnwrap(URL(string: "https://gateway-b.example.test"))
+        let store = OpenChatSessionStore.shared
+
+        do {
+            _ = try await store.runtime(for: serverA, client: APIClient(baseURL: serverA))
+            XCTFail("An inactive origin must not create a runtime.")
+        } catch let error as DirectSessionError {
+            XCTAssertEqual(error, .stopped)
+        }
+
+        store.activateGateway(server: serverA)
+        let oldRuntime = try await store.runtime(for: serverA, client: APIClient(baseURL: serverA))
+        store.activateGateway(server: serverB)
+
+        do {
+            _ = try await store.runtime(for: serverA, client: APIClient(baseURL: serverA))
+            XCTFail("A stale origin must not reacquire the active runtime.")
+        } catch let error as DirectSessionError {
+            XCTAssertEqual(error, .stopped)
+        }
+
+        let newRuntime = try await store.runtime(for: serverB, client: APIClient(baseURL: serverB))
+        XCTAssertEqual(oldRuntime.state, .stopped)
+        XCTAssertEqual(newRuntime.state, .disconnected)
+        await newRuntime.stop()
+        store.activateGateway(server: nil)
+    }
+
+    @MainActor
+    func testCanonicalRekeyRedirectsAncestorToOneRetainedOwner() async throws {
+        let server = try XCTUnwrap(URL(string: "https://gateway.example.test"))
+        let store = OpenChatSessionStore.shared
+        store.activateGateway(server: server)
+
+        let ancestor = SessionSummary(sessionId: nil, title: "draft", createdAt: 1, profile: "alpha")
+        let model = store.viewModel(session: ancestor, server: server)
+        let git = store.gitAvailabilityViewModel(session: ancestor, server: server, chatViewModel: model)
+        let ancestorKeyID = ancestor.id
+        model.onDirectCanonicalID?("canonical-alpha")
+
+        XCTAssertEqual(store.retainedSessionIDsForTesting(for: server), ["canonical-alpha"])
+        let reopened = store.viewModel(session: ancestor, server: server)
+        XCTAssertTrue(reopened === model)
+        let reopenedGit = store.gitAvailabilityViewModel(session: ancestor, server: server, chatViewModel: reopened)
+        XCTAssertTrue(reopenedGit === git)
+        XCTAssertEqual(reopenedGit.bindingForTesting.sessionID, "canonical-alpha")
+        XCTAssertEqual(reopenedGit.bindingForTesting.profile, "alpha")
+        XCTAssertEqual(reopenedGit.requestSession.sessionId, "canonical-alpha")
+        XCTAssertEqual(reopenedGit.requestSession.profile, "alpha")
+        XCTAssertNotEqual(ancestorKeyID, "canonical-alpha")
+        XCTAssertEqual(store.retainedViewModelCountForTesting(for: server), 1)
+
+        await model.disposeDirectConversation()
+        store.activateGateway(server: nil)
+    }
+
+    @MainActor
+    func testGitModelCreatedAfterCanonicalAliasUsesConfirmedDurableBinding() async throws {
+        let server = try XCTUnwrap(URL(string: "https://gateway.example.test"))
+        let store = OpenChatSessionStore.shared
+        store.activateGateway(server: server)
+        let draft = SessionSummary(sessionId: nil, title: "draft", createdAt: 2, profile: "alpha")
+        let chat = store.viewModel(session: draft, server: server)
+        chat.onDirectCanonicalID?("canonical-late")
+
+        let git = store.gitAvailabilityViewModel(session: draft, server: server, chatViewModel: chat)
+
+        XCTAssertEqual(git.bindingForTesting.sessionID, "canonical-late")
+        XCTAssertEqual(git.bindingForTesting.profile, "alpha")
+        XCTAssertEqual(git.requestSession.sessionId, "canonical-late")
+        XCTAssertEqual(git.requestSession.profile, "alpha")
+        await chat.disposeDirectConversation()
+        store.activateGateway(server: nil)
+    }
+
+    @MainActor
+    func testSameSessionIDInDifferentProfilesHasSeparateOwners() throws {
+        let server = try XCTUnwrap(URL(string: "https://gateway.example.test"))
+        let store = OpenChatSessionStore.shared
+        store.activateGateway(server: server)
+
+        let alpha = store.viewModel(
+            session: SessionSummary(sessionId: "same-session", profile: "alpha"),
+            server: server
+        )
+        let beta = store.viewModel(
+            session: SessionSummary(sessionId: "same-session", profile: "beta"),
+            server: server
+        )
+
+        XCTAssertFalse(alpha === beta)
+        XCTAssertTrue(
+            store.viewModel(
+                session: SessionSummary(sessionId: "same-session", profile: "alpha"),
+                server: server
+            ) === alpha
+        )
+        XCTAssertEqual(store.retainedViewModelCountForTesting(for: server), 2)
+
+        store.activateGateway(server: nil)
     }
 
     @MainActor
@@ -330,127 +769,42 @@ final class OpenChatSessionStoreTests: XCTestCase {
     }
 
     @MainActor
-    func testStoreRetentionDoesNotStartSessionEventSync() throws {
+    func testStoreRetentionAndVisibilityKeepColdDirectConversationsUnbound() throws {
         let server = try XCTUnwrap(URL(string: "https://example.test"))
-        let streamClient = SpySSEStreamingClient()
-        let viewModel = OpenChatSessionStore.shared.viewModel(
-            session: SessionSummary(sessionId: "session-abc"),
-            server: server,
-            sessionEventStreamClient: streamClient
-        )
+        let session = SessionSummary(sessionId: "session-abc")
+        let viewModel = OpenChatSessionStore.shared.viewModel(session: session, server: server)
 
-        // Store retention alone must not open a background event stream.
-        // Always-on streams for every retained chat caused main-thread disk
-        // I/O and transcript reloads (build 19 lag regression).
-        XCTAssertEqual(streamClient.startedURLs.count, 0)
-
-        // ChatView owns the lifecycle: appearing starts, disappearing stops.
+        XCTAssertTrue(viewModel.usesDirectGateway)
+        XCTAssertNil(viewModel.directBranchIdentity)
         viewModel.startSessionEventSync()
-        XCTAssertEqual(streamClient.startedURLs.count, 1)
-        XCTAssertEqual(streamClient.startedURLs.first?.path, "/api/sessions/session-abc/events")
-
         viewModel.stopSessionEventSync()
-        XCTAssertEqual(streamClient.stopCount, 1)
+        XCTAssertNil(viewModel.directBranchIdentity)
 
-        // Re-appearing restarts the stream after an explicit stop.
-        viewModel.startSessionEventSync()
-        XCTAssertEqual(streamClient.startedURLs.count, 2)
-    }
-
-    @MainActor
-    func testOfficialSidecarDoesNotStartWebUISessionEventStream() async throws {
-        let streamClient = SpySSEStreamingClient()
-        let capabilities = #"{"features":{"session_resources":true,"session_chat":true,"session_chat_streaming":true},"endpoints":{"sessions":{"method":"GET","path":"/api/sessions"},"session_create":{"method":"POST","path":"/api/sessions"},"session":{"method":"GET","path":"/api/sessions/{session_id}"},"session_messages":{"method":"GET","path":"/api/sessions/{session_id}/messages"},"session_chat_stream":{"method":"POST","path":"/api/sessions/{session_id}/chat/stream"}}}"#
-        let viewModel = try makeViewModel(
-            sessionID: "official-session",
-            sessionEventStreamClient: streamClient,
-            usesOfficialContinuity: true,
-            handler: { request in
-                apiTestJSONResponse(capabilities, for: request)
-            }
-        )
-
-        viewModel.startSessionEventSync()
-        try await Task.sleep(for: .milliseconds(100))
-
-        XCTAssertEqual(streamClient.startedURLs.count, 0)
-    }
-
-    @MainActor
-    func testCursorPersistenceIsDebouncedAcrossStreamingBursts() async throws {
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: "goku.session-event-debounce-\(UUID().uuidString)"))
-        let server = try XCTUnwrap(URL(string: "https://example.test"))
-        let streamClient = SpySSEStreamingClient()
-        let cursorStore = SessionEventCursorStore(defaults: defaults)
-        let coordinator = SessionEventStreamCoordinator(
-            server: server,
-            sessionID: "session-abc",
-            profile: nil,
-            streamClient: streamClient,
-            userDefaults: defaults
-        )
-
-        coordinator.start()
-        let connection = streamClient.startedURLs.count - 1
-        // Burst of events: in-memory dedupe advances immediately, but no
-        // synchronous UserDefaults write happens per event.
-        for index in 0..<10 {
-            streamClient.emit(.token("chunk \(index)"), lastEventID: "session-abc:\(10 + index)", onConnection: connection)
+        let reused = OpenChatSessionStore.shared.viewModel(session: session, server: server)
+        XCTAssertTrue(reused === viewModel)
+        reused.startSessionEventSync()
+        reused.stopSessionEventSync()
+        for index in 0..<100 {
+            _ = OpenChatSessionStore.shared.viewModel(
+                session: SessionSummary(sessionId: "retained-\(index)"), server: server
+            )
         }
-        XCTAssertNil(cursorStore.load(server: server, profile: nil, sessionID: "session-abc"))
-
-        // Stop flushes the coalesced state once.
-        coordinator.stop()
-        XCTAssertEqual(
-            cursorStore.load(server: server, profile: nil, sessionID: "session-abc"),
-            "session-abc:19"
-        )
-        let seenIDs = cursorStore.loadSeenEventIDs(server: server, profile: nil, sessionID: "session-abc")
-        XCTAssertEqual(seenIDs.last, "session-abc:19")
-    }
-
-    @MainActor
-    func testOpaqueEventIDsAdvanceInServerDeliveryOrder() throws {
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: "goku.session-event-order-\(UUID().uuidString)"))
-        let server = try XCTUnwrap(URL(string: "https://example.test"))
-        let streamClient = SpySSEStreamingClient()
-        let cursorStore = SessionEventCursorStore(defaults: defaults)
-        let coordinator = SessionEventStreamCoordinator(
-            server: server,
-            sessionID: "session-abc",
-            profile: nil,
-            streamClient: streamClient,
-            userDefaults: defaults
-        )
-        coordinator.start()
-        let connection = streamClient.startedURLs.count - 1
-        streamClient.emit(.token("first"), lastEventID: "journal:10", onConnection: connection)
-        // Event IDs are opaque. Even though this looks numerically lower, the
-        // server delivered it later, so it becomes the resume point.
-        streamClient.emit(.token("second"), lastEventID: "journal:8", onConnection: connection)
-        coordinator.stop()
-
-        XCTAssertEqual(
-            cursorStore.load(server: server, profile: nil, sessionID: "session-abc"),
-            "journal:8"
-        )
+        XCTAssertNil(viewModel.directBranchIdentity)
     }
 
     @MainActor
     func testSidebarRefreshReconcilesOpenTranscriptFromCanonicalServer() async throws {
         var sessionFetches = 0
-        let viewModel = try makeViewModel(sessionID: "session-abc") { request in
-            XCTAssertEqual(request.url?.path, "/api/session")
+        let (viewModel, runtime) = try makeDirectRefreshViewModel { request in
+            XCTAssertEqual(request.url?.path, "/api/sessions/session-abc/messages")
             sessionFetches += 1
             return apiTestJSONResponse("""
             {
-              "session": {
                 "session_id": "session-abc",
                 "messages": [
-                  {"role": "user", "content": "Sent from TUI", "message_id": "tui-1", "timestamp": 1770000000},
-                  {"role": "assistant", "content": "Canonical response", "message_id": "assistant-1", "timestamp": 1770000001}
+                  {"role": "user", "content": "Sent from TUI", "id": 1, "timestamp": 1770000000},
+                  {"role": "assistant", "content": "Canonical response", "id": 2, "timestamp": 1770000001}
                 ]
-              }
             }
             """, for: request)
         }
@@ -466,6 +820,8 @@ final class OpenChatSessionStoreTests: XCTestCase {
         XCTAssertEqual(refreshed, 1)
         XCTAssertEqual(sessionFetches, 1)
         XCTAssertEqual(viewModel.messages.map(\.content), ["Sent from TUI", "Canonical response"])
+        await viewModel.disposeDirectConversation()
+        await runtime.stop()
     }
 
     @MainActor
@@ -520,129 +876,6 @@ final class OpenChatSessionStoreTests: XCTestCase {
         XCTAssertFalse(reopenedFirst === first, "The least-recent inactive model should be evicted")
     }
 
-    @MainActor
-    func testLeaveDoesNotSuspendALiveRunAndReopenDoesNotNeedSessionFetch() async throws {
-        let streamClient = SpySSEStreamingClient()
-        var sessionFetchCount = 0
-        let viewModel = try makeViewModel(sessionID: "session-abc", streamClient: streamClient) { request in
-            switch request.url?.path {
-            case "/api/chat/start":
-                return apiTestJSONResponse("""
-                {
-                  "session_id": "session-abc",
-                  "stream_id": "stream-123"
-                }
-                """, for: request)
-            case "/api/session":
-                sessionFetchCount += 1
-                XCTFail("Warm reopen must not wait on /api/session to know the run is live.")
-                return apiTestJSONResponse("{}", for: request)
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
-        let server = try XCTUnwrap(URL(string: "https://example.test"))
-        _ = OpenChatSessionStore.shared.adoptedViewModel(
-            session: SessionSummary(sessionId: "session-abc"),
-            server: server,
-            creating: viewModel
-        )
-
-        let didStart = await viewModel.sendMessage("Keep working")
-        XCTAssertTrue(didStart)
-        streamClient.emit(.token("Partial live answer."), lastEventID: "session-abc:4")
-        streamClient.emit(
-            .toolStarted(ToolStreamEvent(
-                eventType: "tool.started",
-                name: "search_files",
-                preview: "searching",
-                args: nil,
-                duration: nil,
-                isError: nil,
-                stableID: "tool-1"
-            )),
-            lastEventID: "session-abc:5"
-        )
-        viewModel.flushPendingStreamingContent()
-
-        XCTAssertEqual(viewModel.activeStreamID, "stream-123")
-        XCTAssertFalse(viewModel.liveToolCalls.isEmpty)
-
-        ChatNavigationLifecycle.applyViewDisappear(to: viewModel)
-        XCTAssertEqual(streamClient.stopCount, 0)
-        XCTAssertEqual(viewModel.activeStreamID, "stream-123")
-        XCTAssertFalse(viewModel.isActiveStreamConnectionSuspended)
-
-        let reopened = OpenChatSessionStore.shared.viewModel(
-            session: SessionSummary(sessionId: "session-abc"),
-            server: server
-        )
-        XCTAssertTrue(reopened === viewModel)
-        XCTAssertTrue(reopened.hasPreservedLiveRun)
-        XCTAssertTrue(reopened.hasPreservedTranscript)
-        XCTAssertFalse(
-            ChatInitialAppearancePolicy.shouldReloadTranscriptOnAppear(
-                hasPreservedTranscript: reopened.hasPreservedTranscript
-            )
-        )
-        XCTAssertEqual(reopened.activeStreamID, "stream-123")
-        XCTAssertEqual(reopened.liveToolCalls.first?.id, "tool-1")
-        XCTAssertEqual(sessionFetchCount, 0)
-    }
-
-    @MainActor
-    func testSidebarPulseUsesLiveOwnerEvenWhenListPayloadIsIdle() async throws {
-        let streamClient = SpySSEStreamingClient()
-        let viewModel = try makeViewModel(sessionID: "session-abc", streamClient: streamClient) { request in
-            XCTAssertEqual(request.url?.path, "/api/chat/start")
-            return apiTestJSONResponse("""
-            {
-              "session_id": "session-abc",
-              "stream_id": "stream-123"
-            }
-            """, for: request)
-        }
-        let server = try XCTUnwrap(URL(string: "https://example.test"))
-        _ = OpenChatSessionStore.shared.adoptedViewModel(
-            session: SessionSummary(sessionId: "session-abc"),
-            server: server,
-            creating: viewModel
-        )
-
-        let didStart = await viewModel.sendMessage("Keep working")
-        XCTAssertTrue(didStart)
-        let idleListRow = SessionSummary(sessionId: "session-abc", isStreaming: false)
-        XCTAssertTrue(
-            SessionRowView.isActiveStreaming(
-                idleListRow,
-                liveOwnerSessionIDs: OpenChatSessionStore.shared.liveSessionIDs(for: server)
-            )
-        )
-        XCTAssertEqual(
-            OpenChatSessionStore.shared.liveStreamIDs(for: server),
-            ["stream-123"]
-        )
-    }
-
-    func testColdOpenAdoptsListStreamIDBeforeSessionFetch() throws {
-        let viewModel = try makeViewModel(
-            sessionID: "session-abc",
-            activeStreamID: "stream-from-list"
-        )
-
-        XCTAssertEqual(viewModel.activeStreamID, "stream-from-list")
-        XCTAssertTrue(viewModel.isActiveStreamConnectionSuspended)
-        XCTAssertTrue(viewModel.hasPreservedLiveRun)
-        XCTAssertFalse(viewModel.hasPreservedTranscript)
-        XCTAssertTrue(
-            ChatInitialAppearancePolicy.shouldReloadTranscriptOnAppear(
-                hasPreservedTranscript: viewModel.hasPreservedTranscript
-            )
-        )
-        XCTAssertFalse(viewModel.isEstablishingConnection)
-    }
-
     func testColdOpenWithoutKnownStreamDoesNotFlashConnectingOnCachePaint() throws {
         let viewModel = try makeViewModel(sessionID: "session-abc")
         viewModel.markConversationConnectionInProgress()
@@ -655,95 +888,7 @@ final class OpenChatSessionStoreTests: XCTestCase {
         XCTAssertTrue(viewModel.isEstablishingConnection)
     }
 
-    func testKnownListStreamReconnectsWithoutWaitingOnSessionFetch() async throws {
-        let streamClient = SpySSEStreamingClient()
-        var sessionFetchCount = 0
-        var statusFetchCount = 0
-        let viewModel = try makeViewModel(
-            sessionID: "session-abc",
-            activeStreamID: "stream-from-list",
-            streamClient: streamClient
-        ) { request in
-            switch request.url?.path {
-            case "/api/chat/stream/status":
-                statusFetchCount += 1
-                return apiTestJSONResponse("""
-                {
-                  "active": true,
-                  "replay_available": true
-                }
-                """, for: request)
-            case "/api/session":
-                sessionFetchCount += 1
-                XCTFail("Known list stream must attach before /api/session.")
-                return apiTestJSONResponse("{}", for: request)
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
 
-        await viewModel.reconnectStreamIfNeeded()
-
-        XCTAssertEqual(statusFetchCount, 1)
-        XCTAssertEqual(sessionFetchCount, 0)
-        XCTAssertEqual(streamClient.startedURLs.count, 1)
-        XCTAssertEqual(viewModel.activeStreamID, "stream-from-list")
-        XCTAssertFalse(viewModel.isActiveStreamConnectionSuspended)
-    }
-
-    @MainActor
-    func testKnownListStreamAttachesBeforeTranscriptReloadWhenReplayIsUnavailable() async throws {
-        let streamClient = SpySSEStreamingClient()
-        var sessionFetchCount = 0
-        let viewModel = try makeViewModel(
-            sessionID: "session-abc",
-            activeStreamID: "stream-from-list",
-            streamClient: streamClient
-        ) { request in
-            switch request.url?.path {
-            case "/api/chat/stream/status":
-                return apiTestJSONResponse("""
-                {
-                  "active": true,
-                  "replay_available": false
-                }
-                """, for: request)
-            case "/api/session":
-                sessionFetchCount += 1
-                XCTAssertEqual(
-                    streamClient.startedURLs.count,
-                    1,
-                    "The live SSE must attach before a lock-bound transcript reload."
-                )
-                return apiTestJSONResponse("""
-                {
-                  "session": {
-                    "session_id": "session-abc",
-                    "messages": [
-                      {
-                        "role": "user",
-                        "content": "Keep working",
-                        "timestamp": 1770000100,
-                        "message_id": "user-1"
-                      }
-                    ]
-                  }
-                }
-                """, for: request)
-            default:
-                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
-                throw URLError(.badURL)
-            }
-        }
-
-        await viewModel.reconnectStreamIfNeeded()
-
-        XCTAssertEqual(sessionFetchCount, 1)
-        XCTAssertEqual(streamClient.startedURLs.count, 1)
-        XCTAssertEqual(viewModel.activeStreamID, "stream-from-list")
-        XCTAssertFalse(viewModel.isActiveStreamConnectionSuspended)
-    }
 
     @MainActor
     func testRememberedRestorePointSurvivesLeaveAndReopen() throws {
@@ -774,198 +919,18 @@ final class OpenChatSessionStoreTests: XCTestCase {
     }
 
     @MainActor
-    func testSessionEventCoordinatorUsesIndependentDurableCursor() throws {
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: "semreh.session-event-tests-\(UUID().uuidString)"))
-        let server = try XCTUnwrap(URL(string: "https://example.test/"))
-        let streamClient = SpySSEStreamingClient()
-        let cursorStore = SessionEventCursorStore(defaults: defaults)
-        cursorStore.save(
-            eventID: "stream-A:9",
-            server: server,
-            profile: "work",
-            sessionID: "session-abc"
-        )
-        var appliedSnapshots = 0
-        let coordinator = SessionEventStreamCoordinator(
-            server: server,
-            sessionID: "session-abc",
-            profile: "work",
-            streamClient: streamClient,
-            userDefaults: defaults
-        )
-        coordinator.onSnapshot = { snapshot in
-            appliedSnapshots += 1
-            XCTAssertEqual(snapshot.sessionId, "session-abc")
-            return true
-        }
-
-        coordinator.start()
-        XCTAssertEqual(streamClient.startedURLs.last?.path, "/api/sessions/session-abc/events")
-        XCTAssertEqual(streamClient.resumeEventIDs.last ?? nil, "stream-A:9")
-
-        streamClient.emit(.token("journal event"), lastEventID: "stream-A:10")
-        // Persistence is debounced: the in-memory cursor advanced but the disk
-        // mirror has not been written yet.
-        XCTAssertEqual(
-            cursorStore.load(server: server, profile: "work", sessionID: "session-abc"),
-            "stream-A:9"
-        )
-
-        // A reconnect prefers the fresher in-memory cursor over the stale disk row.
-        coordinator.start()
-        XCTAssertEqual(streamClient.resumeEventIDs.last ?? nil, "stream-A:10")
-
-        streamClient.emit(.token("duplicate event"), lastEventID: "stream-A:10", onConnection: streamClient.startedURLs.count - 1)
-        coordinator.stop()
-        // Stop flushes the coalesced cursor once.
-        XCTAssertEqual(
-            cursorStore.load(server: server, profile: "work", sessionID: "session-abc"),
-            "stream-A:10"
-        )
-
-        coordinator.start()
-        let liveConnection = streamClient.startedURLs.count - 1
-        streamClient.emit(.token("new stream event"), lastEventID: "stream-B:1", onConnection: liveConnection)
-        streamClient.emit(.token("old stream replay"), lastEventID: "stream-A:10", onConnection: liveConnection)
-        streamClient.emit(.token("opaque one"), lastEventID: "opaque-1", onConnection: liveConnection)
-        streamClient.emit(.token("opaque two"), lastEventID: "opaque-2", onConnection: liveConnection)
-        streamClient.emit(.token("opaque replay"), lastEventID: "opaque-1", onConnection: liveConnection)
-        // Dedupe state is in-memory; the disk mirror still holds the flushed value.
-        XCTAssertEqual(
-            cursorStore.load(server: server, profile: "work", sessionID: "session-abc"),
-            "stream-A:10"
-        )
-        coordinator.stop()
-        XCTAssertEqual(
-            cursorStore.load(server: server, profile: "work", sessionID: "session-abc"),
-            "opaque-2"
-        )
-
-        // Reconnect, then receive a snapshot (recovery boundary): the stale
-        // cursor and dedupe state are discarded and must not be re-persisted.
-        coordinator.start()
-        let recoveryConnection = streamClient.startedURLs.count - 1
-        streamClient.emit(
-            .sessionSnapshot(SessionSummary(sessionId: "session-abc", title: "Updated")),
-            lastEventID: nil,
-            onConnection: recoveryConnection
-        )
-
-        XCTAssertEqual(appliedSnapshots, 1)
-        XCTAssertEqual(
-            cursorStore.load(server: server, profile: "work", sessionID: "session-abc"),
-            nil
-        )
-        coordinator.stop()
-        coordinator.start()
-        XCTAssertNil(streamClient.resumeEventIDs.last ?? nil)
-        XCTAssertNil(
-            cursorStore.load(server: server, profile: "other", sessionID: "session-abc")
-        )
-    }
-
-    @MainActor
-    func testSessionEventCoordinatorReconnectsAfterTerminalAndStopCancelsRetry() async throws {
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: "semreh.session-event-reconnect-tests-\(UUID().uuidString)"))
-        let server = try XCTUnwrap(URL(string: "https://example.test"))
-        let streamClient = SpySSEStreamingClient()
-        let coordinator = SessionEventStreamCoordinator(
-            server: server,
-            sessionID: "session-abc",
-            profile: nil,
-            streamClient: streamClient,
-            userDefaults: defaults
-        )
-        var delivered: [SSEEvent] = []
-        coordinator.onEvent = { delivered.append($0) }
-
-        coordinator.start()
-        streamClient.emit(.streamEnd, lastEventID: "stream-A:10")
-        try await Task.sleep(nanoseconds: 350_000_000)
-        XCTAssertEqual(streamClient.startedURLs.count, 2)
-        XCTAssertEqual(streamClient.resumeEventIDs.last ?? nil, "stream-A:10")
-        XCTAssertEqual(delivered, [.streamEnd])
-
-        coordinator.stop()
-        streamClient.emit(.transportError("late"), lastEventID: nil, onConnection: 1)
-        try await Task.sleep(nanoseconds: 350_000_000)
-        XCTAssertEqual(streamClient.startedURLs.count, 2)
-    }
-
-    @MainActor
-    func testSessionEventCoordinatorReconnectsAfterAcceptedSnapshotWithoutCursor() async throws {
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: "semreh.session-event-snapshot-reconnect-\(UUID().uuidString)"))
-        let server = try XCTUnwrap(URL(string: "https://example.test"))
-        let streamClient = SpySSEStreamingClient()
-        let coordinator = SessionEventStreamCoordinator(
-            server: server,
-            sessionID: "session-abc",
-            profile: nil,
-            streamClient: streamClient,
-            userDefaults: defaults
-        )
-        coordinator.onSnapshot = { _ in true }
-
-        coordinator.start()
-        streamClient.emit(
-            .sessionSnapshot(SessionSummary(sessionId: "session-abc", title: "Recovered")),
-            lastEventID: "journal:42"
-        )
-
-        try await Task.sleep(nanoseconds: 350_000_000)
-        XCTAssertEqual(streamClient.startedURLs.count, 2)
-        XCTAssertNil(streamClient.resumeEventIDs.last ?? nil)
-        coordinator.stop()
-    }
-
-    @MainActor
-    func testRejectedSnapshotDoesNotClearDurableCursor() throws {
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: "semreh.session-event-rejected-\(UUID().uuidString)"))
-        let server = try XCTUnwrap(URL(string: "https://example.test"))
-        let streamClient = SpySSEStreamingClient()
-        let cursorStore = SessionEventCursorStore(defaults: defaults)
-        cursorStore.save(
-            eventID: "journal:41",
-            server: server,
-            profile: nil,
-            sessionID: "session-abc"
-        )
-        let coordinator = SessionEventStreamCoordinator(
-            server: server,
-            sessionID: "session-abc",
-            profile: nil,
-            streamClient: streamClient,
-            userDefaults: defaults
-        )
-        coordinator.onSnapshot = { _ in false }
-
-        coordinator.start()
-        streamClient.emit(
-            .sessionSnapshot(SessionSummary(sessionId: "session-abc", title: "Rejected")),
-            lastEventID: "journal:42"
-        )
-        coordinator.stop()
-
-        XCTAssertEqual(
-            cursorStore.load(server: server, profile: nil, sessionID: "session-abc"),
-            "journal:41"
-        )
-        XCTAssertEqual(streamClient.startedURLs.count, 1)
-    }
-
-    @MainActor
     func testOverlappingOpenSessionRefreshesShareOneCanonicalLoad() async throws {
         let server = try XCTUnwrap(URL(string: "https://example.test"))
-        let viewModel = try makeViewModel(sessionID: "session-abc") { request in
-            XCTAssertEqual(request.url?.path, "/api/session")
+        var sessionFetches = 0
+        let (viewModel, runtime) = try makeDirectRefreshViewModel { request in
+            XCTAssertEqual(request.url?.path, "/api/sessions/session-abc/messages")
+            sessionFetches += 1
             return apiTestJSONResponse("""
             {
-              "session": {
                 "session_id": "session-abc",
                 "messages": [
-                  {"role": "user", "content": "Canonical", "message_id": "canonical-1", "timestamp": 1770000000}
+                  {"role": "user", "content": "Canonical", "id": 1, "timestamp": 1770000000}
                 ]
-              }
             }
             """, for: request)
         }
@@ -987,66 +952,56 @@ final class OpenChatSessionStoreTests: XCTestCase {
         XCTAssertEqual(firstCount, 1)
         XCTAssertEqual(secondCount, 1)
         XCTAssertEqual(viewModel.messages.map(\.content), ["Canonical"])
+        XCTAssertEqual(sessionFetches, 1)
+        await viewModel.disposeDirectConversation()
+        await runtime.stop()
     }
 
     @MainActor
-    func testSyntheticSessionDoesNotStartSessionEventSync() throws {
+    private func makeDirectRefreshViewModel(
+        handler: @escaping (URLRequest) throws -> (HTTPURLResponse, Data)
+    ) throws -> (ChatViewModel, HermesServerRuntime) {
+        MockURLProtocol.requestHandler = handler
+        let server = URL(string: "https://example.test")!
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockURLProtocol.self]
+        let client = APIClient(baseURL: server, session: URLSession(configuration: configuration))
+        let runtime = try HermesServerRuntime(origin: server) { sink in
+            BranchIdentityTransport(sink: sink)
+        }
+        return (ChatViewModel(
+            session: SessionSummary(sessionId: "session-abc", profile: "default"),
+            server: server, client: client, gatewayRuntimeProvider: { _ in runtime }
+        ), runtime)
+    }
+
+    @MainActor
+    func testDraftVisibilityDoesNotCreateDirectRuntime() async throws {
         let server = try XCTUnwrap(URL(string: "https://example.test"))
-        let streamClient = SpySSEStreamingClient()
+        var runtimeRequests = 0
         let viewModel = ChatViewModel(
             session: SessionSummary(sessionId: nil),
             server: server,
-            sessionEventStreamClient: streamClient
+            gatewayRuntimeProvider: { _ in
+                runtimeRequests += 1
+                throw DirectSessionError.stopped
+            }
         )
 
         viewModel.startSessionEventSync()
+        viewModel.stopSessionEventSync()
+        await Task.yield()
 
-        XCTAssertTrue(streamClient.startedURLs.isEmpty)
-        XCTAssertEqual(streamClient.stopCount, 0)
+        XCTAssertTrue(viewModel.usesDirectGateway)
+        XCTAssertNil(viewModel.directBranchIdentity)
+        XCTAssertEqual(runtimeRequests, 0)
     }
 
-    @MainActor
-    func testSessionEventCoordinatorDropsCallbackFromReplacedConnection() throws {
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: "semreh.session-event-stale-tests-\(UUID().uuidString)"))
-        let server = try XCTUnwrap(URL(string: "https://example.test"))
-        let streamClient = SpySSEStreamingClient()
-        var appliedSnapshots = 0
-        let coordinator = SessionEventStreamCoordinator(
-            server: server,
-            sessionID: "session-abc",
-            profile: nil,
-            streamClient: streamClient,
-            userDefaults: defaults
-        )
-        coordinator.onSnapshot = { _ in
-            appliedSnapshots += 1
-            return true
-        }
-
-        coordinator.start()
-        coordinator.start()
-        streamClient.emit(
-            .sessionSnapshot(SessionSummary(sessionId: "session-abc")),
-            lastEventID: "stale",
-            onConnection: 0
-        )
-        XCTAssertEqual(appliedSnapshots, 0)
-
-        streamClient.emit(
-            .sessionSnapshot(SessionSummary(sessionId: "session-abc")),
-            lastEventID: "current",
-            onConnection: 1
-        )
-        XCTAssertEqual(appliedSnapshots, 1)
-    }
 
     @MainActor
     func makeViewModel(
         sessionID: String,
         activeStreamID: String? = nil,
-        streamClient: SSEStreamingClient? = nil,
-        sessionEventStreamClient: SSEStreamingClient? = nil,
-        usesOfficialContinuity: Bool = false,
         handler: ((URLRequest) throws -> (HTTPURLResponse, Data))? = nil
     ) throws -> ChatViewModel {
         if let handler {
@@ -1062,92 +1017,178 @@ final class OpenChatSessionStoreTests: XCTestCase {
         configuration.protocolClasses = [MockURLProtocol.self]
         let urlSession = URLSession(configuration: configuration)
         let server = try XCTUnwrap(URL(string: "https://example.test"))
-        let officialClient = usesOfficialContinuity
-            ? OfficialHermesContinuityClient(
-                baseURL: try XCTUnwrap(URL(string: "https://official.example.test")),
-                session: urlSession,
-                customHeaderProvider: { [] }
-            )
-            : nil
         let client = APIClient(
             baseURL: server,
-            session: urlSession,
-            officialContinuityClient: officialClient
+            session: urlSession
         )
-        let resolvedStreamClient = streamClient ?? SpySSEStreamingClient()
         let viewModel = ChatViewModel(
             session: SessionSummary(sessionId: sessionID, activeStreamId: activeStreamID),
             server: server,
             client: client,
-            streamClient: resolvedStreamClient,
-            approvalStreamClient: SpySSEStreamingClient(),
-            clarifyStreamClient: SpySSEStreamingClient(),
-            sessionEventStreamClient: sessionEventStreamClient ?? SpySSEStreamingClient(),
             listenAudioSession: SpyListenAudioSession(),
             listenRemoteControlCenter: SpyListenRemoteControlCenter()
         )
-        if let spy = resolvedStreamClient as? SpySSEStreamingClient {
-            spy.flushPendingStreamingContent = { [weak viewModel] in
-                viewModel?.flushPendingStreamingContent()
-            }
-        }
         return viewModel
-    }
-}
-
-private final class SpySSEStreamingClient: SSEStreamingClient {
-    private(set) var startedURLs: [URL] = []
-    private(set) var resumeEventIDs: [String?] = []
-    private(set) var stopCount = 0
-    private(set) var lastEventID: String?
-    private var eventHandlers: [@MainActor (SSEEvent, String?) -> Void] = []
-    var automaticallyFlushPendingStreamingContent = true
-    var flushPendingStreamingContent: (() -> Void)?
-
-    func start(url: URL, onEvent: @escaping @MainActor (SSEEvent) -> Void) {
-        start(url: url, resumeFrom: nil, onEvent: onEvent)
-    }
-
-    func start(
-        url: URL,
-        resumeFrom eventID: String?,
-        onEvent: @escaping @MainActor (SSEEvent) -> Void
-    ) {
-        start(url: url, resumeFrom: eventID) { event, _ in
-            onEvent(event)
-        }
-    }
-
-    func start(
-        url: URL,
-        resumeFrom eventID: String?,
-        onEventWithID onEvent: @escaping @MainActor (SSEEvent, String?) -> Void
-    ) {
-        startedURLs.append(url)
-        resumeEventIDs.append(eventID)
-        lastEventID = eventID
-        eventHandlers.append(onEvent)
-    }
-
-    func stop() {
-        stopCount += 1
     }
 
     @MainActor
-    func emit(
-        _ event: SSEEvent,
-        lastEventID: String? = nil,
-        onConnection index: Int? = nil
-    ) {
-        self.lastEventID = lastEventID
-        let handler = index.flatMap { eventHandlers.indices.contains($0) ? eventHandlers[$0] : nil }
-            ?? eventHandlers.last
-        handler?(event, lastEventID)
-        if automaticallyFlushPendingStreamingContent {
-            flushPendingStreamingContent?()
+    private struct DirectBranchFixture {
+        let viewModel: ChatViewModel
+        let runtime: HermesServerRuntime
+        let controller: GatewayConversationController
+    }
+
+    @MainActor
+    private func makeDirectBranchViewModel(
+        session: SessionSummary,
+        server: URL,
+        running: Bool = false,
+        rejectsInterrupt: Bool = false
+    ) async throws -> DirectBranchFixture {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockURLProtocol.self]
+        let client = APIClient(
+            baseURL: server,
+            session: URLSession(configuration: configuration)
+        )
+        let runtime = try HermesServerRuntime(origin: server) { sink in
+            BranchIdentityTransport(running: running, rejectsInterrupt: rejectsInterrupt, sink: sink)
         }
+        let controller = GatewayConversationController(
+            runtime: runtime,
+            storedID: session.sessionId,
+            profile: session.profile ?? "default",
+            loadTranscript: { id, _, _, _ in
+                DirectHermesTranscriptPage(sessionID: id, messages: [], pagination: nil)
+            }
+        )
+        try await controller.open()
+        let viewModel = ChatViewModel(
+            session: session,
+            server: server,
+            client: client,
+            gatewayRuntimeProvider: { _ in runtime },
+            initialDirectConversation: controller
+        )
+        let boundIdentity = try XCTUnwrap(viewModel.directBranchIdentity)
+        XCTAssertEqual(boundIdentity.origin, server)
+        XCTAssertEqual(boundIdentity.profile, session.profile ?? "default")
+        XCTAssertEqual(boundIdentity.sessionID, session.sessionId)
+        return DirectBranchFixture(viewModel: viewModel, runtime: runtime, controller: controller)
     }
 }
+
+private struct BranchIdentityTransport: HermesGatewayTransport, @unchecked Sendable {
+    var running = false
+    var rejectsInterrupt = false
+    var sink: (@Sendable (HermesGatewayEvent) -> Void)?
+    func connect() async throws { }
+    func close() async { }
+    func connectionIdentifier() async -> Int? { 1 }
+
+    func request(method: String, params: JSONValue?, timeout: Duration?) async throws -> JSONValue? {
+        if method == "session.interrupt" {
+            guard !rejectsInterrupt else { throw DirectSessionError.stopUnconfirmed }
+            guard case .object(let fields) = params,
+                  case .string(let runtimeID) = fields["session_id"] else {
+                throw DirectSessionError.invalidResponse
+            }
+            sink?(HermesGatewayEvent(
+                method: "event", type: "message.complete", sessionID: runtimeID,
+                sequence: 1, payload: .object(["status": .string("cancelled")]),
+                params: nil, connectionGeneration: 1
+            ))
+            return .object(["status": .string("interrupted")])
+        }
+        if method == "session.status" {
+            return .object(["output": .string("Agent Running: No")])
+        }
+        guard method == "session.resume" else { return .object([:]) }
+        guard case .object(let fields) = params,
+              case .string(let storedID) = fields["session_id"] else {
+            throw DirectSessionError.invalidResponse
+        }
+        return .object([
+            "session_id": .string("runtime-\(storedID)"),
+            "session_key": .string(storedID),
+            "running": .bool(running)
+        ])
+    }
+}
+
+private actor ForegroundRecoveryTransport: HermesGatewayTransport {
+    private var connections = 0
+    private var closes = 0
+    private var activeConnection: Int?
+    private var staleConnection = false
+    private var failuresRemaining = 0
+    private var blockedConnections: Set<Int> = []
+    private var blockedWaiters: [Int: [CheckedContinuation<Void, Never>]] = [:]
+    private var connectionWaiters: [Int: [CheckedContinuation<Void, Never>]] = [:]
+    private var closeWaiters: [Int: [CheckedContinuation<Void, Never>]] = [:]
+
+    func connect() async throws {
+        connections += 1
+        let number = connections
+        let waiters = connectionWaiters.keys.filter { $0 <= number }
+        for expected in waiters {
+            connectionWaiters.removeValue(forKey: expected)?.forEach { $0.resume() }
+        }
+        if blockedConnections.contains(number) {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                blockedWaiters[number, default: []].append(continuation)
+            }
+        }
+        if failuresRemaining > 0 {
+            failuresRemaining -= 1
+            throw HermesGatewayError.transport("foreground fixture")
+        }
+        activeConnection = number
+        staleConnection = false
+    }
+
+    func close() async {
+        closes += 1
+        activeConnection = nil
+        let waiters = closeWaiters.keys.filter { $0 <= closes }
+        for expected in waiters {
+            closeWaiters.removeValue(forKey: expected)?.forEach { $0.resume() }
+        }
+    }
+
+    func connectionIdentifier() async -> Int? {
+        guard !staleConnection else { return nil }
+        return activeConnection
+    }
+
+    func request(method: String, params: JSONValue?, timeout: Duration?) async throws -> JSONValue? {
+        .object(["ok": .bool(true)])
+    }
+
+    func blockConnection(_ number: Int) { blockedConnections.insert(number) }
+
+    func releaseConnection(_ number: Int) {
+        blockedConnections.remove(number)
+        blockedWaiters.removeValue(forKey: number)?.forEach { $0.resume() }
+    }
+
+    func waitForConnection(_ number: Int) async {
+        guard connections < number else { return }
+        await withCheckedContinuation { connectionWaiters[number, default: []].append($0) }
+    }
+
+    func waitForClose(_ number: Int) async {
+        guard closes < number else { return }
+        await withCheckedContinuation { closeWaiters[number, default: []].append($0) }
+    }
+
+    func failNextConnections(_ count: Int) { failuresRemaining = count }
+
+    func markConnectionStale() { staleConnection = true }
+
+    func connectionCount() -> Int { connections }
+}
+
 
 private final class SpyListenAudioSession: ListenAudioSessionControlling {
     func activate() {}

@@ -14,13 +14,14 @@ struct TaskDetailView: View {
         job: CronJob,
         runningElapsed: Double?,
         server: URL,
+        profile: String = "default",
         onAPIError: @escaping (Error) -> Void,
         onMutation: @escaping (CronJobListMutation) -> Void = { _ in }
     ) {
         self.server = server
         self.onAPIError = onAPIError
         self.onMutation = onMutation
-        _viewModel = State(initialValue: TaskDetailViewModel(job: job, runningElapsed: runningElapsed, server: server))
+        _viewModel = State(initialValue: TaskDetailViewModel(job: job, runningElapsed: runningElapsed, server: server, profile: profile))
     }
 
     var body: some View {
@@ -30,13 +31,13 @@ struct TaskDetailView: View {
                 actionStatusSection
                 metadataSection
 
-                if viewModel.isLoading && viewModel.outputs.isEmpty {
-                    ProgressView("Loading output...")
+                if viewModel.isLoading && viewModel.runs.isEmpty {
+                    ProgressView("Loading runs...")
                         .frame(maxWidth: .infinity, alignment: .center)
                         .padding(.top, 24)
-                } else if let errorMessage = viewModel.errorMessage, viewModel.outputs.isEmpty {
+                } else if let errorMessage = viewModel.errorMessage, viewModel.runs.isEmpty {
                     ContentUnavailableView {
-                        Label("Could Not Load Output", systemImage: "exclamationmark.triangle")
+                        Label("Could Not Load Runs", systemImage: "exclamationmark.triangle")
                     } description: {
                         Text(errorMessage)
                     } actions: {
@@ -45,16 +46,27 @@ struct TaskDetailView: View {
                         }
                     }
                     .padding(.top, 24)
-                } else if viewModel.outputs.isEmpty {
+                } else if viewModel.runs.isEmpty {
                     ContentUnavailableView {
-                        Label("No Recent Output", systemImage: "doc.text")
+                        Label("No Recent Runs", systemImage: "doc.text")
                     } description: {
-                        Text("This task has not produced any output yet.")
+                        Text("No saved run sessions were returned for this task.")
                     }
                     .padding(.top, 24)
                 } else {
-                    outputsSection
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Recent Runs").font(.headline)
+                        ForEach(viewModel.runs) { run in
+                            VStack(alignment: .leading) {
+                                Text(run.title ?? String(localized: "Task run"))
+                                if let date = run.startedAt { Text(date.formatted).font(.caption) }
+                            }
+                        }
+                    }
                 }
+                Text("Saved output files are not available from this Hermes server. Run history is shown above.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
             .padding()
         }
@@ -117,7 +129,8 @@ struct TaskDetailView: View {
                 saveTitle: String(localized: "Save"),
                 isSaving: viewModel.isMutating,
                 errorMessage: viewModel.actionErrorMessage,
-                deliveryOptions: viewModel.deliveryOptions
+                deliveryOptions: viewModel.deliveryOptions,
+                owningProfile: viewModel.owningProfile
             ) { draft in
                 let didUpdate = await viewModel.update(from: draft)
                 handleActionResult(didUpdate)
@@ -130,7 +143,7 @@ struct TaskDetailView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This removes the scheduled task from the Hermes server.")
+            Text("This removes the scheduled task, its saved output files, and its task notepad from Hermes. It does not promise to interrupt an already-running task.")
         }
         .task {
             await loadOutput()
@@ -284,7 +297,7 @@ struct TaskDetailView: View {
     }
 
     private var isActionDisabled: Bool {
-        viewModel.isMutating || viewModel.job.jobId == nil
+        viewModel.isMutating || viewModel.mutationNeedsInspection || viewModel.job.jobId == nil
     }
 
     private var pauseResumeTitle: String {

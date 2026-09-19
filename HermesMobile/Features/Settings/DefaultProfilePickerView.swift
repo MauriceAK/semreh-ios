@@ -24,12 +24,17 @@ struct DefaultProfilePickerView: View {
     @State private var saveError: String?
     @State private var isSingleProfileMode = false
     @State private var showsCreateProfile = false
+    @State private var presentationGeneration = 0
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 24) {
                     ProfilePickerSearchField(text: $searchText)
+
+                    Text("The default is used when starting Hermes. It can differ from the profile selected in this app.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
 
                     if let saveError {
                         Text(saveError)
@@ -72,6 +77,7 @@ struct DefaultProfilePickerView: View {
             }
         }
         .adaptiveFormPresentation()
+        .onDisappear { presentationGeneration &+= 1 }
     }
 
     private var newProfileButton: some View {
@@ -250,9 +256,11 @@ struct DefaultProfilePickerView: View {
         errorMessage = nil
 
         do {
-            let response = try await APIClient(baseURL: server).profiles()
+            let client = APIClient(baseURL: server)
+            let response = try await client.directProfiles()
+            let active = try await client.directActiveProfile()
             profiles = response.profiles ?? []
-            activeProfileName = response.effectiveDefaultProfileName ?? currentDefaultProfileName
+            activeProfileName = active.startupDefaultName
             isSingleProfileMode = response.singleProfileMode ?? false
         } catch {
             // A cancelled .task (view dismissed mid-load) must not surface a
@@ -285,7 +293,8 @@ struct DefaultProfilePickerView: View {
     }
 
     private func save(_ profile: ProfileSummary) async {
-        guard let name = profile.normalizedName else { return }
+        guard !isSaving, let name = profile.normalizedName else { return }
+        let generation = presentationGeneration
 
         isSaving = true
         saveError = nil
@@ -293,28 +302,22 @@ struct DefaultProfilePickerView: View {
         defer { isSaving = false }
 
         do {
-            let response = try await APIClient(baseURL: server).switchProfile(name: name)
-            if let error = response.error?.trimmingCharacters(in: .whitespacesAndNewlines), !error.isEmpty {
-                saveError = error
-                selectedProfileName = nil
-                return
-            }
-
-            let returnedActiveName = response.active?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let resolvedName = returnedActiveName?.isEmpty == false ? returnedActiveName : name
-            let updatedProfiles = response.profiles ?? profiles
-            let selectionResponse = ProfilesResponse(profiles: updatedProfiles, active: resolvedName)
-            profiles = updatedProfiles
-            activeProfileName = selectionResponse.effectiveDefaultProfileName ?? name
+            let response = try await APIClient(baseURL: server).directSetStartupDefaultProfile(name: name)
+            guard generation == presentationGeneration, !Task.isCancelled,
+                  let confirmedName = response.startupDefaultName else { return }
+            let selectionResponse = ProfilesResponse(profiles: profiles, active: confirmedName)
+            activeProfileName = confirmedName
 
             let selection = DefaultProfileSelection(
-                name: activeProfileName ?? name,
+                name: confirmedName,
                 displayName: selectionResponse.displayName(for: activeProfileName) ?? profile.displayName,
-                defaultModel: response.defaultModel
+                // This write changes no running model or local chat profile.
+                defaultModel: nil
             )
             onSave(selection)
             dismiss()
         } catch {
+            guard generation == presentationGeneration, !Task.isCancelled else { return }
             saveError = error.localizedDescription
             selectedProfileName = nil
         }
@@ -332,18 +335,20 @@ private struct CreateProfileSheet: View {
     @State private var name = ""
     @State private var cloneConfig = false
     @State private var modelGroups: [ModelCatalogGroup] = []
-    /// nil = "Use active profile default" (the webui form's empty option).
+    /// nil preserves the stock inherited model rather than selecting a provider.
     @State private var selectedModel: ModelCatalogOption?
     @State private var baseURL = ""
     @State private var apiKey = ""
-    @State private var isCreating = false
-    @State private var errorMessage: String?
+    @State private var creation = DirectProfileCreationWorkflow()
+    private var isCreating: Bool { creation.isWorking }
+    private var errorMessage: String? { creation.errorMessage }
 
     var body: some View {
         NavigationStack {
             Form {
                 Section {
                     TextField("Profile name", text: $name)
+                        .disabled(creation.created != nil || creation.creationUncertain)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
                 } footer: {
@@ -352,21 +357,27 @@ private struct CreateProfileSheet: View {
 
                 Section {
                     Toggle("Clone config from active profile", isOn: $cloneConfig)
+                        .disabled(creation.created != nil || creation.creationUncertain)
+                } footer: {
+                    Text("Copies the running profile's config, skills, and SOUL. Does not copy chat history or switch the running profile.")
                 }
 
                 Section {
                     modelPicker
+                        .disabled(creation.created != nil || creation.creationUncertain)
                 } footer: {
-                    Text("Choose from configured providers and models for this new profile.")
+                    Text("Choose a configured model, or keep the inherited default. Without cloning, Hermes attempts to copy the running profile's model settings; it does not copy the rest of its config.")
                 }
 
                 Section {
                     TextField("Base URL", text: $baseURL)
+                        .disabled(creation.created != nil || creation.creationUncertain)
                         .keyboardType(.URL)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
 
                     SecureField("API key", text: $apiKey)
+                        .disabled(creation.created != nil || creation.creationUncertain)
                 } footer: {
                     if hasInvalidBaseURL {
                         Text("Base URL must start with http:// or https://.")
@@ -389,7 +400,8 @@ private struct CreateProfileSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") {
+                    Button(creation.created != nil || creation.creationUncertain ? "Close" : "Cancel") {
+                        if creation.created != nil || creation.creationUncertain { onCreated(nil) }
                         dismiss()
                     }
                     .disabled(isCreating)
@@ -398,15 +410,16 @@ private struct CreateProfileSheet: View {
                 ToolbarItem(placement: .confirmationAction) {
                     if isCreating {
                         ProgressView()
-                    } else {
-                        Button("Create") {
+                    } else if creation.created == nil || creation.canRetryConfiguration {
+                        Button(creation.created == nil ? "Create" : "Retry Configuration") {
                             Task { await create() }
                         }
-                        .disabled(!ProfileNameRules.isValid(trimmedName) || hasInvalidBaseURL)
+                        .disabled(creation.creationUncertain || (creation.created == nil &&
+                            (!ProfileNameRules.isValid(trimmedName) || hasInvalidBaseURL)))
                     }
                 }
             }
-            .interactiveDismissDisabled(isCreating)
+            .interactiveDismissDisabled(isCreating || creation.created != nil || creation.creationUncertain)
             .task {
                 await loadModels()
             }
@@ -416,7 +429,7 @@ private struct CreateProfileSheet: View {
 
     private var modelPicker: some View {
         Picker("Model", selection: $selectedModel) {
-            Text("Use active profile default")
+            Text("Use inherited model default")
                 .tag(ModelCatalogOption?.none)
 
             ForEach(modelGroups) { group in
@@ -453,44 +466,42 @@ private struct CreateProfileSheet: View {
     }
 
     private func loadModels() async {
-        // Best-effort, like the webui form: on failure the picker simply keeps
-        // only the "Use active profile default" option.
-        guard let response = try? await APIClient(baseURL: server).models() else { return }
-        modelGroups = response.catalogGroups
+        // Keep the selected model unchanged while refreshing available options.
+        guard let groups = try? await ProfileCreationCatalog.load(client: APIClient(baseURL: server)) else { return }
+        modelGroups = groups
     }
 
     private func create() async {
-        let profileName = trimmedName
-        guard ProfileNameRules.isValid(profileName), !hasInvalidBaseURL else { return }
-
-        isCreating = true
-        errorMessage = nil
-        defer { isCreating = false }
-
-        // Mirror the webui payload: a "default" provider id is not a real
-        // provider selection and is dropped.
-        let provider = selectedModel?.providerID
-        let trimmedAPIKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        do {
-            let response = try await APIClient(baseURL: server).createProfile(
-                name: profileName,
-                cloneConfig: cloneConfig,
-                defaultModel: selectedModel?.id,
-                modelProvider: provider == "default" ? nil : provider,
-                baseUrl: trimmedBaseURL.isEmpty ? nil : trimmedBaseURL,
-                apiKey: trimmedAPIKey.isEmpty ? nil : trimmedAPIKey
-            )
-            if let error = response.error?.trimmingCharacters(in: .whitespacesAndNewlines), !error.isEmpty {
-                errorMessage = error
-                return
-            }
-
-            onCreated(response.profile)
-            dismiss()
-        } catch {
-            errorMessage = error.localizedDescription
+        let client = APIClient(baseURL: server)
+        if creation.created != nil {
+            await creation.retryConfiguration(client: client)
+        } else {
+            guard ProfileNameRules.isValid(trimmedName), !hasInvalidBaseURL else { return }
+            let provider = selectedModel?.providerID
+            let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            await creation.create(client: client, name: trimmedName, cloneConfig: cloneConfig,
+                model: selectedModel?.id, provider: provider == "default" ? nil : provider,
+                baseURL: trimmedBaseURL.isEmpty ? nil : trimmedBaseURL,
+                apiKey: key.isEmpty ? nil : key)
         }
+        if creation.completed {
+            apiKey = ""
+            onCreated(nil)
+            dismiss()
+        }
+    }
+}
+
+enum ProfileCreationCatalog {
+    enum LoadError: Error { case missingRunningProfile }
+
+    static func load(client: APIClient) async throws -> [ModelCatalogGroup] {
+        // The old unscoped catalog belonged to the running server. `active`
+        // is only its sticky startup default and must not retarget this read.
+        let context = try await client.directActiveProfile()
+        guard let profile = context.current?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !profile.isEmpty else { throw LoadError.missingRunningProfile }
+        return try await client.directModelOptions(profile: profile).catalogGroups
     }
 }
 

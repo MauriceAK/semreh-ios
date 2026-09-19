@@ -18,7 +18,7 @@ struct ComposerTextInputView: View {
     let onPasteImages: ([UIImage]) -> Void
 
     var body: some View {
-        ZStack(alignment: .topLeading) {
+        ZStack(alignment: .leading) {
             ComposerTextView(
                 text: $text,
                 isFocused: $isFocused,
@@ -36,14 +36,15 @@ struct ComposerTextInputView: View {
             .padding(.horizontal, 16)
 
             if text.isEmpty {
-                Text("Ask anything... /commands")
+                Text("Message")
+                    .lineLimit(1)
                     .foregroundStyle(Color(.placeholderText))
                     .padding(.horizontal, 16)
                     .padding(.vertical, verticalPadding)
                     .allowsHitTesting(false)
             }
         }
-        .frame(minHeight: 42, alignment: .topLeading)
+        .frame(minHeight: 42, alignment: .leading)
     }
 
     private func updateMeasuredHeight(_ newHeight: CGFloat) {
@@ -83,6 +84,7 @@ private struct ComposerTextView: UIViewRepresentable {
         textView.textContainerInset = .zero
         textView.textContainer.lineFragmentPadding = 0
         textView.textContentType = .none
+        textView.accessibilityIdentifier = "chat-composer-input"
         textView.isKeyboardSendEnabled = isKeyboardSendEnabled
         textView.onKeyboardSend = onKeyboardSend
         textView.pasteConfiguration = UIPasteConfiguration(

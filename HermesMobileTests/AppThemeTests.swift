@@ -10,6 +10,8 @@ final class AppThemeTests: XCTestCase {
 
     func testThemeMapsToExpectedColorScheme() {
         XCTAssertNil(AppTheme.system.colorScheme)
+        XCTAssertEqual(AppTheme.semrehLight.colorScheme, .light)
+        XCTAssertEqual(AppTheme.semrehDark.colorScheme, .dark)
         XCTAssertEqual(AppTheme.light.colorScheme, .light)
         XCTAssertEqual(AppTheme.dark.colorScheme, .dark)
         XCTAssertNil(AppTheme.chatgpt.colorScheme)
@@ -20,9 +22,11 @@ final class AppThemeTests: XCTestCase {
 
     func testThemeDropdownKeepsSemrehDefaultsAndAddsNamedPalettes() {
         XCTAssertEqual(AppTheme.allCases.map(\.rawValue), [
-            "system", "light", "dark", "chatgpt", "midnight", "forest", "sand"
+            "system", "semrehLight", "semrehDark", "light", "dark", "chatgpt", "midnight", "forest", "sand"
         ])
         XCTAssertEqual(AppTheme.system.title, "Semreh")
+        XCTAssertEqual(AppTheme.semrehLight.title, "Light")
+        XCTAssertEqual(AppTheme.semrehDark.title, "Dark")
         XCTAssertEqual(AppTheme.light.title, "Goku Light")
         XCTAssertEqual(AppTheme.dark.title, "Goku Dark")
         XCTAssertEqual(AppTheme.chatgpt.title, "ChatGPT")
@@ -30,6 +34,8 @@ final class AppThemeTests: XCTestCase {
         XCTAssertEqual(AppTheme.forest.title, "Forest")
         XCTAssertEqual(AppTheme.sand.title, "Sand")
         XCTAssertEqual(AppTheme.system.palette, .semreh)
+        XCTAssertEqual(AppTheme.semrehLight.palette, .semreh)
+        XCTAssertEqual(AppTheme.semrehDark.palette, .semreh)
         XCTAssertEqual(AppTheme.light.palette, .goku)
         XCTAssertEqual(AppTheme.dark.palette, .goku)
         XCTAssertEqual(AppTheme.chatgpt.palette, .chatgpt)
@@ -37,6 +43,19 @@ final class AppThemeTests: XCTestCase {
         XCTAssertEqual(AppTheme.forest.palette, .forest)
         XCTAssertEqual(AppTheme.sand.palette, .sand)
         XCTAssertEqual(AppTheme.storedValue("chatgpt"), .chatgpt)
+        XCTAssertEqual(AppTheme.storedValue("light"), .light)
+        XCTAssertEqual(AppTheme.storedValue("dark"), .dark)
+        XCTAssertEqual(AppTheme.storedValue("semrehLight"), .semrehLight)
+        XCTAssertEqual(AppTheme.storedValue("semrehDark"), .semrehDark)
+    }
+
+    func testModernSemrehModesDoNotRewriteLegacyGokuRawValues() {
+        XCTAssertNotEqual(AppTheme.semrehLight.rawValue, AppTheme.light.rawValue)
+        XCTAssertNotEqual(AppTheme.semrehDark.rawValue, AppTheme.dark.rawValue)
+        XCTAssertEqual(AppTheme.storedValue(AppTheme.light.rawValue).palette, .goku)
+        XCTAssertEqual(AppTheme.storedValue(AppTheme.dark.rawValue).palette, .goku)
+        XCTAssertEqual(AppTheme.storedValue(AppTheme.semrehLight.rawValue).palette, .semreh)
+        XCTAssertEqual(AppTheme.storedValue(AppTheme.semrehDark.rawValue).palette, .semreh)
     }
 
     func testNamedPalettesKeepReadableBrandedPairs() {
@@ -97,8 +116,8 @@ final class AppThemeTests: XCTestCase {
         XCTAssertEqual(SemrehVisualTheme.deepNavyHex, SemrehVisualTheme.logoNavyHex)
         XCTAssertEqual(SemrehVisualTheme.brandAction, SemrehVisualTheme.logoTeal)
         XCTAssertEqual(SemrehVisualTheme.energy, SemrehVisualTheme.logoTeal)
-        XCTAssertEqual(SemrehVisualTheme.promptBubbleBackgroundHex(for: .dark), "#2FE099")
-        XCTAssertEqual(SemrehVisualTheme.promptBubbleForegroundHex(), "#032357")
+        XCTAssertEqual(SemrehVisualTheme.promptBubbleBackgroundHex(for: .dark), "#D4B992")
+        XCTAssertEqual(SemrehVisualTheme.promptBubbleForegroundHex(), "#30251D")
     }
 
     func testGokuPaletteRetainsLegacyVisualTokens() {
@@ -125,12 +144,12 @@ final class AppThemeTests: XCTestCase {
     }
 
     func testSemrehDarkCanvasStaysSeparateFromLogoNavy() {
-        XCTAssertEqual(SemrehVisualTheme.canvasHex(for: .dark), "#0B1B2E")
+        XCTAssertEqual(SemrehVisualTheme.canvasHex(for: .dark), "#211E1A")
         XCTAssertNotEqual(SemrehVisualTheme.canvasHex(for: .dark), SemrehVisualTheme.logoNavyHex)
     }
     func testSemrehVisualThemeActionAdaptsForDarkModeContrast() {
-        XCTAssertEqual(SemrehVisualTheme.actionHex(for: .light), "#006A72")
-        XCTAssertEqual(SemrehVisualTheme.actionHex(for: .dark), "#31D8CA")
+        XCTAssertEqual(SemrehVisualTheme.actionHex(for: .light), "#795334")
+        XCTAssertEqual(SemrehVisualTheme.actionHex(for: .dark), "#D9B98C")
 
         for scheme in [ColorScheme.light, .dark] {
             XCTAssertGreaterThanOrEqual(
@@ -144,8 +163,8 @@ final class AppThemeTests: XCTestCase {
     }
 
     func testSemrehVisualThemeUsesReadableAccentForegrounds() {
-        XCTAssertEqual(SemrehVisualTheme.accentForegroundHex(for: .light), "#FFFFFF")
-        XCTAssertEqual(SemrehVisualTheme.accentForegroundHex(for: .dark), SemrehVisualTheme.logoNavyHex)
+        XCTAssertEqual(SemrehVisualTheme.accentForegroundHex(for: .light), "#FFF9EF")
+        XCTAssertEqual(SemrehVisualTheme.accentForegroundHex(for: .dark), "#30251D")
 
         for scheme in [ColorScheme.light, .dark] {
             XCTAssertGreaterThanOrEqual(
@@ -192,9 +211,10 @@ final class AppThemeTests: XCTestCase {
     }
 
     func testSemrehVisualThemeCanvasAdaptsToColorScheme() {
-        XCTAssertEqual(SemrehVisualTheme.canvasHex(for: .light), "#F5F8FC")
-        XCTAssertEqual(SemrehVisualTheme.canvasHex(for: .dark), "#0B1B2E")
-        XCTAssertNotEqual(SemrehVisualTheme.panelHex(for: .light), SemrehVisualTheme.panelHex(for: .dark))
+        XCTAssertEqual(SemrehVisualTheme.canvasHex(for: .light), "#F3E8D5")
+        XCTAssertEqual(SemrehVisualTheme.canvasHex(for: .dark), "#211E1A")
+        XCTAssertEqual(SemrehVisualTheme.panelHex(for: .light), "#FBF2E3")
+        XCTAssertEqual(SemrehVisualTheme.panelHex(for: .dark), "#2C2721")
     }
 
     func testAdaptiveBrandAccentMeetsTextContrastInBothAppearances() {
@@ -280,6 +300,128 @@ final class AppThemeTests: XCTestCase {
     func testSessionIdentityInitialsNormalizeUserInput() {
         XCTAssertEqual(SessionIdentitySettings.normalizedInitials(" u-z!9 "), "UZ9")
         XCTAssertEqual(SessionIdentitySettings.normalizedInitials("abcd"), "ABC")
+    }
+}
+
+final class AppAccentTests: XCTestCase {
+    func testPresetOrderAndStorageContractAreStable() {
+        XCTAssertEqual(AppAccent.allCases.map(\.rawValue), ["warm", "violet", "blue", "mint", "rose"])
+        XCTAssertEqual(AppAccent.storageKey, "appearance.appAccent")
+        XCTAssertEqual(AppAccent.defaultValue, .warm)
+        XCTAssertEqual(AppAccent.allCases.map(\.title), ["Warm", "Violet", "Blue", "Mint", "Rose"])
+    }
+
+    func testStoredAccentFallsBackToWarmForUnknownValues() {
+        XCTAssertEqual(AppAccent.storedValue(AppAccent.violet.rawValue), .violet)
+        XCTAssertEqual(AppAccent.storedValue("old-accent"), .warm)
+        XCTAssertEqual(AppAccent.storedValue(""), .warm)
+    }
+
+    func testWarmAccentPreservesTheExistingSemrehAppearance() {
+        XCTAssertEqual(SemrehVisualTheme.actionHex(for: .light, accent: .warm), "#795334")
+        XCTAssertEqual(SemrehVisualTheme.actionHex(for: .dark, accent: .warm), "#D9B98C")
+        XCTAssertEqual(SemrehVisualTheme.promptBubbleBackgroundHex(for: .light, accent: .warm), "#E7D3B3")
+        XCTAssertEqual(SemrehVisualTheme.promptBubbleBackgroundHex(for: .dark, accent: .warm), "#D4B992")
+        XCTAssertEqual(SemrehVisualTheme.promptBubbleForegroundHex(for: .semreh, accent: .warm), "#30251D")
+    }
+
+    func testNamedAccentsProduceDistinctSemrehActionsAndBubbles() {
+        let lightActions = Set(AppAccent.allCases.map {
+            SemrehVisualTheme.actionHex(for: .light, accent: $0)
+        })
+        let darkActions = Set(AppAccent.allCases.map {
+            SemrehVisualTheme.actionHex(for: .dark, accent: $0)
+        })
+        let lightBubbles = Set(AppAccent.allCases.map {
+            SemrehVisualTheme.promptBubbleBackgroundHex(for: .light, accent: $0)
+        })
+        let darkBubbles = Set(AppAccent.allCases.map {
+            SemrehVisualTheme.promptBubbleBackgroundHex(for: .dark, accent: $0)
+        })
+
+        XCTAssertEqual(lightActions.count, AppAccent.allCases.count)
+        XCTAssertEqual(darkActions.count, AppAccent.allCases.count)
+        XCTAssertEqual(lightBubbles.count, AppAccent.allCases.count)
+        XCTAssertEqual(darkBubbles.count, AppAccent.allCases.count)
+    }
+
+    func testEachSemrehAccentHasReadableLightAndDarkActionPairs() {
+        for accent in AppAccent.allCases {
+            for scheme in [ColorScheme.light, .dark] {
+                XCTAssertGreaterThanOrEqual(
+                    SemrehVisualTheme.contrastRatio(
+                        foregroundHex: SemrehVisualTheme.actionHex(for: scheme, accent: accent),
+                        backgroundHex: SemrehVisualTheme.panelHex(for: scheme)
+                    ),
+                    4.5,
+                    "action/panel failed for \(accent) \(scheme)"
+                )
+                XCTAssertGreaterThanOrEqual(
+                    SemrehVisualTheme.contrastRatio(
+                        foregroundHex: SemrehVisualTheme.accentForegroundHex(for: scheme, accent: accent),
+                        backgroundHex: SemrehVisualTheme.actionHex(for: scheme, accent: accent)
+                    ),
+                    4.5,
+                    "foreground/action failed for \(accent) \(scheme)"
+                )
+                XCTAssertGreaterThanOrEqual(
+                    SemrehVisualTheme.contrastRatio(
+                        foregroundHex: SemrehVisualTheme.brandAccentHex(for: scheme, accent: accent),
+                        backgroundHex: SemrehVisualTheme.canvasHex(for: scheme)
+                    ),
+                    4.5,
+                    "brand/canvas failed for \(accent) \(scheme)"
+                )
+            }
+        }
+    }
+
+    func testEachSemrehAccentHasReadableUserBubblePairs() {
+        for accent in AppAccent.allCases {
+            let foreground = SemrehVisualTheme.promptBubbleForegroundHex(for: .semreh, accent: accent)
+            for scheme in [ColorScheme.light, .dark] {
+                XCTAssertGreaterThanOrEqual(
+                    SemrehVisualTheme.contrastRatio(
+                        foregroundHex: foreground,
+                        backgroundHex: SemrehVisualTheme.promptBubbleBackgroundHex(
+                            for: scheme,
+                            palette: .semreh,
+                            accent: accent
+                        )
+                    ),
+                    4.5,
+                    "bubble failed for \(accent) \(scheme)"
+                )
+            }
+        }
+    }
+
+    func testEachSemrehAccentHasReadableEnergyPairs() {
+        for accent in AppAccent.allCases {
+            XCTAssertGreaterThanOrEqual(
+                SemrehVisualTheme.contrastRatio(
+                    foregroundHex: SemrehVisualTheme.energyForegroundHex(for: .semreh, accent: accent),
+                    backgroundHex: SemrehVisualTheme.energyHex(for: .semreh, accent: accent)
+                ),
+                4.5,
+                "energy failed for \(accent)"
+            )
+        }
+    }
+
+    func testAccentDoesNotRewriteLegacyPalettes() {
+        for palette in [AppColorPalette.goku, .chatgpt, .midnight, .forest, .sand] {
+            for scheme in [ColorScheme.light, .dark] {
+                XCTAssertEqual(
+                    SemrehVisualTheme.actionHex(for: scheme, palette: palette, accent: .rose),
+                    SemrehVisualTheme.actionHex(for: scheme, palette: palette, accent: .warm)
+                )
+                XCTAssertEqual(
+                    SemrehVisualTheme.promptBubbleBackgroundHex(for: scheme, palette: palette, accent: .violet),
+                    SemrehVisualTheme.promptBubbleBackgroundHex(for: scheme, palette: palette, accent: .warm)
+                )
+            }
+        }
     }
 }
 
@@ -520,6 +662,52 @@ final class ResponseCompletionNotificationTrackerTests: XCTestCase {
         let tracker = ResponseCompletionNotificationTracker()
 
         XCTAssertTrue(tracker.shouldEndBackgroundTaskOnStreamInactive(completionTrigger: 0))
+    }
+
+    func testEachRunNotifiesOnceButLaterCompletionsNotifyAgain() {
+        var tracker = ResponseCompletionNotificationTracker()
+
+        XCTAssertNotNil(tracker.completionContext(completionTrigger: 1, sceneIsActive: false))
+        XCTAssertNil(
+            tracker.completionContext(completionTrigger: 1, sceneIsActive: false),
+            "One notification per completed run, even if the trigger is observed repeatedly"
+        )
+        XCTAssertNotNil(
+            tracker.completionContext(completionTrigger: 2, sceneIsActive: false),
+            "A later run's completion notifies again"
+        )
+    }
+}
+
+/// Item 4 tap-through: the notification payload must round-trip into the exact
+/// session deep link the app router already consumes.
+final class ResponseCompletionNotificationTapRoutingTests: XCTestCase {
+    func testPayloadMapsToTheSessionDeepLinkTheRouterAlreadyConsumes() throws {
+        let url = try XCTUnwrap(ResponseCompletionNotificationDelegate.deepLinkURL(
+            for: [ResponseCompletionNotificationRequest.sessionIDUserInfoKey: "session-abc"]
+        ))
+
+        XCTAssertEqual(url.scheme, HermesDeepLink.scheme)
+        XCTAssertEqual(url.host, HermesDeepLink.sessionHost)
+        XCTAssertEqual(HermesDeepLink.sessionID(from: url), "session-abc")
+    }
+
+    func testPayloadWithoutSessionIDDoesNotRoute() {
+        XCTAssertNil(ResponseCompletionNotificationDelegate.deepLinkURL(for: [:]))
+        XCTAssertNil(ResponseCompletionNotificationDelegate.deepLinkURL(
+            for: [ResponseCompletionNotificationRequest.sessionIDUserInfoKey: ""]
+        ))
+        XCTAssertNil(ResponseCompletionNotificationDelegate.deepLinkURL(
+            for: [ResponseCompletionNotificationRequest.sessionIDUserInfoKey: "   "]
+        ))
+    }
+
+    func testPayloadKeyMatchesTheScheduledUserInfo() {
+        XCTAssertEqual(ResponseCompletionNotificationRequest.sessionIDUserInfoKey, "session_id")
+        XCTAssertEqual(
+            ResponseCompletionNotificationRequest(sessionID: "session-abc").userInfo,
+            ["session_id": "session-abc"]
+        )
     }
 }
 

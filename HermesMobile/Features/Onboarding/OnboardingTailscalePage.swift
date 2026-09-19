@@ -12,7 +12,7 @@ struct OnboardingTailscalePage: View {
                     stepNumber: 2,
                     icon: "iphone.and.arrow.forward",
                     title: String(localized: "Install Tailscale on iPhone"),
-                    description: String(localized: "Install Tailscale on your iPhone and sign into the same tailnet as your server. Your agent will reply with the exact URL to use on the next screen.")
+                    description: String(localized: "If your Hermes server uses Tailscale, install it on your iPhone and sign into the same tailnet. On the next screen, use the authenticated HTTPS address provided by your server administrator.")
                 )
 
                 VStack(alignment: .leading, spacing: 14) {

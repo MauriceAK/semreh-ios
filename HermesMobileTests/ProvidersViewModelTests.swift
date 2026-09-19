@@ -7,14 +7,14 @@ final class ProvidersViewModelTests: APIClientTestCase {
     @MainActor
     func testLoadPopulatesProvidersPreservingServerOrder() async throws {
         let client = makeClient { request in
-            XCTAssertEqual(request.url?.path, "/api/providers")
+            XCTAssertEqual(request.url?.path, "/api/model/options")
             return apiTestJSONResponse("""
             {
-              "active_provider": "openai-codex",
+              "provider": "openai-codex",
               "providers": [
-                { "id": "openai-codex", "display_name": "OpenAI Codex", "has_key": true },
-                { "id": "anthropic", "display_name": "Anthropic", "has_key": false },
-                { "id": "custom:glmcode", "display_name": "glmcode", "has_key": true }
+                { "slug": "openai-codex", "name": "OpenAI Codex", "authenticated": true },
+                { "slug": "anthropic", "name": "Anthropic", "authenticated": false },
+                { "slug": "custom:glmcode", "name": "glmcode", "authenticated": true }
               ]
             }
             """, for: request)
@@ -57,9 +57,9 @@ final class ProvidersViewModelTests: APIClientTestCase {
         let client = makeClient { request in
             apiTestJSONResponse("""
             {
-              "active_provider": "anthropic",
+              "provider": "anthropic",
               "providers": [
-                { "id": "anthropic", "display_name": "Anthropic", "has_key": true }
+                { "slug": "anthropic", "name": "Anthropic", "authenticated": true }
               ]
             }
             """, for: request)
@@ -119,7 +119,7 @@ final class ProvidersViewModelTests: APIClientTestCase {
 
         // … and its response lands first.
         requests.request(at: 1).complete(withJSON: """
-        { "active_provider": "fresh", "providers": [ { "id": "fresh" } ] }
+        { "provider": "fresh", "providers": [ { "slug": "fresh" } ] }
         """)
         await freshLoad.value
         XCTAssertEqual(model.providers.map(\.id), ["fresh"])
@@ -127,7 +127,7 @@ final class ProvidersViewModelTests: APIClientTestCase {
 
         // The stale response lands afterwards — it must be discarded.
         requests.request(at: 0).complete(withJSON: """
-        { "active_provider": "stale", "providers": [ { "id": "stale" } ] }
+        { "provider": "stale", "providers": [ { "slug": "stale" } ] }
         """)
         await staleLoad.value
 

@@ -15,35 +15,39 @@ struct ToolActivityGroupView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: isExpanded ? 8 : 0) {
+        VStack(alignment: .leading, spacing: isExpanded ? 4 : 0) {
             Button {
-                withAnimation(ChatMotion.disclosure(reduceMotion: reduceMotion)) {
-                    userToggledExpansion = !isExpanded
-                }
+                toggleExpansion()
             } label: {
                 header
             }
             .buttonStyle(.plain)
+            .chatMinimumHitTarget(horizontalPadding: 10, verticalPadding: 8, in: Rectangle())
             .accessibilityLabel(activityAccessibilityLabel)
             .accessibilityHint(isExpanded ? "Double tap to collapse details." : "Double tap to expand details.")
 
             if isExpanded {
-                VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: 4) {
                     ForEach(group.toolCalls) { toolCall in
                         ToolCallCardView(toolCall: toolCall)
                     }
                 }
-                .transition(ChatMotion.disclosureTransition(reduceMotion: reduceMotion))
+                .transition(disclosureTransition)
             }
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 9)
+        .padding(.vertical, isExpanded ? 8 : 6)
         .chatTimelineAccessorySurface(
             fallbackMaterial: .thinMaterial,
             cornerRadius: 10
         )
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .contain)
+        .transaction { transaction in
+            if reduceMotion {
+                transaction.disablesAnimations = true
+            }
+        }
     }
 
     private var usesStackedHeader: Bool {
@@ -53,49 +57,59 @@ struct ToolActivityGroupView: View {
     private var header: some View {
         HStack(alignment: usesStackedHeader ? .top : .center, spacing: 8) {
             Image(systemName: activityIcon)
-                .font(.system(size: 14, weight: .semibold))
+                .font(.system(size: 14, weight: .regular))
                 .foregroundStyle(activityColor)
                 .frame(width: 18, height: 18)
 
             if usesStackedHeader {
                 VStack(alignment: .leading, spacing: 3) {
                     titleText
-                    summaryTextView(lineLimit: 2)
                     if let collapsedStateText {
-                        TranscriptStatusPill(text: collapsedStateText, color: activityColor)
+                        collapsedStatus(text: collapsedStateText)
                     }
                 }
             } else {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     titleText
-                    summaryTextView(lineLimit: 1)
                     if let collapsedStateText {
-                        TranscriptStatusPill(text: collapsedStateText, color: activityColor)
+                        collapsedStatus(text: collapsedStateText)
                     }
                 }
             }
 
-            Spacer(minLength: 6)
-
-            Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+            Image(systemName: isExpanded ? "chevron.down" : "chevron.forward")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        // Compact visual row for standard sizes; accessibility sizes keep the
+        // full 44pt minimum (touch height restored by the button slop above).
+        .frame(minHeight: usesStackedHeader ? 44 : 28)
         .contentShape(Rectangle())
     }
 
-    private var titleText: some View {
-        Text(group.activityTitle)
-            .font(AppFont.caption(weight: .semibold))
-            .foregroundStyle(.primary)
-            .lineLimit(1)
+    @ViewBuilder
+    private func collapsedStatus(text: String) -> some View {
+        if group.hasFailedTool {
+            TranscriptStatusPill(text: text, color: activityColor)
+        } else {
+            Text(text)
+                .font(AppFont.caption2(weight: .semibold))
+                .foregroundStyle(activityColor)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
     }
 
-    private func summaryTextView(lineLimit: Int) -> some View {
-        Text(summaryText)
-            .font(AppFont.caption())
-            .foregroundStyle(.secondary)
-            .lineLimit(lineLimit)
+    private var titleText: some View {
+        Text(actionSummary)
+            .font(AppFont.subheadline())
+            .lineLimit(1)
+            .modifier(ReasoningTextShineModifier(isActive: !group.isComplete))
+    }
+
+    private var actionSummary: String {
+        ToolActivityGroupPresentation.title(for: group)
     }
 
     private var activityIcon: String {
@@ -103,7 +117,7 @@ struct ToolActivityGroupView: View {
             return "exclamationmark.triangle.fill"
         }
 
-        return group.isComplete ? "checkmark.circle.fill" : "wrench.and.screwdriver.fill"
+        return ToolActivityGroupPresentation.icon(for: group)
     }
 
     private var activityColor: Color {
@@ -115,45 +129,59 @@ struct ToolActivityGroupView: View {
     }
 
     private var collapsedStateText: String? {
-        if group.hasFailedTool {
-            return String(localized: "Failed")
-        }
-
-        return group.isComplete ? nil : String(localized: "Running")
+        ToolActivityGroupPresentation.status(for: group)
     }
 
     private var activityAccessibilityLabel: String {
-        "\(group.activityTitle), \(activityStateText), \(summaryText)"
+        guard let collapsedStateText else { return actionSummary }
+        return "\(actionSummary), \(collapsedStateText)"
     }
 
-    private var activityStateText: String {
+    private var disclosureTransition: AnyTransition {
+        reduceMotion ? .identity : ChatMotion.disclosureTransition(reduceMotion: false)
+    }
+
+    private func toggleExpansion() {
+        let update = { userToggledExpansion = !isExpanded }
+        if reduceMotion {
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction, update)
+        } else {
+            withAnimation(ChatMotion.disclosure(reduceMotion: false), update)
+        }
+    }
+}
+
+enum ToolActivityGroupPresentation {
+    static func title(for group: ToolCallGroup) -> String {
+        guard let latestToolCall = group.toolCalls.last else {
+            return String(localized: "No actions")
+        }
+        return ToolCallPresentationLabel.title(for: latestToolCall)
+    }
+
+    static func icon(for group: ToolCallGroup) -> String {
+        ToolCallPresentationLabel.icon(for: group.toolCalls.last?.name)
+    }
+
+    /// Reflects the most recent action without estimating a group duration.
+    /// A duration is shown only when the latest completed tool supplied a
+    /// finite, nonnegative value; missing/invalid values stay plain Completed.
+    static func status(for group: ToolCallGroup) -> String? {
         if group.hasFailedTool {
             return String(localized: "Failed")
         }
+        guard !group.toolCalls.isEmpty else { return nil }
+        guard group.isComplete else { return String(localized: "Running") }
 
-        return group.isComplete ? String(localized: "Completed") : String(localized: "Running")
-    }
-
-    private var summaryText: String {
-        let names = group.toolCalls.map(\.displayName)
-        let uniqueNames = names.reduce(into: [String]()) { result, name in
-            if !result.contains(name) {
-                result.append(name)
-            }
+        if let duration = group.toolCalls.last?.duration,
+           duration.isFinite,
+           duration >= 0 {
+            let formatted = duration.formatted(.number.precision(.fractionLength(0...1)))
+            return String(localized: "Worked for \(formatted)s")
         }
 
-        guard !uniqueNames.isEmpty else {
-            return String(localized: "No tools")
-        }
-
-        let visibleNames = uniqueNames.prefix(3)
-        let remainingCount = uniqueNames.count - visibleNames.count
-        let visibleSummary = visibleNames.joined(separator: ", ")
-
-        guard remainingCount > 0 else {
-            return visibleSummary
-        }
-
-        return "\(visibleSummary), +\(remainingCount)"
+        return String(localized: "Completed")
     }
 }

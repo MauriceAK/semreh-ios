@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>Semreh approved winged S</title>
+  <desc>Source-faithful vector reconstruction of the selected Original Refined reference. Full-bleed warm paper, charcoal upper wing and slate lower band.</desc>
+  <rect width="1024" height="1024" fill="#F7F3EA"/>
+  <g transform="translate(49 -32)">
+    <path fill="#20252B" d="M780 187
+      C774 245 779 291 681 339
+      C704 337 724 328 742 319
+      C724 376 682 409 622 413
+      L428 414
+      C387 416 363 445 362 483
+      C359 541 411 582 475 621
+      L362 621
+      C268 621 211 578 212 493
+      C212 396 264 324 351 291
+      C399 272 454 274 523 270
+      C637 271 725 264 780 187Z"/>
+    <path fill="#8DA4B5" d="M432 477
+      L552 477
+      C641 477 711 530 711 619
+      C711 716 650 784 561 805
+      C527 813 486 810 441 811
+      L334 811
+      C259 811 211 830 173 885
+      C173 790 218 728 289 699
+      C326 683 363 681 407 680
+      L462 680
+      C514 680 550 654 551 614
+      C552 563 493 518 432 477Z"/>
+  </g>
+</svg>

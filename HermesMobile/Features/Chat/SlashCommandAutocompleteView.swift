@@ -10,7 +10,6 @@ struct SlashCommandAutocompleteView: View {
     let modelGroups: [ModelCatalogGroup]
     let workspaceRoots: [WorkspaceRoot]
     let workspaceSuggestions: [String]
-    let personalitySuggestions: [String]
     let skillSuggestions: [SkillSlashSuggestion]
     let agentCommands: [AgentCommand]
     let selectedReasoningEffort: String?
@@ -344,7 +343,7 @@ struct SlashCommandAutocompleteView: View {
                 forSupportedEfforts: supportedReasoningEfforts
             ) + [ReasoningEffortOption.inheritID]
         case .personalities:
-            return personalitySuggestions
+            return []
         case .skills:
             return skillSuggestions.map(\.slashName)
         case .goalActions:

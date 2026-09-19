@@ -13,7 +13,7 @@ final class KanbanLiveUpdateTests: XCTestCase {
 
         XCTAssertEqual(stream.startURLs.first?.queryValue("board"), "main")
         XCTAssertEqual(stream.startURLs.first?.queryValue("since"), "11")
-        stream.emit(.hello(cursor: 11, board: "main"))
+        stream.emit(.connected)
         stream.emit(Self.eventsFrame(cursor: 12, kind: "task.updated"))
         stream.emit(Self.eventsFrame(cursor: 13, kind: "future.unknown.kind"))
 
@@ -40,7 +40,7 @@ final class KanbanLiveUpdateTests: XCTestCase {
         XCTAssertFalse(state.isPreviewStale)
 
         state.setVisible(true)
-        stream.emit(.hello(cursor: 11, board: "main"))
+        stream.emit(.connected)
         stream.emit(Self.eventsFrame(cursor: 12, kind: "task.updated"))
 
         try await waitUntil { await client.boardCallCount == 2 }
@@ -49,10 +49,7 @@ final class KanbanLiveUpdateTests: XCTestCase {
     }
 
     func testRepeatedFailuresFallBackToPollingWithoutRequestStorm() async throws {
-        let client = LiveKanbanClient(
-            boardResults: [.success(.rich), .success(.newer)],
-            eventsResult: .success(.events(cursor: 13))
-        )
+        let client = LiveKanbanClient(boardResults: [.success(.rich), .success(.newer)])
         let stream = KanbanStreamSpy()
         let state = makeState(
             client: client,
@@ -76,8 +73,10 @@ final class KanbanLiveUpdateTests: XCTestCase {
         try await waitUntil { state.liveUpdatesDelayed }
         try await waitUntil { await client.boardCallCount == 2 }
         let eventCallCount = await client.eventCallCount
-        XCTAssertEqual(eventCallCount, 1)
+        XCTAssertEqual(eventCallCount, 0)
         XCTAssertEqual(state.liveCursor, 13)
+        let fallbackRequest = await client.boardRequests.last
+        XCTAssertNil(fallbackRequest?.since)
         XCTAssertEqual(stream.startURLs.count, 3)
         state.setVisible(false)
     }
@@ -93,7 +92,7 @@ final class KanbanLiveUpdateTests: XCTestCase {
 
         await state.load()
         state.setVisible(true)
-        stream.emit(.hello(cursor: 11, board: "main"))
+        stream.emit(.connected)
         let loadedCards = state.allCards
 
         await state.refresh()
@@ -216,7 +215,7 @@ final class KanbanLiveUpdateTests: XCTestCase {
         state.setVisible(false)
     }
 
-    func testPullToRefreshRetriesDelayedStreamAndNoticeClearsOnlyAfterHello() async throws {
+    func testPullToRefreshRetriesDelayedStreamAndNoticeClearsOnlyAfterConnected() async throws {
         let client = LiveKanbanClient(boardResults: [.success(.rich), .success(.newer)])
         let stream = KanbanStreamSpy()
         let state = makeState(
@@ -243,8 +242,9 @@ final class KanbanLiveUpdateTests: XCTestCase {
 
         XCTAssertTrue(state.liveUpdatesDelayed)
         XCTAssertEqual(stream.startURLs.count, 4)
-        stream.emit(.hello(cursor: 13, board: "main"))
+        stream.emit(.connected)
         XCTAssertFalse(state.liveUpdatesDelayed)
+        XCTAssertEqual(state.liveCursor, 13)
         state.setVisible(false)
     }
 
@@ -297,7 +297,7 @@ final class KanbanLiveUpdateTests: XCTestCase {
         await first.load()
         await second.load()
         first.setVisible(true)
-        firstStream.emit(.hello(cursor: 11, board: "main"))
+        firstStream.emit(.connected)
 
         first.setVisible(false)
         second.setVisible(true)
@@ -332,9 +332,9 @@ final class KanbanLiveUpdateTests: XCTestCase {
 
     private static func eventsFrame(cursor: Int, kind: String) -> KanbanStreamFrame {
         KanbanStreamFrameDecoder.decode(
-            eventType: "events",
-            data: #"{"events":[{"id":\#(cursor),"task_id":"CARD-1","kind":"\#(kind)","payload":{"value":"private"}}],"cursor":\#(cursor)}"#,
-            frameID: String(cursor)
+            data: Data(
+                #"{"events":[{"id":\#(cursor),"task_id":"CARD-1","kind":"\#(kind)","payload":{"value":"private"}}],"cursor":\#(cursor)}"#.utf8
+            )
         )
     }
 
@@ -383,7 +383,6 @@ private final class KanbanStreamSpy: KanbanEventStreamingClient {
 private actor LiveKanbanClient: KanbanDataClient {
     private var boardsResults: [Result<KanbanBoardsResponse, Error>]
     private var boardResults: [Result<KanbanBoardSnapshot, Error>]
-    private let eventsResult: Result<KanbanEventsEnvelope, Error>
     private(set) var boardRequests: [KanbanBoardRequest] = []
     private(set) var eventCallCount = 0
     private(set) var statsCallCount = 0
@@ -392,12 +391,10 @@ private actor LiveKanbanClient: KanbanDataClient {
     init(
         boards: KanbanBoardsResponse = .single,
         boardResults: [Result<KanbanBoardSnapshot, Error>],
-        eventsResult: Result<KanbanEventsEnvelope, Error> = .success(.events(cursor: 11)),
         boardsResults: [Result<KanbanBoardsResponse, Error>]? = nil
     ) {
         self.boardsResults = boardsResults ?? [.success(boards)]
         self.boardResults = boardResults
-        self.eventsResult = eventsResult
     }
 
     var boardCallCount: Int { boardRequests.count }
@@ -435,7 +432,7 @@ private actor LiveKanbanClient: KanbanDataClient {
 
     func kanbanEvents(_ request: KanbanEventsRequest) throws -> KanbanEventsEnvelope {
         eventCallCount += 1
-        return try eventsResult.get()
+        return .events(cursor: 11)
     }
 }
 

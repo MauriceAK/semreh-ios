@@ -112,6 +112,8 @@ private struct ProjectFormSheet: View {
                         .textInputAutocapitalization(.words)
                         .focused($nameIsFocused)
                         .disabled(isSaving)
+                } footer: {
+                    Text("Projects are organization saved on this device for this server and profile. They do not move session files or change the workspace.")
                 }
 
                 Section("Color") {

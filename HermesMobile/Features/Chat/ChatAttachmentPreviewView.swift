@@ -8,7 +8,7 @@ struct ChatAttachmentPreviewItem: Identifiable, Equatable {
     let mime: String?
     let size: Int?
     let isImage: Bool?
-    let localImageData: Data?
+    let localPreviewData: Data?
 
     init(message attachment: MessageAttachment, localData: Data?) {
         name = attachment.name
@@ -16,7 +16,7 @@ struct ChatAttachmentPreviewItem: Identifiable, Equatable {
         mime = attachment.mime
         size = attachment.size
         isImage = attachment.isImage
-        localImageData = localData
+        localPreviewData = localData
     }
 
     init(pending attachment: PendingAttachment) {
@@ -25,7 +25,16 @@ struct ChatAttachmentPreviewItem: Identifiable, Equatable {
         mime = attachment.mime
         size = attachment.size
         isImage = attachment.isImage
-        localImageData = attachment.thumbnailData
+        localPreviewData = attachment.thumbnailData
+    }
+
+    init(display item: ComposerAttachmentDisplayItem) {
+        name = item.name
+        path = item.serverPath
+        mime = item.mime
+        size = item.size
+        isImage = item.isImage
+        localPreviewData = item.localPreviewData
     }
 
     var displayName: String {
@@ -93,14 +102,16 @@ struct ChatAttachmentPreviewView: View {
     @Environment(\.dismiss) private var dismiss
 
     init(
-        session: SessionSummary,
         server: URL,
         item: ChatAttachmentPreviewItem,
         onAPIError: @escaping (Error) -> Void
     ) {
         self.item = item
         self.onAPIError = onAPIError
-        _viewModel = State(initialValue: ChatAttachmentPreviewViewModel(session: session, server: server, item: item))
+        _viewModel = State(initialValue: ChatAttachmentPreviewViewModel(
+            server: server,
+            item: item
+        ))
     }
 
     var body: some View {
@@ -310,7 +321,8 @@ struct ChatAttachmentPreviewView: View {
 @MainActor
 @Observable
 final class ChatAttachmentPreviewViewModel {
-    private let session: SessionSummary
+    private static let directTextPreviewMaximumBytes = 256 * 1_024
+
     private let item: ChatAttachmentPreviewItem
     private let apiClient: APIClient
     private var didLoad = false
@@ -321,12 +333,10 @@ final class ChatAttachmentPreviewViewModel {
     private(set) var lastError: Error?
 
     init(
-        session: SessionSummary,
         server: URL,
         item: ChatAttachmentPreviewItem,
         apiClient: APIClient? = nil
     ) {
-        self.session = session
         self.item = item
         self.apiClient = apiClient ?? APIClient(baseURL: server)
     }
@@ -336,14 +346,55 @@ final class ChatAttachmentPreviewViewModel {
         didLoad = true
         preview = nil
 
-        guard let sessionID = session.sessionId else {
-            errorMessage = String(localized: "Session ID is missing.")
+        let trimmedPath = item.path?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let path = trimmedPath, !path.isEmpty else {
+            if let localPreviewData = item.localPreviewData {
+                guard !Task.isCancelled else { return }
+                if item.inferredIsImage {
+                    let originalByteCount = localPreviewData.count
+                    guard let previewData = await ImagePreviewDownsampler.previewDataAsync(
+                        from: localPreviewData,
+                        maxPixelSize: ImagePreviewDownsampler.filePreviewMaxPixelSize
+                    ), !Task.isCancelled else {
+                        return
+                    }
+                    preview = .image(.init(data: previewData, originalByteCount: originalByteCount))
+                    return
+                }
+                if item.documentKind == .pdf {
+                    let declaredByteCount = item.size ?? 0
+                    guard max(localPreviewData.count, declaredByteCount) <= DocumentPreviewLimits.maximumBytes else {
+                        preview = .unavailable(String(localized: "This PDF preview is too large to display."))
+                        return
+                    }
+                    guard let document = await PDFPreviewDocument.load(data: localPreviewData),
+                          !Task.isCancelled else {
+                        if !Task.isCancelled {
+                            preview = .unavailable(String(localized: "Could not decode this PDF."))
+                        }
+                        return
+                    }
+                    preview = .pdf(document)
+                    return
+                }
+            }
+            preview = localFallbackPreview
             return
         }
 
-        let trimmedPath = item.path?.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let path = trimmedPath, !path.isEmpty else {
-            preview = localFallbackPreview
+        // Direct references are opaque server-owned paths. The managed-file
+        // route requires an absolute path; never turn a relative reference
+        // into a guessed host path.
+        guard path.hasPrefix("/") else {
+            preview = .unavailable(String(localized: "Preview is not available for this attachment."))
+            return
+        }
+
+        // These extensions are known binary types without a native preview.
+        // Keep the no-fetch behavior explicit even though the managed-file
+        // route can return arbitrary bytes.
+        if item.isKnownUnsupportedBinary && !item.inferredIsAudio {
+            preview = .unavailable(String(localized: "Preview is not available for this file type."))
             return
         }
 
@@ -353,66 +404,100 @@ final class ChatAttachmentPreviewViewModel {
         defer { isLoading = false }
 
         do {
-            if item.inferredIsImage {
-                let data = try await apiClient.rawFileData(sessionID: sessionID, path: path)
-                if let previewData = ImagePreviewDownsampler.previewData(
-                    from: data,
+            let managedFile = try await apiClient.directReadManagedFile(path: path)
+            guard !Task.isCancelled else { return }
+            let mimeType = managedFile.mimeType ?? item.mime
+            let nameOrPath = item.name ?? managedFile.name ?? path
+            let documentKind = DocumentPreviewKind.infer(
+                nameOrPath: nameOrPath,
+                mimeType: mimeType
+            )
+            let isImage = item.inferredIsImage || mimeType?.lowercased().hasPrefix("image/") == true
+
+            if isImage {
+                let previewData = await ImagePreviewDownsampler.previewDataAsync(
+                    from: managedFile.data,
                     maxPixelSize: ImagePreviewDownsampler.filePreviewMaxPixelSize
-                ) {
-                    preview = .image(.init(data: previewData, originalByteCount: data.count))
+                )
+                guard !Task.isCancelled else { return }
+                if let previewData {
+                    preview = .image(.init(
+                        data: previewData,
+                        originalByteCount: managedFile.data.count
+                    ))
                 } else {
                     preview = .unavailable(String(localized: "Could not decode this image."))
                 }
-            } else if item.inferredIsAudio {
-                // Raw bytes (no downsampling) so AVAudioPlayer gets the original
-                // encoded audio; checked before the unsupported-binary list,
-                // which would otherwise reject m4a/mp3/wav/flac.
-                preview = .audio(try await apiClient.rawFileData(sessionID: sessionID, path: path))
-            } else if item.documentKind == .pdf {
-                let data = try await apiClient.rawFilePreviewData(
-                    sessionID: sessionID,
-                    path: path,
-                    maximumBytes: DocumentPreviewLimits.maximumBytes
-                )
-                if let document = await PDFPreviewDocument.load(data: data) {
+            } else if documentKind == .pdf {
+                guard managedFile.data.count <= DocumentPreviewLimits.maximumBytes else {
+                    throw PreviewDownloadError.responseTooLarge(
+                        maximumBytes: DocumentPreviewLimits.maximumBytes
+                    )
+                }
+                if let document = await PDFPreviewDocument.load(data: managedFile.data) {
+                    guard !Task.isCancelled else { return }
                     preview = .pdf(document)
                 } else {
+                    guard !Task.isCancelled else { return }
                     preview = .unavailable(String(localized: "Could not decode this PDF."))
                 }
-            } else if item.documentKind == .markdown {
-                let data = try await apiClient.rawFilePreviewData(
-                    sessionID: sessionID,
-                    path: path,
-                    maximumBytes: DocumentPreviewLimits.maximumBytes
+            } else if documentKind == .markdown {
+                let textPreview = try makeTextPreview(
+                    from: managedFile.data,
+                    path: managedFile.path ?? path,
+                    name: managedFile.name ?? item.name,
+                    markdown: true
                 )
-                guard let text = String(data: data, encoding: .utf8) else {
-                    preview = .unavailable(String(localized: "Could not decode this Markdown document."))
-                    return
-                }
-                preview = .markdown(
-                    FileResponse(
-                        content: text,
-                        path: path,
-                        name: item.displayName,
-                        language: "markdown",
-                        size: data.count,
-                        lines: text.split(separator: "\n", omittingEmptySubsequences: false).count,
-                        error: nil
-                    )
-                )
-            } else if item.isKnownUnsupportedBinary {
-                preview = .unavailable(String(localized: "Preview is not available for this file type."))
+                guard !Task.isCancelled else { return }
+                preview = textPreview
+            } else if item.inferredIsAudio {
+                guard !Task.isCancelled else { return }
+                preview = .audio(managedFile.data)
             } else {
-                preview = .text(try await apiClient.file(sessionID: sessionID, path: path))
+                let textPreview = try makeTextPreview(
+                    from: managedFile.data,
+                    path: managedFile.path ?? path,
+                    name: managedFile.name ?? item.name,
+                    markdown: false
+                )
+                guard !Task.isCancelled else { return }
+                preview = textPreview
             }
         } catch {
+            if Task.isCancelled { return }
             lastError = error
             errorMessage = error.localizedDescription
         }
     }
 
+    private func makeTextPreview(
+        from data: Data,
+        path: String,
+        name: String?,
+        markdown: Bool
+    ) throws -> FilePreviewContent {
+        guard data.count <= Self.directTextPreviewMaximumBytes else {
+            return .unavailable(String(localized: "This text preview is too large to display."))
+        }
+
+        guard let text = String(data: data, encoding: .utf8) else {
+            return .unavailable(String(localized: "Could not decode this text file."))
+        }
+
+        let file = FileResponse(
+            content: text,
+            path: path,
+            name: name ?? item.displayName,
+            language: markdown ? "markdown" : nil,
+            size: data.count,
+            lines: text.split(separator: "\n", omittingEmptySubsequences: false).count,
+            error: nil
+        )
+        return markdown ? .markdown(file) : .text(file)
+    }
+
     private var localFallbackPreview: FilePreviewContent {
-        if item.inferredIsImage, let data = item.localImageData {
+        if item.inferredIsImage, let data = item.localPreviewData {
             return .image(.init(data: data, originalByteCount: data.count))
         }
 

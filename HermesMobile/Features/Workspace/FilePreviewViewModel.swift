@@ -89,6 +89,7 @@ final class FilePreviewViewModel {
     private(set) var exportErrorMessage: String?
     private(set) var lastError: Error?
     private var exportData: Data?
+    private var loadRevision = 0
 
     init(session: SessionSummary, server: URL, path: String, apiClient: APIClient? = nil) {
         self.session = session
@@ -117,13 +118,18 @@ final class FilePreviewViewModel {
         }
 
         isLoading = true
+        loadRevision += 1
+        let revision = loadRevision
+        defer { if revision == loadRevision { isLoading = false } }
+        exportData = nil
         errorMessage = nil
         exportErrorMessage = nil
         lastError = nil
 
         do {
             if isRasterImagePath {
-                let data = try await apiClient.rawFileData(sessionID: sessionID, path: path)
+                let data = try await apiClient.directWorkspaceDownload(sessionID: sessionID, profile: session.profile ?? "default", path: path)
+                guard revision == loadRevision, !Task.isCancelled else { return }
                 exportData = data
                 if let previewData = ImagePreviewDownsampler.previewData(
                     from: data,
@@ -134,29 +140,37 @@ final class FilePreviewViewModel {
                     preview = .unavailable(String(localized: "Could not decode this image."))
                 }
             } else if documentKind == .pdf {
-                let data = try await apiClient.rawFilePreviewData(
+                let data = try await apiClient.directWorkspaceDownload(
                     sessionID: sessionID,
+                    profile: session.profile ?? "default",
                     path: path,
                     maximumBytes: DocumentPreviewLimits.maximumBytes
                 )
+                guard revision == loadRevision, !Task.isCancelled else { return }
                 exportData = data
-                if let document = await PDFPreviewDocument.load(data: data) {
+                let document = await PDFPreviewDocument.load(data: data)
+                guard revision == loadRevision, !Task.isCancelled else { return }
+                if let document {
                     preview = .pdf(document)
                 } else {
                     preview = .unavailable(String(localized: "Could not decode this PDF."))
                 }
             } else if documentKind == .markdown {
-                let file = try await apiClient.file(sessionID: sessionID, path: path)
-                exportData = Data((file.content ?? "").utf8)
+                let (file, data) = try await readText(sessionID: sessionID)
+                guard revision == loadRevision, !Task.isCancelled else { return }
+                exportData = data
                 preview = .markdown(file)
             } else if isKnownUnsupportedBinaryPath {
                 preview = .unavailable(String(localized: "Preview is not available for this file type."))
             } else {
-                let file = try await apiClient.file(sessionID: sessionID, path: path)
-                exportData = Data((file.content ?? "").utf8)
+                let (file, data) = try await readText(sessionID: sessionID)
+                guard revision == loadRevision, !Task.isCancelled else { return }
+                exportData = data
                 preview = .text(file)
             }
         } catch {
+            guard revision == loadRevision else { return }
+            if Self.isCancellation(error) { isLoading = false; return }
             lastError = error
             errorMessage = error.localizedDescription
         }
@@ -179,6 +193,7 @@ final class FilePreviewViewModel {
         }
 
         isExporting = true
+        let revision = loadRevision
         exportErrorMessage = nil
         lastError = nil
         defer {
@@ -186,10 +201,12 @@ final class FilePreviewViewModel {
         }
 
         do {
-            let data = try await apiClient.rawFileData(sessionID: sessionID, path: path)
+            let data = try await apiClient.directWorkspaceDownload(sessionID: sessionID, profile: session.profile ?? "default", path: path)
+            guard revision == loadRevision, !Task.isCancelled else { throw CancellationError() }
             exportData = data
             return payload(with: data)
         } catch {
+            guard revision == loadRevision, !Task.isCancelled, !Self.isCancellation(error) else { throw error }
             lastError = error
             exportErrorMessage = error.localizedDescription
             throw error
@@ -198,6 +215,21 @@ final class FilePreviewViewModel {
 
     private var pathExtension: String {
         URL(fileURLWithPath: path).pathExtension.lowercased()
+    }
+
+    private func readText(sessionID: String) async throws -> (FileResponse, Data) {
+        let file = try await apiClient.directWorkspaceFile(sessionID: sessionID,
+            profile: session.profile ?? "default", path: path, maximumBytes: DocumentPreviewLimits.maximumBytes)
+        guard let text = String(data: file.data, encoding: .utf8) else { throw DirectWorkspaceError.invalidText }
+        return (FileResponse(content: text, path: path, name: file.name, language: nil,
+            size: file.data.count, lines: text.components(separatedBy: "\n").count, error: nil), file.data)
+    }
+
+    private static func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        if let error = error as? URLError { return error.code == .cancelled }
+        if case APIError.network(let wrapped) = error { return isCancellation(wrapped) }
+        return false
     }
 
     private var documentKind: DocumentPreviewKind? {

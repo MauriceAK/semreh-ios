@@ -159,6 +159,47 @@ final class KanbanCardEditorStateTests: XCTestCase {
         XCTAssertEqual(uncertainCalls, 1)
     }
 
+    func testDirectPreDispatchRefusalsFailDefinitivelyWithoutReconciliation() async {
+        let errors: [DirectKanbanError] = [
+            .unsupportedOperation,
+            .createStatusNotRepresentable("todo"),
+            .tenantMutationNotSupported
+        ]
+
+        for error in errors {
+            let client = CardEditorClient(createResults: [.failure(error)])
+            let state = makeCreateState(client: client)
+            state.title = "Unsupported intent"
+
+            await state.save(allowsMutation: true)
+
+            XCTAssertEqual(state.submission, .failed, "Expected definitive failure for \(error)")
+            let createCallCount = await client.createCallCount
+            let boardCallCount = await client.boardCallCount
+            XCTAssertEqual(createCallCount, 1)
+            XCTAssertEqual(boardCallCount, 0)
+        }
+    }
+
+    func testDirectCreateStatusMismatchReconcilesWrittenCardWithoutRetry() async {
+        let client = CardEditorClient(
+            createResults: [
+                .failure(DirectKanbanError.createStatusMismatch(expected: "triage", actual: "ready"))
+            ],
+            boardResults: [.success(.withCreatedTriage)]
+        )
+        let state = makeCreateState(client: client)
+        state.title = "Retry me"
+
+        await state.save(allowsMutation: true)
+
+        XCTAssertEqual(state.submission, .succeeded(cardID: "CARD-153"))
+        let createCallCount = await client.createCallCount
+        let boardCallCount = await client.boardCallCount
+        XCTAssertEqual(createCallCount, 1)
+        XCTAssertEqual(boardCallCount, 1)
+    }
+
     func testEditConflictPreservesDraftAndOffersReloadOrOverwrite() async {
         let client = CardEditorClient(
             editResults: [.success(.overwritten)],
@@ -517,6 +558,7 @@ private actor CardEditorClient: KanbanDataClient {
     private(set) var idempotencyKeys: [String] = []
     private(set) var createCallCount = 0
     private(set) var editCallCount = 0
+    private(set) var boardCallCount = 0
     private(set) var lastEditRequest: KanbanEditCardRequest?
 
     init(
@@ -538,7 +580,8 @@ private actor CardEditorClient: KanbanDataClient {
     func kanbanEvents(_ request: KanbanEventsRequest) -> KanbanEventsEnvelope { decode(#"{"events":[],"cursor":0}"#) }
 
     func kanbanBoard(_ request: KanbanBoardRequest) throws -> KanbanBoardSnapshot {
-        try boardResults.removeFirst().get()
+        boardCallCount += 1
+        return try boardResults.removeFirst().get()
     }
 
     func kanbanCardDetail(_ request: KanbanCardDetailRequest) throws -> KanbanCardDetailEnvelope {

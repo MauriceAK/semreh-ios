@@ -2,127 +2,71 @@ import XCTest
 @testable import HermesMobile
 
 final class APIClientUpdatesApplyTests: APIClientTestCase {
-    func testApplyUpdateRequestHitsEndpointWithWebuiTargetAndDecodesSuccess() async throws {
+    func testApplyUsesStockPOSTWithoutBody() async throws {
         let client = makeClient { request in
             XCTAssertEqual(request.httpMethod, "POST")
-            XCTAssertEqual(request.url?.path, "/api/updates/apply")
-
-            // Confirm the body targets the webui repo (issue #180 scope).
-            let body = apiTestBodyData(from: request)
-            let decodedBody = try XCTUnwrap(body.flatMap {
-                try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
-            })
-            XCTAssertEqual(decodedBody["target"] as? String, "webui")
-
-            return apiTestJSONResponse("""
-            {
-              "ok": true,
-              "message": "webui updated successfully",
-              "target": "webui",
-              "restart_scheduled": true
-            }
-            """, for: request)
+            XCTAssertEqual(request.url?.path, "/api/hermes/update")
+            XCTAssertNil(apiTestBodyData(from: request))
+            return apiTestJSONResponse(#"{"ok":true,"action_id":"new-action"}"#, for: request)
         }
-
         let response = try await client.applyUpdate()
-
-        XCTAssertEqual(response.ok, true)
-        XCTAssertEqual(response.target, "webui")
-        XCTAssertEqual(response.restartScheduled, true)
-        XCTAssertEqual(response.outcome, .applying)
+        XCTAssertEqual(response.actionId, "new-action")
     }
 
-    func testRestartBlockedResponseIsNotTreatedAsFailure() throws {
-        let response = try decodeApply("""
-        {
-          "ok": false,
-          "message": "Cannot update webui while 1 active chat stream is running. Wait for the response to finish, then retry the update.",
-          "target": "webui",
-          "restart_blocked": true,
-          "active_streams": 1,
-          "active_runs": 0
+    func testStatusUsesBoundedTailAndDoesNotExposeRawLines() async throws {
+        let client = makeClient { request in
+            XCTAssertEqual(request.url?.path, "/api/actions/hermes-update/status")
+            XCTAssertEqual(request.url?.query, "lines=1")
+            return apiTestJSONResponse(#"{"running":false,"exit_code":0,"action_id":"new-action","lines":["secret output"],"receipt":{"outcome":"success","post_version":"0.22.0"}}"#, for: request)
         }
-        """)
-
-        XCTAssertEqual(response.restartBlocked, true)
-        XCTAssertEqual(response.activeStreams, 1)
-        XCTAssertEqual(response.outcome, .restartBlocked)
-        XCTAssertTrue(response.displayMessage(default: "fallback").contains("active chat stream"))
+        let status = try await client.hermesUpdateStatus()
+        XCTAssertEqual(status.actionId, "new-action")
+        XCTAssertEqual(status.receipt?.postVersion, "0.22.0")
     }
 
-    func testConflictResponseIsFailed() throws {
-        let response = try decodeApply("""
-        {
-          "ok": false,
-          "message": "The local webui repo has unresolved merge conflicts.",
-          "conflict": true
-        }
-        """)
-
-        XCTAssertEqual(response.conflict, true)
-        XCTAssertEqual(response.outcome, .failed)
+    func testOnlyMatchingDurableMarkerAndZeroExitConfirmsSuccess() {
+        XCTAssertEqual(HermesUpdateCompletion.evaluate(expectedActionID: "new", status: status(running: false, exit: 0, actionID: "new")), .succeeded)
+        XCTAssertEqual(HermesUpdateCompletion.evaluate(expectedActionID: "new", status: status(running: true, exit: nil, actionID: nil)), .waiting)
+        XCTAssertEqual(HermesUpdateCompletion.evaluate(expectedActionID: "new", status: status(running: false, exit: 0, actionID: "old", receipt: .init(outcome: "success", postVersion: "latest"))), .unknown)
+        XCTAssertEqual(HermesUpdateCompletion.evaluate(expectedActionID: "new", status: status(running: false, exit: 1, actionID: "new")), .unknown)
+        XCTAssertEqual(HermesUpdateCompletion.evaluate(expectedActionID: "new", status: status(running: false, exit: 0, actionID: "new"), isCancelled: true), .unknown)
     }
 
-    func testDivergedResponseIsFailed() throws {
-        let response = try decodeApply("""
-        { "ok": false, "message": "Fast-forward not possible.", "diverged": true }
-        """)
-
-        XCTAssertEqual(response.diverged, true)
-        XCTAssertEqual(response.outcome, .failed)
-    }
-
-    func testGenericNotOkResponseIsFailed() throws {
-        let response = try decodeApply("""
-        { "ok": false, "message": "Update already in progress" }
-        """)
-
-        XCTAssertEqual(response.outcome, .failed)
-    }
-
-    func testSuccessWithStashConflictStillCountsAsApplying() throws {
-        // The server updated and is restarting (ok + restart_scheduled), but set
-        // local changes aside in a stash. That's still a success the app should
-        // recover from — not a hard failure.
-        let response = try decodeApply("""
-        {
-          "ok": true,
-          "message": "webui updated to the latest version. Your local modifications conflicted...",
-          "target": "webui",
-          "restart_scheduled": true,
-          "stash_conflict": true
-        }
-        """)
-
-        XCTAssertEqual(response.stashConflict, true)
-        XCTAssertEqual(response.outcome, .applying)
-    }
-
-    func testDisplayMessageFallsBackWhenMessageMissingOrBlank() throws {
-        let missing = try decodeApply(#"{ "ok": false }"#)
-        XCTAssertEqual(missing.displayMessage(default: "fallback"), "fallback")
-
-        let blank = try decodeApply(#"{ "ok": false, "message": "   " }"#)
-        XCTAssertEqual(blank.displayMessage(default: "fallback"), "fallback")
-
-        let present = try decodeApply(#"{ "ok": false, "message": "  boom  " }"#)
-        XCTAssertEqual(present.displayMessage(default: "fallback"), "boom")
-    }
-
-    func testTolerantDecodingIgnoresUnknownAndMissingFields() throws {
-        // Unknown future keys and an otherwise-empty payload must not crash.
-        let response = try decodeApply("""
-        { "future_key": "ignored", "nested": { "anything": [1, 2, 3] } }
-        """)
-
-        XCTAssertNil(response.ok)
-        XCTAssertNil(response.message)
-        XCTAssertEqual(response.outcome, .failed)
-    }
-
-    private func decodeApply(_ json: String) throws -> UpdatesApplyResponse {
+    func testLostAcknowledgementAndAlreadyRunningWithoutIDRemainUnowned() throws {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
-        return try decoder.decode(UpdatesApplyResponse.self, from: Data(json.utf8))
+        let lost = try decoder.decode(UpdatesApplyResponse.self, from: Data(#"{"ok":true}"#.utf8))
+        let existing = try decoder.decode(UpdatesApplyResponse.self, from: Data(#"{"ok":true,"already_running":true}"#.utf8))
+        XCTAssertNil(lost.actionId)
+        XCTAssertNil(existing.actionId)
+        XCTAssertTrue(existing.alreadyRunning == true)
+        XCTAssertEqual(HermesUpdateStart.evaluate(lost), .unknown)
+        XCTAssertEqual(HermesUpdateStart.evaluate(existing), .unknown)
+    }
+
+    func testOnlyExplicitRefusalIsRetryableAndKnownIDCanBeMonitored() throws {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let malformed = try decoder.decode(UpdatesApplyResponse.self, from: Data(#"{"action_id":"id"}"#.utf8))
+        let refused = try decoder.decode(UpdatesApplyResponse.self, from: Data(#"{"ok":false}"#.utf8))
+        let accepted = try decoder.decode(UpdatesApplyResponse.self, from: Data(#"{"ok":true,"action_id":"id"}"#.utf8))
+        XCTAssertEqual(HermesUpdateStart.evaluate(malformed), .unknown)
+        XCTAssertEqual(HermesUpdateStart.evaluate(refused), .refused)
+        XCTAssertEqual(HermesUpdateStart.evaluate(accepted), .monitor(actionID: "id"))
+    }
+
+    func testNilRunningDoesNotComplete() {
+        XCTAssertEqual(HermesUpdateCompletion.evaluate(expectedActionID: "new", status: status(running: nil, exit: 0, actionID: "new")), .waiting)
+    }
+
+    func testManagedRefusalRetainsGuidance() throws {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let response = try decoder.decode(UpdatesApplyResponse.self, from: Data(#"{"ok":false,"error":"apt_update_required","message":"Run pkg upgrade."}"#.utf8))
+        XCTAssertEqual(response.displayMessage(default: "fallback"), "Run pkg upgrade.")
+    }
+
+    private func status(running: Bool?, exit: Int?, actionID: String?, receipt: HermesUpdateReceiptSummary? = nil) -> HermesUpdateStatusResponse {
+        HermesUpdateStatusResponse(running: running, exitCode: exit, actionId: actionID, receipt: receipt)
     }
 }

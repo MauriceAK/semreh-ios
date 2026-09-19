@@ -13,30 +13,145 @@ final class OpenChatSessionStore {
     /// the lifetime of the process. Active streams are never counted as evictable.
     private let retentionPolicy: OpenChatSessionStoreRetentionPolicy
     private var viewModels: [OpenChatSessionKey: ChatViewModel] = [:]
+    private var canonicalAliases: [OpenChatSessionKey: OpenChatSessionKey] = [:]
+    /// Direct branch handoffs carry an already-bound child controller. Keep the
+    /// identity-to-key association so a stale/replayed handoff cannot be adopted
+    /// under a different server, profile, or durable session ID.
+    private var adoptedBranchKeys: [UUID: OpenChatSessionKey] = [:]
     private var gitAvailabilityViewModels: [OpenChatSessionKey: GitWorkspaceAvailabilityViewModel] = [:]
     /// Oldest first. This is deliberately separate from the dictionary so eviction
     /// remains deterministic instead of depending on dictionary iteration order.
-    private var accessOrder: [OpenChatSessionKey] = []
+    /// Looking up a retained model during view construction touches this list.
+    /// Observing that bookkeeping makes the caller invalidate its own body.
+    @ObservationIgnored private var accessOrder: [OpenChatSessionKey] = []
     /// One canonical refresh task per server. Foreground, pull-to-refresh, reopen,
     /// and event hints may arrive together; they all await the same reconciliation
     /// instead of issuing duplicate `/api/session` loads for every retained chat.
     private var refreshTasks: [String: Task<Int, Never>] = [:]
     private var deferredRetentionTrimTask: Task<Void, Never>?
     private(set) var liveOwnershipGeneration = 0
+    private var activeGatewayOrigin: URL?
+    private var gatewayRuntime: HermesServerRuntime?
+    @ObservationIgnored private var gatewayTeardown: Task<Void, Never>?
+    private var gatewayGeneration = 0
+    @ObservationIgnored private var foregroundRecoveryTask: Task<Error?, Never>?
+    @ObservationIgnored private var foregroundRecoveryGeneration: Int?
+    private let organizerStore: LocalOrganizerStore
+
+    /// Authentication owns activation. A stale chat cannot reactivate a server
+    /// after sign-out or an account switch. New sockets await the old teardown.
+    func activateGateway(server: URL?) {
+        guard activeGatewayOrigin != server else { return }
+        foregroundRecoveryTask?.cancel()
+        foregroundRecoveryTask = nil
+        foregroundRecoveryGeneration = nil
+        activeGatewayOrigin = server
+        gatewayGeneration &+= 1
+        let previousTeardown = gatewayTeardown
+        let previousRuntime = gatewayRuntime
+        gatewayRuntime = nil
+        let previousModels = Array(viewModels.values)
+        viewModels.removeAll()
+        canonicalAliases.removeAll()
+        adoptedBranchKeys.removeAll()
+        gitAvailabilityViewModels.removeAll()
+        accessOrder.removeAll()
+        refreshTasks.values.forEach { $0.cancel() }
+        refreshTasks.removeAll()
+        // Invalidate immediately, before any asynchronous close can suspend.
+        previousModels.forEach { $0.invalidateDirectConversation() }
+        gatewayTeardown = Task {
+            await previousTeardown?.value
+            for model in previousModels { await model.disposeDirectConversation() }
+            await previousRuntime?.stop()
+        }
+        noteStreamingStateChanged()
+    }
+
+    /// Rebinds the single active gateway after the app becomes foregrounded.
+    ///
+    /// This is intentionally a store-level trigger rather than a second recovery
+    /// loop: the runtime owns socket generations, observer resume hooks, and
+    /// reconnect deduplication. A missing runtime is a normal cold-start state;
+    /// the first visible direct conversation will create and attach it later.
+    /// Errors are returned to the caller and never change authentication state.
+    @discardableResult
+    func recoverGatewayOnForeground(for server: URL) async -> Error? {
+        guard activeGatewayOrigin == server, let runtime = gatewayRuntime else { return nil }
+        let generation = gatewayGeneration
+        if let foregroundRecoveryTask,
+           foregroundRecoveryGeneration == generation {
+            return await foregroundRecoveryTask.value
+        }
+
+        foregroundRecoveryTask?.cancel()
+        let task = Task { @MainActor [weak self, runtime] () -> Error? in
+            guard let self,
+                  self.activeGatewayOrigin == server,
+                  self.gatewayGeneration == generation,
+                  self.gatewayRuntime === runtime else { return nil }
+            do {
+                try Task.checkCancellation()
+                // Force a fresh ticket/socket even when the old runtime still
+                // reports ready; iOS can suspend a socket without delivering a
+                // close callback. HermesServerRuntime deduplicates concurrent
+                // reconnects and runs the registered resume barrier.
+                try await runtime.reconnect()
+                return nil
+            } catch {
+                // Connectivity failures remain connectivity failures. The
+                // auth owner decides whether a structured auth response merits
+                // demotion; foreground recovery never logs the user out.
+                return error
+            }
+        }
+        foregroundRecoveryTask = task
+        foregroundRecoveryGeneration = generation
+        let result = await task.value
+        if foregroundRecoveryGeneration == generation {
+            foregroundRecoveryTask = nil
+            foregroundRecoveryGeneration = nil
+        }
+        return result
+    }
+
+    func runtime(for server: URL, client: APIClient) async throws -> HermesServerRuntime {
+        guard activeGatewayOrigin == server else { throw DirectSessionError.stopped }
+        let generation = gatewayGeneration
+        await gatewayTeardown?.value
+        guard generation == gatewayGeneration, activeGatewayOrigin == server else { throw DirectSessionError.staleOperation }
+        if let gatewayRuntime { return gatewayRuntime }
+        let created = try HermesServerRuntime(origin: server, client: client)
+        gatewayRuntime = created
+        return created
+    }
+
+#if DEBUG
+    /// Installs an already-constructed runtime for focused lifecycle tests.
+    /// Production code always obtains the runtime through `runtime(for:client:)`.
+    func installGatewayRuntimeForTesting(_ runtime: HermesServerRuntime, for server: URL) {
+        guard activeGatewayOrigin == server else { return }
+        gatewayRuntime = runtime
+    }
+#endif
 
     var retainedSessionCountForTesting: Int { viewModels.count }
 
-    init(retentionPolicy: OpenChatSessionStoreRetentionPolicy = .production) {
+    init(
+        retentionPolicy: OpenChatSessionStoreRetentionPolicy = .production,
+        organizerStore: LocalOrganizerStore? = nil
+    ) {
         self.retentionPolicy = retentionPolicy
+        self.organizerStore = organizerStore ?? LocalOrganizerStore()
     }
 
     func viewModel(
         session: SessionSummary,
         server: URL,
-        showsLiveActivityResponseExcerpts: Bool = false,
-        sessionEventStreamClient: SSEStreamingClient? = nil
+        showsLiveActivityResponseExcerpts: Bool = false
     ) -> ChatViewModel {
-        let key = OpenChatSessionKey(server: server, sessionID: Self.normalizedSessionID(session))
+        let requestedKey = OpenChatSessionKey(server: server, sessionID: Self.normalizedSessionID(session), profile: session.profile)
+        let key = canonicalAliases[requestedKey] ?? requestedKey
         if let existing = viewModels[key] {
             touch(key)
             existing.markReusedFromOpenSessionStore()
@@ -50,13 +165,50 @@ final class OpenChatSessionStore {
         let created = ChatViewModel(
             session: session,
             server: server,
-            sessionEventStreamClient: sessionEventStreamClient,
-            showsLiveActivityResponseExcerpts: showsLiveActivityResponseExcerpts
+            showsLiveActivityResponseExcerpts: showsLiveActivityResponseExcerpts,
+            gatewayRuntimeProvider: { [weak self] client in
+                guard let self else { throw DirectSessionError.stopped }
+                return try await self.runtime(for: server, client: client)
+            }
         )
+        created.onDirectCanonicalID = { [weak self, weak created] id in
+            guard let self, let created else { return }
+            self.rekey(created, server: server, sessionID: id, profile: session.profile)
+        }
         viewModels[key] = created
         touch(key)
         trimIdleViewModels(forServer: key.server)
         return created
+    }
+
+    private func rekey(_ model: ChatViewModel, server: URL, sessionID: String, profile: String?) {
+        let target = OpenChatSessionKey(server: server, sessionID: sessionID, profile: profile)
+        // Aliases are redirects, not extra retained models or refresh entries.
+        let oldKeys = viewModels.keys.filter { viewModels[$0] === model }
+        if let displaced = viewModels[target], displaced !== model {
+            displaced.invalidateDirectConversation()
+            Task { await displaced.disposeDirectConversation() }
+        }
+        for key in oldKeys where key != target {
+            try? organizerStore.transferSessionAssignment(
+                from: key.sessionID,
+                to: target.sessionID,
+                server: server,
+                profile: target.profile
+            )
+            viewModels.removeValue(forKey: key)
+            if let git = gitAvailabilityViewModels.removeValue(forKey: key) {
+                git.rebindToCanonicalSession(sessionID: target.sessionID, profile: target.profile)
+                gitAvailabilityViewModels[target] = git
+            }
+            accessOrder.removeAll { $0 == key }
+            canonicalAliases[key] = target
+            for alias in Array(canonicalAliases.keys) where canonicalAliases[alias] == key {
+                canonicalAliases[alias] = target
+            }
+        }
+        viewModels[target] = model
+        touch(target)
     }
 
     func gitAvailabilityViewModel(
@@ -64,7 +216,8 @@ final class OpenChatSessionStore {
         server: URL,
         chatViewModel: ChatViewModel
     ) -> GitWorkspaceAvailabilityViewModel {
-        let key = OpenChatSessionKey(server: server, sessionID: Self.normalizedSessionID(session))
+        let requestedKey = OpenChatSessionKey(server: server, sessionID: Self.normalizedSessionID(session), profile: session.profile)
+        let key = canonicalAliases[requestedKey] ?? requestedKey
         if let existing = gitAvailabilityViewModels[key] {
             touch(key)
             return existing
@@ -84,6 +237,7 @@ final class OpenChatSessionStore {
             server: server,
             apiClient: retainedChatViewModel.client
         )
+        created.rebindToCanonicalSession(sessionID: key.sessionID, profile: key.profile)
         gitAvailabilityViewModels[key] = created
         touch(key)
         trimIdleViewModels(forServer: key.server)
@@ -96,11 +250,87 @@ final class OpenChatSessionStore {
         server: URL,
         creating viewModel: ChatViewModel
     ) -> ChatViewModel {
-        let key = OpenChatSessionKey(server: server, sessionID: Self.normalizedSessionID(session))
+        let requestedKey = OpenChatSessionKey(server: server, sessionID: Self.normalizedSessionID(session), profile: session.profile)
+        let key = canonicalAliases[requestedKey] ?? requestedKey
         viewModels[key] = viewModel
         touch(key)
         noteStreamingStateChanged()
         return viewModel
+    }
+
+    /// Retains an already-bound direct branch without constructing or resuming a
+    /// second ChatViewModel. Unlike the legacy `adoptedViewModel` test/import seam,
+    /// this path is collision-safe: a different owner at the exact child key is
+    /// rejected and neither owner is invalidated or disposed.
+    @discardableResult
+    func adoptBranch(_ handoff: DirectBranchHandoff) -> ChatViewModel? {
+        let originKey = OpenChatSessionKey.normalizedServer(handoff.origin)
+        guard let activeGatewayOrigin,
+              OpenChatSessionKey.normalizedServer(activeGatewayOrigin) == originKey,
+              handoff.viewModel.usesDirectGateway else {
+            return nil
+        }
+
+        let sessionID = Self.normalizedSessionID(handoff.session)
+        guard !sessionID.isEmpty else { return nil }
+        let sessionKey = OpenChatSessionKey(
+            server: handoff.origin,
+            sessionID: sessionID,
+            profile: handoff.session.profile
+        )
+        let handoffKey = OpenChatSessionKey(
+            server: handoff.origin,
+            sessionID: sessionID,
+            profile: handoff.profile
+        )
+        guard sessionKey == handoffKey else { return nil }
+        // The summary and handoff fields are caller data. The child VM must also
+        // prove that its still-bound controller owns this exact origin/profile/
+        // durable ID; otherwise a stale VM could be retained under a convincing
+        // but unrelated handoff.
+        guard let actual = handoff.viewModel.directBranchIdentity,
+              OpenChatSessionKey.normalizedServer(actual.origin) == originKey,
+              actual.profile.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty == handoffKey.profile,
+              actual.sessionID.trimmingCharacters(in: .whitespacesAndNewlines) == sessionID else {
+            return nil
+        }
+
+        if let previouslyAdoptedKey = adoptedBranchKeys[handoff.identity], previouslyAdoptedKey != handoffKey {
+            return nil
+        }
+        // A canonical alias at the child key means another conversation already
+        // owns that identity. Never redirect a branch into that owner.
+        guard canonicalAliases[handoffKey] == nil else { return nil }
+
+        if let existing = viewModels[handoffKey] {
+            guard existing === handoff.viewModel else { return nil }
+            adoptedBranchKeys[handoff.identity] = handoffKey
+            touch(handoffKey)
+            return existing
+        }
+
+        let child = handoff.viewModel
+        let origin = handoff.origin
+        let profile = handoff.profile
+        child.onDirectCanonicalID = { [weak self, weak child] id in
+            guard let self, let child else { return }
+            self.rekey(child, server: origin, sessionID: id, profile: profile)
+        }
+        viewModels[handoffKey] = child
+        adoptedBranchKeys[handoff.identity] = handoffKey
+        touch(handoffKey)
+        trimIdleViewModels(forServer: handoffKey.server)
+        noteStreamingStateChanged()
+        return handoff.viewModel
+    }
+
+    /// Releases a branch whose ownership transfer was rejected. The guard keeps
+    /// a VM already retained by this store untouched, so collision handling cannot
+    /// dispose an unrelated or previously adopted owner.
+    func releaseUnadoptedBranch(_ handoff: DirectBranchHandoff) {
+        guard !viewModels.values.contains(where: { $0 === handoff.viewModel }) else { return }
+        handoff.viewModel.invalidateDirectConversation()
+        Task { await handoff.viewModel.disposeDirectConversation() }
     }
 
     func liveSessionIDs(for server: URL) -> Set<String> {
@@ -126,14 +356,8 @@ final class OpenChatSessionStore {
 
     func liveStreamIDs(for server: URL) -> [String] {
         _ = liveOwnershipGeneration
-        let serverKey = OpenChatSessionKey.normalizedServer(server)
-        return viewModels
-            .compactMap { key, viewModel in
-                guard key.server == serverKey else { return nil }
-                return viewModel.activeStreamID?.trimmingCharacters(in: .whitespacesAndNewlines)
-            }
-            .filter { !$0.isEmpty }
-            .sorted()
+        _ = server
+        return []
     }
 
     #if DEBUG
@@ -215,6 +439,10 @@ final class OpenChatSessionStore {
     }
 
     func resetForTesting() {
+        activateGateway(server: nil)
+        foregroundRecoveryTask?.cancel()
+        foregroundRecoveryTask = nil
+        foregroundRecoveryGeneration = nil
         deferredRetentionTrimTask?.cancel()
         deferredRetentionTrimTask = nil
         refreshTasks.values.forEach { $0.cancel() }
@@ -222,6 +450,8 @@ final class OpenChatSessionStore {
         viewModels.values.forEach { $0.stopSessionEventSync() }
         gitAvailabilityViewModels.removeAll()
         viewModels.removeAll()
+        canonicalAliases.removeAll()
+        adoptedBranchKeys.removeAll()
         accessOrder.removeAll()
         liveOwnershipGeneration = 0
     }
@@ -263,11 +493,17 @@ final class OpenChatSessionStore {
         // Stop owned work before dropping the store's strong reference. These APIs
         // are also used by navigation/reset paths and avoid relying on deinit timing.
         viewModel.stopSessionEventSync()
-        viewModel.cancelOwnedStreamStatusWatch()
         viewModel.cleanupPollingTasks()
-        viewModels.removeValue(forKey: key)
-        gitAvailabilityViewModels.removeValue(forKey: key)
-        accessOrder.removeAll { $0 == key }
+        viewModel.invalidateDirectConversation()
+        Task { await viewModel.disposeDirectConversation() }
+        let aliases = viewModels.keys.filter { viewModels[$0] === viewModel }
+        for alias in aliases {
+            viewModels.removeValue(forKey: alias)
+            gitAvailabilityViewModels.removeValue(forKey: alias)
+        }
+        adoptedBranchKeys = adoptedBranchKeys.filter { !aliases.contains($0.value) }
+        accessOrder.removeAll { aliases.contains($0) }
+        canonicalAliases = canonicalAliases.filter { !aliases.contains($0.value) }
     }
     private static func normalizedSessionID(_ session: SessionSummary) -> String {
         let raw = session.sessionId?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -290,313 +526,6 @@ struct OpenChatSessionStoreRetentionPolicy: Equatable {
     }
 }
 
-@MainActor
-final class SessionEventStreamCoordinator {
-    private let streamClient: SSEStreamingClient
-    private let server: URL
-    private let sessionID: String
-    private let profile: String?
-    private let cursorStore: SessionEventCursorStore
-    private var isRunning = false
-    private var generation = 0
-    private var reconnectTask: Task<Void, Never>?
-    private var reconnectAttempt = 0
-    private var lastAcceptedEventID: String?
-    private var seenEventIDs: Set<String>
-    private var seenEventOrder: [String]
-    /// Debounces synchronous UserDefaults writes. Streaming bursts deliver one
-    /// event at a time on the main actor; writing the cursor and seen-ID array
-    /// for every event hitches scrolling/typing (main-actor disk I/O).
-    private var cursorPersistTask: Task<Void, Never>?
-
-
-    var onSnapshot: (@MainActor (SessionSummary) -> Bool)?
-    var onEvent: (@MainActor (SSEEvent) -> Void)?
-
-    init(
-        server: URL,
-        sessionID: String,
-        profile: String?,
-        streamClient: SSEStreamingClient,
-        userDefaults: UserDefaults = .standard
-    ) {
-        self.server = server
-        self.sessionID = sessionID.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.profile = profile
-        self.streamClient = streamClient
-        self.cursorStore = SessionEventCursorStore(defaults: userDefaults)
-        let persistedSeenIDs = cursorStore.loadSeenEventIDs(
-            server: server,
-            profile: profile,
-            sessionID: self.sessionID
-        )
-        self.seenEventIDs = Set(persistedSeenIDs)
-        self.seenEventOrder = persistedSeenIDs
-
-    }
-
-    var persistedEventID: String? {
-        cursorStore.load(server: server, profile: profile, sessionID: sessionID)
-    }
-
-    func start() {
-        guard !sessionID.isEmpty else { return }
-        if isRunning {
-            stop()
-        }
-        isRunning = true
-        reconnectAttempt = 0
-        connect()
-    }
-
-    func stop() {
-        isRunning = false
-        generation &+= 1
-        reconnectTask?.cancel()
-        reconnectTask = nil
-        streamClient.stop()
-        flushCursorPersist()
-    }
-
-    /// Coalesces cursor + seen-ID persistence into one delayed write per burst.
-    /// In-memory dedupe state stays immediately consistent; only the disk
-    /// mirror is deferred. A crash within the window replays at most a few
-    /// already-deduped events, which handleSessionEvent tolerates.
-    private func scheduleCursorPersist() {
-        cursorPersistTask?.cancel()
-        cursorPersistTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 500_000_000)
-            guard let self, !Task.isCancelled else { return }
-            self.cursorPersistTask = nil
-            guard let eventID = self.lastAcceptedEventID else { return }
-            self.cursorStore.save(
-                eventID: eventID,
-                server: self.server,
-                profile: self.profile,
-                sessionID: self.sessionID
-            )
-            self.cursorStore.saveSeenEventIDs(
-                self.seenEventOrder,
-                server: self.server,
-                profile: self.profile,
-                sessionID: self.sessionID
-            )
-        }
-    }
-
-    private func flushCursorPersist() {
-        cursorPersistTask?.cancel()
-        cursorPersistTask = nil
-        guard let eventID = lastAcceptedEventID else { return }
-        cursorStore.save(
-            eventID: eventID,
-            server: server,
-            profile: profile,
-            sessionID: sessionID
-        )
-        cursorStore.saveSeenEventIDs(
-            seenEventOrder,
-            server: server,
-            profile: profile,
-            sessionID: sessionID
-        )
-    }
-
-    private func connect() {
-        guard !sessionID.isEmpty else { return }
-        generation &+= 1
-        let connectionGeneration = generation
-        let url = Endpoint.sessionEvents(sessionID: sessionID).url(relativeTo: server)
-        // Prefer the in-memory cursor: persistence is debounced, so the disk
-        // mirror can lag behind during a streaming burst while a reconnect is
-        // already due.
-        let resumeFrom = Self.normalizedEventID(lastAcceptedEventID)
-            ?? cursorStore.load(server: server, profile: profile, sessionID: sessionID)
-        lastAcceptedEventID = resumeFrom
-        if let resumeFrom {
-            remember(eventID: resumeFrom, persist: false)
-        }
-        streamClient.start(url: url, resumeFrom: resumeFrom, onEventWithID: { [weak self] event, eventID in
-            guard let self, self.generation == connectionGeneration else { return }
-
-            if case let .sessionSnapshot(snapshot) = event {
-                guard Self.normalizedID(snapshot.sessionId ?? snapshot.id) == Self.normalizedID(self.sessionID),
-                      let onSnapshot = self.onSnapshot,
-                      onSnapshot(snapshot)
-                else {
-                    // A malformed, wrong-session, or rejected snapshot is not a
-                    // recovery boundary. Keep the durable cursor so the next
-                    // reconnect can retry the same authoritative state.
-                    return
-                }
-
-                // A successfully applied snapshot means the server could not honor
-                // the prior replay cursor. It is a recovery boundary: discard the
-                // stale cursor and all prior dedupe state before the next reconnect.
-                self.cursorPersistTask?.cancel()
-                self.cursorPersistTask = nil
-                self.lastAcceptedEventID = nil
-                self.seenEventIDs.removeAll(keepingCapacity: true)
-                self.seenEventOrder.removeAll(keepingCapacity: true)
-
-                self.cursorStore.clear(
-                    server: self.server,
-                    profile: self.profile,
-                    sessionID: self.sessionID
-                )
-                self.cursorStore.clearSeenEventIDs(
-                    server: self.server,
-                    profile: self.profile,
-                    sessionID: self.sessionID
-                )
-                // Reconnect without Last-Event-ID. A snapshot is the server's
-                // explicit signal that incremental replay is no longer safe.
-                self.scheduleReconnect(connectionGeneration: connectionGeneration)
-            } else {
-                if case .transportError = event {
-                    // Keep the attempt counter so an older Hermes server that
-                    // does not expose session events cannot cause a tight retry
-                    // loop. A later view appearance explicitly starts a fresh
-                    // capability attempt.
-                } else {
-                    self.reconnectAttempt = 0
-                }
-                if Self.shouldAdvanceCursor(for: event),
-                   let eventID = Self.normalizedEventID(eventID) {
-                    guard !self.seenEventIDs.contains(eventID) else { return }
-                    self.lastAcceptedEventID = eventID
-                    self.remember(eventID: eventID, persist: false)
-                    self.scheduleCursorPersist()
-                }
-                self.onEvent?(event)
-                if Self.requiresReconnect(for: event) {
-                    self.scheduleReconnect(connectionGeneration: connectionGeneration)
-                }
-            }
-        })
-    }
-
-    private func scheduleReconnect(connectionGeneration: Int) {
-        guard reconnectTask == nil, generation == connectionGeneration else { return }
-        guard reconnectAttempt < 3 else { return }
-        reconnectAttempt += 1
-        let delay = UInt64(250_000_000 * (1 << min(reconnectAttempt - 1, 2)))
-        reconnectTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: delay)
-            guard let self, !Task.isCancelled, self.generation == connectionGeneration else { return }
-            self.reconnectTask = nil
-            self.connect()
-        }
-    }
-
-    private func remember(eventID: String, persist: Bool) {
-        guard !seenEventIDs.contains(eventID) else { return }
-        seenEventIDs.insert(eventID)
-        seenEventOrder.append(eventID)
-        while seenEventOrder.count > 256 {
-            let removed = seenEventOrder.removeFirst()
-            seenEventIDs.remove(removed)
-        }
-
-        if persist {
-            cursorStore.saveSeenEventIDs(
-                seenEventOrder,
-                server: server,
-                profile: profile,
-                sessionID: sessionID
-            )
-        }
-    }
-
-    private static func normalizedID(_ value: String) -> String {
-        value.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-
-    private static func requiresReconnect(for event: SSEEvent) -> Bool {
-        switch event {
-        case .done, .streamEnd, .cancelled, .error, .lostWorkerBookkeeping, .transportError:
-            return true
-        default:
-            return false
-        }
-    }
-
-    private static func shouldAdvanceCursor(for event: SSEEvent) -> Bool {
-        switch event {
-        case .ignored:
-            // The decoder could not establish a valid event payload. Advancing
-            // past its ID would make an authoritative replay permanently skip it.
-            return false
-        default:
-            return true
-        }
-    }
-
-    private static func normalizedEventID(_ value: String?) -> String? {
-        guard let value else { return nil }
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
-    }
-}
-
-struct SessionEventCursorStore {
-    private let defaults: UserDefaults
-    private let keyPrefix = "semreh.session-events.cursor.v1"
-    private let seenKeyPrefix = "semreh.session-events.seen.v1"
-
-    init(defaults: UserDefaults = .standard) {
-        self.defaults = defaults
-    }
-
-    func load(server: URL, profile: String?, sessionID: String) -> String? {
-        guard let value = defaults.string(forKey: key(server: server, profile: profile, sessionID: sessionID)) else {
-            return nil
-        }
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
-    }
-
-    func save(eventID: String, server: URL, profile: String?, sessionID: String) {
-        let trimmed = eventID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        defaults.set(trimmed, forKey: key(server: server, profile: profile, sessionID: sessionID))
-    }
-
-    func clear(server: URL, profile: String?, sessionID: String) {
-        defaults.removeObject(forKey: key(server: server, profile: profile, sessionID: sessionID))
-    }
-
-    func loadSeenEventIDs(server: URL, profile: String?, sessionID: String) -> [String] {
-        guard let values = defaults.array(forKey: seenKey(server: server, profile: profile, sessionID: sessionID)) as? [String] else {
-            return []
-        }
-        return values.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.suffix(256)
-    }
-
-    func saveSeenEventIDs(_ eventIDs: [String], server: URL, profile: String?, sessionID: String) {
-        defaults.set(Array(eventIDs.suffix(256)), forKey: seenKey(server: server, profile: profile, sessionID: sessionID))
-    }
-
-    func clearSeenEventIDs(server: URL, profile: String?, sessionID: String) {
-        defaults.removeObject(forKey: seenKey(server: server, profile: profile, sessionID: sessionID))
-    }
-
-    private func seenKey(server: URL, profile: String?, sessionID: String) -> String {
-        let serverKey = server.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        let profileKey = profile?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty ?? "default"
-        let sessionKey = sessionID.trimmingCharacters(in: .whitespacesAndNewlines)
-        return "\(seenKeyPrefix).\(serverKey).\(profileKey).\(sessionKey)"
-    }
-
-    private func key(server: URL, profile: String?, sessionID: String) -> String {
-        let serverKey = server.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        let profileKey = profile?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty ?? "default"
-        let sessionKey = sessionID.trimmingCharacters(in: .whitespacesAndNewlines)
-        return "\(keyPrefix).\(serverKey).\(profileKey).\(sessionKey)"
-    }
-}
-
 private extension String {
     var nonEmpty: String? {
         isEmpty ? nil : self
@@ -606,31 +535,16 @@ private extension String {
 private struct OpenChatSessionKey: Hashable {
     let server: String
     let sessionID: String
+    let profile: String
 
-    init(server: URL, sessionID: String) {
+    init(server: URL, sessionID: String, profile: String? = nil) {
         self.server = Self.normalizedServer(server)
         self.sessionID = sessionID
+        let normalized = profile?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self.profile = normalized.isEmpty ? "default" : normalized
     }
 
     static func normalizedServer(_ server: URL) -> String {
         server.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-    }
-}
-
-enum ChatNavigationLifecyclePolicy {
-    static var shouldKeepLiveStreamOnDisappear: Bool { true }
-}
-
-@MainActor
-enum ChatNavigationLifecycle {
-    static func applyViewDisappear(to viewModel: ChatViewModel) {
-        viewModel.stopListening()
-        guard ChatNavigationLifecyclePolicy.shouldKeepLiveStreamOnDisappear else {
-            viewModel.cancelStreamReconnectRetry()
-            viewModel.suspendStreamForNavigation()
-            viewModel.cleanupPollingTasks()
-            return
-        }
-        viewModel.ensureOwnedStreamStatusWatch()
     }
 }

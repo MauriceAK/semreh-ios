@@ -1,39 +1,11 @@
 import SwiftUI
 
-struct ClarificationRequestOverlay: View {
-    let prompt: ClarificationPromptState
-    let isResponding: Bool
-    let errorMessage: String?
-    let bottomPadding: CGFloat
-    let onSubmit: (String) -> Void
-
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.colorScheme) private var colorScheme
-
-    var body: some View {
-        ZStack(alignment: .bottom) {
-            Color.black.opacity(colorScheme == .dark ? 0.24 : 0.18)
-                .ignoresSafeArea()
-
-            ClarificationRequestCard(
-                prompt: prompt,
-                isResponding: isResponding,
-                errorMessage: errorMessage,
-                onSubmit: onSubmit
-            )
-                .padding(.horizontal, 16)
-                .padding(.bottom, bottomPadding)
-                .transition(ChatMotion.bottomOverlayTransition(reduceMotion: reduceMotion))
-        }
-        .accessibilityElement(children: .contain)
-    }
-}
-
 struct ClarificationRequestCard: View {
     let prompt: ClarificationPromptState
     let isResponding: Bool
     let errorMessage: String?
-    let onSubmit: (String) -> Void
+    let onSubmit: (String, GatewayBlockingPromptIdentity?) -> Void
+    let onCancel: (GatewayBlockingPromptIdentity?) -> Void
 
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.colorScheme) private var colorScheme
@@ -44,6 +16,7 @@ struct ClarificationRequestCard: View {
     var body: some View {
         card
             .accessibilityElement(children: .contain)
+            .accessibilityIdentifier(prompt.gatewayIdentity == nil ? "clarification.card" : "direct.clarification.card")
     }
 
     private var card: some View {
@@ -111,6 +84,10 @@ struct ClarificationRequestCard: View {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .stroke(SemrehVisualTheme.promptBubbleBorder(for: colorScheme, palette: palette).opacity(0.82), lineWidth: 1)
             )
+            .accessibilityIdentifier(
+                prompt.gatewayCancelOnly ? "direct.clarification.unsupported" :
+                    (prompt.gatewayIdentity == nil ? "clarification.question" : "direct.clarification.question")
+            )
     }
 
     private var choicesList: some View {
@@ -132,6 +109,7 @@ struct ClarificationRequestCard: View {
                 .background(textFieldBackground, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .overlay(textFieldBorder)
                 .disabled(isResponding)
+                .accessibilityIdentifier(prompt.gatewayIdentity == nil ? "clarification.answer" : "direct.clarification.answer")
 
             Button {
                 submitDraft()
@@ -145,7 +123,27 @@ struct ClarificationRequestCard: View {
             .buttonStyle(.chatTactile(.icon))
             .disabled(isResponding || trimmedDraft.isEmpty)
             .accessibilityLabel("Submit clarification")
+            .accessibilityIdentifier(prompt.gatewayIdentity == nil ? "clarification.submit" : "direct.clarification.submit")
         }
+    }
+
+    private var cancelButton: some View {
+        Button {
+            onCancel(prompt.gatewayIdentity)
+        } label: {
+            Text("Cancel")
+                .font(.callout.weight(.semibold))
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .foregroundStyle(.primary)
+                .background(
+                    Color.primary.opacity(colorScheme == .dark ? 0.08 : 0.06),
+                    in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                )
+        }
+        .buttonStyle(.chatTactile(.capsule))
+        .disabled(isResponding)
+        .accessibilityLabel("Cancel clarification")
+        .accessibilityIdentifier("direct.clarification.cancel")
     }
 
     @ViewBuilder
@@ -204,7 +202,12 @@ struct ClarificationRequestCard: View {
                 choicesList
             }
 
-            responseField
+            if !prompt.gatewayCancelOnly {
+                responseField
+            }
+            if prompt.gatewayIdentity != nil {
+                cancelButton
+            }
             footer
         }
         .padding(16)
@@ -226,7 +229,7 @@ struct ClarificationRequestCard: View {
     @ViewBuilder
     private func choiceButton(_ choice: String) -> some View {
         Button {
-            onSubmit(choice)
+            onSubmit(choice, prompt.gatewayIdentity)
         } label: {
             Text(choice)
                 .font(.callout.weight(.semibold))
@@ -287,7 +290,7 @@ struct ClarificationRequestCard: View {
     private func submitDraft() {
         let value = trimmedDraft
         guard !value.isEmpty else { return }
-        onSubmit(value)
+        onSubmit(value, prompt.gatewayIdentity)
     }
 
     private func remainingSeconds(now: Date) -> TimeInterval? {

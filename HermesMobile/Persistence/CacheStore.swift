@@ -20,6 +20,38 @@ enum CacheStore {
             .map(SessionSummary.init(cachedSession:))
     }
 
+    /// Loads all compact, locally observed previews for one server. The list
+    /// joins by profile plus raw durable session ID without per-row cache reads
+    /// or decoding transcript bodies.
+    @MainActor
+    static func cachedSessionPreviews(
+        serverURL: URL,
+        in context: ModelContext,
+        now: Date = Date()
+    ) throws -> [CachedSessionPreviewIdentity: CachedSessionPreview] {
+        let serverURLString = serverURL.absoluteString
+        let descriptor = FetchDescriptor<CachedSessionPreviewRecord>(
+            predicate: #Predicate { preview in
+                preview.serverURLString == serverURLString
+                    && preview.expiresAt > now
+            }
+        )
+
+        return Dictionary(
+            try context.fetch(descriptor).map { record in
+                (
+                    CachedSessionPreviewIdentity(profile: record.profile, sessionID: record.sessionID),
+                    CachedSessionPreview(
+                        text: record.previewText,
+                        messageTimestamp: record.messageTimestamp,
+                        locallyObservedAt: record.cachedAt
+                    )
+                )
+            },
+            uniquingKeysWith: { current, _ in current }
+        )
+    }
+
     @MainActor
     static func cachedMessages(
         serverURL: URL,
@@ -90,6 +122,10 @@ enum CacheStore {
         for staleSession in existingByKey.values {
             context.delete(staleSession)
         }
+        // This existing metadata cache is server/session keyed, while previews
+        // are profile scoped. A profile-filtered session refresh cannot safely
+        // identify which profile's missing previews should be purged; explicit
+        // delete/archive, server clear, and TTL maintenance own that cleanup.
 
         try performMaintenance(in: context, now: cachedAt)
         try context.save()
@@ -99,13 +135,21 @@ enum CacheStore {
     static func deleteSession(
         sessionID: String,
         serverURL: URL,
+        profile: String? = nil,
         in context: ModelContext
     ) throws {
         let serverURLString = serverURL.absoluteString
         let cacheKey = CachedSession.cacheKey(serverURLString: serverURLString, sessionID: sessionID)
-        if let cachedSession = try cachedSession(cacheKey: cacheKey, in: context) {
+        let cachedSession = try cachedSession(cacheKey: cacheKey, in: context)
+        if let cachedSession {
             context.delete(cachedSession)
         }
+        try deleteSessionPreviews(
+            serverURLString: serverURLString,
+            sessionID: sessionID,
+            profile: profile ?? cachedSession?.profile ?? "default",
+            in: context
+        )
         try context.save()
     }
 
@@ -122,9 +166,16 @@ enum CacheStore {
         let cacheKey = CachedSession.cacheKey(serverURLString: serverURLString, sessionID: sessionID)
 
         if session.archived == true {
-            if let cachedSession = try cachedSession(cacheKey: cacheKey, in: context) {
+            let cachedSession = try cachedSession(cacheKey: cacheKey, in: context)
+            if let cachedSession {
                 context.delete(cachedSession)
             }
+            try deleteSessionPreviews(
+                serverURLString: serverURLString,
+                sessionID: sessionID,
+                profile: session.profile ?? cachedSession?.profile ?? "default",
+                in: context
+            )
         } else if let cachedSession = try cachedSession(cacheKey: cacheKey, in: context) {
             cachedSession.apply(session, cachedAt: cachedAt)
         } else {
@@ -140,6 +191,7 @@ enum CacheStore {
         _ messages: [ChatMessage],
         serverURL: URL,
         sessionID: String,
+        previewIdentity: CachedSessionPreviewIdentity? = nil,
         in context: ModelContext,
         cachedAt: Date = Date()
     ) throws {
@@ -183,20 +235,33 @@ enum CacheStore {
             context.delete(staleMessage)
         }
 
+        if let previewIdentity {
+            if messages.isEmpty {
+                try deleteSessionPreviews(
+                    serverURLString: serverURLString,
+                    sessionID: previewIdentity.sessionID,
+                    profile: previewIdentity.profile,
+                    in: context
+                )
+            } else if let preview = CachedSessionPreviewBuilder.latest(in: messages) {
+                try upsertSessionPreview(
+                    preview,
+                    serverURLString: serverURLString,
+                    identity: previewIdentity,
+                    cachedAt: cachedAt,
+                    in: context
+                )
+            } else {
+                try deleteSessionPreviews(
+                    serverURLString: serverURLString,
+                    sessionID: previewIdentity.sessionID,
+                    profile: previewIdentity.profile,
+                    in: context
+                )
+            }
+        }
+
         try performMaintenance(in: context, now: cachedAt)
-        try context.save()
-    }
-
-    @MainActor
-    static func clearAll(in context: ModelContext) throws {
-        for cachedSession in try context.fetch(FetchDescriptor<CachedSession>()) {
-            context.delete(cachedSession)
-        }
-
-        for cachedMessage in try context.fetch(FetchDescriptor<CachedMessage>()) {
-            context.delete(cachedMessage)
-        }
-
         try context.save()
     }
 
@@ -227,6 +292,15 @@ enum CacheStore {
             context.delete(cachedMessage)
         }
 
+        let previewDescriptor = FetchDescriptor<CachedSessionPreviewRecord>(
+            predicate: #Predicate { preview in
+                preview.serverURLString == serverURLString
+            }
+        )
+        for preview in try context.fetch(previewDescriptor) {
+            context.delete(preview)
+        }
+
         try context.save()
     }
 
@@ -234,30 +308,46 @@ enum CacheStore {
     private static func performMaintenance(in context: ModelContext, now: Date) throws {
         try deleteExpiredSessions(in: context, now: now)
         try deleteExpiredMessages(in: context, now: now)
+        try deleteExpiredSessionPreviews(in: context, now: now)
         try evictOldestMessagesIfNeeded(in: context)
     }
 
     @MainActor
     private static func deleteExpiredSessions(in context: ModelContext, now: Date) throws {
-        let descriptor = FetchDescriptor<CachedSession>()
-        let expiredSessions = try context.fetch(descriptor).filter { $0.expiresAt <= now }
-        for session in expiredSessions {
+        let descriptor = FetchDescriptor<CachedSession>(
+            predicate: #Predicate { $0.expiresAt <= now }
+        )
+        for session in try context.fetch(descriptor) {
             context.delete(session)
         }
     }
 
     @MainActor
     private static func deleteExpiredMessages(in context: ModelContext, now: Date) throws {
-        let descriptor = FetchDescriptor<CachedMessage>()
-        let expiredMessages = try context.fetch(descriptor).filter { $0.expiresAt <= now }
-        for message in expiredMessages {
+        let descriptor = FetchDescriptor<CachedMessage>(
+            predicate: #Predicate { $0.expiresAt <= now }
+        )
+        for message in try context.fetch(descriptor) {
             context.delete(message)
+        }
+    }
+
+    @MainActor
+    private static func deleteExpiredSessionPreviews(in context: ModelContext, now: Date) throws {
+        let descriptor = FetchDescriptor<CachedSessionPreviewRecord>(
+            predicate: #Predicate { $0.expiresAt <= now }
+        )
+        for preview in try context.fetch(descriptor) {
+            context.delete(preview)
         }
     }
 
     @MainActor
     private static func evictOldestMessagesIfNeeded(in context: ModelContext) throws {
         let descriptor = FetchDescriptor<CachedMessage>()
+        // Include pending inserts/deletes from reconciliation and expiration.
+        // Most writes fit within the cap and need no full message fetch or sort.
+        guard try context.fetchCount(descriptor) > CachePolicy.maxMessages else { return }
         let messages = try context.fetch(descriptor)
         let overflowCount = messages.count - CachePolicy.maxMessages
         guard overflowCount > 0 else { return }
@@ -282,6 +372,51 @@ enum CacheStore {
     }
 
     @MainActor
+    private static func upsertSessionPreview(
+        _ preview: CachedSessionPreview,
+        serverURLString: String,
+        identity: CachedSessionPreviewIdentity,
+        cachedAt: Date,
+        in context: ModelContext
+    ) throws {
+        let cacheKey = CachedSessionPreviewRecord.cacheKey(
+            serverURLString: serverURLString,
+            profile: identity.profile,
+            sessionID: identity.sessionID
+        )
+        if let record = try cachedSessionPreview(cacheKey: cacheKey, in: context) {
+            record.apply(preview, cachedAt: cachedAt)
+        } else {
+            context.insert(CachedSessionPreviewRecord(
+                serverURLString: serverURLString,
+                identity: identity,
+                preview: preview,
+                cachedAt: cachedAt
+            ))
+        }
+    }
+
+    @MainActor
+    private static func deleteSessionPreviews(
+        serverURLString: String,
+        sessionID: String,
+        profile: String,
+        in context: ModelContext
+    ) throws {
+        let normalizedProfile = CachedSessionPreviewIdentity(profile: profile, sessionID: sessionID).profile
+        let descriptor = FetchDescriptor<CachedSessionPreviewRecord>(
+            predicate: #Predicate { preview in
+                preview.serverURLString == serverURLString
+                    && preview.sessionID == sessionID
+                    && preview.profile == normalizedProfile
+            }
+        )
+        for record in try context.fetch(descriptor) {
+            context.delete(record)
+        }
+    }
+
+    @MainActor
     private static func cachedSession(cacheKey: String, in context: ModelContext) throws -> CachedSession? {
         var descriptor = FetchDescriptor<CachedSession>(
             predicate: #Predicate { cachedSession in
@@ -291,43 +426,57 @@ enum CacheStore {
         descriptor.fetchLimit = 1
         return try context.fetch(descriptor).first
     }
+
+    @MainActor
+    private static func cachedSessionPreview(
+        cacheKey: String,
+        in context: ModelContext
+    ) throws -> CachedSessionPreviewRecord? {
+        var descriptor = FetchDescriptor<CachedSessionPreviewRecord>(
+            predicate: #Predicate { preview in
+                preview.cacheKey == cacheKey
+            }
+        )
+        descriptor.fetchLimit = 1
+        return try context.fetch(descriptor).first
+    }
 }
 
 private extension SessionSummary {
     init(cachedSession: CachedSession) {
-        sessionId = cachedSession.sessionID
-        title = cachedSession.title
-        workspace = cachedSession.workspace
-        model = cachedSession.model
-        modelProvider = cachedSession.modelProvider
-        reasoningEffort = nil
-        messageCount = cachedSession.messageCount
-        createdAt = cachedSession.createdAt
-        updatedAt = cachedSession.updatedAt
-        lastMessageAt = cachedSession.lastMessageAt
-        pinned = cachedSession.pinned
-        archived = cachedSession.archived
-        projectId = cachedSession.projectId
-        profile = cachedSession.profile
-        inputTokens = cachedSession.inputTokens
-        outputTokens = cachedSession.outputTokens
-        estimatedCost = cachedSession.estimatedCost
-        activeStreamId = cachedSession.activeStreamId
-        isStreaming = cachedSession.isStreaming
-        isCliSession = cachedSession.isCliSession
-        userMessageCount = cachedSession.userMessageCount
-        hasPendingUserMessage = cachedSession.hasPendingUserMessage
-        pendingStartedAt = cachedSession.pendingStartedAt
-        worktreePath = cachedSession.worktreePath
-        sourceTag = cachedSession.sourceTag
-        rawSource = cachedSession.rawSource
-        sessionSource = cachedSession.sessionSource
-        sourceLabel = cachedSession.sourceLabel
-        parentSessionId = cachedSession.parentSessionId
-        relationshipType = cachedSession.relationshipType
-        readOnly = cachedSession.readOnly
-        isReadOnly = cachedSession.isReadOnly
-        matchType = nil
+        // These fields came from the removed WebUI list projection and describe
+        // process-local state that cannot still be authoritative after a cache
+        // restore. Direct Hermes list responses intentionally omit them; current
+        // activity is supplied by OpenChatSessionStore's live owner instead.
+        self.init(
+            sessionId: cachedSession.sessionID,
+            title: cachedSession.title,
+            workspace: cachedSession.workspace,
+            model: cachedSession.model,
+            modelProvider: cachedSession.modelProvider,
+            messageCount: cachedSession.messageCount,
+            createdAt: cachedSession.createdAt,
+            updatedAt: cachedSession.updatedAt,
+            lastMessageAt: cachedSession.lastMessageAt,
+            pinned: cachedSession.pinned,
+            archived: cachedSession.archived,
+            projectId: cachedSession.projectId,
+            profile: cachedSession.profile,
+            inputTokens: cachedSession.inputTokens,
+            outputTokens: cachedSession.outputTokens,
+            estimatedCost: cachedSession.estimatedCost,
+            isCliSession: cachedSession.isCliSession,
+            userMessageCount: cachedSession.userMessageCount,
+            worktreePath: cachedSession.worktreePath,
+            sourceTag: cachedSession.sourceTag,
+            rawSource: cachedSession.rawSource,
+            sessionSource: cachedSession.sessionSource,
+            sourceLabel: cachedSession.sourceLabel,
+            parentSessionId: cachedSession.parentSessionId,
+            relationshipType: cachedSession.relationshipType,
+            readOnly: cachedSession.readOnly,
+            isReadOnly: cachedSession.isReadOnly
+        )
     }
 }
 

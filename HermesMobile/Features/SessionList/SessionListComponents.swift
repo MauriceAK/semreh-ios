@@ -14,15 +14,59 @@ struct SessionListRowActions {
     let createProject: (SessionSummary) -> Void
     let refreshProjects: () -> Void
     let export: (SessionSummary, SessionExportFormat) -> Void
+    var projectsEnabled: Bool = true
 }
 
 enum SessionRowActionPolicy {
+    /// Capabilities that depend on where a row came from rather than on the
+    /// server's metadata. Search-only rows are authoritative enough for the
+    /// verified metadata endpoints, but are not part of the canonical sidebar
+    /// collection until the collection mutation contracts are migrated.
+    struct Capabilities: Equatable {
+        var isSearchOnlySession = false
+        var isViewingCachedData = false
+
+        static let canonical = Self()
+
+        func includingCachedData(_ isCached: Bool) -> Self {
+            var effective = self
+            effective.isViewingCachedData = effective.isViewingCachedData || isCached
+            return effective
+        }
+    }
+
     static func offersMutationActions(for session: SessionSummary) -> Bool {
         !session.isSessionReadOnly
     }
 
+    static func offersMetadataActions(
+        for session: SessionSummary,
+        capabilities: Capabilities = .canonical
+    ) -> Bool {
+        !session.isSessionReadOnly
+            && !capabilities.isViewingCachedData
+            && hasServerSessionID(session)
+    }
+
+    static func offersCollectionActions(
+        for session: SessionSummary,
+        capabilities: Capabilities = .canonical
+    ) -> Bool {
+        offersMetadataActions(for: session, capabilities: capabilities)
+            && !capabilities.isSearchOnlySession
+    }
+
     static func canExport(_ session: SessionSummary, isViewingCachedData: Bool) -> Bool {
         !isViewingCachedData && hasServerSessionID(session)
+    }
+
+    static func canExport(
+        _ session: SessionSummary,
+        capabilities: Capabilities
+    ) -> Bool {
+        !capabilities.isViewingCachedData
+            && !capabilities.isSearchOnlySession
+            && hasServerSessionID(session)
     }
 
     static func deepLinkURL(
@@ -179,6 +223,31 @@ struct SidebarSectionVisibility: Equatable {
     /// once all of them are hidden rather than leaving an empty padded gap.
     var showsAnyUtilityLink: Bool {
         tasks || kanban || skills || memory || insights
+    }
+}
+
+enum SessionListUtilityRowsVisibilityPolicy {
+    static func visibleSections(
+        usesShellChrome: Bool,
+        projectsEnabled: Bool,
+        isSearchingSessions: Bool,
+        userVisibility: SidebarSectionVisibility
+    ) -> SidebarSectionVisibility? {
+        guard !isSearchingSessions else { return nil }
+        var effectiveVisibility = userVisibility
+        effectiveVisibility.projects = projectsEnabled && userVisibility.projects
+        guard usesShellChrome else { return effectiveVisibility }
+        guard effectiveVisibility.projects else { return nil }
+
+        return SidebarSectionVisibility(
+            tasks: false,
+            kanban: false,
+            skills: false,
+            memory: false,
+            insights: false,
+            activeProfile: false,
+            projects: true
+        )
     }
 }
 
@@ -471,6 +540,7 @@ struct SessionSidebarUtilityRows: View {
 struct SessionListRowsSection: View {
     let viewModel: SessionListViewModel
     var server: URL? = nil
+    var latestMessagePreviews: [CachedSessionPreviewIdentity: CachedSessionPreview] = [:]
 
     let sessions: [SessionSummary]
     let emptyTitle: String
@@ -506,6 +576,7 @@ struct SessionListRowsSection: View {
                 .sessionsScreenListRow()
         } else {
             ForEach(sessions) { session in
+                let preview = latestPreview(for: session)
                 SessionInteractiveRow(
                     viewModel: viewModel,
                     session: session,
@@ -514,10 +585,27 @@ struct SessionListRowsSection: View {
                     showsWorkspace: showsWorkspace,
                     selectedSessionID: selectedSessionID,
                     actions: actions,
-                    useMessagesStyle: useMessagesStyle
+                    useMessagesStyle: useMessagesStyle,
+                    latestMessagePreview: preview?.text,
+                    latestMessageTimestamp: preview?.messageTimestamp
                 )
             }
         }
+    }
+
+    private func latestPreview(for session: SessionSummary) -> CachedSessionPreview? {
+        guard let sessionID = session.sessionId else { return nil }
+        let activeProfile = normalizedProfile(viewModel.activeProfileName) ?? "default"
+        let rowProfile = normalizedProfile(session.profile) ?? activeProfile
+        return latestMessagePreviews[
+            CachedSessionPreviewIdentity(profile: rowProfile, sessionID: sessionID)
+        ]
+    }
+
+    private func normalizedProfile(_ rawProfile: String?) -> String? {
+        guard let profile = rawProfile?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !profile.isEmpty else { return nil }
+        return profile
     }
 
     private var sessionsHeaderRow: some View {
@@ -604,6 +692,15 @@ struct SessionInteractiveRow: View {
     let selectedSessionID: String?
     let actions: SessionListRowActions
     var useMessagesStyle = false
+    var latestMessagePreview: String? = nil
+    var latestMessageTimestamp: Double? = nil
+
+    private var actionCapabilities: SessionRowActionPolicy.Capabilities {
+        SessionRowActionPolicy.Capabilities(
+            isSearchOnlySession: viewModel.isSearchOnlySession(session),
+            isViewingCachedData: viewModel.isViewingCachedData
+        )
+    }
 
     var body: some View {
         Button {
@@ -613,7 +710,9 @@ struct SessionInteractiveRow: View {
                 MessagesSessionRowView(
                     session: session,
                     isViewingCachedData: viewModel.isViewingCachedData,
-                    server: server
+                    server: server,
+                    latestMessagePreview: latestMessagePreview,
+                    latestMessageTimestamp: latestMessageTimestamp
                 )
             } else {
                 SessionRowView(
@@ -649,6 +748,7 @@ struct SessionInteractiveRow: View {
                 isMovingSession: viewModel.isMovingSession,
                 isLoadingProjects: viewModel.isLoadingProjects,
                 isMutating: viewModel.isMutating(session),
+                capabilities: actionCapabilities,
                 actions: actions
             )
         }
@@ -661,7 +761,10 @@ struct SessionInteractiveRow: View {
 
     @ViewBuilder
     private func sessionLeadingSwipeActions(for session: SessionSummary) -> some View {
-        if canShowSessionMutationActions(for: session) {
+        if SessionRowActionPolicy.offersMetadataActions(
+            for: session,
+            capabilities: actionCapabilities
+        ) {
             Button {
                 actions.togglePinned(session)
             } label: {
@@ -674,7 +777,10 @@ struct SessionInteractiveRow: View {
 
     @ViewBuilder
     private func sessionTrailingSwipeActions(for session: SessionSummary) -> some View {
-        if canShowSessionMutationActions(for: session) {
+        if SessionRowActionPolicy.offersMetadataActions(
+            for: session,
+            capabilities: actionCapabilities
+        ) {
             Button {
                 actions.archive(session)
             } label: {
@@ -682,7 +788,12 @@ struct SessionInteractiveRow: View {
             }
             .disabled(viewModel.isMutating(session))
             .tint(.orange)
+        }
 
+        if SessionRowActionPolicy.offersCollectionActions(
+            for: session,
+            capabilities: actionCapabilities
+        ) {
             Button {
                 actions.delete(session)
             } label: {
@@ -691,12 +802,6 @@ struct SessionInteractiveRow: View {
             .disabled(viewModel.isMutating(session))
             .tint(.red)
         }
-    }
-
-    private func canShowSessionMutationActions(for session: SessionSummary) -> Bool {
-        SessionRowActionPolicy.offersMutationActions(for: session)
-            && !viewModel.isViewingCachedData
-            && hasServerSessionID(session)
     }
 }
 
@@ -844,7 +949,12 @@ struct SessionRowContextMenu: View {
     let isMovingSession: Bool
     let isLoadingProjects: Bool
     let isMutating: Bool
+    var capabilities: SessionRowActionPolicy.Capabilities = .canonical
     let actions: SessionListRowActions
+
+    private var effectiveCapabilities: SessionRowActionPolicy.Capabilities {
+        capabilities.includingCachedData(isViewingCachedData)
+    }
 
     var body: some View {
         let fullTitle = SessionRowView.displayTitle(for: session)
@@ -859,7 +969,10 @@ struct SessionRowContextMenu: View {
             }
         }
 
-        if SessionRowActionPolicy.offersMutationActions(for: session) {
+        if SessionRowActionPolicy.offersMetadataActions(
+            for: session,
+            capabilities: effectiveCapabilities
+        ) {
             Button {
                 actions.togglePinned(session)
             } label: {
@@ -873,7 +986,12 @@ struct SessionRowContextMenu: View {
                 Label("Rename", systemImage: "pencil")
             }
             .disabled(isViewingCachedData || isRenamingSession || !hasServerSessionID(session))
+        }
 
+        if SessionRowActionPolicy.offersCollectionActions(
+            for: session,
+            capabilities: effectiveCapabilities
+        ) {
             Button {
                 actions.duplicate(session)
             } label: {
@@ -881,34 +999,39 @@ struct SessionRowContextMenu: View {
             }
             .disabled(isViewingCachedData || session.sessionId == nil || isMutating)
 
-            Menu {
-                SessionProjectMoveMenu(
-                    session: session,
-                    projects: projects,
-                    isCreatingProject: isCreatingProject,
-                    isMovingSession: isMovingSession,
-                    isLoadingProjects: isLoadingProjects,
-                    actions: actions
-                )
-            } label: {
-                Label("Move to Project", systemImage: "folder")
+            if actions.projectsEnabled {
+                Menu {
+                    SessionProjectMoveMenu(
+                        session: session,
+                        projects: projects,
+                        isCreatingProject: isCreatingProject,
+                        isMovingSession: isMovingSession,
+                        isLoadingProjects: isLoadingProjects,
+                        actions: actions
+                    )
+                } label: {
+                    Label("Move to Project", systemImage: "folder")
+                }
+                .disabled(isViewingCachedData || session.sessionId == nil || isMutating)
             }
-            .disabled(isViewingCachedData || session.sessionId == nil || isMutating)
         }
 
-        // Export works for any session the server can see, including read-only
-        // and foreign/CLI rows; it only needs a live server session ID.
+        // Export works for canonical sessions the server can see, including
+        // read-only and foreign/CLI rows. Search-only rows retain the local
+        // deeplink action but do not claim collection-backed export support.
         Menu {
-            Button {
-                actions.export(session, .html)
-            } label: {
-                Label("Export as HTML", systemImage: "doc.richtext")
-            }
+            if canExportSession {
+                Button {
+                    actions.export(session, .html)
+                } label: {
+                    Label("Export as HTML", systemImage: "doc.richtext")
+                }
 
-            Button {
-                actions.export(session, .json)
-            } label: {
-                Label("Export as JSON", systemImage: "curlybraces")
+                Button {
+                    actions.export(session, .json)
+                } label: {
+                    Label("Export as JSON", systemImage: "curlybraces")
+                }
             }
 
             if let deepLinkURL = SessionRowActionPolicy.deepLinkURL(
@@ -925,16 +1048,24 @@ struct SessionRowContextMenu: View {
         } label: {
             Label("Export", systemImage: "square.and.arrow.up")
         }
-        .disabled(!canExportSession || isMutating)
+        .disabled((!canExportSession && !canCopyDeepLink) || isMutating)
 
-        if SessionRowActionPolicy.offersMutationActions(for: session) {
+        if SessionRowActionPolicy.offersMetadataActions(
+            for: session,
+            capabilities: effectiveCapabilities
+        ) {
             Button {
                 actions.archive(session)
             } label: {
                 Label("Archive", systemImage: "archivebox")
             }
             .disabled(!canShowSessionMutationActions || isMutating)
+        }
 
+        if SessionRowActionPolicy.offersCollectionActions(
+            for: session,
+            capabilities: effectiveCapabilities
+        ) {
             Button(role: .destructive) {
                 actions.delete(session)
             } label: {
@@ -945,13 +1076,22 @@ struct SessionRowContextMenu: View {
     }
 
     private var canShowSessionMutationActions: Bool {
-        SessionRowActionPolicy.offersMutationActions(for: session)
-            && !isViewingCachedData
-            && hasServerSessionID(session)
+        SessionRowActionPolicy.offersMetadataActions(
+            for: session,
+            capabilities: effectiveCapabilities
+        )
     }
 
     private var canExportSession: Bool {
-        SessionRowActionPolicy.canExport(session, isViewingCachedData: isViewingCachedData)
+        SessionRowActionPolicy.canExport(session, capabilities: effectiveCapabilities)
+    }
+
+    private var canCopyDeepLink: Bool {
+        SessionRowActionPolicy.deepLinkURL(
+            for: session,
+            isViewingCachedData: isViewingCachedData,
+            isMutating: isMutating
+        ) != nil
     }
 }
 

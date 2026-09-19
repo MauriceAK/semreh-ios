@@ -27,38 +27,6 @@ struct SessionMutationResponse: Decodable {
     let error: String?
 }
 
-struct ProjectsResponse: Decodable, Equatable {
-    let projects: [ProjectSummary]?
-
-    enum CodingKeys: String, CodingKey {
-        case projects
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        projects = try? container.decodeIfPresent([ProjectSummary].self, forKey: .projects)
-    }
-}
-
-struct ProjectMutationResponse: Decodable, Equatable {
-    let ok: Bool?
-    let project: ProjectSummary?
-    let error: String?
-
-    enum CodingKeys: String, CodingKey {
-        case ok
-        case project
-        case error
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        ok = container.decodeLossyBoolIfPresent(forKey: .ok)
-        project = try? container.decodeIfPresent(ProjectSummary.self, forKey: .project)
-        error = container.decodeLossyStringIfPresent(forKey: .error)
-    }
-}
-
 struct ProjectSummary: Decodable, Equatable, Hashable, Identifiable {
     var id: String { projectId ?? name ?? UUID().uuidString }
 
@@ -66,6 +34,13 @@ struct ProjectSummary: Decodable, Equatable, Hashable, Identifiable {
     let name: String?
     let color: String?
     let createdAt: Double?
+
+    init(projectId: String?, name: String?, color: String?, createdAt: Double? = nil) {
+        self.projectId = projectId
+        self.name = name
+        self.color = color
+        self.createdAt = createdAt
+    }
 
     enum CodingKeys: String, CodingKey {
         case projectId
@@ -133,14 +108,6 @@ struct SessionRetryResponse: Decodable, Equatable {
     let error: String?
 }
 
-struct SessionStatusResponse: Decodable, Equatable {
-    let sessionId: String?
-    let activeStreamId: String?
-    let isStreaming: Bool?
-    let pendingUserMessage: String?
-    let error: String?
-}
-
 struct SessionSummary: Decodable, Equatable, Hashable, Identifiable {
     var id: String {
         if let sessionId, !sessionId.isEmpty {
@@ -153,7 +120,7 @@ struct SessionSummary: Decodable, Equatable, Hashable, Identifiable {
     }
 
     let sessionId: String?
-    let title: String?
+    private(set) var title: String?
     let workspace: String?
     let model: String?
     let modelProvider: String?
@@ -162,9 +129,9 @@ struct SessionSummary: Decodable, Equatable, Hashable, Identifiable {
     let createdAt: Double?
     let updatedAt: Double?
     let lastMessageAt: Double?
-    let pinned: Bool?
-    let archived: Bool?
-    let projectId: String?
+    private(set) var pinned: Bool?
+    private(set) var archived: Bool?
+    private(set) var projectId: String?
     let profile: String?
     let inputTokens: Int?
     let outputTokens: Int?
@@ -296,48 +263,26 @@ struct SessionSummary: Decodable, Equatable, Hashable, Identifiable {
         matchType = nil
     }
 
-    /// Mirrors all stored fields so local title patches preserve session-list metadata.
-    /// Update this when `SessionSummary` gains a new stored property.
-    func replacingTitle(with title: String) -> SessionSummary {
-        SessionSummary(
-            sessionId: sessionId,
-            title: title,
-            workspace: workspace,
-            model: model,
-            modelProvider: modelProvider,
-            reasoningEffort: reasoningEffort,
-            messageCount: messageCount,
-            createdAt: createdAt,
-            updatedAt: updatedAt,
-            lastMessageAt: lastMessageAt,
-            pinned: pinned,
-            archived: archived,
-            projectId: projectId,
-            profile: profile,
-            inputTokens: inputTokens,
-            outputTokens: outputTokens,
-            estimatedCost: estimatedCost,
-            activeStreamId: activeStreamId,
-            isStreaming: isStreaming,
-            isCliSession: isCliSession,
-            userMessageCount: userMessageCount,
-            hasPendingUserMessage: hasPendingUserMessage,
-            pendingStartedAt: pendingStartedAt,
-            worktreePath: worktreePath,
-            sourceTag: sourceTag,
-            rawSource: rawSource,
-            sessionSource: sessionSource,
-            sourceLabel: sourceLabel,
-            parentSessionId: parentSessionId,
-            relationshipType: relationshipType,
-            readOnly: readOnly,
-            isReadOnly: isReadOnly,
-            matchType: matchType
-        )
-    }
 }
 
 extension SessionSummary {
+    /// Replaces exactly these fields, including nil. Callers resolve any
+    /// revision or fallback policy before constructing the new value.
+    func replacingListMetadata(title: String?, pinned: Bool?, archived: Bool?) -> SessionSummary {
+        var copy = self
+        copy.title = title
+        copy.pinned = pinned
+        copy.archived = archived
+        return copy
+    }
+
+    /// Nil explicitly removes the local group assignment.
+    func withLocalOrganizerGroupID(_ groupID: String?) -> SessionSummary {
+        var copy = self
+        copy.projectId = groupID
+        return copy
+    }
+
     /// Delegated children are identified only by an explicit source marker.
     /// Parent linkage is shared by ordinary forks and compression continuations,
     /// so it must never classify a row as a subagent on its own.

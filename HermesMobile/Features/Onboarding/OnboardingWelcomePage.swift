@@ -3,53 +3,110 @@ import SwiftUI
 struct OnboardingWelcomePage: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.colorScheme) private var colorScheme
-    @Environment(\.appColorPalette) private var palette
 
     private var logoWidth: CGFloat {
-        dynamicTypeSize.isAccessibilitySize ? 208 : 244
+        dynamicTypeSize.isAccessibilitySize ? 210 : 220
     }
 
+    private let birdIdentities: [BirdAvatarIdentity] = {
+        guard let server = URL(string: "https://semreh.example") else { return [] }
+        return (0..<5).compactMap { BirdAvatarIdentity(server: server, profile: "onboarding-\($0)") }
+    }()
+
     var body: some View {
-        VStack(spacing: 0) {
-            Spacer(minLength: 30)
-
-            SemrehBrandLockup(width: logoWidth)
-
-            Spacer(minLength: 34)
-
-            VStack(spacing: 12) {
-                Text("Control Semreh from iPhone or iPad.")
-                    .font(.system(size: dynamicTypeSize.isAccessibilitySize ? 27 : 31, weight: .bold))
-                    .foregroundStyle(OnboardingTheme.primaryText(for: colorScheme, palette: palette))
-                    .multilineTextAlignment(.center)
-                    .lineLimit(3)
-                    .minimumScaleFactor(0.86)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                Text("Connect to your self-hosted Web UI over Tailscale.")
-                    .font(.subheadline)
-                    .foregroundStyle(OnboardingTheme.secondaryText(for: colorScheme, palette: palette))
-                    .multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 8) {
-                        HeroBadge(systemImage: "lock.shield.fill", title: String(localized: "Password protected"))
-                        HeroBadge(systemImage: "network", title: String(localized: "Tailscale ready"))
+        GeometryReader { geometry in
+            ScrollView(.vertical, showsIndicators: false) {
+                ZStack {
+                    if shouldShowBirds(in: geometry.size) {
+                        OnboardingBirdPerimeter(
+                            identities: birdIdentities,
+                            canvasSize: geometry.size
+                        )
                     }
 
-                    VStack(spacing: 8) {
-                        HeroBadge(systemImage: "lock.shield.fill", title: String(localized: "Password protected"))
-                        HeroBadge(systemImage: "network", title: String(localized: "Tailscale ready"))
+                    VStack(spacing: 0) {
+                        Spacer(minLength: 70)
+
+                        SemrehBrandLockup(width: logoWidth)
+
+                        Color.clear.frame(height: 20)
+
+                        Text("Your Hermes companion")
+                            .font(.system(.title3, design: .rounded, weight: .medium))
+                            .foregroundStyle(OnboardingTheme.primaryText(for: colorScheme, palette: .semreh))
+                            .multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        Spacer(minLength: 70)
                     }
+                    .frame(width: min(420, max(0, geometry.size.width - 48)))
+                    .frame(minHeight: geometry.size.height)
+                    .padding(.horizontal, 24)
+                }
+                .frame(width: geometry.size.width)
+                .frame(minHeight: geometry.size.height)
+                .padding(.bottom, 18)
+            }
+            .scrollBounceBehavior(.basedOnSize)
+        }
+    }
+
+    private func shouldShowBirds(in size: CGSize) -> Bool {
+        !dynamicTypeSize.isAccessibilitySize && size.width >= 320 && size.height >= 420
+    }
+}
+
+private struct OnboardingBirdPerimeter: View {
+    let identities: [BirdAvatarIdentity]
+    let canvasSize: CGSize
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var hasAppeared = false
+
+    private let placements: [(x: CGFloat, y: CGFloat, size: CGFloat, rotation: Double, mirrored: Bool)] = [
+        (42, 90, 48, -8, false),
+        (-42, 152, 58, 10, true),
+        (28, 0.42, 46, -5, false),
+        (-34, 0.58, 64, 8, true),
+        (-70, -74, 52, -11, false)
+    ]
+
+    var body: some View {
+        ZStack {
+            ForEach(Array(placements.enumerated()), id: \.offset) { index, placement in
+                if index < identities.count {
+                    BirdAvatarView(identity: identities[index])
+                        .frame(width: placement.size, height: placement.size)
+                        .scaleEffect(x: placement.mirrored ? -1 : 1, y: 1)
+                        .rotationEffect(.degrees(placement.rotation))
+                        .opacity(reduceMotion || hasAppeared ? 1 : 0)
+                        .offset(y: reduceMotion || hasAppeared ? 0 : 6)
+                        .animation(
+                            reduceMotion
+                                ? nil
+                                : .easeOut(duration: 0.42).delay(Double(index) * 0.06),
+                            value: hasAppeared
+                        )
+                        .position(
+                            x: positionX(placement.x),
+                            y: positionY(placement.y)
+                        )
                 }
             }
-            .frame(maxWidth: 420)
-
-            Spacer(minLength: 18)
         }
-        .padding(.horizontal, 24)
-        .padding(.top, 28)
-        .padding(.bottom, 22)
+        .frame(width: canvasSize.width, height: canvasSize.height)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+        .onAppear { hasAppeared = true }
+    }
+
+    private func positionX(_ offset: CGFloat) -> CGFloat {
+        offset >= 0 ? offset : canvasSize.width + offset
+    }
+
+    private func positionY(_ value: CGFloat) -> CGFloat {
+        if value > 0, value < 1 {
+            return canvasSize.height * value
+        }
+        return value >= 0 ? value : canvasSize.height + value
     }
 }

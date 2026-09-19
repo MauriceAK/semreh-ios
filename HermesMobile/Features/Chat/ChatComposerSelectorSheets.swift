@@ -9,6 +9,8 @@ struct ComposerModelPickerSheet: View {
     let onSelect: (ModelCatalogOption) -> Void
     let onToggleFavorite: (ModelCatalogOption) -> Void
     let onDeleteSavedCustom: (ModelCatalogOption) -> Void
+    var controlsHeader: AnyView? = nil
+    var selectionDisabled = false
 
     @Environment(\.dismiss) private var dismiss
     @State private var searchText = ""
@@ -22,12 +24,18 @@ struct ComposerModelPickerSheet: View {
     var body: some View {
         NavigationStack {
             List {
-                customModelEntry
-                    .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 12))
-                    .listRowSeparator(.hidden)
+                if let controlsHeader {
+                    controlsHeader
+                        .listRowSeparator(.hidden)
+                } else {
+                    customModelEntry
+                        .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 12))
+                        .listRowSeparator(.hidden)
+                }
 
                 ForEach(filteredModelGroups) { group in
                     modelGroupDisclosure(group)
+                        .disabled(selectionDisabled)
                         .listRowInsets(EdgeInsets(top: 5, leading: 16, bottom: 5, trailing: 12))
                         .listRowSeparator(.hidden)
                 }
@@ -36,10 +44,16 @@ struct ComposerModelPickerSheet: View {
                     ContentUnavailableView.search(text: searchText)
                         .listRowSeparator(.hidden)
                 }
+                if controlsHeader != nil {
+                    DisclosureGroup("Custom model") {
+                        customModelEntry.disabled(selectionDisabled)
+                    }
+                }
             }
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
-            .navigationTitle("Choose Model")
+            .background { SemrehBackdrop().ignoresSafeArea() }
+            .navigationTitle(controlsHeader == nil ? "Choose Model" : "Chat controls")
             .navigationBarTitleDisplayMode(.inline)
             .searchable(
                 text: $searchText,
@@ -416,6 +430,7 @@ struct ComposerWorkspacePickerSheet: View {
     /// Server base URL used to open the registry manager; nil hides the
     /// Manage affordance (e.g. offline cached mode).
     var managementServer: URL?
+    var managementProfile: String = "default"
     let onLoadSuggestions: (String) async -> Void
     let onSelect: (String) async -> Void
     /// Called after the registry manager closes having changed the registry,
@@ -464,7 +479,7 @@ struct ComposerWorkspacePickerSheet: View {
                     ContentUnavailableView {
                         Label("No Workspaces", systemImage: "folder")
                     } description: {
-                        Text("Try typing a path under your home folder or an existing workspace root.")
+                    Text("Add a device-local bookmark, or enter a path to use for this chat.")
                     }
                 }
             }
@@ -494,7 +509,7 @@ struct ComposerWorkspacePickerSheet: View {
             }
             .sheet(isPresented: $showsManagerSheet) {
                 if let managementServer {
-                    WorkspaceManagerView(server: managementServer) {
+                    WorkspaceManagerView(server: managementServer, profile: managementProfile) {
                         await onRegistryChanged()
                     }
                     .adaptiveFormPresentation()

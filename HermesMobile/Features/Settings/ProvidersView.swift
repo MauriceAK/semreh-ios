@@ -1,9 +1,7 @@
 import SwiftUI
 
-/// Read-only provider status screen (#26): which providers the server knows
-/// about, whether each has a credential (and where it came from), which one is
-/// active, and each provider's model catalog. Deliberately carries no write
-/// affordances — API-key set/delete stays a server-side operation.
+/// Read-only stock provider inventory for the default profile. Availability is
+/// a configuration hint, not a health probe; credential sources are not exposed.
 struct ProvidersView: View {
     let server: URL
 
@@ -69,7 +67,7 @@ struct ProvidersView: View {
                             )
                         }
 
-                        Text("Provider keys are managed on the server. This screen is read-only.")
+                        Text("Default profile provider inventory. Credentials are managed on the server; availability is not a connection test. Credential sources are not reported by this Hermes API.")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                             .padding(.top, 6)
@@ -151,7 +149,7 @@ private struct ProviderRow: View {
                     .multilineTextAlignment(.leading)
 
                 if isActive {
-                    Text("Active")
+                    Text("Selected")
                         .font(.caption2.weight(.semibold))
                         .padding(.horizontal, 8)
                         .padding(.vertical, 3)
@@ -187,7 +185,7 @@ private struct ProviderRow: View {
                         .multilineTextAlignment(.leading)
                 }
                 .accessibilityElement(children: .ignore)
-                .accessibilityLabel(Text("Authentication error: \(authError)"))
+                .accessibilityLabel(Text("Provider notice: \(authError)"))
             }
 
             if let models = provider.models, !models.isEmpty {
@@ -204,7 +202,12 @@ private struct ProviderRow: View {
 
     @ViewBuilder
     private var keyStatusLine: some View {
-        if let hasKey = provider.hasKey {
+        if let available = provider.credentialsAvailable {
+            Label(available ? "Available in model inventory" : "Setup required",
+                  systemImage: available ? "checkmark.seal" : "key")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        } else if let hasKey = provider.hasKey {
             HStack(spacing: 6) {
                 Image(systemName: hasKey ? "checkmark.seal.fill" : "key.slash")
                     .font(.caption)

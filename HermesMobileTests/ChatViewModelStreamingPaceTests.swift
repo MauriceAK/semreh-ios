@@ -13,7 +13,7 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
 
     @MainActor
     func testBufferedBurstRevealsWordByWordAtCadence() async throws {
-        let streamClient = PacingSpySSEStreamingClient()
+        let streamClient = DirectPacingEventFixture()
         // 60s lag bound keeps the quota at one word per tick for this backlog.
         let viewModel = try makeViewModel(
             streamClient: streamClient,
@@ -21,8 +21,7 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
             maxLagNanoseconds: 60_000_000_000
         )
 
-        let didStart = await viewModel.sendMessage("Stream a reply")
-        XCTAssertTrue(didStart)
+        streamClient.startResponse(on: viewModel)
 
         streamClient.emit(.token("alpha beta gamma delta"))
 
@@ -50,7 +49,7 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
 
     @MainActor
     func testLargeBacklogCatchesUpWithinLagBound() async throws {
-        let streamClient = PacingSpySSEStreamingClient()
+        let streamClient = DirectPacingEventFixture()
         // 60 words × 100ms cadence = 6s of backlog; the 300ms lag bound forces a
         // ~20-word quota per tick, so convergence inside the 4s observation window
         // proves catch-up scaling (steady one-word cadence would time out).
@@ -60,8 +59,7 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
             maxLagNanoseconds: 300_000_000
         )
 
-        let didStart = await viewModel.sendMessage("Stream a reply")
-        XCTAssertTrue(didStart)
+        streamClient.startResponse(on: viewModel)
 
         let words = (0..<60).map { "w\($0) " }
         for word in words {
@@ -80,17 +78,16 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
 
     @MainActor
     func testDoneEventFlushesRemainingBufferImmediately() async throws {
-        let streamClient = PacingSpySSEStreamingClient()
+        let streamClient = DirectPacingEventFixture()
         let viewModel = try makeStalledDrainViewModel(streamClient: streamClient)
 
-        let didStart = await viewModel.sendMessage("Stream a reply")
-        XCTAssertTrue(didStart)
+        streamClient.startResponse(on: viewModel)
 
         streamClient.emit(.token("alpha beta gamma"))
         _ = try await observeAssistantContent(viewModel, until: "alpha ")
         XCTAssertEqual(assistantContent(of: viewModel), "alpha ")
 
-        streamClient.emit(.done(DoneStreamEvent()))
+        streamClient.emit(.done)
         XCTAssertEqual(assistantContent(of: viewModel), "alpha beta gamma")
 
         // Nothing may trickle in after completion.
@@ -100,11 +97,10 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
 
     @MainActor
     func testCancelledEventFlushesRemainingBufferImmediately() async throws {
-        let streamClient = PacingSpySSEStreamingClient()
+        let streamClient = DirectPacingEventFixture()
         let viewModel = try makeStalledDrainViewModel(streamClient: streamClient)
 
-        let didStart = await viewModel.sendMessage("Stream a reply")
-        XCTAssertTrue(didStart)
+        streamClient.startResponse(on: viewModel)
 
         streamClient.emit(.token("alpha beta gamma"))
         _ = try await observeAssistantContent(viewModel, until: "alpha ")
@@ -119,15 +115,14 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
 
     @MainActor
     func testPacedContentConvergesByteIdenticalToUnpacedJoin() async throws {
-        let streamClient = PacingSpySSEStreamingClient()
+        let streamClient = DirectPacingEventFixture()
         let viewModel = try makeViewModel(
             streamClient: streamClient,
             wordCadenceNanoseconds: 1_000_000,
             maxLagNanoseconds: 50_000_000
         )
 
-        let didStart = await viewModel.sendMessage("Stream a reply")
-        XCTAssertTrue(didStart)
+        streamClient.startResponse(on: viewModel)
 
         // Awkward chunk boundaries: ZWJ family, flag, CRLF, tabs, doubled spaces,
         // and a combining mark split across chunks ("cafe" + U+0301).
@@ -154,15 +149,14 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
 
     @MainActor
     func testOffscreenTranscriptBuffersPresentationUntilReopened() async throws {
-        let streamClient = PacingSpySSEStreamingClient()
+        let streamClient = DirectPacingEventFixture()
         let viewModel = try makeViewModel(
             streamClient: streamClient,
             wordCadenceNanoseconds: 1_000_000,
             maxLagNanoseconds: 50_000_000
         )
 
-        let didStart = await viewModel.sendMessage("Keep working while I leave")
-        XCTAssertTrue(didStart)
+        streamClient.startResponse(on: viewModel)
         viewModel.setTranscriptPresentationActive(false)
         streamClient.emit(.token("alpha beta gamma"))
         try await Task.sleep(nanoseconds: 50_000_000)
@@ -206,8 +200,8 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
     }
 
     @MainActor
-    func testStreamingPositionRecoversAfterOlderPagePrependsRows() async throws {
-        let streamClient = PacingSpySSEStreamingClient()
+    func testStreamingPositionRecoversAfterStructuralPrepend() async throws {
+        let streamClient = DirectPacingEventFixture()
         let olderMessages: [[String: Any]] = [[
             "role": "user",
             "content": "older page",
@@ -223,18 +217,24 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
             olderMessages: olderMessages
         )
 
-        await viewModel.loadMessages()
+        // makeViewModel seeds renderer history directly; no gateway load claim.
         XCTAssertEqual(viewModel.messagesOffset, 1)
 
-        let didStart = await viewModel.sendMessage("Keep the live tail")
-        XCTAssertTrue(didStart)
+        streamClient.startResponse(on: viewModel)
         streamClient.emit(.token("live"))
         viewModel.flushPendingStreamingContent()
         let liveMessageID = try XCTUnwrap(viewModel.streamingAssistantMessageID)
         XCTAssertTrue(viewModel.hasStreamingAssistantMessageContent)
 
-        let didLoadOlderMessages = await viewModel.loadOlderMessages()
-        XCTAssertTrue(didLoadOlderMessages)
+        // Exercise the shared structural reducer, not gateway pagination;
+        // direct active-run paging has separate boundary and event-routing tests.
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let olderRows = try decoder.decode(
+            [ChatMessage].self,
+            from: JSONSerialization.data(withJSONObject: olderMessages)
+        )
+        viewModel.prependMessagesForTesting(olderRows)
         XCTAssertEqual(viewModel.messages.first?.id, "older-page-0")
         XCTAssertEqual(viewModel.messages.last?.id, liveMessageID)
         XCTAssertTrue(
@@ -243,10 +243,7 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
         )
 
         let recomputesAfterPrepend = viewModel.transcriptFullRecomputeCountForTesting
-        streamClient.emit(.interimAssistant(InterimAssistantStreamEvent(
-            text: "late interim",
-            alreadyStreamed: false
-        )))
+        streamClient.emit(.interimAssistant(text: "late interim", alreadyStreamed: false))
 
         let expectedContent = "live\n\nlate interim"
         XCTAssertEqual(viewModel.messages.last?.content, expectedContent)
@@ -254,8 +251,9 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
         XCTAssertEqual(
             viewModel.transcriptFullRecomputeCountForTesting,
             recomputesAfterPrepend,
-            "an interim event after pagination must replace the shifted live row incrementally"
+            "sealing an interim after pagination must update the shifted live row incrementally"
         )
+        XCTAssertNil(viewModel.streamingAssistantMessageID)
     }
 
     // MARK: - Helpers
@@ -265,7 +263,7 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
     /// so completion-path flushes are observable.
     @MainActor
     private func makeStalledDrainViewModel(
-        streamClient: PacingSpySSEStreamingClient
+        streamClient: DirectPacingEventFixture
     ) throws -> ChatViewModel {
         try makeViewModel(
             streamClient: streamClient,
@@ -274,430 +272,10 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
         )
     }
 
-    @MainActor
-    func testNativeAuthPromptSurvivesStreamFinishForLocalInput() async throws {
-        let streamClient = PacingSpySSEStreamingClient()
-        let viewModel = try makeViewModel(
-            streamClient: streamClient,
-            wordCadenceNanoseconds: 1_000_000,
-            maxLagNanoseconds: 50_000_000
-        )
-        let didStart = await viewModel.sendMessage("Hold the native auth request open")
-        XCTAssertTrue(didStart)
-        let component = try XCTUnwrap(
-            try? JSONDecoder().decode(
-                NativeAuthWireComponent.self,
-                from: Data(
-                    """
-                    {"type":"semreh.native-component.v1","issued_by":"browser","immutable":true,"context_id":"ctx_1234567890","browser_session_id":"bs_1234567890","component_id":"cmp_1234567890","field":"fld_email_12345678","action_handle":"act_fill_12345678","kind":"identifier","label":"Email","provider_origin":"https://example.com","path":"/login","runtime_public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","key_id":"rt_1234567890","expires_at":"2099-01-01T00:00:00Z","binding":{"issued_by":"browser","immutable":true,"tab_handle":"tab_12345678","frame_handle":"frame_12345678","document_generation":"doc_12345678","visibility":"visible","editability":"editable","match_count":1,"target_ref":{"issued_by":"browser","immutable":true,"ref_id":"ref_email_12345678","strategy":"css","selector":"input[type=email]"}}}
-                    """.utf8
-                )
-            )
-        )
-
-        viewModel.streamCoordinatorApplyNativeAuthComponent(component)
-        XCTAssertNotNil(viewModel.nativeAuthPrompt)
-
-        streamClient.emit(.done(DoneStreamEvent()))
-
-        XCTAssertNil(viewModel.activeStreamID)
-        XCTAssertNotNil(
-            viewModel.nativeAuthPrompt,
-            "an active native-auth prompt must remain available after the model stream ends"
-        )
-        XCTAssertEqual(
-            viewModel.nativeAuthPrompt?.streamID,
-            "stream-123",
-            "the prompt must retain the browser stream owner after the SSE connection ends"
-        )
-
-        MockURLProtocol.requestHandler = { request in
-            XCTAssertEqual(request.url?.path, "/api/native-auth/cancel")
-            let body = try XCTUnwrap(apiTestJSONBody(from: request))
-            XCTAssertEqual(body["session_id"] as? String, "session-abc")
-            XCTAssertEqual(body["stream_id"] as? String, "stream-123")
-            return apiTestJSONResponse(
-                #"{"ok":true,"state":"cancelled","code":"cancelled","stage":"cancel","retryable":false,"requires_remint":false}"#,
-                for: request
-            )
-        }
-        let didCancel = await viewModel.cancelNativeAuth()
-        XCTAssertTrue(didCancel)
-    }
-
-    @MainActor
-    func testNativeAuthConflictingDuplicateFailsClosedAfterIdempotentDuplicate() async throws {
-        let streamClient = PacingSpySSEStreamingClient()
-        let viewModel = try makeViewModel(
-            streamClient: streamClient,
-            wordCadenceNanoseconds: 1_000_000,
-            maxLagNanoseconds: 50_000_000
-        )
-        let didStart = await viewModel.sendMessage("Open a native auth prompt")
-        XCTAssertTrue(didStart)
-
-        let original = try makeNativeAuthComponent()
-        viewModel.streamCoordinatorApplyNativeAuthComponent(original)
-        viewModel.streamCoordinatorApplyNativeAuthComponent(original)
-        XCTAssertEqual(viewModel.nativeAuthPrompt?.components, [original])
-
-        let conflictingDuplicate = try makeNativeAuthComponent(label: "Changed label")
-        viewModel.streamCoordinatorApplyNativeAuthComponent(conflictingDuplicate)
-
-        XCTAssertNil(viewModel.nativeAuthPrompt)
-        XCTAssertNotNil(viewModel.nativeAuthErrorMessage)
-    }
-
-    @MainActor
-    func testNativeAuthMixedMetadataAndConflictingContextFailClosed() async throws {
-        let streamClient = PacingSpySSEStreamingClient()
-        let viewModel = try makeViewModel(
-            streamClient: streamClient,
-            wordCadenceNanoseconds: 1_000_000,
-            maxLagNanoseconds: 50_000_000
-        )
-        let didStartMixedMetadataStream = await viewModel.sendMessage("Open a native auth prompt")
-        XCTAssertTrue(didStartMixedMetadataStream)
-        let runtimeKey = nativeAuthRuntimePublicKey()
-        let original = try makeNativeAuthComponent(runtimePublicKey: runtimeKey)
-        viewModel.streamCoordinatorApplyNativeAuthComponent(original)
-
-        let mixedMetadata = try makeNativeAuthComponent(
-            browserSessionID: "bs_other_123456",
-            componentID: "cmp_second_123456",
-            field: "fld_second_123456",
-            actionHandle: "act_second_123456",
-            runtimePublicKey: runtimeKey
-        )
-        viewModel.streamCoordinatorApplyNativeAuthComponent(mixedMetadata)
-        XCTAssertNil(viewModel.nativeAuthPrompt)
-
-        let conflictingContext = try makeNativeAuthComponent(
-            contextID: "ctx_other_123456",
-            componentID: "cmp_other_123456",
-            runtimePublicKey: runtimeKey
-        )
-        viewModel.streamCoordinatorApplyNativeAuthComponent(conflictingContext)
-        XCTAssertNil(viewModel.nativeAuthPrompt)
-        XCTAssertNotNil(viewModel.nativeAuthErrorMessage)
-    }
-
-    @MainActor
-    func testNativeAuthOutOfOrderStateAndTerminalReplayCannotResurrectPrompt() async throws {
-        let streamClient = PacingSpySSEStreamingClient()
-        let viewModel = try makeViewModel(
-            streamClient: streamClient,
-            wordCadenceNanoseconds: 1_000_000,
-            maxLagNanoseconds: 50_000_000
-        )
-        let didStartOutOfOrderStream = await viewModel.sendMessage("Open a native auth prompt")
-        XCTAssertTrue(didStartOutOfOrderStream)
-        let component = try makeNativeAuthComponent()
-        viewModel.streamCoordinatorApplyNativeAuthComponent(component)
-
-        let awaiting = try makeNativeAuthState(status: "awaiting_browser")
-        viewModel.streamCoordinatorApplyNativeAuthState(awaiting)
-        viewModel.streamCoordinatorApplyNativeAuthState(try makeNativeAuthState(status: "focused"))
-        XCTAssertEqual(viewModel.nativeAuthPrompt?.state, awaiting)
-
-        viewModel.streamCoordinatorApplyNativeAuthState(try makeNativeAuthState(status: "completed"))
-        XCTAssertNil(viewModel.nativeAuthPrompt)
-        viewModel.streamCoordinatorApplyNativeAuthComponent(component)
-        viewModel.streamCoordinatorApplyNativeAuthState(awaiting)
-        XCTAssertNil(viewModel.nativeAuthPrompt)
-    }
-
-    @MainActor
-    func testNativeAuthAmbiguousRetryReusesEnvelopeAndStaleSuccessCannotReviveState() async throws {
-        let streamClient = PacingSpySSEStreamingClient()
-        let viewModel = try makeViewModel(
-            streamClient: streamClient,
-            wordCadenceNanoseconds: 1_000_000,
-            maxLagNanoseconds: 50_000_000
-        )
-        let didStartRetryStream = await viewModel.sendMessage("Open a native auth prompt")
-        XCTAssertTrue(didStartRetryStream)
-        let runtimeKey = nativeAuthRuntimePublicKey()
-        let input = try makeNativeAuthComponent(runtimePublicKey: runtimeKey)
-        let submit = try makeNativeAuthComponent(
-            componentID: "cmp_submit_123456",
-            field: "fld_submit_123456",
-            actionHandle: "act_submit_123456",
-            kind: "submit",
-            label: "Continue",
-            runtimePublicKey: runtimeKey
-        )
-        viewModel.streamCoordinatorApplyNativeAuthComponent(input)
-        viewModel.streamCoordinatorApplyNativeAuthComponent(submit)
-
-        var envelopes: [[String: Any]] = []
-        var attempt = 0
-        MockURLProtocol.requestHandler = { request in
-            let body = try XCTUnwrap(apiTestJSONBody(from: request))
-            envelopes.append(try XCTUnwrap(body["envelope"] as? [String: Any]))
-            attempt += 1
-            if attempt == 1 { throw URLError(.timedOut) }
-            Thread.sleep(forTimeInterval: 0.12)
-            return apiTestJSONResponse(
-                #"{"ok":true,"state":"submitted","code":"submitted","stage":"complete","retryable":false,"requires_remint":false}"#,
-                for: request
-            )
-        }
-
-        let initialSubmitSucceeded = await viewModel.submitNativeAuth(
-            values: [input.field: "synthetic-value"],
-            component: submit,
-            actionHandle: submit.actionHandle
-        )
-        XCTAssertFalse(initialSubmitSucceeded)
-        XCTAssertTrue(viewModel.nativeAuthCanRetrySubmission)
-
-        let retryTask = Task { @MainActor in
-            await viewModel.submitNativeAuth(
-                values: [:],
-                component: submit,
-                actionHandle: submit.actionHandle
-            )
-        }
-        try await Task.sleep(nanoseconds: 20_000_000)
-        viewModel.streamCoordinatorApplyNativeAuthState(
-            try makeNativeAuthState(
-                componentID: submit.componentID,
-                actionHandle: submit.actionHandle,
-                kind: "submit",
-                status: "completed"
-            )
-        )
-        let retrySucceeded = await retryTask.value
-        XCTAssertFalse(retrySucceeded)
-        XCTAssertEqual(envelopes.count, 2)
-        XCTAssertEqual(envelopes[0]["envelope_id"] as? String, envelopes[1]["envelope_id"] as? String)
-        XCTAssertEqual(envelopes[0]["ciphertext"] as? String, envelopes[1]["ciphertext"] as? String)
-        XCTAssertNil(viewModel.nativeAuthPrompt)
-        XCTAssertFalse(viewModel.nativeAuthCanRetrySubmission)
-    }
-
-    #if DEBUG
-    @MainActor
-    func testNativeAuthE2EAutoSubmitUsesProductionEncryptedRouteOnceAndClearsState() async throws {
-        let streamClient = PacingSpySSEStreamingClient()
-        let server = try XCTUnwrap(URL(string: "http://127.0.0.1:8787"))
-        let forbiddenProbe = UUID().uuidString
-        let controller = try XCTUnwrap(
-            NativeAuthE2EAutoSubmitController.resolve(
-                arguments: [
-                    NativeAuthE2EAutoSubmitController.launchFlag,
-                    "--ignored-e2e-input",
-                    forbiddenProbe
-                ],
-                serverURL: server
-            )
-        )
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [MockURLProtocol.self]
-        let client = APIClient(baseURL: server, session: URLSession(configuration: configuration))
-        let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
-        let summary = try decoder.decode(
-            SessionSummary.self,
-            from: Data(#"{"session_id":"session-abc","title":"E2E"}"#.utf8)
-        )
-        let viewModel = ChatViewModel(
-            session: summary,
-            server: server,
-            client: client,
-            streamClient: streamClient,
-            approvalStreamClient: PacingSpySSEStreamingClient(),
-            clarifyStreamClient: PacingSpySSEStreamingClient()
-        )
-        viewModel.setNativeAuthE2EAutoSubmitControllerForTesting(controller)
-        let submitted = expectation(description: "production native-auth submit route called")
-        var submitRequestCount = 0
-        MockURLProtocol.requestHandler = { request in
-            switch request.url?.path {
-            case "/api/chat/start":
-                return apiTestJSONResponse(
-                    #"{"session_id":"session-abc","stream_id":"stream-123"}"#,
-                    for: request
-                )
-            case "/api/native-auth/submit":
-                submitRequestCount += 1
-                XCTAssertEqual(request.httpMethod, "POST")
-                XCTAssertEqual(request.value(forHTTPHeaderField: "X-Semreh-Client"), "native-auth-v1")
-                let bodyData = try XCTUnwrap(apiTestBodyData(from: request))
-                XCTAssertFalse(String(decoding: bodyData, as: UTF8.self).contains(forbiddenProbe))
-                let body = try XCTUnwrap(JSONSerialization.jsonObject(with: bodyData) as? [String: Any])
-                XCTAssertEqual(Set(body.keys), Set(["session_id", "stream_id", "envelope"]))
-                let envelope = try XCTUnwrap(body["envelope"] as? [String: Any])
-                XCTAssertEqual(
-                    Set(envelope.keys),
-                    Set([
-                        "type", "issued_by", "immutable", "context_id", "browser_session_id",
-                        "envelope_id", "provider_origin", "path", "cipher_suite", "key_id",
-                        "client_public_key", "nonce", "ciphertext", "tag", "journal_policy", "expires_at"
-                    ])
-                )
-                XCTAssertEqual(envelope["journal_policy"] as? String, "never")
-                submitted.fulfill()
-                return apiTestJSONResponse(
-                    #"{"ok":true,"state":"submitted","code":"submitted","stage":"complete","retryable":false,"requires_remint":false}"#,
-                    for: request
-                )
-            default:
-                return apiTestJSONResponse(
-                    #"{"session":{"session_id":"session-abc","title":"E2E","messages":[]}}"#,
-                    for: request
-                )
-            }
-        }
-
-        let didStartFixtureStream = await viewModel.sendMessage("Open the fixture prompt")
-        XCTAssertTrue(didStartFixtureStream)
-        let runtimeKey = nativeAuthRuntimePublicKey()
-        let input = try makeNativeAuthComponent(
-            providerOrigin: "https://127.0.0.1:9443",
-            runtimePublicKey: runtimeKey
-        )
-        let submit = try makeNativeAuthComponent(
-            componentID: "cmp_submit_123456",
-            field: "fld_submit_123456",
-            actionHandle: "act_submit_123456",
-            kind: "submit",
-            label: "Continue",
-            providerOrigin: "https://127.0.0.1:9443",
-            runtimePublicKey: runtimeKey
-        )
-        // SSE callbacks may be scheduled onto MainActor out of wire order. The
-        // available state must be held until its exact components arrive.
-        viewModel.streamCoordinatorApplyNativeAuthState(
-            try makeNativeAuthState(
-                componentID: submit.componentID,
-                actionHandle: submit.actionHandle,
-                kind: "submit",
-                providerOrigin: "https://127.0.0.1:9443",
-                status: "available"
-            )
-        )
-        viewModel.streamCoordinatorApplyNativeAuthComponent(input)
-        viewModel.streamCoordinatorApplyNativeAuthComponent(submit)
-
-        await fulfillment(of: [submitted], timeout: 2)
-        for _ in 0..<100 where !controller.isSpent {
-            try await Task.sleep(nanoseconds: 1_000_000)
-        }
-        XCTAssertEqual(submitRequestCount, 1)
-        XCTAssertNil(viewModel.nativeAuthPrompt)
-        XCTAssertFalse(viewModel.nativeAuthCanRetrySubmission)
-        XCTAssertFalse(controller.hasPendingValues)
-        XCTAssertTrue(controller.isSpent)
-        XCTAssertEqual(controller.attemptCount, 1)
-
-        viewModel.streamCoordinatorApplyNativeAuthComponent(input)
-        try await Task.sleep(nanoseconds: 20_000_000)
-        XCTAssertEqual(submitRequestCount, 1)
-    }
-
-    @MainActor
-    func testNativeAuthE2EAutoSubmitTransportFailureTerminalizesWithoutRetryState() async throws {
-        let streamClient = PacingSpySSEStreamingClient()
-        let server = try XCTUnwrap(URL(string: "http://127.0.0.1:8787"))
-        let controller = try XCTUnwrap(
-            NativeAuthE2EAutoSubmitController.resolve(
-                arguments: [NativeAuthE2EAutoSubmitController.launchFlag],
-                serverURL: server
-            )
-        )
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [MockURLProtocol.self]
-        let client = APIClient(baseURL: server, session: URLSession(configuration: configuration))
-        let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
-        let summary = try decoder.decode(
-            SessionSummary.self,
-            from: Data(#"{"session_id":"session-abc","title":"E2E failure"}"#.utf8)
-        )
-        let viewModel = ChatViewModel(
-            session: summary,
-            server: server,
-            client: client,
-            streamClient: streamClient,
-            approvalStreamClient: PacingSpySSEStreamingClient(),
-            clarifyStreamClient: PacingSpySSEStreamingClient()
-        )
-        viewModel.setNativeAuthE2EAutoSubmitControllerForTesting(controller)
-        let submitAttempted = expectation(description: "encrypted native-auth submit attempted")
-        var submitRequestCount = 0
-        MockURLProtocol.requestHandler = { request in
-            switch request.url?.path {
-            case "/api/chat/start":
-                return apiTestJSONResponse(
-                    #"{"session_id":"session-abc","stream_id":"stream-123"}"#,
-                    for: request
-                )
-            case "/api/native-auth/submit":
-                submitRequestCount += 1
-                let bodyData = try XCTUnwrap(apiTestBodyData(from: request))
-                let body = try XCTUnwrap(JSONSerialization.jsonObject(with: bodyData) as? [String: Any])
-                XCTAssertEqual(Set(body.keys), Set(["session_id", "stream_id", "envelope"]))
-                XCTAssertNotNil(body["envelope"] as? [String: Any])
-                submitAttempted.fulfill()
-                throw URLError(.timedOut)
-            default:
-                return apiTestJSONResponse(
-                    #"{"session":{"session_id":"session-abc","title":"E2E failure","messages":[]}}"#,
-                    for: request
-                )
-            }
-        }
-
-        let didStartFixtureStream = await viewModel.sendMessage("Open the fixture prompt")
-        XCTAssertTrue(didStartFixtureStream)
-        let runtimeKey = nativeAuthRuntimePublicKey()
-        let input = try makeNativeAuthComponent(
-            providerOrigin: "https://127.0.0.1:9443",
-            runtimePublicKey: runtimeKey
-        )
-        let submit = try makeNativeAuthComponent(
-            componentID: "cmp_submit_failure_123456",
-            field: "fld_submit_failure_123456",
-            actionHandle: "act_submit_failure_123456",
-            kind: "submit",
-            label: "Continue",
-            providerOrigin: "https://127.0.0.1:9443",
-            runtimePublicKey: runtimeKey
-        )
-        viewModel.streamCoordinatorApplyNativeAuthComponent(input)
-        viewModel.streamCoordinatorApplyNativeAuthComponent(submit)
-        viewModel.streamCoordinatorApplyNativeAuthState(
-            try makeNativeAuthState(
-                componentID: submit.componentID,
-                actionHandle: submit.actionHandle,
-                kind: "submit",
-                providerOrigin: "https://127.0.0.1:9443",
-                status: "available"
-            )
-        )
-
-        await fulfillment(of: [submitAttempted], timeout: 2)
-        for _ in 0..<100 where viewModel.nativeAuthPrompt != nil {
-            await Task.yield()
-        }
-        XCTAssertEqual(submitRequestCount, 1)
-        XCTAssertNil(viewModel.nativeAuthPrompt)
-        XCTAssertFalse(viewModel.nativeAuthCanRetrySubmission)
-        XCTAssertFalse(viewModel.hasPendingNativeAuthSubmissionForTesting)
-        XCTAssertFalse(controller.hasPendingValues)
-        XCTAssertTrue(controller.isSpent)
-
-        viewModel.streamCoordinatorApplyNativeAuthComponent(input)
-        try await Task.sleep(nanoseconds: 20_000_000)
-        XCTAssertEqual(submitRequestCount, 1)
-    }
-    #endif
 
     @MainActor
     private func makeViewModel(
-        streamClient: PacingSpySSEStreamingClient,
+        streamClient: DirectPacingEventFixture,
         wordCadenceNanoseconds: UInt64,
         maxLagNanoseconds: UInt64,
         historyMessageCount: Int = 0,
@@ -769,17 +347,21 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
             )
         )
 
-        return ChatViewModel(
+        let viewModel = ChatViewModel(
             session: summary,
             server: server,
             client: client,
-            streamClient: streamClient,
-            approvalStreamClient: PacingSpySSEStreamingClient(),
-            clarifyStreamClient: PacingSpySSEStreamingClient(),
             streamingScrollCoalescingDelayNanoseconds: 1_000_000,
             streamingWordRevealCadenceNanoseconds: wordCadenceNanoseconds,
-            streamingMaxRevealLagNanoseconds: maxLagNanoseconds
+            streamingMaxRevealLagNanoseconds: maxLagNanoseconds,
+            gatewayRuntimeProvider: { _ in throw DirectSessionError.invalidResponse }
         )
+        streamClient.attach(viewModel)
+        if historyMessageCount > 0 {
+            let rows = try decoder.decode([ChatMessage].self, from: JSONSerialization.data(withJSONObject: historyMessages))
+            viewModel.seedTranscriptForTesting(rows, messagesOffset: initialMessagesOffset)
+        }
+        return viewModel
     }
 
     @MainActor
@@ -791,16 +373,16 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
 
     @MainActor
     private func timedStreamingHotPaths(historyMessageCount: Int) async throws -> StreamingHotPathBenchmark {
-        let streamClient = PacingSpySSEStreamingClient()
+        let streamClient = DirectPacingEventFixture()
         let viewModel = try makeViewModel(
             streamClient: streamClient,
             wordCadenceNanoseconds: 60_000_000_000,
             maxLagNanoseconds: 3_600_000_000_000,
             historyMessageCount: historyMessageCount
         )
-        await viewModel.loadMessages()
-        let didStart = await viewModel.sendMessage("Benchmark live tail")
-        XCTAssertTrue(didStart)
+        // Benchmark renderer state only; history is explicitly seeded above.
+        let historicalContents = viewModel.messages.compactMap(\.content)
+        streamClient.startResponse(on: viewModel)
         let startedAt = CFAbsoluteTimeGetCurrent()
         streamClient.emit(.token("seed"))
         viewModel.flushPendingStreamingContent()
@@ -817,28 +399,25 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
         XCTAssertEqual(positiveLookups, 2_000)
 
         let recomputesBeforeBurst = viewModel.transcriptFullRecomputeCountForTesting
-        var expectedContent = "seed"
+        var expectedSegments: [String] = []
         let interimStartedAt = CFAbsoluteTimeGetCurrent()
         for index in 0..<400 {
             let interimText = "interim-\(index)"
-            streamClient.emit(.interimAssistant(InterimAssistantStreamEvent(
-                text: interimText,
-                alreadyStreamed: false
-            )))
-            expectedContent += "\n\n\(interimText)"
+            streamClient.emit(.interimAssistant(text: interimText, alreadyStreamed: false))
+            expectedSegments.append(index == 0 ? "seed\n\n\(interimText)" : interimText)
         }
         let interimIngestion = CFAbsoluteTimeGetCurrent() - interimStartedAt
 
-        XCTAssertEqual(assistantContent(of: viewModel), expectedContent)
         XCTAssertEqual(
-            viewModel.displayedTranscriptMessages.last?.message.content,
-            expectedContent,
-            "the incrementally replaced live row must display every interim event"
+            viewModel.messages.compactMap(\.content),
+            historicalContents + expectedSegments,
+            "Sealed segments append without changing the seeded history."
         )
+        XCTAssertEqual(viewModel.displayedTranscriptMessages.last?.message.content, expectedSegments.last)
         XCTAssertEqual(
             viewModel.transcriptFullRecomputeCountForTesting,
             recomputesBeforeBurst,
-            "interim_assistant must replace only the live row, not remap the full transcript"
+            "interim_assistant segment sealing must stay on the incremental transcript path"
         )
 
         let chunks = (0..<400).map { "t\($0) " }
@@ -846,17 +425,17 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
             streamClient.emit(.token(chunk))
         }
         let completionStartedAt = CFAbsoluteTimeGetCurrent()
-        streamClient.emit(.done(DoneStreamEvent()))
+        streamClient.emit(.done)
         let completionElapsed = CFAbsoluteTimeGetCurrent() - completionStartedAt
         let elapsed = CFAbsoluteTimeGetCurrent() - startedAt
         print(
             "SEMREH_HISTORY_PHASE rows=\(historyMessageCount) interim=\(interimIngestion)s completion=\(completionElapsed)s total=\(elapsed)s"
         )
 
-        XCTAssertEqual(assistantContent(of: viewModel), expectedContent + chunks.joined())
+        XCTAssertEqual(assistantContent(of: viewModel), chunks.joined())
         XCTAssertEqual(
             viewModel.displayedTranscriptMessages.last?.message.content,
-            expectedContent + chunks.joined(),
+            chunks.joined(),
             "the incrementally appended live row must paint the complete assistant content"
         )
         return StreamingHotPathBenchmark(
@@ -866,103 +445,6 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
         )
     }
 
-    private func makeNativeAuthComponent(
-        contextID: String = "ctx_1234567890",
-        browserSessionID: String = "bs_1234567890",
-        componentID: String = "cmp_1234567890",
-        field: String = "fld_email_12345678",
-        actionHandle: String = "act_fill_12345678",
-        kind: String = "identifier",
-        label: String = "Email",
-        providerOrigin: String = "https://example.com",
-        path: String = "/login",
-        runtimePublicKey: String? = nil,
-        keyID: String = "rt_1234567890",
-        expiresAt: String = "2099-01-01T00:00:00Z",
-        tabHandle: String = "tab_12345678",
-        frameHandle: String = "frame_12345678",
-        documentGeneration: String = "doc_12345678"
-    ) throws -> NativeAuthWireComponent {
-        let publicKey = runtimePublicKey ?? Curve25519.KeyAgreement.PrivateKey()
-            .publicKey.rawRepresentation.base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
-        let object: [String: Any] = [
-            "type": "semreh.native-component.v1",
-            "issued_by": "browser",
-            "immutable": true,
-            "context_id": contextID,
-            "browser_session_id": browserSessionID,
-            "component_id": componentID,
-            "field": field,
-            "action_handle": actionHandle,
-            "kind": kind,
-            "label": label,
-            "provider_origin": providerOrigin,
-            "path": path,
-            "runtime_public_key": publicKey,
-            "key_id": keyID,
-            "expires_at": expiresAt,
-            "binding": [
-                "issued_by": "browser",
-                "immutable": true,
-                "tab_handle": tabHandle,
-                "frame_handle": frameHandle,
-                "document_generation": documentGeneration,
-                "visibility": "visible",
-                "editability": kind == "submit" ? "not_editable" : "editable",
-                "match_count": 1,
-                "target_ref": [
-                    "issued_by": "browser",
-                    "immutable": true,
-                    "ref_id": "ref_12345678",
-                    "strategy": "css",
-                    "selector": kind == "submit" ? "button[type=submit]" : "input[type=email]"
-                ]
-            ]
-        ]
-        return try JSONDecoder().decode(
-            NativeAuthWireComponent.self,
-            from: JSONSerialization.data(withJSONObject: object)
-        )
-    }
-
-    private func nativeAuthRuntimePublicKey() -> String {
-        Curve25519.KeyAgreement.PrivateKey().publicKey.rawRepresentation.base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
-    }
-
-    private func makeNativeAuthState(
-        contextID: String = "ctx_1234567890",
-        browserSessionID: String = "bs_1234567890",
-        componentID: String = "cmp_1234567890",
-        actionHandle: String = "act_fill_12345678",
-        kind: String = "identifier",
-        providerOrigin: String = "https://example.com",
-        path: String = "/login",
-        status: String
-    ) throws -> NativeAuthWireState {
-        let object: [String: Any] = [
-            "type": "semreh.native-component-state.v1",
-            "issued_by": "browser",
-            "immutable": true,
-            "context_id": contextID,
-            "browser_session_id": browserSessionID,
-            "component_id": componentID,
-            "action_handle": actionHandle,
-            "kind": kind,
-            "provider_origin": providerOrigin,
-            "path": path,
-            "status": status
-        ]
-        return try JSONDecoder().decode(
-            NativeAuthWireState.self,
-            from: JSONSerialization.data(withJSONObject: object)
-        )
-    }
 
     @MainActor
     private func assistantContent(of viewModel: ChatViewModel) -> String? {
@@ -1028,22 +510,52 @@ final class ChatStreamingMotionTests: XCTestCase {
     }
 }
 
-private final class PacingSpySSEStreamingClient: SSEStreamingClient {
-    private(set) var lastEventID: String?
+@MainActor
+private final class DirectPacingEventFixture {
+    enum Event {
+        case token(String)
+        case interimAssistant(text: String, alreadyStreamed: Bool)
+        case done
+        case cancelled
+    }
+
     private(set) var stopCount = 0
-    private var onEvent: (@MainActor (SSEEvent) -> Void)?
+    private weak var viewModel: ChatViewModel?
+    private var sequence = 0
 
-    func start(url: URL, onEvent: @escaping @MainActor (SSEEvent) -> Void) {
-        lastEventID = nil
-        self.onEvent = onEvent
+    func attach(_ viewModel: ChatViewModel) { self.viewModel = viewModel }
+
+    func startResponse(on viewModel: ChatViewModel) {
+        attach(viewModel)
+        emit(type: "message.start")
     }
 
-    func stop() {
-        stopCount += 1
+    func emit(_ event: Event) {
+        switch event {
+        case .token(let text):
+            emit(type: "message.delta", payload: ["text": .string(text)])
+        case .interimAssistant(let text, let alreadyStreamed):
+            emit(type: "message.interim", payload: [
+                "text": .string(text),
+                "already_streamed": .bool(alreadyStreamed)
+            ])
+        case .done:
+            emit(type: "message.complete", payload: ["status": .string("complete")])
+        case .cancelled:
+            emit(type: "message.complete", payload: ["status": .string("cancelled")])
+        }
     }
 
-    @MainActor
-    func emit(_ event: SSEEvent) {
-        onEvent?(event)
+    private func emit(type: String, payload: [String: JSONValue] = [:]) {
+        sequence += 1
+        viewModel?.handleDirectEventForTesting(HermesGatewayEvent(
+            method: "event",
+            type: type,
+            sessionID: "runtime-test",
+            sequence: sequence,
+            payload: .object(payload),
+            params: nil,
+            connectionGeneration: 1
+        ))
     }
 }

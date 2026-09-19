@@ -17,8 +17,19 @@ enum ChatMotion {
         reduceMotion ? .easeOut(duration: 0.12) : .smooth(duration: 0.22, extraBounce: 0)
     }
 
+    /// Duration of the explicit bottom-jump easeOut. The settlement-churn
+    /// gate shares this same constant so its in-flight window can never
+    /// drift from the animation actually issued.
+    static let scrollToLatestDuration: TimeInterval = 0.20
+
     static func scrollToLatest(reduceMotion: Bool) -> Animation? {
-        reduceMotion ? nil : .easeOut(duration: 0.20)
+        reduceMotion ? nil : .easeOut(duration: scrollToLatestDuration)
+    }
+
+    /// The window during which an issued explicit bottom-jump animation is
+    /// still airborne. Direct jumps (Reduce Motion) have no window.
+    static func explicitBottomAnimationWindow(reduceMotion: Bool) -> TimeInterval {
+        reduceMotion ? 0 : scrollToLatestDuration
     }
 
     /// Bottom-follow scrolling and active-row height growth while a response

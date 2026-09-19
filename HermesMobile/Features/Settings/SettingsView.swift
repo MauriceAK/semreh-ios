@@ -3,20 +3,44 @@ import SwiftData
 import UIKit
 import UserNotifications
 
-/// A Settings section a deep link can scroll to when the screen opens — the
-/// avatar long-press "Manage Servers" shortcut lands on the Servers card (#283).
+/// A Settings section a deep link can open when the screen opens — the avatar
+/// long-press "Manage Servers" shortcut lands on Connections (#283).
 enum SettingsScrollAnchor: Hashable {
     case servers
+}
+
+private enum SettingsDestination: Hashable {
+    case appearance
+    case chat
+    case connections
+    case toolsAndHistory
+    case aboutAndStorage
+
+    var title: String {
+        switch self {
+        case .appearance:
+            String(localized: "Appearance")
+        case .chat:
+            String(localized: "Chat")
+        case .connections:
+            String(localized: "Connections")
+        case .toolsAndHistory:
+            String(localized: "Tools & History")
+        case .aboutAndStorage:
+            String(localized: "About & Storage")
+        }
+    }
 }
 
 struct SettingsView: View {
     @Bindable var authManager: AuthManager
     let server: URL
-    /// When set, Settings scrolls to this section once on first appear (#283).
+    /// When set, Settings opens the matching destination once on first appear (#283).
     let initialScrollTarget: SettingsScrollAnchor?
     /// Optional content rendered above the existing settings cards (for example,
     /// the profile summary in the shell's You tab).
     let header: AnyView?
+    private let destination: SettingsDestination?
 
     init(
         authManager: AuthManager,
@@ -28,21 +52,23 @@ struct SettingsView: View {
         self.server = server
         self.initialScrollTarget = initialScrollTarget
         self.header = header
-        // The CLI-sessions toggle is server-synced (#19): loads adopt the
-        // server's `show_cli_sessions`, toggles POST it back, failures revert.
-        // Stored per-server so one server's value never leaks into another.
-        _cliSessionsSync = State(initialValue: CliSessionsSyncModel(server: server) { value in
-            let client = APIClient(baseURL: server)
-            _ = try await client.updateSettings(showCliSessions: value)
-        } writeClaudeCodeToServer: { value in
-            let client = APIClient(baseURL: server)
-            _ = try await client.updateSettings(showClaudeCodeSessions: value)
-        })
+        self.destination = nil
+        _cliSessionsSync = State(initialValue: CliSessionsSyncModel(server: server))
+    }
+
+    private init(authManager: AuthManager, server: URL, destination: SettingsDestination) {
+        self.authManager = authManager
+        self.server = server
+        self.initialScrollTarget = nil
+        self.header = nil
+        self.destination = destination
+        _cliSessionsSync = State(initialValue: CliSessionsSyncModel(server: server))
     }
 
     @ScaledMetric(relativeTo: .body) private var settingsCardSpacing: CGFloat = 18
     @State private var isConfirmingReconfigure = false
     @State private var didScrollToInitialTarget = false
+    @State private var isPresentingInitialServerDestination = false
     @State private var isPresentingAddServer = false
     @State private var isConfirmingClearCache = false
     @State private var isClearingCache = false
@@ -50,13 +76,14 @@ struct SettingsView: View {
     @State private var isLoadingServerSettings = false
     @State private var serverVersion: String?
     @State private var serverSettingsError: String?
-    @State private var serverUpdateState: UpdatesCheckResponse.WebUIUpdateState?
+    @State private var serverUpdateState: UpdatesCheckResponse.UpdateState?
     @State private var updateApplyPhase: ServerUpdateApplyPhase = .idle
     @State private var isConfirmingUpdate = false
     @State private var updateApplyMessage: String?
     @State private var isCheckingForUpdates = false
     @State private var forcedCheckOutcome: UpdatesCheckResponse.ForcedCheckOutcome?
     @State private var isPresentingForcedCheckResult = false
+    @State private var updateOperation: Task<Void, Never>?
     @State private var defaultModel: String?
     @State private var defaultProfileName: String?
     @State private var defaultProfileDisplayName: String?
@@ -67,6 +94,7 @@ struct SettingsView: View {
     @State private var notificationPermissionStatus: UNAuthorizationStatus?
     @State private var notificationStatusMessage: String?
     @AppStorage(AppTheme.storageKey) private var appThemeRawValue = AppTheme.system.rawValue
+    @AppStorage(AppAccent.storageKey) private var appAccentRawValue = AppAccent.defaultValue.rawValue
     @AppStorage(AppHaptics.isEnabledKey) private var isHapticsEnabled = true
     @AppStorage(ResponseCompletionNotifications.isEnabledKey) private var isResponseCompletionNotificationsEnabled = false
     @AppStorage(ResponseCompletionNotifications.hasRequestedPermissionKey) private var hasRequestedResponseCompletionNotificationPermission = false
@@ -89,6 +117,9 @@ struct SettingsView: View {
     @AppStorage(ChatTranscriptDisplaySettings.rtlChatLayoutEnabledKey) private var rtlChatLayoutEnabled = ChatTranscriptDisplaySettings.rtlChatLayoutDefaultEnabled
     @AppStorage(StreamedTextAnimationSettings.isEnabledKey) private var isStreamedTextAnimationEnabled = true
     @AppStorage(PrimaryActionTintSettings.isEnabledKey) private var tintsPrimaryActions = false
+    // These legacy identity values remain persisted and are still consumed by
+    // the server registry/session list. The editor is intentionally not on the
+    // settings index; per-server identity remains available from Connections.
     @AppStorage(SessionIdentitySettings.displayNameKey) private var identityDisplayName = ""
     @AppStorage(SessionIdentitySettings.initialsKey) private var identityInitials = ""
     @AppStorage(SectionVisibilitySettings.tasksKey) private var showsTasksSection = true
@@ -106,44 +137,54 @@ struct SettingsView: View {
     @Environment(\.appColorPalette) private var palette
 
     var body: some View {
-        ScrollViewReader { proxy in
         ScrollView {
             VStack(spacing: settingsCardSpacing) {
-                if let header {
-                    header
-                }
-
-                SettingsCard(title: String(localized: "Identity")) {
-                    SessionIdentitySettingsEditor(
-                        displayName: $identityDisplayName,
-                        initials: identityInitialsBinding,
-                        previewInitials: identityPreviewInitials,
-                        previewColor: SemrehVisualTheme.brandActionColor(for: palette),
-                        previewForeground: SemrehVisualTheme.energyForeground(for: palette)
-                    )
-                }
-
-                SettingsCard(title: String(localized: "Archived Sessions")) {
-                    NavigationLink {
-                        ArchivedSessionsView(server: server, onAPIError: authManager.handleAPIError)
-                    } label: {
-                        SettingsAccessoryRow(title: String(localized: "Archived Sessions"), systemImage: "archivebox")
+                if destination == nil {
+                    if let header {
+                        header
+                    } else {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Make Semreh yours.").font(SemrehTypography.heading)
+                            Text("Your preferences, conversations, and connected servers.")
+                                .font(SemrehTypography.body).foregroundStyle(.secondary)
+                        }.frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .buttonStyle(.plain)
+
+                    settingsDestinationIndex
                 }
 
-                SettingsCard(title: String(localized: "Appearance")) {
+                if destination == .appearance {
+                SettingsCard {
                     SettingsPickerRow(
                         title: String(localized: "Theme"),
                         systemImage: "circle.lefthalf.filled",
-                        selection: $appThemeRawValue
+                        selection: appThemeSettingsBinding
                     ) {
-                        ForEach(AppTheme.allCases) { theme in
-                            Text(theme.title).tag(theme.rawValue)
+                        ForEach(settingsThemeOptions) { theme in
+                            Text(settingsThemeTitle(for: theme)).tag(theme.rawValue)
                         }
                     }
 
-                    SettingsFootnote(String(localized: "Semreh follows your system appearance. Goku Light and Goku Dark keep the legacy Goku colors; other themes restyle the app."))
+                    SettingsFootnote(String(localized: "System follows the device appearance. Light and Dark use Semreh's cream and charcoal palette."))
+
+                    if let legacyThemeTitle {
+                        SettingsFootnote(String(localized: "Legacy theme \(legacyThemeTitle) is still preserved. Choose System, Light, or Dark to switch."))
+                    }
+
+                    SettingsDivider()
+
+                    SettingsPickerRow(
+                        title: String(localized: "Accent"),
+                        systemImage: "paintbrush",
+                        selection: Binding(
+                            get: { AppAccent.storedValue(appAccentRawValue).rawValue },
+                            set: { appAccentRawValue = $0 }
+                        )
+                    ) {
+                        ForEach(AppAccent.allCases) { accent in
+                            Text(accent.title).tag(accent.rawValue)
+                        }
+                    }
 
                     SettingsDivider()
 
@@ -155,7 +196,10 @@ struct SettingsView: View {
 
                     SettingsFootnote(String(localized: "Apply the active theme accent to these primary buttons."))
                 }
+                }
 
+                if destination == .chat {
+                SettingsCategory(title: "Chat", subtitle: "Responses, dictation, and transcript details", systemImage: "bubble.left.and.bubble.right") {
                 SettingsCard(title: String(localized: "Interaction")) {
                     SettingsToggleRow(
                         title: String(localized: "Haptic Feedback"),
@@ -174,6 +218,8 @@ struct SettingsView: View {
                     if let notificationStatusText {
                         SettingsFootnote(notificationStatusText)
                     }
+
+                    SettingsFootnote(String(localized: "Uses on-device iOS notifications. Remote push delivery is not configured."))
 
                     SettingsDivider()
 
@@ -298,7 +344,7 @@ struct SettingsView: View {
                     SettingsDivider()
 
                     SettingsToggleRow(
-                        title: String(localized: "Files Button"),
+                        title: String(localized: "Show Files in chat menu"),
                         systemImage: "folder",
                         isOn: $showsChatFilesButton
                     )
@@ -306,15 +352,36 @@ struct SettingsView: View {
                     SettingsDivider()
 
                     SettingsToggleRow(
-                        title: String(localized: "Git Actions"),
+                        title: String(localized: "Show Git actions"),
                         systemImage: "arrow.triangle.branch",
                         isOn: $showsChatGitControls
                     )
 
                     SettingsFootnote(String(localized: "Covers both the git menu in the chat toolbar and the branch picker in the composer."))
                 }
+                }
+                }
 
-                SettingsCard(title: String(localized: "Main Page")) {
+                if destination == .toolsAndHistory {
+                SettingsCategory(title: "Tools & History", subtitle: "Organizers, session visibility, and archives", systemImage: "square.grid.2x2") {
+                SettingsCard(title: String(localized: "Tools")) {
+                    NavigationLink {
+                        ControlView(
+                            authManager: authManager,
+                            server: server,
+                            showsConnectionRows: false
+                        )
+                    } label: {
+                        SettingsAccessoryRow(
+                            title: String(localized: "Open Tools"),
+                            systemImage: "square.grid.2x2"
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("Opens secondary tools and organizers.")
+
+                    SettingsDivider()
+
                     SettingsToggleRow(
                         title: String(localized: "Tasks"),
                         systemImage: "calendar.badge.clock",
@@ -369,7 +436,7 @@ struct SettingsView: View {
                         isOn: $showsProjectsSection
                     )
 
-                    SettingsFootnote(String(localized: "Turn off the entries you never use to shorten the top of the session list. Each one is the only way into its screen, so turn it back on here when you need it again."))
+                    SettingsFootnote(String(localized: "Choose which entries appear in Settings → Tools. Turn an entry back on here whenever you need it."))
                 }
 
                 SettingsCard(title: String(localized: "Sessions")) {
@@ -426,33 +493,23 @@ struct SettingsView: View {
                         isOn: $showsSubagentSessions
                     )
 
-                    if let syncError = cliSessionsSync.syncErrorMessage
-                        ?? cliSessionsSync.claudeCodeSyncErrorMessage {
-                        SettingsErrorFootnote(syncError)
-                    } else if cliSessionsSync.serverSyncsCliSessions
-                        || cliSessionsSync.serverSyncsClaudeCodeSessions {
-                        SettingsFootnote(String(localized: "Session visibility is synced with this server, so the WebUI follows it too."))
-                    }
+                    SettingsFootnote(String(localized: "Session visibility is saved on this device for this server."))
                 }
 
-                SettingsCard(title: String(localized: "Siri & Shortcuts")) {
-                    if let settingsURL = URL(string: UIApplication.openSettingsURLString) {
-                        Link(destination: settingsURL) {
-                            SettingsAccessoryRow(
-                                title: String(localized: "Open Semreh Settings"),
-                                systemImage: "gearshape",
-                                accessorySystemImage: "arrow.up.forward"
-                            )
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Open Semreh Settings")
+                SettingsCard(title: String(localized: "Archived Sessions")) {
+                    NavigationLink {
+                        ArchivedSessionsView(server: server, onAPIError: authManager.handleAPIError)
+                } label: {
+                        SettingsAccessoryRow(title: String(localized: "Archived Sessions"), systemImage: "archivebox")
                     }
-
-                    SettingsFootnote(String(localized: "Run Semreh actions like New Chat from Siri, Spotlight, the Lock Screen, or the iPhone Action button. Open Semreh Settings to manage its Siri & Search options. To assign an action to the Action button, open the iOS Settings app, choose Action Button, then Shortcut, and pick a Semreh action."))
+                    .buttonStyle(.plain)
+                }
+                }
                 }
 
+                if destination == .connections {
+                SettingsCategory(title: "Connections", subtitle: "Servers, profiles, providers, and updates", systemImage: "server.rack") {
                 serversCard
-                    .id(SettingsScrollAnchor.servers)
 
                 SettingsCard(title: String(localized: "Active Server")) {
                     HapticButton {
@@ -489,6 +546,17 @@ struct SettingsView: View {
 
                     SettingsDivider()
 
+                    SettingsValueRow(title: String(localized: "Version")) {
+                        serverVersionContent
+                    }
+
+                    serverUpdateCheckAction
+                    serverUpdateNote
+                    serverUpdateAction
+                }
+
+                SettingsCard(title: String(localized: "Advanced")) {
+
                     NavigationLink {
                         ProvidersView(server: server)
                     } label: {
@@ -512,27 +580,26 @@ struct SettingsView: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityHint("Opens the custom request headers editor.")
+                }
+                }
+                }
 
-                    SettingsDivider()
-
-                    NavigationLink {
-                        OfficialContinuitySettingsView(authManager: authManager, account: activeAccount)
-                    } label: {
-                        SettingsAccessoryRow(
-                            title: String(localized: "Hermes Continuity"),
-                            systemImage: "arrow.triangle.merge"
-                        )
+                if destination == .aboutAndStorage {
+                SettingsCategory(title: "About & Storage", subtitle: "Support, offline data, and account", systemImage: "info.circle") {
+                SettingsCard(title: String(localized: "Siri & Shortcuts")) {
+                    if let settingsURL = URL(string: UIApplication.openSettingsURLString) {
+                        Link(destination: settingsURL) {
+                            SettingsAccessoryRow(
+                                title: String(localized: "Open Semreh Settings"),
+                                systemImage: "gearshape",
+                                accessorySystemImage: "arrow.up.forward"
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Open Semreh Settings")
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityHint("Configures the optional official Hermes API sidecar.")
 
-                    SettingsValueRow(title: String(localized: "Version")) {
-                        serverVersionContent
-                    }
-
-                    serverUpdateCheckAction
-                    serverUpdateNote
-                    serverUpdateAction
+                    SettingsFootnote(String(localized: "Run Semreh actions like New Chat from Siri, Spotlight, the Lock Screen, or the iPhone Action button. Open Semreh Settings to manage its Siri & Search options. To assign an action to the Action button, open the iOS Settings app, choose Action Button, then Shortcut, and pick a Semreh action."))
                 }
 
                 SettingsCard(title: String(localized: "App")) {
@@ -593,17 +660,31 @@ struct SettingsView: View {
                         isConfirmingReconfigure = true
                     }
                 }
+                }
+                }
             }
             .padding(.horizontal, 16)
             .padding(.top, 18)
             .padding(.bottom, 36)
             .adaptiveReadableContent(maxWidth: AdaptiveReadableContentWidth.secondaryDestination)
         }
-        .background { SemrehBackdrop().ignoresSafeArea() }
-        .navigationTitle("Settings")
+        .background { SemrehVisualTheme.canvas(for: colorScheme, palette: palette).ignoresSafeArea() }
+        .navigationTitle(destination?.title ?? "Settings")
+        .toolbar(header == nil ? .visible : .hidden, for: .navigationBar)
         .task {
-            await loadServerSettings()
-            await refreshNotificationPermissionStatus()
+            if destination == .connections {
+                await loadServerSettings()
+            } else if destination == .chat {
+                await refreshNotificationPermissionStatus()
+            }
+        }
+        .onDisappear {
+            updateOperation?.cancel()
+            updateOperation = nil
+            if isUpdateApplyInFlight {
+                updateApplyMessage = String(localized: "Update monitoring stopped. Check the server status before trying again.")
+                updateApplyPhase = .unknown
+            }
         }
         .alert("Clear this server's cache?", isPresented: $isConfirmingClearCache) {
             Button("Cancel", role: .cancel) {}
@@ -618,7 +699,7 @@ struct SettingsView: View {
         .alert("Update server?", isPresented: $isConfirmingUpdate) {
             Button("Cancel", role: .cancel) {}
             Button("Update") {
-                Task {
+                updateOperation = Task {
                     await applyServerUpdate()
                 }
             }
@@ -636,7 +717,7 @@ struct SettingsView: View {
                 // The popup already carries the restart warning, so Update applies
                 // directly — no second confirmation dialog (issue #308).
                 Button("Update") {
-                    Task {
+                    updateOperation = Task {
                         await applyServerUpdate()
                     }
                 }
@@ -694,17 +775,95 @@ struct SettingsView: View {
                 }
             )
         }
+        .navigationDestination(isPresented: $isPresentingInitialServerDestination) {
+            SettingsView(authManager: authManager, server: server, destination: .connections)
+        }
         .onAppear {
-            // Land on the requested section once when opened via a deep link
-            // (the avatar's "Manage Servers" → Servers card), not on every
-            // re-appear after popping back from a sub-screen (#283).
-            guard let initialScrollTarget, !didScrollToInitialTarget else { return }
+            // Land on the Connections destination when opened via the avatar's
+            // "Manage Servers" deep link. The one-shot guard prevents popping
+            // back from a server detail screen from reopening it (#283).
+            guard destination == nil,
+                  initialScrollTarget == .servers,
+                  !didScrollToInitialTarget else { return }
             didScrollToInitialTarget = true
             DispatchQueue.main.async {
-                proxy.scrollTo(initialScrollTarget, anchor: .top)
+                isPresentingInitialServerDestination = true
             }
         }
+    }
+
+    @ViewBuilder
+    private var settingsDestinationIndex: some View {
+        VStack(spacing: 0) {
+            NavigationLink {
+                SettingsView(authManager: authManager, server: server, destination: .appearance)
+            } label: {
+                SettingsDestinationRow(
+                    title: String(localized: "Appearance"),
+                    subtitle: String(localized: "Theme and primary actions"),
+                    systemImage: "paintpalette"
+                )
+            }
+            .buttonStyle(.plain)
+
+            SettingsIndexDivider()
+
+            NavigationLink {
+                SettingsView(authManager: authManager, server: server, destination: .chat)
+            } label: {
+                SettingsDestinationRow(
+                    title: String(localized: "Chat"),
+                    subtitle: String(localized: "Interaction, dictation, and transcript details"),
+                    systemImage: "bubble.left.and.bubble.right"
+                )
+            }
+            .buttonStyle(.plain)
+
+            SettingsIndexDivider()
+
+            NavigationLink {
+                SettingsView(authManager: authManager, server: server, destination: .connections)
+            } label: {
+                SettingsDestinationRow(
+                    title: String(localized: "Connections"),
+                    subtitle: String(localized: "Servers, profiles, models, and headers"),
+                    systemImage: "server.rack"
+                )
+            }
+            .buttonStyle(.plain)
+
+            SettingsIndexDivider()
+
+            NavigationLink {
+                SettingsView(authManager: authManager, server: server, destination: .toolsAndHistory)
+            } label: {
+                SettingsDestinationRow(
+                    title: String(localized: "Tools & History"),
+                    subtitle: String(localized: "Organizers, session visibility, and archives"),
+                    systemImage: "square.grid.2x2"
+                )
+            }
+            .buttonStyle(.plain)
+
+            SettingsIndexDivider()
+
+            NavigationLink {
+                SettingsView(authManager: authManager, server: server, destination: .aboutAndStorage)
+            } label: {
+                SettingsDestinationRow(
+                    title: String(localized: "About & Storage"),
+                    subtitle: String(localized: "Support, offline data, and account"),
+                    systemImage: "info.circle"
+                )
+            }
+            .buttonStyle(.plain)
         }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 4)
+        .background(
+            SemrehVisualTheme.raisedPanel(for: colorScheme, palette: palette),
+            in: RoundedRectangle(cornerRadius: 22, style: .continuous)
+        )
     }
 
     @ViewBuilder
@@ -804,7 +963,7 @@ struct SettingsView: View {
         }
 
         guard let defaultProfileName, !defaultProfileName.isEmpty else {
-            return String(localized: "Not set")
+            return String(localized: "Unavailable")
         }
 
         return defaultProfileName == "default" ? String(localized: "Default") : defaultProfileName
@@ -832,6 +991,47 @@ struct SettingsView: View {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? String(localized: "Unknown")
     }
 
+    private var settingsThemeOptions: [AppTheme] {
+        [.system, .semrehLight, .semrehDark]
+    }
+
+    /// The index intentionally offers only the supported three choices. An
+    /// older stored palette remains untouched until the user explicitly picks
+    /// one of these options, so upgrading never silently changes appearance.
+    private var appThemeSettingsBinding: Binding<String> {
+        Binding(
+            get: {
+                guard let storedTheme = AppTheme(rawValue: appThemeRawValue),
+                      settingsThemeOptions.contains(storedTheme) else {
+                    return AppTheme.system.rawValue
+                }
+                return storedTheme.rawValue
+            },
+            set: { appThemeRawValue = $0 }
+        )
+    }
+
+    private var legacyThemeTitle: String? {
+        guard let storedTheme = AppTheme(rawValue: appThemeRawValue),
+              !settingsThemeOptions.contains(storedTheme) else {
+            return nil
+        }
+        return storedTheme.title
+    }
+
+    private func settingsThemeTitle(for theme: AppTheme) -> String {
+        switch theme {
+        case .system:
+            return String(localized: "System")
+        case .semrehLight:
+            return String(localized: "Light")
+        case .semrehDark:
+            return String(localized: "Dark")
+        case .light, .dark, .chatgpt, .midnight, .forest, .sand:
+            return theme.title
+        }
+    }
+
     private var responseCompletionNotificationBinding: Binding<Bool> {
         Binding(
             get: { isResponseCompletionNotificationsEnabled },
@@ -850,21 +1050,6 @@ struct SettingsView: View {
         )
     }
 
-    private var identityInitialsBinding: Binding<String> {
-        Binding(
-            get: { identityInitials },
-            set: { identityInitials = SessionIdentitySettings.normalizedInitials($0) }
-        )
-    }
-
-    private var identityPreviewInitials: String {
-        SessionIdentitySettings.displayInitials(
-            displayName: identityDisplayName,
-            storedInitials: identityInitials,
-            fallbackFullName: NSFullUserName()
-        )
-    }
-
     private var notificationStatusText: String? {
         notificationStatusMessage ?? notificationPermissionStatus.map(notificationPermissionLabel)
     }
@@ -875,7 +1060,7 @@ struct SettingsView: View {
         switch updateApplyPhase {
         case .applying, .recovering:
             return true
-        case .idle, .blocked, .failed:
+        case .idle, .blocked, .failed, .unknown:
             return false
         }
     }
@@ -890,7 +1075,7 @@ struct SettingsView: View {
             updateProgressRow(String(localized: "Checking for updates…"))
         } else {
             SettingsButton(String(localized: "Check for updates")) {
-                Task {
+                updateOperation = Task {
                     await checkForUpdatesManually()
                 }
             }
@@ -902,11 +1087,12 @@ struct SettingsView: View {
     private var forcedCheckAlertTitle: String {
         switch forcedCheckOutcome {
         case let .updateAvailable(behind):
-            return String(localized: "Update available · \(behind) behind")
+            return behind.map { String(localized: "Update available · \($0) behind") }
+                ?? String(localized: "Update available")
         case .upToDate:
             return String(localized: "You're up to date")
-        case .disabled:
-            return String(localized: "Update checks are off")
+        case .managed:
+            return String(localized: "Update managed externally")
         case .error, .none:
             return String(localized: "Couldn't check for updates")
         }
@@ -918,8 +1104,8 @@ struct SettingsView: View {
             return String(localized: "This pulls the latest Hermes server version and restarts it. Active chats may be interrupted briefly; the app reconnects when the server is back.")
         case .upToDate:
             return String(localized: "The Hermes server is running the latest version.")
-        case .disabled:
-            return String(localized: "Update checks are turned off on this server.")
+        case let .managed(message):
+            return message ?? String(localized: "This Hermes installation must be updated outside the app.")
         case .error, .none:
             return String(localized: "Something went wrong reaching the server. Try again in a moment.")
         }
@@ -936,7 +1122,12 @@ struct SettingsView: View {
             case .upToDate:
                 updateNoteRow(systemImage: "checkmark.circle", tint: .secondary, text: String(localized: "Up to date"))
             case let .updateAvailable(behind):
-                updateNoteRow(systemImage: "arrow.up.circle", tint: .blue, text: String(localized: "Update available · \(behind) behind"))
+                updateNoteRow(systemImage: "arrow.up.circle", tint: .blue,
+                    text: behind.map { String(localized: "Update available · \($0) behind") }
+                        ?? String(localized: "Update available"))
+            case let .managed(message):
+                updateNoteRow(systemImage: "info.circle", tint: .secondary,
+                    text: message ?? String(localized: "Updates are managed outside this app."))
             case .unavailable:
                 EmptyView()
             }
@@ -983,6 +1174,8 @@ struct SettingsView: View {
                 updateMessageRow(systemImage: "exclamationmark.triangle", tint: .orange)
                 updateActionButton(title: String(localized: "Retry update"))
             }
+        case .unknown:
+            updateMessageRow(systemImage: "questionmark.circle", tint: .orange)
         }
     }
 
@@ -991,8 +1184,7 @@ struct SettingsView: View {
             isConfirmingUpdate = true
         }
         // Mirror of the check button's `isUpdateApplyInFlight` guard: while a
-        // forced check is running, block Update/Retry so apply can't race the
-        // in-flight POST /api/updates/check (#308 review).
+        // forced check is running, block Update/Retry so apply can't race it.
         .disabled(isCheckingForUpdates)
         .padding(.top, 4)
     }
@@ -1034,12 +1226,8 @@ struct SettingsView: View {
         let client = APIClient(baseURL: server)
 
         do {
-            let settings = try await client.settings()
-            serverVersion = settings.webuiVersion
-            // Server wins on conflict: `show_cli_sessions` is the cross-device
-            // truth, the local value is just its offline cache (#19).
-            cliSessionsSync.adopt(serverValue: settings.showCliSessions)
-            cliSessionsSync.adoptClaudeCode(serverValue: settings.showClaudeCodeSessions)
+            let status = try await client.directStatus()
+            serverVersion = status.version
             if serverVersion == nil {
                 serverSettingsError = String(localized: "Unknown")
             }
@@ -1052,7 +1240,7 @@ struct SettingsView: View {
 
         do {
             let updates = try await client.updatesCheck()
-            serverUpdateState = updates.webuiUpdateState
+            serverUpdateState = updates.updateState
         } catch {
             // Non-fatal: update availability is optional info. On any failure we
             // degrade to showing the version only, with no indicator.
@@ -1060,8 +1248,10 @@ struct SettingsView: View {
         }
 
         do {
-            let catalog = try await client.models()
-            defaultModel = catalog.defaultModel
+            let context = try await client.directActiveProfile()
+            guard let running = context.current?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !running.isEmpty else { throw DirectMainModelError.invalidSelection }
+            defaultModel = try await client.directModelOptions(profile: running).model
         } catch {
             // Non-fatal: default model is optional info
             defaultModel = nil
@@ -1070,8 +1260,11 @@ struct SettingsView: View {
         isLoadingDefaultModel = false
 
         do {
-            let profiles = try await client.profiles()
-            defaultProfileName = profiles.effectiveDefaultProfileName
+            let profiles = try await client.directProfiles()
+            let active = try await client.directActiveProfile()
+            // Sticky startup default, not the running process or reserved
+            // `is_default` profile row.
+            defaultProfileName = active.startupDefaultName
             defaultProfileDisplayName = profiles.displayName(for: defaultProfileName)
         } catch {
             // Non-fatal: default profile is optional info
@@ -1096,7 +1289,7 @@ struct SettingsView: View {
             let response = try await client.updatesCheckForced()
             // Refresh the passive inline indicator from the fresh result too, so a
             // forced check keeps the on-open note in sync (issue #308).
-            serverUpdateState = response.webuiUpdateState
+            serverUpdateState = response.updateState
             forcedCheckOutcome = response.forcedCheckOutcome
         } catch {
             authManager.handleAPIError(error)
@@ -1122,7 +1315,7 @@ struct SettingsView: View {
         switch updateApplyPhase {
         case .idle, .blocked, .failed:
             break
-        case .applying, .recovering:
+        case .applying, .recovering, .unknown:
             return
         }
 
@@ -1132,45 +1325,45 @@ struct SettingsView: View {
 
         let response: UpdatesApplyResponse
         do {
-            response = try await client.applyUpdate(target: "webui")
+            response = try await client.applyUpdate()
         } catch {
-            // The apply call returns before the server restarts, so a failure
-            // here is a real pre-restart error (auth, unreachable, decode).
+            // The server may have accepted the bodyless POST before its ACK was
+            // lost. Do not retry or claim failure when action ownership is unknown.
             authManager.handleAPIError(error)
-            updateApplyMessage = String(localized: "Could not reach the server to start the update.")
-            updateApplyPhase = .failed
+            updateApplyMessage = String(localized: "Hermes may have started updating, but the response was lost. Check the server status before trying again.")
+            updateApplyPhase = .unknown
             return
         }
 
-        switch response.outcome {
-        case .applying:
-            updateApplyPhase = .recovering
-            await waitForServerToReturn(using: client, previousVersion: serverVersion)
-        case .restartBlocked:
-            updateApplyMessage = response.displayMessage(
-                default: String(localized: "The server is busy with active work. Wait for it to finish, then retry.")
-            )
-            updateApplyPhase = .blocked
-        case .failed:
+        // Navigation may cancel monitoring while the POST acknowledgement is
+        // returning. Do not overwrite onDisappear's unknown state with a
+        // recovering spinner that a cancelled task can never finish.
+        guard !Task.isCancelled else {
+            updateApplyPhase = .unknown
+            return
+        }
+        switch HermesUpdateStart.evaluate(response) {
+        case .refused:
             updateApplyMessage = response.displayMessage(
                 default: String(localized: "The update could not be applied.")
             )
-            updateApplyPhase = .failed
+            updateApplyPhase = .blocked
+            return
+        case .unknown:
+            updateApplyMessage = String(localized: "Hermes may already be updating, but this app could not identify that update. Check the server status before trying again.")
+            updateApplyPhase = .unknown
+            return
+        case let .monitor(actionID):
+            updateApplyPhase = .recovering
+            await waitForUpdateCompletion(using: client, actionID: actionID)
         }
     }
 
-    /// Polls the self-restarting server until the restart is confirmed, then
-    /// refreshes the version and indicator. Bounded so a slow/stuck restart
-    /// never leaves a spinner up.
-    ///
-    /// Completion requires *proof the restart happened* — the reported version
-    /// changed, or the check explicitly reports `.upToDate` — not merely a
-    /// reachable server. That avoids finalising against the outgoing process or
-    /// on a transient `stale_check` that still claims a non-zero `behind`, while
-    /// still letting update-check-disabled servers converge via the new version.
-    /// State is refreshed inline (not via the non-reentrant `loadServerSettings`)
-    /// so a concurrent load can't make us flip to `.idle` without refreshing.
-    private func waitForServerToReturn(using client: APIClient, previousVersion: String?) async {
+    /// Polls the stock action status for a bounded interval. Completion is owned
+    /// only when its durable marker matches the POST-returned action ID and the
+    /// corroborating exit code is zero; version/liveness/latest receipt are not
+    /// substitutes. A confirmed completion then refreshes Settings from stock.
+    private func waitForUpdateCompletion(using client: APIClient, actionID: String) async {
         let maxAttempts = 30 // ~60s at a 2s cadence — generous for a self-restart.
 
         for _ in 0..<maxAttempts {
@@ -1180,43 +1373,29 @@ struct SettingsView: View {
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             guard !Task.isCancelled else { return }
 
-            // One reachable settings call gives us both liveness and the fresh
-            // version; a nil result means the restart outage hasn't cleared yet.
-            guard let settings = try? await client.settings() else {
+            guard let status = try? await client.hermesUpdateStatus() else {
                 continue
             }
-
-            let newVersion = settings.webuiVersion
-            let updateState = (try? await client.updatesCheck())?.webuiUpdateState ?? .unavailable
-            let restartConfirmed = (newVersion != nil && newVersion != previousVersion)
-                || updateState == .upToDate
-
-            if restartConfirmed {
-                serverVersion = newVersion
-                serverSettingsError = newVersion == nil ? String(localized: "Unknown") : nil
-                serverUpdateState = updateState
+            guard !Task.isCancelled else { return }
+            switch HermesUpdateCompletion.evaluate(expectedActionID: actionID, status: status) {
+            case .waiting:
+                continue
+            case .succeeded:
+                await loadServerSettings()
+                guard !Task.isCancelled else { return }
                 updateApplyPhase = .idle
                 updateApplyMessage = nil
+                return
+            case .unknown:
+                updateApplyMessage = String(localized: "The update outcome could not be confirmed. Inspect the server before trying again.")
+                updateApplyPhase = .unknown
                 return
             }
         }
 
-        // Didn't confirm the restart in the window. Refresh once so the indicator
-        // reflects reality, then surface a distinct, retryable failure — never a
-        // silent reset (the `.failed` UI stays visible regardless of the now
-        // possibly-nil `serverUpdateState`).
-        await loadServerSettings()
-        if serverSettingsError != nil {
-            updateApplyMessage = String(localized: "The server didn't come back after the update. Check the server, then retry.")
-            updateApplyPhase = .failed
-        } else if case .updateAvailable = serverUpdateState {
-            updateApplyMessage = String(localized: "The update is taking longer than expected to finish. Try again in a moment.")
-            updateApplyPhase = .failed
-        } else {
-            // Server is back and not reporting a pending update — treat as done.
-            updateApplyPhase = .idle
-            updateApplyMessage = nil
-        }
+        // A timeout is ambiguous. Do not silently retry the POST or infer success.
+        updateApplyMessage = String(localized: "The update outcome could not be confirmed in time. Inspect the server before trying again.")
+        updateApplyPhase = .unknown
     }
 
     private func clearOfflineCache() async {
@@ -1291,7 +1470,7 @@ struct SettingsView: View {
     }
 }
 
-/// Phases of the in-app "apply webui update" flow (issue #180).
+/// Phases of the in-app stock Hermes update flow.
 private enum ServerUpdateApplyPhase: Equatable {
     /// No update in flight; show the "Update" button.
     case idle
@@ -1301,6 +1480,8 @@ private enum ServerUpdateApplyPhase: Equatable {
     case recovering
     /// Restart was blocked by active chat/agent work; offer a retry.
     case blocked
+    /// The request may have started an update, but ownership/completion is not provable.
+    case unknown
     /// The update failed (conflict, diverged, unreachable, or timed-out restart).
     case failed
 }
@@ -1318,41 +1499,92 @@ private extension UNAuthorizationStatus {
     }
 }
 
-private struct SessionIdentitySettingsEditor: View {
-    @ScaledMetric(relativeTo: .caption) private var avatarPreviewSize: CGFloat = 36
+private struct SettingsDestinationRow: View {
+    let title: String
+    let subtitle: String
+    let systemImage: String
 
-    @Binding var displayName: String
-    @Binding var initials: String
-    let previewInitials: String
-    let previewColor: Color
-    let previewForeground: Color
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.appColorPalette) private var palette
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 12) {
-                Text(previewInitials)
-                    .font(AppFont.caption(weight: .semibold))
-                    .foregroundStyle(previewForeground)
-                    .frame(width: avatarPreviewSize, height: avatarPreviewSize)
-                    .background(previewColor, in: Circle())
-                    .overlay(Circle().stroke(.white.opacity(0.18), lineWidth: 1))
-                    .accessibilityHidden(true)
+        HStack(spacing: 14) {
+            Image(systemName: systemImage)
+                .font(AppFont.body(weight: .semibold))
+                .foregroundStyle(SemrehVisualTheme.action(for: colorScheme, palette: palette))
+                .frame(width: 36, height: 36)
+                .background(
+                    SemrehVisualTheme.canvas(for: colorScheme, palette: palette),
+                    in: RoundedRectangle(cornerRadius: 11, style: .continuous)
+                )
+                .accessibilityHidden(true)
 
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Sessions Avatar")
-                        .font(AppFont.subheadline(weight: .medium))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(AppFont.subheadline(weight: .semibold))
+                    .foregroundStyle(.primary)
 
-                    Text("Stored on this device only.")
-                        .font(AppFont.caption())
-                        .foregroundStyle(.secondary)
-                }
+                Text(subtitle)
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
-            SettingsTextFieldRow(title: String(localized: "Display Name"), text: $displayName, placeholder: NSFullUserName())
+            Spacer(minLength: 8)
 
-            SettingsDivider()
+            Image(systemName: "chevron.forward")
+                .font(AppFont.caption(weight: .semibold))
+                .foregroundStyle(.tertiary)
+                .accessibilityHidden(true)
+        }
+        .padding(.vertical, 11)
+        .frame(maxWidth: .infinity, minHeight: 64, alignment: .leading)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+        .accessibilityHint("Opens this settings section.")
+    }
+}
 
-            SettingsTextFieldRow(title: String(localized: "Initials"), text: $initials, placeholder: previewInitials)
+private struct SettingsIndexDivider: View {
+    var body: some View {
+        Divider()
+            .padding(.leading, 50)
+            .opacity(0.72)
+    }
+}
+
+private struct SettingsCategory<Content: View>: View {
+    @Environment(\.appColorPalette) private var palette
+    @Environment(\.colorScheme) private var colorScheme
+    let title: LocalizedStringKey
+    let subtitle: LocalizedStringKey
+    let systemImage: String
+    @ViewBuilder let content: Content
+
+    init(title: LocalizedStringKey, subtitle: LocalizedStringKey, systemImage: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.subtitle = subtitle
+        self.systemImage = systemImage
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: systemImage)
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(SemrehVisualTheme.action(for: colorScheme, palette: palette))
+                    .frame(width: 34, height: 34)
+                    .background(SemrehVisualTheme.canvas(for: colorScheme, palette: palette), in: RoundedRectangle(cornerRadius: 10))
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(title).font(SemrehTypography.label).foregroundStyle(.primary)
+                    Text(subtitle).font(SemrehTypography.caption).foregroundStyle(.secondary)
+                }.fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+            }
+
+            VStack(spacing: 20) { content }
         }
     }
 }
@@ -1416,26 +1648,28 @@ private struct SettingsTextFieldRow: View {
 }
 
 private struct SettingsCard<Content: View>: View {
-    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.appColorPalette) private var palette
+    @Environment(\.colorScheme) private var colorScheme
     @ScaledMetric(relativeTo: .body) private var contentSpacing: CGFloat = 12
 
-    let title: String
+    let title: String?
     @ViewBuilder let content: Content
 
-    init(title: String, @ViewBuilder content: () -> Content) {
+    init(title: String? = nil, @ViewBuilder content: () -> Content) {
         self.title = title
         self.content = content()
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            if let title {
             Text(title)
                 .textCase(.uppercase)
                 .font(AppFont.caption(weight: .semibold))
                 .foregroundStyle(SemrehVisualTheme.brandAccent(for: colorScheme, palette: palette))
                 .padding(.horizontal, 4)
                 .padding(.bottom, 8)
+            }
 
             VStack(alignment: .leading, spacing: contentSpacing) {
                 content
@@ -1443,7 +1677,7 @@ private struct SettingsCard<Content: View>: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 14)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .semrehPanel(cornerRadius: 18)
+            .background(SemrehVisualTheme.panel(for: colorScheme, palette: palette), in: RoundedRectangle(cornerRadius: 18))
         }
     }
 }
@@ -1534,30 +1768,6 @@ private struct SettingsFootnote: View {
             .font(AppFont.caption())
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
-    }
-}
-
-/// A footnote for inline failures (e.g. the CLI-sessions server write): same
-/// footprint as `SettingsFootnote`, plus a warning icon so it reads as an error.
-private struct SettingsErrorFootnote: View {
-    let text: String
-
-    init(_ text: String) {
-        self.text = text
-    }
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 6) {
-            Image(systemName: "exclamationmark.triangle")
-                .font(AppFont.caption())
-                .foregroundStyle(.orange)
-
-            Text(text)
-                .font(AppFont.caption())
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .accessibilityElement(children: .combine)
     }
 }
 
@@ -1735,63 +1945,6 @@ private struct CustomHeadersSettingsView: View {
     }
 }
 
-private struct OfficialContinuitySettingsView: View {
-    @Bindable var authManager: AuthManager
-    let account: ServerAccount?
-    @Environment(\.dismiss) private var dismiss
-    @State private var officialURL: String
-    @State private var apiKey = ""
-    @State private var isWorking = false
-
-    init(authManager: AuthManager, account: ServerAccount?) {
-        self.authManager = authManager
-        self.account = account
-        _officialURL = State(initialValue: account?.officialAPIURLString ?? "")
-    }
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                SettingsCard(title: String(localized: "Hermes Continuity")) {
-                    Text(String(localized: "Completed turns can stay continuous between the TUI and Semreh through the official Hermes API. Live mid-turn TUI mirroring is not promised."))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    SettingsTextFieldRow(title: String(localized: "Official API URL"), text: $officialURL, placeholder: "https://hermes.example.com", keyboardType: .URL, autocapitalization: .never)
-                    SecureField(String(localized: "API key"), text: $apiKey)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 11)
-                        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 8))
-
-                    HStack {
-                        SettingsButton(String(localized: "Test & Save"), isLoading: isWorking) {
-                            isWorking = true
-                            Task {
-                                await authManager.testAndSaveOfficialContinuity(officialURLString: officialURL, apiKey: apiKey)
-                                isWorking = false
-                            }
-                        }
-                        .disabled(isWorking || officialURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || apiKey.isEmpty)
-                        SettingsButton(String(localized: "Disable"), role: .destructive) {
-                            authManager.disableOfficialContinuity()
-                            dismiss()
-                        }
-                    }
-
-                    if let error = authManager.lastErrorMessage {
-                        Text(error).font(.caption).foregroundStyle(.red)
-                    }
-                }
-            }
-            .padding(20)
-        }
-        .navigationTitle("Hermes Continuity")
-        .navigationBarTitleDisplayMode(.inline)
-    }
-}
 
 private struct SettingsToggleRow: View {
     let title: String
@@ -2166,6 +2319,7 @@ struct AddServerView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var serverURLString = ""
+    @State private var username = ""
     @State private var password = ""
     @State private var customHeaders: [CustomHeader] = []
     @State private var needsPassword = false
@@ -2192,11 +2346,19 @@ struct AddServerView: View {
                         SettingsTextFieldRow(
                             title: String(localized: "URL"),
                             text: $serverURLString,
-                            placeholder: "100.64.0.1:8787",
+                            placeholder: "https://server.tailnet-name.ts.net",
                             keyboardType: .URL,
                             autocapitalization: .never,
                             submitLabel: .go,
                             onSubmit: { Task { await submit() } }
+                        )
+
+                        SettingsTextFieldRow(
+                            title: String(localized: "Username"),
+                            text: $username,
+                            placeholder: String(localized: "Server username"),
+                            autocapitalization: .never,
+                            submitLabel: .next
                         )
 
                         if needsPassword {
@@ -2270,6 +2432,7 @@ struct AddServerView: View {
         isWorking = true
         let outcome = await authManager.addServer(
             serverURLString: serverURLString,
+            username: username,
             password: password,
             customHeaders: customHeaders
         )

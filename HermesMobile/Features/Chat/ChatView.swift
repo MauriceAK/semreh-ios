@@ -4,6 +4,14 @@ import UIKit
 import PhotosUI
 import CoreTransferable
 import UniformTypeIdentifiers
+import OSLog
+
+#if DEBUG
+private struct ChatTranscriptProxyGenerationDiagnostic {
+    let targetKey: String
+    let generation: Int
+}
+#endif
 
 private struct ImportedPhotoVideo: Transferable {
     let data: Data
@@ -17,13 +25,11 @@ private struct ImportedPhotoVideo: Transferable {
 
 private enum GitChatAlert: Identifiable {
     case confirmRemote(GitRemoteAction)
-    case dirtyCheckout(GitCheckoutTarget)
     case error(String)
 
     var id: String {
         switch self {
         case .confirmRemote(let action): "remote:\(action.rawValue)"
-        case .dirtyCheckout(let target): "checkout:\(target.id)"
         case .error(let message): "error:\(message)"
         }
     }
@@ -31,7 +37,7 @@ private enum GitChatAlert: Identifiable {
 
 private enum ActiveGitSheet: Identifiable {
     case changes
-    case commit
+    case stage
 
     var id: Self { self }
 }
@@ -46,6 +52,162 @@ private enum TurnDiffPresentation: Identifiable {
         switch self {
         case .turnFiles(let files): return "turn:" + files.map(\.id).joined(separator: "|")
         case .file(let file): return "file:" + file.id
+        }
+    }
+}
+
+private struct DirectAttachmentRecoveryBanner: View {
+    let isBusy: Bool
+    let isActionAvailable: Bool
+    let onDiscard: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Attachment delivery needs attention")
+                    .font(AppFont.caption(weight: .semibold))
+                Text("Saved chat history is kept. Reset the pending upload before sending or adding attachments.")
+                    .font(AppFont.caption())
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 4)
+
+            if isBusy {
+                ProgressView()
+                    .controlSize(.small)
+                    .accessibilityLabel("Resetting pending upload")
+            } else if isActionAvailable {
+                Button("Discard pending upload", action: onDiscard)
+                    .font(AppFont.caption(weight: .semibold))
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .accessibilityIdentifier("discard-pending-upload")
+            } else {
+                Text("Reconnect this chat to check upload status.")
+                    .font(AppFont.caption())
+                    .multilineTextAlignment(.trailing)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.orange.opacity(0.35), lineWidth: 0.5)
+        }
+        .accessibilityElement(children: .contain)
+    }
+}
+
+private struct DirectPromptDeliveryRecoveryBanner: View {
+    let isBusy: Bool
+    let isActionAvailable: Bool
+    let isSafetyRecordUnavailable: Bool
+    let hasConfirmedAcceptance: Bool
+    let onAllow: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(hasConfirmedAcceptance ? "Message accepted; cleanup needed" : "Message delivery needs attention")
+                    .font(.subheadline.weight(.semibold))
+                    .accessibilityIdentifier("direct-prompt-uncertainty-banner")
+                Text(recoveryExplanation)
+                    .font(.caption)
+                    .accessibilityIdentifier("direct-prompt-uncertainty-explanation")
+            }
+            Spacer(minLength: 8)
+            if isBusy {
+                ProgressView()
+                    .accessibilityLabel("Checking latest conversation")
+            } else if isActionAvailable {
+                Button("Allow a new message…", action: onAllow)
+                    .font(.caption.weight(.semibold))
+                    .accessibilityIdentifier("direct-prompt-uncertainty-allow-new-message")
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.orange.opacity(0.35), lineWidth: 0.5)
+        }
+        .accessibilityElement(children: .contain)
+    }
+
+    private var recoveryExplanation: String {
+        if hasConfirmedAcceptance {
+            return "Hermes accepted the message, but Semreh could not clear its local safety record. It will not resend it."
+        }
+        if isSafetyRecordUnavailable {
+            return "Semreh cannot verify this chat’s delivery safety record. Saved history remains readable, but this chat cannot safely send. Return to Chats and start a New Chat to continue."
+        }
+        return "Semreh cannot confirm the previous send. It may still appear, and Semreh will not resend it."
+    }
+}
+
+private struct DirectAttachmentRecoveryAlertModifier: ViewModifier {
+    @Binding var target: DirectAttachmentRecoveryTarget?
+    let viewModel: ChatViewModel
+
+    func body(content: Content) -> some View {
+        content.alert(
+            "Discard Pending Upload?",
+            isPresented: Binding(
+                get: { target != nil },
+                set: { isPresented in
+                    if !isPresented { target = nil }
+                }
+            )
+        ) {
+            Button("Cancel", role: .cancel) {
+                target = nil
+            }
+            Button("Discard pending upload", role: .destructive) {
+                guard let capturedTarget = target else { return }
+                target = nil
+                Task {
+                    _ = await viewModel.resetDirectAttachmentRecovery(capturedTarget)
+                }
+            }
+        } message: {
+            Text("This resets only the affected live chat and may interrupt an active response. Saved chat history and your draft will be kept. The old staged upload will not be sent again.")
+        }
+    }
+}
+
+private struct DirectPromptDeliveryRecoveryAlertModifier: ViewModifier {
+    @Binding var target: DirectPromptDeliveryRecoveryTarget?
+    let viewModel: ChatViewModel
+
+    func body(content: Content) -> some View {
+        content.alert(
+            "Allow a New Message?",
+            isPresented: Binding(
+                get: { target != nil },
+                set: { if !$0 { target = nil } }
+            )
+        ) {
+            Button("Cancel", role: .cancel) { target = nil }
+            Button("Allow a new message", role: .destructive) {
+                guard let capturedTarget = target else { return }
+                target = nil
+                Task { _ = await viewModel.abandonDirectPromptDeliveryUncertainty(capturedTarget) }
+            }
+        } message: {
+            Text(viewModel.directPromptDeliveryHasConfirmedAcceptance
+                ? "Hermes accepted your previous message, but Semreh could not clear its local safety record. Semreh will not resend it. After checking the latest conversation, continue only if you want to write a different message."
+                : "Semreh cannot confirm the previous send. It may still appear in this conversation, and Semreh will not resend it. After checking the latest conversation, continue only if you want to write a different message.")
         }
     }
 }
@@ -269,13 +431,26 @@ private struct ListenPlaybackBar: View {
 
 struct ChatView: View {
     private let bottomAnchorID = "chat-bottom-anchor"
+    /// Keep ordinary transcript messages separated while compacting adjacent
+    /// Thinking/tool/action status blocks to the same restrained rhythm.
     private let transcriptMessageSpacing: CGFloat = 10
-    private let transcriptBlockSpacing: CGFloat = 6
+    private let transcriptBlockSpacing: CGFloat = 4
     private let composerAccessoryVerticalSpacing: CGFloat = 8
     private let activeRunStatusSpacerHeight: CGFloat = 36
-    private let approvalBypassStatusSpacerHeight: CGFloat = 38
+    /// Keep a short, nearby return-to-latest motion readable without animating
+    /// a tour through a long transcript. This is intentionally a band, not a
+    /// continuously-updated distance, so scroll metrics do not invalidate the
+    /// whole chat on every point of a drag.
+    private let nearbyBottomMotionDistance: CGFloat = 640
+#if DEBUG
+    private static let transcriptScrollLogger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "HermesMobile",
+        category: "TranscriptActivationRecovery"
+    )
+#endif
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
     @Environment(\.scenePhase) private var scenePhase
@@ -291,6 +466,7 @@ struct ChatView: View {
     let session: SessionSummary
     let server: URL
     let onAPIError: (Error) -> Void
+    let onParentBack: (() -> Void)?
     let loadsInitialMessages: Bool
     let disablesExternalLifecycle: Bool
     /// When true, the composer auto-starts voice dictation on appear — set by the
@@ -300,21 +476,59 @@ struct ChatView: View {
     @State private var draftMessage = ""
     @State private var followRejoinScrollToken = 0
     @State private var restoreScrollToken = 0
+    @State private var transcriptRestoreCancellationToken = 0
     @State private var didRequestTranscriptRestore = false
+    @State private var didInteractBeforeTranscriptRestore = false
+    @State private var isTranscriptRestorePending = false
+    @State private var pendingTranscriptRestoreMessageID: String?
+    @State private var transcriptRestoreOutcomeState = ChatTranscriptRestoreOutcomeState()
     @State private var isScrolledNearBottom = true
+    /// Set once a live near-bottom run becomes visibly long (~10 s, item 4) so
+    /// the floating elapsed pill can appear without a continuous ticker; reset
+    /// when the run starts or ends.
+    @State private var hasActiveRunPassedElapsedThreshold = false
     @State private var isReadingOlderTranscript = false
     @State private var shouldFollowLatestMessage = true
     @State private var visibleTranscriptRowID: String?
     @State private var followScrollGeneration = 0
     @State private var explicitBottomScrollGeneration = 0
     @State private var isExplicitBottomScrollActive = false
+    @State private var hasIssuedExplicitBottomScroll = false
+    /// Whether this pass's single ANIMATED issue has fired. A pass opens
+    /// direct and every settlement tick stays direct until the tail region
+    /// is realized on screen, so "has issued" and "has animated" are
+    /// distinct: the one animated correction - a bounded glide over
+    /// realized geometry - may re-arm the easeOut; every other issue is
+    /// direct.
+    @State private var hasIssuedAnimatedExplicitBottomScroll = false
+    /// Timestamp of the last ANIMATED explicit bottom issue. The P02
+    /// settlement-churn gate defers re-issues until this issue's animation
+    /// window has elapsed, so an in-flight easeOut is never reset by a retry
+    /// and UI quiescence always arrives. Direct issues do not arm the gate:
+    /// an immediate direct re-issue cannot reset an animation that is not
+    /// running.
+    @State private var lastExplicitBottomIssueAt: Date?
+#if DEBUG
+    @State private var explicitBottomScrollAttemptCount = 0
+    @State private var hasLoggedComposerCollapseForResize = false
+    @State private var pendingTranscriptProxyGenerationDiagnostic: ChatTranscriptProxyGenerationDiagnostic?
+#endif
+    @State private var isLatestTranscriptRowVisible = false
+    @State private var isTranscriptBottomVisible = false
     @State private var explicitBottomScrollTask: Task<Void, Never>?
+    @State private var isExplicitBottomDecelerationActive = false
     @State private var isUserInteractingWithScroll = false
+    @State private var isNearBottomForMotion = false
     @State private var userScrollCooldownUntil: Date?
     /// While set and in the future, auto-follow scrolls snap instead of animating, so
     /// the cache-first → network reconcile re-pins to the bottom without a jump (#289).
     @State private var cacheFirstSnapUntil: Date?
     @State private var forkedSession: SessionSummary?
+    /// A direct branch already owns a bound child controller. Keep the handoff
+    /// alive through navigation so the destination can use the retained VM
+    /// instead of resuming the child a second time.
+    @State private var directBranchHandoff: DirectBranchHandoff?
+    @State private var isShowingDirectBranch = false
     @State private var editContext: MessageActionContext?
     @State private var editDraft = ""
     @State private var showEditSheet = false
@@ -326,6 +540,8 @@ struct ChatView: View {
     @State private var transcriptMediaPreviewItem: TranscriptMediaPreviewItem?
     @State private var pendingProfileSelection: ProfileSummary?
     @State private var showProfileNewSessionConfirmation = false
+    @State private var attachmentRecoveryConfirmationTarget: DirectAttachmentRecoveryTarget?
+    @State private var promptDeliveryRecoveryConfirmationTarget: DirectPromptDeliveryRecoveryTarget?
     @State private var goalDraft = ""
     @State private var showsGoalSheet = false
     @State private var activeGitSheet: ActiveGitSheet?
@@ -335,18 +551,25 @@ struct ChatView: View {
     @State private var gitToastState = GitActionToastState()
     @State private var gitAlert: GitChatAlert?
     @State private var composerHeight: CGFloat = 52
+    @State private var showsChatControls = false
+    @State private var showsBotDetails = false
+    @State private var showsChatFiles = false
+    @State private var workspacePickerRequest = 0
+    @State private var gitBranchPickerRequest = 0
     @State private var isComposerResizing = false
     @State private var composerResizeFollowIntent = false
     @State private var composerResizeGeneration = 0
     @State private var composerResizeTask: Task<Void, Never>?
+    @State private var shouldAnimateNextFollowAfterComposerResize = false
     @State private var composerIsFocused = false
     @State private var didCompleteInitialAppearance = false
+    @State private var pagingStartupReadyScope: UUID?
+    @State private var pagingStartupOperation = ChatTranscriptPagingOperationState()
     @State private var isInitialComposerFocusContentReady = false
     @State private var didApplyInitialComposerFocusPolicy = false
     @State private var shouldRestoreComposerFocusAfterPreview = false
     @State private var responseCompletionNotificationTracker = ResponseCompletionNotificationTracker()
     @State private var responseCompletionBackgroundTask: UIBackgroundTaskIdentifier = .invalid
-    @State private var activeStreamStatusRefreshTask: Task<Void, Never>?
     @State private var foregroundRefreshTask: Task<Void, Never>?
     @State private var initialAttachments: [SharedAttachmentImport]
     @State private var didUploadInitialAttachments = false
@@ -355,6 +578,7 @@ struct ChatView: View {
         session: SessionSummary,
         server: URL,
         onAPIError: @escaping (Error) -> Void,
+        onParentBack: (() -> Void)? = nil,
         initialDraft: String = "",
         initialAttachments: [SharedAttachmentImport] = [],
         loadsInitialMessages: Bool = true,
@@ -365,6 +589,7 @@ struct ChatView: View {
         self.session = session
         self.server = server
         self.onAPIError = onAPIError
+        self.onParentBack = onParentBack
         self.loadsInitialMessages = loadsInitialMessages
         self.autoStartsVoiceInput = autoStartsVoiceInput
         self.disablesExternalLifecycle = disablesExternalLifecycle
@@ -385,6 +610,11 @@ struct ChatView: View {
             )
         )
         _viewModel = State(initialValue: resolvedRetainedViewModel)
+        _shouldFollowLatestMessage = State(initialValue: resolvedRetainedViewModel.savedFollowingLatest)
+        let initialRestoreTarget = resolvedRetainedViewModel.transcriptRestoreTarget
+        _visibleTranscriptRowID = State(initialValue: Self.savedTranscriptVisibleMessageID(from: initialRestoreTarget))
+        _pendingTranscriptRestoreMessageID = State(initialValue: Self.savedTranscriptVisibleMessageID(from: initialRestoreTarget))
+        _isTranscriptRestorePending = State(initialValue: Self.savedTranscriptVisibleMessageID(from: initialRestoreTarget) != nil)
         _gitAvailabilityViewModel = State(initialValue: openSessionStore.gitAvailabilityViewModel(
             session: session,
             server: server,
@@ -417,7 +647,7 @@ struct ChatView: View {
             selectedWorkspacePath: viewModel.selectedWorkspacePath,
             workspaceSuggestions: viewModel.workspaceSuggestions,
             workspaceManagementServer: server,
-            personalitySuggestions: viewModel.personalitySuggestions,
+            workspaceManagementProfile: viewModel.workspaceOrganizerProfile,
             skillSuggestions: viewModel.skillSlashSuggestions,
             agentCommands: viewModel.agentCommands,
             profileOptions: viewModel.profileOptions,
@@ -427,21 +657,36 @@ struct ChatView: View {
             isLoadingModels: viewModel.isLoadingComposerConfiguration,
             selectedReasoningEffort: viewModel.selectedReasoningSelection,
             supportedReasoningEfforts: viewModel.supportedReasoningEfforts,
-            sessionScopedReasoning: viewModel.sessionScopedReasoning == true,
+            allowsReasoningInheritance: viewModel.allowsReasoningInheritance,
+            allowsReasoningChangesWhileStreaming: viewModel.allowsReasoningChangesWhileStreaming,
+            isReasoningChangeDeferred: viewModel.isReasoningChangeDeferred,
             showsReasoningControl: viewModel.showsReasoningEffortControl,
             isUpdatingConfiguration: viewModel.isUpdatingComposerConfiguration,
             pendingAttachments: viewModel.pendingAttachments,
+            displayAttachments: viewModel.usesDirectGateway
+                ? viewModel.directPendingAttachmentDisplayItems
+                : [],
             isUploadingAttachment: viewModel.isUploadingAttachment,
             attachmentUploadCount: viewModel.attachmentUploadCount,
             attachmentUploadGeneration: viewModel.attachmentUploadGeneration,
             isSendingVoiceNote: viewModel.isSendingVoiceNote,
             autoStartsVoiceInput: autoStartsVoiceInput,
             apiClient: viewModel.client,
+            voiceInputProfileName: viewModel.voiceInputProfileName,
+            currentVoiceInputProfile: { viewModel.voiceInputProfileName },
             uploadAttachmentErrorMessage: viewModel.uploadAttachmentErrorMessage,
             onSend: {
+#if DEBUG
+                ChatPerformanceCadenceMonitor.begin(.send)
+                logChatScrollBoundary(event: "send_begin", decision: "composer_submit")
+#endif
                 Task { await sendDraftMessage() }
             },
             onSendVoiceNote: { data, filename in
+#if DEBUG
+                ChatPerformanceCadenceMonitor.begin(.send)
+                logChatScrollBoundary(event: "send_begin", decision: "voice_note_submit")
+#endif
                 Task { await sendVoiceNote(audioData: data, filename: filename) }
             },
             onCancel: {
@@ -463,9 +708,6 @@ struct ChatView: View {
             },
             onWorkspaceRegistryChanged: {
                 await viewModel.refreshWorkspaceRoots()
-            },
-            onLoadPersonalitySuggestions: {
-                await viewModel.loadPersonalitySuggestions()
             },
             onLoadSkillSuggestions: {
                 await viewModel.loadSkillSlashSuggestions()
@@ -516,6 +758,19 @@ struct ChatView: View {
                     attachmentPreviewItem = ChatAttachmentPreviewItem(pending: attachment)
                 }
             },
+            onPreviewDisplayAttachment: { item in
+                if viewModel.usesDirectGateway {
+                    presentPreviewRestoringComposerFocusIfNeeded {
+                        attachmentPreviewItem = ChatAttachmentPreviewItem(display: item)
+                    }
+                } else if let attachment = item.legacyPendingAttachment() {
+                    // Keep the legacy path available if a display projection is
+                    // ever supplied by a non-direct caller.
+                    presentPreviewRestoringComposerFocusIfNeeded {
+                        attachmentPreviewItem = ChatAttachmentPreviewItem(pending: attachment)
+                    }
+                }
+            },
             onDismissUploadAttachmentError: {
                 viewModel.setUploadAttachmentError(nil)
             },
@@ -527,7 +782,10 @@ struct ChatView: View {
             },
             onRefreshGitBranches: {
                 Task { await gitAvailabilityViewModel.loadBranches() }
-            }
+            },
+            controlsPresentation: $showsChatControls,
+            workspacePickerRequest: workspacePickerRequest,
+            gitBranchPickerRequest: gitBranchPickerRequest
         )
         // The composer flips wholesale with the transcript under the RTL
         // toggle (#259): input, placeholder, and chrome mirror together.
@@ -568,7 +826,132 @@ struct ChatView: View {
         "\(server.absoluteString)|\(transcriptMediaSessionID ?? "local:\(session.id)")"
     }
 
-    var body: some View {
+    private var chatBotHeader: some View {
+        Button {
+            showsBotDetails = true
+        } label: {
+            VStack(spacing: -3) {
+                if let identity = BirdAvatarIdentity(server: server, profile: viewModel.selectedProfileName ?? session.profile) {
+                    BirdAvatarView(identity: identity)
+                        .frame(width: 52, height: 52)
+                        .offset(y: 2)
+                }
+
+                Text(viewModel.selectedProfileTitle)
+                    .font(.system(.body, design: .rounded).weight(.medium))
+                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
+                    .truncationMode(.middle)
+                    .minimumScaleFactor(0.75)
+                    .padding(.horizontal, 12)
+                    .frame(minHeight: 32)
+                    .adaptiveGlass(.regular, isInteractive: true, fallbackMaterial: .thinMaterial, in: Capsule())
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("View details for \(viewModel.selectedProfileTitle)")
+        .accessibilityValue(headerSubtitle ?? viewModel.selectedProfileTitle)
+        .accessibilityHint("Shows read-only bot details.")
+    }
+
+    private var chatNavigationBar: some View {
+        ZStack(alignment: .top) {
+            HStack(spacing: 0) {
+                Spacer(minLength: 0)
+                chatBotHeader
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 56)
+            .frame(maxWidth: .infinity)
+            .frame(minHeight: 96, alignment: .center)
+
+            HStack(alignment: .top, spacing: 8) {
+                Button {
+                    handleBackNavigation()
+                } label: {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 20, weight: .medium))
+                        .frame(width: 44, height: 44)
+                        .contentShape(Circle())
+                        .adaptiveGlass(.regular, isInteractive: true, fallbackMaterial: .thinMaterial, in: Circle())
+                }
+                .frame(width: 44, height: 44)
+                .contentShape(Circle())
+                .accessibilityLabel("Back")
+                Spacer()
+                Button { showsChatControls = true } label: {
+                    Image(systemName: "slider.horizontal.3")
+                        .frame(width: 44, height: 44)
+                        .contentShape(Circle())
+                        .adaptiveGlass(.regular, isInteractive: true, fallbackMaterial: .thinMaterial, in: Circle())
+                }
+                .frame(width: 44, height: 44)
+                .contentShape(Circle())
+                .accessibilityLabel("Chat controls")
+                chatOverflowMenu
+            }
+            .buttonStyle(.plain)
+            .frame(maxWidth: .infinity, alignment: .top)
+            .padding(.top, 4)
+            .padding(.horizontal, 12)
+        }
+        .frame(minHeight: 96)
+        .background {
+            ChatHeaderReadabilityBackdrop()
+                .padding(.bottom, -24)
+                .ignoresSafeArea(.container, edges: .top)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
+    }
+
+    /// The Sessions shell owns the selected destination, while this view owns
+    /// the actual navigation destination presented by SwiftUI. Clear both
+    /// pieces of state on an explicit Back request: the parent callback keeps
+    /// a late restore from reopening this chat, and `dismiss()` performs the
+    /// immediate pop from the destination's navigation context. The latter is
+    /// required for the custom header button because it is outside the system
+    /// navigation bar and therefore has no implicit pop action of its own.
+    private func handleBackNavigation() {
+#if DEBUG
+        ChatPerformanceCadenceMonitor.begin(.back)
+#endif
+        onParentBack?()
+        dismiss()
+    }
+
+    private var chatOverflowMenu: some View {
+        Menu {
+            if showsFilesButton {
+                Button("Files", systemImage: "folder") { showsChatFiles = true }
+                    .disabled(viewModel.isViewingCachedData)
+            }
+            Button("Choose workspace path", systemImage: "folder.badge.gearshape") {
+                workspacePickerRequest += 1
+            }
+            .disabled(viewModel.isViewingCachedData || viewModel.isStartingChat
+                || viewModel.isSendingVoiceNote || viewModel.isCompressingSession
+                || viewModel.activeStreamID != nil || viewModel.isUpdatingComposerConfiguration)
+            if viewModel.hasActivatedGoalCommand { goalControlMenu }
+            if showsGitControls, gitAvailabilityViewModel.hasRepository {
+                gitActionsMenu
+                Button("Git branch", systemImage: "arrow.triangle.branch") {
+                    gitBranchPickerRequest += 1
+                }
+                .disabled(viewModel.isViewingCachedData || viewModel.activeStreamID != nil
+                    || gitAvailabilityViewModel.isLoadingBranches || gitAvailabilityViewModel.isSwitchingBranch)
+            }
+        } label: {
+            Image(systemName: "ellipsis")
+                .frame(width: 44, height: 44)
+                .contentShape(Circle())
+                .adaptiveGlass(.regular, isInteractive: true, fallbackMaterial: .thinMaterial, in: Circle())
+        }
+        .frame(width: 44, height: 44)
+        .contentShape(Circle())
+        .accessibilityLabel("Chat options")
+    }
+
+    private var chatBaseView: some View {
         ZStack(alignment: .bottom) {
             VStack(spacing: 0) {
                 if viewModel.isViewingCachedData {
@@ -581,33 +964,62 @@ struct ChatView: View {
                     // Scope RTL to the chat transcript only (#259): the offline
                     // banner above stays in the app's default direction.
                     .environment(\.layoutDirection, chatLayoutDirection)
+
             }
             .animation(ChatMotion.quickState(reduceMotion: reduceMotion), value: viewModel.showsListenPlaybackBar)
 
-            BottomComposerMaterialFade(composerHeight: composerHeight)
-
             composerAccessoryStack
+
+            if viewModel.attachmentRecoveryNeedsReset || viewModel.directConversationHasPromptDeliveryUncertainty {
+                VStack(spacing: 8) {
+                    if viewModel.attachmentRecoveryNeedsReset {
+                        DirectAttachmentRecoveryBanner(
+                            isBusy: viewModel.attachmentRecoveryIsBusy,
+                            isActionAvailable: viewModel.directAttachmentRecoveryTarget != nil,
+                            onDiscard: {
+                                attachmentRecoveryConfirmationTarget = viewModel.directAttachmentRecoveryTarget
+                            }
+                        )
+                    }
+                    if viewModel.directConversationHasPromptDeliveryUncertainty {
+                        DirectPromptDeliveryRecoveryBanner(
+                            isBusy: viewModel.promptDeliveryRecoveryIsBusy,
+                            isActionAvailable: viewModel.directPromptDeliveryRecoveryTarget != nil,
+                            isSafetyRecordUnavailable: viewModel.directPromptDeliverySafetyRecordUnavailable,
+                            hasConfirmedAcceptance: viewModel.directPromptDeliveryHasConfirmedAcceptance,
+                            onAllow: {
+                                promptDeliveryRecoveryConfirmationTarget = viewModel.directPromptDeliveryRecoveryTarget
+                            }
+                        )
+                    }
+                }
+                .padding(.horizontal)
+                .padding(.bottom, composerHeight + 8)
+                .zIndex(12)
+            }
 
             messageComposer
 
-            if let approvalPrompt = viewModel.approvalPrompt {
+            if let directApprovalPrompt = viewModel.pendingApprovalPrompt {
                 ApprovalRequestOverlay(
-                    prompt: approvalPrompt,
-                    isResponding: viewModel.isRespondingToApproval,
-                    errorMessage: viewModel.approvalErrorMessage,
+                    prompt: directApprovalPrompt,
+                    isResponding: viewModel.blockingInteractionResponseInFlight,
+                    errorMessage: viewModel.blockingInteractionErrorMessage(for: directApprovalPrompt.identity),
                     onChoice: { choice in
+                        let renderedIdentity = directApprovalPrompt.identity
                         Task {
-                            let didRespond = await viewModel.respondToApproval(choice)
-                            if didRespond {
-                                ChatHaptics.approvalSubmitted(choice, isEnabled: isHapticsEnabled)
-                            }
-                        }
-                    },
-                    onSkipAll: {
-                        Task {
-                            let didSkip = await viewModel.skipApprovalsForCurrentSession()
-                            if didSkip {
-                                ChatHaptics.approvalBypassEnabled(isEnabled: isHapticsEnabled)
+                            do {
+                                let response = try await viewModel.respondToApproval(
+                                    choice,
+                                    expectedIdentity: renderedIdentity
+                                )
+                                if response == .accepted,
+                                   let legacyChoice = ApprovalChoice(rawValue: choice.rawValue) {
+                                    ChatHaptics.approvalSubmitted(legacyChoice, isEnabled: isHapticsEnabled)
+                                }
+                            } catch {
+                                // The VM keeps an identity-scoped error visible
+                                // when the request is still the rendered one.
                             }
                         }
                     }
@@ -615,45 +1027,92 @@ struct ChatView: View {
                 .zIndex(10)
             }
 
-            if let nativeAuthPrompt = viewModel.nativeAuthPrompt {
-                NativeAuthComponentOverlay(
-                    prompt: nativeAuthPrompt,
-                    errorMessage: viewModel.nativeAuthErrorMessage,
-                    onSubmit: { values, submitComponent in
-                        await viewModel.submitNativeAuth(
-                            values: values,
-                            component: submitComponent,
-                            actionHandle: submitComponent.actionHandle
-                        )
-                    },
+            if let secretPrompt = viewModel.pendingSecretPrompt {
+                DirectGatewaySensitivePromptOverlay(
+                    prompt: secretPrompt,
+                    isResponding: viewModel.blockingInteractionResponseInFlight,
+                    errorMessage: viewModel.blockingInteractionErrorMessage(for: secretPrompt.identity),
                     onCancel: {
-                        await viewModel.cancelNativeAuth()
+                        let renderedIdentity = secretPrompt.identity
+                        Task {
+                            _ = try? await viewModel.cancelSecret(expectedIdentity: renderedIdentity)
+                        }
                     }
                 )
-                .zIndex(30)
+                .zIndex(31)
+            } else if let sudoPrompt = viewModel.pendingSudoPrompt {
+                DirectGatewaySensitivePromptOverlay(
+                    prompt: sudoPrompt,
+                    isResponding: viewModel.blockingInteractionResponseInFlight,
+                    errorMessage: viewModel.blockingInteractionErrorMessage(for: sudoPrompt.identity),
+                    onCancel: {
+                        let renderedIdentity = sudoPrompt.identity
+                        Task {
+                            _ = try? await viewModel.cancelSudo(expectedIdentity: renderedIdentity)
+                        }
+                    }
+                )
+                .zIndex(31)
             }
 
-            if viewModel.nativeAuthPrompt == nil,
-               let websiteLoginPrompt = viewModel.websiteLoginPrompt {
-                WebsiteLoginRequestOverlay(prompt: websiteLoginPrompt) { result in
-                    switch result {
-                    case .completed:
-                        return await viewModel.completeWebsiteLogin(requestID: websiteLoginPrompt.requestID)
-                    case .cancelled:
-                        return await viewModel.cancelWebsiteLogin(requestID: websiteLoginPrompt.requestID)
-                    case .failed:
-                        return await viewModel.failWebsiteLogin(requestID: websiteLoginPrompt.requestID)
-                    }
-                }
-                .zIndex(20)
-            }
         }
-        .background { SemrehBackdrop().ignoresSafeArea() }
+        .safeAreaInset(edge: .top, spacing: 0) { chatNavigationBar }
+        .background {
+            SemrehBackdrop().ignoresSafeArea()
+                .onChange(of: draftMessage) {
+                    viewModel.setDirectComposerEditing(!draftMessage.isEmpty)
+                }
+                .onChange(of: viewModel.clarificationPrompt?.gatewayIdentity) { oldIdentity, newIdentity in
+                    guard viewModel.usesDirectGateway,
+                          let newIdentity,
+                          oldIdentity != newIdentity,
+                          composerIsFocused else { return }
+                    // The ordinary composer owns this binding. Do not send a global
+                    // resignFirstResponder action: the clarification card's answer
+                    // field may already be focused and must not be hijacked.
+                    composerIsFocused = false
+                }
+                .onChange(of: viewModel.pendingApprovalPrompt?.identity) { oldIdentity, newIdentity in
+                    guard viewModel.usesDirectGateway,
+                          let newIdentity,
+                          oldIdentity != newIdentity,
+                          composerIsFocused else { return }
+                    composerIsFocused = false
+                }
+                .onChange(of: viewModel.pendingSecretPrompt?.identity) { oldIdentity, newIdentity in
+                    guard viewModel.usesDirectGateway,
+                          let newIdentity,
+                          oldIdentity != newIdentity,
+                          composerIsFocused else { return }
+                    composerIsFocused = false
+                }
+                .onChange(of: viewModel.pendingSudoPrompt?.identity) { oldIdentity, newIdentity in
+                    guard viewModel.usesDirectGateway,
+                          let newIdentity,
+                          oldIdentity != newIdentity,
+                          composerIsFocused else { return }
+                    composerIsFocused = false
+                }
+        }
         .overlay(alignment: .top) {
             GitActionToastOverlay(state: gitToastState)
         }
-        .navigationTitle(displayTitle)
+        .navigationTitle("")
+        .toolbar(.hidden, for: .navigationBar)
+        .navigationDestination(isPresented: $showsChatFiles) {
+            FileBrowserView(session: session, server: server, onAPIError: onAPIError)
+                .toolbar(.visible, for: .navigationBar)
+        }
+        .sheet(isPresented: $showsBotDetails) {
+            NavigationStack {
+                ChatBotDetailsView(
+                    profile: activeProfileDetails,
+                    profileTitle: viewModel.selectedProfileTitle
+                )
+            }
+        }
         .navigationBarTitleDisplayMode(.inline)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("chat-detail:\(viewModel.displayTitle)")
         .task(id: didCompleteInitialAppearance) {
             await handleInitialAppearanceTask()
@@ -691,20 +1150,20 @@ struct ChatView: View {
                 persistTranscriptRestore()
                 foregroundRefreshTask?.cancel()
                 foregroundRefreshTask = nil
-                activeStreamStatusRefreshTask?.cancel()
-                activeStreamStatusRefreshTask = nil
                 guard !disablesExternalLifecycle else { return }
                 // Stop the per-session event stream when the chat is not on
                 // screen. Background sync for every retained conversation caused
                 // main-thread disk I/O and transcript reloads (build 19 lag).
                 viewModel.stopSessionEventSync()
-                ChatNavigationLifecycle.applyViewDisappear(to: viewModel)
+                viewModel.stopListening()
             }
             .onAppear {
+#if DEBUG
+                ChatPerformanceCadenceMonitor.end(.entry)
+#endif
                 viewModel.setTranscriptPresentationActive(true)
                 guard !disablesExternalLifecycle else { return }
                 foregroundRefreshTask?.cancel()
-                viewModel.cancelOwnedStreamStatusWatch()
                 foregroundRefreshTask = Task { @MainActor in
                     guard !Task.isCancelled, scenePhase == .active else { return }
                     await viewModel.reconnectStreamIfNeeded(modelContext: modelContext)
@@ -727,51 +1186,51 @@ struct ChatView: View {
                 guard viewModel.responseCompletionHapticTrigger > 0 else { return }
                 handleResponseCompletionSideEffects()
             }
-            .toolbar {
-                ToolbarItem(placement: .principal) {
-                    ChatToolbarTitleLabel(
-                        title: displayTitle,
-                        subtitle: headerSubtitle
-                    )
+            // One re-eval per run at the elapsed-visibility threshold (item 4). A
+            // quiet stretch (long tool, no stream events) would otherwise never
+            // re-derive the pill, and a 1 Hz ticker would re-render the chat
+            // constantly for nothing.
+            .task(id: viewModel.activeRunStartedAt) {
+                hasActiveRunPassedElapsedThreshold = false
+                guard let startedAt = viewModel.activeRunStartedAt else { return }
+                guard !ChatActiveRunElapsedPolicy.hasPassedVisibilityThreshold(
+                    activeRunStartedAt: startedAt,
+                    now: Date()
+                ) else {
+                    hasActiveRunPassedElapsedThreshold = true
+                    return
                 }
-
-                ToolbarItem(placement: .topBarTrailing) {
-                    ChatToolbarActionCluster {
-                        if viewModel.hasActivatedGoalCommand {
-                            ChatToolbarActionSlot {
-                                goalControlMenu
-                            }
-                        }
-
-                        if showsFilesButton {
-                            ChatToolbarActionSlot {
-                                NavigationLink {
-                                    FileBrowserView(session: session, server: server, onAPIError: onAPIError)
-                                } label: {
-                                    Label("Files", systemImage: "folder")
-                                }
-                                .disabled(viewModel.isViewingCachedData)
-                                .accessibilityLabel("Files")
-                            }
-                        }
-
-                        if showsGitControls, gitAvailabilityViewModel.hasRepository {
-                            ChatToolbarActionSlot {
-                                gitActionsMenu
-                            }
-                        }
-                    }
-                }
+                let remaining = ChatActiveRunElapsedPolicy.pillVisibilityThreshold
+                    - Date().timeIntervalSince(startedAt)
+                try? await Task.sleep(for: .seconds(max(0, remaining)))
+                guard !Task.isCancelled, viewModel.activeRunStartedAt == startedAt else { return }
+                hasActiveRunPassedElapsedThreshold = true
             }
             .navigationDestination(item: $forkedSession) { session in
                 ChatView(session: session, server: server, onAPIError: onAPIError)
+            }
+            .navigationDestination(isPresented: $isShowingDirectBranch) {
+                if let directBranchHandoff {
+                    ChatView(
+                        session: directBranchHandoff.session,
+                        server: directBranchHandoff.origin,
+                        onAPIError: onAPIError,
+                        retainedViewModel: directBranchHandoff.viewModel
+                    )
+                }
+            }
+            .onChange(of: isShowingDirectBranch) { _, isPresented in
+                guard !isPresented else { return }
+                // The store owns the adopted child after transfer. Drop the
+                // navigation state's extra strong reference so bounded eviction
+                // remains effective after the child is popped.
+                directBranchHandoff = nil
             }
             .fullScreenCover(item: $selectableResponseText) { selectableText in
                 SelectableTextPresentationView(selection: selectableText)
             }
             .sheet(item: $attachmentPreviewItem) { item in
                 ChatAttachmentPreviewView(
-                    session: session,
                     server: server,
                     item: item,
                     onAPIError: onAPIError
@@ -783,8 +1242,12 @@ struct ChatView: View {
                 }
             }
             .sheet(item: $transcriptMediaPreviewItem, content: transcriptMediaPreviewView)
-            .sheet(item: $activeGitSheet, content: gitSheet)
-            .sheet(item: $turnDiffPresentation, content: turnDiffSheet)
+            .sheet(item: $activeGitSheet) { sheet in
+                gitSheet(sheet).id(gitAvailabilityViewModel.requestSession)
+            }
+            .sheet(item: $turnDiffPresentation) { presentation in
+                turnDiffSheet(presentation).id(gitAvailabilityViewModel.requestSession)
+            }
             .alert(item: $gitAlert, content: gitAlertPresentation)
             .sheet(isPresented: $showsGoalSheet) {
                 GoalSubmissionSheet(
@@ -806,6 +1269,10 @@ struct ChatView: View {
                     }
                 )
             }
+        }
+
+    var body: some View {
+        chatBaseView
             .alert(
                 "Discard Later Messages?",
                 isPresented: $showEditDiscardConfirmation
@@ -869,6 +1336,14 @@ struct ChatView: View {
             } message: {
                 Text(viewModel.messageActionErrorMessage ?? "")
             }
+            .modifier(DirectAttachmentRecoveryAlertModifier(
+                target: $attachmentRecoveryConfirmationTarget,
+                viewModel: viewModel
+            ))
+            .modifier(DirectPromptDeliveryRecoveryAlertModifier(
+                target: $promptDeliveryRecoveryConfirmationTarget,
+                viewModel: viewModel
+            ))
     }
 
     @ViewBuilder
@@ -910,16 +1385,13 @@ struct ChatView: View {
     private func gitSheet(_ sheet: ActiveGitSheet) -> some View {
         switch sheet {
         case .changes:
-            GitWorkspaceView(session: session, server: server, onAPIError: onAPIError)
-        case .commit:
+            GitWorkspaceView(session: gitAvailabilityViewModel.requestSession, server: server, onAPIError: onAPIError)
+        case .stage:
             GitCommitView(
-                session: session,
+                session: gitAvailabilityViewModel.requestSession,
                 server: server,
                 writesDisabled: gitWriteAvailability.writesDisabled,
-                onAPIError: onAPIError,
-                onCommitted: {
-                    Task { await gitAvailabilityViewModel.refreshAfterExternalMutation() }
-                }
+                onAPIError: onAPIError
             )
         }
     }
@@ -928,9 +1400,9 @@ struct ChatView: View {
     private func turnDiffSheet(_ presentation: TurnDiffPresentation) -> some View {
         switch presentation {
         case .turnFiles(let files):
-            GitTurnDiffSheet(session: session, server: server, files: files, onAPIError: onAPIError)
+            GitTurnDiffSheet(session: gitAvailabilityViewModel.requestSession, server: server, files: files, onAPIError: onAPIError)
         case .file(let file):
-            GitDiffView(session: session, server: server, file: file, onAPIError: onAPIError)
+            GitDiffView(session: gitAvailabilityViewModel.requestSession, server: server, file: file, onAPIError: onAPIError)
         }
     }
 
@@ -944,7 +1416,6 @@ struct ChatView: View {
                 statusFailed: gitAvailabilityViewModel.statusError != nil
             ),
             isEnabled: !viewModel.isViewingCachedData,
-            fetchDisabled: gitWriteAvailability.fetchDisabled,
             writesDisabled: gitWriteAvailability.writesDisabled,
             isRunningAction: gitAvailabilityViewModel.isRunningGitAction,
             onTap: {
@@ -954,38 +1425,11 @@ struct ChatView: View {
                 activeGitSheet = .changes
             },
             onStageEdit: {
-                activeGitSheet = .commit
-            },
-            onCommit: {
-                Task { await performQuickCommit(push: false) }
-            },
-            onCommitAndPush: {
-                Task { await performQuickCommit(push: true) }
-            },
-            onFetch: {
-                Task { await performGitRemoteAction(.fetch) }
-            },
-            onPull: {
-                gitAlert = .confirmRemote(.pull)
+                activeGitSheet = .stage
             },
             onPush: {
                 gitAlert = .confirmRemote(.push)
             }
-        )
-    }
-
-    /// Inputs for the inline "Commit & Push" button shown under the latest assistant turn.
-    /// Only for git workspaces, when the latest message is an assistant turn (not while a
-    /// response streams), and there is something to commit (or a commit is in flight).
-    private var inlineCommitContext: ChatInlineCommitContext? {
-        guard gitAvailabilityViewModel.hasRepository,
-              viewModel.activeStreamID == nil,
-              latestTranscriptMessageRole == "assistant",
-              gitAvailabilityViewModel.hasCommittableChanges || gitAvailabilityViewModel.isCommitting
-        else { return nil }
-        return ChatInlineCommitContext(
-            runningPhase: gitAvailabilityViewModel.commitPhase,
-            isDisabled: gitWriteAvailability.writesDisabled
         )
     }
 
@@ -1013,65 +1457,10 @@ struct ChatView: View {
     }
 
     @MainActor
-    private func performQuickCommit(push: Bool) async {
-        guard !gitAvailabilityViewModel.isCommitting else { return }
-
-        let branch = gitAvailabilityViewModel.currentBranchName
-        gitToastState.showProgress(GitActionProgress(
-            title: GitCommitPhase.generatingMessage.progressTitle,
-            subtitle: branch
-        ))
-
-        let outcome = await gitAvailabilityViewModel.quickCommit(push: push) { phase in
-            gitToastState.showProgress(GitActionProgress(
-                title: phase.progressTitle,
-                subtitle: gitAvailabilityViewModel.currentBranchName
-            ))
-        }
-
-        switch outcome {
-        case .success(let result):
-            var detailLines: [String] = []
-            if let sha = result.shortSHA { detailLines.append(String(localized: "Commit \(sha)")) }
-            if result.truncatedMessage { detailLines.append(String(localized: "Diff was large; message may be partial.")) }
-            if let pushError = result.pushFailureMessage {
-                // The commit landed but the requested push failed — report partial success
-                // so the user knows the local commit is safe and only the push needs retrying.
-                detailLines.append(String(localized: "Push failed: \(pushError)"))
-            }
-            gitToastState.showSuccess(GitActionSuccess(
-                title: result.pushFailureMessage != nil
-                    ? String(localized: "Committed — push failed")
-                    : (result.didPush ? String(localized: "Commit & push complete") : String(localized: "Commit complete")),
-                subtitle: result.branch,
-                detailLines: detailLines
-            ))
-        case .nothingToCommit:
-            gitToastState.dismissProgress()
-            gitAlert = .error(String(localized: "There are no changes to commit."))
-        case .tooManyChanges:
-            // Status was truncated (>500 files): the commit was blocked to avoid silently
-            // dropping files 501+. Always surface a message — falling back to a hardcoded
-            // string if the view model ever leaves actionErrorMessage unset — because a
-            // blocked commit with no feedback would be the very silent failure this guards
-            // against. (Kept separate from .failure, which intentionally stays quiet when its
-            // busy/no-session guard returns with no message.) No success toast/SHA.
-            gitToastState.dismissProgress()
-            gitAlert = .error(gitAvailabilityViewModel.actionErrorMessage
-                ?? String(localized: "Too many changes to quick-commit. Commit in smaller batches, or use git directly."))
-        case .failure:
-            gitToastState.dismissProgress()
-            if let message = gitAvailabilityViewModel.actionErrorMessage {
-                gitAlert = .error(message)
-            }
-        }
-    }
-
-    @MainActor
     private func performGitCheckout(_ target: GitCheckoutTarget, stashingChanges: Bool = false) async {
         let outcome = await gitAvailabilityViewModel.checkout(target, stashingChanges: stashingChanges)
         if outcome == .requiresStash {
-            gitAlert = .dirtyCheckout(target)
+            gitAlert = .error(String(localized: "Switching a branch with local changes is deferred. Commit or clean the workspace through chat first."))
         } else if let message = gitAvailabilityViewModel.actionErrorMessage {
             // Surface real failures and partial successes (branch switched but the
             // stashed changes could not be restored) — the view model sets
@@ -1107,21 +1496,10 @@ struct ChatView: View {
         switch alert {
         case .confirmRemote(let action):
             return Alert(
-                title: Text(action == .pull ? "Pull Remote Changes?" : "Push Local Commits?"),
-                message: Text(action == .pull
-                    ? "Pull uses fast-forward only and will not create a merge commit."
-                    : "Push the current branch to its configured upstream remote?"),
-                primaryButton: .default(Text(action == .pull ? "Pull" : "Push")) {
+                title: Text("Push Local Commits?"),
+                message: Text("Push the current branch to its upstream, or to origin and set its upstream if none is configured?"),
+                primaryButton: .default(Text("Push")) {
                     Task { await performGitRemoteAction(action) }
-                },
-                secondaryButton: .cancel()
-            )
-        case .dirtyCheckout(let target):
-            return Alert(
-                title: Text("Uncommitted Changes"),
-                message: Text("This workspace has uncommitted changes. Save them temporarily, switch branches, then restore any saved changes for the destination branch."),
-                primaryButton: .default(Text("Stash & Switch")) {
-                    Task { await performGitCheckout(target, stashingChanges: true) }
                 },
                 secondaryButton: .cancel()
             )
@@ -1150,10 +1528,6 @@ struct ChatView: View {
                         .transition(ChatMotion.bottomOverlayTransition(reduceMotion: reduceMotion))
                 }
 
-                if showsApprovalBypassStatus {
-                    ApprovalBypassStatusPill()
-                        .transition(ChatMotion.bottomOverlayTransition(reduceMotion: reduceMotion))
-                }
             }
             .padding(.horizontal)
             .padding(.bottom, composerHeight + 8)
@@ -1162,7 +1536,6 @@ struct ChatView: View {
             .animation(ChatMotion.quickState(reduceMotion: reduceMotion), value: composerAccessoryVisibleItemCount)
             .animation(ChatMotion.quickState(reduceMotion: reduceMotion), value: activeRunStatusPresentation)
             .animation(ChatMotion.quickState(reduceMotion: reduceMotion), value: viewModel.pinnedLocalNotices)
-            .animation(ChatMotion.quickState(reduceMotion: reduceMotion), value: showsApprovalBypassStatus)
         }
     }
 
@@ -1194,6 +1567,7 @@ struct ChatView: View {
             showsThinkingAndToolCards: showsThinkingAndToolCards,
             showsAssistantTypingIndicator: showsAssistantTypingIndicator,
             showsScrollToBottomButton: showsScrollToBottomButton,
+            hasExplicitBottomScrollRequest: isExplicitBottomScrollActive,
             shouldFollowLatestMessage: shouldFollowLatestMessage,
             latestTranscriptMessageRole: latestTranscriptMessageRole,
             isScrolledNearBottom: isScrolledNearBottom,
@@ -1233,8 +1607,39 @@ struct ChatView: View {
             onLoadMessages: {
                 await loadMessages()
             },
-            onLoadOlderMessages: {
-                await loadOlderMessages()
+            onLoadOlderMessages: { intent, isCurrentOperation in
+                if !intent.acceptsUserIntent {
+                    guard pagingStartupReadyScope == viewModel.outgoingInsertionScope,
+                          transcriptRestoreOutcomeState.pending == nil,
+                          scenePhase == .active else { return .notAdmitted }
+#if DEBUG && targetEnvironment(simulator)
+                    guard await ChatP09PagingCalibration.shared.waitIfConfigured(
+                        server: server, sessionID: session.sessionId ?? session.id,
+                        scope: viewModel.outgoingInsertionScope
+                    ), !Task.isCancelled, isCurrentOperation(),
+                        pagingStartupReadyScope == viewModel.outgoingInsertionScope,
+                        transcriptRestoreOutcomeState.pending == nil,
+                        scenePhase == .active else { return .notAdmitted }
+#endif
+                }
+                if intent.acceptsUserIntent {
+#if DEBUG
+                    let previousCancellationToken = transcriptRestoreCancellationToken
+#endif
+                    didInteractBeforeTranscriptRestore = true
+                    transcriptRestoreOutcomeState.acceptUserIntent()
+                    isTranscriptRestorePending = false
+                    pendingTranscriptRestoreMessageID = nil
+                    transcriptRestoreCancellationToken &+= 1
+#if DEBUG
+                    logTranscriptRestoreBoundary(
+                        event: "transcript_restore_cancellation",
+                        decision: "explicit_older_messages_callback",
+                        previousCancellationToken: previousCancellationToken
+                    )
+#endif
+                }
+                return await loadOlderMessages(intent: intent) ? .progress : .noProgress
             },
             onUpdateScrollMetrics: updateScrollMetrics,
             onDismissKeyboard: dismissKeyboard,
@@ -1249,8 +1654,19 @@ struct ChatView: View {
                 scrollToTranscriptMessage(proxy, messageID: messageID, animated: animated)
             },
             onVisibleTranscriptRowIDChange: { rowID in
+                if isTranscriptRestorePending {
+                    guard let rowID, rowID == pendingTranscriptRestoreMessageID else {
+                        return
+                    }
+                    isTranscriptRestorePending = false
+                    pendingTranscriptRestoreMessageID = nil
+                }
                 guard visibleTranscriptRowID != rowID else { return }
                 visibleTranscriptRowID = rowID
+            },
+            onTranscriptTailVisibilityChange: { latestRow, bottom in
+                if isLatestTranscriptRowVisible != latestRow { isLatestTranscriptRowVisible = latestRow }
+                if isTranscriptBottomVisible != bottom { isTranscriptBottomVisible = bottom }
             },
             onPreviewAttachment: { attachment, localData in
                 presentPreviewRestoringComposerFocusIfNeeded {
@@ -1263,9 +1679,25 @@ struct ChatView: View {
             onToggleListening: { context in
                 viewModel.toggleListening(to: context)
             },
-            onSubmitClarification: { response in
+            onSubmitClarification: { response, identity in
+                guard let identity else { return }
                 Task {
-                    let didRespond = await viewModel.respondToClarification(response)
+                    let didRespond = await viewModel.respondToDirectClarification(
+                        response,
+                        expectedIdentity: identity
+                    )
+                    if didRespond {
+                        ChatHaptics.clarificationSubmitted(isEnabled: isHapticsEnabled)
+                    }
+                }
+            },
+            onCancelClarification: { identity in
+                guard let identity else { return }
+                Task {
+                    let didRespond = await viewModel.respondToDirectClarification(
+                        "",
+                        expectedIdentity: identity
+                    )
                     if didRespond {
                         ChatHaptics.clarificationSubmitted(isEnabled: isHapticsEnabled)
                     }
@@ -1282,10 +1714,8 @@ struct ChatView: View {
             onCopy: { context in
                 UIPasteboard.general.string = context.copyText
             },
-            inlineCommitContext: inlineCommitContext,
-            onInlineCommit: {
-                Task { await performQuickCommit(push: true) }
-            },
+            inlineCommitContext: nil,
+            onInlineCommit: {},
             turnChangesSummary: turnChangesRecapSummary,
             onOpenTurnDiff: {
                 presentTurnDiff(for: turnChangesRecapSummary)
@@ -1295,9 +1725,22 @@ struct ChatView: View {
             },
             restoreScrollToken: restoreScrollToken,
             restoreTarget: viewModel.transcriptRestoreTarget,
+            initialRestoreRequest: transcriptRestoreOutcomeState.pending,
+            isPagingStartupReady: pagingStartupReadyScope == viewModel.outgoingInsertionScope,
+            onInitialRestoreOutcome: { request, outcome in
+                guard transcriptRestoreOutcomeState.complete(
+                    request, outcome: outcome, currentScope: viewModel.outgoingInsertionScope
+                ) else { return }
+                isTranscriptRestorePending = false
+                pendingTranscriptRestoreMessageID = nil
+            },
+            transcriptRestoreCancellationToken: transcriptRestoreCancellationToken,
             followRejoinScrollToken: followRejoinScrollToken,
             isComposerResizing: isComposerResizing,
-            transcriptRenderRevision: viewModel.transcriptRenderRevision
+            isUserInteractingWithScroll: isUserInteractingWithScroll,
+            transcriptRenderRevision: viewModel.transcriptRenderRevision,
+            outgoingInsertionScope: viewModel.outgoingInsertionScope,
+            outgoingInsertionEvent: viewModel.outgoingInsertionEvent
         )
         .equatable()
     }
@@ -1311,7 +1754,9 @@ struct ChatView: View {
 
     private var showsScrollToBottomButton: Bool {
         ChatScrollPolicy.shouldShowScrollToBottomButton(
-            isNearBottom: isScrolledNearBottom,
+            isNearBottom: isScrolledNearBottom && (
+                !isExplicitBottomScrollActive || isLatestTranscriptRowVisible || isTranscriptBottomVisible
+            ),
             hasExplicitBottomRequest: isExplicitBottomScrollActive,
             hasActiveStream: viewModel.activeStreamID != nil,
             shouldFollowLatestMessage: shouldFollowLatestMessage
@@ -1347,18 +1792,19 @@ struct ChatView: View {
     }
 
     private var activeRunStatusPresentation: ChatActiveRunStatusPresentation? {
-        ChatActiveRunStatusPolicy.presentation(
+        // The composer already owns the pending-stop label. A second floating
+        // copy both repeats it and inserts another 36pt into the transcript.
+        guard !viewModel.isCancellingStream else { return nil }
+        return ChatActiveRunStatusPolicy.presentation(
             isStartingChat: viewModel.isStartingChat,
             hasActiveStream: viewModel.activeStreamID != nil,
             activeStreamRecoveryState: viewModel.activeStreamRecoveryState,
             isCancellingStream: viewModel.isCancellingStream,
             isScrolledNearBottom: isScrolledNearBottom,
-            isEstablishingConnection: viewModel.isEstablishingConnection
+            isEstablishingConnection: viewModel.isEstablishingConnection,
+            activeRunStartedAt: viewModel.activeRunStartedAt,
+            hasActiveRunPassedElapsedThreshold: hasActiveRunPassedElapsedThreshold
         )
-    }
-
-    private var showsApprovalBypassStatus: Bool {
-        viewModel.isSessionApprovalBypassEnabled && viewModel.approvalPrompt == nil
     }
 
     private var composerAccessorySpacerHeight: CGFloat {
@@ -1366,10 +1812,6 @@ struct ChatView: View {
         if activeRunStatusPresentation != nil {
             height += activeRunStatusSpacerHeight
         }
-        if showsApprovalBypassStatus {
-            height += approvalBypassStatusSpacerHeight
-        }
-
         let visibleItemCount = composerAccessoryVisibleItemCount
         if visibleItemCount > 1 {
             height += CGFloat(visibleItemCount - 1) * composerAccessoryVerticalSpacing
@@ -1385,14 +1827,22 @@ struct ChatView: View {
         if activeRunStatusPresentation != nil {
             count += 1
         }
-        if showsApprovalBypassStatus {
-            count += 1
-        }
         return count
     }
 
     private var displayTitle: String {
         viewModel.displayTitle
+    }
+
+    private var activeProfileDetails: ProfileSummary? {
+        guard let profileName = (viewModel.selectedProfileName ?? session.profile)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !profileName.isEmpty
+        else {
+            return nil
+        }
+
+        return viewModel.profileOptions.first { $0.normalizedName == profileName }
     }
 
     private var headerSubtitle: String? {
@@ -1418,12 +1868,37 @@ struct ChatView: View {
         transcriptMessages
     }
 
+    private var latestRenderedTranscriptMessage: TranscriptMessage? {
+        var liveAnchorIDs = Set<String>()
+        if showsThinkingAndToolCards, viewModel.activeStreamID != nil {
+            if !viewModel.liveReasoningText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               let anchorID = viewModel.reasoningAnchorMessageID {
+                liveAnchorIDs.insert(anchorID)
+            }
+            if !viewModel.liveToolCalls.isEmpty, let anchorID = viewModel.toolCallAnchorMessageID {
+                liveAnchorIDs.insert(anchorID)
+            }
+        }
+
+        return transcriptMessages.last {
+            ChatTranscriptRenderSequence.includes(
+                $0,
+                showsThinkingAndToolCards: showsThinkingAndToolCards,
+                compressionAfterRenderID: viewModel.compressionReferenceCard?.afterRenderID,
+                reasoningGroupsForAnchor: viewModel.displayedReasoningGroupsForAnchor,
+                toolCallGroupsForAnchor: viewModel.completedToolCallGroupsForAnchor,
+                liveAccessoryAnchorIDs: liveAnchorIDs,
+                shouldRenderMessage: shouldRenderMessageRow
+            )
+        }
+    }
+
     private var latestTranscriptMessageID: String? {
-        transcriptMessages.last?.id
+        latestRenderedTranscriptMessage?.id
     }
 
     private var latestTranscriptMessageRole: String? {
-        transcriptMessages.last?.message.role
+        latestRenderedTranscriptMessage?.message.role
     }
 
     private func prepareInitialAppearance() {
@@ -1441,7 +1916,9 @@ struct ChatView: View {
         prepareInitialAppearance()
 
         if disablesExternalLifecycle {
+            _ = pagingStartupOperation.begin(scope: viewModel.outgoingInsertionScope)
             requestTranscriptRestoreIfNeeded()
+            pagingStartupReadyScope = viewModel.outgoingInsertionScope
             isInitialComposerFocusContentReady = true
             handleInitialAppearanceCompletion()
             return
@@ -1460,6 +1937,9 @@ struct ChatView: View {
 
     private func performInitialAsyncWork() async {
         guard !Task.isCancelled else { return }
+        let startupScope = viewModel.outgoingInsertionScope
+        let startupGeneration = pagingStartupOperation.begin(scope: startupScope)
+        pagingStartupReadyScope = nil
 
         if loadsInitialMessages,
            ChatInitialAppearancePolicy.shouldReloadTranscriptOnAppear(
@@ -1484,15 +1964,16 @@ struct ChatView: View {
             await viewModel.reconnectStreamIfNeeded(modelContext: modelContext)
             guard !Task.isCancelled else { return }
         }
+        guard !Task.isCancelled,
+              startupScope == viewModel.outgoingInsertionScope,
+              pagingStartupOperation.matches(scope: startupScope, generation: startupGeneration) else { return }
         requestTranscriptRestoreIfNeeded()
+        pagingStartupReadyScope = startupScope
         if initialAttachments.isEmpty {
             isInitialComposerFocusContentReady = true
             applyInitialComposerFocusPolicyIfNeeded()
         }
         await viewModel.loadComposerConfiguration()
-        guard !Task.isCancelled else { return }
-
-        await viewModel.refreshApprovalBypassState()
         guard !Task.isCancelled else { return }
 
         await uploadInitialAttachmentsIfNeeded()
@@ -1506,6 +1987,10 @@ struct ChatView: View {
     }
 
     private func loadInitialGitAvailability() async {
+        if viewModel.usesDirectGateway {
+            await gitAvailabilityViewModel.loadIfNeeded()
+            return
+        }
         let availabilityViewModel = GitWorkspaceAvailabilityViewModel(session: session, server: server)
         gitAvailabilityViewModel = availabilityViewModel
         await availabilityViewModel.loadIfNeeded()
@@ -1516,6 +2001,7 @@ struct ChatView: View {
             currentGoal: viewModel.currentGoal,
             isViewingCachedData: viewModel.isViewingCachedData,
             isActionDisabled: isGoalActionDisabled,
+            isRunning: viewModel.activeStreamID != nil,
             onSetGoal: {
                 showsGoalSheet = true
             },
@@ -1526,7 +2012,7 @@ struct ChatView: View {
     }
 
     private var isGoalActionDisabled: Bool {
-        viewModel.isViewingCachedData || viewModel.activeStreamID != nil || viewModel.isSubmittingGoal
+        viewModel.isViewingCachedData || viewModel.isSubmittingGoal
     }
 
     private func loadMessages(appliesInitialFocus: Bool = true, reconnectsAfterLoad: Bool = true) async {
@@ -1543,11 +2029,23 @@ struct ChatView: View {
         }
     }
 
-    private func loadOlderMessages() async -> Bool {
-        shouldFollowLatestMessage = false
-        if !isReadingOlderTranscript {
-            withAnimation(ChatMotion.quickState(reduceMotion: reduceMotion)) {
-                isReadingOlderTranscript = true
+    private func loadOlderMessages(intent: ChatTranscriptOlderLoadIntent) async -> Bool {
+        if intent.acceptsUserIntent {
+#if DEBUG
+            let previousFollowLatest = shouldFollowLatestMessage
+#endif
+            shouldFollowLatestMessage = false
+#if DEBUG
+            logChatScrollBoundary(
+                event: "follow_state_transition",
+                decision: "explicit_load_older_messages",
+                previousFollowLatest: previousFollowLatest
+            )
+#endif
+            if !isReadingOlderTranscript {
+                withAnimation(ChatMotion.quickState(reduceMotion: reduceMotion)) {
+                    isReadingOlderTranscript = true
+                }
             }
         }
 
@@ -1581,6 +2079,9 @@ struct ChatView: View {
     }
 
     private func sendDraftMessage() async {
+#if DEBUG
+        defer { ChatPerformanceCadenceMonitor.end(.send) }
+#endif
         let submittedDraft = draftMessage
         let shouldRestoreFocusAfterSend = composerIsFocused
 
@@ -1625,6 +2126,9 @@ struct ChatView: View {
     }
 
     private func sendVoiceNote(audioData: Data, filename: String) async {
+#if DEBUG
+        defer { ChatPerformanceCadenceMonitor.end(.send) }
+#endif
         prepareTranscriptForExplicitSend()
 
         let didSend = await viewModel.sendVoiceNote(
@@ -1650,6 +2154,12 @@ struct ChatView: View {
         prepareTranscriptForExplicitSend()
 
         draftMessage = ""
+        if viewModel.usesDirectGateway {
+            // Clear saved direct draft before awaiting submission to reduce
+            // stale composer restoration after termination. UserDefaults
+            // does not guarantee synchronous disk durability.
+            persistComposerDraft()
+        }
 
         let didStart = await viewModel.sendMessage(submittedDraft, modelContext: modelContext)
         if !didStart, draftMessage.isEmpty {
@@ -1680,6 +2190,15 @@ struct ChatView: View {
             draftMessage = ""
         case .openedSession(let session):
             forkedSession = session
+            draftMessage = ""
+        case .openedDirectBranch(let handoff):
+            guard OpenChatSessionStore.shared.adoptBranch(handoff) != nil else {
+                OpenChatSessionStore.shared.releaseUnadoptedBranch(handoff)
+                viewModel.setSendErrorMessage(String(localized: "The direct branch could not be opened safely."))
+                return
+            }
+            directBranchHandoff = handoff
+            isShowingDirectBranch = true
             draftMessage = ""
         case .unsupported(let friendlyMessage):
             viewModel.setSendErrorMessage(friendlyMessage)
@@ -2037,46 +2556,91 @@ struct ChatView: View {
     }
 
     private func handleActiveStreamChange() {
-        guard let activeStreamID = viewModel.activeStreamID else {
-            activeStreamStatusRefreshTask?.cancel()
-            activeStreamStatusRefreshTask = nil
+        guard viewModel.activeStreamID == nil else { return }
 
-            if responseCompletionNotificationTracker.shouldEndBackgroundTaskOnStreamInactive(
-                completionTrigger: viewModel.responseCompletionHapticTrigger
-            ) {
-                endResponseCompletionBackgroundTask()
-            }
+        if responseCompletionNotificationTracker.shouldEndBackgroundTaskOnStreamInactive(
+            completionTrigger: viewModel.responseCompletionHapticTrigger
+        ) {
+            endResponseCompletionBackgroundTask()
+        }
 
-            // The agent may have edited files this turn, so refresh git state (status,
-            // ahead/behind, branch) once the response finishes — keeps the toolbar badge,
-            // Changes row, and commit surfaces in sync without re-entering the chat.
-            // Run unconditionally: refreshAfterExternalMutation re-checks /api/git-info first,
-            // so it also detects a repo the agent just created (git init/clone) mid-turn.
-            Task { await gitAvailabilityViewModel.refreshAfterExternalMutation() }
+        // The agent may have edited files this turn, so refresh git state once
+        // the response finishes.
+        Task { await gitAvailabilityViewModel.refreshAfterExternalMutation() }
+    }
+
+#if DEBUG
+    private func debugOpaqueTranscriptTargetKey(_ targetID: String) -> String {
+        // Use a deterministic opaque key for cross-boundary correlation without
+        // placing a transcript/render ID in the diagnostic stream.
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        for byte in targetID.utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 1_099_511_628_211
+        }
+        return String(hash, radix: 16)
+    }
+
+    private func logTranscriptRestoreBoundary(
+        event: String,
+        decision: String,
+        previousCancellationToken: Int? = nil
+    ) {
+        let previousCancellationValue = previousCancellationToken.map(String.init) ?? "none"
+        Self.transcriptScrollLogger.debug("""
+            event=\(event, privacy: .public) decision=\(decision, privacy: .public) \
+            restoreScrollToken=\(restoreScrollToken, privacy: .public) transcriptRestoreCancellationToken=\(transcriptRestoreCancellationToken, privacy: .public) \
+            previousCancellationToken=\(previousCancellationValue, privacy: .public) didRequestRestore=\(didRequestTranscriptRestore, privacy: .public) \
+            didInteractBeforeRestore=\(didInteractBeforeTranscriptRestore, privacy: .public) restorePending=\(isTranscriptRestorePending, privacy: .public) \
+            savedFollowLatest=\(shouldFollowLatestMessage, privacy: .public) userInteracting=\(isUserInteractingWithScroll, privacy: .public) \
+            followGeneration=\(followScrollGeneration, privacy: .public)
+            """)
+    }
+
+    private func logTranscriptProxyGenerationBoundary(
+        event: String,
+        decision: String,
+        targetKey: String,
+        generation: Int
+    ) {
+        Self.transcriptScrollLogger.debug("""
+            event=\(event, privacy: .public) decision=\(decision, privacy: .public) \
+            proxyTargetKey=\(targetKey, privacy: .public) generation=\(generation, privacy: .public) \
+            currentGeneration=\(followScrollGeneration, privacy: .public) userInteracting=\(isUserInteractingWithScroll, privacy: .public) \
+            directTranscriptRestore=\(isTranscriptRestorePending, privacy: .public) followLatest=\(shouldFollowLatestMessage, privacy: .public)
+            """)
+    }
+
+    /// Emits bounded, content-free ChatView scroll-boundary evidence. Metrics are
+    /// supplied only by an existing scroll callback; no per-sample state is kept.
+    private func logChatScrollBoundary(
+        event: String,
+        decision: String,
+        previousFollowLatest: Bool? = nil,
+        metrics: ChatScrollMetrics? = nil
+    ) {
+        if let previousFollowLatest, previousFollowLatest == shouldFollowLatestMessage {
             return
         }
+        let previousFollowValue = previousFollowLatest.map { $0 ? "true" : "false" } ?? "unknown"
+        let directInteractionValue = metrics.map { $0.isDirectlyInteracting ? "true" : "false" } ?? "unknown"
+        let deceleratingValue = metrics.map { $0.isDecelerating ? "true" : "false" } ?? "unknown"
+        let distanceValue = metrics.map { String(Double($0.distanceFromBottom)) } ?? "unknown"
 
-        startActiveStreamStatusRefreshTask(streamID: activeStreamID)
+        Self.transcriptScrollLogger.debug("""
+            event=\(event, privacy: .public) decision=\(decision, privacy: .public) \
+            followLatest=\(shouldFollowLatestMessage, privacy: .public) previousFollowLatest=\(previousFollowValue, privacy: .public) \
+            directInteraction=\(directInteractionValue, privacy: .public) decelerating=\(deceleratingValue, privacy: .public) \
+            effectiveUserInteraction=\(isUserInteractingWithScroll, privacy: .public) explicitBottomDeceleration=\(isExplicitBottomDecelerationActive, privacy: .public) \
+            followGeneration=\(followScrollGeneration, privacy: .public) distanceFromBottom=\(distanceValue, privacy: .public) \
+            nearBottom=\(isScrolledNearBottom, privacy: .public) nearMotionBand=\(isNearBottomForMotion, privacy: .public) \
+            latestRowVisible=\(isLatestTranscriptRowVisible, privacy: .public) tailVisible=\(isTranscriptBottomVisible, privacy: .public) \
+            composerHeight=\(Double(composerHeight), privacy: .public) transcriptBottomInsetHeight=\(Double(transcriptBottomInsetHeight), privacy: .public) \
+            composerAccessorySpacerHeight=\(Double(composerAccessorySpacerHeight), privacy: .public) composerResizeGeneration=\(composerResizeGeneration, privacy: .public) composerResizing=\(isComposerResizing, privacy: .public) \
+            streamActive=\(viewModel.activeStreamID != nil, privacy: .public)
+            """)
     }
-
-    private func startActiveStreamStatusRefreshTask(streamID: String) {
-        activeStreamStatusRefreshTask?.cancel()
-        activeStreamStatusRefreshTask = Task { @MainActor in
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
-                guard !Task.isCancelled else { return }
-                guard viewModel.activeStreamID == streamID else { return }
-
-                if viewModel.isActiveStreamConnectionSuspended {
-                    continue
-                }
-
-                await viewModel.recoverStaleActiveStreamIfNeeded(modelContext: modelContext)
-
-                guard viewModel.activeStreamID == streamID else { return }
-            }
-        }
-    }
+#endif
 
     private func handleResponseCompletionSideEffects() {
         if !viewModel.responseCompletionNeedsTranscriptRefresh {
@@ -2114,14 +2678,10 @@ struct ChatView: View {
         let taskIdentifier = UIApplication.shared.beginBackgroundTask(withName: "Semreh response completion") {
             Task { @MainActor in
                 endResponseCompletionBackgroundTask()
-                viewModel.suspendStreamForBackground()
             }
         }
 
         responseCompletionBackgroundTask = taskIdentifier
-        if taskIdentifier == .invalid {
-            viewModel.suspendStreamForBackground()
-        }
     }
 
     private func endResponseCompletionBackgroundTask() {
@@ -2132,6 +2692,10 @@ struct ChatView: View {
     }
 
     private func scrollToBottom(_ proxy: ScrollViewProxy) {
+        transcriptRestoreOutcomeState.acceptUserIntent()
+        didInteractBeforeTranscriptRestore = true
+        isTranscriptRestorePending = false
+        pendingTranscriptRestoreMessageID = nil
         beginExplicitBottomScroll(proxy)
     }
 
@@ -2139,41 +2703,200 @@ struct ChatView: View {
         explicitBottomScrollTask?.cancel()
         explicitBottomScrollGeneration &+= 1
         let generation = explicitBottomScrollGeneration
+        let shouldAnimateInitialJump = ChatScrollPolicy.shouldAnimateExplicitBottomJump(
+            reduceMotion: reduceMotion
+        )
+#if DEBUG
+        explicitBottomScrollAttemptCount = 0
+        Self.transcriptScrollLogger.debug("""
+            event=explicit_bottom_start decision=\(shouldAnimateInitialJump ? "animate" : "reduce_motion_snap", privacy: .public) \
+            animated=\(shouldAnimateInitialJump, privacy: .public) reduceMotion=\(reduceMotion, privacy: .public) \
+            nearMotionBand=\(isNearBottomForMotion, privacy: .public) directInteraction=\(isUserInteractingWithScroll, privacy: .public)
+            """)
+#endif
 
         userScrollCooldownUntil = nil
-        shouldFollowLatestMessage = true
-        isReadingOlderTranscript = false
+        isExplicitBottomDecelerationActive = false
+        hasIssuedExplicitBottomScroll = false
+        hasIssuedAnimatedExplicitBottomScroll = false
+        // A fresh pass owns its motion from here: the prior pass's animation
+        // window must not defer this pass's opening ticks (the re-hit tap is
+        // accepted immediately and starts a fresh sequential pass). The
+        // within-pass gate below still defers this pass's own retries while
+        // its single animated issue is in flight.
+        lastExplicitBottomIssueAt = nil
+        // Invalidate any previously scheduled automatic follow operation. Its
+        // delayed proxy call must not win after an explicit user jump begins.
+        followScrollGeneration &+= 1
+        // The explicit jump owns positioning until its concrete tail arrives.
+        // Re-enabling automatic anchoring or expanding the composer here races
+        // lazy measurement and can turn an estimated offset into a blank tail.
+#if DEBUG
+        let previousFollowLatest = shouldFollowLatestMessage
+#endif
+        shouldFollowLatestMessage = false
         isExplicitBottomScrollActive = true
+#if DEBUG
+        logChatScrollBoundary(
+            event: "follow_state_transition",
+            decision: "explicit_bottom_settling",
+            previousFollowLatest: previousFollowLatest
+        )
+#endif
+
+        // Issue the first effective tick synchronously so the request never
+        // looks settled without delivering its target to UIKit (a stale
+        // near-bottom/tail-visible sample must not complete it first). The
+        // pass opens DIRECT on every path now: the settlement walk is a
+        // bounded sequence of direct re-issues, and the pass's single
+        // ANIMATED issue fires later as a short correction once the tail
+        // region is realized on screen (see the ladder below). Long-range
+        // animated travel across still-unrealized lazy rows re-targets on
+        // every realization pass and never drains (the observed never-idle
+        // wedge), so it is removed entirely; Reduce Motion keeps its
+        // byte-identical direct tick (same call, same timing - UI-B pins it).
+        issueExplicitBottomScroll(proxy, animated: false)
+        guard isExplicitBottomScrollActive else { return }
 
         explicitBottomScrollTask = Task { @MainActor in
-            for delay in ChatScrollPolicy.explicitBottomSettlementDelays {
-                if delay > 0 {
-                    try? await Task.sleep(nanoseconds: delay)
-                } else {
-                    await Task.yield()
-                }
+            for delay in ChatScrollPolicy.explicitBottomSettlementDelays.dropFirst() {
+                try? await Task.sleep(nanoseconds: delay)
 
                 guard !Task.isCancelled,
                       generation == explicitBottomScrollGeneration,
                       isExplicitBottomScrollActive
                 else { return }
 
-                if isScrolledNearBottom {
-                    finishExplicitBottomScroll(generation: generation)
+                if ChatScrollPolicy.shouldFinishExplicitBottomRequest(
+                    isNearBottom: isScrolledNearBottom,
+                    isTailVisible: isLatestTranscriptRowVisible || isTranscriptBottomVisible,
+                    hasIssuedScroll: hasIssuedExplicitBottomScroll
+                ) {
+                    completeExplicitBottomScroll(generation: generation)
                     return
                 }
 
-                // Explicit navigation should land, not animate toward a moving
-                // lazy-layout estimate. Repeating against the stable sentinel
-                // closes over rows/Markdown/media that realize during settlement.
-                proxy.scrollTo(bottomAnchorID, anchor: .bottom)
+                // Realize the concrete last row before refining toward
+                // trailing content. P02 quiescence: every tick is direct
+                // until the tail region is realized on screen; the pass's
+                // single ANIMATED issue may then fire as a short correction
+                // over realized geometry - bounded to at most about one
+                // viewport of travel, so the easeOut always drains and
+                // quiescence can arrive.
+                let tailRegionRealized = isLatestTranscriptRowVisible
+                    || isTranscriptBottomVisible
+                issueExplicitBottomScroll(
+                    proxy,
+                    animated: shouldAnimateInitialJump && tailRegionRealized
+                )
             }
 
             guard generation == explicitBottomScrollGeneration else { return }
+
+            // P02 keep-alive cruise: the pinned retry ladder can exhaust
+            // while a cold lazy jump is still realizing its rows. Continue
+            // the settlement as quiet direct re-issues on a slow cadence —
+            // never re-arming an animation — so the app reaches quiescence
+            // between ticks (XCTest idle can be granted) while the walk
+            // still finishes. Bounded; afterwards the request stays visible
+            // for a fresh tap, exactly as before.
+            for cruiseIndex in 0..<ChatScrollPolicy.explicitBottomCruiseMaxTicks {
+                let cruiseDelay = cruiseIndex == 0
+                    ? ChatScrollPolicy.explicitBottomCruiseInitialDelay
+                    : ChatScrollPolicy.explicitBottomCruiseInterval
+                try? await Task.sleep(nanoseconds: UInt64(cruiseDelay * 1_000_000_000))
+
+                guard !Task.isCancelled,
+                      generation == explicitBottomScrollGeneration,
+                      isExplicitBottomScrollActive
+                else { return }
+
+                if ChatScrollPolicy.shouldFinishExplicitBottomRequest(
+                    isNearBottom: isScrolledNearBottom,
+                    isTailVisible: isLatestTranscriptRowVisible || isTranscriptBottomVisible,
+                    hasIssuedScroll: hasIssuedExplicitBottomScroll
+                ) {
+                    completeExplicitBottomScroll(generation: generation)
+                    return
+                }
+
+                issueExplicitBottomScroll(proxy, animated: false)
+            }
+
             explicitBottomScrollTask = nil
+#if DEBUG
+            Self.transcriptScrollLogger.debug("""
+                event=explicit_bottom_exhausted decision=keep_request_visible \
+                attempts=\(explicitBottomScrollAttemptCount, privacy: .public) nearBottom=\(isScrolledNearBottom, privacy: .public) \
+                latestRowVisible=\(isLatestTranscriptRowVisible, privacy: .public) tailVisible=\(isTranscriptBottomVisible, privacy: .public)
+                """)
+#endif
             // Leave the request active (and the button visible) if UIKit still
             // reports distance. A subsequent tap starts a fresh settlement pass.
         }
+    }
+
+    private func issueExplicitBottomScroll(
+        _ proxy: ScrollViewProxy,
+        animated: Bool = false
+    ) {
+        // P02 keep-alive: re-issues never re-arm the easeOut. The deferral
+        // gate below skips settlement ticks while the prior issue's animation
+        // window is still open, and the pass animates only its single
+        // correction (fired over realized tail geometry); every other issue
+        // is direct, so the CA transaction always drains and UI quiescence
+        // can arrive.
+        if let lastIssueAt = lastExplicitBottomIssueAt,
+           ChatScrollPolicy.shouldDeferExplicitBottomReissue(
+               elapsedSinceLastIssue: Date().timeIntervalSince(lastIssueAt),
+               reduceMotion: reduceMotion
+           ) {
+#if DEBUG
+            Self.transcriptScrollLogger.debug("""
+                event=explicit_bottom_issue_deferred decision=prior_issue_in_flight \
+                elapsedMs=\(Int(Date().timeIntervalSince(lastIssueAt) * 1000), privacy: .public) \
+                animated=\(animated, privacy: .public)
+                """)
+#endif
+            return
+        }
+        let target = ChatScrollPolicy.explicitBottomTargetID(
+            latestMessageID: latestTranscriptMessageID,
+            latestMessageIsVisible: isLatestTranscriptRowVisible,
+            bottomAnchorID: bottomAnchorID
+        )
+#if DEBUG
+        explicitBottomScrollAttemptCount += 1
+        Self.transcriptScrollLogger.debug("""
+            event=explicit_bottom_attempt decision=proxy_scroll \
+            attempt=\(explicitBottomScrollAttemptCount, privacy: .public) animated=\(animated, privacy: .public) \
+            targetKind=\(target == bottomAnchorID ? "tail" : "latest_row", privacy: .public) \
+            latestRowExists=\(latestTranscriptMessageID != nil, privacy: .public) latestRowVisible=\(isLatestTranscriptRowVisible, privacy: .public)
+            """)
+#endif
+        // P02 quiescence: only the pass's single ANIMATED correction may
+        // re-arm the easeOut, and the ladder fires it only once the tail
+        // region is realized on screen. The pass-opening tick and every
+        // other re-issue are non-animated: an animated issue into a lazy
+        // transcript that is still realizing re-opens the CA transaction
+        // against a moving target and quiescence never arrives (the
+        // observed never-idle wedge).
+        if animated, !hasIssuedAnimatedExplicitBottomScroll,
+           let animation = ChatMotion.scrollToLatest(reduceMotion: reduceMotion) {
+            withAnimation(animation) {
+                proxy.scrollTo(target, anchor: .bottom)
+            }
+            // The issued motion is now airborne; further re-issues are
+            // deferred until this animation window elapses (see the gate
+            // above). Direct issues do not arm the gate: an immediate direct
+            // re-issue cannot reset an easeOut that is not running.
+            hasIssuedAnimatedExplicitBottomScroll = true
+            lastExplicitBottomIssueAt = Date()
+        } else {
+            proxy.scrollTo(target, anchor: .bottom)
+        }
+        guard isExplicitBottomScrollActive else { return }
+        hasIssuedExplicitBottomScroll = true
     }
 
     private func finishExplicitBottomScroll(generation: Int? = nil) {
@@ -2181,10 +2904,43 @@ struct ChatView: View {
         explicitBottomScrollTask?.cancel()
         explicitBottomScrollTask = nil
         isExplicitBottomScrollActive = false
+        hasIssuedExplicitBottomScroll = false
+        hasIssuedAnimatedExplicitBottomScroll = false
+    }
+
+    private func completeExplicitBottomScroll(generation: Int? = nil) {
+        guard generation == nil || generation == explicitBottomScrollGeneration else { return }
+#if DEBUG
+        Self.transcriptScrollLogger.debug("""
+            event=explicit_bottom_settled decision=near_bottom_and_tail_visible \
+            attempts=\(explicitBottomScrollAttemptCount, privacy: .public) latestRowVisible=\(isLatestTranscriptRowVisible, privacy: .public) \
+            tailVisible=\(isTranscriptBottomVisible, privacy: .public)
+            """)
+#endif
+        finishExplicitBottomScroll(generation: generation)
+#if DEBUG
+        let previousFollowLatest = shouldFollowLatestMessage
+#endif
+        shouldFollowLatestMessage = true
+#if DEBUG
+        logChatScrollBoundary(
+            event: "follow_state_transition",
+            decision: "explicit_bottom_settled",
+            previousFollowLatest: previousFollowLatest
+        )
+#endif
+        isReadingOlderTranscript = false
     }
 
     private func cancelExplicitBottomScroll() {
+#if DEBUG
+        Self.transcriptScrollLogger.debug("""
+            event=explicit_bottom_cancelled decision=direct_interaction \
+            attempts=\(explicitBottomScrollAttemptCount, privacy: .public)
+            """)
+#endif
         explicitBottomScrollGeneration &+= 1
+        isExplicitBottomDecelerationActive = false
         finishExplicitBottomScroll()
     }
 
@@ -2209,13 +2965,15 @@ struct ChatView: View {
         animated: Bool = true,
         isUserInitiated: Bool = false
     ) {
+        let animateAfterComposerResize = shouldAnimateNextFollowAfterComposerResize
+        shouldAnimateNextFollowAfterComposerResize = false
         guard !viewModel.messages.isEmpty else { return }
 
         scheduleFollowScroll(
             proxy,
             targetID: bottomAnchorID,
             anchor: .bottom,
-            animated: animated,
+            animated: animated || animateAfterComposerResize,
             isUserInitiated: isUserInitiated
         )
     }
@@ -2225,13 +2983,54 @@ struct ChatView: View {
         messageID: String,
         animated: Bool
     ) {
+#if DEBUG
+        let targetKey = debugOpaqueTranscriptTargetKey(messageID)
+        if let pendingDiagnostic = pendingTranscriptProxyGenerationDiagnostic {
+            logTranscriptProxyGenerationBoundary(
+                event: "transcript_proxy_generation",
+                decision: "superseded_before_fire",
+                targetKey: pendingDiagnostic.targetKey,
+                generation: pendingDiagnostic.generation
+            )
+            pendingTranscriptProxyGenerationDiagnostic = nil
+        }
+#endif
         followScrollGeneration += 1
         let generation = followScrollGeneration
+#if DEBUG
+        pendingTranscriptProxyGenerationDiagnostic = ChatTranscriptProxyGenerationDiagnostic(
+            targetKey: targetKey,
+            generation: generation
+        )
+        logTranscriptProxyGenerationBoundary(
+            event: "transcript_proxy_generation",
+            decision: "scheduled",
+            targetKey: targetKey,
+            generation: generation
+        )
+#endif
 
         Task { @MainActor in
             await Task.yield()
             try? await Task.sleep(nanoseconds: 16_000_000)
+#if DEBUG
+            let taskWasCancelled = Task.isCancelled
+            let generationChanged = generation != followScrollGeneration
+            guard !taskWasCancelled, !generationChanged else {
+                if pendingTranscriptProxyGenerationDiagnostic?.generation == generation {
+                    logTranscriptProxyGenerationBoundary(
+                        event: "transcript_proxy_generation",
+                        decision: taskWasCancelled ? "task_cancelled" : "generation_changed",
+                        targetKey: targetKey,
+                        generation: generation
+                    )
+                    pendingTranscriptProxyGenerationDiagnostic = nil
+                }
+                return
+            }
+#else
             guard !Task.isCancelled, generation == followScrollGeneration else { return }
+#endif
 
             if animated {
                 withAnimation(ChatMotion.quickState(reduceMotion: reduceMotion)) {
@@ -2240,6 +3039,17 @@ struct ChatView: View {
             } else {
                 proxy.scrollTo(messageID, anchor: .top)
             }
+#if DEBUG
+            if pendingTranscriptProxyGenerationDiagnostic?.generation == generation {
+                logTranscriptProxyGenerationBoundary(
+                    event: "transcript_proxy_generation",
+                    decision: "issued",
+                    targetKey: targetKey,
+                    generation: generation
+                )
+                pendingTranscriptProxyGenerationDiagnostic = nil
+            }
+#endif
         }
     }
 
@@ -2250,9 +3060,20 @@ struct ChatView: View {
         animated: Bool,
         isUserInitiated: Bool
     ) {
+#if DEBUG
+        let targetKind = targetID == bottomAnchorID ? "latest_content" : "latest_row"
+#endif
         // Auto-follow (streaming tokens, new rows) must not override the user's
         // scroll position while they are interacting or within the cooldown.
         if !isUserInitiated, isAutoFollowScrollPaused {
+#if DEBUG
+            let cooldownActive = userScrollCooldownUntil.map { Date() < $0 } ?? false
+            Self.transcriptScrollLogger.debug("""
+                event=follow_scroll_skipped decision=auto_follow_paused targetKind=\(targetKind, privacy: .public) \
+                userInitiated=\(isUserInitiated, privacy: .public) animatedRequested=\(animated, privacy: .public) \
+                effectiveUserInteraction=\(isUserInteractingWithScroll, privacy: .public) cooldownActive=\(cooldownActive, privacy: .public)
+                """)
+#endif
             return
         }
 
@@ -2260,23 +3081,70 @@ struct ChatView: View {
             userScrollCooldownUntil = nil
         }
 
+#if DEBUG
+        let previousFollowLatest = shouldFollowLatestMessage
+#endif
         shouldFollowLatestMessage = true
         isReadingOlderTranscript = false
         followScrollGeneration += 1
         let generation = followScrollGeneration
+#if DEBUG
+        logChatScrollBoundary(
+            event: "follow_state_transition",
+            decision: isUserInitiated ? "user_follow_scroll" : "automatic_follow_scroll",
+            previousFollowLatest: previousFollowLatest
+        )
+#endif
+#if DEBUG
+        Self.transcriptScrollLogger.debug("""
+            event=follow_scroll_scheduled decision=await_layout targetKind=\(targetKind, privacy: .public) \
+            userInitiated=\(isUserInitiated, privacy: .public) animatedRequested=\(animated, privacy: .public) \
+            generation=\(generation, privacy: .public) nearMotionBand=\(isNearBottomForMotion, privacy: .public)
+            """)
+#endif
 
         Task { @MainActor in
             await Task.yield()
             try? await Task.sleep(nanoseconds: 16_000_000)
-            guard !Task.isCancelled, generation == followScrollGeneration else { return }
+            guard !Task.isCancelled, generation == followScrollGeneration else {
+#if DEBUG
+                Self.transcriptScrollLogger.debug("""
+                    event=follow_scroll_cancelled decision=generation_changed targetKind=\(targetKind, privacy: .public) \
+                    generation=\(generation, privacy: .public)
+                    """)
+#endif
+                return
+            }
             // Re-check at fire time: a gesture may have begun during the delay.
-            if !isUserInitiated, isAutoFollowScrollPaused { return }
+            if !isUserInitiated, isAutoFollowScrollPaused {
+#if DEBUG
+                Self.transcriptScrollLogger.debug("""
+                    event=follow_scroll_skipped decision=auto_follow_paused_at_fire targetKind=\(targetKind, privacy: .public) \
+                    generation=\(generation, privacy: .public) directInteraction=\(isUserInteractingWithScroll, privacy: .public)
+                    """)
+#endif
+                return
+            }
 
             // Snap (no animation) while inside the cache-first reconcile window so the
             // taller server transcript replacing the cached one doesn't animate a jump
             // (#289). Evaluated at fire time so it's robust to onChange ordering.
             let isCacheFirstSnapWindow = cacheFirstSnapUntil.map { Date() < $0 } ?? false
-            if animated, !isCacheFirstSnapWindow {
+            // Keep nearby follow motions readable, but never animate a long
+            // return through history. `isNearBottomForMotion` is a coarse band
+            // updated only when crossing its threshold, not a per-pixel state.
+            let shouldAnimate = animated
+                && isNearBottomForMotion
+                && !isCacheFirstSnapWindow
+                && !reduceMotion
+#if DEBUG
+            Self.transcriptScrollLogger.debug("""
+                event=follow_scroll_command decision=proxy_scroll targetKind=\(targetKind, privacy: .public) \
+                generation=\(generation, privacy: .public) animated=\(shouldAnimate, privacy: .public) \
+                nearMotionBand=\(isNearBottomForMotion, privacy: .public) cacheFirstSnap=\(isCacheFirstSnapWindow, privacy: .public) reduceMotion=\(reduceMotion, privacy: .public)
+                """)
+#endif
+            if shouldAnimate {
                 // While streaming, follow with the short cadence-synced curve so
                 // back-to-back triggers retarget smoothly; otherwise keep the
                 // regular follow-scroll feel.
@@ -2362,11 +3230,25 @@ struct ChatView: View {
     private func handleComposerHeightChange(_ height: CGFloat) {
         guard abs(composerHeight - height) > 0.5 else { return }
 
+#if DEBUG
+        let previousComposerHeight = composerHeight
+        if height > 100, hasLoggedComposerCollapseForResize {
+            hasLoggedComposerCollapseForResize = false
+        }
+#endif
         if !isComposerResizing {
             composerResizeFollowIntent = shouldFollowLatestMessage
         }
         composerHeight = height
         isComposerResizing = true
+#if DEBUG
+        if previousComposerHeight > 100,
+           height <= 100,
+           !hasLoggedComposerCollapseForResize {
+            hasLoggedComposerCollapseForResize = true
+            logChatScrollBoundary(event: "composer_collapse", decision: "height_decreased")
+        }
+#endif
         composerResizeGeneration &+= 1
         let generation = composerResizeGeneration
 
@@ -2385,11 +3267,19 @@ struct ChatView: View {
             isComposerResizing = false
 
             guard shouldFollow else { return }
+            shouldAnimateNextFollowAfterComposerResize = true
             followRejoinScrollToken += 1
         }
     }
 
     private func persistTranscriptRestore() {
+        guard !transcriptRestoreOutcomeState.preservesDurableTarget else { return }
+        guard didRequestTranscriptRestore || didInteractBeforeTranscriptRestore else {
+            // The durable point remains authoritative until appearance
+            // restoration has initialized local state or the user makes a
+            // real gesture.
+            return
+        }
         viewModel.rememberTranscriptRestorePoint(
             followingLatest: shouldFollowLatestMessage,
             // Persist only the row identity, not the high-frequency scroll offset.
@@ -2401,43 +3291,139 @@ struct ChatView: View {
 
     private func requestTranscriptRestoreIfNeeded() {
         guard !didRequestTranscriptRestore else { return }
-        guard ChatTranscriptRestorePolicy.shouldProgrammaticallyRestoreOnAppear(
-            hasMessages: !viewModel.messages.isEmpty
-        ) else { return }
-
+        guard !viewModel.messages.isEmpty else { return }
         didRequestTranscriptRestore = true
+        let restoreTarget = viewModel.transcriptRestoreTarget
+        pendingTranscriptRestoreMessageID = Self.savedTranscriptVisibleMessageID(from: restoreTarget)
+        isTranscriptRestorePending = pendingTranscriptRestoreMessageID != nil
+        guard ChatTranscriptRestorePolicy.shouldStartRestore(
+            hasMessages: true,
+            hasUserInteractedBeforeRestore: didInteractBeforeTranscriptRestore
+        ) else {
+            isTranscriptRestorePending = false
+            pendingTranscriptRestoreMessageID = nil
+            return
+        }
+
+#if DEBUG
+        let previousFollowLatest = shouldFollowLatestMessage
+#endif
         shouldFollowLatestMessage = viewModel.savedFollowingLatest
+#if DEBUG
+        logChatScrollBoundary(
+            event: "follow_state_transition",
+            decision: "restore_saved_follow_intent",
+            previousFollowLatest: previousFollowLatest
+        )
+#endif
         restoreScrollToken += 1
+        transcriptRestoreOutcomeState.begin(ChatTranscriptRestoreRequest(
+            scope: viewModel.outgoingInsertionScope,
+            generation: restoreScrollToken,
+            target: restoreTarget
+        ))
+#if DEBUG
+        logTranscriptRestoreBoundary(
+            event: "transcript_restore_request",
+            decision: "saved_target_requested"
+        )
+#endif
     }
 
     private func updateScrollMetrics(_ metrics: ChatScrollMetrics) {
+#if DEBUG
+        let previousFollowLatest = shouldFollowLatestMessage
+#endif
+        if metrics.isDirectlyInteracting {
+            transcriptRestoreOutcomeState.acceptUserIntent()
+            didInteractBeforeTranscriptRestore = true
+            isTranscriptRestorePending = false
+            pendingTranscriptRestoreMessageID = nil
+        }
+
         let isStreaming = viewModel.activeStreamID != nil
+        let isNearBottomForMotionNow = max(0, metrics.distanceFromBottom) <= nearbyBottomMotionDistance
+        if isNearBottomForMotion != isNearBottomForMotionNow {
+            isNearBottomForMotion = isNearBottomForMotionNow
+        }
         let isNearBottom = ChatScrollPolicy.isNearBottom(
             distanceFromBottom: max(0, metrics.distanceFromBottom),
             isStreaming: isStreaming
         )
         isScrolledNearBottom = isNearBottom
-        isUserInteractingWithScroll = metrics.isUserInteracting
+        // P02 quiescence: the metrics callback writes no per-delivery
+        // changing state (the former warm-up feed is gone). A write whose
+        // value changed on every delivery re-armed a SwiftUI transaction
+        // per metrics sample and kept the app out of quiescence at rest
+        // (the observed P0 idle hang); the remaining writes here either
+        // change at most once per settle or are change-guarded.
+
+        // Direct touch is a new user decision, even if a stale geometry sample
+        // still says that the tail is visible. Inherited deceleration belongs to
+        // the explicit jump and must not create a fresh follow cooldown.
+        let wasExplicitBottomScrollActive = isExplicitBottomScrollActive
+        let wasExplicitBottomDecelerationActive = isExplicitBottomDecelerationActive
+        var cancelledExplicitBottomScroll = false
+
+        isExplicitBottomDecelerationActive = ChatScrollPolicy.nextExplicitBottomDecelerationContext(
+            wasExplicitBottomScrollActive: wasExplicitBottomScrollActive,
+            wasExplicitBottomDecelerationActive: wasExplicitBottomDecelerationActive,
+            isDirectlyInteracting: metrics.isDirectlyInteracting,
+            isDecelerating: metrics.isDecelerating
+        )
+
+        let isExplicitBottomScrollContext = wasExplicitBottomScrollActive
+            || wasExplicitBottomDecelerationActive
+        let isEffectiveUserInteraction = ChatScrollPolicy.isEffectiveUserInteraction(
+            isUserInteracting: metrics.isUserInteracting,
+            isDirectlyInteracting: metrics.isDirectlyInteracting,
+            isDecelerating: metrics.isDecelerating,
+            isExplicitBottomScrollContext: isExplicitBottomScrollContext
+        )
+        isUserInteractingWithScroll = isEffectiveUserInteraction
+
+        guard ChatTranscriptRestorePolicy.shouldApplyScrollMetricsBeforeRestore(
+            hasRequestedRestore: didRequestTranscriptRestore,
+            hasPendingMessageRestore: isTranscriptRestorePending,
+            hasUserInteractedBeforeRestore: didInteractBeforeTranscriptRestore,
+            isDirectlyInteracting: metrics.isDirectlyInteracting
+        ) else {
+            return
+        }
 
         if isExplicitBottomScrollActive {
-            if isNearBottom {
-                finishExplicitBottomScroll()
-            } else if ChatScrollPolicy.shouldCancelExplicitBottomRequest(
+            if ChatScrollPolicy.shouldCancelExplicitBottomRequest(
                 isDirectlyInteracting: metrics.isDirectlyInteracting,
                 isDecelerating: metrics.isDecelerating
             ) {
                 cancelExplicitBottomScroll()
+                cancelledExplicitBottomScroll = true
+            } else if ChatScrollPolicy.shouldFinishExplicitBottomRequest(
+                isNearBottom: isNearBottom,
+                isTailVisible: isLatestTranscriptRowVisible || isTranscriptBottomVisible,
+                hasIssuedScroll: hasIssuedExplicitBottomScroll
+            ) {
+                completeExplicitBottomScroll()
             }
         }
 
+        let confirmedNearBottom = !cancelledExplicitBottomScroll && isNearBottom && (
+            !isExplicitBottomScrollActive || isLatestTranscriptRowVisible || isTranscriptBottomVisible
+        )
+
         // Touching the scroll view pauses auto-follow for a short window so
         // streaming layout growth cannot yank the viewport mid-gesture.
-        if metrics.isUserInteracting {
+        if ChatScrollPolicy.shouldRecordUserScrollCooldown(
+            isUserInteracting: metrics.isUserInteracting,
+            isDirectlyInteracting: metrics.isDirectlyInteracting,
+            isDecelerating: metrics.isDecelerating,
+            isExplicitBottomScrollContext: isExplicitBottomScrollContext
+        ) {
             followScrollGeneration += 1
             userScrollCooldownUntil = ChatScrollPolicy.cooldownDeadline()
         }
 
-        if isNearBottom {
+        if confirmedNearBottom {
             if ChatScrollPolicy.shouldSnapWhenRejoiningLatest(
                 wasFollowingLatest: shouldFollowLatestMessage,
                 isNearBottom: true
@@ -2446,22 +3432,32 @@ struct ChatView: View {
             }
             shouldFollowLatestMessage = true
             if isReadingOlderTranscript {
-                withAnimation(ChatMotion.quickState(reduceMotion: reduceMotion)) {
-                    isReadingOlderTranscript = false
-                }
+                // Direct set: a per-sample scroll/deceleration callback must
+                // not start an animation transaction while the lazy transcript
+                // is still settling (P16 layout livelock); declared
+                // .animation(value:) modifiers own any presentation animation.
+                isReadingOlderTranscript = false
             }
-        } else if metrics.isUserInteracting {
+        } else if isEffectiveUserInteraction {
             shouldFollowLatestMessage = false
             if !isReadingOlderTranscript,
                ChatScrollPolicy.shouldEnterReadingOlder(
                    distanceFromBottom: metrics.distanceFromBottom,
                    isStreaming: isStreaming
                ) {
-                withAnimation(ChatMotion.quickState(reduceMotion: reduceMotion)) {
-                    isReadingOlderTranscript = true
-                }
+                isReadingOlderTranscript = true
             }
         }
+#if DEBUG
+        if previousFollowLatest != shouldFollowLatestMessage {
+            logChatScrollBoundary(
+                event: "follow_state_transition",
+                decision: shouldFollowLatestMessage ? "metrics_confirmed_near_bottom" : "metrics_effective_user_interaction",
+                previousFollowLatest: previousFollowLatest,
+                metrics: metrics
+            )
+        }
+#endif
     }
 
     private var isAutoFollowScrollPaused: Bool {
@@ -2471,10 +3467,32 @@ struct ChatView: View {
         )
     }
 
+    private static func savedTranscriptVisibleMessageID(
+        from target: ChatTranscriptRestoreTarget
+    ) -> String? {
+        guard case let .message(id) = target else { return nil }
+        return id
+    }
+
     private func prepareTranscriptForExplicitSend() {
+        transcriptRestoreOutcomeState.acceptUserIntent()
+        didInteractBeforeTranscriptRestore = true
+        isTranscriptRestorePending = false
+        pendingTranscriptRestoreMessageID = nil
+        transcriptRestoreCancellationToken &+= 1
+#if DEBUG
+        let previousFollowLatest = shouldFollowLatestMessage
+#endif
         shouldFollowLatestMessage = true
         userScrollCooldownUntil = nil
         followScrollGeneration += 1
+#if DEBUG
+        logChatScrollBoundary(
+            event: "follow_state_transition",
+            decision: "explicit_send",
+            previousFollowLatest: previousFollowLatest
+        )
+#endif
         if isReadingOlderTranscript {
             withAnimation(ChatMotion.quickState(reduceMotion: reduceMotion)) {
                 isReadingOlderTranscript = false
@@ -2558,6 +3576,82 @@ struct ChatView: View {
     }
 }
 
+/// A scroll-edge fade, not a separate header panel. It protects the status bar
+/// and floating identity without changing transcript layout or intercepting taps.
+private struct ChatHeaderReadabilityBackdrop: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.appColorPalette) private var palette
+
+    var body: some View {
+        let canvas = SemrehVisualTheme.canvas(for: colorScheme, palette: palette)
+        LinearGradient(
+            stops: [
+                .init(color: canvas.opacity(0.98), location: 0),
+                .init(color: canvas.opacity(0.94), location: 0.45),
+                .init(color: canvas.opacity(0.70), location: 0.75),
+                .init(color: canvas.opacity(0), location: 1)
+            ],
+            startPoint: .top,
+            endPoint: .bottom
+        )
+    }
+}
+
+private struct ChatBotDetailsView: View {
+    let profile: ProfileSummary?
+    let profileTitle: String
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        List {
+            Section("Profile") {
+                LabeledContent("Name", value: profile?.displayName ?? profileTitle)
+                if let provider = nonEmpty(profile?.provider) {
+                    LabeledContent("Provider", value: provider)
+                }
+                if let model = nonEmpty(profile?.model) {
+                    LabeledContent("Model", value: model)
+                }
+            }
+
+            if let profile {
+                Section("Available metadata") {
+                    if let gatewayRunning = profile.gatewayRunning {
+                        LabeledContent("Gateway", value: gatewayRunning ? "Running" : "Stopped")
+                    }
+                    if let hasEnv = profile.hasEnv {
+                        LabeledContent("Environment", value: hasEnv ? "Configured" : "Not configured")
+                    }
+                    if let skillCount = profile.skillCount {
+                        LabeledContent("Skills", value: String(skillCount))
+                    }
+                    if profile.isDefault == true {
+                        LabeledContent("Server default", value: "Yes")
+                    }
+                    if profile.isActive == true {
+                        LabeledContent("Active profile", value: "Yes")
+                    }
+                }
+            }
+        }
+        .navigationTitle(profileTitle)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("Done") { dismiss() }
+            }
+        }
+        .scrollContentBackground(.hidden)
+        .background { SemrehBackdrop().ignoresSafeArea() }
+    }
+
+    private func nonEmpty(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
 struct ChatToolbarTitleLabel: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
@@ -2567,14 +3661,14 @@ struct ChatToolbarTitleLabel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
             Text(title)
-                .font(.subheadline.weight(.semibold))
+                .font(AppFont.subheadline(weight: .semibold))
                 .foregroundStyle(.primary)
                 .lineLimit(1)
                 .truncationMode(.tail)
 
             if showsSubtitle, let subtitle {
                 Text(subtitle)
-                    .font(.caption2)
+                    .font(AppFont.caption2())
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -2727,7 +3821,7 @@ private enum PastedFileError: LocalizedError {
 private extension SlashCommandExecutionResult {
     var isSuccessfulSubmission: Bool {
         switch self {
-        case .executed, .openedSession:
+        case .executed, .openedSession, .openedDirectBranch:
             true
         case .sendAsMessage, .unsupported, .needsSubArg:
             false
