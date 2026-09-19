@@ -1,5 +1,42 @@
 # Prepared parallel batch
 
+## Full dispatch map
+
+All 24 seed units now have an individual brief below. Each brief contains acceptance criteria, dependencies, ownership, write restrictions, verification requirements, and release conditions. This is preparation, not a claim that a code repair has already been identified for every acceptance task.
+
+After greenlight, 11 cloud preparation assignments can run concurrently: C01–C03 plus U02/U04/U05/U07/U12/U20/U21/U23. Two use Terra (C01, U12); nine use Luna. C01 owns causal analysis; the related unit workers own distinct regression/fixture recipes and must cite C01 rather than duplicate its causal investigation. C02 owns activity chronology; C03 owns measurement-method analysis. Read-only work publishes to separate issues. Additional implementation dispatches require exact writable ownership and evidence; this batch does not authorize broad edits.
+
+Muse's M01/M02 remain ready; M03/M04/M05 remain reserved and held. The native verifier runs serially, with U01 first. No new workers have been launched.
+
+| Brief | Issue | Owner | State | Dependencies |
+| --- | --- | --- | --- | --- |
+| [U00](units/U00.md) | [#5](https://github.com/MauriceAK/semreh-ios/issues/5) | Completed | DONE | — |
+| [U01](units/U01.md) | [#4](https://github.com/MauriceAK/semreh-ios/issues/4) | Codex preparation / Sol medium native acceptance | COVERED BY C01/C02/C03; DO NOT DUPLICATE | U00 |
+| [U02](units/U02.md) | [#25](https://github.com/MauriceAK/semreh-ios/issues/25) | Codex preparation / Sol medium native acceptance | READY FOR CLOUD PREPARATION AFTER GREENLIGHT | U01 |
+| [U03](units/U03.md) | [#26](https://github.com/MauriceAK/semreh-ios/issues/26) | Codex preparation / Sol medium native acceptance | COVERED BY C01/C02/C03; DO NOT DUPLICATE | U01 |
+| [U04](units/U04.md) | [#27](https://github.com/MauriceAK/semreh-ios/issues/27) | Codex preparation / Sol medium native acceptance | READY FOR CLOUD PREPARATION AFTER GREENLIGHT | U01 |
+| [U05](units/U05.md) | [#28](https://github.com/MauriceAK/semreh-ios/issues/28) | Codex preparation / Sol medium native acceptance | READY FOR CLOUD PREPARATION AFTER GREENLIGHT | U01 |
+| [U06](units/U06.md) | [#22](https://github.com/MauriceAK/semreh-ios/issues/22) | Muse | MUSE RESERVED | — |
+| [U07](units/U07.md) | [#29](https://github.com/MauriceAK/semreh-ios/issues/29) | Codex preparation / Sol medium native acceptance | READY FOR CLOUD PREPARATION AFTER GREENLIGHT | U01 |
+| [U08](units/U08.md) | [#23](https://github.com/MauriceAK/semreh-ios/issues/23) | Muse | MUSE RESERVED | — |
+| [U09](units/U09.md) | [#20](https://github.com/MauriceAK/semreh-ios/issues/20) | Muse | MUSE RESERVED | — |
+| [U10](units/U10.md) | [#24](https://github.com/MauriceAK/semreh-ios/issues/24) | Muse | MUSE RESERVED | — |
+| [U11](units/U11.md) | [#21](https://github.com/MauriceAK/semreh-ios/issues/21) | Muse | MUSE RESERVED | — |
+| [U12](units/U12.md) | [#30](https://github.com/MauriceAK/semreh-ios/issues/30) | Codex preparation / Sol medium native acceptance | READY FOR CLOUD PREPARATION AFTER GREENLIGHT | U11 |
+| [U13](units/U13.md) | [#31](https://github.com/MauriceAK/semreh-ios/issues/31) | Codex preparation / Sol medium native acceptance | COVERED BY C01/C02/C03; DO NOT DUPLICATE | — |
+| [U14](units/U14.md) | [#32](https://github.com/MauriceAK/semreh-ios/issues/32) | Codex preparation / Sol medium native acceptance | DEPENDENCY OR DEVICE GATED | U13, U16 |
+| [U15](units/U15.md) | [#33](https://github.com/MauriceAK/semreh-ios/issues/33) | Coordinator | DEPENDENCY OR DEVICE GATED | U00 |
+| [U16](units/U16.md) | [#34](https://github.com/MauriceAK/semreh-ios/issues/34) | Codex preparation / Sol medium native acceptance | DEPENDENCY OR DEVICE GATED | — |
+| [U17](units/U17.md) | [#35](https://github.com/MauriceAK/semreh-ios/issues/35) | Codex preparation / Sol medium native acceptance | DEPENDENCY OR DEVICE GATED | U13, U16 |
+| [U18](units/U18.md) | [#36](https://github.com/MauriceAK/semreh-ios/issues/36) | Codex preparation / Sol medium native acceptance | DEPENDENCY OR DEVICE GATED | U02, U17 |
+| [U19](units/U19.md) | [#37](https://github.com/MauriceAK/semreh-ios/issues/37) | Codex preparation / Sol medium native acceptance | DEPENDENCY OR DEVICE GATED | U07, U17 |
+| [U20](units/U20.md) | [#38](https://github.com/MauriceAK/semreh-ios/issues/38) | Codex preparation / Sol medium native acceptance | READY FOR CLOUD PREPARATION AFTER GREENLIGHT | U01 |
+| [U21](units/U21.md) | [#39](https://github.com/MauriceAK/semreh-ios/issues/39) | Codex preparation / Sol medium native acceptance | READY FOR CLOUD PREPARATION AFTER GREENLIGHT | U05 |
+| [U22](units/U22.md) | [#40](https://github.com/MauriceAK/semreh-ios/issues/40) | Codex preparation / Sol medium native acceptance | DEPENDENCY OR DEVICE GATED | U03 |
+| [U23](units/U23.md) | [#41](https://github.com/MauriceAK/semreh-ios/issues/41) | Codex preparation / Sol medium native acceptance | READY FOR CLOUD PREPARATION AFTER GREENLIGHT | — |
+
+The initial research wave described below is now expanded by this full map. Unit briefs supersede the earlier grouped summary for dispatch scope. Review-only reports do not need a PR; actual code assignments do.
+
 Prepared 2026-09-19. No workers launched. Maurice's greenlight is pending.
 
 ## Ready investigations
