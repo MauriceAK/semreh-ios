@@ -61,6 +61,8 @@ final class SessionListViewModel {
 
     var activeProfileModel: String?
 
+    var locallySelectedProfileName: String?
+
     var activeProfileProvider: String?
 
     var profileOptions: [ProfileSummary] = []

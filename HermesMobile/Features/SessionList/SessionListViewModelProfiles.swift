@@ -53,8 +53,6 @@ extension SessionListViewModel {
         }
     }
 
-    private var locallySelectedProfileName: String?
-
     func switchActiveProfile(_ profile: ProfileSummary) async -> Bool {
         guard !isViewingCachedData else {
             activeProfileErrorMessage = String(localized: "Reconnect to the server to change profiles.")
