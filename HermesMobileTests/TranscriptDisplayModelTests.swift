@@ -427,6 +427,11 @@ final class TranscriptMessageTests: XCTestCase {
         XCTAssertEqual(groups.count, 1)
         XCTAssertEqual(groups.first?.anchorMessageID, "a3")
         XCTAssertEqual(groups.first?.text, "First thought.\n\nSecond thought.\n\nThird thought.")
+        // Segmented-thinking spec change (2026-09-18, user-requested): each
+        // reasoning arrival stays a discrete segment for the expanded Thinking
+        // view; `text` above remains the canonical joined form for collapse
+        // summaries and echo handling.
+        XCTAssertEqual(groups.first?.segments, ["First thought.", "Second thought.", "Third thought."])
     }
 
     func testReasoningDisplayGroupsCollapseExactServerEnvelopeOnFinalAnchor() throws {
@@ -440,6 +445,16 @@ final class TranscriptMessageTests: XCTestCase {
 
         XCTAssertEqual(groups.count, 1)
         XCTAssertEqual(groups.first?.anchorMessageID, "a3")
+        // Segmented-thinking spec change (2026-09-18, user-requested): the
+        // envelope keeps one segment per assistant reasoning arrival, in order.
+        XCTAssertEqual(
+            groups.first?.segments,
+            [
+                "Inspecting the canonical session identity.",
+                "Comparing WebUI and official Hermes transport behavior.",
+                "Synthesizing the verified findings."
+            ]
+        )
     }
 
     func testReasoningDisplayGroupsDeduplicateNormalizedTextInFirstSeenOrder() {
@@ -453,6 +468,10 @@ final class TranscriptMessageTests: XCTestCase {
         let group = ChatViewModel.reasoningDisplayGroups(messages: messages, archivedGroups: []).first
 
         XCTAssertEqual(group?.text, "First   thought.\n\nSecond thought.")
+        // Segmented-thinking spec change (2026-09-18, user-requested): the
+        // normalized-duplicate arrival is skipped; surviving segments keep
+        // first-seen order and their original (untrimmed-inner) text.
+        XCTAssertEqual(group?.segments, ["First   thought.", "Second thought."])
     }
 
     func testReasoningDisplayGroupsDoNotCrossUserTurns() {
@@ -467,6 +486,9 @@ final class TranscriptMessageTests: XCTestCase {
 
         XCTAssertEqual(groups.map(\.anchorMessageID), ["a1", "a2"])
         XCTAssertEqual(groups.map(\.text), ["First thought.", "Second thought."])
+        // Segmented-thinking spec change (2026-09-18, user-requested): each
+        // turn's group keeps its own single arrival as one segment.
+        XCTAssertEqual(groups.map(\.segments), [["First thought."], ["Second thought."]])
     }
 
     func testReasoningDisplayGroupsKeepRepeatedNoIDUserPromptsAsSeparateTurns() {
@@ -481,6 +503,9 @@ final class TranscriptMessageTests: XCTestCase {
 
         XCTAssertEqual(groups.map(\.anchorMessageID), ["a1", "a2"])
         XCTAssertEqual(groups.map(\.text), ["First thought.", "Second thought."])
+        // Segmented-thinking spec change (2026-09-18, user-requested): repeated
+        // no-ID prompts stay separate turns, each with one segment.
+        XCTAssertEqual(groups.map(\.segments), [["First thought."], ["Second thought."]])
     }
 
     func testReasoningDisplayGroupsAggregateArchivedAndMessageDerivedReasoning() {
@@ -495,6 +520,10 @@ final class TranscriptMessageTests: XCTestCase {
         XCTAssertEqual(groups.count, 1)
         XCTAssertEqual(groups.first?.anchorMessageID, "a2")
         XCTAssertEqual(groups.first?.text, "Archived thought.\n\nMessage-derived thought.")
+        // Segmented-thinking spec change (2026-09-18, user-requested): archived
+        // and message-derived arrivals remain separate segments in first-seen
+        // order.
+        XCTAssertEqual(groups.first?.segments, ["Archived thought.", "Message-derived thought."])
     }
 
     func testReasoningDisplayGroupIDIsStableAcrossMessageOffsets() {

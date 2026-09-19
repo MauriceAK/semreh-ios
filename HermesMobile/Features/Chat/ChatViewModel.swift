@@ -5693,11 +5693,16 @@ struct ReasoningGroup: Identifiable, Equatable {
     let id: String
     let anchorMessageID: String?
     let text: String
+    /// Per-arrival reasoning segments retained for the expanded Thinking view.
+    /// `text` stays the canonical joined form (collapse summaries and echo
+    /// stripping keep reading it); rendering walks the segments instead.
+    let segments: [String]
 
-    init(id: String = UUID().uuidString, anchorMessageID: String?, text: String) {
+    init(id: String = UUID().uuidString, anchorMessageID: String?, text: String, segments: [String] = []) {
         self.id = id
         self.anchorMessageID = anchorMessageID
         self.text = text
+        self.segments = segments
     }
 }
 
@@ -6180,7 +6185,8 @@ private struct ReasoningDisplayBuilder {
         ReasoningGroup(
             id: "reasoning-turn-\(turnKey)",
             anchorMessageID: anchorMessageID,
-            text: segments.joined(separator: "\n\n")
+            text: segments.joined(separator: "\n\n"),
+            segments: segments
         )
     }
 }

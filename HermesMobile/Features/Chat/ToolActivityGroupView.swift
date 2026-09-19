@@ -22,6 +22,7 @@ struct ToolActivityGroupView: View {
                 header
             }
             .buttonStyle(.plain)
+            .chatMinimumHitTarget(horizontalPadding: 10, verticalPadding: 8, in: Rectangle())
             .accessibilityLabel(activityAccessibilityLabel)
             .accessibilityHint(isExpanded ? "Double tap to collapse details." : "Double tap to expand details.")
 
@@ -34,6 +35,12 @@ struct ToolActivityGroupView: View {
                 .transition(disclosureTransition)
             }
         }
+        .padding(.horizontal, 10)
+        .padding(.vertical, isExpanded ? 8 : 6)
+        .chatTimelineAccessorySurface(
+            fallbackMaterial: .thinMaterial,
+            cornerRadius: 10
+        )
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .contain)
         .transaction { transaction in
@@ -75,7 +82,9 @@ struct ToolActivityGroupView: View {
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .frame(minHeight: 44)
+        // Compact visual row for standard sizes; accessibility sizes keep the
+        // full 44pt minimum (touch height restored by the button slop above).
+        .frame(minHeight: usesStackedHeader ? 44 : 28)
         .contentShape(Rectangle())
     }
 
@@ -95,8 +104,8 @@ struct ToolActivityGroupView: View {
     private var titleText: some View {
         Text(actionSummary)
             .font(AppFont.subheadline())
-            .foregroundStyle(.secondary)
             .lineLimit(1)
+            .modifier(ReasoningTextShineModifier(isActive: !group.isComplete))
     }
 
     private var actionSummary: String {

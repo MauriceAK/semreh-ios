@@ -24,6 +24,7 @@ struct ToolCallCardView: View {
                 header(statusDisplay: statusDisplay)
             }
             .buttonStyle(.plain)
+            .chatMinimumHitTarget(horizontalPadding: 9, verticalPadding: 8, in: Rectangle())
             .accessibilityLabel(String(localized: "\(actionTitle), \(statusDisplay.detailText)"))
             .accessibilityHint(isExpanded ? "Double tap to collapse details." : "Double tap to expand details.")
 
@@ -32,7 +33,12 @@ struct ToolCallCardView: View {
                     .transition(disclosureTransition)
             }
         }
-        .padding(.bottom, isExpanded ? 4 : 0)
+        .padding(.horizontal, 9)
+        .padding(.vertical, isExpanded ? 8 : 6)
+        .chatTimelineAccessorySurface(
+            fallbackMaterial: .thinMaterial,
+            cornerRadius: 9
+        )
         .frame(maxWidth: .infinity, alignment: .leading)
         // Tool-call bodies are commands, JSON, file paths, and results — code-like
         // content that must stay left-to-right inside an RTL message (#259). The
@@ -105,7 +111,10 @@ struct ToolCallCardView: View {
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .frame(minHeight: 44)
+        // Standard sizes keep a compact visual row; accessibility sizes keep
+        // the full 44pt minimum. The button's `chatMinimumHitTarget` slop
+        // restores ~44pt of touch height without consuming row space.
+        .frame(minHeight: usesStackedHeader ? 44 : 28)
         .contentShape(Rectangle())
     }
 
@@ -121,8 +130,8 @@ struct ToolCallCardView: View {
     private var titleText: some View {
         Text(actionTitle)
             .font(AppFont.subheadline())
-            .foregroundStyle(.secondary)
             .lineLimit(1)
+            .modifier(ReasoningTextShineModifier(isActive: !toolCall.isCompleted))
     }
 
     private var actionTitle: String {

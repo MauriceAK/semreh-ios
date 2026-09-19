@@ -314,6 +314,10 @@ enum ReasoningDisplayText {
 
 struct ReasoningBlockView: View {
     let text: String
+    /// Reasoning arrivals retained as separate segments; the expanded view
+    /// renders one quiet sub-block per entry. Empty for legacy single-blob
+    /// callers (and the live streaming path) — `text` is then the one block.
+    let segments: [String]
     /// Live reasoning callers can opt into a gentle title shine. Completed
     /// reasoning keeps the quiet static label by default.
     let isActive: Bool
@@ -322,8 +326,9 @@ struct ReasoningBlockView: View {
     @AppStorage(ChatTranscriptDisplaySettings.thinkingCardsStartExpandedKey) private var startsExpanded = false
     @State private var userToggledExpansion: Bool?
 
-    init(text: String, isActive: Bool = false) {
+    init(text: String, segments: [String] = [], isActive: Bool = false) {
         self.text = text
+        self.segments = segments
         self.isActive = isActive
     }
 
@@ -358,20 +363,50 @@ struct ReasoningBlockView: View {
                 .accessibilityHint(isExpanded ? "Double tap to collapse details." : "Double tap to expand details.")
 
                 if isExpanded {
-                    Group {
-                        if let fullMarkdownSource {
-                            MarkdownRenderer(content: fullMarkdownSource, isStreaming: isActive)
-                        } else if isActive {
-                            Text("Thinking…")
-                                .font(AppFont.caption())
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .transition(disclosureTransition)
+                    expandedReasoning
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .transition(disclosureTransition)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    /// Segments when the group retained them; legacy single-blob callers (and
+    /// the live streaming path) fall back to `text` as the one block.
+    private var resolvedSegments: [String] {
+        segments.isEmpty ? [text] : segments
+    }
+
+    /// Expanded Thinking renders each preserved reasoning segment as its own
+    /// sub-block: spaced paragraphs separated by a quiet hairline. The joined
+    /// `text` blob is never rendered whole; boundaries survive from
+    /// `ReasoningDisplayBuilder` through `ReasoningGroup.segments`.
+    @ViewBuilder
+    private var expandedReasoning: some View {
+        let renderedSegments = resolvedSegments.compactMap { segment in
+            ReasoningDisplayText.markdownSource(segment)
+        }
+
+        if !renderedSegments.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(Array(renderedSegments.enumerated()), id: \.offset) { index, markdown in
+                    if index > 0 {
+                        Divider().opacity(0.4)
+                    }
+
+                    MarkdownRenderer(
+                        content: markdown,
+                        isStreaming: isActive,
+                        isThinkingBody: true
+                    )
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } else if isActive {
+            Text("Thinking…")
+                .font(AppFont.thinkingBody)
+                .foregroundStyle(.secondary)
         }
     }
 

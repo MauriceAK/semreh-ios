@@ -49,6 +49,15 @@ enum AppFont {
         system(style, design: .monospaced, weight: weight)
     }
 
+    /// Dedicated reading style for the expanded Thinking content: callout
+    /// size, rounded family, with increased line spacing.
+    static var thinkingBody: Font { system(.callout) }
+
+    /// Single taste-test knob for the Thinking reading rhythm. It scales the
+    /// standard chat paragraph leading (0.18 em) applied by
+    /// `ChatMarkdownView` via `MarkdownBodyStyle`: 1.15 ≈ +15% leading.
+    static let thinkingBodyLineSpacingMultiplier: CGFloat = 1.15
+
     private static func system(
         _ style: Font.TextStyle,
         design: Font.Design = .rounded,

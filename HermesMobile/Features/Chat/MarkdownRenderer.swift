@@ -5,15 +5,48 @@ import Splash
 import SwiftUI
 import UIKit
 
+/// Paragraph-leading style for markdown bodies. `.standard` matches the chat
+/// transcript; `.thinking` is the expanded-Thinking reading variant and is
+/// driven by `AppFont.thinkingBodyLineSpacingMultiplier` (single taste knob).
+private enum MarkdownBodyStyle {
+    case standard
+    case thinking
+
+    var paragraphLeadingEm: CGFloat {
+        switch self {
+        case .standard:
+            return Self.standardParagraphLeadingEm
+        case .thinking:
+            return Self.standardParagraphLeadingEm * AppFont.thinkingBodyLineSpacingMultiplier
+        }
+    }
+
+    private static let standardParagraphLeadingEm: CGFloat = 0.18
+}
+
+private struct MarkdownBodyStyleEnvironmentKey: EnvironmentKey {
+    static let defaultValue: MarkdownBodyStyle = .standard
+}
+
+private extension EnvironmentValues {
+    var markdownBodyStyle: MarkdownBodyStyle {
+        get { self[MarkdownBodyStyleEnvironmentKey.self] }
+        set { self[MarkdownBodyStyleEnvironmentKey.self] = newValue }
+    }
+}
+
 struct MarkdownRenderer: View {
     let content: String
     let isStreaming: Bool
+    /// Renders through the expanded-Thinking paragraph rhythm when true.
+    let isThinkingBody: Bool
 
     @Environment(\.colorScheme) private var colorScheme
 
-    init(content: String, isStreaming: Bool = false) {
+    init(content: String, isStreaming: Bool = false, isThinkingBody: Bool = false) {
         self.content = content
         self.isStreaming = isStreaming
+        self.isThinkingBody = isThinkingBody
     }
 
     /// Keeps the streaming renderer mounted briefly after streaming ends so
@@ -36,6 +69,7 @@ struct MarkdownRenderer: View {
                 markdownContent
             }
         }
+        .environment(\.markdownBodyStyle, isThinkingBody ? .thinking : .standard)
         .onChange(of: isStreaming) { wasStreaming, nowStreaming in
             if wasStreaming, !nowStreaming {
                 lingersAfterStreaming = true
@@ -429,6 +463,8 @@ private struct ChatMarkdownView: View, Equatable {
     let colorScheme: ColorScheme
     let isStreaming: Bool
 
+    @Environment(\.markdownBodyStyle) private var markdownBodyStyle
+
     static func == (lhs: ChatMarkdownView, rhs: ChatMarkdownView) -> Bool {
         lhs.content == rhs.content
             && lhs.colorScheme == rhs.colorScheme
@@ -451,7 +487,7 @@ private struct ChatMarkdownView: View, Equatable {
             .markdownBlockStyle(\.paragraph) { configuration in
                 configuration.label
                     .fixedSize(horizontal: false, vertical: true)
-                    .relativeLineSpacing(.em(0.18))
+                    .relativeLineSpacing(.em(markdownBodyStyle.paragraphLeadingEm))
                     .markdownMargin(top: 0, bottom: 8)
             }
     }

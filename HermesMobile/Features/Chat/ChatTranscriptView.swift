@@ -3472,7 +3472,7 @@ struct ChatTranscriptView: View, Equatable {
     private func reasoningBlocks(anchorMessageID: String?) -> some View {
         if showsThinkingAndToolCards {
             ForEach(reasoningGroupsForAnchor(anchorMessageID)) { group in
-                ReasoningBlockView(text: group.text)
+                ReasoningBlockView(text: group.text, segments: group.segments)
             }
         }
     }
@@ -3680,7 +3680,7 @@ private struct ChatTranscriptMessageBlock: View, Equatable {
     private var reasoningBlocks: some View {
         if showsThinkingAndToolCards {
             ForEach(reasoningGroups) { group in
-                ReasoningBlockView(text: group.text)
+                ReasoningBlockView(text: group.text, segments: group.segments)
             }
         }
     }
