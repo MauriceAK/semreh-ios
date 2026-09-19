@@ -133,6 +133,29 @@ enum ChatScrollPolicy {
         !reduceMotion
     }
 
+    /// P02 settlement-churn gate: a re-issue may fire only once the prior
+    /// issue's animation window has elapsed. The retry ladder keeps its
+    /// pinned timing; the pass's single animated correction arms this gate
+    /// and every other issue is direct, so the in-flight easeOut is never
+    /// reset (a direct issue would cancel it) and UI quiescence always
+    /// arrives instead of wedging the keep-alive.
+    static func shouldDeferExplicitBottomReissue(
+        elapsedSinceLastIssue: TimeInterval,
+        reduceMotion: Bool
+    ) -> Bool {
+        elapsedSinceLastIssue < ChatMotion.explicitBottomAnimationWindow(reduceMotion: reduceMotion)
+    }
+
+    /// P02 keep-alive cruise: after the pinned retry ladder exhausts on a
+    /// lazy transcript, settlement continues as quiet direct re-issues on a
+    /// slow cadence. Re-issues never re-arm an animation, so the app reaches
+    /// quiescence between ticks while the walk still completes. Bounded so
+    /// the request always ends in the existing keep-request-visible state
+    /// (a subsequent tap starts a fresh pass).
+    static let explicitBottomCruiseInitialDelay: TimeInterval = 0.4
+    static let explicitBottomCruiseInterval: TimeInterval = 0.4
+    static let explicitBottomCruiseMaxTicks = 8
+
     /// A lazy transcript can need more than one layout pass before its bottom
     /// sentinel has an exact position. Explicit jumps therefore settle in a
     /// short, bounded sequence instead of trusting one open-loop `scrollTo`.

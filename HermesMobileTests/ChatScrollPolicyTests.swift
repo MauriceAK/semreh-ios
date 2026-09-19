@@ -1163,6 +1163,114 @@ final class ChatScrollPolicyTests: XCTestCase {
                 ChatScrollPolicy.explicitBottomSettlementDelays.dropFirst()
             ).allSatisfy(<)
         )
+        // The settlement contract is sequential: the first scrollTo is issued at
+        // t=0, then the loop sleeps through each remaining delay in order. Pin
+        // the exact ladder, the five sequential retry sleeps and the worst-case
+        // cumulative tap-to-last-retry budget (16+48+96+180+320 = 660ms; 320ms
+        // is only the final inter-retry gap, not the total).
+        XCTAssertEqual(
+            ChatScrollPolicy.explicitBottomSettlementDelays,
+            [0, 16_000_000, 48_000_000, 96_000_000, 180_000_000, 320_000_000],
+            "The explicit bottom settlement ladder is a pinned sequential contract."
+        )
+        XCTAssertEqual(
+            ChatScrollPolicy.explicitBottomSettlementDelays.dropFirst().count, 5,
+            "Five sequential retry sleeps run after the t=0 issue."
+        )
+        XCTAssertEqual(
+            ChatScrollPolicy.explicitBottomSettlementDelays.reduce(0, +), 660_000_000,
+            "Worst-case tap-to-last-retry budget is the 660ms cumulative sleep total."
+        )
+    }
+
+    /// Gap-2 (re-hit) contract: production has no re-hit timer or debounce.
+    /// Every tap runs the `beginExplicitBottomScroll` prologue - cancel the
+    /// prior settlement task, `explicitBottomScrollGeneration &+= 1`, capture
+    /// the new token - and a pass may complete or reissue only while its
+    /// captured token still equals the live one (ChatView.swift:2662-2745,
+    /// 2768-2776). The token lives in ChatView `@State`, so the policy layer
+    /// cannot hold it; this pins the token discipline with the real retry
+    /// ladder and completion predicate, and the UI test's mid-settlement
+    /// re-hit step exercises the same contract end-to-end. No 1s re-hit
+    /// window is asserted anywhere - production defines none.
+    func testExplicitBottomReTapInvalidatesPriorGenerationAndRestartsSettlement() {
+        let retryDelaysMilliseconds = ChatScrollPolicy.explicitBottomSettlementDelays
+            .dropFirst()
+            .map { Int($0 / 1_000_000) }
+        XCTAssertEqual(retryDelaysMilliseconds, [16, 48, 96, 180, 320])
+
+        // `liveGeneration` mirrors `explicitBottomScrollGeneration`; `tap()`
+        // is the production prologue (cancel prior task, bump, capture).
+        var liveGeneration = 0
+        func tap() -> Int {
+            liveGeneration &+= 1
+            return liveGeneration
+        }
+
+        // First settlement: armed by the first tap. The re-tap lands
+        // mid-settlement between the 48ms and 96ms guards (~100ms into the
+        // ladder); guards after it must reject the stale token exactly like
+        // the production sleep guard, so a stale pass can neither retry nor
+        // complete.
+        let firstPass = tap()
+        var firstPassRetries = 0
+        var firstPassCompletions = 0
+        var reTapGeneration = 0
+        for guardIndex in retryDelaysMilliseconds.indices {
+            if guardIndex == 2 {
+                reTapGeneration = tap()
+            }
+            guard firstPass == liveGeneration else { continue }
+            if ChatScrollPolicy.shouldFinishExplicitBottomRequest(
+                isNearBottom: false, isTailVisible: false
+            ) {
+                firstPassCompletions += 1
+            } else {
+                firstPassRetries += 1
+            }
+        }
+        XCTAssertEqual(reTapGeneration, firstPass &+ 1)
+        XCTAssertNotEqual(reTapGeneration, firstPass, "A re-tap must invalidate the previous generation token.")
+        XCTAssertEqual(firstPassRetries, 2, "The invalidated pass may retry only while its token is still live.")
+        XCTAssertEqual(firstPassCompletions, 0, "An invalidated pass can never complete the request.")
+
+        // Settled geometry is not enough: completion re-checks the token
+        // (completeExplicitBottomScroll guards `generation ==`), so the old
+        // pass stays a no-op no matter how settled the viewport becomes.
+        XCTAssertTrue(
+            ChatScrollPolicy.shouldFinishExplicitBottomRequest(isNearBottom: true, isTailVisible: true)
+        )
+        XCTAssertFalse(
+            firstPass == liveGeneration,
+            "A stale generation can never complete the request, even with settled geometry."
+        )
+
+        // The restarted pass replays the whole ladder from its own tap; when
+        // the tail settles only at the final guard it completes at the full
+        // 660ms worst-case budget - a restart, not a continuation.
+        let restartedPass = reTapGeneration
+        var restartedElapsedMilliseconds = 0
+        var restartedCompletions = 0
+        for (guardIndex, delay) in retryDelaysMilliseconds.enumerated() {
+            guard restartedPass == liveGeneration else { continue }
+            restartedElapsedMilliseconds += delay
+            let tailSettled = guardIndex == retryDelaysMilliseconds.count - 1
+            if ChatScrollPolicy.shouldFinishExplicitBottomRequest(
+                isNearBottom: tailSettled, isTailVisible: tailSettled
+            ) {
+                restartedCompletions += 1
+                break
+            }
+        }
+        XCTAssertEqual(restartedCompletions, 1, "The restarted pass completes exactly once, under its own token.")
+        XCTAssertEqual(
+            restartedElapsedMilliseconds, 660,
+            "The restarted pass replays the whole 660ms ladder from its own tap."
+        )
+        XCTAssertEqual(
+            firstPassCompletions + restartedCompletions, 1,
+            "The explicit bottom request completes exactly once across generations."
+        )
     }
 
     func testExplicitBottomTargetKeepsSelectingLatestRowUntilTailIsVisible() {

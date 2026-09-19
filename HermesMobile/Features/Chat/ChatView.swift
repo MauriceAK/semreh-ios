@@ -490,6 +490,20 @@ struct ChatView: View {
     @State private var explicitBottomScrollGeneration = 0
     @State private var isExplicitBottomScrollActive = false
     @State private var hasIssuedExplicitBottomScroll = false
+    /// Whether this pass's single ANIMATED issue has fired. A pass opens
+    /// direct and every settlement tick stays direct until the tail region
+    /// is realized on screen, so "has issued" and "has animated" are
+    /// distinct: the one animated correction - a bounded glide over
+    /// realized geometry - may re-arm the easeOut; every other issue is
+    /// direct.
+    @State private var hasIssuedAnimatedExplicitBottomScroll = false
+    /// Timestamp of the last ANIMATED explicit bottom issue. The P02
+    /// settlement-churn gate defers re-issues until this issue's animation
+    /// window has elapsed, so an in-flight easeOut is never reset by a retry
+    /// and UI quiescence always arrives. Direct issues do not arm the gate:
+    /// an immediate direct re-issue cannot reset an animation that is not
+    /// running.
+    @State private var lastExplicitBottomIssueAt: Date?
 #if DEBUG
     @State private var explicitBottomScrollAttemptCount = 0
     @State private var hasLoggedComposerCollapseForResize = false
@@ -2678,6 +2692,13 @@ struct ChatView: View {
         userScrollCooldownUntil = nil
         isExplicitBottomDecelerationActive = false
         hasIssuedExplicitBottomScroll = false
+        hasIssuedAnimatedExplicitBottomScroll = false
+        // A fresh pass owns its motion from here: the prior pass's animation
+        // window must not defer this pass's opening ticks (the re-hit tap is
+        // accepted immediately and starts a fresh sequential pass). The
+        // within-pass gate below still defers this pass's own retries while
+        // its single animated issue is in flight.
+        lastExplicitBottomIssueAt = nil
         // Invalidate any previously scheduled automatic follow operation. Its
         // delayed proxy call must not win after an explicit user jump begins.
         followScrollGeneration &+= 1
@@ -2697,10 +2718,18 @@ struct ChatView: View {
         )
 #endif
 
-        // Do not wait for a task hop before the first jump. In particular, an
-        // old near-bottom/tail-visible metrics sample must not make the request
-        // look settled without ever delivering its target to UIKit.
-        issueExplicitBottomScroll(proxy, animated: shouldAnimateInitialJump)
+        // Issue the first effective tick synchronously so the request never
+        // looks settled without delivering its target to UIKit (a stale
+        // near-bottom/tail-visible sample must not complete it first). The
+        // pass opens DIRECT on every path now: the settlement walk is a
+        // bounded sequence of direct re-issues, and the pass's single
+        // ANIMATED issue fires later as a short correction once the tail
+        // region is realized on screen (see the ladder below). Long-range
+        // animated travel across still-unrealized lazy rows re-targets on
+        // every realization pass and never drains (the observed never-idle
+        // wedge), so it is removed entirely; Reduce Motion keeps its
+        // byte-identical direct tick (same call, same timing - UI-B pins it).
+        issueExplicitBottomScroll(proxy, animated: false)
         guard isExplicitBottomScrollActive else { return }
 
         explicitBottomScrollTask = Task { @MainActor in
@@ -2721,14 +2750,53 @@ struct ChatView: View {
                     return
                 }
 
-                // Realize the concrete last row before refining toward trailing
-                // content. Keep nearby settlement calls animated so a retry
-                // retargets the in-flight motion instead of cancelling it;
-                // far-history settlement remains direct.
-                issueExplicitBottomScroll(proxy, animated: shouldAnimateInitialJump)
+                // Realize the concrete last row before refining toward
+                // trailing content. P02 quiescence: every tick is direct
+                // until the tail region is realized on screen; the pass's
+                // single ANIMATED issue may then fire as a short correction
+                // over realized geometry - bounded to at most about one
+                // viewport of travel, so the easeOut always drains and
+                // quiescence can arrive.
+                let tailRegionRealized = isLatestTranscriptRowVisible
+                    || isTranscriptBottomVisible
+                issueExplicitBottomScroll(
+                    proxy,
+                    animated: shouldAnimateInitialJump && tailRegionRealized
+                )
             }
 
             guard generation == explicitBottomScrollGeneration else { return }
+
+            // P02 keep-alive cruise: the pinned retry ladder can exhaust
+            // while a cold lazy jump is still realizing its rows. Continue
+            // the settlement as quiet direct re-issues on a slow cadence —
+            // never re-arming an animation — so the app reaches quiescence
+            // between ticks (XCTest idle can be granted) while the walk
+            // still finishes. Bounded; afterwards the request stays visible
+            // for a fresh tap, exactly as before.
+            for cruiseIndex in 0..<ChatScrollPolicy.explicitBottomCruiseMaxTicks {
+                let cruiseDelay = cruiseIndex == 0
+                    ? ChatScrollPolicy.explicitBottomCruiseInitialDelay
+                    : ChatScrollPolicy.explicitBottomCruiseInterval
+                try? await Task.sleep(nanoseconds: UInt64(cruiseDelay * 1_000_000_000))
+
+                guard !Task.isCancelled,
+                      generation == explicitBottomScrollGeneration,
+                      isExplicitBottomScrollActive
+                else { return }
+
+                if ChatScrollPolicy.shouldFinishExplicitBottomRequest(
+                    isNearBottom: isScrolledNearBottom,
+                    isTailVisible: isLatestTranscriptRowVisible || isTranscriptBottomVisible,
+                    hasIssuedScroll: hasIssuedExplicitBottomScroll
+                ) {
+                    completeExplicitBottomScroll(generation: generation)
+                    return
+                }
+
+                issueExplicitBottomScroll(proxy, animated: false)
+            }
+
             explicitBottomScrollTask = nil
 #if DEBUG
             Self.transcriptScrollLogger.debug("""
@@ -2746,6 +2814,26 @@ struct ChatView: View {
         _ proxy: ScrollViewProxy,
         animated: Bool = false
     ) {
+        // P02 keep-alive: re-issues never re-arm the easeOut. The deferral
+        // gate below skips settlement ticks while the prior issue's animation
+        // window is still open, and the pass animates only its single
+        // correction (fired over realized tail geometry); every other issue
+        // is direct, so the CA transaction always drains and UI quiescence
+        // can arrive.
+        if let lastIssueAt = lastExplicitBottomIssueAt,
+           ChatScrollPolicy.shouldDeferExplicitBottomReissue(
+               elapsedSinceLastIssue: Date().timeIntervalSince(lastIssueAt),
+               reduceMotion: reduceMotion
+           ) {
+#if DEBUG
+            Self.transcriptScrollLogger.debug("""
+                event=explicit_bottom_issue_deferred decision=prior_issue_in_flight \
+                elapsedMs=\(Int(Date().timeIntervalSince(lastIssueAt) * 1000), privacy: .public) \
+                animated=\(animated, privacy: .public)
+                """)
+#endif
+            return
+        }
         let target = ChatScrollPolicy.explicitBottomTargetID(
             latestMessageID: latestTranscriptMessageID,
             latestMessageIsVisible: isLatestTranscriptRowVisible,
@@ -2760,10 +2848,24 @@ struct ChatView: View {
             latestRowExists=\(latestTranscriptMessageID != nil, privacy: .public) latestRowVisible=\(isLatestTranscriptRowVisible, privacy: .public)
             """)
 #endif
-        if animated, let animation = ChatMotion.scrollToLatest(reduceMotion: reduceMotion) {
+        // P02 quiescence: only the pass's single ANIMATED correction may
+        // re-arm the easeOut, and the ladder fires it only once the tail
+        // region is realized on screen. The pass-opening tick and every
+        // other re-issue are non-animated: an animated issue into a lazy
+        // transcript that is still realizing re-opens the CA transaction
+        // against a moving target and quiescence never arrives (the
+        // observed never-idle wedge).
+        if animated, !hasIssuedAnimatedExplicitBottomScroll,
+           let animation = ChatMotion.scrollToLatest(reduceMotion: reduceMotion) {
             withAnimation(animation) {
                 proxy.scrollTo(target, anchor: .bottom)
             }
+            // The issued motion is now airborne; further re-issues are
+            // deferred until this animation window elapses (see the gate
+            // above). Direct issues do not arm the gate: an immediate direct
+            // re-issue cannot reset an easeOut that is not running.
+            hasIssuedAnimatedExplicitBottomScroll = true
+            lastExplicitBottomIssueAt = Date()
         } else {
             proxy.scrollTo(target, anchor: .bottom)
         }
@@ -2777,6 +2879,7 @@ struct ChatView: View {
         explicitBottomScrollTask = nil
         isExplicitBottomScrollActive = false
         hasIssuedExplicitBottomScroll = false
+        hasIssuedAnimatedExplicitBottomScroll = false
     }
 
     private func completeExplicitBottomScroll(generation: Int? = nil) {
@@ -3222,6 +3325,12 @@ struct ChatView: View {
             isStreaming: isStreaming
         )
         isScrolledNearBottom = isNearBottom
+        // P02 quiescence: the metrics callback writes no per-delivery
+        // changing state (the former warm-up feed is gone). A write whose
+        // value changed on every delivery re-armed a SwiftUI transaction
+        // per metrics sample and kept the app out of quiescence at rest
+        // (the observed P0 idle hang); the remaining writes here either
+        // change at most once per settle or are change-guarded.
 
         // Direct touch is a new user decision, even if a stale geometry sample
         // still says that the tail is visible. Inherited deceleration belongs to
