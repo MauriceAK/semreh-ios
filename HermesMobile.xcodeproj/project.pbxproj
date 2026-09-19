@@ -679,10 +679,10 @@
 		1A2B3C4D5E6F7000000000F4 /* CacheStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CacheStoreTests.swift; sourceTree = "<group>"; };
 		C04400000000000000000004 /* CacheFallbackPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CacheFallbackPolicyTests.swift; sourceTree = "<group>"; };
 		1A2B3C4D5E6F7000000000F6 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
-		357EEFD5B5F6E6421F3FD62B /* SettingsView+Sections.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView+Sections.swift; sourceTree = "<group>"; };
-		00E5E71FE9759AF1127F0F0B /* SettingsView+MoreSections.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView+MoreSections.swift; sourceTree = "<group>"; };
-		1CCDB8903B222D996923CF8F /* SettingsView+Helpers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView+Helpers.swift; sourceTree = "<group>"; };
-		55C2854AA60C0D5FC5D948DA /* SettingsView+ServerHelpers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView+ServerHelpers.swift; sourceTree = "<group>"; };
+		357EEFD5B5F6E6421F3FD62B /* SettingsView+Sections.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SettingsView+Sections.swift"; sourceTree = "<group>"; };
+		00E5E71FE9759AF1127F0F0B /* SettingsView+MoreSections.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SettingsView+MoreSections.swift"; sourceTree = "<group>"; };
+		1CCDB8903B222D996923CF8F /* SettingsView+Helpers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SettingsView+Helpers.swift"; sourceTree = "<group>"; };
+		55C2854AA60C0D5FC5D948DA /* SettingsView+ServerHelpers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SettingsView+ServerHelpers.swift"; sourceTree = "<group>"; };
 		0DB4A1FFF1135456F8953A37 /* SettingsComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsComponents.swift; sourceTree = "<group>"; };
 		F5EEC57233566C40C7AD65A8 /* SettingsServerComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsServerComponents.swift; sourceTree = "<group>"; };
 		65DCDA975C43F9430CEB2E4B /* SettingsServerViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsServerViews.swift; sourceTree = "<group>"; };
