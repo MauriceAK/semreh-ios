@@ -1,93 +1,71 @@
-# Prepared parallel batch
+# Semreh execution map
 
-## Full dispatch map
+Prepared for Maurice's greenlight. No new workers launched. This replaces the earlier eleven-report preparation wave.
 
-All 24 seed units now have an individual brief below. Each brief contains acceptance criteria, dependencies, ownership, write restrictions, verification requirements, and release conditions. This is preparation, not a claim that a code repair has already been identified for every acceptance task.
+## Engineering owners
 
-After greenlight, 11 cloud preparation assignments can run concurrently: C01–C03 plus U02/U04/U05/U07/U12/U20/U21/U23. Two use Terra (C01, U12); nine use Luna. C01 owns causal analysis; the related unit workers own distinct regression/fixture recipes and must cite C01 rather than duplicate its causal investigation. C02 owns activity chronology; C03 owns measurement-method analysis. Read-only work publishes to separate issues. Additional implementation dispatches require exact writable ownership and evidence; this batch does not authorize broad edits.
-
-Muse's M01/M02 remain ready; M03/M04/M05 remain reserved and held. The native verifier runs serially, with U01 first. No new workers have been launched.
-
-| Brief | Issue | Owner | State | Dependencies |
-| --- | --- | --- | --- | --- |
-| [U00](units/U00.md) | [#5](https://github.com/MauriceAK/semreh-ios/issues/5) | Completed | DONE | — |
-| [U01](units/U01.md) | [#4](https://github.com/MauriceAK/semreh-ios/issues/4) | Codex preparation / Sol medium native acceptance | COVERED BY C01/C02/C03; DO NOT DUPLICATE | U00 |
-| [U02](units/U02.md) | [#25](https://github.com/MauriceAK/semreh-ios/issues/25) | Codex preparation / Sol medium native acceptance | READY FOR CLOUD PREPARATION AFTER GREENLIGHT | U01 |
-| [U03](units/U03.md) | [#26](https://github.com/MauriceAK/semreh-ios/issues/26) | Codex preparation / Sol medium native acceptance | COVERED BY C01/C02/C03; DO NOT DUPLICATE | U01 |
-| [U04](units/U04.md) | [#27](https://github.com/MauriceAK/semreh-ios/issues/27) | Codex preparation / Sol medium native acceptance | READY FOR CLOUD PREPARATION AFTER GREENLIGHT | U01 |
-| [U05](units/U05.md) | [#28](https://github.com/MauriceAK/semreh-ios/issues/28) | Codex preparation / Sol medium native acceptance | READY FOR CLOUD PREPARATION AFTER GREENLIGHT | U01 |
-| [U06](units/U06.md) | [#22](https://github.com/MauriceAK/semreh-ios/issues/22) | Muse | MUSE RESERVED | — |
-| [U07](units/U07.md) | [#29](https://github.com/MauriceAK/semreh-ios/issues/29) | Codex preparation / Sol medium native acceptance | READY FOR CLOUD PREPARATION AFTER GREENLIGHT | U01 |
-| [U08](units/U08.md) | [#23](https://github.com/MauriceAK/semreh-ios/issues/23) | Muse | MUSE RESERVED | — |
-| [U09](units/U09.md) | [#20](https://github.com/MauriceAK/semreh-ios/issues/20) | Muse | MUSE RESERVED | — |
-| [U10](units/U10.md) | [#24](https://github.com/MauriceAK/semreh-ios/issues/24) | Muse | MUSE RESERVED | — |
-| [U11](units/U11.md) | [#21](https://github.com/MauriceAK/semreh-ios/issues/21) | Muse | MUSE RESERVED | — |
-| [U12](units/U12.md) | [#30](https://github.com/MauriceAK/semreh-ios/issues/30) | Codex preparation / Sol medium native acceptance | READY FOR CLOUD PREPARATION AFTER GREENLIGHT | U11 |
-| [U13](units/U13.md) | [#31](https://github.com/MauriceAK/semreh-ios/issues/31) | Codex preparation / Sol medium native acceptance | COVERED BY C01/C02/C03; DO NOT DUPLICATE | — |
-| [U14](units/U14.md) | [#32](https://github.com/MauriceAK/semreh-ios/issues/32) | Codex preparation / Sol medium native acceptance | DEPENDENCY OR DEVICE GATED | U13, U16 |
-| [U15](units/U15.md) | [#33](https://github.com/MauriceAK/semreh-ios/issues/33) | Coordinator | DEPENDENCY OR DEVICE GATED | U00 |
-| [U16](units/U16.md) | [#34](https://github.com/MauriceAK/semreh-ios/issues/34) | Codex preparation / Sol medium native acceptance | DEPENDENCY OR DEVICE GATED | — |
-| [U17](units/U17.md) | [#35](https://github.com/MauriceAK/semreh-ios/issues/35) | Codex preparation / Sol medium native acceptance | DEPENDENCY OR DEVICE GATED | U13, U16 |
-| [U18](units/U18.md) | [#36](https://github.com/MauriceAK/semreh-ios/issues/36) | Codex preparation / Sol medium native acceptance | DEPENDENCY OR DEVICE GATED | U02, U17 |
-| [U19](units/U19.md) | [#37](https://github.com/MauriceAK/semreh-ios/issues/37) | Codex preparation / Sol medium native acceptance | DEPENDENCY OR DEVICE GATED | U07, U17 |
-| [U20](units/U20.md) | [#38](https://github.com/MauriceAK/semreh-ios/issues/38) | Codex preparation / Sol medium native acceptance | READY FOR CLOUD PREPARATION AFTER GREENLIGHT | U01 |
-| [U21](units/U21.md) | [#39](https://github.com/MauriceAK/semreh-ios/issues/39) | Codex preparation / Sol medium native acceptance | READY FOR CLOUD PREPARATION AFTER GREENLIGHT | U05 |
-| [U22](units/U22.md) | [#40](https://github.com/MauriceAK/semreh-ios/issues/40) | Codex preparation / Sol medium native acceptance | DEPENDENCY OR DEVICE GATED | U03 |
-| [U23](units/U23.md) | [#41](https://github.com/MauriceAK/semreh-ios/issues/41) | Codex preparation / Sol medium native acceptance | READY FOR CLOUD PREPARATION AFTER GREENLIGHT | — |
-
-The initial research wave described below is now expanded by this full map. Unit briefs supersede the earlier grouped summary for dispatch scope. Review-only reports do not need a PR; actual code assignments do.
-
-Prepared 2026-09-19. No workers launched. Maurice's greenlight is pending.
-
-## Ready investigations
-
-| Lane | Issue | Model | Scope |
+| Owner | Assignment | Model | Release |
 | --- | --- | --- | --- |
-| Codex C01 | [#17](https://github.com/MauriceAK/semreh-ios/issues/17) | Terra | Transcript recovery, paging, navigation and send causality |
-| Codex C02 | [#18](https://github.com/MauriceAK/semreh-ios/issues/18) | Luna | Thinking/tool chronology |
-| Codex C03 | [#19](https://github.com/MauriceAK/semreh-ios/issues/19) | Luna | Performance measurement and fixture coverage |
-| Muse M01 | [#20](https://github.com/MauriceAK/semreh-ios/issues/20) | Record provider model | Settings |
-| Muse M02 | [#21](https://github.com/MauriceAK/semreh-ios/issues/21) | Record provider model | Onboarding routes |
+| [C01](C01.md) | [#17 Transcript correctness, paging, send and navigation](https://github.com/MauriceAK/semreh-ios/issues/17) | Terra | After greenlight and routine source reconciliation |
+| [C02](C02.md) | [#18 Thinking/actions presentation](https://github.com/MauriceAK/semreh-ios/issues/18) | Luna | Same; shared producer edits route through C01 |
+| [C03](C03.md) | [#19 Performance instrumentation/coverage](https://github.com/MauriceAK/semreh-ios/issues/19) | Luna | Same; device measurements remain local |
+| [M01](M01.md) | [#20 Settings](https://github.com/MauriceAK/semreh-ios/issues/20) | Muse records actual model | Same; excludes C03 StreamingLab files |
+| [M02](M02.md) | [#21 Onboarding](https://github.com/MauriceAK/semreh-ios/issues/21) | Muse records actual model | Same; approved fixture only |
+| [M03](M03.md) | [#22 Session previews](https://github.com/MauriceAK/semreh-ios/issues/22) | Muse | After #10/#14 scope disposition |
+| [M04](M04.md) | [#23 Bird/header/icons](https://github.com/MauriceAK/semreh-ios/issues/23) | Astra design; Muse implementation | After reference handoff and shared header ownership |
+| [M05](M05.md) | [#24 Bots/Tasks](https://github.com/MauriceAK/semreh-ios/issues/24) | Muse | After #12/#13 scope disposition |
 
-These five may run concurrently because they read source and publish separate issue reports. They do not edit shared product files. Their deliverable is concrete repair candidates, not a claim the app passes acceptance. No arbitrary worker cap is imposed; these are the ready work products justified by the present backlog.
+Five engineering owners can work concurrently with disjoint listed writes. Each owns investigation, confirmed in-scope fixes, focused tests, PR CI and returned verifier findings. A no-change outcome requires evidence; a planning report alone does not complete an engineering assignment. Three held owners join as dependencies clear. There is no fixed numerical concurrency cap.
 
-## Reserved Muse work
+Two separate read-only contract tasks (#30 groups and #41 Live Activity delivery) can also run concurrently if included in the greenlight. These have real authority/contract questions; they do not authorize backend deployment or speculative implementation.
 
-- M03 / [#22](https://github.com/MauriceAK/semreh-ios/issues/22): session previews; wait for PR #10/#14 disposition.
-- M04 / [#23](https://github.com/MauriceAK/semreh-ios/issues/23): bird/header/icons; wait for shared scope and visual reference handoff.
-- M05 / [#24](https://github.com/MauriceAK/semreh-ios/issues/24): Bots/Tasks reentry; wait for PR #12/#13 disposition.
+## Verification and integration
 
-Muse may use subagents for M01/M02 only after greenlight. The reservations are visible ownership, not five running jobs. No new product features were added to fill worker slots.
+Sol medium owns the one warm native simulator and starts with transcript issue #4. Source investigations can proceed while the native scenario is reproduced. CI is an admission gate, not acceptance. The original failure and meaningful regressions must be checked on the exact candidate. Appearance requires named-state screenshots, motion/lifecycle recordings, and performance measured traces with workload/device/build identity. Test errors, skips and limitations remain explicit. No physical-device claims from simulator evidence.
 
-## Native verification and implementation gates
+Failed findings return to the same issue owner. Unsupported provider resumption uses an explicit replacement assignment carrying the branch and evidence. Root reviews passing evidence and integrates. This preserves Maurice's requested coordinator-only merge policy rather than importing Full Autopilot's owner-merge authority.
 
-Issue #4 remains the first native task: rich persisted conversations, initial entry, repeated Back/chat switching, send/stop, background return, and actual prepend anchor preservation. Before running, the coordinator pins the then-current integrated product commit and disposable fixture in a trusted verifier brief. The old seed SHA is historical, not an instruction to test stale source. One warm simulator is shared serially. Cloud findings inform reproduction; they do not replace it.
+## Dispatch checklist owned by coordinator
 
-Confirmed failures become implementation briefs with exclusive writable paths, original reproduction, acceptance checks, and provider task identity. When no same-task repair API exists, create an explicit correction task. Refill independent implementation slots as scopes become ready. Maintain actual model and task identity rather than assuming the provider honors the desired model.
+Before each launch, pin the current integrated SHA, inspect open overlapping PRs, reconcile relevant local dirty work, and give the worker all relevant evidence and standing constraints. Confirm the requested provider model is supported. Make the repository playbooks reachable by merging PR #16 after review or explicitly supplying that documentation revision. Register task identity and repair route. These are launch operations, not reasons to ask Maurice to re-plan the backlog.
 
-## Reconciliation of all 24 seed units
+The writable source list in each owner brief is exclusive. Shared project.pbxproj, network contracts and unassigned shared tests require an ownership transfer. Do not split one transcript state machine among competing writers to inflate parallelism.
 
-| Units | Disposition |
-| --- | --- |
-| U00 | Completed through PR #7; no redispatch |
-| U01 | Native issue #4; cloud C01 investigation supports it |
-| U02/U04/U05/U07/U20 | Native acceptance follows U01; C01 identifies source/test gaps |
-| U03/U22 | C02 investigation; native chronology acceptance follows U01/U03 |
-| U06/U08/U09/U10/U11 | Muse M03/M04/M01/M05/M02 respectively |
-| U12 | Blocked on approved multi-profile fixture and contracts |
-| U13 | C03 inventories committed probe; coordinator preserves/reconciles local dirty probe before any implementation |
-| U14/U16/U17 | Physical-device work; U14/U17 share one measurement session where possible |
-| U15 | Observed repair/reverification/callback proof exists; provider continuation and reboot persistence are separate unproven claims |
-| U18/U19 | Measurement diagnosis follows physical baseline; no speculative optimization |
-| U21 | Native motion acceptance follows send correctness; C03 prepares measurement gaps |
-| U23 | Relay/team/fixture decision precedes implementation |
+## All 24 acceptance units
 
-The source worktree has substantial uncommitted changes unavailable in cloud. Workers inspect the pinned committed baseline; the coordinator must reconcile relevant local changes before assigning any repair to avoid overwriting or duplicating them.
+These are checklists nested under owners, not 24 obligatory workers. Existing issue numbers remain stable for visibility and history.
 
-## Research and choices
+| Unit | Issue | Owning task |
+| --- | --- | --- |
+| [U00](units/U00.md) | #5 | Done |
+| [U01](units/U01.md) | #4 | C01 |
+| [U02](units/U02.md) | #25 | C01 |
+| [U03](units/U03.md) | #26 | C02 |
+| [U04](units/U04.md) | #27 | C01 |
+| [U05](units/U05.md) | #28 | C01 |
+| [U06](units/U06.md) | #22 | M03 |
+| [U07](units/U07.md) | #29 | C01 |
+| [U08](units/U08.md) | #23 | M04 |
+| [U09](units/U09.md) | #20 | M01 |
+| [U10](units/U10.md) | #24 | M05 |
+| [U11](units/U11.md) | #21 | M02 |
+| [U12](units/U12.md) | #30 | Contract task #30 |
+| [U13](units/U13.md) | #31 | C03 |
+| [U14](units/U14.md) | #32 | C03 |
+| [U15](units/U15.md) | #33 | Coordinator |
+| [U16](units/U16.md) | #34 | Native device gate |
+| [U17](units/U17.md) | #35 | C03 |
+| [U18](units/U18.md) | #36 | C03 |
+| [U19](units/U19.md) | #37 | C03 |
+| [U20](units/U20.md) | #38 | C01 |
+| [U21](units/U21.md) | #39 | C03 |
+| [U22](units/U22.md) | #40 | C02 |
+| [U23](units/U23.md) | #41 | Contract task #41 |
 
-[Upstream Orchestrate](https://github.com/cursor/plugins/blob/main/pstack/skills/poteto-mode/playbooks/orchestrate.md) assigns briefs and queue management to one coordinator, favors cloud work except local-runtime tasks, and refills a rolling window. The [PStack README](https://github.com/cursor/plugins/blob/main/pstack/README.md) emphasizes verifiable quality over code volume. Semreh retains those choices with the existing single Mac verifier.
+U00 is complete. U12 and U23 retain fixture/authority gates. U14/U16/U17 require physical-device verification. U15 records pipeline evidence and remaining limitations. Other seed dependencies govern native acceptance; they do not impose a global barrier on independent engineering.
 
-[How I use the PStack plugin](https://www.grokbot.sh/blog/how-i-use-the-pstack-plugin) is Steffen Dybvik's account of using Lauren Tan's toolkit, not Lauren Tan's own Grok Bot documentation. Its coordinator/worker/skill separation supports repository-visible worker guidance. The normative source here is upstream PStack plus Semreh's explicit model and native-testing requirements.
+## Muse handoff
 
-PStack's Laziness Protocol keeps this batch to existing backlog goals and issue reports. Separate Before Serializing Shared State gives each report its own issue and later each implementation its own owned files. This is a portable adaptation; Cursor Task types and loops are not claimed to exist in Codex or Muse.
+> Read issue #15, this execution map and the PStack guidance in PR #16. Own #20 and #21 independently through investigation, confirmed in-scope repair, focused tests, linked PRs and macOS CI. Follow each issue's file ownership. Keep #22–#24 reserved until their release conditions clear. Report actual model and branch/head/PR. Return native-only checks to the shared Sol verifier; respond to its findings. Do not merge. Product redesign goes through Astra. Continue within scope without stopping for another planning approval.
+
+See [research and adaptation](research-and-adaptation.md) for the source rationale. The runtime scheduler and provider repair limitations remain recorded in local CURRENT.md; this map does not claim new automation was tested.
