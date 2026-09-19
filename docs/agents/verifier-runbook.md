@@ -33,7 +33,7 @@ xcodebuild build \
   -project HermesMobile.xcodeproj \
   -scheme HermesMobile \
   -configuration Debug \
-  -destination 'platform=iOS Simulator,id=$UDID' \
+  -destination "platform=iOS Simulator,id=$UDID" \
   -derivedDataPath DerivedData-verify
 ```
 
