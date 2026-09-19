@@ -1,0 +1,1015 @@
+{
+  "schema": "semreh-cloud-queue-seed/v2-portable",
+  "receipt": {
+    "kind": "inventory-only",
+    "created_at": "2026-09-19T10:10:00Z",
+    "path": "docs/agents/semreh-backlog-2026-09-19.json",
+    "dispatch_performed": false,
+    "github_mutation_performed": false,
+    "repo_or_code_edits_performed": false,
+    "credentials_or_personal_hermes_accessed": false,
+    "old_transcript_fixes_accepted": false
+  },
+  "repo": {
+    "name": "MauriceAK/semreh-ios",
+    "base_ref": "master",
+    "base_sha": "4ff3f9c274a6280ea4ccaf7e36b6e697a79acd71",
+    "working_copy": null,
+    "working_copy_state": "portable spec based on origin/master after PR #7"
+  },
+  "priority_order": [
+    "transcript correctness and durable lifecycle (P01/P09 first)",
+    "transcript presentation and send/stop correctness (P03-P05)",
+    "scroll/navigation smoothness and measured performance (P02/P08/P12/P15/PF-1..6)",
+    "remaining session/settings/onboarding UI acceptance (P07/P10/P11/P13)",
+    "blocked authority-dependent work (P06/P14/P17) and lane readiness (P16)"
+  ],
+  "source_snapshot": [
+    "docs/agents/pstack-workflow.md",
+    "docs/agents/batch-intake.md",
+    "docs/agents/verifier-runbook.md",
+    "docs/migration/remaining-work.md",
+    "docs/migration/performance-followups.md"
+  ],
+  "github_snapshot": {
+    "observed_at": "2026-09-19T10:10:00Z",
+    "repository": "MauriceAK/semreh-ios",
+    "open_issues": [
+      {
+        "number": 4,
+        "title": "P01/P09: independently verify merged transcript recovery and paging",
+        "labels": [],
+        "status": "open_queued_unclaimed",
+        "url": "https://github.com/MauriceAK/semreh-ios/issues/4",
+        "queue_unit": "U01-p01-p09-transcript-acceptance"
+      },
+      {
+        "number": 5,
+        "title": "Cloud trial: preserve lifecycle state in verifier runbook",
+        "labels": [],
+        "status": "open_trial_issue",
+        "url": "https://github.com/MauriceAK/semreh-ios/issues/5",
+        "queue_unit": "U00-pr6-runbook-udid-repair"
+      }
+    ],
+    "open_prs": [
+      {
+        "number": 6,
+        "title": "docs: preserve simulator app state for lifecycle verification",
+        "head_sha": "317d3fa64f4c082f54c8eaf6d0292c2be6065188",
+        "labels": [
+          "needs-fix"
+        ],
+        "status": "open_needs_fix",
+        "changed_paths": [
+          "docs/agents/verifier-runbook.md"
+        ],
+        "url": "https://github.com/MauriceAK/semreh-ios/pull/6",
+        "note": "Obsolete earlier runbook attempt; superseded by verified merged PR #7. Do not redispatch as product work."
+      }
+    ],
+    "no_other_open_issues_or_prs_observed": true,
+    "merged_prs": [
+      {
+        "number": 7,
+        "head_sha": "e1e96b083944d2ba5cea863459904c10d65a6e9b",
+        "merge_sha": "4ff3f9c274a6280ea4ccaf7e36b6e697a79acd71",
+        "status": "verified_and_merged",
+        "note": "Live Jules repair, CI, automatic Sol-medium verification, root evidence review, and integration passed."
+      }
+    ]
+  },
+  "model_policy": {
+    "default_bounded_cloud_implementation": "Jules Gemini3Flash",
+    "complex_ui_architecture_or_repeated_failure": "Jules Gemini3.1Pro only with explicit escalation evidence",
+    "user_facing_ui_fallback": "Astra local only when Jules fallback is not used and a concrete accepted repair exists",
+    "verification_and_judgment": "Sol verifier lane; verifier never edits code",
+    "local_bounded_work": "Luna only for bounded local probes/controller work; no inherited expensive model",
+    "ui_selector_caveat": "CURRENT.md says no explicit Jules model selector is exposed. Every model field below is a recommendation to record or select if the UI exposes it, never a claim that a model was actually selected.",
+    "dispatch_caveat": "This file seeds specs only. No Jules, Codex, Muse, Sol, Luna, GitHub, scheduler, simulator, TestFlight, or Hermes dispatch occurred."
+  },
+  "file_ownership_conflict_groups": {
+    "G-docs-verifier-runbook": {
+      "paths": [
+        "docs/agents/verifier-runbook.md"
+      ],
+      "exclusive_units": [
+        "U00-pr6-runbook-udid-repair"
+      ],
+      "rule": "One docs repair on PR 6; preserve unrelated runbook edits and do not merge from the worker."
+    },
+    "G-native-serial-evidence": {
+      "paths": [
+        "selected explicit simulator UDID",
+        "DerivedData-verify",
+        "fixture app data",
+        "signed simulator install"
+      ],
+      "exclusive_units": [
+        "U01-p01-p09-transcript-acceptance",
+        "U02-p02-scroll-acceptance",
+        "U03-p03-activity-acceptance",
+        "U04-p04-chrome-acceptance",
+        "U05-p05-streaming-acceptance",
+        "U06-p07-session-list-acceptance",
+        "U07-p08-navigation-acceptance",
+        "U08-p10-header-acceptance",
+        "U09-p11-settings-acceptance",
+        "U10-p12-tasks-acceptance",
+        "U11-p13-onboarding-acceptance",
+        "U14-p15-device-performance",
+        "U15-p16-lane-proof",
+        "U16-p17-device-acceptance",
+        "U17-pf1-device-baseline",
+        "U18-pf2-large-jump",
+        "U19-pf3-chat-switch",
+        "U20-pf4-real-history",
+        "U21-pf5-transition-polish",
+        "U22-pf6-thinking-lifecycle"
+      ],
+      "rule": "One native owner at a time. Do not install, launch, drive, uninstall, or reset concurrently; use the exact explicit UDID and preserve app data unless a separately scoped disposable onboarding fixture is approved."
+    },
+    "G-chat-transcript-core": {
+      "paths": [
+        "HermesMobile/Features/Chat/ChatTranscriptView.swift",
+        "HermesMobile/Features/Chat/ChatView.swift",
+        "HermesMobile/Features/Chat/ChatViewModel.swift",
+        "HermesMobile/Features/Chat/ChatScrollPolicy.swift",
+        "HermesMobile/Features/Chat/ChatTranscriptSupportingViews.swift",
+        "HermesMobile/Features/Chat/ChatMarkerMessageClassifier.swift",
+        "HermesMobile/Features/Chat/CompressionAnchorResolver.swift",
+        "HermesMobile/Features/Chat/OpenChatSessionStore.swift",
+        "HermesMobile/Features/Chat/ReasoningBlockView.swift",
+        "HermesMobile/Features/Chat/ToolActivityGroupView.swift",
+        "HermesMobile/Features/Chat/ToolCallCardView.swift",
+        "HermesMobileTests/ChatViewModelDirectGatewayTests.swift",
+        "HermesMobileTests/ChatTranscriptViewRestoreTests.swift",
+        "HermesMobileTests/ChatScrollPolicyTests.swift",
+        "HermesMobileUITests/LongChatScrollUITests.swift"
+      ],
+      "exclusive_units": [
+        "conditional-p01-p09-repair-after-evidence",
+        "U02-p02-scroll-acceptance",
+        "U03-p03-activity-acceptance",
+        "U04-p04-chrome-acceptance",
+        "U05-p05-streaming-acceptance",
+        "U18-pf2-large-jump",
+        "U20-pf4-real-history",
+        "U21-pf5-transition-polish",
+        "U22-pf6-thinking-lifecycle"
+      ],
+      "rule": "Verification units are read-only. Any code change requires a new bounded repair spec naming the failing criterion and exact owner files; never preemptively rewrite merged transcript code."
+    },
+    "G-session-list": {
+      "paths": [
+        "HermesMobile/Features/SessionList/SessionListView.swift",
+        "HermesMobile/Features/SessionList/SessionListViewModel.swift",
+        "HermesMobile/Features/SessionList/SessionRowView.swift",
+        "HermesMobile/Features/SessionList/MessagesSessionRowView.swift",
+        "HermesMobileTests/SessionListDirectTests.swift",
+        "HermesMobileTests/SessionListGatewayInvalidationTests.swift"
+      ],
+      "exclusive_units": [
+        "U06-p07-session-list-acceptance",
+        "U08-p10-header-acceptance"
+      ],
+      "rule": "Do not combine session-row visual work with header work unless evidence proves a shared defect."
+    },
+    "G-navigation-shell": {
+      "paths": [
+        "HermesMobile/Features/AppShell/AppShellView.swift",
+        "HermesMobile/Features/AppShell/AppShellMenuView.swift",
+        "HermesMobile/Features/SessionList/SessionNavigationState.swift",
+        "HermesMobile/Features/Chat/OpenChatSessionStore.swift",
+        "HermesMobileTests/AppShellNavigationTests.swift",
+        "HermesMobileTests/SessionNavigationStateTests.swift"
+      ],
+      "exclusive_units": [
+        "U07-p08-navigation-acceptance",
+        "U09-p11-settings-acceptance",
+        "U10-p12-tasks-acceptance"
+      ],
+      "rule": "Navigation and settings/task surfaces are separately accepted; no broad shell redesign."
+    },
+    "G-settings-profiles": {
+      "paths": [
+        "HermesMobile/Features/Settings/SettingsView.swift",
+        "HermesMobile/Features/Settings/DefaultModelPickerView.swift",
+        "HermesMobile/Features/Settings/DefaultProfilePickerView.swift",
+        "HermesMobile/Persistence/LocalOrganizerStore.swift",
+        "HermesMobile/Models/ServerCatalog.swift",
+        "HermesMobile/Networking/APIClient+DirectProfiles.swift",
+        "HermesMobileTests/WorkspaceRegistryViewModelTests.swift",
+        "HermesMobileTests/SessionListMutationTests.swift"
+      ],
+      "exclusive_units": [
+        "U09-p11-settings-acceptance",
+        "U12-p14-groups-implementation"
+      ],
+      "rule": "Profile-scoped settings and group creation must not be changed in parallel."
+    },
+    "G-onboarding": {
+      "paths": [
+        "HermesMobile/Features/Onboarding/",
+        "HermesMobileTests/OnboardingFlowTests.swift",
+        "HermesMobileUITests/DirectSkillUITests.swift"
+      ],
+      "exclusive_units": [
+        "U11-p13-onboarding-acceptance"
+      ],
+      "rule": "Manual entry remains; no SSH/automatic installer or personal endpoint assumptions."
+    },
+    "G-tasks-kanban": {
+      "paths": [
+        "HermesMobile/Features/Tasks/",
+        "HermesMobile/Features/Kanban/",
+        "HermesMobile/Models/Kanban.swift",
+        "HermesMobile/Networking/APIClient+Kanban.swift",
+        "HermesMobile/Networking/DirectKanbanDataClient.swift",
+        "HermesMobileTests/KanbanFeatureStateTests.swift",
+        "HermesMobileTests/KanbanLiveUpdateTests.swift"
+      ],
+      "exclusive_units": [
+        "U10-p12-tasks-acceptance",
+        "U12-p14-groups-implementation"
+      ],
+      "rule": "Bots/Tasks loading acceptance and Groups execution are distinct; no contract invention."
+    },
+    "G-teams-groups": {
+      "paths": [
+        "HermesMobile/Features/Teams/",
+        "HermesMobile/Models/HostedBotGroup.swift",
+        "HermesMobile/Networking/APIClient+DirectProfiles.swift",
+        "HermesMobileTests/HostedBotGroupTests.swift",
+        "HermesMobileTests/TeamsCollaborationTests.swift"
+      ],
+      "exclusive_units": [
+        "U12-p14-groups-implementation"
+      ],
+      "rule": "Blocked until an explicitly approved disposable two-profile fixture exists."
+    },
+    "G-live-activity": {
+      "paths": [
+        "HermesMobile/LiveActivities/",
+        "HermesLiveActivityWidget/",
+        "HermesMobileTests/LiveActivityTests.swift"
+      ],
+      "exclusive_units": [
+        "U23-p06-live-activity-decision"
+      ],
+      "rule": "No APNs keys, relay, deployment, or widget mutation is authorized by this seed."
+    },
+    "G-performance-probe": {
+      "paths": [
+        "HermesMobile/Features/Chat/ChatFrameCallbackTimingProbe.swift",
+        "HermesMobileTests/ChatFrameCallbackTimingAccumulatorTests.swift",
+        "HermesMobile/Features/Settings/StreamingLabReplay.swift",
+        "HermesMobile/Features/Settings/StreamingLabView.swift"
+      ],
+      "exclusive_units": [
+        "U13-p15-capability-probe",
+        "U17-pf1-device-baseline",
+        "U18-pf2-large-jump",
+        "U19-pf3-chat-switch"
+      ],
+      "rule": "Probe work stays opt-in and additive; no timing callback or screenshot may be represented as physical FPS proof."
+    },
+    "G-verifier-lane": {
+      "paths": [
+        "external verifier lane state",
+        "docs/agents/verifier-runbook.md"
+      ],
+      "exclusive_units": [
+        "U00-pr6-runbook-udid-repair",
+        "U15-p16-lane-proof"
+      ],
+      "rule": "Keep STOP/old-Hermes lane authority intact; no scheduler cutover or unattended activation from a seed."
+    },
+    "G-device-evidence": {
+      "paths": [
+        "Maurice-owned physical phone",
+        "device evidence and sanitized export"
+      ],
+      "exclusive_units": [
+        "U14-p15-device-performance",
+        "U16-p17-device-acceptance",
+        "U17-pf1-device-baseline"
+      ],
+      "rule": "Physical-device checks are serial and require human/device authority; simulator results do not substitute."
+    }
+  },
+  "units": [
+    {
+      "id": "U00-pr6-runbook-udid-repair",
+      "title": "Repair PR 6 verifier runbook simulator targeting",
+      "priority": "P0-blocker",
+      "kind": "bounded-docs-repair",
+      "status_at_seed": "superseded_by_verified_merged_pr7",
+      "github": {
+        "issue": 5,
+        "obsolete_pr": 6,
+        "replacement_pr": 7,
+        "merge_sha": "4ff3f9c274a6280ea4ccaf7e36b6e697a79acd71"
+      },
+      "owner_role": "Jules",
+      "suggested_jules_model_ui_selection": {
+        "model": "Gemini3Flash",
+        "ui_selection": "select Gemini3Flash if exposed; otherwise record unavailable",
+        "escalate_only_if": "the same bounded docs repair repeatedly fails or becomes architectural"
+      },
+      "dependencies": [],
+      "conflict_groups": [
+        "G-docs-verifier-runbook",
+        "G-verifier-lane"
+      ],
+      "owned_paths": [
+        "docs/agents/verifier-runbook.md"
+      ],
+      "acceptance_criteria": [
+        "Change only docs/agents/verifier-runbook.md on the existing PR branch.",
+        "Remove the claim that iPhone Air is the only iPhone simulator.",
+        "Require selecting and recording one explicit available simulator UDID.",
+        "Use that same explicit UDID for destination, install, launch, terminate, and any other operational simctl command; no bare booted target remains.",
+        "Preserve app-data preservation versus explicit disposable fresh-onboarding distinction, signed install, exact SHA, diagnostics-never, and physical-FPS limitations.",
+        "git diff --check passes; no app code, workflow, secret, runtime, merge, or deployment change."
+      ],
+      "verification_owner": "Sol/integrator rereads the new exact SHA and CI Gate; docs-only Build/Test skip is not native evidence.",
+      "dispatch_gate": "Historical only; do not redispatch PR #6."
+    },
+    {
+      "id": "U01-p01-p09-transcript-acceptance",
+      "title": "Independently verify merged transcript recovery and paging",
+      "priority": "P0-top",
+      "kind": "verification",
+      "status_at_seed": "queued_open_issue",
+      "github": {
+        "issue": 4,
+        "url": "https://github.com/MauriceAK/semreh-ios/issues/4"
+      },
+      "owner_role": "Sol",
+      "suggested_jules_model_ui_selection": {
+        "model": null,
+        "ui_selection": "not applicable; Sol owns verification",
+        "fallback": "If a concrete regression is found, create a new bounded repair spec for the same implementer; do not edit during verification."
+      },
+      "dependencies": [
+        "U00-pr6-runbook-udid-repair"
+      ],
+      "conflict_groups": [
+        "G-native-serial-evidence",
+        "G-chat-transcript-core"
+      ],
+      "owned_paths": [],
+      "acceptance_criteria": [
+        "Pin app SHA c0c010e51a0ee65f3b9947b9f43254fe21c86c6d and the disposable fixture revision in evidence.",
+        "Exercise multiple persisted rich Markdown/code/activity conversations: initial entry, repeated Back/chat switching, send/stop, and at least 60 seconds of background return without corrective scrolling.",
+        "For older-history paging, demonstrate a real prepend and the same canonical row before/after within the existing 12-point tolerance; distinguish calibrated held timing from an unheld user flow.",
+        "Retain sanitized recordings/screenshots for blankness and motion, timestamps, and per-criterion PASS/FAIL; do not claim physical FPS or universal bug-freedom from screenshots/callbacks.",
+        "Leave the issue open unless every criterion passes on this exact candidate; concrete failures become a bounded repair handoff, not speculative transcript rewrites."
+      ],
+      "verification_notes": "The merged 5325801/P01/P09 work is not accepted by this seed. Issue 4 remains the source of truth."
+    },
+    {
+      "id": "U02-p02-scroll-acceptance",
+      "title": "Verify momentum down-arrow and distant-history arrival",
+      "priority": "P1-smoothness",
+      "kind": "verification",
+      "status_at_seed": "implemented_verification_pending",
+      "owner_role": "Sol",
+      "suggested_jules_model_ui_selection": {
+        "model": null,
+        "ui_selection": "not applicable; Sol owns production verification",
+        "fallback": "A Jules Gemini3Flash repair is allowed only for a named mechanical defect; Gemini3.1Pro requires repeated/architectural evidence."
+      },
+      "dependencies": [
+        "U01-p01-p09-transcript-acceptance"
+      ],
+      "conflict_groups": [
+        "G-native-serial-evidence",
+        "G-chat-transcript-core",
+        "G-performance-probe"
+      ],
+      "owned_paths": [],
+      "acceptance_criteria": [
+        "In the real production long-scroll fixture, tap the down-arrow from distant history during momentum and record scoped geometry/row displacement.",
+        "The canonical target arrives before the button hides; subsequent user gesture can override the animation.",
+        "Reduce Motion uses immediate movement with no stale animation state.",
+        "Evidence includes recording and exact fixture/build; a static screenshot or callback timing is not called smoothness proof."
+      ]
+    },
+    {
+      "id": "U03-p03-activity-acceptance",
+      "title": "Verify production Thinking/tool chronology and completion motion",
+      "priority": "P1-transcript",
+      "kind": "verification",
+      "status_at_seed": "partially_verified",
+      "owner_role": "Sol",
+      "suggested_jules_model_ui_selection": {
+        "model": null,
+        "ui_selection": "not applicable; Sol owns verification",
+        "fallback": "Use Jules Gemini3Flash for a bounded presentation repair only after a named failed criterion."
+      },
+      "dependencies": [
+        "U01-p01-p09-transcript-acceptance"
+      ],
+      "conflict_groups": [
+        "G-native-serial-evidence",
+        "G-chat-transcript-core"
+      ],
+      "owned_paths": [],
+      "acceptance_criteria": [
+        "A real production rich fixture shows the latest meaningful activity in chronology, including tool/task completion and preserved raw content.",
+        "Collapse/expand is readable; finished placeholders are not presented as active work or stale empty Thinking; no spinner-face regression.",
+        "Check long history and Reduce Motion, with motion evidence for completion rather than component-only screenshots.",
+        "Record any chronology/content gap separately from layout polish; do not hide a blocking request as cosmetic."
+      ]
+    },
+    {
+      "id": "U04-p04-chrome-acceptance",
+      "title": "Verify active/background-return chrome and scroll inset",
+      "priority": "P1-transcript",
+      "kind": "verification",
+      "status_at_seed": "implemented_verification_pending",
+      "owner_role": "Sol",
+      "suggested_jules_model_ui_selection": {
+        "model": null,
+        "ui_selection": "not applicable; Sol owns verification",
+        "fallback": "Jules Gemini3Flash only for a bounded evidence-backed UI repair."
+      },
+      "dependencies": [
+        "U01-p01-p09-transcript-acceptance"
+      ],
+      "conflict_groups": [
+        "G-native-serial-evidence",
+        "G-chat-transcript-core"
+      ],
+      "owned_paths": [],
+      "acceptance_criteria": [
+        "During a real running response and after background return, no redundant Hermes-working pill or success-reconnect transcript banner appears.",
+        "Ordinary active scrolling keeps the expected transcript inset; real errors and recovery states remain visible.",
+        "Use production taps/backgrounding and sanitized recording, not a directly constructed view model."
+      ]
+    },
+    {
+      "id": "U05-p05-streaming-acceptance",
+      "title": "Verify local send, streaming, stop/resend, and completion behavior",
+      "priority": "P1-transcript",
+      "kind": "verification",
+      "status_at_seed": "implemented_verification_pending",
+      "owner_role": "Sol",
+      "suggested_jules_model_ui_selection": {
+        "model": null,
+        "ui_selection": "not applicable; Sol owns verification",
+        "fallback": "Jules Gemini3Flash only for a bounded repair after a production failure; no Astra redesign."
+      },
+      "dependencies": [
+        "U01-p01-p09-transcript-acceptance"
+      ],
+      "conflict_groups": [
+        "G-native-serial-evidence",
+        "G-chat-transcript-core"
+      ],
+      "owned_paths": [],
+      "acceptance_criteria": [
+        "Production send makes the local user message visible immediately without blank-on-send; streaming, Stop, resend, and completion all settle correctly.",
+        "Record motion and terminal state; verify historical context-menu Copy and completion reading-position preservation.",
+        "Separate a true delivery/cancellation defect from animation polish and retain evidence for each criterion."
+      ]
+    },
+    {
+      "id": "U06-p07-session-list-acceptance",
+      "title": "Verify session-row latest preview, date buckets, and return refresh",
+      "priority": "P2-ui",
+      "kind": "verification",
+      "status_at_seed": "implemented_verification_pending",
+      "owner_role": "Sol",
+      "suggested_jules_model_ui_selection": {
+        "model": null,
+        "ui_selection": "not applicable; Sol owns visual verification",
+        "fallback": "Jules Gemini3Flash for a bounded row/layout repair only if evidence names one."
+      },
+      "dependencies": [],
+      "conflict_groups": [
+        "G-native-serial-evidence",
+        "G-session-list"
+      ],
+      "owned_paths": [],
+      "acceptance_criteria": [
+        "Real session list pixels show the two-line latest locally received message preview and expected today/Yesterday/older date formatting.",
+        "Return from a chat refreshes the row without profile/session cross-contamination; heartbeat or first user message is not misrepresented as the latest received message.",
+        "Unseen remote-update behavior is recorded as a contract/coverage gap if the fixture cannot establish it."
+      ]
+    },
+    {
+      "id": "U07-p08-navigation-acceptance",
+      "title": "Verify first-tap Back, no unsolicited reopen, and tab navigation",
+      "priority": "P2-smoothness",
+      "kind": "verification",
+      "status_at_seed": "reopen_verification_pending",
+      "owner_role": "Sol",
+      "suggested_jules_model_ui_selection": {
+        "model": null,
+        "ui_selection": "not applicable; Sol owns verification",
+        "fallback": "Jules Gemini3Flash for a small deterministic navigation repair; Pro only after repeated/architectural failure."
+      },
+      "dependencies": [
+        "U01-p01-p09-transcript-acceptance"
+      ],
+      "conflict_groups": [
+        "G-native-serial-evidence",
+        "G-navigation-shell"
+      ],
+      "owned_paths": [],
+      "acceptance_criteria": [
+        "Repeat short and long conversation changes, first-tap Back, tab/page navigation, and return to the list.",
+        "Back exits on the first intended tap and no prior session reopens without an explicit user action.",
+        "Record transitions and any reopen with exact session identity; do not call a unit pass a production navigation result."
+      ]
+    },
+    {
+      "id": "U08-p10-header-acceptance",
+      "title": "Verify bird/header, tab outline, and light/dark hit targets",
+      "priority": "P2-ui",
+      "kind": "verification",
+      "status_at_seed": "implemented_verification_pending",
+      "owner_role": "Sol",
+      "suggested_jules_model_ui_selection": {
+        "model": null,
+        "ui_selection": "not applicable; Sol owns UI acceptance",
+        "fallback": "Astra local is permitted only as a user-facing UI fallback when Jules is unavailable; no speculative morph redesign."
+      },
+      "dependencies": [],
+      "conflict_groups": [
+        "G-native-serial-evidence",
+        "G-session-list"
+      ],
+      "owned_paths": [],
+      "acceptance_criteria": [
+        "Inspect real light and dark screens: bird is larger/lower/centered, name overlaps the glass treatment as intended, and no dropdown/white logo tile appears.",
+        "Outlined bird tab and transparent S hit targets are reachable without center drift or a hard header/content panel.",
+        "Keep experimental bird-to-S morph deferred unless separately authorized."
+      ]
+    },
+    {
+      "id": "U09-p11-settings-acceptance",
+      "title": "Verify settings/menu organization and supported controls",
+      "priority": "P2-ui",
+      "kind": "verification",
+      "status_at_seed": "final_review_pending",
+      "owner_role": "Sol",
+      "suggested_jules_model_ui_selection": {
+        "model": null,
+        "ui_selection": "not applicable; Sol owns reference review",
+        "fallback": "Jules Gemini3Flash for a narrow reachable-control fix only; no broad settings redesign."
+      },
+      "dependencies": [],
+      "conflict_groups": [
+        "G-native-serial-evidence",
+        "G-navigation-shell",
+        "G-settings-profiles"
+      ],
+      "owned_paths": [],
+      "acceptance_criteria": [
+        "Reach supported model/reasoning/context/theme/accent controls in the production shell and confirm context comes from canonical usage.",
+        "Empty projects and useless controls are absent while scheduled-history deletion protections remain intact.",
+        "Perform the final reference comparison on the exact candidate and list unsupported-control gaps rather than inventing APIs."
+      ]
+    },
+    {
+      "id": "U10-p12-tasks-acceptance",
+      "title": "Verify Bots and Tasks reentry without blank/black transitions",
+      "priority": "P2-smoothness",
+      "kind": "verification",
+      "status_at_seed": "overall_performance_gate_open",
+      "owner_role": "Sol",
+      "suggested_jules_model_ui_selection": {
+        "model": null,
+        "ui_selection": "not applicable; Sol owns production verification",
+        "fallback": "Jules Gemini3Flash for a bounded loading-state fix only after exact evidence."
+      },
+      "dependencies": [],
+      "conflict_groups": [
+        "G-native-serial-evidence",
+        "G-navigation-shell",
+        "G-tasks-kanban"
+      ],
+      "owned_paths": [],
+      "acceptance_criteria": [
+        "Repeat Bots and Tasks entry/reentry with realistic data, stale/cancelled loads, and themed transient frames.",
+        "No blank/black transition or stale result is observed; report measured wait/settlement behavior rather than promising instant network loading.",
+        "Use live fixture interactions and distinguish app loading from backend latency."
+      ]
+    },
+    {
+      "id": "U11-p13-onboarding-acceptance",
+      "title": "Verify Welcome, Connect, Personalize, and reauth paths",
+      "priority": "P2-ui",
+      "kind": "verification",
+      "status_at_seed": "implemented_verification_pending",
+      "owner_role": "Sol",
+      "suggested_jules_model_ui_selection": {
+        "model": null,
+        "ui_selection": "not applicable; Sol owns production onboarding verification",
+        "fallback": "Jules Gemini3Flash for a small onboarding control fix only if the fixture proves it."
+      },
+      "dependencies": [],
+      "conflict_groups": [
+        "G-native-serial-evidence",
+        "G-onboarding"
+      ],
+      "owned_paths": [],
+      "acceptance_criteria": [
+        "Exercise fresh login, failed-login retry, saved-server reauthentication, optional personalization, and an actual isolated Hermes fixture connection.",
+        "Physical QR path is separately identified as open if no approved device fixture is available; manual entry remains supported.",
+        "Do not promise SSH, automatic installation, or personal-provider access."
+      ]
+    },
+    {
+      "id": "U12-p14-groups-implementation",
+      "title": "Bound real bot/group create, readback, send, and stop",
+      "priority": "P3-blocked",
+      "kind": "implementation_then_verification",
+      "status_at_seed": "blocked_fixture_authority",
+      "owner_role": "Jules after fixture approval; Sol verifies",
+      "suggested_jules_model_ui_selection": {
+        "model": "Gemini3.1Pro",
+        "ui_selection": "select Gemini3.1Pro only after explicit approval because this is multi-profile/contract architecture; otherwise do not dispatch",
+        "fallback": "No Astra redesign or personal backend probing."
+      },
+      "dependencies": [
+        "U11-p13-onboarding-acceptance"
+      ],
+      "conflict_groups": [
+        "G-settings-profiles",
+        "G-tasks-kanban",
+        "G-teams-groups",
+        "G-native-serial-evidence"
+      ],
+      "owned_paths": [
+        "HermesMobile/Features/Teams/",
+        "HermesMobile/Models/HostedBotGroup.swift",
+        "HermesMobile/Networking/APIClient+DirectProfiles.swift",
+        "HermesMobile/Persistence/LocalOrganizerStore.swift"
+      ],
+      "acceptance_criteria": [
+        "Before dispatch, record approval and exact revision for a disposable two-profile fixture; no personal provider/service/route is allowed.",
+        "Safely create/configure a bot or group, read back the canonical object, send, stop, and verify profile/group ownership without clone/config safety gaps.",
+        "Add focused tolerant-decoding/behavior tests for the exact contract; Sol verifies real execution and failure boundaries separately.",
+        "If fixture authority is absent, remain blocked and do not implement speculative DTOs/endpoints."
+      ]
+    },
+    {
+      "id": "U13-p15-capability-probe",
+      "title": "Complete bounded opt-in smoothness capability probe",
+      "priority": "P2-measurement",
+      "kind": "bounded_local_probe",
+      "status_at_seed": "implementing_not_accepted",
+      "owner_role": "Luna",
+      "suggested_jules_model_ui_selection": {
+        "model": null,
+        "ui_selection": "not applicable; Luna local bounded work",
+        "fallback": "Do not inherit a cloud model or convert the probe into a product rewrite."
+      },
+      "dependencies": [],
+      "conflict_groups": [
+        "G-performance-probe",
+        "G-native-serial-evidence"
+      ],
+      "owned_paths": [
+        "HermesMobile/Features/Chat/ChatFrameCallbackTimingProbe.swift",
+        "HermesMobileTests/ChatFrameCallbackTimingAccumulatorTests.swift",
+        "existing opt-in StreamingLab files"
+      ],
+      "acceptance_criteria": [
+        "Use the existing opt-in synthetic lab only; keep product behavior unchanged.",
+        "Report whether the installed SDK/runtime actually exposes XCTHitchMetric and data, plus CPU, memory, signposts, fixture size, and environment.",
+        "Clearly separate callback timing, XCTest waits, and synthetic lab data from production lifecycle or physical-device FPS claims.",
+        "Focused tests pass and receipt names exact revision/evidence; no production claim is made from a probe pass alone."
+      ]
+    },
+    {
+      "id": "U14-p15-device-performance",
+      "title": "Measure production smoothness on the physical device",
+      "priority": "P2-measurement",
+      "kind": "device_verification",
+      "status_at_seed": "blocked_device_gate",
+      "owner_role": "Sol with Maurice device authority",
+      "suggested_jules_model_ui_selection": {
+        "model": null,
+        "ui_selection": "not applicable; device verification is not a Jules task",
+        "fallback": "No simulator substitution."
+      },
+      "dependencies": [
+        "U13-p15-capability-probe",
+        "U16-p17-device-acceptance"
+      ],
+      "conflict_groups": [
+        "G-device-evidence",
+        "G-native-serial-evidence",
+        "G-performance-probe"
+      ],
+      "owned_paths": [],
+      "acceptance_criteria": [
+        "On the same physical phone, measure three 10k-row fixtures for initial/repeated chat switch, distant jump, scrolling, send/stop, and app switching.",
+        "Capture actual hitch/FPS/resource evidence with environment and distinguish Debug from optimized behavior.",
+        "Do not claim no drops from screenshots, XCTest quiescence, or simulator-only evidence."
+      ]
+    },
+    {
+      "id": "U15-p16-lane-proof",
+      "title": "Prove one pinned PR through verifier-lane event and evidence handoff",
+      "priority": "P3-readiness",
+      "kind": "bounded_controller_verification",
+      "status_at_seed": "single_live_cycle_passed_fleet_hardening_in_progress",
+      "owner_role": "Sol verification; Astra reviews",
+      "suggested_jules_model_ui_selection": {
+        "model": null,
+        "ui_selection": "not applicable; controller judgment belongs to Sol/Astra",
+        "fallback": "Luna may implement only a separately bounded local adapter/test repair."
+      },
+      "dependencies": [
+        "U00-pr6-runbook-udid-repair"
+      ],
+      "conflict_groups": [
+        "G-verifier-lane",
+        "G-native-serial-evidence"
+      ],
+      "owned_paths": [],
+      "acceptance_criteria": [
+        "Use one exact pinned PR/SHA and demonstrate producer event -> adapter -> ended-root wake with immutable receipt.",
+        "Exercise success, failure, missing, stale, duplicate, busy, and stop paths; retain failure evidence and do not turn missing receipt into pass.",
+        "Prove exact PR/SHA/result identity and review timing separately from model dispatch timing.",
+        "Do not activate the unattended scheduler, automatic repair routing, merge, or deployment from this proof.",
+        "Before fleet release, prove one global serial verifier lock across multiple worker sessions, durable per-PR worker routing, automatic first-failure return, restart/idempotency, and exact coordinator acknowledgment that releases the next queued PR."
+      ]
+    },
+    {
+      "id": "U16-p17-device-acceptance",
+      "title": "Perform physical interaction gate and safe device-evidence handoff",
+      "priority": "P3-device",
+      "kind": "device_verification",
+      "status_at_seed": "installed_but_physical_gate_open",
+      "owner_role": "Sol with Maurice device authority",
+      "suggested_jules_model_ui_selection": {
+        "model": null,
+        "ui_selection": "not applicable; device owner gate",
+        "fallback": "No cloud or simulator claim can satisfy this unit."
+      },
+      "dependencies": [],
+      "conflict_groups": [
+        "G-device-evidence",
+        "G-native-serial-evidence"
+      ],
+      "owned_paths": [],
+      "acceptance_criteria": [
+        "Read back the exact installed signed build and exercise physical interaction, lifecycle, and any requested FPS/hitch checks.",
+        "Retain the initial destination timeout as historical evidence; do not uninstall/reset or mutate the production app.",
+        "Confirm drive/evidence headroom and sanitize artifacts before any upload; no credential-bearing diagnostics."
+      ]
+    },
+    {
+      "id": "U17-pf1-device-baseline",
+      "title": "Establish optimized-device baseline",
+      "priority": "P2-smoothness",
+      "kind": "device_measurement",
+      "status_at_seed": "queued",
+      "owner_role": "Sol with Maurice device authority",
+      "suggested_jules_model_ui_selection": {
+        "model": null,
+        "ui_selection": "not applicable; measurement task",
+        "fallback": "No model dispatch for measurement."
+      },
+      "dependencies": [
+        "U13-p15-capability-probe",
+        "U16-p17-device-acceptance"
+      ],
+      "conflict_groups": [
+        "G-device-evidence",
+        "G-performance-probe",
+        "G-native-serial-evidence"
+      ],
+      "owned_paths": [],
+      "acceptance_criteria": [
+        "Measure the same physical phone and three 10k-row fixtures for initial/repeated switch, large jump latency, scrolling hitches, and resource usage.",
+        "Compare optimized and Debug runs separately; do not present XCTest quiescence duration as frame time.",
+        "Publish fixture size, device/build, method, raw sanitized evidence, and unresolved measurement gaps."
+      ]
+    },
+    {
+      "id": "U18-pf2-large-jump",
+      "title": "Diagnose and bound large-jump latency",
+      "priority": "P2-smoothness",
+      "kind": "measurement_then_repair_spec",
+      "status_at_seed": "queued_after_baseline",
+      "owner_role": "Sol diagnosis; Jules only for an accepted repair",
+      "suggested_jules_model_ui_selection": {
+        "model": "Gemini3.1Pro_if_architectural",
+        "ui_selection": "leave unselected until baseline identifies a causal code change; Gemini3Flash for mechanical test-only work, Gemini3.1Pro only for complex UI/architecture/repeated failures",
+        "fallback": "Astra local user-facing UI only if Jules fallback is not used and a concrete repair is approved."
+      },
+      "dependencies": [
+        "U02-p02-scroll-acceptance",
+        "U17-pf1-device-baseline"
+      ],
+      "conflict_groups": [
+        "G-chat-transcript-core",
+        "G-performance-probe",
+        "G-native-serial-evidence"
+      ],
+      "owned_paths": [],
+      "acceptance_criteria": [
+        "Profile target realization/layout/settlement on a measured fixture and identify the causal bottleneck before code changes.",
+        "If a repair is justified, issue a new bounded spec with exact files and preserve reliable bottom reach, later gesture override, and no blank/disappearing transcript.",
+        "Do not call a timing trace a fix or weaken long-scroll assertions to make a pass."
+      ]
+    },
+    {
+      "id": "U19-pf3-chat-switch",
+      "title": "Measure and diagnose first/repeated chat-switch latency",
+      "priority": "P2-smoothness",
+      "kind": "measurement_then_repair_spec",
+      "status_at_seed": "queued_after_baseline",
+      "owner_role": "Sol diagnosis; Jules only for an accepted repair",
+      "suggested_jules_model_ui_selection": {
+        "model": "Gemini3.1Pro_if_architectural",
+        "ui_selection": "leave unselected until baseline identifies a causal code change; default Gemini3Flash for bounded mechanical fixes",
+        "fallback": "Astra local only for an explicitly accepted user-facing UI fallback."
+      },
+      "dependencies": [
+        "U07-p08-navigation-acceptance",
+        "U17-pf1-device-baseline"
+      ],
+      "conflict_groups": [
+        "G-navigation-shell",
+        "G-chat-transcript-core",
+        "G-performance-probe",
+        "G-native-serial-evidence"
+      ],
+      "owned_paths": [],
+      "acceptance_criteria": [
+        "Measure first and repeated switches with cached realistic histories and record cold/warm conditions.",
+        "Investigate view recreation versus parsing/layout without removing per-chat identity resets or retaining unlimited transcript views.",
+        "Any code repair is separately scoped to the measured cause and rechecks P01/P09 correctness."
+      ]
+    },
+    {
+      "id": "U20-pf4-real-history",
+      "title": "Verify real-history opening, prefetch, prepend, and streaming while reading",
+      "priority": "P2-correctness-smoothness",
+      "kind": "verification",
+      "status_at_seed": "queued",
+      "owner_role": "Sol",
+      "suggested_jules_model_ui_selection": {
+        "model": null,
+        "ui_selection": "not applicable; Sol owns live-history verification",
+        "fallback": "Concrete regressions route to Jules Gemini3Flash by default, Pro only for repeated/architectural failure."
+      },
+      "dependencies": [
+        "U01-p01-p09-transcript-acceptance"
+      ],
+      "conflict_groups": [
+        "G-chat-transcript-core",
+        "G-native-serial-evidence"
+      ],
+      "owned_paths": [],
+      "acceptance_criteria": [
+        "Exercise cache-first opening, older-page prefetch, true prepend anchor preservation, mixed Markdown/tools/media, and streaming while reading.",
+        "Separate live-network evidence from synthetic lab evidence and retain old/new reading position.",
+        "Report loading density/regression without silently loosening the existing paging tolerance."
+      ]
+    },
+    {
+      "id": "U21-pf5-transition-polish",
+      "title": "Verify send/transition polish after correctness gates",
+      "priority": "P3-polish",
+      "kind": "verification",
+      "status_at_seed": "queued_after_correctness",
+      "owner_role": "Sol",
+      "suggested_jules_model_ui_selection": {
+        "model": null,
+        "ui_selection": "not applicable; verification first",
+        "fallback": "Jules Gemini3Flash for bounded motion mechanics only after P05 evidence; no cosmetic masking of correctness issues."
+      },
+      "dependencies": [
+        "U05-p05-streaming-acceptance"
+      ],
+      "conflict_groups": [
+        "G-chat-transcript-core",
+        "G-native-serial-evidence"
+      ],
+      "owned_paths": [],
+      "acceptance_criteria": [
+        "Assess entrance animation, easing, transitions, and perceived responsiveness on production send/stream/complete flows.",
+        "Ensure polish does not freeze typing, duplicate submissions, lose drafts, change reading position, or mask a missing terminal state.",
+        "Use motion recording with exact candidate and keep cosmetic findings after correctness findings."
+      ]
+    },
+    {
+      "id": "U22-pf6-thinking-lifecycle",
+      "title": "Review long real conversations for thinking/tool lifecycle drift",
+      "priority": "P2-transcript",
+      "kind": "verification",
+      "status_at_seed": "queued",
+      "owner_role": "Sol",
+      "suggested_jules_model_ui_selection": {
+        "model": null,
+        "ui_selection": "not applicable; Sol owns lifecycle judgment",
+        "fallback": "Route a concrete causal defect to Jules; do not hide blocking work as cosmetic."
+      },
+      "dependencies": [
+        "U03-p03-activity-acceptance"
+      ],
+      "conflict_groups": [
+        "G-chat-transcript-core",
+        "G-native-serial-evidence"
+      ],
+      "owned_paths": [],
+      "acceptance_criteria": [
+        "Recheck long real conversations for stale, misplaced, or prematurely completed Thinking/tool cards across foreground/background and navigation.",
+        "Keep blocking requests visible and distinguish durable content loss from intentional cold-resume reconciliation.",
+        "Record chronology/content failures separately from styling; no cosmetic hiding or assertion weakening."
+      ]
+    },
+    {
+      "id": "U23-p06-live-activity-decision",
+      "title": "Resolve Live Activity closed-app delivery authority before implementation",
+      "priority": "P3-blocked",
+      "kind": "human_decision_gate",
+      "status_at_seed": "blocked_relay_and_team_authority",
+      "owner_role": "Maurice/Astra decision; Sol verifies only after authorization",
+      "suggested_jules_model_ui_selection": {
+        "model": null,
+        "ui_selection": "do not dispatch",
+        "fallback": "No Astra, Jules, or Luna implementation without explicit relay/team authority."
+      },
+      "dependencies": [],
+      "conflict_groups": [
+        "G-live-activity"
+      ],
+      "owned_paths": [],
+      "acceptance_criteria": [
+        "Decide whether authenticated ActivityKit token registration/rotation and an APNs update/end relay are authorized for an approved fixture.",
+        "Do not request/store keys, deploy a service, mutate the pinned Hermes, or claim closed-app completion from pushType:nil background logic.",
+        "If authority is granted later, create a separate bounded implementation and physical stale/orphan reconciliation verification task."
+      ]
+    }
+  ],
+  "conditional_repair_routing": {
+    "rule": "A verifier receipt may create a new repair seed only when it names an exact failed criterion, revision, fixture, and bounded owner paths. Do not pre-seed speculative transcript rewrites.",
+    "default": "Jules Gemini3Flash",
+    "escalate_to": "Jules Gemini3.1Pro only for complex UI/architecture or repeated failure after evidence",
+    "ui_fallback": "Astra local only for user-facing UI when Jules fallback is not used",
+    "review": "Sol verifies the repair candidate; Astra performs the second pass; only verified work may be merged."
+  },
+  "first_rolling_wave": {
+    "dispatch_performed": false,
+    "unit_ids": [
+      "U00-pr6-runbook-udid-repair",
+      "U01-p01-p09-transcript-acceptance",
+      "U02-p02-scroll-acceptance",
+      "U13-p15-capability-probe"
+    ],
+    "unit_ids_in_order": [
+      "U00-pr6-runbook-udid-repair",
+      "U01-p01-p09-transcript-acceptance",
+      "U02-p02-scroll-acceptance",
+      "U13-p15-capability-probe"
+    ],
+    "rationale": "Queue all bounded units, but dispatch only dependency-ready units whose ownership groups do not conflict. Native/device verification remains serial.",
+    "dependency_notes": [
+      "U01 waits for U00's exact runbook repair or an equivalent coordinator-supplied explicit-UDID procedure.",
+      "U02 waits for U01 because smooth scrolling cannot be accepted while transcript lifecycle/paging correctness is unresolved.",
+      "U13 is bounded local probe work and may be prepared independently, but it must not share a simulator/DerivedData owner with U01/U02."
+    ],
+    "serial_execution_rule": "One native/device verifier at a time; cloud implementers may run concurrently only across non-conflicting ownership groups."
+  },
+  "deferred_or_excluded": [
+    {
+      "id": "P06-runtime",
+      "reason": "blocked by APNs/ActivityKit relay and Apple-team decision; represented by U23"
+    },
+    {
+      "id": "P18",
+      "reason": "deferred modular navbar/advanced morph/cross-machine A2A/remote-control/release scope"
+    },
+    {
+      "id": "P20",
+      "reason": "voice remains research-only; no implementation seed"
+    },
+    {
+      "id": "old-Hermes-callbacks",
+      "reason": "archived; do not restart or let old scheduler compete with the lane"
+    },
+    {
+      "id": "unattended-launch",
+      "reason": "A zero-token local verifier scheduler is active, but full multi-worker fleet dispatch remains blocked until routing/acknowledgment hardening passes."
+    }
+  ],
+  "dispatch_strategy": {
+    "queue": "all bounded units may be registered",
+    "cloud_parallelism": "conflict-aware rolling window, no arbitrary fixed cap",
+    "verification": "one global serial Sol-medium lane",
+    "integration": "root/orchestrator reviews immutable exact-SHA evidence and integrates",
+    "failure": "first valid failure returns to originating worker; blocker or repeated failure wakes root"
+  }
+}
