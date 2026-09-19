@@ -8,8 +8,7 @@ Written for a Solo-piloted agent to read cold, mid-task.
 - Xcode installed. Signed Debug simulator builds work without an Apple
   account sign-in (verified). Bundle `com.maurice.semreh`.
 - Repo cloned, `master` builds clean in Xcode.
-- One warm simulator: **iPhone Air** (the only iPhone sim on this Mac;
-  kept booted between runs).
+- The Mac may have multiple booted simulators. Select and record one explicit available simulator UDID (`$UDID`) to use.
 - `gh` authenticated.
 
 ## 0. Claim a PR
@@ -20,7 +19,7 @@ Written for a Solo-piloted agent to read cold, mid-task.
 
 ## 1. Doctor (read-only, run first)
 
-- `xcrun simctl list devices | grep "iPhone Air"` — booted, not busy.
+- `xcrun simctl list devices | grep "$UDID"` — booted, not busy.
 - `git status --porcelain` — clean except the PR branch.
 - If anything looks off, stop and report; do not force through.
 
@@ -34,19 +33,19 @@ xcodebuild build \
   -project HermesMobile.xcodeproj \
   -scheme HermesMobile \
   -configuration Debug \
-  -destination 'platform=iOS Simulator,name=iPhone Air' \
+  -destination 'platform=iOS Simulator,id=$UDID' \
   -derivedDataPath DerivedData-verify
 ```
 
 Install + launch:
 
 ```
-xcrun simctl install booted <path-to>/HermesMobile.app
-xcrun simctl launch booted com.maurice.semreh
+xcrun simctl install $UDID <path-to>/HermesMobile.app
+xcrun simctl launch $UDID com.maurice.semreh
 ```
 
-Teardown afterwards: `xcrun simctl terminate booted com.maurice.semreh`
-and uninstall the app. Never kill by process name.
+Teardown afterwards: `xcrun simctl terminate $UDID com.maurice.semreh`.
+Preserve app data by default. Never kill by process name.
 
 ## 3. Drive
 
@@ -66,8 +65,11 @@ Then:
 - Verdict per acceptance criterion: PASS / FAIL with one line each.
 - Logs attached on FAIL. Label `verifying` → `verified` (all PASS) or
   `needs-fix` (any FAIL, with the failing evidence inline).
+- Exact-SHA evidence is required.
+- No credential diagnostics.
+- No physical-device FPS inference.
 
 ## 5. Cleanup
 
-Uninstall app, terminate sim processes you started, restore tree to master.
+Preserve app data by default, terminate sim processes you started, restore tree to master.
 Evidence posted to the PR survives cleanup.
