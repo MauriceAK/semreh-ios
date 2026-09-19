@@ -111,7 +111,7 @@ Preferred implementation:
    - `method = app-store-connect`
    - `destination = upload`
    - `signingStyle = automatic`
-   - `teamID = U8G25F98S2`
+   - `teamID = XXXXXXXXXX`
    - `uploadSymbols = true`
    - no `testFlightInternalTestingOnly` key
 3. Add a separate manual workflow, for example `.github/workflows/external-testflight.yml`, with stronger gates:
@@ -152,11 +152,11 @@ Purpose: prevent archive/upload failures caused by missing identifiers or entitl
 Owner task in Apple Developer / App Store Connect:
 
 1. Confirm app bundle ID exists:
-   - `com.jacobmoore.semreh`
+   - `com.mauriceak.semreh`
 2. Confirm share extension bundle ID exists:
-   - `com.jacobmoore.semreh.shareextension`
+   - `com.mauriceak.semreh.shareextension`
 3. Confirm App Group exists:
-   - `group.com.jacobmoore.semreh`
+   - `group.com.mauriceak.semreh`
 4. Confirm the App Group is enabled for both the app and share-extension bundle IDs.
 5. Confirm automatic signing can create/update App Store provisioning profiles for both targets.
 6. Confirm Apple Developer Program agreements are accepted.
@@ -177,9 +177,9 @@ Exit criteria:
 Current local result as of 2026-05-15:
 
 - Local validation passed on `codex/testflight-doc-reconcile`.
-- App target Release settings use automatic signing, Team ID `U8G25F98S2`, bundle ID `com.jacobmoore.semreh`, and `HermesMobile/Resources/HermesMobile.entitlements`.
-- Share extension Release settings use automatic signing, Team ID `U8G25F98S2`, bundle ID `com.jacobmoore.semreh.shareextension`, and `HermesShareExtension/Resources/HermesShareExtension.entitlements`.
-- Both entitlement files include `group.com.jacobmoore.semreh`.
+- App target Release settings use automatic signing, Team ID `XXXXXXXXXX`, bundle ID `com.mauriceak.semreh`, and `HermesMobile/Resources/HermesMobile.entitlements`.
+- Share extension Release settings use automatic signing, Team ID `XXXXXXXXXX`, bundle ID `com.mauriceak.semreh.shareextension`, and `HermesShareExtension/Resources/HermesShareExtension.entitlements`.
+- Both entitlement files include `group.com.mauriceak.semreh`.
 - Owner confirmed the Apple Developer Portal and App Store Connect API key items on 2026-05-15.
 
 Current Step 4 status:

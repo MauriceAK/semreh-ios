@@ -102,7 +102,7 @@ XcodeBuildMCP is the preferred local validation path for feature and bug-fix sli
 - Scheme: `HermesMobile`
 - Configuration: `Debug`
 - Simulator: `iPhone 17`
-- Bundle ID: `com.jacobmoore.semreh`
+- Bundle ID: `com.mauriceak.semreh`
 
 After each completed implementation slice:
 
@@ -116,7 +116,7 @@ After each completed implementation slice:
 Agent/MCP flow:
 
 - Call `session_show_defaults` before the first local build/run/test.
-- If defaults are missing, set project `HermesMobile.xcodeproj`, scheme `HermesMobile`, configuration `Debug`, simulator `iPhone 17`, and bundle ID `com.jacobmoore.semreh`.
+- If defaults are missing, set project `HermesMobile.xcodeproj`, scheme `HermesMobile`, configuration `Debug`, simulator `iPhone 17`, and bundle ID `com.mauriceak.semreh`.
 - Use `test_sim` for XCTest validation.
 - Use `build_run_sim` to build, install, launch, and open Simulator for manual testing.
 - Use `screenshot`, UI inspection, and log capture only when they help validate the slice.
@@ -186,10 +186,10 @@ Current status:
 - App Store Connect record name: `Semreh Mobile Agent` (Apple requires a globally unique record name; the installed product name remains exactly `Semreh`).
 - Xcode target/scheme name: `HermesMobile` (internal build plumbing only).
 - iPhone/iPad home-screen display and bundle name: `Semreh`.
-- Bundle ID: `com.jacobmoore.semreh`.
-- Test bundle ID: `com.jacobmoore.semreh.tests`.
+- Bundle ID: `com.mauriceak.semreh`.
+- Test bundle ID: `com.mauriceak.semreh.tests`.
 - SKU: `semreh-ios-2026`.
-- Apple Developer Team ID: `U8G25F98S2`.
+- Apple Developer Team ID: `XXXXXXXXXX`.
 - Signing uses Xcode automatic signing.
 - Export compliance is declared in `Info.plist` with `ITSAppUsesNonExemptEncryption = NO`; the app does not implement custom/proprietary encryption and uses normal Apple/platform networking security.
 - The canonical app icon is generated from `Brand/SemrehAppIconSource.png`; legacy alternate Hermex icons are intentionally removed.
@@ -206,16 +206,16 @@ The App Store Connect record, bundle ID, TestFlight group, and installed app all
 When the owner says **"push to branch testflight"**, upload the current *feature branch*
 to the side-by-side **Semreh Branch** internal TestFlight app. This is a TestFlight
 upload, **not** a Git push. Never merge, Git push, or upload the production
-`com.jacobmoore.semreh` TestFlight app unless the owner explicitly asks.
+`com.mauriceak.semreh` TestFlight app unless the owner explicitly asks.
 
 Branch TestFlight app identity:
 
 - App Store Connect app name: `Semreh Branch`
-- Main bundle ID: `com.jacobmoore.semreh.branch`
-- Share extension bundle ID: `com.jacobmoore.semreh.branch.shareextension`
-- Live Activity widget bundle ID: `com.jacobmoore.semreh.branch.liveactivitywidget`
+- Main bundle ID: `com.mauriceak.semreh.branch`
+- Share extension bundle ID: `com.mauriceak.semreh.branch.shareextension`
+- Live Activity widget bundle ID: `com.mauriceak.semreh.branch.liveactivitywidget`
 - Display name: `Semreh Branch`
-- App group: `group.com.jacobmoore.semreh.branch`
+- App group: `group.com.mauriceak.semreh.branch`
 - URL scheme: `semreh-branch`
 - SKU: `semreh-ios-branch`
 
@@ -262,7 +262,7 @@ GitHub Actions internal TestFlight flow:
    - `APP_STORE_CONNECT_KEY_ID`: the App Store Connect API key ID.
    - `APP_STORE_CONNECT_ISSUER_ID`: the App Store Connect issuer ID.
    - `APP_STORE_CONNECT_PRIVATE_KEY`: the full `.p8` private key contents. A one-line value with escaped `\n` separators also works.
-3. Use an App Store Connect team API key with enough access to upload builds and let automatic signing manage Team ID `U8G25F98S2`. If provisioning fails in CI, check the API key role, Apple Developer agreements, and App Store Connect access before changing the project to manual signing.
+3. Use an App Store Connect team API key with enough access to upload builds and let automatic signing manage Team ID `XXXXXXXXXX`. If provisioning fails in CI, check the API key role, Apple Developer agreements, and App Store Connect access before changing the project to manual signing.
 4. Merging to `master` automatically runs Fastlane (`bundle exec fastlane ios internal_testflight`) and uploads an internal-only TestFlight build. Markdown/docs-only pushes are skipped.
 5. To retry the same `master` commit without another merge, run the `Internal TestFlight` workflow from the Actions tab and leave `build_number` blank so Fastlane selects the next App Store Connect build number.
 6. Fastlane archives a Release IPA with `ci/TestFlightExportIPA.plist` (`testFlightInternalTestingOnly = true`) and uploads it with `upload_to_testflight`. Those builds cannot be promoted to external TestFlight or App Store distribution.

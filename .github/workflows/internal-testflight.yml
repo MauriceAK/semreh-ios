@@ -41,8 +41,8 @@ jobs:
       EXPORT_OPTIONS_PLIST: ci/TestFlightExportIPA.plist
       PROJECT_PATH: HermesMobile.xcodeproj
       SCHEME: HermesMobile
-      TEAM_ID: U8G25F98S2
-      BUNDLE_ID: com.jacobmoore.semreh
+      TEAM_ID: XXXXXXXXXX
+      BUNDLE_ID: com.mauriceak.semreh
       FASTLANE_SKIP_UPDATE_CHECK: "1"
       FASTLANE_HIDE_CHANGELOG: "1"
 

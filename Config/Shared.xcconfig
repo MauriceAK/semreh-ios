@@ -5,10 +5,10 @@
 // Apple team. Create Config/Local.xcconfig (gitignored) instead — see
 // CONTRIBUTING.md ("Code signing for contributors").
 
-DEVELOPMENT_TEAM = U8G25F98S2
+DEVELOPMENT_TEAM = XXXXXXXXXX
 APP_IDENTIFIER_SUFFIX =
-APP_BUNDLE_IDENTIFIER = com.jacobmoore.semreh$(APP_IDENTIFIER_SUFFIX)
-APP_GROUP_IDENTIFIER = group.com.jacobmoore.semreh$(APP_IDENTIFIER_SUFFIX)
+APP_BUNDLE_IDENTIFIER = com.mauriceak.semreh$(APP_IDENTIFIER_SUFFIX)
+APP_GROUP_IDENTIFIER = group.com.mauriceak.semreh$(APP_IDENTIFIER_SUFFIX)
 
 // Fork identity. Per-machine Local.xcconfig remains the final override layer.
 #include "Semreh.xcconfig"
