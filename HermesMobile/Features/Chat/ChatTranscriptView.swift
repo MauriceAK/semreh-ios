@@ -190,6 +190,15 @@ private final class ChatTranscriptViewportTracker {
     var measuredLayoutFollowNextAllowedAt: Date?
     var pendingOlderMessagesReconciliation = ChatTranscriptPagingReconciliationState()
     var olderMessagesSettlementExpiryTask: Task<Void, Never>?
+    /// The single measured correction is issued once per paging operation, but
+    /// a prepend can still be realizing lazily (or a SwiftUI layout pass can
+    /// overwrite a UIKit offset change) when the first displaced sample
+    /// arrives. The same anchored baseline correction is then re-issued on
+    /// fresh displaced samples, strictly bounded by this budget and by the
+    /// existing settlement deadline. This never invents a new delta: every
+    /// re-issue measures the same captured beforeFrame against the newest
+    /// afterFrame.
+    var pendingAnchorCorrectionReapplicationCount = 0
 #if DEBUG
     var pagingEvidenceSequence = 0
     var pendingPagingEvidence: ChatTranscriptPagingDebugEvidence?
@@ -2709,6 +2718,7 @@ struct ChatTranscriptView: View, Equatable {
         viewportTracker.olderMessagesSettlementExpiryTask?.cancel()
         viewportTracker.pendingOlderMessagesReconciliation.reset()
         viewportTracker.pendingOlderMessagesAnchor = anchor
+        viewportTracker.pendingAnchorCorrectionReapplicationCount = 0
         viewportTracker.pendingOlderMessagesLoadCompleted = false
         viewportTracker.pendingOlderMessagesBaselineMessageCount = messages.count
         viewportTracker.pendingOlderMessagesBaselineRenderRevision = transcriptRenderRevision
@@ -3028,17 +3038,34 @@ struct ChatTranscriptView: View, Equatable {
             return
         case .waitForFreshSnapshot:
             if frames[anchor.messageID] != nil {
+                // After the single measured correction was issued, a fresh
+                // sample can still show the anchor displaced because the
+                // prepend kept realizing lazily or a view pass overwrote the
+                // UIKit offset change. Re-issue the same anchored baseline
+                // correction (bounded, and the settlement deadline still
+                // bounds the whole window) instead of waiting out the budget
+                // with the reader left displaced.
+                if let correctionGeneration = viewportTracker.pendingOlderMessagesReconciliation.correctionGeneration,
+                   viewportTracker.framesGeneration > correctionGeneration,
+                   Self.shouldReapplyPagingCorrection(displacement: Self.measuredDisplacement(
+                       beforeFrame: anchor.frame, afterFrame: frames[anchor.messageID]
+                   )),
+                   viewportTracker.pendingAnchorCorrectionReapplicationCount < Self.maximumPagingCorrectionReapplications {
+                    viewportTracker.pendingAnchorCorrectionReapplicationCount += 1
+                    applyMeasuredPrependedAnchorCorrection(anchor: anchor, afterFrame: frames[anchor.messageID], proxy: proxy)
+                } else {
 #if DEBUG
-                logPagingReconcileDispositionIfNeeded(
-                    decision: viewportTracker.pendingOlderMessagesReconciliation.correctionGeneration == nil
-                        ? "wait_unchanged_anchor_confirmation" : "wait_post_correction_confirmation",
-                    anchor: anchor,
-                    frames: frames,
-                    currentFirstLoadedRowID: currentFirstLoadedRowID,
-                    transcriptChanged: didChangeTranscript,
-                    firstLoadedIDChanged: true
-                )
+                    logPagingReconcileDispositionIfNeeded(
+                        decision: viewportTracker.pendingOlderMessagesReconciliation.correctionGeneration == nil
+                            ? "wait_unchanged_anchor_confirmation" : "wait_post_correction_confirmation",
+                        anchor: anchor,
+                        frames: frames,
+                        currentFirstLoadedRowID: currentFirstLoadedRowID,
+                        transcriptChanged: didChangeTranscript,
+                        firstLoadedIDChanged: true
+                    )
 #endif
+                }
                 return
             }
 #if DEBUG
@@ -3111,14 +3138,50 @@ struct ChatTranscriptView: View, Equatable {
             break
         }
 
-        guard let afterFrame = frames[anchor.messageID] else {
+        applyMeasuredPrependedAnchorCorrection(
+            anchor: anchor,
+            afterFrame: frames[anchor.messageID],
+            proxy: proxy
+        )
+    }
+
+    /// Re-application budget for the single measured prepend correction. The
+    /// correction delta is always derived from the same captured anchor
+    /// baseline; fresh displaced samples may re-issue it while a lazy prepend
+    /// is still realizing or a view pass overwrote the UIKit offset change.
+    /// The existing settlement deadline still bounds the whole window.
+    private static let maximumPagingCorrectionReapplications = 3
+
+    private static func measuredDisplacement(
+        beforeFrame: CGRect?,
+        afterFrame: CGRect?
+    ) -> CGFloat? {
+        guard let beforeFrame, let afterFrame else { return nil }
+        return afterFrame.minY - beforeFrame.minY
+    }
+
+    private static func shouldReapplyPagingCorrection(displacement: CGFloat?) -> Bool {
+        guard let displacement else { return false }
+        return abs(displacement) > ChatTranscriptPagingPolicy.anchorPreservationTolerance
+    }
+
+    /// Issues the measured prepend correction against the captured anchor
+    /// baseline and its bounded re-applications. The reconciliation state
+    /// machine records the correction generation once; later displaced samples
+    /// re-enter here from the wait branch with the same baseline.
+    private func applyMeasuredPrependedAnchorCorrection(
+        anchor: ChatTranscriptViewportAnchor,
+        afterFrame: CGRect?,
+        proxy: ScrollViewProxy
+    ) {
+        guard let afterFrame else {
 #if DEBUG
             logPagingReconcileDispositionIfNeeded(
                 decision: "wait_anchor_frame_disappeared",
                 anchor: anchor,
-                frames: frames,
-                currentFirstLoadedRowID: currentFirstLoadedRowID,
-                transcriptChanged: didChangeTranscript,
+                frames: viewportTracker.latestFrames,
+                currentFirstLoadedRowID: nil,
+                transcriptChanged: true,
                 firstLoadedIDChanged: true
             )
 #endif
@@ -3246,6 +3309,7 @@ struct ChatTranscriptView: View, Equatable {
         viewportTracker.pagingOperation.cancel()
         viewportTracker.olderMessagesLoadInFlight = false
         viewportTracker.pendingOlderMessagesAnchor = nil
+        viewportTracker.pendingAnchorCorrectionReapplicationCount = 0
         viewportTracker.olderMessagesSettlementExpiryTask?.cancel()
         viewportTracker.olderMessagesSettlementExpiryTask = nil
         viewportTracker.pendingOlderMessagesLoadCompleted = false
