@@ -11,7 +11,7 @@ import OSLog
 final class NativeAuthE2EAutoSubmitController {
     static let launchFlag = "--native-auth-e2e-auto-submit"
     private static let diagnosticLog = Logger(
-        subsystem: "com.jacobmoore.semreh",
+        subsystem: "com.maurice.semreh",
         category: "NativeAuthE2E"
     )
 

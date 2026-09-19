@@ -68,7 +68,7 @@ The server owns execution. The app owns mobile interaction quality.
 | 8 | Terminal feature | **Skip for v1** |
 | 9 | Offline behavior | **Read-only cache** of session list and recent messages |
 | 10 | App name | **Semreh** in App Store Connect; iPhone display name **Semreh**; Xcode target remains `HermesMobile` |
-| 11 | Apple Developer account | **Enrolled** — Team ID `U8G25F98S2`; bundle ID `com.jacobmoore.semreh`; SKU `semreh-ios` |
+| 11 | Apple Developer account | **MauriceAK account** (2026-09-18 takeover) — Team ID `6D65NQ2V3Q` (pending enrollment processing); bundle ID `com.maurice.semreh`; SKU `semreh-ios` |
 
 ---
 
