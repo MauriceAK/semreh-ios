@@ -528,7 +528,7 @@ final class LongChatScrollUITests: XCTestCase {
             "# fixture=2 chats x 10,000 rows; pattern=alternating enter/back visits",
             "# enter_ms is tap-to-chat-root-hittable; return_ms is Back-to-list-button-hittable",
             "# These are XCTest wall-clock timings including accessibility waits; use Instruments for hitches/FPS.",
-            "# signposts=subsystem=com.jacobmoore.semreh category=ChatPerformance names=ChatPerformancePhase,ChatPerformanceTransition",
+            "# signposts=subsystem=com.maurice.semreh category=ChatPerformance names=ChatPerformancePhase,ChatPerformanceTransition",
             "cycle,chat,enter_ms,return_ms,total_ms"
         ]
 

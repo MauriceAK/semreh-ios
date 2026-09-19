@@ -410,12 +410,12 @@ struct HermesMobileApp: App {
         WindowGroup {
             #if DEBUG
             // Launch argument hooks for deterministic, server-free simulator diagnosis:
-            // `xcrun simctl launch <udid> com.jacobmoore.semreh --streaming-lab`
-            // `xcrun simctl launch <udid> com.jacobmoore.semreh --chat-performance-lab`
-            // `xcrun simctl launch <udid> com.jacobmoore.semreh --chat-performance-cycle-lab --chat-performance-signposts`
-            // `xcrun simctl launch <udid> com.jacobmoore.semreh --chat-performance-app-wide-monitor`
-            // `xcrun simctl launch <udid> com.jacobmoore.semreh --sidebar-brand-lab`
-            // `xcrun simctl launch <udid> com.jacobmoore.semreh --bird-palette-visual-lab`
+            // `xcrun simctl launch <udid> com.maurice.semreh --streaming-lab`
+            // `xcrun simctl launch <udid> com.maurice.semreh --chat-performance-lab`
+            // `xcrun simctl launch <udid> com.maurice.semreh --chat-performance-cycle-lab --chat-performance-signposts`
+            // `xcrun simctl launch <udid> com.maurice.semreh --chat-performance-app-wide-monitor`
+            // `xcrun simctl launch <udid> com.maurice.semreh --sidebar-brand-lab`
+            // `xcrun simctl launch <udid> com.maurice.semreh --bird-palette-visual-lab`
             Group {
                 if ProcessInfo.processInfo.arguments.contains("--chat-performance-lab") {
                     NavigationStack {
@@ -526,7 +526,7 @@ private enum ChatPerformanceInstrumentation {
     }
 
     private static let log = OSLog(
-        subsystem: "com.jacobmoore.semreh",
+        subsystem: "com.maurice.semreh",
         category: "ChatPerformance"
     )
 

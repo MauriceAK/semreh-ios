@@ -4,9 +4,9 @@
 // xcodebuild ... -xcconfig Config/BranchTestFlight.xcconfig CURRENT_PROJECT_VERSION=<unique-build-number>
 //
 // The derived bundle IDs are:
-// - com.jacobmoore.semreh.branch
-// - com.jacobmoore.semreh.branch.shareextension
-// - com.jacobmoore.semreh.branch.liveactivitywidget
+// - com.maurice.semreh.branch
+// - com.maurice.semreh.branch.shareextension
+// - com.maurice.semreh.branch.liveactivitywidget
 
 APP_IDENTIFIER_SUFFIX = .branch
 APP_DISPLAY_NAME = Semreh Branch

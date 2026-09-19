@@ -1,6 +1,6 @@
-// Committed identity for Jacob Moore's Semreh fork.
+// Committed identity for the Semreh fork (MauriceAK Apple Developer account).
 // Config/Local.xcconfig may still override these values for contributor builds.
-DEVELOPMENT_TEAM = U8G25F98S2
+DEVELOPMENT_TEAM = 6D65NQ2V3Q
 APP_IDENTIFIER_SUFFIX =
-APP_BUNDLE_IDENTIFIER = com.jacobmoore.semreh$(APP_IDENTIFIER_SUFFIX)
-APP_GROUP_IDENTIFIER = group.com.jacobmoore.semreh$(APP_IDENTIFIER_SUFFIX)
+APP_BUNDLE_IDENTIFIER = com.maurice.semreh$(APP_IDENTIFIER_SUFFIX)
+APP_GROUP_IDENTIFIER = group.com.maurice.semreh$(APP_IDENTIFIER_SUFFIX)

@@ -81,14 +81,14 @@ Read by every agent (Codex, Claude Code, …); keep it tool-agnostic.
   build + launch the app for the human's manual simulator test when UI changed.
 
 ## App identity (resolved via xcconfig — not grep-able)
-Bundle ID `com.jacobmoore.semreh` · tests `….tests` · Team `U8G25F98S2` · SKU `semreh-ios`.
+Bundle ID `com.maurice.semreh` · tests `….tests` · Team `6D65NQ2V3Q` · SKU `semreh-ios`.
 
 ## "push to branch testflight" (maintainer-only)
 Upload the current branch to the side-by-side **Semreh Branch** internal TestFlight app
-(`com.jacobmoore.semreh.branch`) — a TestFlight upload, **not** a git push.
+(`com.maurice.semreh.branch`) — a TestFlight upload, **not** a git push.
 Requires the maintainer's App Store Connect access; contributors never need this. Use a
 unique `CURRENT_PROJECT_VERSION` (e.g. `YYYYMMDDHHMM`) each time. Full commands + branch
-identity: `DEVELOPMENT.md`. Never touch the production `com.jacobmoore.semreh` app
+identity: `DEVELOPMENT.md`. Never touch the production `com.maurice.semreh` app
 unless explicitly asked.
 
 ## Working with the human

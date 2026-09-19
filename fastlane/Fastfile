@@ -15,10 +15,10 @@ platform :ios do
     key_id = required_env!("APP_STORE_CONNECT_KEY_ID")
     issuer_id = required_env!("APP_STORE_CONNECT_ISSUER_ID")
     key_path = required_env!("APP_STORE_CONNECT_KEY_PATH")
-    team_id = ENV.fetch("TEAM_ID", "U8G25F98S2")
+    team_id = ENV.fetch("TEAM_ID", "6D65NQ2V3Q")
     scheme = ENV.fetch("SCHEME", "HermesMobile")
     marketing_version = required_env!("MARKETING_VERSION")
-    bundle_id = ENV.fetch("BUNDLE_ID", "com.jacobmoore.semreh")
+    bundle_id = ENV.fetch("BUNDLE_ID", "com.maurice.semreh")
 
     project = absolutize(ENV.fetch("PROJECT_PATH", "HermesMobile.xcodeproj"), repo_root)
     export_options = absolutize(ENV.fetch("EXPORT_OPTIONS_PLIST", "ci/TestFlightExportIPA.plist"), repo_root)
