@@ -111,7 +111,7 @@ Preferred implementation:
    - `method = app-store-connect`
    - `destination = upload`
    - `signingStyle = automatic`
-   - `teamID = XXXXXXXXXX`
+   - `teamID = 6D65NQ2V3Q`
    - `uploadSymbols = true`
    - no `testFlightInternalTestingOnly` key
 3. Add a separate manual workflow, for example `.github/workflows/external-testflight.yml`, with stronger gates:
@@ -177,8 +177,8 @@ Exit criteria:
 Current local result as of 2026-05-15:
 
 - Local validation passed on `codex/testflight-doc-reconcile`.
-- App target Release settings use automatic signing, Team ID `XXXXXXXXXX`, bundle ID `com.mauriceak.semreh`, and `HermesMobile/Resources/HermesMobile.entitlements`.
-- Share extension Release settings use automatic signing, Team ID `XXXXXXXXXX`, bundle ID `com.mauriceak.semreh.shareextension`, and `HermesShareExtension/Resources/HermesShareExtension.entitlements`.
+- App target Release settings use automatic signing, Team ID `6D65NQ2V3Q`, bundle ID `com.mauriceak.semreh`, and `HermesMobile/Resources/HermesMobile.entitlements`.
+- Share extension Release settings use automatic signing, Team ID `6D65NQ2V3Q`, bundle ID `com.mauriceak.semreh.shareextension`, and `HermesShareExtension/Resources/HermesShareExtension.entitlements`.
 - Both entitlement files include `group.com.mauriceak.semreh`.
 - Owner confirmed the Apple Developer Portal and App Store Connect API key items on 2026-05-15.
 

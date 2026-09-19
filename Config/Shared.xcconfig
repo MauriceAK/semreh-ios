@@ -5,7 +5,7 @@
 // Apple team. Create Config/Local.xcconfig (gitignored) instead — see
 // CONTRIBUTING.md ("Code signing for contributors").
 
-DEVELOPMENT_TEAM = XXXXXXXXXX
+DEVELOPMENT_TEAM = 6D65NQ2V3Q
 APP_IDENTIFIER_SUFFIX =
 APP_BUNDLE_IDENTIFIER = com.mauriceak.semreh$(APP_IDENTIFIER_SUFFIX)
 APP_GROUP_IDENTIFIER = group.com.mauriceak.semreh$(APP_IDENTIFIER_SUFFIX)

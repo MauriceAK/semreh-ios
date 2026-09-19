@@ -40,7 +40,7 @@ jobs:
       EXPORT_OPTIONS_PLIST: ci/ExternalTestFlightExportOptions.plist
       PROJECT_PATH: HermesMobile.xcodeproj
       SCHEME: HermesMobile
-      TEAM_ID: XXXXXXXXXX
+      TEAM_ID: 6D65NQ2V3Q
 
     steps:
       - name: Check manual gate

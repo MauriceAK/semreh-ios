@@ -56,7 +56,7 @@ Read by every agent (Codex, Claude Code, …); keep it tool-agnostic.
   build + launch the app for the human's manual simulator test when UI changed.
 
 ## App identity (resolved via xcconfig — not grep-able)
-Bundle ID `com.mauriceak.semreh` · tests `….tests` · Team `XXXXXXXXXX` · SKU `semreh-ios`.
+Bundle ID `com.mauriceak.semreh` · tests `….tests` · Team `6D65NQ2V3Q` · SKU `semreh-ios`.
 
 ## "push to branch testflight" (maintainer-only)
 Upload the current branch to the side-by-side **Semreh Branch** internal TestFlight app

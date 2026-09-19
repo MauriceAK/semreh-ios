@@ -189,7 +189,7 @@ Current status:
 - Bundle ID: `com.mauriceak.semreh`.
 - Test bundle ID: `com.mauriceak.semreh.tests`.
 - SKU: `semreh-ios-2026`.
-- Apple Developer Team ID: `XXXXXXXXXX`.
+- Apple Developer Team ID: `6D65NQ2V3Q`.
 - Signing uses Xcode automatic signing.
 - Export compliance is declared in `Info.plist` with `ITSAppUsesNonExemptEncryption = NO`; the app does not implement custom/proprietary encryption and uses normal Apple/platform networking security.
 - The canonical app icon is generated from `Brand/SemrehAppIconSource.png`; legacy alternate Hermex icons are intentionally removed.
@@ -262,7 +262,7 @@ GitHub Actions internal TestFlight flow:
    - `APP_STORE_CONNECT_KEY_ID`: the App Store Connect API key ID.
    - `APP_STORE_CONNECT_ISSUER_ID`: the App Store Connect issuer ID.
    - `APP_STORE_CONNECT_PRIVATE_KEY`: the full `.p8` private key contents. A one-line value with escaped `\n` separators also works.
-3. Use an App Store Connect team API key with enough access to upload builds and let automatic signing manage Team ID `XXXXXXXXXX`. If provisioning fails in CI, check the API key role, Apple Developer agreements, and App Store Connect access before changing the project to manual signing.
+3. Use an App Store Connect team API key with enough access to upload builds and let automatic signing manage Team ID `6D65NQ2V3Q`. If provisioning fails in CI, check the API key role, Apple Developer agreements, and App Store Connect access before changing the project to manual signing.
 4. Merging to `master` automatically runs Fastlane (`bundle exec fastlane ios internal_testflight`) and uploads an internal-only TestFlight build. Markdown/docs-only pushes are skipped.
 5. To retry the same `master` commit without another merge, run the `Internal TestFlight` workflow from the Actions tab and leave `build_number` blank so Fastlane selects the next App Store Connect build number.
 6. Fastlane archives a Release IPA with `ci/TestFlightExportIPA.plist` (`testFlightInternalTestingOnly = true`) and uploads it with `upload_to_testflight`. Those builds cannot be promoted to external TestFlight or App Store distribution.
