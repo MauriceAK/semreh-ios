@@ -145,7 +145,7 @@ extension KanbanStatusFocusView {
         .accessibilityFocused($selectionControlsAreFocused)
     }
 
-    var bulkDisabledExplanation: String? {
+    private var bulkDisabledExplanation: String? {
         switch model.bulkActionsAvailability {
         case .available: nil
         case .noSelection: nil
@@ -246,7 +246,7 @@ extension KanbanStatusFocusView {
         .background(.orange.opacity(0.12))
     }
 
-    var unavailableWriteCapabilityNames: String {
+    private var unavailableWriteCapabilityNames: String {
         KanbanWriteCapability.allCases
             .filter(model.unavailableWriteCapabilities.contains)
             .map(\.title)

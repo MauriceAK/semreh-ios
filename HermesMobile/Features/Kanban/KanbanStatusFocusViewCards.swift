@@ -41,7 +41,7 @@ extension KanbanStatusFocusView {
     }
 
     @ViewBuilder
-    func cardNavigationLink(_ card: KanbanCard) -> some View {
+    private func cardNavigationLink(_ card: KanbanCard) -> some View {
         if model.isSelectingCards {
             Button {
                 activateCard(card)
@@ -92,7 +92,7 @@ extension KanbanStatusFocusView {
         }
     }
 
-    func activateCard(_ card: KanbanCard) {
+    private func activateCard(_ card: KanbanCard) {
         switch KanbanCardRowPrimaryAction.resolve(for: card, isSelecting: model.isSelectingCards) {
         case let .openDetail(cardID):
             focusedCardID = cardID
@@ -105,7 +105,7 @@ extension KanbanStatusFocusView {
         }
     }
 
-    func cardActionsMenu(_ card: KanbanCard) -> some View {
+    private func cardActionsMenu(_ card: KanbanCard) -> some View {
         Menu {
             let destinations = model.moveDestinations(for: card)
             if !destinations.isEmpty {
@@ -139,7 +139,7 @@ extension KanbanStatusFocusView {
     }
 
     @ViewBuilder
-    func mutationStatus(for card: KanbanCard) -> some View {
+    private func mutationStatus(for card: KanbanCard) -> some View {
         if let mutation = model.mutationState(for: card.cardID) {
             switch mutation.phase {
             case .updating:
@@ -221,7 +221,7 @@ extension KanbanStatusFocusView {
         }
     }
 
-    func retryMutation(for card: KanbanCard) {
+    private func retryMutation(for card: KanbanCard) {
         guard card.status?.rawValue == "running",
               let mutation = model.mutationState(for: card.cardID) else {
             Task { await model.retryMutation(for: card) }
@@ -235,7 +235,7 @@ extension KanbanStatusFocusView {
         }
     }
 
-    var emptyContent: some View {
+    private var emptyContent: some View {
         ContentUnavailableView {
             Label(
                 model.hasActiveFilters ? String(localized: "No matching Cards") : String(localized: "No Cards in this Status"),

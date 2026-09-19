@@ -14,7 +14,7 @@ enum KanbanBoardEditorMode: Identifiable {
     }
 }
 
-struct KanbanBoardStatusLabelStyle: LabelStyle {
+private struct KanbanBoardStatusLabelStyle: LabelStyle {
     func makeBody(configuration: Configuration) -> some View {
         HStack(spacing: 4) {
             configuration.icon

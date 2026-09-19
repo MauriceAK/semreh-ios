@@ -104,7 +104,7 @@ struct KanbanFiltersDraft {
 }
 
 struct KanbanStatusFocusView: View {
-    @Environment(\.scenePhase) var scenePhase
+    @Environment(\.scenePhase) private var scenePhase
     @Bindable var model: KanbanFeatureState
     @State var showsFilters = false
     @State var showsBoardManagement = false
@@ -266,7 +266,7 @@ struct KanbanStatusFocusView: View {
         }
     }
 
-    func activateCurrentModel() {
+    private func activateCurrentModel() {
         guard visibleModel !== model else {
             model.setVisible(true)
             return
@@ -276,12 +276,12 @@ struct KanbanStatusFocusView: View {
         model.setVisible(true)
     }
 
-    func updateSceneActivity(_ phase: ScenePhase) {
+    private func updateSceneActivity(_ phase: ScenePhase) {
         let isActive = phase == .active
         Task { await model.setSceneActive(isActive) }
     }
 
-    var loadingContent: some View {
+    private var loadingContent: some View {
         VStack(spacing: 12) {
             ProgressView()
             Text("Loading Kanban")
@@ -292,7 +292,7 @@ struct KanbanStatusFocusView: View {
         .accessibilityLabel(Text("Loading Kanban"))
     }
 
-    var boardContent: some View {
+    private var boardContent: some View {
         VStack(spacing: 0) {
             if model.state == .partial {
                 compatibilityBanner

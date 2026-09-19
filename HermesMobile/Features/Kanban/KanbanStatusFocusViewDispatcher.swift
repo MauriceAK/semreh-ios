@@ -29,7 +29,7 @@ extension KanbanStatusFocusView {
         }
     }
 
-    var dispatcherPanel: some View {
+    private var dispatcherPanel: some View {
         VStack(alignment: .leading, spacing: 10) {
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 12) {
@@ -63,7 +63,7 @@ extension KanbanStatusFocusView {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    var previewDispatchButton: some View {
+    private var previewDispatchButton: some View {
         Button("Preview Dispatch") {
             Task { await model.previewDispatch() }
         }
@@ -72,7 +72,7 @@ extension KanbanStatusFocusView {
         .frame(minHeight: 44)
     }
 
-    var runDispatcherButton: some View {
+    private var runDispatcherButton: some View {
         Button("Run Dispatcher") {
             confirmsRunDispatcher = true
         }
@@ -82,7 +82,7 @@ extension KanbanStatusFocusView {
     }
 
     @ViewBuilder
-    func dispatchSummary(_ dispatch: KanbanDispatchState) -> some View {
+    private func dispatchSummary(_ dispatch: KanbanDispatchState) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline) {
                 Text(dispatchModeTitle(dispatch.mode))
@@ -158,7 +158,7 @@ extension KanbanStatusFocusView {
         .accessibilityFocused($dispatchSummaryIsFocused)
     }
 
-    func dispatchMetrics(_ result: KanbanDispatchResult) -> some View {
+    private func dispatchMetrics(_ result: KanbanDispatchResult) -> some View {
         Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 5) {
             dispatchMetricRow("Spawned", result.spawned, "Promoted", result.promoted)
             dispatchMetricRow("Reclaimed", result.reclaimed, "Skipped—No Assignee", result.skippedUnassigned)
@@ -169,7 +169,7 @@ extension KanbanStatusFocusView {
         .accessibilityElement(children: .combine)
     }
 
-    func dispatchMetricRow(
+    private func dispatchMetricRow(
         _ firstLabel: LocalizedStringKey,
         _ firstCount: Int?,
         _ secondLabel: LocalizedStringKey,
@@ -181,7 +181,7 @@ extension KanbanStatusFocusView {
         }
     }
 
-    func dispatchMetric(_ label: LocalizedStringKey, _ count: Int?) -> some View {
+    private func dispatchMetric(_ label: LocalizedStringKey, _ count: Int?) -> some View {
         HStack(spacing: 4) {
             Text(label)
             Text(count.map(String.init) ?? String(localized: "Unknown"))
@@ -189,7 +189,7 @@ extension KanbanStatusFocusView {
         }
     }
 
-    var dispatcherUnavailableReason: LocalizedStringKey? {
+    private var dispatcherUnavailableReason: LocalizedStringKey? {
         switch model.dispatcherAvailability {
         case .available: nil
         case .busy: "Another Board action is in progress."
@@ -202,14 +202,14 @@ extension KanbanStatusFocusView {
         }
     }
 
-    func dispatchModeTitle(_ mode: KanbanDispatchMode) -> LocalizedStringKey {
+    private func dispatchModeTitle(_ mode: KanbanDispatchMode) -> LocalizedStringKey {
         switch mode {
         case .preview: "Preview Dispatch"
         case .run: "Run Dispatcher"
         }
     }
 
-    func dispatchStatusIcon(_ dispatch: KanbanDispatchState) -> String {
+    private func dispatchStatusIcon(_ dispatch: KanbanDispatchState) -> String {
         switch dispatch.phase {
         case .succeeded: model.isPreviewStale ? "clock.badge.exclamationmark" : "checkmark.circle.fill"
         case .submitting, .reconciling: "arrow.triangle.2.circlepath"
@@ -218,7 +218,7 @@ extension KanbanStatusFocusView {
         }
     }
 
-    func dispatchStatusColor(_ dispatch: KanbanDispatchState) -> Color {
+    private func dispatchStatusColor(_ dispatch: KanbanDispatchState) -> Color {
         switch dispatch.phase {
         case .succeeded: model.isPreviewStale ? .orange : .green
         case .submitting, .reconciling: .secondary
