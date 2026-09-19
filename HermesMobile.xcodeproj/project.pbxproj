@@ -175,6 +175,15 @@
 		C05100000000000000000004 /* ChatTranscriptSupportingViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = C05100000000000000000014 /* ChatTranscriptSupportingViews.swift */; };
 		1A2B3C4D5E6F7000000000D0 /* SessionRowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F7000000000D2 /* SessionRowView.swift */; };
 		1A2B3C4D5E6F7000000000D1 /* SessionListViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F7000000000D3 /* SessionListViewModel.swift */; };
+		5ACB4ED18C57957FE2FC4DDB /* SessionListModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8AE84D83975ECF4854E45C09 /* SessionListModels.swift */; };
+		804ECC9D26B92D3491493B4A /* SessionListViewModelGateway.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06311D690042AD6533A9ABE0 /* SessionListViewModelGateway.swift */; };
+		B32E39160B697F95F5F0D190 /* SessionListViewModelHelpers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A5F985F0102B6C97FCCDA3B /* SessionListViewModelHelpers.swift */; };
+		FF2C8CFCF0EC39B3F4BC793B /* SessionListViewModelLoading.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB25CF95751264E94C03D546 /* SessionListViewModelLoading.swift */; };
+		E418DD0C82BA6EE007F3EAC8 /* SessionListViewModelMetadata.swift in Sources */ = {isa = PBXBuildFile; fileRef = C57036CA7105A2D13EEEE2C9 /* SessionListViewModelMetadata.swift */; };
+		25FF4A71D625D864CC9E0062 /* SessionListViewModelProfiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = 749648165F11FC5091AAFDF4 /* SessionListViewModelProfiles.swift */; };
+		DF6AE90D10556D3AC2CFF13E /* SessionListViewModelProjectMutations.swift in Sources */ = {isa = PBXBuildFile; fileRef = E42481A3AC6CF0806810B457 /* SessionListViewModelProjectMutations.swift */; };
+		C44778AC779CF4A144C28D5F /* SessionListViewModelSearch.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61A5AB784099E1F1D69E2168 /* SessionListViewModelSearch.swift */; };
+		24EF68FC5D344B473852999B /* SessionListViewModelSessionMutations.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9EBA9AEF4E8E0B381267A183 /* SessionListViewModelSessionMutations.swift */; };
 		A10900000000000000000001 /* SessionNavigationState.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10900000000000000000011 /* SessionNavigationState.swift */; };
 		A04300000000000000000002 /* SessionListActionConfirmations.swift in Sources */ = {isa = PBXBuildFile; fileRef = A04300000000000000000012 /* SessionListActionConfirmations.swift */; };
 		A04300000000000000000003 /* SessionMutator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A04300000000000000000013 /* SessionMutator.swift */; };
@@ -604,6 +613,15 @@
 		C05100000000000000000014 /* ChatTranscriptSupportingViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatTranscriptSupportingViews.swift; sourceTree = "<group>"; };
 		1A2B3C4D5E6F7000000000D2 /* SessionRowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionRowView.swift; sourceTree = "<group>"; };
 		1A2B3C4D5E6F7000000000D3 /* SessionListViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListViewModel.swift; sourceTree = "<group>"; };
+		8AE84D83975ECF4854E45C09 /* SessionListModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListModels.swift; sourceTree = "<group>"; };
+		06311D690042AD6533A9ABE0 /* SessionListViewModelGateway.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListViewModelGateway.swift; sourceTree = "<group>"; };
+		1A5F985F0102B6C97FCCDA3B /* SessionListViewModelHelpers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListViewModelHelpers.swift; sourceTree = "<group>"; };
+		DB25CF95751264E94C03D546 /* SessionListViewModelLoading.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListViewModelLoading.swift; sourceTree = "<group>"; };
+		C57036CA7105A2D13EEEE2C9 /* SessionListViewModelMetadata.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListViewModelMetadata.swift; sourceTree = "<group>"; };
+		749648165F11FC5091AAFDF4 /* SessionListViewModelProfiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListViewModelProfiles.swift; sourceTree = "<group>"; };
+		E42481A3AC6CF0806810B457 /* SessionListViewModelProjectMutations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListViewModelProjectMutations.swift; sourceTree = "<group>"; };
+		61A5AB784099E1F1D69E2168 /* SessionListViewModelSearch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListViewModelSearch.swift; sourceTree = "<group>"; };
+		9EBA9AEF4E8E0B381267A183 /* SessionListViewModelSessionMutations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListViewModelSessionMutations.swift; sourceTree = "<group>"; };
 		A10900000000000000000011 /* SessionNavigationState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionNavigationState.swift; sourceTree = "<group>"; };
 		A04300000000000000000012 /* SessionListActionConfirmations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListActionConfirmations.swift; sourceTree = "<group>"; };
 		A04300000000000000000013 /* SessionMutator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionMutator.swift; sourceTree = "<group>"; };
@@ -1250,6 +1268,15 @@
 				1C1F433656C909C785E1C24B /* SessionListViewExtensions.swift */,
 				1A2B3C4D5E6F7000000000D2 /* SessionRowView.swift */,
 				1A2B3C4D5E6F7000000000D3 /* SessionListViewModel.swift */,
+				8AE84D83975ECF4854E45C09 /* SessionListModels.swift */,
+				06311D690042AD6533A9ABE0 /* SessionListViewModelGateway.swift */,
+				1A5F985F0102B6C97FCCDA3B /* SessionListViewModelHelpers.swift */,
+				DB25CF95751264E94C03D546 /* SessionListViewModelLoading.swift */,
+				C57036CA7105A2D13EEEE2C9 /* SessionListViewModelMetadata.swift */,
+				749648165F11FC5091AAFDF4 /* SessionListViewModelProfiles.swift */,
+				E42481A3AC6CF0806810B457 /* SessionListViewModelProjectMutations.swift */,
+				61A5AB784099E1F1D69E2168 /* SessionListViewModelSearch.swift */,
+				9EBA9AEF4E8E0B381267A183 /* SessionListViewModelSessionMutations.swift */,
 				A10900000000000000000011 /* SessionNavigationState.swift */,
 				A04300000000000000000012 /* SessionListActionConfirmations.swift */,
 				A04300000000000000000013 /* SessionMutator.swift */,
@@ -1934,6 +1961,15 @@
 				C0FF000000000000000000A1 /* CustomHeader.swift in Sources */,
 				1A2B3C4D5E6F7000000000D0 /* SessionRowView.swift in Sources */,
 				1A2B3C4D5E6F7000000000D1 /* SessionListViewModel.swift in Sources */,
+				5ACB4ED18C57957FE2FC4DDB /* SessionListModels.swift in Sources */,
+				804ECC9D26B92D3491493B4A /* SessionListViewModelGateway.swift in Sources */,
+				B32E39160B697F95F5F0D190 /* SessionListViewModelHelpers.swift in Sources */,
+				FF2C8CFCF0EC39B3F4BC793B /* SessionListViewModelLoading.swift in Sources */,
+				E418DD0C82BA6EE007F3EAC8 /* SessionListViewModelMetadata.swift in Sources */,
+				25FF4A71D625D864CC9E0062 /* SessionListViewModelProfiles.swift in Sources */,
+				DF6AE90D10556D3AC2CFF13E /* SessionListViewModelProjectMutations.swift in Sources */,
+				C44778AC779CF4A144C28D5F /* SessionListViewModelSearch.swift in Sources */,
+				24EF68FC5D344B473852999B /* SessionListViewModelSessionMutations.swift in Sources */,
 				A10900000000000000000001 /* SessionNavigationState.swift in Sources */,
 				A04300000000000000000002 /* SessionListActionConfirmations.swift in Sources */,
 				A04300000000000000000003 /* SessionMutator.swift in Sources */,
