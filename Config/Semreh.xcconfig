@@ -2,5 +2,5 @@
 // Config/Local.xcconfig may still override these values for contributor builds.
 DEVELOPMENT_TEAM = 6D65NQ2V3Q
 APP_IDENTIFIER_SUFFIX =
-APP_BUNDLE_IDENTIFIER = com.mauriceak.semreh$(APP_IDENTIFIER_SUFFIX)
-APP_GROUP_IDENTIFIER = group.com.mauriceak.semreh$(APP_IDENTIFIER_SUFFIX)
+APP_BUNDLE_IDENTIFIER = com.maurice.semreh$(APP_IDENTIFIER_SUFFIX)
+APP_GROUP_IDENTIFIER = group.com.maurice.semreh$(APP_IDENTIFIER_SUFFIX)

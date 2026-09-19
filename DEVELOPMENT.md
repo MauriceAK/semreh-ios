@@ -102,7 +102,7 @@ XcodeBuildMCP is the preferred local validation path for feature and bug-fix sli
 - Scheme: `HermesMobile`
 - Configuration: `Debug`
 - Simulator: `iPhone 17`
-- Bundle ID: `com.mauriceak.semreh`
+- Bundle ID: `com.maurice.semreh`
 
 After each completed implementation slice:
 
@@ -116,7 +116,7 @@ After each completed implementation slice:
 Agent/MCP flow:
 
 - Call `session_show_defaults` before the first local build/run/test.
-- If defaults are missing, set project `HermesMobile.xcodeproj`, scheme `HermesMobile`, configuration `Debug`, simulator `iPhone 17`, and bundle ID `com.mauriceak.semreh`.
+- If defaults are missing, set project `HermesMobile.xcodeproj`, scheme `HermesMobile`, configuration `Debug`, simulator `iPhone 17`, and bundle ID `com.maurice.semreh`.
 - Use `test_sim` for XCTest validation.
 - Use `build_run_sim` to build, install, launch, and open Simulator for manual testing.
 - Use `screenshot`, UI inspection, and log capture only when they help validate the slice.
@@ -186,8 +186,8 @@ Current status:
 - App Store Connect record name: `Semreh Mobile Agent` (Apple requires a globally unique record name; the installed product name remains exactly `Semreh`).
 - Xcode target/scheme name: `HermesMobile` (internal build plumbing only).
 - iPhone/iPad home-screen display and bundle name: `Semreh`.
-- Bundle ID: `com.mauriceak.semreh`.
-- Test bundle ID: `com.mauriceak.semreh.tests`.
+- Bundle ID: `com.maurice.semreh`.
+- Test bundle ID: `com.maurice.semreh.tests`.
 - SKU: `semreh-ios-2026`.
 - Apple Developer Team ID: `6D65NQ2V3Q`.
 - Signing uses Xcode automatic signing.
@@ -206,16 +206,16 @@ The App Store Connect record, bundle ID, TestFlight group, and installed app all
 When the owner says **"push to branch testflight"**, upload the current *feature branch*
 to the side-by-side **Semreh Branch** internal TestFlight app. This is a TestFlight
 upload, **not** a Git push. Never merge, Git push, or upload the production
-`com.mauriceak.semreh` TestFlight app unless the owner explicitly asks.
+`com.maurice.semreh` TestFlight app unless the owner explicitly asks.
 
 Branch TestFlight app identity:
 
 - App Store Connect app name: `Semreh Branch`
-- Main bundle ID: `com.mauriceak.semreh.branch`
-- Share extension bundle ID: `com.mauriceak.semreh.branch.shareextension`
-- Live Activity widget bundle ID: `com.mauriceak.semreh.branch.liveactivitywidget`
+- Main bundle ID: `com.maurice.semreh.branch`
+- Share extension bundle ID: `com.maurice.semreh.branch.shareextension`
+- Live Activity widget bundle ID: `com.maurice.semreh.branch.liveactivitywidget`
 - Display name: `Semreh Branch`
-- App group: `group.com.mauriceak.semreh.branch`
+- App group: `group.com.maurice.semreh.branch`
 - URL scheme: `semreh-branch`
 - SKU: `semreh-ios-branch`
 

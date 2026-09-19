@@ -4,7 +4,7 @@ import OSLog
 
 #if DEBUG
 private let websiteLoginE2ELogger = Logger(
-    subsystem: "com.mauriceak.semreh",
+    subsystem: "com.maurice.semreh",
     category: "website-login-e2e"
 )
 

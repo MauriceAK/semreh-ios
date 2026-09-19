@@ -126,7 +126,7 @@ jobs:
       # (bitten 2026-06-02 with 1.0 and 2026-08-04 with 1.4).
       - name: Check release train and select build number
         env:
-          BUNDLE_ID: com.mauriceak.semreh
+          BUNDLE_ID: com.maurice.semreh
           REQUESTED_BUILD_NUMBER: ${{ inputs.build_number }}
           ENFORCE_OPEN_TRAIN: "1"
         run: |

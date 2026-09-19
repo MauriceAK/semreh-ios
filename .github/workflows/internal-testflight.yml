@@ -42,7 +42,7 @@ jobs:
       PROJECT_PATH: HermesMobile.xcodeproj
       SCHEME: HermesMobile
       TEAM_ID: 6D65NQ2V3Q
-      BUNDLE_ID: com.mauriceak.semreh
+      BUNDLE_ID: com.maurice.semreh
       FASTLANE_SKIP_UPDATE_CHECK: "1"
       FASTLANE_HIDE_CHANGELOG: "1"
 

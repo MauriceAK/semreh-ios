@@ -41,7 +41,7 @@ struct SharedImport: Equatable {
 enum HermesShareDraft {
     static var appGroupIdentifier: String {
         Bundle.main.object(forInfoDictionaryKey: "HermesAppGroupIdentifier") as? String
-            ?? "group.com.mauriceak.semreh"
+            ?? "group.com.maurice.semreh"
     }
 
     static let pendingDraftFileName = "pending-share-draft.json"
