@@ -62,3 +62,46 @@ final class ComposerAttachmentDisplayItemTests: XCTestCase {
         Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")!
     }
 }
+
+/// Item 5 (2026-09-18 app-chat scope): the "+" attach menu enablement matrix.
+/// Attachments queue like a send, so the streaming state must never disable the
+/// menu — `isWaitingForStream` was the reported "dead +" during every run.
+final class ChatComposerAttachPolicyTests: XCTestCase {
+    func testAttachMenuStaysEnabledWhileIdleAndWhileStreaming() {
+        // This call shape is the state the "+" sat in for the whole duration of
+        // any run: none of the gating flags is "agent is streaming".
+        XCTAssertFalse(ChatComposerAttachPolicy.isAttachMenuDisabled(
+            isOfflineReadOnly: false,
+            isSending: false,
+            isCompressingSession: false,
+            isUpdatingConfiguration: false
+        ))
+    }
+
+    func testAttachMenuDisablesForReadOnlyTranscriptAndInFlightMutations() {
+        XCTAssertTrue(ChatComposerAttachPolicy.isAttachMenuDisabled(
+            isOfflineReadOnly: true,
+            isSending: false,
+            isCompressingSession: false,
+            isUpdatingConfiguration: false
+        ))
+        XCTAssertTrue(ChatComposerAttachPolicy.isAttachMenuDisabled(
+            isOfflineReadOnly: false,
+            isSending: true,
+            isCompressingSession: false,
+            isUpdatingConfiguration: false
+        ))
+        XCTAssertTrue(ChatComposerAttachPolicy.isAttachMenuDisabled(
+            isOfflineReadOnly: false,
+            isSending: false,
+            isCompressingSession: true,
+            isUpdatingConfiguration: false
+        ))
+        XCTAssertTrue(ChatComposerAttachPolicy.isAttachMenuDisabled(
+            isOfflineReadOnly: false,
+            isSending: false,
+            isCompressingSession: false,
+            isUpdatingConfiguration: true
+        ))
+    }
+}

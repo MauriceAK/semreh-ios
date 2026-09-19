@@ -3,6 +3,7 @@ import SwiftData
 import OSLog
 import Foundation
 import CoreFoundation
+import UserNotifications
 
 struct SemrehSceneActions {
     let canCreateNewChat: Bool
@@ -392,6 +393,10 @@ struct HermesMobileApp: App {
     @AppStorage(AppTheme.storageKey) private var appThemeRawValue = AppTheme.system.rawValue
 
     init() {
+        // Route taps on "response complete" notifications into the app's existing
+        // deep-link path (item 4). Set during app init so a cold-launch tap on a
+        // killed app still lands before the first scene connects.
+        UNUserNotificationCenter.current().delegate = ResponseCompletionNotificationDelegate.shared
 #if DEBUG
         // This is intentionally before ContentView/ChatViewModel creation so
         // the normal persisted restore reader consumes the seeded row.
@@ -464,6 +469,47 @@ struct HermesMobileApp: App {
             SemrehCommands()
             SidebarCommands()
         }
+    }
+}
+
+/// Turns a tap on a "response complete" local notification into the same session
+/// deep link the app already routes from links and App Intents
+/// (`semreh://session?id=<storedID>` → `ContentView.handleOpenURL` → the session
+/// navigation path). The completion payload carries the session's stored ID,
+/// which is exactly what `HermesDeepLink.sessionURL(sessionID:)` expects, so no
+/// extra ID mapping is needed. Scheduling itself is unchanged: the service still
+/// fires only while the scene is inactive (`ResponseCompletionNotificationPolicy`).
+final class ResponseCompletionNotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
+    static let shared = ResponseCompletionNotificationDelegate()
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse
+    ) async {
+        guard let url = Self.deepLinkURL(for: response.notification.request.content.userInfo) else { return }
+        await MainActor.run {
+            AppIntentRouter.shared.requestDeepLink(url)
+        }
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification
+    ) async -> UNNotificationPresentationOptions {
+        // The scheduling policy already gates on the scene being inactive; a
+        // foreground delivery is only a reactivation race. Suppress it to keep
+        // the pre-delegate behavior of silent foreground delivery.
+        []
+    }
+
+    /// Pure payload → deep-link mapping, unit-tested without live notifications.
+    static func deepLinkURL(for userInfo: [AnyHashable: Any]) -> URL? {
+        guard let sessionID = userInfo[ResponseCompletionNotificationRequest.sessionIDUserInfoKey] as? String,
+              !sessionID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            return nil
+        }
+        return HermesDeepLink.sessionURL(sessionID: sessionID)
     }
 }
 

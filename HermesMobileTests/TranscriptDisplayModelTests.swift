@@ -1208,6 +1208,124 @@ final class ChatActiveRunStatusPolicyTests: XCTestCase {
 
         XCTAssertEqual(presentation?.kind, .reconnecting)
     }
+
+    // MARK: Item 4 — elapsed readout on the active-run pill
+
+    func testActiveRunPillStaysHiddenNearBottomBeforeElapsedThreshold() {
+        let startedAt = Date(timeIntervalSince1970: 1_000)
+
+        XCTAssertNil(ChatActiveRunStatusPolicy.presentation(
+            isStartingChat: false,
+            hasActiveStream: true,
+            activeStreamRecoveryState: .idle,
+            isCancellingStream: false,
+            isScrolledNearBottom: true,
+            activeRunStartedAt: startedAt,
+            hasActiveRunPassedElapsedThreshold: false
+        ))
+    }
+
+    func testActiveRunPillShowsNearBottomAfterElapsedThreshold() {
+        let startedAt = Date(timeIntervalSince1970: 1_000)
+        let presentation = ChatActiveRunStatusPolicy.presentation(
+            isStartingChat: false,
+            hasActiveStream: true,
+            activeStreamRecoveryState: .idle,
+            isCancellingStream: false,
+            isScrolledNearBottom: true,
+            activeRunStartedAt: startedAt,
+            hasActiveRunPassedElapsedThreshold: true
+        )
+
+        XCTAssertEqual(presentation?.kind, .active)
+        XCTAssertEqual(presentation?.activeRunStartedAt, startedAt)
+        XCTAssertEqual(presentation?.label, "Hermes is working")
+    }
+
+    func testActiveRunPillShowsWhenReaderScrolledAwayEvenBeforeThreshold() {
+        let startedAt = Date(timeIntervalSince1970: 1_000)
+        let presentation = ChatActiveRunStatusPolicy.presentation(
+            isStartingChat: false,
+            hasActiveStream: true,
+            activeStreamRecoveryState: .idle,
+            isCancellingStream: false,
+            isScrolledNearBottom: false,
+            activeRunStartedAt: startedAt,
+            hasActiveRunPassedElapsedThreshold: false
+        )
+
+        XCTAssertEqual(presentation?.kind, .active)
+        XCTAssertEqual(presentation?.activeRunStartedAt, startedAt)
+    }
+
+    func testActiveRunPillStaysHiddenWithoutARecordedStart() {
+        let presentation = ChatActiveRunStatusPolicy.presentation(
+            isStartingChat: false,
+            hasActiveStream: true,
+            activeStreamRecoveryState: .idle,
+            isCancellingStream: false,
+            isScrolledNearBottom: false,
+            hasActiveRunPassedElapsedThreshold: true
+        )
+
+        XCTAssertNil(presentation)
+    }
+}
+
+final class ChatActiveRunElapsedPolicyTests: XCTestCase {
+    private let startedAt = Date(timeIntervalSince1970: 100)
+
+    func testVisibilityThresholdCrossesAtTenSeconds() {
+        XCTAssertFalse(ChatActiveRunElapsedPolicy.hasPassedVisibilityThreshold(
+            activeRunStartedAt: startedAt,
+            now: startedAt.addingTimeInterval(9.99)
+        ))
+        XCTAssertTrue(ChatActiveRunElapsedPolicy.hasPassedVisibilityThreshold(
+            activeRunStartedAt: startedAt,
+            now: startedAt.addingTimeInterval(10)
+        ))
+        XCTAssertTrue(ChatActiveRunElapsedPolicy.hasPassedVisibilityThreshold(
+            activeRunStartedAt: startedAt,
+            now: startedAt.addingTimeInterval(45)
+        ))
+    }
+
+    func testVisibilityThresholdNeedsARecordedStart() {
+        XCTAssertFalse(ChatActiveRunElapsedPolicy.hasPassedVisibilityThreshold(
+            activeRunStartedAt: nil,
+            now: startedAt
+        ))
+    }
+
+    func testPillMatrixAcrossStartThresholdAndScroll() {
+        // No start recorded: hidden in every scroll/threshold combination.
+        XCTAssertFalse(ChatActiveRunElapsedPolicy.shouldShowActiveRunPill(
+            activeRunStartedAt: nil, hasPassedElapsedThreshold: true, isScrolledNearBottom: true
+        ))
+        XCTAssertFalse(ChatActiveRunElapsedPolicy.shouldShowActiveRunPill(
+            activeRunStartedAt: nil, hasPassedElapsedThreshold: true, isScrolledNearBottom: false
+        ))
+
+        // Near bottom, below threshold: the one deliberately quiet live case (P04 path).
+        XCTAssertFalse(ChatActiveRunElapsedPolicy.shouldShowActiveRunPill(
+            activeRunStartedAt: startedAt, hasPassedElapsedThreshold: false, isScrolledNearBottom: true
+        ))
+
+        // A long near-bottom run, or any run the reader scrolled away from, shows.
+        XCTAssertTrue(ChatActiveRunElapsedPolicy.shouldShowActiveRunPill(
+            activeRunStartedAt: startedAt, hasPassedElapsedThreshold: true, isScrolledNearBottom: true
+        ))
+        XCTAssertTrue(ChatActiveRunElapsedPolicy.shouldShowActiveRunPill(
+            activeRunStartedAt: startedAt, hasPassedElapsedThreshold: false, isScrolledNearBottom: false
+        ))
+        XCTAssertTrue(ChatActiveRunElapsedPolicy.shouldShowActiveRunPill(
+            activeRunStartedAt: startedAt, hasPassedElapsedThreshold: true, isScrolledNearBottom: false
+        ))
+    }
+
+    func testThresholdMatchesProductionValue() {
+        XCTAssertEqual(ChatActiveRunElapsedPolicy.pillVisibilityThreshold, 10)
+    }
 }
 
 final class AssistantTurnTimestampFormatterTests: XCTestCase {

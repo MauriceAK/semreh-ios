@@ -15,6 +15,16 @@ struct ChatActiveRunStatusView: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
                 .minimumScaleFactor(0.88)
+
+            if let activeRunStartedAt = presentation.activeRunStartedAt {
+                // Self-updating "working for X" readout (item 4). The count-up has
+                // no natural end, so the bound stays far out; the system updates the
+                // text on its own cadence without re-evaluating this view.
+                Text(timerInterval: activeRunStartedAt...Date.distantFuture, countsDown: false)
+                    .font(.caption.monospacedDigit().weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
         }
         .padding(.horizontal, 11)
         .padding(.vertical, 7)
@@ -45,7 +55,10 @@ struct ChatActiveRunStatusView: View {
 #Preview("Active Run Status") {
     VStack(spacing: 12) {
         ChatActiveRunStatusView(
-            presentation: ChatActiveRunStatusPresentation(kind: .active)
+            presentation: ChatActiveRunStatusPresentation(
+                kind: .active,
+                activeRunStartedAt: Date(timeIntervalSinceNow: -83)
+            )
         )
 
         ChatActiveRunStatusView(

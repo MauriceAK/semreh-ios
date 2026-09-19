@@ -483,6 +483,10 @@ struct ChatView: View {
     @State private var pendingTranscriptRestoreMessageID: String?
     @State private var transcriptRestoreOutcomeState = ChatTranscriptRestoreOutcomeState()
     @State private var isScrolledNearBottom = true
+    /// Set once a live near-bottom run becomes visibly long (~10 s, item 4) so
+    /// the floating elapsed pill can appear without a continuous ticker; reset
+    /// when the run starts or ends.
+    @State private var hasActiveRunPassedElapsedThreshold = false
     @State private var isReadingOlderTranscript = false
     @State private var shouldFollowLatestMessage = true
     @State private var visibleTranscriptRowID: String?
@@ -1182,6 +1186,26 @@ struct ChatView: View {
                 guard viewModel.responseCompletionHapticTrigger > 0 else { return }
                 handleResponseCompletionSideEffects()
             }
+            // One re-eval per run at the elapsed-visibility threshold (item 4). A
+            // quiet stretch (long tool, no stream events) would otherwise never
+            // re-derive the pill, and a 1 Hz ticker would re-render the chat
+            // constantly for nothing.
+            .task(id: viewModel.activeRunStartedAt) {
+                hasActiveRunPassedElapsedThreshold = false
+                guard let startedAt = viewModel.activeRunStartedAt else { return }
+                guard !ChatActiveRunElapsedPolicy.hasPassedVisibilityThreshold(
+                    activeRunStartedAt: startedAt,
+                    now: Date()
+                ) else {
+                    hasActiveRunPassedElapsedThreshold = true
+                    return
+                }
+                let remaining = ChatActiveRunElapsedPolicy.pillVisibilityThreshold
+                    - Date().timeIntervalSince(startedAt)
+                try? await Task.sleep(for: .seconds(max(0, remaining)))
+                guard !Task.isCancelled, viewModel.activeRunStartedAt == startedAt else { return }
+                hasActiveRunPassedElapsedThreshold = true
+            }
             .navigationDestination(item: $forkedSession) { session in
                 ChatView(session: session, server: server, onAPIError: onAPIError)
             }
@@ -1777,7 +1801,9 @@ struct ChatView: View {
             activeStreamRecoveryState: viewModel.activeStreamRecoveryState,
             isCancellingStream: viewModel.isCancellingStream,
             isScrolledNearBottom: isScrolledNearBottom,
-            isEstablishingConnection: viewModel.isEstablishingConnection
+            isEstablishingConnection: viewModel.isEstablishingConnection,
+            activeRunStartedAt: viewModel.activeRunStartedAt,
+            hasActiveRunPassedElapsedThreshold: hasActiveRunPassedElapsedThreshold
         )
     }
 

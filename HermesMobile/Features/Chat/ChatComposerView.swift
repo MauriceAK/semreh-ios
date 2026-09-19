@@ -53,6 +53,28 @@ private struct ComposerStatusView: View {
     }
 }
 
+/// Enablement matrix for the composer "+" attach menu (item 5 of the 2026-09-18
+/// app-chat UX scope).
+///
+/// The "+" used to be disabled for the entire duration of any run because the
+/// configuration matrix includes `isWaitingForStream`. Attachments are
+/// read-only inputs that queue like a send (the recording precedent: "Recording
+/// mid-stream is fine (it queues like any send)"), so the attach menu
+/// deliberately ignores the streaming state. It keeps only the gates that mean
+/// the transcript cannot accept new content at all: cached/offline read-only,
+/// an in-flight send, session compression, or a configuration update. The SEND
+/// action keeps its own (stricter) gate.
+enum ChatComposerAttachPolicy {
+    static func isAttachMenuDisabled(
+        isOfflineReadOnly: Bool,
+        isSending: Bool,
+        isCompressingSession: Bool,
+        isUpdatingConfiguration: Bool
+    ) -> Bool {
+        isOfflineReadOnly || isSending || isCompressingSession || isUpdatingConfiguration
+    }
+}
+
 struct MessageComposerView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
@@ -679,7 +701,11 @@ struct MessageComposerView: View {
     }
 
     private var composerPlusMenu: some View {
-        ChatUIKitMenuButton(horizontalPadding: 0, verticalPadding: 0) {
+        // Item 5: the label's `chatMinimumHitTarget(in: Circle())` is decorative
+        // where this UIKit menu backer wins hit-testing, so the backer must get
+        // the same 8 pt expansion (the SwiftUI modifier's defaults) — otherwise
+        // the ring around the 50 pt circle is dead and edge taps do nothing.
+        ChatUIKitMenuButton(horizontalPadding: 8, verticalPadding: 8) {
             Image(systemName: "plus")
                 .font(.system(size: plusIconSize, weight: .regular))
                 .foregroundStyle(metaControlColor)
@@ -689,7 +715,7 @@ struct MessageComposerView: View {
             composerOptionsMenu()
         }
         .tint(metaControlColor)
-        .disabled(isConfigurationControlDisabled)
+        .disabled(isAttachMenuDisabled)
         .accessibilityLabel("Composer options")
         .photosPicker(isPresented: $showPhotoPicker, selection: $selectedPhotoItems, matching: .any(of: [.images, .videos]))
         .onChange(of: selectedPhotoItems) {
@@ -963,6 +989,15 @@ struct MessageComposerView: View {
 
     private var isConfigurationControlDisabled: Bool {
         isOfflineReadOnly || isSending || isCompressingSession || isWaitingForStream || isUpdatingConfiguration
+    }
+
+    private var isAttachMenuDisabled: Bool {
+        ChatComposerAttachPolicy.isAttachMenuDisabled(
+            isOfflineReadOnly: isOfflineReadOnly,
+            isSending: isSending,
+            isCompressingSession: isCompressingSession,
+            isUpdatingConfiguration: isUpdatingConfiguration
+        )
     }
 
     private var isReasoningControlDisabled: Bool {

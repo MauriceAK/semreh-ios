@@ -663,6 +663,52 @@ final class ResponseCompletionNotificationTrackerTests: XCTestCase {
 
         XCTAssertTrue(tracker.shouldEndBackgroundTaskOnStreamInactive(completionTrigger: 0))
     }
+
+    func testEachRunNotifiesOnceButLaterCompletionsNotifyAgain() {
+        var tracker = ResponseCompletionNotificationTracker()
+
+        XCTAssertNotNil(tracker.completionContext(completionTrigger: 1, sceneIsActive: false))
+        XCTAssertNil(
+            tracker.completionContext(completionTrigger: 1, sceneIsActive: false),
+            "One notification per completed run, even if the trigger is observed repeatedly"
+        )
+        XCTAssertNotNil(
+            tracker.completionContext(completionTrigger: 2, sceneIsActive: false),
+            "A later run's completion notifies again"
+        )
+    }
+}
+
+/// Item 4 tap-through: the notification payload must round-trip into the exact
+/// session deep link the app router already consumes.
+final class ResponseCompletionNotificationTapRoutingTests: XCTestCase {
+    func testPayloadMapsToTheSessionDeepLinkTheRouterAlreadyConsumes() throws {
+        let url = try XCTUnwrap(ResponseCompletionNotificationDelegate.deepLinkURL(
+            for: [ResponseCompletionNotificationRequest.sessionIDUserInfoKey: "session-abc"]
+        ))
+
+        XCTAssertEqual(url.scheme, HermesDeepLink.scheme)
+        XCTAssertEqual(url.host, HermesDeepLink.sessionHost)
+        XCTAssertEqual(HermesDeepLink.sessionID(from: url), "session-abc")
+    }
+
+    func testPayloadWithoutSessionIDDoesNotRoute() {
+        XCTAssertNil(ResponseCompletionNotificationDelegate.deepLinkURL(for: [:]))
+        XCTAssertNil(ResponseCompletionNotificationDelegate.deepLinkURL(
+            for: [ResponseCompletionNotificationRequest.sessionIDUserInfoKey: ""]
+        ))
+        XCTAssertNil(ResponseCompletionNotificationDelegate.deepLinkURL(
+            for: [ResponseCompletionNotificationRequest.sessionIDUserInfoKey: "   "]
+        ))
+    }
+
+    func testPayloadKeyMatchesTheScheduledUserInfo() {
+        XCTAssertEqual(ResponseCompletionNotificationRequest.sessionIDUserInfoKey, "session_id")
+        XCTAssertEqual(
+            ResponseCompletionNotificationRequest(sessionID: "session-abc").userInfo,
+            ["session_id": "session-abc"]
+        )
+    }
 }
 
 private final class SpyResponseCompletionNotificationScheduler: ResponseCompletionNotificationScheduling {

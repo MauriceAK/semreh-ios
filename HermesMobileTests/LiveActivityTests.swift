@@ -270,6 +270,30 @@ final class LiveActivityTests: XCTestCase {
         await fixture.runtime.stop()
     }
 
+    func testActiveRunStartedAtTracksDirectRunLifecycle() async throws {
+        let manager = SpyAgentLiveActivityManager()
+        let fixture = try await makeDirectActivityFixture(manager: manager)
+
+        XCTAssertNil(fixture.viewModel.activeRunStartedAt)
+
+        await fixture.emit("message.start")
+        let firstStart = try XCTUnwrap(fixture.viewModel.activeRunStartedAt)
+        XCTAssertLessThan(abs(firstStart.timeIntervalSinceNow), 5)
+
+        await fixture.emit("message.complete", payload: ["status": .string("complete")])
+        XCTAssertNil(fixture.viewModel.activeRunStartedAt)
+
+        // A follow-up turn starts a fresh elapsed window (item 4: one readout
+        // per run, never a stale carry-over from the previous turn).
+        await fixture.emit("message.start")
+        let secondStart = try XCTUnwrap(fixture.viewModel.activeRunStartedAt)
+        XCTAssertGreaterThanOrEqual(secondStart, firstStart)
+        await fixture.emit("message.complete", payload: ["status": .string("complete")])
+        XCTAssertNil(fixture.viewModel.activeRunStartedAt)
+
+        await fixture.runtime.stop()
+    }
+
     func testChatViewModelSuppressesLiveActivityResponseExcerptsByDefault() async throws {
         let manager = SpyAgentLiveActivityManager()
         let fixture = try await makeDirectActivityFixture(manager: manager)

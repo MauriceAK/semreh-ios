@@ -836,6 +836,13 @@ final class ChatViewModel {
     private var directInvalidated = false
     private var directVisible = false
     private var directLiveActivityRun: (owner: UUID, sessionID: String, profile: String)?
+    /// Wall-clock start of the currently active direct run. Surfaced to the chat
+    /// as the floating "working for X" pill (item 4 of the 2026-09-18 app-chat
+    /// scope). Set whenever the gateway starts a response; cleared on terminal
+    /// handling and whenever the owned run ends. Nil means "no elapsed readout"
+    /// (e.g. a run resumed from the gateway that never emitted an observed
+    /// `message.start` in this process).
+    private(set) var activeRunStartedAt: Date?
     private(set) var directClarificationPrompt: ClarificationPromptState? = nil
     private(set) var isRespondingToDirectClarification = false
     private(set) var directClarificationErrorMessage: String? = nil
@@ -2149,6 +2156,9 @@ final class ChatViewModel {
             directResponseComplete = true
             sealedInterimAssistantMessageIDs.removeAll()
             responseCompletionHapticTrigger += 1
+            // Terminal handling is the single completion chokepoint (item 4): the
+            // elapsed readout must not survive into an idle composer.
+            activeRunStartedAt = nil
             if let terminalError = terminal.error {
                 sendErrorMessage = terminalError
             } else if directConversation?.hasAmbiguousPromptDelivery == true {
@@ -2164,6 +2174,9 @@ final class ChatViewModel {
                 archiveDirectLiveTurnBeforeNewStart()
                 isReasoningChangeDeferred = false
                 directResponseComplete = false
+                // Item 4: the elapsed readout starts when the gateway starts the
+                // response, alongside the live-activity run.
+                activeRunStartedAt = Date()
                 streamingAssistantMessageID = nil
                 streamingAssistantMessageIndex = nil
                 if let sessionID {
@@ -2190,6 +2203,7 @@ final class ChatViewModel {
               ownedRun.sessionID == canonicalSessionID,
               ownedRun.profile == directConversation?.profile else { return }
         directLiveActivityRun = nil
+        activeRunStartedAt = nil
         liveActivityManager.endDirect(owner: ownedRun.owner, status: status, activity: activity, errorSummary: errorSummary)
     }
 
