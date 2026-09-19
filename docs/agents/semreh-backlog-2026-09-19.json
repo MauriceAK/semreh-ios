@@ -117,6 +117,8 @@
         "U09-p11-settings-acceptance",
         "U10-p12-tasks-acceptance",
         "U11-p13-onboarding-acceptance",
+        "U12-p14-groups-implementation",
+        "U13-p15-capability-probe",
         "U14-p15-device-performance",
         "U15-p16-lane-proof",
         "U16-p17-device-acceptance",
@@ -149,11 +151,13 @@
       ],
       "exclusive_units": [
         "conditional-p01-p09-repair-after-evidence",
+        "U01-p01-p09-transcript-acceptance",
         "U02-p02-scroll-acceptance",
         "U03-p03-activity-acceptance",
         "U04-p04-chrome-acceptance",
         "U05-p05-streaming-acceptance",
         "U18-pf2-large-jump",
+        "U19-pf3-chat-switch",
         "U20-pf4-real-history",
         "U21-pf5-transition-polish",
         "U22-pf6-thinking-lifecycle"
@@ -187,7 +191,8 @@
       "exclusive_units": [
         "U07-p08-navigation-acceptance",
         "U09-p11-settings-acceptance",
-        "U10-p12-tasks-acceptance"
+        "U10-p12-tasks-acceptance",
+        "U19-pf3-chat-switch"
       ],
       "rule": "Navigation and settings/task surfaces are separately accepted; no broad shell redesign."
     },
@@ -267,7 +272,9 @@
         "HermesMobile/Features/Settings/StreamingLabView.swift"
       ],
       "exclusive_units": [
+        "U02-p02-scroll-acceptance",
         "U13-p15-capability-probe",
+        "U14-p15-device-performance",
         "U17-pf1-device-baseline",
         "U18-pf2-large-jump",
         "U19-pf3-chat-switch"
@@ -964,20 +971,18 @@
   "first_rolling_wave": {
     "dispatch_performed": false,
     "unit_ids": [
-      "U00-pr6-runbook-udid-repair",
       "U01-p01-p09-transcript-acceptance",
       "U02-p02-scroll-acceptance",
       "U13-p15-capability-probe"
     ],
     "unit_ids_in_order": [
-      "U00-pr6-runbook-udid-repair",
       "U01-p01-p09-transcript-acceptance",
       "U02-p02-scroll-acceptance",
       "U13-p15-capability-probe"
     ],
     "rationale": "Queue all bounded units, but dispatch only dependency-ready units whose ownership groups do not conflict. Native/device verification remains serial.",
     "dependency_notes": [
-      "U01 waits for U00's exact runbook repair or an equivalent coordinator-supplied explicit-UDID procedure.",
+      "U00 is historical and satisfied by verified merged PR #7; it is not dispatchable.",
       "U02 waits for U01 because smooth scrolling cannot be accepted while transcript lifecycle/paging correctness is unresolved.",
       "U13 is bounded local probe work and may be prepared independently, but it must not share a simulator/DerivedData owner with U01/U02."
     ],
