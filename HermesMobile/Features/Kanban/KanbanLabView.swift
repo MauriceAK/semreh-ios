@@ -108,11 +108,11 @@ struct KanbanStatusFocusView: View {
     @Bindable var model: KanbanFeatureState
     @State var showsFilters = false
     @State var showsBoardManagement = false
-    @State var visibleModel: KanbanFeatureState?
+    @State private var visibleModel: KanbanFeatureState?
     @State var cardEditor: KanbanCardEditorState?
     @State var pendingRunningAction: KanbanPendingCardAction?
     @State var showsBulkActions = false
-    @State var confirmsBulkArchive = false
+    @State private var confirmsBulkArchive = false
     @State var confirmsRunDispatcher = false
     @State var showsDispatcher = false
     @State var presentedCardID: String?

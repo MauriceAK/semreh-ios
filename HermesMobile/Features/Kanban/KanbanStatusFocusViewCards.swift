@@ -169,7 +169,7 @@ extension KanbanStatusFocusView {
         }
     }
 
-    func request(_ action: KanbanCardAction, for card: KanbanCard) {
+    private func request(_ action: KanbanCardAction, for card: KanbanCard) {
         if card.status?.rawValue == "running" {
             pendingRunningAction = KanbanPendingCardAction(card: card, action: action)
         } else {
