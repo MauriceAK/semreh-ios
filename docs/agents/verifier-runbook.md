@@ -45,12 +45,12 @@ xcrun simctl install booted <path-to>/HermesMobile.app
 xcrun simctl launch booted com.maurice.semreh
 ```
 
-Teardown afterwards: `xcrun simctl terminate booted com.maurice.semreh`
-and uninstall the app. Never kill by process name.
+Teardown afterwards: `xcrun simctl terminate booted com.maurice.semreh`.
+**Do not unconditionally uninstall the app.** You must preserve installed app data to allow for resume/background/history verification. App reset (uninstall/reinstall) is only permitted if it is an explicit, separately scoped disposable clean-onboarding test. Never kill by process name.
 
 ## 3. Drive
 
-Read the PR description's **Acceptance criteria** and **Repro** sections first.
+Read the PR description's **Acceptance criteria** and **Repro** sections first. Determine if the test is a state-preservation scenario (default) or an explicit fresh-fixture clean-onboarding scenario.
 Then:
 
 1. Reproduce the OLD behavior on `master` (stash the branch or use a
@@ -61,13 +61,15 @@ Then:
 
 ## 4. Evidence (posted to the PR as a comment)
 
+- **Exact PR head SHA** tested.
+- **Timing:** Dispatch/start/completion timing when available.
 - Screen recording (simctl io recordVideo) of before vs after, or
-  screenshots when motion isn't the point.
+  screenshots when motion isn't the point. **Limitation:** Simulator performance does not prove physical device FPS. Do not claim or promise physical device FPS validation based on the simulator.
 - Verdict per acceptance criterion: PASS / FAIL with one line each.
-- Logs attached on FAIL. Label `verifying` → `verified` (all PASS) or
+- Logs attached on FAIL. **Do not collect credential-bearing diagnostics.** Label `verifying` → `verified` (all PASS) or
   `needs-fix` (any FAIL, with the failing evidence inline).
 
 ## 5. Cleanup
 
-Uninstall app, terminate sim processes you started, restore tree to master.
+Terminate sim processes you started, restore tree to master. **Do not uninstall the app** unless running a fresh-fixture scenario.
 Evidence posted to the PR survives cleanup.
