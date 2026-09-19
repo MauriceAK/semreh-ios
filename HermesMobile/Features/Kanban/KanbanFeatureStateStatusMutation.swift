@@ -67,7 +67,7 @@ extension KanbanFeatureState {
         }
     }
 
-    func reconcileStatusMutation(
+    private func reconcileStatusMutation(
         cardID: String,
         expectedStatus: String,
         baseline: KanbanCard,
@@ -113,7 +113,7 @@ extension KanbanFeatureState {
         }
     }
 
-    func settleSuccessfulStatusMutation(
+    private func settleSuccessfulStatusMutation(
         _ authoritative: KanbanCard,
         baseline: KanbanCard,
         kind: KanbanCardMutationKind,

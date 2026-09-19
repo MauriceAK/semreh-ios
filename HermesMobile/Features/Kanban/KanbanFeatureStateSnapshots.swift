@@ -50,7 +50,7 @@ extension KanbanFeatureState {
         return result
     }
 
-    func snapshotReplacing(_ card: KanbanCard, in snapshot: KanbanBoardSnapshot) -> KanbanBoardSnapshot {
+    private func snapshotReplacing(_ card: KanbanCard, in snapshot: KanbanBoardSnapshot) -> KanbanBoardSnapshot {
         guard let cardID = normalizedOptional(card.cardID),
               let destination = normalizedOptional(card.status?.rawValue) else { return snapshot }
         var destinationFound = false
@@ -68,7 +68,7 @@ extension KanbanFeatureState {
         return snapshotReplacingColumns(snapshot, columns: columns)
     }
 
-    func snapshotReplacingColumns(
+    private func snapshotReplacingColumns(
         _ snapshot: KanbanBoardSnapshot,
         columns: [KanbanColumn]
     ) -> KanbanBoardSnapshot {

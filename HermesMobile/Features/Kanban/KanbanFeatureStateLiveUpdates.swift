@@ -10,7 +10,7 @@ extension KanbanFeatureState {
         startStream()
     }
 
-    func startStream() {
+    private func startStream() {
         guard isVisible, sceneIsActive, let board = selectedBoardSlug else { return }
         streamAttemptID += 1
         let attemptID = streamAttemptID
@@ -36,7 +36,7 @@ extension KanbanFeatureState {
         )
     }
 
-    func handleStreamFrame(
+    private func handleStreamFrame(
         _ frame: KanbanStreamFrame,
         board: String,
         generation: Int,
@@ -72,7 +72,7 @@ extension KanbanFeatureState {
         }
     }
 
-    func handleStreamFailure(board: String, generation: Int, attemptID: Int) {
+    private func handleStreamFailure(board: String, generation: Int, attemptID: Int) {
         guard isCurrentLiveWork(board: board, generation: generation), streamAttemptID == attemptID else { return }
         streamAttemptID += 1 // Makes duplicate callbacks from this attempt inert.
         streamClient.stop()
@@ -95,7 +95,7 @@ extension KanbanFeatureState {
         }
     }
 
-    func scheduleCoalescedReconciliation(board: String, generation: Int) {
+    private func scheduleCoalescedReconciliation(board: String, generation: Int) {
         let sleep = self.sleep
         let delay = timing.coalescingDelay
         coalescingTask?.cancel()
@@ -125,7 +125,7 @@ extension KanbanFeatureState {
         }
     }
 
-    func pollBoardSnapshot(board: String, generation: Int) async {
+    private func pollBoardSnapshot(board: String, generation: Int) async {
         guard isCurrentLiveWork(board: board, generation: generation) else { return }
         let wasOffline = isOffline
         let succeeded = await refreshBoard(usingCursor: false, refreshSupplementary: true)
@@ -136,7 +136,7 @@ extension KanbanFeatureState {
         }
     }
 
-    func directKanbanEventsURL(board: String, since: Int) -> URL {
+    private func directKanbanEventsURL(board: String, since: Int) -> URL {
         guard var components = URLComponents(url: server, resolvingAgainstBaseURL: false) else {
             return server
         }

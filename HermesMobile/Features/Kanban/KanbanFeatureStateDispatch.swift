@@ -147,7 +147,7 @@ extension KanbanFeatureState {
         }
     }
 
-    func performDispatch(mode: KanbanDispatchMode) async {
+    private func performDispatch(mode: KanbanDispatchMode) async {
         guard dispatcherAvailability == .available,
               let board = selectedBoardSlug else { return }
         if mode == .run {
@@ -248,7 +248,7 @@ extension KanbanFeatureState {
         }
     }
 
-    func reconcileRun(
+    private func reconcileRun(
         board: String,
         generation: Int,
         result: KanbanDispatchResult?,
@@ -301,7 +301,7 @@ extension KanbanFeatureState {
             && !Task.isCancelled
     }
 
-    func clearDispatchIfCurrent(_ generation: Int) {
+    private func clearDispatchIfCurrent(_ generation: Int) {
         guard generation == dispatchGeneration else { return }
         dispatchState = nil
     }
@@ -311,7 +311,7 @@ extension KanbanFeatureState {
         dispatchState = nil
     }
 
-    func isDispatcherIncompatible(_ error: Error) -> Bool {
+    private func isDispatcherIncompatible(_ error: Error) -> Bool {
         guard case let APIError.http(statusCode, _) = error else { return false }
         return statusCode == 404 || statusCode == 405
     }

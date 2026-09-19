@@ -147,7 +147,7 @@ extension KanbanFeatureState {
         _ = await refreshBoard(usingCursor: false, refreshSupplementary: true)
     }
 
-    func fetchBulkCardDetails(
+    private func fetchBulkCardDetails(
         cardIDs: [String],
         board: String
     ) async -> [String: Result<KanbanCardDetailEnvelope, Error>] {
@@ -172,7 +172,7 @@ extension KanbanFeatureState {
         }
     }
 
-    func addBulkDetailTask(
+    private func addBulkDetailTask(
         cardID: String,
         board: String,
         to group: inout TaskGroup<(String, Result<KanbanCardDetailEnvelope, Error>)>
@@ -205,7 +205,7 @@ extension KanbanFeatureState {
         }
     }
 
-    func actionMatches(_ action: KanbanBulkAction, card: KanbanCard) -> Bool {
+    private func actionMatches(_ action: KanbanBulkAction, card: KanbanCard) -> Bool {
         switch action {
         case let .changeStatus(status):
             return card.status?.rawValue == normalized(status)
@@ -218,7 +218,7 @@ extension KanbanFeatureState {
         }
     }
 
-    func bulkMember(
+    private func bulkMember(
         cardID: String,
         card: KanbanCard?,
         outcome: KanbanBulkMemberOutcome

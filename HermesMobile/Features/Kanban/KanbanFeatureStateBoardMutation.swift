@@ -90,7 +90,7 @@ extension KanbanFeatureState {
         }
     }
 
-    func boardCollectionExpectationIsCurrent(
+    private func boardCollectionExpectationIsCurrent(
         _ expectation: KanbanBoardCollectionExpectation?
     ) -> Bool {
         guard !Task.isCancelled else { return false }

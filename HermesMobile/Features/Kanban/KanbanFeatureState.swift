@@ -9,7 +9,7 @@ import Observation
 @Observable
 final class KanbanFeatureState {
     static let liveStatuses = ["triage", "todo", "ready", "running", "blocked", "done"]
-    static let bulkReconciliationConcurrency = 4
+    private static let bulkReconciliationConcurrency = 4
 
     let server: URL
     var state: KanbanCompatibilityState = .idle

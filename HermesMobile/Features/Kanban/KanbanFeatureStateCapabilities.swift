@@ -7,7 +7,7 @@ extension KanbanFeatureState {
         snapshot != nil && !isOffline && !isRefreshing && !refreshFailed
     }
 
-    var canUseWrites: Bool {
+    private var canUseWrites: Bool {
         canUseServerAuthoritativeActions
             && configuration?.readOnly == false
             && boardsResponse?.readOnly == false

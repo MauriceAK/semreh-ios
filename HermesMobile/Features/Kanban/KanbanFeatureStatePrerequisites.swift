@@ -58,7 +58,7 @@ extension KanbanFeatureState {
         }
     }
 
-    func reconcileDependencyMutation(
+    private func reconcileDependencyMutation(
         request: KanbanDependencyMutationRequest,
         shouldExist: Bool,
         kind: KanbanCardMutationKind,
