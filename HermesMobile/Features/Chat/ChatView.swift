@@ -3297,9 +3297,11 @@ struct ChatView: View {
             }
             shouldFollowLatestMessage = true
             if isReadingOlderTranscript {
-                withAnimation(ChatMotion.quickState(reduceMotion: reduceMotion)) {
-                    isReadingOlderTranscript = false
-                }
+                // Direct set: a per-sample scroll/deceleration callback must
+                // not start an animation transaction while the lazy transcript
+                // is still settling (P16 layout livelock); declared
+                // .animation(value:) modifiers own any presentation animation.
+                isReadingOlderTranscript = false
             }
         } else if isEffectiveUserInteraction {
             shouldFollowLatestMessage = false
@@ -3308,9 +3310,7 @@ struct ChatView: View {
                    distanceFromBottom: metrics.distanceFromBottom,
                    isStreaming: isStreaming
                ) {
-                withAnimation(ChatMotion.quickState(reduceMotion: reduceMotion)) {
-                    isReadingOlderTranscript = true
-                }
+                isReadingOlderTranscript = true
             }
         }
 #if DEBUG

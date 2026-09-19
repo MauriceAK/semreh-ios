@@ -997,11 +997,12 @@ struct ChatTranscriptView: View, Equatable {
                 .onChange(of: automaticPagingAdmitted) { _, admitted in
                     viewportTracker.automaticPagingAdmitted = admitted
                     guard admitted else { return }
-                    // One layout pass on ownership handoff; only the resulting
-                    // real preference sample may admit a load. Never poll/load here.
+                    // Ownership handoff must not force a synchronous layout:
+                    // layoutIfNeeded() mid-update re-enters lazy placement and
+                    // scroll-anchor translation from the handoff's own output
+                    // (P16 livelock). The reconcile token stands; the next
+                    // natural preference sample admits a load. Never poll/load.
                     pendingOlderMessagesReconcileToken &+= 1
-                    viewportTracker.scrollView?.setNeedsLayout()
-                    viewportTracker.scrollView?.layoutIfNeeded()
                 }
 #if DEBUG
                 .onChange(of: activeStreamID) { oldStreamID, newStreamID in
