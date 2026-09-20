@@ -2,6 +2,19 @@ import Foundation
 
 extension KanbanFeatureState {
     func load() async {
+        if snapshot != nil {
+            // Reentry owns the settled board until the replacement snapshot is
+            // ready. Invalidate any older handshake so its optional reads and
+            // stream start cannot publish after this refresh.
+            activeLoadID = nil
+            isLoading = false
+            if state == .checking {
+                state = report?.isPartial == true ? .partial : .compatible
+            }
+            await refresh()
+            return
+        }
+
         let previouslySelectedBoard = normalizedOptional(selectedBoardSlug)
         let previouslySelectedBoardName = selectedBoard?.name
         invalidateBoardMutation()
@@ -27,7 +40,12 @@ extension KanbanFeatureState {
         assigneeHistory = nil
         capabilityWarnings = []
         defer {
-            if activeLoadID == loadID { isLoading = false }
+            guard activeLoadID == loadID else { return }
+            isLoading = false
+            if Task.isCancelled, snapshot == nil {
+                report = nil
+                state = .idle
+            }
         }
 
         do {
@@ -87,6 +105,7 @@ extension KanbanFeatureState {
             state = report.isPartial ? .partial : .compatible
 
             await loadSupplementaryReads(board: boardToLoad, loadID: loadID)
+            guard isCurrent(loadID) else { return }
             startLiveUpdatesIfReady()
         } catch is CancellationError {
             guard activeLoadID == loadID else { return }

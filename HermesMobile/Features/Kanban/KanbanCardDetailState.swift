@@ -49,6 +49,7 @@ final class KanbanCardDetailState {
     private let onDetailLoaded: (KanbanCardDetailEnvelope) -> Void
     private let onCapabilityUnavailable: (KanbanWriteCapability) -> Void
     private var activeDetailLoadID: UUID?
+    private var activeWorkerLogID: UUID?
     private var activeMutationID: UUID?
     private var lastReconciledRevision = -1
     private var pendingAttempt: PendingCommentAttempt?
@@ -150,19 +151,30 @@ final class KanbanCardDetailState {
 
     func loadWorkerLog() async {
         guard workerLogState != .loading else { return }
+        let loadID = UUID()
+        activeWorkerLogID = loadID
         workerLogState = .loading
         do {
             let log = try await client.kanbanWorkerLog(
                 KanbanWorkerLogRequest(cardID: cardID, board: board)
             )
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, activeWorkerLogID == loadID else {
+                if activeWorkerLogID == loadID, Task.isCancelled {
+                    workerLogState = .idle
+                }
+                return
+            }
             guard log.cardID == nil || normalized(log.cardID) == normalized(cardID) else {
                 workerLogState = .failed
                 return
             }
             workerLogState = log.exists == false || (log.content ?? "").isEmpty ? .absent : .loaded(log)
         } catch {
-            guard !isCancellation(error) else { return }
+            guard activeWorkerLogID == loadID else { return }
+            guard !isCancellation(error) else {
+                workerLogState = .idle
+                return
+            }
             forwardAuthentication(error)
             if isNotFound(error) {
                 await reconcileMissingEntity(loadID: nil)
@@ -181,13 +193,19 @@ final class KanbanCardDetailState {
                 KanbanCardDetailRequest(cardID: cardID, board: board)
             )
             try KanbanCardDetailValidator.validate(response, requestedCardID: cardID)
-            guard !Task.isCancelled, activeDetailLoadID == loadID, activeMutationID == nil else { return }
+            guard !Task.isCancelled, activeDetailLoadID == loadID, activeMutationID == nil else {
+                resetCancelledDetailLoad(loadID)
+                return
+            }
             detail = response
             loadState = .loaded
             onDetailLoaded(response)
         } catch {
             guard activeDetailLoadID == loadID, activeMutationID == nil else { return }
-            guard !isCancellation(error) else { return }
+            guard !isCancellation(error) else {
+                resetCancelledDetailLoad(loadID)
+                return
+            }
             forwardAuthentication(error)
             if isNotFound(error) {
                 await reconcileMissingEntity(loadID: loadID)
@@ -195,6 +213,13 @@ final class KanbanCardDetailState {
                 loadState = .failed
             }
         }
+    }
+
+    private func resetCancelledDetailLoad(_ loadID: UUID) {
+        guard activeDetailLoadID == loadID,
+              activeMutationID == nil,
+              detail == nil else { return }
+        loadState = .idle
     }
 
     private func checkPendingCommentOutcome(mutationID: UUID? = nil) async {
