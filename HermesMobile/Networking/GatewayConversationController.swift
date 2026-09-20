@@ -4197,21 +4197,11 @@ final class GatewayConversationController {
 
     private func receive(_ event: HermesGatewayEvent) {
         guard !disposed else { return }
-        // P01: HermesServerRuntime.deliver no longer generation-gates, because
-        // a reconnect can legitimately keep an event tag at the previous
-        // socket generation for a reattached running stream (session.resume
-        // running:true). That exemption is exactly as narrow as the state that
-        // proves it. Any other generation mismatch is a stale socket's
-        // leftover frame (buffered during connecting, e.g. a message.start
-        // whose turn already completed server-side) and must not mutate the
-        // current binding — re-delivering it would re-open a finished run.
-        // A stale transport.closed never qualifies: the old socket's closure
-        // cannot legitimately affect the new binding.
-        if event.connectionGeneration != runtime.connectionGeneration,
-           !(runState == .running && suppressesColdResumedContent
-             && event.method != "local" && event.type != "transport.closed") {
-            return
-        }
+        // HermesGatewayClient checks socket identity and transport generation
+        // before emitting frames. That generation and HermesServerRuntime's
+        // reconnect counter are independent, so comparing them here rejects
+        // valid first-connection events. Keep session binding checks below;
+        // transport.closed freshness is checked by HermesServerRuntime.
         if event.method == "local", event.type == "transport.closed" {
             if let attempt = activeBtw?.attemptID {
                 activeBtw = nil

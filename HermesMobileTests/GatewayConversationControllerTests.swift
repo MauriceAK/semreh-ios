@@ -1673,6 +1673,28 @@ final class GatewayConversationControllerTests: XCTestCase {
         await runtime.stop()
     }
 
+    func testValidEventWithIndependentTransportGenerationIsAccepted() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setResumeResponse(.object([
+            "session_id": .string("runtime-session"),
+            "session_key": .string("stored-chat"),
+            "running": .bool(false)
+        ]))
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime, storedID: "stored-chat")
+        try await controller.open()
+
+        var received = false
+        controller.onEvent = { event in
+            received = event.type == "message.complete"
+        }
+        fake.emit(event(sessionID: "runtime-session", type: "message.complete", sequence: 4,
+                        payload: .object(["status": .string("complete")]), connectionGeneration: 2))
+        await yieldUntil { received }
+        XCTAssertEqual(controller.runState, .idle)
+        await runtime.stop()
+    }
+
     func testPromptTimeoutBlocksRetryWithoutDuplicateSubmission() async throws {
         let fake = ControllerFakeTransport()
         fake.setPromptTimeout(true)
@@ -2271,7 +2293,8 @@ final class GatewayConversationControllerTests: XCTestCase {
         type: String,
         sequence: Int,
         payload: JSONValue? = nil,
-        method: String = "gateway.event"
+        method: String = "gateway.event",
+        connectionGeneration: Int = 1
     ) -> HermesGatewayEvent {
         HermesGatewayEvent(
             method: method,
@@ -2280,7 +2303,7 @@ final class GatewayConversationControllerTests: XCTestCase {
             sequence: sequence,
             payload: payload,
             params: nil,
-            connectionGeneration: 1
+            connectionGeneration: connectionGeneration
         )
     }
 
