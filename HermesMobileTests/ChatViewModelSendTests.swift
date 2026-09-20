@@ -1804,6 +1804,135 @@ final class ChatViewModelSendTests: XCTestCase {
         }
     }
 
+    func testDirectTranscriptFallbackIdentitySurvivesOlderPagePrepend() throws {
+        let visibleRows = [
+            ChatMessage(role: "user", content: "Visible question", timestamp: 20, messageId: nil),
+            ChatMessage(role: "assistant", content: "Visible answer", timestamp: 21, messageId: nil)
+        ]
+        let before = ChatViewModel.transcriptMessages(
+            from: visibleRows,
+            hidingStreamingAssistantID: nil,
+            preferDurableIDs: true
+        )
+
+        let after = ChatViewModel.transcriptMessages(
+            from: [
+                ChatMessage(role: "assistant", content: "Older answer", timestamp: 10, messageId: nil)
+            ] + visibleRows,
+            hidingStreamingAssistantID: nil,
+            preferDurableIDs: true
+        )
+
+        XCTAssertEqual(
+            before.map(\.renderID),
+            Array(after.dropFirst()).map(\.renderID),
+            "Prepending direct rows must not retarget existing SwiftUI anchors when a tolerated row has no ID."
+        )
+        XCTAssertTrue(try XCTUnwrap(before.first?.renderID).hasPrefix("transcript:row:fallback:"))
+    }
+
+    func testDirectTranscriptFallbackKeepsDuplicateRowsDistinct() {
+        let duplicate = ChatMessage(
+            role: "assistant",
+            content: "Repeated event",
+            timestamp: nil,
+            messageId: "  "
+        )
+
+        let rendered = ChatViewModel.transcriptMessages(
+            from: [duplicate, duplicate],
+            hidingStreamingAssistantID: nil,
+            preferDurableIDs: true
+        )
+
+        XCTAssertEqual(rendered.count, 2)
+        XCTAssertEqual(Set(rendered.map(\.renderID)).count, 2)
+        XCTAssertTrue(rendered.allSatisfy { $0.renderID.hasPrefix("transcript:row:fallback:") })
+    }
+
+    func testDirectTranscriptFallbackIncludesNilIDWhenStreamingIDIsNil() {
+        let rendered = ChatViewModel.transcriptMessages(
+            from: [ChatMessage(role: "assistant", content: "No ID", timestamp: nil, messageId: nil)],
+            hidingStreamingAssistantID: nil,
+            preferDurableIDs: true
+        )
+
+        XCTAssertEqual(rendered.count, 1)
+        XCTAssertTrue(rendered[0].renderID.hasPrefix("transcript:row:fallback:"))
+    }
+
+    func testDirectTranscriptFallbackLedgerPreservesDuplicateLineageAcrossPrependAndAppend() {
+        let ledger = DirectFallbackRenderIdentityLedger()
+        let duplicate = ChatMessage(role: "assistant", content: "Same", timestamp: nil, messageId: nil)
+        let durable = ChatMessage(role: "user", content: "Durable", timestamp: 1, messageId: "canonical-1")
+
+        func render(_ rows: [ChatMessage], prepend: Bool = false) -> [TranscriptMessage] {
+            ChatViewModel.transcriptMessages(
+                from: rows,
+                hidingStreamingAssistantID: nil,
+                preferDurableIDs: true,
+                fallbackLedger: ledger,
+                fallbackScope: "server|profile|session-a",
+                isOlderPagePrepend: prepend
+            )
+        }
+
+        let initial = render([durable, duplicate, duplicate])
+        let initialDuplicateIDs = Array(initial.dropFirst()).map(\.renderID)
+        let durableID = initial[0].renderID
+
+        let prepended = render([duplicate, durable, duplicate, duplicate], prepend: true)
+        XCTAssertEqual(Array(prepended.suffix(2)).map(\.renderID), initialDuplicateIDs)
+        XCTAssertEqual(prepended[1].renderID, durableID)
+        XCTAssertEqual(Set(prepended.map(\.renderID)).count, prepended.count)
+
+        let appended = render([duplicate, durable, duplicate, duplicate, duplicate])
+        XCTAssertEqual(Array(appended.prefix(4)).map(\.renderID), prepended.map(\.renderID))
+        XCTAssertEqual(appended[1].renderID, durableID)
+        XCTAssertEqual(Set(appended.map(\.renderID)).count, appended.count)
+        XCTAssertEqual(render([duplicate, durable, duplicate, duplicate, duplicate]).map(\.renderID), appended.map(\.renderID))
+
+        let resetScope = ChatViewModel.transcriptMessages(
+            from: [duplicate, duplicate],
+            hidingStreamingAssistantID: nil,
+            preferDurableIDs: true,
+            fallbackLedger: ledger,
+            fallbackScope: "server|profile|session-b"
+        )
+        XCTAssertTrue(Set(resetScope.map(\.renderID)).isDisjoint(with: Set(appended.map(\.renderID))))
+    }
+
+    func testDirectTranscriptFallbackLedgerRetainsUnaffectedRowsAcrossUpdateAndWindowShrink() {
+        let ledger = DirectFallbackRenderIdentityLedger()
+        let first = ChatMessage(role: "assistant", content: "First", timestamp: nil, messageId: nil)
+        let second = ChatMessage(role: "assistant", content: "Second", timestamp: nil, messageId: nil)
+        let changedSecond = ChatMessage(role: "assistant", content: "Second, updated", timestamp: nil, messageId: nil)
+        let third = ChatMessage(role: "assistant", content: "Third", timestamp: nil, messageId: nil)
+        let fourth = ChatMessage(role: "assistant", content: "Fourth", timestamp: nil, messageId: nil)
+
+        func render(_ rows: [ChatMessage]) -> [TranscriptMessage] {
+            ChatViewModel.transcriptMessages(
+                from: rows,
+                hidingStreamingAssistantID: nil,
+                preferDurableIDs: true,
+                fallbackLedger: ledger,
+                fallbackScope: "server|profile|session-update",
+                isOlderPagePrepend: false
+            )
+        }
+
+        let initial = render([first, second, third])
+        let updated = render([first, changedSecond, third])
+        XCTAssertEqual(updated[0].renderID, initial[0].renderID)
+        XCTAssertNotEqual(updated[1].renderID, initial[1].renderID)
+        XCTAssertEqual(updated[2].renderID, initial[2].renderID)
+
+        let expanded = render([first, changedSecond, third, fourth])
+        let shrunk = render([changedSecond, third, fourth])
+        XCTAssertEqual(shrunk.map(\.renderID), Array(expanded.dropFirst()).map(\.renderID))
+        XCTAssertEqual(Set(shrunk.map(\.renderID)).count, shrunk.count)
+    }
+
     @MainActor
     func testPerformanceLabStreamingUpdatesOnlyTheSelectedTranscriptIncrementally() async throws {
         let fixtures = ChatViewModel.makePerformanceLabFixtures(count: 3)

@@ -411,6 +411,8 @@ final class ChatViewModel {
     @ObservationIgnored private var pendingReasoningTextBuffer: String = ""
     @ObservationIgnored private var pendingStreamingContentFlushTask: Task<Void, Never>?
     @ObservationIgnored private var isTranscriptPresentationActive = true
+    @ObservationIgnored private let directFallbackRenderIdentityLedger = DirectFallbackRenderIdentityLedger()
+    @ObservationIgnored private var isApplyingOlderDirectHistoryPage = false
     @ObservationIgnored private var connectionVisibilityTask: Task<Void, Never>?
     private var isConnectionVisiblySlow = false
     private(set) var completedToolCallGroups: [ToolCallGroup] = [] {
@@ -533,7 +535,10 @@ final class ChatViewModel {
             from: messages,
             messageOffset: messagesOffset,
             hidingStreamingAssistantID: nil,
-            preferDurableIDs: usesDirectGateway
+            preferDurableIDs: usesDirectGateway,
+            fallbackLedger: usesDirectGateway ? directFallbackRenderIdentityLedger : nil,
+            fallbackScope: directTranscriptFallbackScope,
+            isOlderPagePrepend: isApplyingOlderDirectHistoryPage
         )
         displayedTranscriptRowIndexByLoadedIndex = Dictionary(
             uniqueKeysWithValues: displayedTranscriptMessages.enumerated().map { rowIndex, message in
@@ -542,6 +547,15 @@ final class ChatViewModel {
         )
         recomputeCompressionReferenceCard()
         recomputeDisplayedReasoningGroups()
+    }
+
+    private var directTranscriptFallbackScope: String? {
+        guard usesDirectGateway,
+              let historyID = directHistoryID,
+              !historyID.isEmpty
+        else { return nil }
+        let profile = directConversation?.profile ?? (Self.nonEmpty(currentProfile) ?? "default")
+        return "\(server.absoluteString)|\(profile)|\(historyID)"
     }
 
     private func recomputeDisplayedReasoningGroups() {
@@ -1703,6 +1717,8 @@ final class ChatViewModel {
             // reset the transient live tail, tool/reasoning groups, or timers.
             guard directHistoryID == page.sessionID else { return }
             streamingAssistantMessageIndex = nil
+            isApplyingOlderDirectHistoryPage = true
+            defer { isApplyingOlderDirectHistoryPage = false }
             withBatchedTranscriptDerivedState {
                 messages = Self.prependingOlderMessages(page.messages, to: messages)
             }
@@ -5787,10 +5803,152 @@ final class OutgoingInsertionLedger {
 /// collide with the legacy position-based transcript IDs.
 enum TranscriptRenderIdentity {
     static let directPrefix = "transcript:row:"
+    private static let directFallbackPrefix = "transcript:row:fallback:"
 
     static func directID(for canonicalMessageID: String?) -> String? {
-        guard let canonicalMessageID, !canonicalMessageID.isEmpty else { return nil }
+        guard let canonicalMessageID,
+              !canonicalMessageID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return nil }
         return "\(directPrefix)\(canonicalMessageID)"
+    }
+
+    /// Direct history normally supplies a durable message ID, but tolerant
+    /// decoding also admits older/partial rows without one. Falling back to a
+    /// loaded index makes every existing SwiftUI row change identity when an
+    /// older page is prepended, which defeats the measured anchor-preservation
+    /// path. Use a deterministic content fingerprint for those exceptional
+    /// rows instead. The per-fingerprint occurrence suffix keeps duplicate
+    /// rows distinct within a rendered transcript.
+    static func directFallbackID(for message: ChatMessage, occurrence: Int) -> String {
+        var hash: UInt64 = 14_695_981_039_346_656_037
+
+        func combine(_ value: String?) {
+            for byte in (value ?? "<nil>").utf8 {
+                hash ^= UInt64(byte)
+                hash &*= 1_099_511_628_211
+            }
+            // Preserve field boundaries ("ab" + "c" must not equal "a" + "bc").
+            hash ^= 0xff
+            hash &*= 1_099_511_628_211
+        }
+
+        combine(message.role)
+        combine(message.timestamp.map { String($0.bitPattern, radix: 16) })
+        combine(message.content)
+        combine(message.name)
+        combine(message.toolCallId)
+        combine(message.toolUseId)
+        return "\(directFallbackPrefix)\(String(hash, radix: 16)):\(occurrence)"
+    }
+}
+
+/// Session-scoped identity for the exceptional direct-history rows that have no
+/// durable Hermes ID. The ledger retains only the current rendered window. An
+/// explicit older-page prepend resolves the otherwise unknowable lineage of
+/// identical rows from the suffix; ordinary tail growth resolves it from the
+/// prefix. A scope change drops every prior assignment.
+final class DirectFallbackRenderIdentityLedger {
+    private struct Entry {
+        let fingerprint: String
+        let renderID: String
+    }
+
+    private var scope: String?
+    private var entries: [Entry] = []
+    private var scopeGeneration: UInt64 = 0
+    private var nextSequence: UInt64 = 0
+
+    func renderIDs(
+        for messages: [(loadedIndex: Int, message: ChatMessage)],
+        scope newScope: String?,
+        isOlderPagePrepend: Bool
+    ) -> [Int: String] {
+        guard let newScope else {
+            reset()
+            return Dictionary(uniqueKeysWithValues: messages.map {
+                ($0.loadedIndex, TranscriptRenderIdentity.directFallbackID(for: $0.message, occurrence: $0.loadedIndex))
+            })
+        }
+        if scope != newScope {
+            scope = newScope
+            entries.removeAll(keepingCapacity: true)
+            scopeGeneration &+= 1
+            nextSequence = 0
+        }
+
+        let fingerprints = messages.map {
+            TranscriptRenderIdentity.directFallbackID(for: $0.message, occurrence: 0)
+        }
+        var reconciled = fingerprints.map { Entry(fingerprint: $0, renderID: "") }
+
+        let oldFingerprints = entries.map(\.fingerprint)
+        let sharedCount = min(entries.count, fingerprints.count)
+        let rawPrefixCount = sharedPrefixLength(oldFingerprints, fingerprints)
+        let rawSuffixCount = sharedSuffixLength(oldFingerprints, fingerprints)
+        // Older pages are known head insertions, while a smaller ordinary
+        // window is normally the newest suffix. Favoring that side resolves
+        // equal duplicate rows deterministically without scanning candidate
+        // offsets or allocating an Array slice for every offset.
+        // A middle deletion of indistinguishable ID-less rows has no
+        // recoverable lineage; only the proven prefix/suffix is retained.
+        let preferSuffix = isOlderPagePrepend || fingerprints.count < entries.count
+        let suffixCount: Int
+        let prefixCount: Int
+        if preferSuffix {
+            suffixCount = min(rawSuffixCount, sharedCount)
+            prefixCount = min(rawPrefixCount, sharedCount - suffixCount)
+        } else {
+            prefixCount = min(rawPrefixCount, sharedCount)
+            suffixCount = min(rawSuffixCount, sharedCount - prefixCount)
+        }
+
+        for index in 0..<prefixCount {
+            reconciled[index] = entries[index]
+        }
+        if suffixCount > 0 {
+            let newStart = fingerprints.count - suffixCount
+            let oldStart = entries.count - suffixCount
+            for offset in 0..<suffixCount {
+                reconciled[newStart + offset] = entries[oldStart + offset]
+            }
+        }
+
+        for index in reconciled.indices where reconciled[index].renderID.isEmpty {
+            nextSequence &+= 1
+            reconciled[index] = Entry(
+                fingerprint: fingerprints[index],
+                renderID: "\(fingerprints[index]):ledger:\(scopeGeneration):\(nextSequence)"
+            )
+        }
+        entries = reconciled
+        return Dictionary(uniqueKeysWithValues: zip(messages, reconciled).map {
+            ($0.0.loadedIndex, $0.1.renderID)
+        })
+    }
+
+    private func sharedPrefixLength(_ lhs: [String], _ rhs: [String]) -> Int {
+        let limit = min(lhs.count, rhs.count)
+        var count = 0
+        while count < limit, lhs[count] == rhs[count] {
+            count += 1
+        }
+        return count
+    }
+
+    private func sharedSuffixLength(_ lhs: [String], _ rhs: [String]) -> Int {
+        let limit = min(lhs.count, rhs.count)
+        var count = 0
+        while count < limit,
+              lhs[lhs.count - count - 1] == rhs[rhs.count - count - 1] {
+            count += 1
+        }
+        return count
+    }
+
+    private func reset() {
+        scope = nil
+        entries.removeAll(keepingCapacity: false)
+        nextSequence = 0
     }
 }
 
@@ -5972,11 +6130,29 @@ extension ChatViewModel {
         from messages: [ChatMessage],
         messageOffset: Int? = nil,
         hidingStreamingAssistantID streamingAssistantID: String?,
-        preferDurableIDs: Bool = false
+        preferDurableIDs: Bool = false,
+        fallbackLedger: DirectFallbackRenderIdentityLedger? = nil,
+        fallbackScope: String? = nil,
+        isOlderPagePrepend: Bool = false
     ) -> [TranscriptMessage] {
         let offset = max(0, messageOffset ?? 0)
         var transcriptMessages: [TranscriptMessage] = []
         transcriptMessages.reserveCapacity(messages.count)
+        var directFallbackOccurrences: [String: Int] = [:]
+        let fallbackRows: [(loadedIndex: Int, message: ChatMessage)] = messages.enumerated().compactMap { loadedIndex, message in
+            guard preferDurableIDs,
+                  message.role != "tool",
+                  !TranscriptTurnClassifier.isToolResultOnlyMessage(message),
+                  TranscriptRenderIdentity.directID(for: message.messageId) == nil
+            else { return nil }
+            if let streamingAssistantID, message.messageId == streamingAssistantID { return nil }
+            return (loadedIndex: loadedIndex, message: message)
+        }
+        let ledgerRenderIDs = fallbackLedger?.renderIDs(
+            for: fallbackRows,
+            scope: fallbackScope,
+            isOlderPagePrepend: isOlderPagePrepend
+        ) ?? [:]
 
         for (loadedIndex, message) in messages.enumerated() {
             guard message.role != "tool" else { continue }
@@ -5991,8 +6167,23 @@ extension ChatViewModel {
                 messageOffset: messageOffset
             )
             let absoluteIndex = offset + loadedIndex
-            let renderID = transcriptRenderID(for: message, absoluteIndex: absoluteIndex,
-                                              preferDurableID: preferDurableIDs)
+            let renderID: String
+            if preferDurableIDs, TranscriptRenderIdentity.directID(for: message.messageId) == nil {
+                let fallbackKey = TranscriptRenderIdentity.directFallbackID(for: message, occurrence: 0)
+                let occurrence = directFallbackOccurrences[fallbackKey, default: 0]
+                directFallbackOccurrences[fallbackKey] = occurrence + 1
+                let deterministicRenderID = TranscriptRenderIdentity.directFallbackID(
+                    for: message,
+                    occurrence: occurrence
+                )
+                renderID = ledgerRenderIDs[loadedIndex] ?? deterministicRenderID
+            } else {
+                renderID = transcriptRenderID(
+                    for: message,
+                    absoluteIndex: absoluteIndex,
+                    preferDurableID: preferDurableIDs
+                )
+            }
 
             transcriptMessages.append(TranscriptMessage(
                 loadedIndex: loadedIndex,
