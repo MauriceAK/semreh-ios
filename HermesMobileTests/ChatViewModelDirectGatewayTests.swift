@@ -1036,6 +1036,54 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         await runtime.stop()
     }
 
+    func testComposerConfigurationFailureDiagnosticUsesOnlyBoundedClassification() throws {
+        XCTAssertEqual(ComposerConfigurationLoadOutcome(error: URLError(.notConnectedToInternet)).rawValue, "network")
+        XCTAssertEqual(
+            ComposerConfigurationLoadOutcome(error: APIError.http(statusCode: 503, body: "private response contents")).rawValue,
+            "http_503_server_error"
+        )
+        XCTAssertEqual(
+            ComposerConfigurationLoadOutcome(error: APIError.decoding(underlying: DecodingError.dataCorrupted(
+                .init(codingPath: [], debugDescription: "private payload")
+            ))).rawValue,
+            "decoding"
+        )
+        XCTAssertEqual(ComposerConfigurationLoadOutcome(error: CancellationError()).rawValue, "cancelled")
+        XCTAssertEqual(
+            ComposerConfigurationLoadOutcome(error: APIError.network(underlying: URLError(.cancelled))).rawValue,
+            "cancelled"
+        )
+        XCTAssertEqual(ComposerConfigurationLoadOutcome(error: CocoaError(.fileReadCorruptFile)).rawValue, "other")
+    }
+
+    func testDirectComposerFailureBannerIdentifiesSourceWithoutResponseContent() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let client = makeClient { request in
+            if request.url?.path == "/api/model/options" {
+                return apiTestJSONResponse(#"{"model":"model-a","provider":"fixture","providers":[]}"#, for: request)
+            }
+            throw APIError.http(statusCode: 503, body: "private profile name and response contents")
+        }
+        let vm = makeViewModel(client: client, runtime: runtime, sessionID: nil)
+
+        await vm.loadComposerConfiguration()
+
+        let message = try XCTUnwrap(vm.composerConfigurationErrorMessage)
+        XCTAssertEqual(
+            message,
+            "Hermes chat settings could not be loaded. Your draft was preserved. source=profiles outcome=http_503_server_error has_canonical_session=false profile_scope_present=true"
+        )
+        XCTAssertFalse(message.contains("private"))
+        guard case .http(let statusCode, let body) = vm.lastError as? APIError else {
+            return XCTFail("The underlying error must remain available")
+        }
+        XCTAssertEqual(statusCode, 503)
+        XCTAssertEqual(body, "private profile name and response contents")
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
     func testExistingDirectChatLoadsScopedReasoningAndWritesOnlyThroughGateway() async throws {
         let fake = ChatDirectFakeTransport()
         let runtime = try makeRuntime(fake)

@@ -52,6 +52,73 @@ struct ListenNowPlayingSnapshot: Equatable {
     let isPlaying: Bool
 }
 
+enum ComposerConfigurationLoadSource: String {
+    case modelOptions = "model_options"
+    case profiles
+    case sessionReasoning = "session_reasoning"
+    case workspaceBookmarks = "workspace_bookmarks"
+    case unknown
+}
+
+private struct ComposerConfigurationLoadFailure: Error {
+    let source: ComposerConfigurationLoadSource
+    let underlying: Error
+}
+
+struct ComposerConfigurationLoadOutcome: Equatable {
+    let rawValue: String
+
+    init(error: Error) {
+        if Self.isCancellation(error) {
+            rawValue = "cancelled"
+            return
+        }
+
+        if let apiError = error as? APIError {
+            switch apiError {
+            case .network:
+                rawValue = "network"
+            case .http(let statusCode, _):
+                rawValue = "http_\(statusCode)_\(Self.safeHTTPReason(statusCode))"
+            case .decoding:
+                rawValue = "decoding"
+            case .unauthorized:
+                rawValue = "http_401_unauthorized"
+            case .invalidServerURL:
+                rawValue = "other"
+            }
+        } else if error is URLError {
+            rawValue = "network"
+        } else if error is DecodingError {
+            rawValue = "decoding"
+        } else {
+            rawValue = "other"
+        }
+    }
+
+    private static func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        if let urlError = error as? URLError { return urlError.code == .cancelled }
+        guard let apiError = error as? APIError,
+              case .network(let underlying) = apiError else { return false }
+        return isCancellation(underlying)
+    }
+
+    private static func safeHTTPReason(_ statusCode: Int) -> String {
+        switch statusCode {
+        case 400: "bad_request"
+        case 401: "unauthorized"
+        case 403: "forbidden"
+        case 404: "not_found"
+        case 408: "timeout"
+        case 409: "conflict"
+        case 429: "rate_limited"
+        case 500...599: "server_error"
+        default: "request_failed"
+        }
+    }
+}
+
 private enum DirectAttachmentSendFailure: Error {
     case staging(id: UUID, filename: String, error: DirectGatewayAttachmentStageError)
 
@@ -1028,14 +1095,21 @@ final class ChatViewModel {
     private func loadDirectComposerConfiguration() async {
         guard !directInvalidated, !isLoadingComposerConfiguration else { return }
         let profile = requestProfileName ?? "default"
+        let profileScopePresent = Self.nonEmpty(requestProfileName) != nil
         let mutation = composerConfigurationMutationToken
         isLoadingComposerConfiguration = true
         composerConfigurationErrorMessage = nil
         defer { isLoadingComposerConfiguration = false }
         do {
-            async let inventory = client.directModelOptions(profile: profile)
-            async let profiles = client.directProfiles()
-            let (options, availableProfiles) = try await (inventory, profiles)
+            async let inventoryResult = composerConfigurationResult(source: .modelOptions) {
+                try await client.directModelOptions(profile: profile)
+            }
+            async let profilesResult = composerConfigurationResult(source: .profiles) {
+                try await client.directProfiles()
+            }
+            let (inventory, profiles) = await (inventoryResult, profilesResult)
+            let options = try inventory.get()
+            let availableProfiles = try profiles.get()
             guard !directInvalidated, profile == (requestProfileName ?? "default"),
                   mutation == composerConfigurationMutationToken else { return }
             directModelOptions = options
@@ -1043,7 +1117,11 @@ final class ChatViewModel {
             profileOptions = availableProfiles.profiles ?? []
             isSingleProfileMode = availableProfiles.singleProfileMode ?? false
             selectedProfileName = profile
-            await refreshWorkspaceRoots()
+            do {
+                try loadWorkspaceRoots()
+            } catch {
+                throw ComposerConfigurationLoadFailure(source: .workspaceBookmarks, underlying: error)
+            }
             // The catalog reports profile defaults, not this stored chat's
             // effective configuration. Only a new local draft inherits them.
             if canonicalSessionID == nil, currentModel == nil {
@@ -1051,8 +1129,14 @@ final class ChatViewModel {
                 currentModelProvider = Self.nonEmpty(options.provider)
             }
             applyDirectReasoningGating()
-            if canonicalSessionID != nil { try await loadDirectSessionReasoning() }
-        } catch {
+            if canonicalSessionID != nil {
+                do {
+                    try await loadDirectSessionReasoning()
+                } catch {
+                    throw ComposerConfigurationLoadFailure(source: .sessionReasoning, underlying: error)
+                }
+            }
+        } catch let failure as ComposerConfigurationLoadFailure {
             guard !directInvalidated, profile == (requestProfileName ?? "default"),
                   mutation == composerConfigurationMutationToken else { return }
             if canonicalSessionID != nil {
@@ -1060,9 +1144,47 @@ final class ChatViewModel {
                 isReasoningChangeDeferred = false
                 applyDirectReasoningGating()
             }
+            lastError = failure.underlying
+            composerConfigurationErrorMessage = Self.composerConfigurationFailureMessage(
+                source: failure.source,
+                error: failure.underlying,
+                hasCanonicalSession: canonicalSessionID != nil,
+                profileScopePresent: profileScopePresent
+            )
+        } catch {
+            guard !directInvalidated, profile == (requestProfileName ?? "default"),
+                  mutation == composerConfigurationMutationToken else { return }
             lastError = error
-            composerConfigurationErrorMessage = "Hermes chat settings could not be loaded. Your draft was preserved."
+            composerConfigurationErrorMessage = Self.composerConfigurationFailureMessage(
+                source: .unknown,
+                error: error,
+                hasCanonicalSession: canonicalSessionID != nil,
+                profileScopePresent: profileScopePresent
+            )
         }
+    }
+
+    private func composerConfigurationResult<Value>(
+        source: ComposerConfigurationLoadSource,
+        operation: () async throws -> Value
+    ) async -> Result<Value, ComposerConfigurationLoadFailure> {
+        do {
+            return .success(try await operation())
+        } catch {
+            return .failure(ComposerConfigurationLoadFailure(source: source, underlying: error))
+        }
+    }
+
+    static func composerConfigurationFailureMessage(
+        source: ComposerConfigurationLoadSource,
+        error: Error,
+        hasCanonicalSession: Bool,
+        profileScopePresent: Bool
+    ) -> String {
+        let outcome = ComposerConfigurationLoadOutcome(error: error).rawValue
+        return "Hermes chat settings could not be loaded. Your draft was preserved. "
+            + "source=\(source.rawValue) outcome=\(outcome) "
+            + "has_canonical_session=\(hasCanonicalSession) profile_scope_present=\(profileScopePresent)"
     }
 
     private func loadDirectSessionReasoning() async throws {
@@ -2618,14 +2740,20 @@ final class ChatViewModel {
         workspaceRoots = []
         workspaceSuggestions = []
         do {
-            workspaceRoots = try localOrganizerStore.workspaceBookmarks(
-                server: server, profile: workspaceOrganizerProfile
-            ).map { WorkspaceRoot(path: $0.path, name: $0.name) }
-            workspaceSuggestions = workspaceRoots.compactMap(\.path)
+            try loadWorkspaceRoots()
         } catch {
             lastError = error
             composerConfigurationErrorMessage = error.localizedDescription
         }
+    }
+
+    private func loadWorkspaceRoots() throws {
+        workspaceRoots = []
+        workspaceSuggestions = []
+        workspaceRoots = try localOrganizerStore.workspaceBookmarks(
+            server: server, profile: workspaceOrganizerProfile
+        ).map { WorkspaceRoot(path: $0.path, name: $0.name) }
+        workspaceSuggestions = workspaceRoots.compactMap(\.path)
     }
 
     func loadWorkspaceSuggestions(prefix: String) async {
