@@ -309,14 +309,11 @@ final class HermesServerRuntime {
         // same transport-generation check at drain time so an old
         // message.start/clarify event cannot reopen or clear current state.
         guard event.connectionGeneration == acceptedTransportGeneration else { return }
-        // The transport is the freshness authority: HermesGatewayClient drops
-        // frames from a stale socket generation before they become events
-        // (receiveLoop re-checks generation per frame), and a reconnect can
-        // legitimately keep the client's event tag at an older value (e.g.
-        // fake transports pinned to one generation). Rejecting events here by
-        // generation would strand a reattached stream that is already bound
-        // and running (P01 lost-terminal resume). transport.closed events are
-        // still generation-gated in receive() before they reach this point.
+        // The transport is the freshness authority: this accepted transport
+        // generation is intentionally distinct from the runtime reconnect
+        // counter. HermesGatewayClient also rejects frames from stale socket
+        // instances before they become events; this drain-time guard covers
+        // frames buffered during the runtime's reconnect barrier.
         for sink in Array(observers.values.map(\.event)) { sink(event) }
     }
 }
