@@ -43,7 +43,7 @@ extension SessionListView {
         .accessibilityLabel("New Session")
     }
 
-    var visibleSessions: [SessionSummary] {
+    private var visibleSessions: [SessionSummary] {
         viewModel.visibleSessions(
             searchText: searchText,
             selectedProjectID: selectedProjectID,
