@@ -10,11 +10,11 @@ reasoning from the pinned code.
 | Component | Recorded value | How verified |
 | --- | --- | --- |
 | Semreh app base | `master` @ `4ff83558f5566da2b14e1187518a75a4edc9b21e` | `git rev-parse HEAD` on the worker checkout, 2026-09-19 |
-| Documented Hermes pin | `29112bef099274229cadff79cdff7bf7b99c4b77` | `GET /repos/MauriceAK/hermes-agent/commits/<sha>` → 200, release v0.21.0, 2026-08-31. **Not** in `nesquena/hermes-webui` (422) — the pin lives in the agent repo |
-| Hermes `main` HEAD (drift) | `d177b119e9c56c9ddc0b7379ffce52341ec06584` (2026-09-18) | `GET /repos/MauriceAK/hermes-agent/commits/main` |
+| Documented Hermes pin | `29112bef099274229cadff79cdff7bf7b99c4b77` | Approved independent clone `/Users/maurice/workspace/semreh-slice1-backend-source` is clean, detached at the exact SHA, and tagged `v2026.8.31`; canonical source is `NousResearch/hermes-agent` (the MauriceAK fork contains the same pinned object) |
+| Hermes mirror `main` HEAD (drift, not contract) | `d177b119e9c56c9ddc0b7379ffce52341ec06584` (2026-09-18) | `MauriceAK/hermes-agent` mirror; all contract anchors remain at the pinned SHA |
 | hermes-agent package | 0.21.0 | `pyproject.toml` at the pin |
 | Agent browser backends | local Chromium via `agent-browser` CLI (npx-managed binary); cloud `browser-use` → `browserbase` preference; Camofox / Lightpanda variants | `tools/browser_tool.py` docstring + `_get_cloud_provider` + `agent/browser_registry.py` |
-| Broker protocol | `BROWSER_CONTROL_PROTOCOL_VERSION` (int, exact-match) | `gateway/browser_control_broker.py:143` |
+| Broker protocol | `BROWSER_CONTROL_PROTOCOL_VERSION` (int, exact-match) | `gateway/browser_control_broker.py:87` (constant), `:143-145` (validator) |
 | Semreh gateway transport | `/api/ws` WebSocket + single-use `ticket` query param; JSON-RPC | `HermesMobile/Networking/HermesGatewayClient.swift` |
 
 Dependency versions beyond the above were not enumerated: they do not
@@ -31,9 +31,18 @@ machine.
 - Per-task CDP supervisor: `tools/browser_tool.py:656`
   `_ensure_cdp_supervisor`; host-local CDP lookup `:1571`
   `_agent_browser_get_cdp`.
+- Gateway session identity: `tui_gateway/methods_session.py:14-18,130-135`
+  distinguishes short `session_id` from durable `stored_session_id`; prompt
+  execution passes the durable key as browser `task_id`
+  (`tui_gateway/server.py:13055-13074`), while short-id resolution is
+  internal (`tui_gateway/server.py:8356-8367`).
 - Screenshot storage (host-local): `tools/browser_tool.py:5442`
   (`cache/screenshots/browser_screenshots/browser_screenshot_<uuid>.png`,
   24h cleanup at `:5744`).
+- One-shot browser vision: `tools/browser_tool.py:5412-5434,5590-5636`
+  returns a screenshot-capable tool result; gateway tool completion emits the
+  result (`tui_gateway/server.py:7923-7944`) and the Semreh event projection
+  retains it (`HermesMobile/Networking/GatewayConversationController+Events.swift:7-16,107-118`).
 - Control broker: `gateway/browser_control_broker.py:92` capability
   allowlist, `:113` developer capabilities, `:234` `ControllerScope`,
   `:399` ticket mint, `:438` attach, `:646` dispatch, single-shot
@@ -45,7 +54,10 @@ machine.
   `tui_gateway/server.py:17605`).
 - Local API routes: `POST /v1/browser-control/register`,
   `GET /v1/browser-control/ws` (ticket ≤30s)
-  — `tests/gateway/test_browser_control_api.py:64`.
+  — `tests/gateway/test_browser_control_api.py:64`; local API principal and
+  transport family are derived at `gateway/platforms/api_server.py:3751-3785`.
+- Dashboard controller identity is distinct: `tui_gateway/methods_browser_control.py:65-89`
+  derives `principal:dashboard:*` from the authenticated `/api/ws` identity.
 - Turn lease (NOT a browser lease): `gateway/turn_lease.py` docstring —
   serializes transcript load/run/flush per `session_id`.
 - Semreh client surface: `HermesMobile/Networking/HermesGatewayClient.swift`
@@ -65,14 +77,18 @@ Controller registration round-trip shape (test fixture, no live backend):
  "principal_id": "spoofed-client-principal"}
 // → 201: {"protocol_version": 1, "ticket": "<single-use, ≤30s>",
 //         "ws_path": "/v1/browser-control/ws",
-//         "scope": {"principal_id": "principal:dashboard:<server digest, NOT the spoofed value>",
+//         "scope": {"principal_id": "principal:<profile>:<server digest, NOT the spoofed value>",
 //                    "transport_family": "local-api",
 //                    "capabilities": ["browser_navigate", "controller.noop"]}}
 ```
 
-This is the shape a future `browser.task.watch` should mirror
-(ticket → WS → server-minted identity). It is evidence of the *pattern*,
-not of a watch capability.
+The HTTP controller ticket is presented in the WebSocket subprotocol, not a
+query parameter; query-string tickets are rejected
+(`gateway/platforms/api_server.py:3595-3631`). This local-API exchange is only
+evidence of the ticket/scope pattern, not of a watch capability. A future
+`browser.task.watch` over Semreh's `/api/ws` must use that authenticated
+transport identity and must not copy the local-API principal shape (or vice
+versa).
 
 ## 4. Fixture recipe (approved, bounded, disposable)
 
@@ -90,9 +106,10 @@ For the verifier / #46 owner, once the §6 backend extension exists:
 5. Change server/profile/conversation mid-watch; assert stale frames are
    masked and no cross-origin ticket/frame leaks.
 
-Until the extension exists, the only executable check is the *currently
-supported* surface: browser tool text results in the transcript. That is
-NOT live-browser watch evidence and must not be presented as such.
+Until the extension exists, no executable *watch* check exists. Ordinary browser
+tools remain turn-scoped; `browser_vision` may produce a one-shot screenshot
+tool result, but that is NOT live-browser watch evidence and must not be
+presented as such.
 
 ## 5. What was NOT done
 
