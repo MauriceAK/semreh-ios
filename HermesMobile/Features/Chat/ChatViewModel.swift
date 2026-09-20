@@ -87,6 +87,9 @@ struct ComposerConfigurationLoadOutcome: Equatable {
             case .invalidServerURL:
                 rawValue = "other"
             }
+        } else if let requestError = error as? DirectHermesRequestError,
+                  case .http(let statusCode, _) = requestError {
+            rawValue = "http_\(statusCode)_\(Self.safeHTTPReason(statusCode))"
         } else if error is URLError {
             rawValue = "network"
         } else if error is DecodingError {

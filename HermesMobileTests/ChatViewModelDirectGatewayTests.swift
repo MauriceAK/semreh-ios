@@ -800,6 +800,7 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
             vm.sendErrorMessage,
             "Hermes accepted the previous message, but Semreh could not clear its local safety record. It was not resent."
         )
+        await waitUntil { vm.directPromptDeliveryRecoveryTarget != nil }
         XCTAssertNotNil(vm.directPromptDeliveryRecoveryTarget)
         XCTAssertEqual(fake.calls().filter { $0.method == "prompt.submit" }.count, 1)
         await vm.disposeDirectConversation()
