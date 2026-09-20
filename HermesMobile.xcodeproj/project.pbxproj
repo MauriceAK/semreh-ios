@@ -7,6 +7,15 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		814BBCCF6E3422CE7EDB4254 /* SessionListActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FAE828EC51BD9F87EB50E8C /* SessionListActions.swift */; };
+		E6E3A8EAEA9415264CB97E10 /* SessionListState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B24A12A6666A5029EBFD47A /* SessionListState.swift */; };
+		01AFAA007B61440A23B9F06D /* SessionListUtilityViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A39745F18FD3347BA4AEA0E0 /* SessionListUtilityViews.swift */; };
+		E678FC45B73234EB905ED3A1 /* SessionListFilterViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = BAB612CCA6591C401D5B6B16 /* SessionListFilterViews.swift */; };
+		20475FF71FF39442CAC75E01 /* SessionListRowViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D4839D9F7A13BB31274E156 /* SessionListRowViews.swift */; };
+		0C2341FC74119EA4B57F9A16 /* SessionListMenus.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7817C942EF4FF1A1E1CB2FE3 /* SessionListMenus.swift */; };
+		466F6CD6F6527C460E414144 /* ScheduledSessionsComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 73161443CDA7F56BBBDE8E7B /* ScheduledSessionsComponents.swift */; };
+		DE530802218298B256E3EC42 /* SessionListSkeleton.swift in Sources */ = {isa = PBXBuildFile; fileRef = F5793C50B72392AABB0D39A6 /* SessionListSkeleton.swift */; };
+		32E310C6E45AD8077072DC21 /* SessionListViewExtensions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C1F433656C909C785E1C24B /* SessionListViewExtensions.swift */; };
 		E91400000000000000000002 /* HostedBotGroup.swift in Sources */ = {isa = PBXBuildFile; fileRef = E91400000000000000000001 /* HostedBotGroup.swift */; };
 		E91400000000000000000004 /* HostedBotGroupTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E91400000000000000000003 /* HostedBotGroupTests.swift */; };
 		E91300000000000000000002 /* BirdAvatarIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = E91300000000000000000001 /* BirdAvatarIdentity.swift */; };
@@ -166,7 +175,6 @@
 		C05100000000000000000004 /* ChatTranscriptSupportingViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = C05100000000000000000014 /* ChatTranscriptSupportingViews.swift */; };
 		1A2B3C4D5E6F7000000000D0 /* SessionRowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F7000000000D2 /* SessionRowView.swift */; };
 		1A2B3C4D5E6F7000000000D1 /* SessionListViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F7000000000D3 /* SessionListViewModel.swift */; };
-		A04300000000000000000001 /* SessionListComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = A04300000000000000000011 /* SessionListComponents.swift */; };
 		A10900000000000000000001 /* SessionNavigationState.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10900000000000000000011 /* SessionNavigationState.swift */; };
 		A04300000000000000000002 /* SessionListActionConfirmations.swift in Sources */ = {isa = PBXBuildFile; fileRef = A04300000000000000000012 /* SessionListActionConfirmations.swift */; };
 		A04300000000000000000003 /* SessionMutator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A04300000000000000000013 /* SessionMutator.swift */; };
@@ -242,6 +250,13 @@
 		1A2B3C4D5E6F7000000000F2 /* CacheStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F7000000000F4 /* CacheStoreTests.swift */; };
 		C04400000000000000000003 /* CacheFallbackPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C04400000000000000000004 /* CacheFallbackPolicyTests.swift */; };
 		1A2B3C4D5E6F7000000000F5 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F7000000000F6 /* SettingsView.swift */; };
+		D9268D0B8F0FC99075675206 /* SettingsView+Sections.swift in Sources */ = {isa = PBXBuildFile; fileRef = 357EEFD5B5F6E6421F3FD62B /* SettingsView+Sections.swift */; };
+		55B6860B8AB944804C9773EE /* SettingsView+MoreSections.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00E5E71FE9759AF1127F0F0B /* SettingsView+MoreSections.swift */; };
+		FE91342F1262F02F12B77093 /* SettingsView+Helpers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1CCDB8903B222D996923CF8F /* SettingsView+Helpers.swift */; };
+		881286D367840E6484A85457 /* SettingsView+ServerHelpers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55C2854AA60C0D5FC5D948DA /* SettingsView+ServerHelpers.swift */; };
+		4C9319B03D6BC9E55B768670 /* SettingsComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DB4A1FFF1135456F8953A37 /* SettingsComponents.swift */; };
+		3E43B666FCB1D2ADF9CC3CA7 /* SettingsServerComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = F5EEC57233566C40C7AD65A8 /* SettingsServerComponents.swift */; };
+		FDA3D72D34195855013805CD /* SettingsServerViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 65DCDA975C43F9430CEB2E4B /* SettingsServerViews.swift */; };
 		1A2B3C4D5E6F7000000000F8 /* AppConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F7000000000F9 /* AppConfig.swift */; };
 		C09200000000000000000001 /* AppFont.swift in Sources */ = {isa = PBXBuildFile; fileRef = C09200000000000000000002 /* AppFont.swift */; };
 		1A2B3C4D5E6F700000000100 /* AppTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F700000000101 /* AppTheme.swift */; };
@@ -327,7 +342,32 @@
 		D2C810000000000000000001 /* DirectKanbanDataClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2C810000000000000000002 /* DirectKanbanDataClient.swift */; };
 		D2C810000000000000000003 /* DirectKanbanDataClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2C810000000000000000004 /* DirectKanbanDataClientTests.swift */; };
 		C14900000000000000000005 /* KanbanFeatureState.swift in Sources */ = {isa = PBXBuildFile; fileRef = C14900000000000000000006 /* KanbanFeatureState.swift */; };
+		CAA483F5A9DC9079C73419D6 /* KanbanStateTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 789E15B7386131208B7BABD6 /* KanbanStateTypes.swift */; };
+		E131591A769213F9B0580AC8 /* KanbanFeatureStateCapabilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = 321EDCB5A7A737E7A873846F /* KanbanFeatureStateCapabilities.swift */; };
+		E22BB16DEFBAC3D3210D19A8 /* KanbanFeatureStateBrowsing.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA2B08E58B4CEF57CC5543D5 /* KanbanFeatureStateBrowsing.swift */; };
+		B6780F920F25B013CB574EB1 /* KanbanFeatureStateCardMutations.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01E887A521FCE7E55C38A26D /* KanbanFeatureStateCardMutations.swift */; };
+		B564FBD1FECE337065778B21 /* KanbanFeatureStateLoading.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF69A48F5DD3B72D7E76E66F /* KanbanFeatureStateLoading.swift */; };
+		4540D5651692B245668F0489 /* KanbanFeatureStateDispatch.swift in Sources */ = {isa = PBXBuildFile; fileRef = 934E9137A3651081C02EDB89 /* KanbanFeatureStateDispatch.swift */; };
+		EC51D19DF346E76FBF1BD075 /* KanbanFeatureStateFilters.swift in Sources */ = {isa = PBXBuildFile; fileRef = D61E1B0BB5292B8CF72B5471 /* KanbanFeatureStateFilters.swift */; };
+		2642CB6095C1FC79ADA33DA7 /* KanbanFeatureStateBulkActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C6C32B9D637C3B2036A8702 /* KanbanFeatureStateBulkActions.swift */; };
+		768D5A4FB52E99F004BC7684 /* KanbanFeatureStateStatusMutation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D57EACFAF710DE8091CE7DB /* KanbanFeatureStateStatusMutation.swift */; };
+		E5C62C1D1744FE220A119386 /* KanbanFeatureStatePrerequisites.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B56AFBDA6AA5FE5DD6DE23C /* KanbanFeatureStatePrerequisites.swift */; };
+		37862FA2BE0C0728E7D6597F /* KanbanFeatureStateSnapshots.swift in Sources */ = {isa = PBXBuildFile; fileRef = 492822BDDB755339D93DC87F /* KanbanFeatureStateSnapshots.swift */; };
+		04198F9574B006D81CB20667 /* KanbanFeatureStateBoardMutation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62F7169973520CD756F2244D /* KanbanFeatureStateBoardMutation.swift */; };
+		CD93DC5F25BDAC212045E28E /* KanbanFeatureStateLiveUpdates.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D651FE4279A976647A5B722 /* KanbanFeatureStateLiveUpdates.swift */; };
+		82CEF2338C83B9D5365D4CDB /* KanbanFeatureStateReads.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7A28B91ECB96DCEC0D13032 /* KanbanFeatureStateReads.swift */; };
 		C14900000000000000000007 /* KanbanLabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C14900000000000000000008 /* KanbanLabView.swift */; };
+		A5EA36DEF7F252C370024548 /* KanbanStatusFocusViewDispatcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28A4232D4B99FC482AD7E792 /* KanbanStatusFocusViewDispatcher.swift */; };
+		D6B6C9DD5FAFC268407BAB50 /* KanbanStatusFocusViewBanners.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0605AE9E3DB4E70917B4C93D /* KanbanStatusFocusViewBanners.swift */; };
+		6C0101BCE544A0DC9494B941 /* KanbanStatusFocusViewSelector.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3FBDA8072CE90CE4870EF2E /* KanbanStatusFocusViewSelector.swift */; };
+		EACB0B7E4D19C10E40B2276A /* KanbanStatusFocusViewCards.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70A3C70E093C1A48FB1CCC72 /* KanbanStatusFocusViewCards.swift */; };
+		189BBDC5E6F692A3240AF542 /* KanbanBoardManagementViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD9EF80DB3AF5159C8230463 /* KanbanBoardManagementViews.swift */; };
+		995A67F1E31ED3A752F32A6C /* KanbanBoardEditorViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = E56B47E2F9BF975C676A2A28 /* KanbanBoardEditorViews.swift */; };
+		1B8D6D58FE9B12A33D1B4179 /* KanbanCardViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12260777EFAC34F20A1375FE /* KanbanCardViews.swift */; };
+		480736E98A1D1F38E3BC4869 /* KanbanPresentations.swift in Sources */ = {isa = PBXBuildFile; fileRef = BCD852E911F6350B0D72AF48 /* KanbanPresentations.swift */; };
+		8B5FEBAC110B1BFCF109BDF2 /* KanbanLab.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39EC5CA980F4E42DA20D407B /* KanbanLab.swift */; };
+		18893720EE86A5167E6C2C1A /* KanbanLabClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 95DB1BA39F3F47177AFCF885 /* KanbanLabClient.swift */; };
+		E31BB6D5A857DC063F5BF2F3 /* KanbanLabClientMethods.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E795B72FFA76801410FA580 /* KanbanLabClientMethods.swift */; };
 		C1490000000000000000000B /* KanbanFeatureStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1490000000000000000000C /* KanbanFeatureStateTests.swift */; };
 		C15100000000000000000001 /* KanbanEventStreamClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = C15100000000000000000002 /* KanbanEventStreamClient.swift */; };
 		C15100000000000000000003 /* KanbanEventStreamClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C15100000000000000000004 /* KanbanEventStreamClientTests.swift */; };
@@ -429,6 +469,15 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		6FAE828EC51BD9F87EB50E8C /* SessionListActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListActions.swift; sourceTree = "<group>"; };
+		4B24A12A6666A5029EBFD47A /* SessionListState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListState.swift; sourceTree = "<group>"; };
+		A39745F18FD3347BA4AEA0E0 /* SessionListUtilityViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListUtilityViews.swift; sourceTree = "<group>"; };
+		BAB612CCA6591C401D5B6B16 /* SessionListFilterViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListFilterViews.swift; sourceTree = "<group>"; };
+		0D4839D9F7A13BB31274E156 /* SessionListRowViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListRowViews.swift; sourceTree = "<group>"; };
+		7817C942EF4FF1A1E1CB2FE3 /* SessionListMenus.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListMenus.swift; sourceTree = "<group>"; };
+		73161443CDA7F56BBBDE8E7B /* ScheduledSessionsComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScheduledSessionsComponents.swift; sourceTree = "<group>"; };
+		F5793C50B72392AABB0D39A6 /* SessionListSkeleton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListSkeleton.swift; sourceTree = "<group>"; };
+		1C1F433656C909C785E1C24B /* SessionListViewExtensions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListViewExtensions.swift; sourceTree = "<group>"; };
 		E91400000000000000000001 /* HostedBotGroup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostedBotGroup.swift; sourceTree = "<group>"; };
 		E91400000000000000000003 /* HostedBotGroupTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostedBotGroupTests.swift; sourceTree = "<group>"; };
 		E91300000000000000000001 /* BirdAvatarIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BirdAvatarIdentity.swift; sourceTree = "<group>"; };
@@ -580,7 +629,6 @@
 		C05100000000000000000014 /* ChatTranscriptSupportingViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatTranscriptSupportingViews.swift; sourceTree = "<group>"; };
 		1A2B3C4D5E6F7000000000D2 /* SessionRowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionRowView.swift; sourceTree = "<group>"; };
 		1A2B3C4D5E6F7000000000D3 /* SessionListViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListViewModel.swift; sourceTree = "<group>"; };
-		A04300000000000000000011 /* SessionListComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListComponents.swift; sourceTree = "<group>"; };
 		A10900000000000000000011 /* SessionNavigationState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionNavigationState.swift; sourceTree = "<group>"; };
 		A04300000000000000000012 /* SessionListActionConfirmations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListActionConfirmations.swift; sourceTree = "<group>"; };
 		A04300000000000000000013 /* SessionMutator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionMutator.swift; sourceTree = "<group>"; };
@@ -656,6 +704,13 @@
 		1A2B3C4D5E6F7000000000F4 /* CacheStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CacheStoreTests.swift; sourceTree = "<group>"; };
 		C04400000000000000000004 /* CacheFallbackPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CacheFallbackPolicyTests.swift; sourceTree = "<group>"; };
 		1A2B3C4D5E6F7000000000F6 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		357EEFD5B5F6E6421F3FD62B /* SettingsView+Sections.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SettingsView+Sections.swift"; sourceTree = "<group>"; };
+		00E5E71FE9759AF1127F0F0B /* SettingsView+MoreSections.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SettingsView+MoreSections.swift"; sourceTree = "<group>"; };
+		1CCDB8903B222D996923CF8F /* SettingsView+Helpers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SettingsView+Helpers.swift"; sourceTree = "<group>"; };
+		55C2854AA60C0D5FC5D948DA /* SettingsView+ServerHelpers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SettingsView+ServerHelpers.swift"; sourceTree = "<group>"; };
+		0DB4A1FFF1135456F8953A37 /* SettingsComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsComponents.swift; sourceTree = "<group>"; };
+		F5EEC57233566C40C7AD65A8 /* SettingsServerComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsServerComponents.swift; sourceTree = "<group>"; };
+		65DCDA975C43F9430CEB2E4B /* SettingsServerViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsServerViews.swift; sourceTree = "<group>"; };
 		1A2B3C4D5E6F7000000000F9 /* AppConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfig.swift; sourceTree = "<group>"; };
 		C09200000000000000000002 /* AppFont.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppFont.swift; sourceTree = "<group>"; };
 		1A2B3C4D5E6F700000000101 /* AppTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppTheme.swift; sourceTree = "<group>"; };
@@ -764,7 +819,32 @@
 		D2C810000000000000000002 /* DirectKanbanDataClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectKanbanDataClient.swift; sourceTree = "<group>"; };
 		D2C810000000000000000004 /* DirectKanbanDataClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectKanbanDataClientTests.swift; sourceTree = "<group>"; };
 		C14900000000000000000006 /* KanbanFeatureState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanFeatureState.swift; sourceTree = "<group>"; };
+		789E15B7386131208B7BABD6 /* KanbanStateTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanStateTypes.swift; sourceTree = "<group>"; };
+		321EDCB5A7A737E7A873846F /* KanbanFeatureStateCapabilities.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanFeatureStateCapabilities.swift; sourceTree = "<group>"; };
+		DA2B08E58B4CEF57CC5543D5 /* KanbanFeatureStateBrowsing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanFeatureStateBrowsing.swift; sourceTree = "<group>"; };
+		01E887A521FCE7E55C38A26D /* KanbanFeatureStateCardMutations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanFeatureStateCardMutations.swift; sourceTree = "<group>"; };
+		AF69A48F5DD3B72D7E76E66F /* KanbanFeatureStateLoading.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanFeatureStateLoading.swift; sourceTree = "<group>"; };
+		934E9137A3651081C02EDB89 /* KanbanFeatureStateDispatch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanFeatureStateDispatch.swift; sourceTree = "<group>"; };
+		D61E1B0BB5292B8CF72B5471 /* KanbanFeatureStateFilters.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanFeatureStateFilters.swift; sourceTree = "<group>"; };
+		7C6C32B9D637C3B2036A8702 /* KanbanFeatureStateBulkActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanFeatureStateBulkActions.swift; sourceTree = "<group>"; };
+		1D57EACFAF710DE8091CE7DB /* KanbanFeatureStateStatusMutation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanFeatureStateStatusMutation.swift; sourceTree = "<group>"; };
+		4B56AFBDA6AA5FE5DD6DE23C /* KanbanFeatureStatePrerequisites.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanFeatureStatePrerequisites.swift; sourceTree = "<group>"; };
+		492822BDDB755339D93DC87F /* KanbanFeatureStateSnapshots.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanFeatureStateSnapshots.swift; sourceTree = "<group>"; };
+		62F7169973520CD756F2244D /* KanbanFeatureStateBoardMutation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanFeatureStateBoardMutation.swift; sourceTree = "<group>"; };
+		3D651FE4279A976647A5B722 /* KanbanFeatureStateLiveUpdates.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanFeatureStateLiveUpdates.swift; sourceTree = "<group>"; };
+		E7A28B91ECB96DCEC0D13032 /* KanbanFeatureStateReads.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanFeatureStateReads.swift; sourceTree = "<group>"; };
 		C14900000000000000000008 /* KanbanLabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanLabView.swift; sourceTree = "<group>"; };
+		28A4232D4B99FC482AD7E792 /* KanbanStatusFocusViewDispatcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanStatusFocusViewDispatcher.swift; sourceTree = "<group>"; };
+		0605AE9E3DB4E70917B4C93D /* KanbanStatusFocusViewBanners.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanStatusFocusViewBanners.swift; sourceTree = "<group>"; };
+		D3FBDA8072CE90CE4870EF2E /* KanbanStatusFocusViewSelector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanStatusFocusViewSelector.swift; sourceTree = "<group>"; };
+		70A3C70E093C1A48FB1CCC72 /* KanbanStatusFocusViewCards.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanStatusFocusViewCards.swift; sourceTree = "<group>"; };
+		DD9EF80DB3AF5159C8230463 /* KanbanBoardManagementViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanBoardManagementViews.swift; sourceTree = "<group>"; };
+		E56B47E2F9BF975C676A2A28 /* KanbanBoardEditorViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanBoardEditorViews.swift; sourceTree = "<group>"; };
+		12260777EFAC34F20A1375FE /* KanbanCardViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanCardViews.swift; sourceTree = "<group>"; };
+		BCD852E911F6350B0D72AF48 /* KanbanPresentations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanPresentations.swift; sourceTree = "<group>"; };
+		39EC5CA980F4E42DA20D407B /* KanbanLab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanLab.swift; sourceTree = "<group>"; };
+		95DB1BA39F3F47177AFCF885 /* KanbanLabClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanLabClient.swift; sourceTree = "<group>"; };
+		2E795B72FFA76801410FA580 /* KanbanLabClientMethods.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanLabClientMethods.swift; sourceTree = "<group>"; };
 		C1490000000000000000000C /* KanbanFeatureStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanFeatureStateTests.swift; sourceTree = "<group>"; };
 		C15100000000000000000002 /* KanbanEventStreamClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanEventStreamClient.swift; sourceTree = "<group>"; };
 		C15100000000000000000004 /* KanbanEventStreamClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanEventStreamClientTests.swift; sourceTree = "<group>"; };
@@ -1185,7 +1265,32 @@
 			isa = PBXGroup;
 			children = (
 				C14900000000000000000006 /* KanbanFeatureState.swift */,
+				789E15B7386131208B7BABD6 /* KanbanStateTypes.swift */,
+				321EDCB5A7A737E7A873846F /* KanbanFeatureStateCapabilities.swift */,
+				DA2B08E58B4CEF57CC5543D5 /* KanbanFeatureStateBrowsing.swift */,
+				01E887A521FCE7E55C38A26D /* KanbanFeatureStateCardMutations.swift */,
+				AF69A48F5DD3B72D7E76E66F /* KanbanFeatureStateLoading.swift */,
+				934E9137A3651081C02EDB89 /* KanbanFeatureStateDispatch.swift */,
+				D61E1B0BB5292B8CF72B5471 /* KanbanFeatureStateFilters.swift */,
+				7C6C32B9D637C3B2036A8702 /* KanbanFeatureStateBulkActions.swift */,
+				1D57EACFAF710DE8091CE7DB /* KanbanFeatureStateStatusMutation.swift */,
+				4B56AFBDA6AA5FE5DD6DE23C /* KanbanFeatureStatePrerequisites.swift */,
+				492822BDDB755339D93DC87F /* KanbanFeatureStateSnapshots.swift */,
+				62F7169973520CD756F2244D /* KanbanFeatureStateBoardMutation.swift */,
+				3D651FE4279A976647A5B722 /* KanbanFeatureStateLiveUpdates.swift */,
+				E7A28B91ECB96DCEC0D13032 /* KanbanFeatureStateReads.swift */,
 				C14900000000000000000008 /* KanbanLabView.swift */,
+				28A4232D4B99FC482AD7E792 /* KanbanStatusFocusViewDispatcher.swift */,
+				0605AE9E3DB4E70917B4C93D /* KanbanStatusFocusViewBanners.swift */,
+				D3FBDA8072CE90CE4870EF2E /* KanbanStatusFocusViewSelector.swift */,
+				70A3C70E093C1A48FB1CCC72 /* KanbanStatusFocusViewCards.swift */,
+				DD9EF80DB3AF5159C8230463 /* KanbanBoardManagementViews.swift */,
+				E56B47E2F9BF975C676A2A28 /* KanbanBoardEditorViews.swift */,
+				12260777EFAC34F20A1375FE /* KanbanCardViews.swift */,
+				BCD852E911F6350B0D72AF48 /* KanbanPresentations.swift */,
+				39EC5CA980F4E42DA20D407B /* KanbanLab.swift */,
+				95DB1BA39F3F47177AFCF885 /* KanbanLabClient.swift */,
+				2E795B72FFA76801410FA580 /* KanbanLabClientMethods.swift */,
 				C15400000000000000000002 /* KanbanCardDetailState.swift */,
 				C15400000000000000000004 /* KanbanCardDetailView.swift */,
 				C15300000000000000000002 /* KanbanCardEditorState.swift */,
@@ -1209,9 +1314,17 @@
 			isa = PBXGroup;
 			children = (
 				1A2B3C4D5E6F7000000000B7 /* SessionListView.swift */,
+				6FAE828EC51BD9F87EB50E8C /* SessionListActions.swift */,
+				4B24A12A6666A5029EBFD47A /* SessionListState.swift */,
+				A39745F18FD3347BA4AEA0E0 /* SessionListUtilityViews.swift */,
+				BAB612CCA6591C401D5B6B16 /* SessionListFilterViews.swift */,
+				0D4839D9F7A13BB31274E156 /* SessionListRowViews.swift */,
+				7817C942EF4FF1A1E1CB2FE3 /* SessionListMenus.swift */,
+				73161443CDA7F56BBBDE8E7B /* ScheduledSessionsComponents.swift */,
+				F5793C50B72392AABB0D39A6 /* SessionListSkeleton.swift */,
+				1C1F433656C909C785E1C24B /* SessionListViewExtensions.swift */,
 				1A2B3C4D5E6F7000000000D2 /* SessionRowView.swift */,
 				1A2B3C4D5E6F7000000000D3 /* SessionListViewModel.swift */,
-				A04300000000000000000011 /* SessionListComponents.swift */,
 				A10900000000000000000011 /* SessionNavigationState.swift */,
 				A04300000000000000000012 /* SessionListActionConfirmations.swift */,
 				A04300000000000000000013 /* SessionMutator.swift */,
@@ -1332,6 +1445,13 @@
 			isa = PBXGroup;
 			children = (
 				1A2B3C4D5E6F7000000000F6 /* SettingsView.swift */,
+				357EEFD5B5F6E6421F3FD62B /* SettingsView+Sections.swift */,
+				00E5E71FE9759AF1127F0F0B /* SettingsView+MoreSections.swift */,
+				1CCDB8903B222D996923CF8F /* SettingsView+Helpers.swift */,
+				55C2854AA60C0D5FC5D948DA /* SettingsView+ServerHelpers.swift */,
+				0DB4A1FFF1135456F8953A37 /* SettingsComponents.swift */,
+				F5EEC57233566C40C7AD65A8 /* SettingsServerComponents.swift */,
+				65DCDA975C43F9430CEB2E4B /* SettingsServerViews.swift */,
 				C012400000000000000003 /* AppIconSettingsSection.swift */,
 				1A2B3C4D5E6F70000000115 /* DefaultModelPickerView.swift */,
 				103200000000000000000001 /* DefaultProfilePickerView.swift */,
@@ -1749,7 +1869,32 @@
 				D2C810000000000000000001 /* DirectKanbanDataClient.swift in Sources */,
 				C15100000000000000000001 /* KanbanEventStreamClient.swift in Sources */,
 				C14900000000000000000005 /* KanbanFeatureState.swift in Sources */,
+				CAA483F5A9DC9079C73419D6 /* KanbanStateTypes.swift in Sources */,
+				E131591A769213F9B0580AC8 /* KanbanFeatureStateCapabilities.swift in Sources */,
+				E22BB16DEFBAC3D3210D19A8 /* KanbanFeatureStateBrowsing.swift in Sources */,
+				B6780F920F25B013CB574EB1 /* KanbanFeatureStateCardMutations.swift in Sources */,
+				B564FBD1FECE337065778B21 /* KanbanFeatureStateLoading.swift in Sources */,
+				4540D5651692B245668F0489 /* KanbanFeatureStateDispatch.swift in Sources */,
+				EC51D19DF346E76FBF1BD075 /* KanbanFeatureStateFilters.swift in Sources */,
+				2642CB6095C1FC79ADA33DA7 /* KanbanFeatureStateBulkActions.swift in Sources */,
+				768D5A4FB52E99F004BC7684 /* KanbanFeatureStateStatusMutation.swift in Sources */,
+				E5C62C1D1744FE220A119386 /* KanbanFeatureStatePrerequisites.swift in Sources */,
+				37862FA2BE0C0728E7D6597F /* KanbanFeatureStateSnapshots.swift in Sources */,
+				04198F9574B006D81CB20667 /* KanbanFeatureStateBoardMutation.swift in Sources */,
+				CD93DC5F25BDAC212045E28E /* KanbanFeatureStateLiveUpdates.swift in Sources */,
+				82CEF2338C83B9D5365D4CDB /* KanbanFeatureStateReads.swift in Sources */,
 				C14900000000000000000007 /* KanbanLabView.swift in Sources */,
+				A5EA36DEF7F252C370024548 /* KanbanStatusFocusViewDispatcher.swift in Sources */,
+				D6B6C9DD5FAFC268407BAB50 /* KanbanStatusFocusViewBanners.swift in Sources */,
+				6C0101BCE544A0DC9494B941 /* KanbanStatusFocusViewSelector.swift in Sources */,
+				EACB0B7E4D19C10E40B2276A /* KanbanStatusFocusViewCards.swift in Sources */,
+				189BBDC5E6F692A3240AF542 /* KanbanBoardManagementViews.swift in Sources */,
+				995A67F1E31ED3A752F32A6C /* KanbanBoardEditorViews.swift in Sources */,
+				1B8D6D58FE9B12A33D1B4179 /* KanbanCardViews.swift in Sources */,
+				480736E98A1D1F38E3BC4869 /* KanbanPresentations.swift in Sources */,
+				8B5FEBAC110B1BFCF109BDF2 /* KanbanLab.swift in Sources */,
+				18893720EE86A5167E6C2C1A /* KanbanLabClient.swift in Sources */,
+				E31BB6D5A857DC063F5BF2F3 /* KanbanLabClientMethods.swift in Sources */,
 				C15400000000000000000001 /* KanbanCardDetailState.swift in Sources */,
 				C15400000000000000000003 /* KanbanCardDetailView.swift in Sources */,
 				C15300000000000000000001 /* KanbanCardEditorState.swift in Sources */,
@@ -1792,6 +1937,13 @@
 				1A2B3C4D5E6F7000000000F1 /* CacheStore.swift in Sources */,
 				D50A00000000000000000001 /* LocalOrganizerStore.swift in Sources */,
 				1A2B3C4D5E6F7000000000F5 /* SettingsView.swift in Sources */,
+				D9268D0B8F0FC99075675206 /* SettingsView+Sections.swift in Sources */,
+				55B6860B8AB944804C9773EE /* SettingsView+MoreSections.swift in Sources */,
+				FE91342F1262F02F12B77093 /* SettingsView+Helpers.swift in Sources */,
+				881286D367840E6484A85457 /* SettingsView+ServerHelpers.swift in Sources */,
+				4C9319B03D6BC9E55B768670 /* SettingsComponents.swift in Sources */,
+				3E43B666FCB1D2ADF9CC3CA7 /* SettingsServerComponents.swift in Sources */,
+				FDA3D72D34195855013805CD /* SettingsServerViews.swift in Sources */,
 				C012400000000000000004 /* AppIconSettingsSection.swift in Sources */,
 				1A2B3C4D5E6F70000000114 /* DefaultModelPickerView.swift in Sources */,
 				103200000000000000000002 /* DefaultProfilePickerView.swift in Sources */,
@@ -1810,6 +1962,15 @@
 				C09500000000000000000001 /* AdaptiveGlassModifier.swift in Sources */,
 				C09500000000000000000005 /* AdaptiveGlassDebugFixture.swift in Sources */,
 					1A2B3C4D5E6F7000000000A7 /* SessionListView.swift in Sources */,
+				814BBCCF6E3422CE7EDB4254 /* SessionListActions.swift in Sources */,
+				E6E3A8EAEA9415264CB97E10 /* SessionListState.swift in Sources */,
+				01AFAA007B61440A23B9F06D /* SessionListUtilityViews.swift in Sources */,
+				E678FC45B73234EB905ED3A1 /* SessionListFilterViews.swift in Sources */,
+				20475FF71FF39442CAC75E01 /* SessionListRowViews.swift in Sources */,
+				0C2341FC74119EA4B57F9A16 /* SessionListMenus.swift in Sources */,
+				466F6CD6F6527C460E414144 /* ScheduledSessionsComponents.swift in Sources */,
+				DE530802218298B256E3EC42 /* SessionListSkeleton.swift in Sources */,
+				32E310C6E45AD8077072DC21 /* SessionListViewExtensions.swift in Sources */,
 					1A2B3C4D5E6F7000000000AF /* ChatView.swift in Sources */,
 					C05100000000000000000001 /* ChatTranscriptView.swift in Sources */,
 					C05100000000000000000002 /* ChatMessageActions.swift in Sources */,
@@ -1873,7 +2034,6 @@
 				C0FF000000000000000000A1 /* CustomHeader.swift in Sources */,
 				1A2B3C4D5E6F7000000000D0 /* SessionRowView.swift in Sources */,
 				1A2B3C4D5E6F7000000000D1 /* SessionListViewModel.swift in Sources */,
-				A04300000000000000000001 /* SessionListComponents.swift in Sources */,
 				A10900000000000000000001 /* SessionNavigationState.swift in Sources */,
 				A04300000000000000000002 /* SessionListActionConfirmations.swift in Sources */,
 				A04300000000000000000003 /* SessionMutator.swift in Sources */,
