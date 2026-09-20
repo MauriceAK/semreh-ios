@@ -40,11 +40,12 @@ extension KanbanFeatureState {
         assigneeHistory = nil
         capabilityWarnings = []
         defer {
-            guard activeLoadID == loadID else { return }
-            isLoading = false
-            if Task.isCancelled, snapshot == nil {
-                report = nil
-                state = .idle
+            if activeLoadID == loadID {
+                isLoading = false
+                if Task.isCancelled, snapshot == nil {
+                    report = nil
+                    state = .idle
+                }
             }
         }
 
