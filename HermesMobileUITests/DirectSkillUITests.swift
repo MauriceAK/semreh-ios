@@ -235,9 +235,11 @@ final class DirectSkillUITests: XCTestCase {
         let controls = app.buttons.matching(NSPredicate(format: "label == %@", "Chat controls")).firstMatch
         XCTAssertTrue(controls.waitForExistence(timeout: 5) && controls.isHittable); controls.tap()
         XCTAssertTrue(app.navigationBars["Chat controls"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["Models"].exists)
-        XCTAssertTrue(app.staticTexts["Custom endpoint"].exists,
-                      "Opening Chat controls must expose actual model choices directly.")
+        XCTAssertTrue(app.staticTexts["chatControlsCurrentModel"].exists)
+        XCTAssertTrue(app.staticTexts["chatControlsConfigurationReadOnly"].exists)
+        XCTAssertFalse(app.staticTexts["Models"].exists)
+        XCTAssertFalse(app.staticTexts["Custom endpoint"].exists)
+        XCTAssertFalse(app.searchFields["Search models"].exists)
         XCTAssertTrue(app.sliders.firstMatch.exists)
         XCTAssertTrue(app.staticTexts["Context usage unavailable"].exists || app.progressIndicators["Context used"].exists)
         retainPreviewScreenshot("Preview chat sliders and context", app: app)
@@ -245,6 +247,10 @@ final class DirectSkillUITests: XCTestCase {
 
         let options = app.buttons["Chat options"]
         XCTAssertTrue(options.waitForExistence(timeout: 5) && options.isHittable); options.tap()
+        let readOnlyWorkspace = app.buttons["Workspace is read-only"]
+        XCTAssertTrue(readOnlyWorkspace.waitForExistence(timeout: 5))
+        XCTAssertFalse(readOnlyWorkspace.isEnabled)
+        XCTAssertFalse(app.buttons["Choose workspace path"].exists)
         let files = app.buttons["Files"]
         XCTAssertTrue(files.waitForExistence(timeout: 5) && files.isHittable); files.tap()
         let filesNavigationBar = app.navigationBars["Files"]
