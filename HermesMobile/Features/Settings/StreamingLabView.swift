@@ -10,6 +10,8 @@ struct StreamingLabView: View {
     @State private var isStreaming = false
     @State private var replayID = 0
     @State private var followsTail = true
+    @State private var usesRegressionConversation = false
+    @State private var regressionConversationIndex = 0
     // Surfaced here because the user setting silently disables every fade
     // knob below — invisible state the lab must make visible (see the #232
     // textSelection dead-cascade hunt).
@@ -73,6 +75,29 @@ struct StreamingLabView: View {
 
             Toggle("Follow tail while streaming", isOn: $followsTail)
                 .font(.subheadline)
+
+            Toggle("Realistic synthetic conversation", isOn: $usesRegressionConversation)
+                .font(.subheadline)
+                .onChange(of: usesRegressionConversation) { _, _ in replayID += 1 }
+
+            if usesRegressionConversation {
+                Stepper(
+                    "Conversation \(regressionConversationIndex + 1) of \(StreamingLabReplay.regressionConversationCount)",
+                    value: $regressionConversationIndex,
+                    in: 0...(StreamingLabReplay.regressionConversationCount - 1)
+                )
+                .font(.subheadline)
+                .onChange(of: regressionConversationIndex) { _, _ in replayID += 1 }
+
+                Text(StreamingLabReplay.corpusMetadata.report)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+
+                Text("Synthetic callback/load evidence only. Physical-device hitches and FPS require a separate native trace.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
 
             Toggle("Streamed text animation (user setting)", isOn: $isStreamedTextAnimationEnabled)
                 .font(.subheadline)
@@ -179,8 +204,10 @@ struct StreamingLabView: View {
         displayedContent = ""
         isStreaming = true
 
-        let fixture = StreamingLabReplay.fixture
-        let totalUnits = StreamingLabReplay.fixtureUnitCount
+        let fixture = usesRegressionConversation
+            ? StreamingLabReplay.regressionConversation(at: regressionConversationIndex)
+            : StreamingLabReplay.fixture
+        let totalUnits = StreamingWordDrain.unitCount(in: fixture)
         var revealed = 0
         var carry = 0.0
 

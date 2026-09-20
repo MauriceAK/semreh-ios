@@ -56,9 +56,90 @@ enum StreamingLabReplay {
     fadeable text and the completion linger is visible at the very end.
     """
 
+    /// Deterministic, server-free workload metadata for regression runs. It
+    /// describes the same content classes exercised by the native performance
+    /// fixture without pretending a synthetic replay is a device acceptance
+    /// result. Payloads stay compact: the corpus is generated from these
+    /// templates instead of retaining hundreds of copied strings.
+    enum FixtureContentKind: String, CaseIterable {
+        case richMarkdown = "rich_markdown"
+        case code
+        case tool
+        case media
+    }
+
+    struct CorpusMetadata: Equatable {
+        let conversationCount: Int
+        let messagesPerConversation: Int
+        let totalMessageCount: Int
+        let approximateUTF8Bytes: Int
+        let contentKinds: Set<FixtureContentKind>
+
+        var report: String {
+            let kinds = contentKinds.map(\.rawValue).sorted().joined(separator: ",")
+            return "synthetic_fixture=true conversations=\(conversationCount) "
+                + "messages_per_conversation=\(messagesPerConversation) "
+                + "total_messages=\(totalMessageCount) approximate_utf8_bytes=\(approximateUTF8Bytes) "
+                + "content_kinds=\(kinds) native_device_acceptance=required_separately"
+        }
+    }
+
+    static let regressionConversationCount = 12
+    static let regressionMessagesPerConversation = 50
+
     static var fixtureUnitCount: Int {
         StreamingWordDrain.unitCount(in: fixture)
     }
+
+    static var corpusMetadata: CorpusMetadata {
+        let templates = regressionMessageTemplates
+        let bytesPerConversation = (0..<regressionMessagesPerConversation).reduce(into: 0) { total, index in
+            total += templates[index % templates.count].payload.utf8.count
+        }
+        return CorpusMetadata(
+            conversationCount: regressionConversationCount,
+            messagesPerConversation: regressionMessagesPerConversation,
+            totalMessageCount: regressionConversationCount * regressionMessagesPerConversation,
+            approximateUTF8Bytes: bytesPerConversation * regressionConversationCount,
+            contentKinds: Set(templates.map(\.kind))
+        )
+    }
+
+    /// Returns one deterministic conversation from the realistic-size corpus.
+    /// The lab still mounts only one conversation at a time so opting in does
+    /// not silently turn normal app launch into a performance workload.
+    static func regressionConversation(at index: Int) -> String {
+        guard regressionConversationCount > 0 else { return "" }
+        let conversation = min(max(index, 0), regressionConversationCount - 1)
+        let templates = regressionMessageTemplates
+        return (0..<regressionMessagesPerConversation).map { message in
+            let template = templates[(conversation + message) % templates.count]
+            return "## Message \(message + 1) · \(template.kind.rawValue)\n\n\(template.payload)"
+        }.joined(separator: "\n\n---\n\n")
+    }
+
+    private static let regressionMessageTemplates: [(kind: FixtureContentKind, payload: String)] = [
+        (.richMarkdown, fixture),
+        (.code, """
+        ```swift
+        struct Row: Identifiable { let id: Int; let title: String }
+        let rows = (0..<250).map { Row(id: $0, title: "Row \\($0)") }
+        ```
+        """),
+        (.tool, """
+        **Tool activity fixture** — `read_file` completed with a bounded preview.
+
+        ```json
+        {"path":"Sources/Transcript.swift","lines":240,"truncated":true}
+        ```
+        """),
+        (.media, """
+        Media references exercise parser paths without network access:
+        MEDIA:/fixtures/performance/image-01.png
+        MEDIA:/fixtures/performance/clip-01.m4a
+        MEDIA:/fixtures/performance/document-01.pdf
+        """)
+    ]
 
     /// First `unitCount` word units of `text`.
     static func prefix(of text: String, unitCount: Int) -> String {

@@ -36,6 +36,55 @@ final class StreamingLabReplayTests: XCTestCase {
         XCTAssertGreaterThan(longestLine, 300, "needs a paragraph long enough to wrap several lines")
     }
 
+    // MARK: - Realistic regression corpus
+
+    func testRegressionCorpusRecordsRealisticMultiConversationFixtureSize() {
+        let metadata = StreamingLabReplay.corpusMetadata
+
+        XCTAssertEqual(metadata.conversationCount, 12)
+        XCTAssertEqual(metadata.messagesPerConversation, 50)
+        XCTAssertEqual(metadata.totalMessageCount, 600)
+        XCTAssertGreaterThan(metadata.approximateUTF8Bytes, 100_000)
+        XCTAssertEqual(metadata.contentKinds, Set(StreamingLabReplay.FixtureContentKind.allCases))
+    }
+
+    func testRegressionConversationCoversMarkdownCodeToolsAndMedia() {
+        let conversation = StreamingLabReplay.regressionConversation(at: 0)
+
+        XCTAssertTrue(conversation.contains("# How the fade should feel"))
+        XCTAssertTrue(conversation.contains("```swift"))
+        XCTAssertTrue(conversation.contains("**Tool activity fixture**"))
+        XCTAssertTrue(conversation.contains("```json"))
+        XCTAssertTrue(conversation.contains("MEDIA:/fixtures/performance/image-01.png"))
+        XCTAssertTrue(conversation.contains("MEDIA:/fixtures/performance/clip-01.m4a"))
+        XCTAssertTrue(conversation.contains("MEDIA:/fixtures/performance/document-01.pdf"))
+        XCTAssertEqual(conversation.components(separatedBy: "## Message ").count - 1, 50)
+    }
+
+    func testRegressionConversationSelectionIsDeterministicAndClamped() {
+        XCTAssertEqual(
+            StreamingLabReplay.regressionConversation(at: -1),
+            StreamingLabReplay.regressionConversation(at: 0)
+        )
+        XCTAssertEqual(
+            StreamingLabReplay.regressionConversation(at: 99),
+            StreamingLabReplay.regressionConversation(at: 11)
+        )
+        XCTAssertNotEqual(
+            StreamingLabReplay.regressionConversation(at: 0),
+            StreamingLabReplay.regressionConversation(at: 1)
+        )
+    }
+
+    func testCorpusReportLabelsSyntheticEvidenceAndRequiresNativeAcceptance() {
+        let report = StreamingLabReplay.corpusMetadata.report
+
+        XCTAssertTrue(report.contains("synthetic_fixture=true"))
+        XCTAssertTrue(report.contains("conversations=12"))
+        XCTAssertTrue(report.contains("total_messages=600"))
+        XCTAssertTrue(report.contains("native_device_acceptance=required_separately"))
+    }
+
     // MARK: - Prefix paging
 
     func testPrefixAtTotalUnitCountReproducesTheFixtureExactly() {

@@ -28,7 +28,10 @@ struct ChatFrameCallbackTimingSummary: Equatable {
 
     var formattedReport: String {
         return ([
-            "measurement=CADisplayLink main-run-loop callback timing only; not presented frames, FPS, or GPU hitch proof",
+            "measurement=CADisplayLink main-run-loop callback timing only",
+            "presented_frame_hitches=not_measured",
+            "fps=not_measured",
+            "gpu_timing=not_measured",
         ] + reportLines())
             .joined(separator: "\n")
     }
@@ -456,7 +459,10 @@ struct ChatPerformanceCadenceMonitorSummary: Equatable {
 
     var formattedReport: String {
         var lines = [
-            "measurement=CADisplayLink main-run-loop callback timing only; not presented frames, FPS, or GPU hitch proof",
+            "measurement=CADisplayLink main-run-loop callback timing only",
+            "presented_frame_hitches=not_measured",
+            "fps=not_measured",
+            "gpu_timing=not_measured",
             "scope=DEBUG opt-in app-wide cadence monitor",
             "sample_duration_seconds=\(String(format: "%.3f", sampleDurationSeconds))",
             "phase_marker_scope=entry ends at ChatView.onAppear; back ends at return observation; send ends when sendDraftMessage returns; not first-presented-frame timing"
