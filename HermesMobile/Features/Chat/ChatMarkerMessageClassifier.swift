@@ -41,7 +41,7 @@ enum ChatMarkerMessageClassifier {
             return .preservedTaskList
         }
 
-        if role == "user", hasCaseInsensitivePrefix(text, processWakeupPrefix) {
+        if role == "user", hasMarkerPrefix(text, processWakeupPrefix) {
             return .processWakeup
         }
 
@@ -57,7 +57,7 @@ enum ChatMarkerMessageClassifier {
     /// gate the synthesized reference card).
     static func isContextCompactionText(_ text: String?) -> Bool {
         let trimmed = (text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        return contextCompactionPrefixes.contains { hasCaseInsensitivePrefix(trimmed, $0) }
+        return contextCompactionPrefixes.contains { hasMarkerPrefix(trimmed, $0) }
     }
 
     /// The card body with the preserved-task-list marker line stripped, so the
@@ -84,5 +84,19 @@ enum ChatMarkerMessageClassifier {
 
     private static func hasCaseInsensitivePrefix(_ text: String, _ prefix: String) -> Bool {
         text.range(of: prefix, options: [.caseInsensitive, .anchored]) != nil
+    }
+
+    /// Marker stems must end at a token boundary. Without this guard, ordinary
+    /// user text such as "context compactional..." or a bracketed note about
+    /// "background processes" is removed from the conversation as a system
+    /// card merely because it begins with the same characters as a marker.
+    private static func hasMarkerPrefix(_ text: String, _ prefix: String) -> Bool {
+        guard let range = text.range(of: prefix, options: [.caseInsensitive, .anchored]) else {
+            return false
+        }
+        guard range.upperBound < text.endIndex else { return true }
+
+        let boundary = text[range.upperBound]
+        return boundary.isWhitespace || boundary == "]" || boundary == ":"
     }
 }
