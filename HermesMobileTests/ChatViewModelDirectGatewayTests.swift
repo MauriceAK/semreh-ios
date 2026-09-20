@@ -3703,7 +3703,8 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
             sessionID: "runtime-1",
             type: "tool.start",
             sequence: 3,
-            payload: ["tool_id": .string("reattached-tool"), "name": .string("read_file")]
+            payload: ["tool_id": .string("reattached-tool"), "name": .string("read_file")],
+            connectionGeneration: 2
         ))
         await waitUntil { viewModel.liveToolCalls.map(\.id).contains("reattached-tool") }
 
@@ -3923,7 +3924,8 @@ private enum ChatDirectEventFactory {
         sessionID: String,
         type: String,
         sequence: Int,
-        payload: [String: JSONValue]? = nil
+        payload: [String: JSONValue]? = nil,
+        connectionGeneration: Int = 1
     ) -> HermesGatewayEvent {
         HermesGatewayEvent(
             method: "event",
@@ -3932,7 +3934,7 @@ private enum ChatDirectEventFactory {
             sequence: sequence,
             payload: payload.map(JSONValue.object),
             params: nil,
-            connectionGeneration: 1
+            connectionGeneration: connectionGeneration
         )
     }
 }
