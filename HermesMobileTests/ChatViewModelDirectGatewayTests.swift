@@ -1082,11 +1082,11 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
             "Hermes chat settings could not be loaded. Your draft was preserved. source=profiles outcome=http_503_server_error has_canonical_session=false profile_scope_present=true"
         )
         XCTAssertFalse(message.contains("private"))
-        guard case .http(let statusCode, let body) = vm.lastError as? APIError else {
-            return XCTFail("The underlying error must remain available")
+        guard case .http(let statusCode, let reason) = vm.lastError as? DirectHermesRequestError else {
+            return XCTFail("The bounded underlying HTTP error must remain available")
         }
         XCTAssertEqual(statusCode, 503)
-        XCTAssertEqual(body, "private profile name and response contents")
+        XCTAssertEqual(reason, .unavailable)
         await vm.disposeDirectConversation()
         await runtime.stop()
     }
