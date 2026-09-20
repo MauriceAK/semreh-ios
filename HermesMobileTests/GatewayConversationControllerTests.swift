@@ -1675,6 +1675,7 @@ final class GatewayConversationControllerTests: XCTestCase {
 
     func testValidEventWithIndependentTransportGenerationIsAccepted() async throws {
         let fake = ControllerFakeTransport()
+        fake.setConnectionIdentifierOffset(1)
         fake.setResumeResponse(.object([
             "session_id": .string("runtime-session"),
             "session_key": .string("stored-chat"),
@@ -2354,6 +2355,7 @@ private final class ControllerFakeTransport: HermesGatewayTransport, @unchecked 
     private var sink: (@Sendable (HermesGatewayEvent) -> Void)?
     private var callsValue: [Call] = []
     private var generationValue = 0
+    private var connectionIdentifierOffset = 0
     private var connected = false
     private var createCount = 0
     private var resumeResponse: JSONValue?
@@ -2402,6 +2404,10 @@ private final class ControllerFakeTransport: HermesGatewayTransport, @unchecked 
 
     func setResumeResponse(_ response: JSONValue) {
         withLock { resumeResponse = response }
+    }
+
+    func setConnectionIdentifierOffset(_ offset: Int) {
+        withLock { connectionIdentifierOffset = offset }
     }
 
     func setResumeError(_ error: HermesGatewayError?) {
@@ -2503,7 +2509,7 @@ private final class ControllerFakeTransport: HermesGatewayTransport, @unchecked 
     }
 
     func connectionIdentifier() async -> Int? {
-        withLock { connected ? generationValue : nil }
+        withLock { connected ? generationValue + connectionIdentifierOffset : nil }
     }
 
     func request(method: String, params: JSONValue?, timeout: Duration?) async throws -> JSONValue? {

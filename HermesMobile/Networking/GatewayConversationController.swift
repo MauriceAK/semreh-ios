@@ -4197,11 +4197,9 @@ final class GatewayConversationController {
 
     private func receive(_ event: HermesGatewayEvent) {
         guard !disposed else { return }
-        // HermesGatewayClient checks socket identity and transport generation
-        // before emitting frames. That generation and HermesServerRuntime's
-        // reconnect counter are independent, so comparing them here rejects
-        // valid first-connection events. Keep session binding checks below;
-        // transport.closed freshness is checked by HermesServerRuntime.
+        // HermesServerRuntime filters stale frames against the accepted
+        // transport generation before delivery. Keep session binding checks
+        // below; transport.closed freshness is checked by the runtime.
         if event.method == "local", event.type == "transport.closed" {
             if let attempt = activeBtw?.attemptID {
                 activeBtw = nil

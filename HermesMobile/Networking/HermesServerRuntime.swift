@@ -295,10 +295,20 @@ final class HermesServerRuntime {
         if state == .connecting || bindingBarrierDepth > 0 {
             if pendingEvents.count < Self.maximumBufferedEvents { pendingEvents.append(event) }
             else { bufferOverflowed = true }
-        } else if state == .ready { deliver(event) }
+        } else if state == .ready {
+            // Ordinary events carry the transport-owned generation. Reject
+            // frames from an older socket before they reach observers; this
+            // compares transport generations, never runtime reconnect count.
+            guard event.connectionGeneration == acceptedTransportGeneration else { return }
+            deliver(event)
+        }
     }
 
     private func deliver(_ event: HermesGatewayEvent) {
+        // Pending frames may have been captured while reconnecting. Apply the
+        // same transport-generation check at drain time so an old
+        // message.start/clarify event cannot reopen or clear current state.
+        guard event.connectionGeneration == acceptedTransportGeneration else { return }
         // The transport is the freshness authority: HermesGatewayClient drops
         // frames from a stale socket generation before they become events
         // (receiveLoop re-checks generation per frame), and a reconnect can
