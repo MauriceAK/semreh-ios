@@ -1025,12 +1025,11 @@ final class LongChatScrollUITests: XCTestCase {
         defer { clearPasteboard() }
 
         prepareNormalSignIn(app: app)
-        let welcome = app.staticTexts["Control Semreh from iPhone or iPad."]
+        let welcome = app.buttons["Get Started"]
         if !app.textFields["onboarding-server-url"].exists {
             XCTAssertTrue(welcome.waitForExistence(timeout: 15), "Normal sign-out must return to Welcome.")
-            let existingServer = app.buttons["Already have a server?"]
-            XCTAssertTrue(existingServer.waitForExistence(timeout: 5))
-            existingServer.tap()
+            XCTAssertTrue(welcome.isHittable)
+            welcome.tap()
         }
 
         let serverURL = app.textFields["onboarding-server-url"]
@@ -1042,10 +1041,19 @@ final class LongChatScrollUITests: XCTestCase {
         let password = app.secureTextFields["onboarding-password"]
         XCTAssertTrue(username.waitForExistence(timeout: 30), "The approved HTTPS origin must advertise username auth.")
         XCTAssertTrue(password.waitForExistence(timeout: 5))
+        attachScreenshot(named: "live-production-onboarding-password-form")
         replacePublicText(username, with: credentials.username, app: app)
         pasteSecret(credentials.password, into: password, app: app)
         app.buttons["Connect"].tap()
         dismissKnownPasswordSavePrompt(app: app)
+        let personalize = app.navigationBars["Personalize"]
+        if personalize.waitForExistence(timeout: 5) {
+            dismissKnownPasswordSavePrompt(app: app)
+            let skip = personalize.buttons["Skip"]
+            XCTAssertTrue(skip.waitForExistence(timeout: 5) && skip.isHittable)
+            skip.tap()
+            XCTAssertFalse(personalize.waitForExistence(timeout: 1))
+        }
 
         // The shell remembers the selected tab across normal sign-out/login.
         // Successful authentication need not land on Sessions automatically.
@@ -1201,18 +1209,16 @@ final class LongChatScrollUITests: XCTestCase {
         let sessionsTab = app.buttons["Sessions"]
         XCTAssertTrue(sessionsTab.waitForExistence(timeout: 10), "Successful login must reach the production shell.")
         sessionsTab.tap()
-        let newSession = app.buttons["New session"]
-        XCTAssertTrue(newSession.waitForExistence(timeout: 15), "Sessions must expose New session.")
-
-        // Exercise the production shell startup path before creating a chat.
-        app.buttons["Control"].tap()
-        XCTAssertTrue(app.staticTexts["Control"].firstMatch.waitForExistence(timeout: 15))
-        XCTAssertFalse(app.alerts["Session Action Failed"].exists)
-        XCTAssertTrue(app.buttons["Expand projects"].waitForExistence(timeout: 10),
-                      "The normal Control path must expose the local Projects organizer.")
-        app.buttons["Sessions"].tap()
-        XCTAssertTrue(newSession.waitForExistence(timeout: 15))
+        let newSession = app.buttons["New chat"]
+        XCTAssertTrue(newSession.waitForExistence(timeout: 15), "Sessions must expose New chat.")
+        attachScreenshot(named: "live-production-authenticated-sessions")
         newSession.tap()
+
+        let defaultBot = app.buttons["bot-profile:default"]
+        if defaultBot.waitForExistence(timeout: 5) {
+            XCTAssertTrue(defaultBot.isHittable)
+            defaultBot.tap()
+        }
 
         let chat = app.otherElements.matching(
             NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
@@ -1220,9 +1226,7 @@ final class LongChatScrollUITests: XCTestCase {
         XCTAssertTrue(chat.waitForExistence(timeout: 20))
         // SwiftUI propagates ChatView's identifier onto its UIKit text view.
         // Target the actual editable descendant observed in the AX hierarchy.
-        let composers = app.textViews.matching(
-            NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
-        )
+        let composers = app.descendants(matching: .any).matching(identifier: "chat-composer-input")
         let composer = composers.firstMatch
         XCTAssertTrue(composer.waitForExistence(timeout: 10))
         XCTAssertEqual(composers.count, 1, "The open conversation must expose one composer.")
@@ -2794,10 +2798,14 @@ final class LongChatScrollUITests: XCTestCase {
             return
         }
 
-        let backButton = app.navigationBars.buttons["BackButton"]
+        let currentBackButton = app.buttons.matching(
+            NSPredicate(format: "label == %@", "Back")
+        ).firstMatch
+        let legacyBackButton = app.navigationBars.buttons["BackButton"]
+        let backButton = currentBackButton.exists ? currentBackButton : legacyBackButton
         XCTAssertTrue(
             backButton.waitForExistence(timeout: 5),
-            "A restored chat detail must expose its known NavigationStack BackButton."
+            "A restored chat detail must expose its current Back control or legacy NavigationStack BackButton."
         )
         let navigationDeadline = Date().addingTimeInterval(5)
         while !backButton.isHittable && Date() < navigationDeadline {
@@ -2819,8 +2827,15 @@ final class LongChatScrollUITests: XCTestCase {
     }
 
     private func prepareNormalSignIn(app: XCUIApplication) {
-        let welcome = app.staticTexts["Control Semreh from iPhone or iPad."]
-        if welcome.waitForExistence(timeout: 5) { return }
+        let personalize = app.navigationBars["Personalize"]
+        if personalize.exists {
+            dismissKnownPasswordSavePrompt(app: app)
+            let skip = personalize.buttons["Skip"]
+            XCTAssertTrue(skip.waitForExistence(timeout: 5) && skip.isHittable)
+            skip.tap()
+        }
+        let welcome = app.buttons["Get Started"]
+        if welcome.waitForExistence(timeout: 5) && welcome.isHittable { return }
         // An expired cookie legitimately restores the existing Connect page,
         // rather than the first onboarding page or an authenticated shell.
         if app.staticTexts["Your session expired. Sign in again."].exists,
@@ -2837,18 +2852,37 @@ final class LongChatScrollUITests: XCTestCase {
         }
         dismissKnownPasswordSavePrompt(app: app)
 
-        let you = app.buttons["You"]
-        if !you.waitForExistence(timeout: 5) {
-            let back = app.navigationBars.buttons.firstMatch
-            XCTAssertTrue(back.waitForExistence(timeout: 5), "The authenticated app must be navigable back to the shell.")
+        let settings = app.buttons["Settings"]
+        if !settings.waitForExistence(timeout: 5) {
+            let customBack = app.buttons.matching(NSPredicate(format: "label == %@", "Back")).firstMatch
+            let back = customBack.exists ? customBack : app.navigationBars.buttons.firstMatch
+            XCTAssertTrue(back.waitForExistence(timeout: 5) && back.isHittable,
+                          "The authenticated app must be navigable back to the shell.")
             back.tap()
         }
-        XCTAssertTrue(you.waitForExistence(timeout: 10), "The authenticated app must expose the You surface.")
-        you.tap()
+        XCTAssertTrue(settings.waitForExistence(timeout: 10) && settings.isHittable,
+                      "The authenticated app must expose Settings.")
+        settings.tap()
 
         let host = app.staticTexts[approvedLiveHost]
-        XCTAssertTrue(host.waitForExistence(timeout: 15), "The You surface must show the approved test server.")
+        XCTAssertTrue(host.waitForExistence(timeout: 15), "Settings must show the approved test server.")
         let signOut = app.buttons["Sign Out of This Server"]
+        if !signOut.exists {
+            let aboutAndStorage = app.staticTexts["About & Storage"]
+            for _ in 0..<8 where !aboutAndStorage.isHittable {
+                let scrollView = app.scrollViews.firstMatch
+                XCTAssertTrue(scrollView.exists, "Settings must expose a bounded scroll path to About & Storage.")
+                scrollView.swipeUp()
+            }
+            XCTAssertTrue(aboutAndStorage.waitForExistence(timeout: 5) && aboutAndStorage.isHittable)
+            aboutAndStorage.tap()
+        }
+        let singleServerFootnote = app.staticTexts[
+            "Signs out of the active server and returns to onboarding."
+        ]
+        for _ in 0..<8 where !singleServerFootnote.isHittable { app.scrollViews.firstMatch.swipeUp() }
+        XCTAssertTrue(singleServerFootnote.waitForExistence(timeout: 5) && singleServerFootnote.isHittable,
+                      "Refusing sign-out unless the disposable fixture is the only configured server.")
         for _ in 0..<8 where !signOut.isHittable {
             let scrollView = app.scrollViews.firstMatch
             XCTAssertTrue(scrollView.exists, "Settings must expose a bounded scroll path to sign out.")
