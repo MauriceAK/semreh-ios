@@ -1850,6 +1850,58 @@ final class ChatViewModelSendTests: XCTestCase {
         XCTAssertTrue(rendered.allSatisfy { $0.renderID.hasPrefix("transcript:row:fallback:") })
     }
 
+    func testDirectTranscriptFallbackIncludesNilIDWhenStreamingIDIsNil() {
+        let rendered = ChatViewModel.transcriptMessages(
+            from: [ChatMessage(role: "assistant", content: "No ID", timestamp: nil, messageId: nil)],
+            hidingStreamingAssistantID: nil,
+            preferDurableIDs: true
+        )
+
+        XCTAssertEqual(rendered.count, 1)
+        XCTAssertTrue(rendered[0].renderID.hasPrefix("transcript:row:fallback:"))
+    }
+
+    func testDirectTranscriptFallbackLedgerPreservesDuplicateLineageAcrossPrependAndAppend() {
+        let ledger = DirectFallbackRenderIdentityLedger()
+        let duplicate = ChatMessage(role: "assistant", content: "Same", timestamp: nil, messageId: nil)
+        let durable = ChatMessage(role: "user", content: "Durable", timestamp: 1, messageId: "canonical-1")
+
+        func render(_ rows: [ChatMessage], prepend: Bool = false) -> [TranscriptMessage] {
+            ChatViewModel.transcriptMessages(
+                from: rows,
+                hidingStreamingAssistantID: nil,
+                preferDurableIDs: true,
+                fallbackLedger: ledger,
+                fallbackScope: "server|profile|session-a",
+                isOlderPagePrepend: prepend
+            )
+        }
+
+        let initial = render([durable, duplicate, duplicate])
+        let initialDuplicateIDs = Array(initial.dropFirst()).map(\.renderID)
+        let durableID = initial[0].renderID
+
+        let prepended = render([duplicate, durable, duplicate, duplicate], prepend: true)
+        XCTAssertEqual(Array(prepended.suffix(2)).map(\.renderID), initialDuplicateIDs)
+        XCTAssertEqual(prepended[1].renderID, durableID)
+        XCTAssertEqual(Set(prepended.map(\.renderID)).count, prepended.count)
+
+        let appended = render([duplicate, durable, duplicate, duplicate, duplicate])
+        XCTAssertEqual(Array(appended.prefix(4)).map(\.renderID), prepended.map(\.renderID))
+        XCTAssertEqual(appended[1].renderID, durableID)
+        XCTAssertEqual(Set(appended.map(\.renderID)).count, appended.count)
+        XCTAssertEqual(render([duplicate, durable, duplicate, duplicate, duplicate]).map(\.renderID), appended.map(\.renderID))
+
+        let resetScope = ChatViewModel.transcriptMessages(
+            from: [duplicate, duplicate],
+            hidingStreamingAssistantID: nil,
+            preferDurableIDs: true,
+            fallbackLedger: ledger,
+            fallbackScope: "server|profile|session-b"
+        )
+        XCTAssertTrue(Set(resetScope.map(\.renderID)).isDisjoint(with: Set(appended.map(\.renderID))))
+    }
+
     @MainActor
     func testPerformanceLabStreamingUpdatesOnlyTheSelectedTranscriptIncrementally() async throws {
         let fixtures = ChatViewModel.makePerformanceLabFixtures(count: 3)
