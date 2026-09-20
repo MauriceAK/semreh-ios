@@ -342,6 +342,20 @@
 		D2C810000000000000000001 /* DirectKanbanDataClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2C810000000000000000002 /* DirectKanbanDataClient.swift */; };
 		D2C810000000000000000003 /* DirectKanbanDataClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2C810000000000000000004 /* DirectKanbanDataClientTests.swift */; };
 		C14900000000000000000005 /* KanbanFeatureState.swift in Sources */ = {isa = PBXBuildFile; fileRef = C14900000000000000000006 /* KanbanFeatureState.swift */; };
+		CAA483F5A9DC9079C73419D6 /* KanbanStateTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 789E15B7386131208B7BABD6 /* KanbanStateTypes.swift */; };
+		E131591A769213F9B0580AC8 /* KanbanFeatureStateCapabilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = 321EDCB5A7A737E7A873846F /* KanbanFeatureStateCapabilities.swift */; };
+		E22BB16DEFBAC3D3210D19A8 /* KanbanFeatureStateBrowsing.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA2B08E58B4CEF57CC5543D5 /* KanbanFeatureStateBrowsing.swift */; };
+		B6780F920F25B013CB574EB1 /* KanbanFeatureStateCardMutations.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01E887A521FCE7E55C38A26D /* KanbanFeatureStateCardMutations.swift */; };
+		B564FBD1FECE337065778B21 /* KanbanFeatureStateLoading.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF69A48F5DD3B72D7E76E66F /* KanbanFeatureStateLoading.swift */; };
+		4540D5651692B245668F0489 /* KanbanFeatureStateDispatch.swift in Sources */ = {isa = PBXBuildFile; fileRef = 934E9137A3651081C02EDB89 /* KanbanFeatureStateDispatch.swift */; };
+		EC51D19DF346E76FBF1BD075 /* KanbanFeatureStateFilters.swift in Sources */ = {isa = PBXBuildFile; fileRef = D61E1B0BB5292B8CF72B5471 /* KanbanFeatureStateFilters.swift */; };
+		2642CB6095C1FC79ADA33DA7 /* KanbanFeatureStateBulkActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C6C32B9D637C3B2036A8702 /* KanbanFeatureStateBulkActions.swift */; };
+		768D5A4FB52E99F004BC7684 /* KanbanFeatureStateStatusMutation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D57EACFAF710DE8091CE7DB /* KanbanFeatureStateStatusMutation.swift */; };
+		E5C62C1D1744FE220A119386 /* KanbanFeatureStatePrerequisites.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B56AFBDA6AA5FE5DD6DE23C /* KanbanFeatureStatePrerequisites.swift */; };
+		37862FA2BE0C0728E7D6597F /* KanbanFeatureStateSnapshots.swift in Sources */ = {isa = PBXBuildFile; fileRef = 492822BDDB755339D93DC87F /* KanbanFeatureStateSnapshots.swift */; };
+		04198F9574B006D81CB20667 /* KanbanFeatureStateBoardMutation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62F7169973520CD756F2244D /* KanbanFeatureStateBoardMutation.swift */; };
+		CD93DC5F25BDAC212045E28E /* KanbanFeatureStateLiveUpdates.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D651FE4279A976647A5B722 /* KanbanFeatureStateLiveUpdates.swift */; };
+		82CEF2338C83B9D5365D4CDB /* KanbanFeatureStateReads.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7A28B91ECB96DCEC0D13032 /* KanbanFeatureStateReads.swift */; };
 		C14900000000000000000007 /* KanbanLabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C14900000000000000000008 /* KanbanLabView.swift */; };
 		A5EA36DEF7F252C370024548 /* KanbanStatusFocusViewDispatcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28A4232D4B99FC482AD7E792 /* KanbanStatusFocusViewDispatcher.swift */; };
 		D6B6C9DD5FAFC268407BAB50 /* KanbanStatusFocusViewBanners.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0605AE9E3DB4E70917B4C93D /* KanbanStatusFocusViewBanners.swift */; };
@@ -805,6 +819,20 @@
 		D2C810000000000000000002 /* DirectKanbanDataClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectKanbanDataClient.swift; sourceTree = "<group>"; };
 		D2C810000000000000000004 /* DirectKanbanDataClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectKanbanDataClientTests.swift; sourceTree = "<group>"; };
 		C14900000000000000000006 /* KanbanFeatureState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanFeatureState.swift; sourceTree = "<group>"; };
+		789E15B7386131208B7BABD6 /* KanbanStateTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanStateTypes.swift; sourceTree = "<group>"; };
+		321EDCB5A7A737E7A873846F /* KanbanFeatureStateCapabilities.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanFeatureStateCapabilities.swift; sourceTree = "<group>"; };
+		DA2B08E58B4CEF57CC5543D5 /* KanbanFeatureStateBrowsing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanFeatureStateBrowsing.swift; sourceTree = "<group>"; };
+		01E887A521FCE7E55C38A26D /* KanbanFeatureStateCardMutations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanFeatureStateCardMutations.swift; sourceTree = "<group>"; };
+		AF69A48F5DD3B72D7E76E66F /* KanbanFeatureStateLoading.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanFeatureStateLoading.swift; sourceTree = "<group>"; };
+		934E9137A3651081C02EDB89 /* KanbanFeatureStateDispatch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanFeatureStateDispatch.swift; sourceTree = "<group>"; };
+		D61E1B0BB5292B8CF72B5471 /* KanbanFeatureStateFilters.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanFeatureStateFilters.swift; sourceTree = "<group>"; };
+		7C6C32B9D637C3B2036A8702 /* KanbanFeatureStateBulkActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanFeatureStateBulkActions.swift; sourceTree = "<group>"; };
+		1D57EACFAF710DE8091CE7DB /* KanbanFeatureStateStatusMutation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanFeatureStateStatusMutation.swift; sourceTree = "<group>"; };
+		4B56AFBDA6AA5FE5DD6DE23C /* KanbanFeatureStatePrerequisites.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanFeatureStatePrerequisites.swift; sourceTree = "<group>"; };
+		492822BDDB755339D93DC87F /* KanbanFeatureStateSnapshots.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanFeatureStateSnapshots.swift; sourceTree = "<group>"; };
+		62F7169973520CD756F2244D /* KanbanFeatureStateBoardMutation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanFeatureStateBoardMutation.swift; sourceTree = "<group>"; };
+		3D651FE4279A976647A5B722 /* KanbanFeatureStateLiveUpdates.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanFeatureStateLiveUpdates.swift; sourceTree = "<group>"; };
+		E7A28B91ECB96DCEC0D13032 /* KanbanFeatureStateReads.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanFeatureStateReads.swift; sourceTree = "<group>"; };
 		C14900000000000000000008 /* KanbanLabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanLabView.swift; sourceTree = "<group>"; };
 		28A4232D4B99FC482AD7E792 /* KanbanStatusFocusViewDispatcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanStatusFocusViewDispatcher.swift; sourceTree = "<group>"; };
 		0605AE9E3DB4E70917B4C93D /* KanbanStatusFocusViewBanners.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanStatusFocusViewBanners.swift; sourceTree = "<group>"; };
@@ -1237,6 +1265,20 @@
 			isa = PBXGroup;
 			children = (
 				C14900000000000000000006 /* KanbanFeatureState.swift */,
+				789E15B7386131208B7BABD6 /* KanbanStateTypes.swift */,
+				321EDCB5A7A737E7A873846F /* KanbanFeatureStateCapabilities.swift */,
+				DA2B08E58B4CEF57CC5543D5 /* KanbanFeatureStateBrowsing.swift */,
+				01E887A521FCE7E55C38A26D /* KanbanFeatureStateCardMutations.swift */,
+				AF69A48F5DD3B72D7E76E66F /* KanbanFeatureStateLoading.swift */,
+				934E9137A3651081C02EDB89 /* KanbanFeatureStateDispatch.swift */,
+				D61E1B0BB5292B8CF72B5471 /* KanbanFeatureStateFilters.swift */,
+				7C6C32B9D637C3B2036A8702 /* KanbanFeatureStateBulkActions.swift */,
+				1D57EACFAF710DE8091CE7DB /* KanbanFeatureStateStatusMutation.swift */,
+				4B56AFBDA6AA5FE5DD6DE23C /* KanbanFeatureStatePrerequisites.swift */,
+				492822BDDB755339D93DC87F /* KanbanFeatureStateSnapshots.swift */,
+				62F7169973520CD756F2244D /* KanbanFeatureStateBoardMutation.swift */,
+				3D651FE4279A976647A5B722 /* KanbanFeatureStateLiveUpdates.swift */,
+				E7A28B91ECB96DCEC0D13032 /* KanbanFeatureStateReads.swift */,
 				C14900000000000000000008 /* KanbanLabView.swift */,
 				28A4232D4B99FC482AD7E792 /* KanbanStatusFocusViewDispatcher.swift */,
 				0605AE9E3DB4E70917B4C93D /* KanbanStatusFocusViewBanners.swift */,
@@ -1827,6 +1869,20 @@
 				D2C810000000000000000001 /* DirectKanbanDataClient.swift in Sources */,
 				C15100000000000000000001 /* KanbanEventStreamClient.swift in Sources */,
 				C14900000000000000000005 /* KanbanFeatureState.swift in Sources */,
+				CAA483F5A9DC9079C73419D6 /* KanbanStateTypes.swift in Sources */,
+				E131591A769213F9B0580AC8 /* KanbanFeatureStateCapabilities.swift in Sources */,
+				E22BB16DEFBAC3D3210D19A8 /* KanbanFeatureStateBrowsing.swift in Sources */,
+				B6780F920F25B013CB574EB1 /* KanbanFeatureStateCardMutations.swift in Sources */,
+				B564FBD1FECE337065778B21 /* KanbanFeatureStateLoading.swift in Sources */,
+				4540D5651692B245668F0489 /* KanbanFeatureStateDispatch.swift in Sources */,
+				EC51D19DF346E76FBF1BD075 /* KanbanFeatureStateFilters.swift in Sources */,
+				2642CB6095C1FC79ADA33DA7 /* KanbanFeatureStateBulkActions.swift in Sources */,
+				768D5A4FB52E99F004BC7684 /* KanbanFeatureStateStatusMutation.swift in Sources */,
+				E5C62C1D1744FE220A119386 /* KanbanFeatureStatePrerequisites.swift in Sources */,
+				37862FA2BE0C0728E7D6597F /* KanbanFeatureStateSnapshots.swift in Sources */,
+				04198F9574B006D81CB20667 /* KanbanFeatureStateBoardMutation.swift in Sources */,
+				CD93DC5F25BDAC212045E28E /* KanbanFeatureStateLiveUpdates.swift in Sources */,
+				82CEF2338C83B9D5365D4CDB /* KanbanFeatureStateReads.swift in Sources */,
 				C14900000000000000000007 /* KanbanLabView.swift in Sources */,
 				A5EA36DEF7F252C370024548 /* KanbanStatusFocusViewDispatcher.swift in Sources */,
 				D6B6C9DD5FAFC268407BAB50 /* KanbanStatusFocusViewBanners.swift in Sources */,
