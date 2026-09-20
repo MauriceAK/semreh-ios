@@ -203,6 +203,12 @@ final class AuthManager {
     ) async {
         advanceAuthEpoch()
         lastErrorMessage = nil
+        // A rejected *fresh* login must not flip .unconfigured → .loggedOut:
+        // ContentView renders those as different view branches, and the swap
+        // destroys the OnboardingViewModel holding the typed username/password
+        // (issue #21). Saved-server reauth still transitions to .loggedOut.
+        let wasUnconfigured: Bool
+        if case .unconfigured = state { wasUnconfigured = true } else { wasUnconfigured = false }
 
         do {
             try Self.validateDirectHermesInput(serverURLString)
@@ -250,7 +256,13 @@ final class AuthManager {
                     provider: provider
                 )
                 guard loginResponse.ok == true else {
-                    state = .loggedOut(server: serverURL)
+                    // Stay .unconfigured on a rejected *fresh* login so the
+                    // onboarding view keeps the typed username/password for
+                    // retry (issue #21). Saved-server reauth still moves to
+                    // .loggedOut, which prefills origin/headers.
+                    if !wasUnconfigured {
+                        state = .loggedOut(server: serverURL)
+                    }
                     lastErrorMessage = String(localized: "The Hermes login was not accepted.")
                     return
                 }

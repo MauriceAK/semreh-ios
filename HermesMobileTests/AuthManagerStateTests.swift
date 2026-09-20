@@ -203,6 +203,73 @@ final class AuthManagerStateTests: XCTestCase {
         XCTAssertEqual(manager.lastErrorMessage, Self.sessionExpiredMessage)
     }
 
+    func testRejectedFreshLoginStaysUnconfiguredSoRetryKeepsTypedCredentials() async throws {
+        // Issue #21: a rejected first login must not flip .unconfigured to
+        // .loggedOut — ContentView renders those as different view branches,
+        // and the swap destroys the OnboardingViewModel holding the typed
+        // username/password. Saved-server reauth still moves to .loggedOut.
+        let server = try XCTUnwrap(URL(string: "https://example.test"))
+        let client = MockAuthAPIClient(
+            authStatus: AuthStatusResponse(authEnabled: true, loggedIn: false),
+            loginResponse: LoginResponse(ok: false, message: nil, error: "nope")
+        )
+        let manager = AuthManager(
+            keychain: InMemoryKeychainStore(),
+            clientFactory: { _ in client },
+            serverRegistry: ServerRegistry.inMemory()
+        )
+        XCTAssertEqual(manager.state, .unconfigured)
+
+        await manager.configure(
+            serverURLString: server.absoluteString,
+            username: "test-user",
+            password: "wrong"
+        )
+
+        XCTAssertEqual(manager.state, .unconfigured)
+        XCTAssertEqual(manager.lastErrorMessage, "The Hermes login was not accepted.")
+    }
+
+    func testRejectedSavedServerReauthStillMovesToLoggedOut() async throws {
+        // Counterpart to the fresh-login test above: a rejected reauth from
+        // .loggedOut must keep .loggedOut (saved-server branch with prefilled
+        // origin/headers), not fall back to .unconfigured.
+        let server = try XCTUnwrap(URL(string: "https://example.test"))
+        let keychain = InMemoryKeychainStore()
+        let succeeding = MockAuthAPIClient(authStatus: AuthStatusResponse(authEnabled: true, loggedIn: false))
+        let expiringProbe = ProbeAuthClient(server: server, probes: [.expired])
+        let rejecting = MockAuthAPIClient(
+            authStatus: AuthStatusResponse(authEnabled: true, loggedIn: false),
+            loginResponse: LoginResponse(ok: false, message: nil, error: "nope")
+        )
+        var phase = 0
+        let manager = AuthManager(
+            keychain: keychain,
+            clientFactory: { _ in
+                phase += 1
+                switch phase {
+                case 1: return succeeding
+                case 2: return expiringProbe
+                default: return rejecting
+                }
+            },
+            serverRegistry: ServerRegistry.inMemory()
+        )
+        await manager.configure(serverURLString: server.absoluteString, username: "test-user", password: "secret")
+        guard case .loggedIn = manager.state else {
+            XCTFail("Expected loggedIn after configure, got \(manager.state)")
+            return
+        }
+
+        manager.handleAPIError(DirectHermesAuthError.sessionExpired)
+        await waitForProbe(expiringProbe, count: 1)
+        XCTAssertEqual(manager.state, .loggedOut(server: server))
+
+        await manager.configure(serverURLString: server.absoluteString, username: "test-user", password: "wrong")
+        XCTAssertEqual(manager.state, .loggedOut(server: server))
+        XCTAssertEqual(manager.lastErrorMessage, "The Hermes login was not accepted.")
+    }
+
     func testNonUnauthorizedErrorDoesNotChangeState() async throws {
         let keychain = InMemoryKeychainStore()
         let manager = try await makeLoggedInManager(keychain: keychain, serverURLString: "https://example.test")

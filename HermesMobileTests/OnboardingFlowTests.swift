@@ -70,7 +70,10 @@ final class OnboardingFlowTests: XCTestCase {
 
         XCTAssertEqual(viewModel.serverURLString, server.absoluteString)
         XCTAssertEqual(viewModel.errorMessage, "The Hermes login was not accepted.")
-        XCTAssertEqual(manager.state, .loggedOut(server: server))
+        // A rejected *fresh* login stays .unconfigured so the typed
+        // username/password survive for retry (issue #21); it must not flip
+        // to .loggedOut and destroy the onboarding view model.
+        XCTAssertEqual(manager.state, .unconfigured)
         XCTAssertNil(keychain.savedValues[.serverURL])
         XCTAssertEqual(client.loginUsernames, ["fixture-user"])
     }
