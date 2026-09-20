@@ -1063,7 +1063,13 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
             if request.url?.path == "/api/model/options" {
                 return apiTestJSONResponse(#"{"model":"model-a","provider":"fixture","providers":[]}"#, for: request)
             }
-            throw APIError.http(statusCode: 503, body: "private profile name and response contents")
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 503,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "text/plain"]
+            )!
+            return (response, Data("private profile name and response contents".utf8))
         }
         let vm = makeViewModel(client: client, runtime: runtime, sessionID: nil)
 
