@@ -170,6 +170,7 @@ final class LongChatScrollUITests: XCTestCase {
         pasteSecret(credentials.password, into: password, app: app)
         app.buttons["Connect"].tap()
         dismissKnownPasswordSavePrompt(app: app)
+        completePersonalizationIfPresented(app: app)
         waitForPostLoginDestination(app: app)
 
         addTeardownBlock { @MainActor in
@@ -1213,6 +1214,7 @@ final class LongChatScrollUITests: XCTestCase {
         app.buttons["Sessions"].tap()
         XCTAssertTrue(newSession.waitForExistence(timeout: 15))
         newSession.tap()
+        selectProfileForNewChatIfPresented(app: app)
 
         let chat = app.otherElements.matching(
             NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
@@ -2819,6 +2821,7 @@ final class LongChatScrollUITests: XCTestCase {
     }
 
     private func prepareNormalSignIn(app: XCUIApplication) {
+        completePersonalizationIfPresented(app: app)
         let welcome = containedOnboardingWelcome(app)
         if welcome.waitForExistence(timeout: 5) { return }
         // An expired cookie legitimately restores the existing Connect page,
@@ -2862,6 +2865,26 @@ final class LongChatScrollUITests: XCTestCase {
         XCTAssertTrue(confirmation.waitForExistence(timeout: 5))
         confirmation.buttons["Sign Out"].tap()
         XCTAssertTrue(welcome.waitForExistence(timeout: 20), "Normal sign-out must return to Welcome.")
+    }
+
+    private func completePersonalizationIfPresented(app: XCUIApplication) {
+        let title = app.staticTexts["Personalize"]
+        guard title.waitForExistence(timeout: 2) else { return }
+        let done = app.buttons["Done"]
+        XCTAssertTrue(done.waitForExistence(timeout: 5), "The known Personalize surface must expose Done.")
+        guard done.exists && done.isHittable else { return }
+        done.tap()
+    }
+
+    private func selectProfileForNewChatIfPresented(app: XCUIApplication) {
+        let picker = app.navigationBars["New chat"]
+        guard picker.waitForExistence(timeout: 5) else { return }
+        let profile = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH[c] %@", "Chat with ")
+        ).firstMatch
+        XCTAssertTrue(profile.waitForExistence(timeout: 15), "New chat profile picker must expose a chat profile.")
+        XCTAssertTrue(profile.isHittable, "The selected fixture profile must be hittable.")
+        profile.tap()
     }
 
     /// The verifier has to tolerate both approved onboarding copy variants:
