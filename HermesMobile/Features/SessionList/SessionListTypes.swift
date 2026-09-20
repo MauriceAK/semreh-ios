@@ -193,7 +193,7 @@ struct SessionFiltersSheet: View {
     let clearFilters: () -> Void
     let createProject: () -> Void
 
-    @Environment(\.dismiss) var dismiss
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         List {
@@ -267,7 +267,7 @@ struct SessionFiltersSheet: View {
         }
     }
 
-    private var hasActiveFilters: Bool {
+    var hasActiveFilters: Bool {
         selectedBot != nil
             || pinnedOnly
             || scheduledHistoryOnly

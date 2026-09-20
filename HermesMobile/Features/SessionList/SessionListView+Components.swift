@@ -43,7 +43,7 @@ extension SessionListView {
         .accessibilityLabel("New Session")
     }
 
-    var visibleSessions: [SessionSummary] {
+    private var visibleSessions: [SessionSummary] {
         viewModel.visibleSessions(
             searchText: searchText,
             selectedProjectID: selectedProjectID,
@@ -100,11 +100,11 @@ extension SessionListView {
         )
     }
 
-    var shouldShowPinnedSessionStrip: Bool {
+    private var shouldShowPinnedSessionStrip: Bool {
         !shellPinnedSessions.isEmpty
     }
 
-    func matchesShellFilters(_ session: SessionSummary) -> Bool {
+    private func matchesShellFilters(_ session: SessionSummary) -> Bool {
         SessionShellFilter.matches(
             session,
             bot: selectedBot,
@@ -128,7 +128,7 @@ extension SessionListView {
         return names.sorted()
     }
 
-    var selectedProjectName: String? {
+    private var selectedProjectName: String? {
         guard let selectedProjectID else { return nil }
         return viewModel.projects.first(where: { $0.projectId == selectedProjectID })?.name
             .flatMap { name in
@@ -138,11 +138,11 @@ extension SessionListView {
             ?? String(localized: "Project")
     }
 
-    var hasActiveSessionFilters: Bool {
+    private var hasActiveSessionFilters: Bool {
         selectedBot != nil || pinnedOnly || scheduledHistoryOnly || selectedProjectID != nil
     }
 
-    var activeSessionFilterSummary: String? {
+    private var activeSessionFilterSummary: String? {
         var parts: [String] = []
         if let selectedBot {
             parts.append(selectedBot)
@@ -203,6 +203,18 @@ extension SessionListView {
         .buttonStyle(.plain)
         .padding(.horizontal, 18)
         .frame(minHeight: 44)
+    }
+
+    var sidebarSectionVisibility: SidebarSectionVisibility {
+        SidebarSectionVisibility(
+            tasks: showsTasksSection,
+            kanban: showsKanbanSection,
+            skills: showsSkillsSection,
+            memory: showsMemorySection,
+            insights: showsInsightsSection,
+            activeProfile: showsActiveProfileSection,
+            projects: showsProjectsSection
+        )
     }
 
     /// Bottom-of-list entry to the Archived screen (issue #17). Hidden while
@@ -271,7 +283,17 @@ extension SessionListView {
         searchChromeIsExpanded && !searchText.isEmpty
     }
 
-    var settingsInitials: String {
+    private func isActiveProfile(_ profile: ProfileSummary) -> Bool {
+        guard let profileName = profile.normalizedName else { return false }
+
+        if let activeProfileName = viewModel.activeProfileName {
+            return profileName == activeProfileName
+        }
+
+        return profile.isActive == true
+    }
+
+    private var settingsInitials: String {
         SessionIdentitySettings.displayInitials(
             displayName: identityDisplayName,
             storedInitials: identityInitials,
@@ -290,7 +312,20 @@ extension SessionListView {
         )
     }
 
-    var newSessionButtonForegroundColor: Color {
+    // The glass tint is dropped on the material/opaque fallback surfaces, so a
+    // themed button would otherwise show its contrast-picked foreground over a
+    // neutral material (e.g. black-on-dark for a light theme color). Draw a
+    // solid header-color fill there so the button stays themed and readable;
+    // the liquid-glass surface keeps tinting via `newSessionButtonGlassTint`.
+    private var newSessionButtonSolidThemeFill: Color? {
+        guard newSessionButtonUsesThemeColor, newSessionButtonSurface != .liquidGlass else {
+            return nil
+        }
+
+        return selectedHeaderLogoColor
+    }
+
+    private var newSessionButtonForegroundColor: Color {
         if newSessionButtonUsesThemeColor {
             return SemrehVisualTheme.energyForeground(for: palette, accent: accent)
         }
@@ -298,11 +333,11 @@ extension SessionListView {
         return colorScheme == .dark ? .black : .white
     }
 
-    var initialsAvatarForegroundColor: Color {
+    private var initialsAvatarForegroundColor: Color {
         SemrehVisualTheme.energyForeground(for: palette, accent: accent)
     }
 
-    var normalizedSearchText: String {
+    private var normalizedSearchText: String {
         searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
