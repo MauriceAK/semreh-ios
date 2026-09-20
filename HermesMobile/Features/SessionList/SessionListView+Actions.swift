@@ -68,7 +68,7 @@ extension SessionListView {
         }
     }
 
-    func openPendingSharedImportIfNeeded() {
+    private func openPendingSharedImportIfNeeded() {
         guard let sharedImport = pendingSharedImport else {
             return
         }
@@ -104,7 +104,7 @@ extension SessionListView {
         }
     }
 
-    func openDeepLinkedSession(id sessionID: String) async {
+    private func openDeepLinkedSession(id sessionID: String) async {
         if let loadedSession = viewModel.sessions.first(where: { $0.sessionId == sessionID }) {
             selectSession(loadedSession)
             return
@@ -126,7 +126,7 @@ extension SessionListView {
     /// mirroring the "+" button. Carries `autoStartsVoiceInput` so the voice variant begins
     /// dictation once the composer appears. The request is cleared so it fires once per
     /// invocation.
-    func openRequestedNewChatIfNeeded() {
+    private func openRequestedNewChatIfNeeded() {
         guard let request = requestedNewChat else { return }
         guard startNewChat(
             PendingNewChatRoute(
@@ -142,7 +142,7 @@ extension SessionListView {
     }
 
     @discardableResult
-    func startNewChat(_ route: PendingNewChatRoute) -> Bool {
+    private func startNewChat(_ route: PendingNewChatRoute) -> Bool {
         guard !viewModel.isViewingCachedData,
               !viewModel.isCreatingSession,
               navigationState.beginNewChatCreation(route)

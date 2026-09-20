@@ -100,11 +100,11 @@ extension SessionListView {
         )
     }
 
-    var shouldShowPinnedSessionStrip: Bool {
+    private var shouldShowPinnedSessionStrip: Bool {
         !shellPinnedSessions.isEmpty
     }
 
-    func matchesShellFilters(_ session: SessionSummary) -> Bool {
+    private func matchesShellFilters(_ session: SessionSummary) -> Bool {
         SessionShellFilter.matches(
             session,
             bot: selectedBot,
@@ -128,7 +128,7 @@ extension SessionListView {
         return names.sorted()
     }
 
-    var selectedProjectName: String? {
+    private var selectedProjectName: String? {
         guard let selectedProjectID else { return nil }
         return viewModel.projects.first(where: { $0.projectId == selectedProjectID })?.name
             .flatMap { name in
@@ -138,11 +138,11 @@ extension SessionListView {
             ?? String(localized: "Project")
     }
 
-    var hasActiveSessionFilters: Bool {
+    private var hasActiveSessionFilters: Bool {
         selectedBot != nil || pinnedOnly || scheduledHistoryOnly || selectedProjectID != nil
     }
 
-    var activeSessionFilterSummary: String? {
+    private var activeSessionFilterSummary: String? {
         var parts: [String] = []
         if let selectedBot {
             parts.append(selectedBot)
@@ -271,7 +271,7 @@ extension SessionListView {
         searchChromeIsExpanded && !searchText.isEmpty
     }
 
-    var settingsInitials: String {
+    private var settingsInitials: String {
         SessionIdentitySettings.displayInitials(
             displayName: identityDisplayName,
             storedInitials: identityInitials,
@@ -290,7 +290,7 @@ extension SessionListView {
         )
     }
 
-    var newSessionButtonForegroundColor: Color {
+    private var newSessionButtonForegroundColor: Color {
         if newSessionButtonUsesThemeColor {
             return SemrehVisualTheme.energyForeground(for: palette, accent: accent)
         }
@@ -298,11 +298,11 @@ extension SessionListView {
         return colorScheme == .dark ? .black : .white
     }
 
-    var initialsAvatarForegroundColor: Color {
+    private var initialsAvatarForegroundColor: Color {
         SemrehVisualTheme.energyForeground(for: palette, accent: accent)
     }
 
-    var normalizedSearchText: String {
+    private var normalizedSearchText: String {
         searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
