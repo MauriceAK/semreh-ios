@@ -3,18 +3,6 @@ import SwiftData
 
 extension SessionListView {
 
-    func refreshSessionsAndActiveProfile(reconcileOpenTranscripts: Bool = false) async {
-        await SidebarLoadOrdering.run(
-            resolveActiveProfile: { await viewModel.loadActiveProfile() },
-            loadSessions: { await loadSessions() }
-        )
-        guard !Task.isCancelled, reconcileOpenTranscripts else { return }
-        _ = await OpenChatSessionStore.shared.refreshOpenSessions(
-            for: server,
-            modelContext: modelContext
-        )
-    }
-
     func openNewChatFromKeyboard() {
         guard !viewModel.isViewingCachedData,
               !viewModel.isCreatingSession,
@@ -68,20 +56,6 @@ extension SessionListView {
         }
     }
 
-    @MainActor
-    func switchActiveProfile(_ profile: ProfileSummary) async {
-        let didSwitch = await viewModel.switchActiveProfile(profile)
-        handleLastError()
-
-        guard didSwitch else { return }
-
-        withAnimation(SessionListMotion.disclosureAnimation(reduceMotion: reduceMotion)) {
-            profilesAreExpanded = false
-        }
-
-        await loadSessions()
-    }
-
     func loadSessions() async {
         await viewModel.load(modelContext: modelContext)
         guard !Task.isCancelled else { return }
@@ -94,98 +68,7 @@ extension SessionListView {
         }
     }
 
-    func togglePinned(_ session: SessionSummary) async {
-        let didChangePinState = await viewModel.setPinned(
-            !(session.pinned ?? false),
-            for: session,
-            modelContext: modelContext,
-            animation: SessionListMotion.sessionMutationAnimation(reduceMotion: reduceMotion)
-        )
-        handleLastError()
-
-        if didChangePinState {
-            SessionHaptics.pinStateChanged(isEnabled: isHapticsEnabled)
-        }
-    }
-
-    func archive(_ session: SessionSummary) async {
-        let didArchive = await viewModel.archive(
-            session,
-            modelContext: modelContext,
-            animation: SessionListMotion.sessionMutationAnimation(reduceMotion: reduceMotion)
-        )
-        handleLastError()
-
-        if didArchive {
-            removeSessionFromNavigation(session)
-            SessionHaptics.archiveStateChanged(isEnabled: isHapticsEnabled)
-        }
-    }
-
-    func delete(_ session: SessionSummary) async {
-        await SessionHaptics.commitSessionDeletion(isEnabled: isHapticsEnabled) {
-            let didDelete = await viewModel.delete(
-                session,
-                modelContext: modelContext,
-                animation: SessionListMotion.sessionMutationAnimation(reduceMotion: reduceMotion)
-            )
-            handleLastError()
-
-            if didDelete {
-                removeSessionFromNavigation(session)
-            }
-        }
-    }
-
-    func rename(_ session: SessionSummary, to title: String) async -> Bool {
-        let didChangeTitle = normalizedTitle(title) != normalizedTitle(session.title)
-        let didRename = await viewModel.rename(session, to: title, modelContext: modelContext)
-        handleLastError()
-
-        if didRename, didChangeTitle {
-            SessionHaptics.sessionRenamed(isEnabled: isHapticsEnabled)
-        }
-
-        return didRename
-    }
-
-    func move(_ session: SessionSummary, to projectID: String?) async {
-        await viewModel.move(session, to: projectID, modelContext: modelContext)
-        handleLastError()
-    }
-
-    func export(_ session: SessionSummary, format: SessionExportFormat) async {
-        let fileURL = await viewModel.export(session, format: format)
-        handleLastError()
-
-        if let fileURL {
-            sessionExportShareItem = SessionExportShareItem(fileURL: fileURL)
-        }
-    }
-
-    func delete(_ project: ProjectSummary) async {
-        let deletedProjectID = project.projectId
-        let didDelete = await viewModel.delete(project, modelContext: modelContext)
-        handleLastError()
-
-        if didDelete, selectedProjectID == deletedProjectID {
-            selectedProjectID = nil
-        }
-    }
-
-    private func normalizedTitle(_ title: String?) -> String? {
-        guard let title else { return nil }
-        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
-    }
-
-    func handleLastError() {
-        if let lastError = viewModel.lastError {
-            authManager.handleAPIError(lastError)
-        }
-    }
-
-    private func openPendingSharedImportIfNeeded() {
+    func openPendingSharedImportIfNeeded() {
         guard let sharedImport = pendingSharedImport else {
             return
         }
@@ -221,7 +104,7 @@ extension SessionListView {
         }
     }
 
-    private func openDeepLinkedSession(id sessionID: String) async {
+    func openDeepLinkedSession(id sessionID: String) async {
         if let loadedSession = viewModel.sessions.first(where: { $0.sessionId == sessionID }) {
             selectSession(loadedSession)
             return
@@ -243,7 +126,7 @@ extension SessionListView {
     /// mirroring the "+" button. Carries `autoStartsVoiceInput` so the voice variant begins
     /// dictation once the composer appears. The request is cleared so it fires once per
     /// invocation.
-    private func openRequestedNewChatIfNeeded() {
+    func openRequestedNewChatIfNeeded() {
         guard let request = requestedNewChat else { return }
         guard startNewChat(
             PendingNewChatRoute(
@@ -259,7 +142,7 @@ extension SessionListView {
     }
 
     @discardableResult
-    private func startNewChat(_ route: PendingNewChatRoute) -> Bool {
+    func startNewChat(_ route: PendingNewChatRoute) -> Bool {
         guard !viewModel.isViewingCachedData,
               !viewModel.isCreatingSession,
               navigationState.beginNewChatCreation(route)
@@ -328,7 +211,7 @@ extension SessionListView {
         persistLastSelectedSession()
     }
 
-    private func removeSessionFromNavigation(_ session: SessionSummary) {
+    func removeSessionFromNavigation(_ session: SessionSummary) {
         navigationState.remove(sessionID: session.sessionId)
         persistLastSelectedSession()
     }

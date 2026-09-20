@@ -157,7 +157,7 @@ extension SessionListView {
         }
     }
 
-    private var shellOfflineStatus: some View {
+    var shellOfflineStatus: some View {
         HStack(spacing: 8) {
             Image(systemName: "wifi.slash")
                 .font(.system(size: 13, weight: .semibold))

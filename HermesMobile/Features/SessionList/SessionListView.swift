@@ -24,8 +24,8 @@ struct SessionListView: View {
     @Environment(\.colorScheme) var colorScheme
     @Environment(\.horizontalSizeClass) var horizontalSizeClass
     @Environment(\.accessibilityReduceMotion) var reduceMotion
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
-    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceTransparency) var reduceTransparency
+    @Environment(\.scenePhase) var scenePhase
     @Environment(\.appColorPalette) var palette
     @Environment(\.appAccent) var accent
     @State var viewModel: SessionListViewModel
@@ -50,7 +50,7 @@ struct SessionListView: View {
     @State var shouldPresentProjectCreationAfterFiltersDismissal = false
     @State var sidebarScrollPosition: String?
     @State var didCompleteInitialLoad = false
-    @State private var returnRefreshID: UUID?
+    @State var returnRefreshID: UUID?
     @State private var foregroundRefreshTask: Task<Void, Never>?
     @State var newChatCreationTask: Task<Void, Never>?
     @State var isSessionListVisible = false
@@ -65,7 +65,7 @@ struct SessionListView: View {
     @AppStorage(SessionRowDisplaySettings.showWorkspaceKey) var showsSessionWorkspace = true
     @AppStorage(SessionRowDisplaySettings.showCronSessionsKey) var showsCronSessions = true
     @AppStorage(SessionRowDisplaySettings.showSubagentSessionsKey)
-    private var showsSubagentSessions = SessionRowDisplaySettings.defaultShowsSubagentSessions
+    var showsSubagentSessions = SessionRowDisplaySettings.defaultShowsSubagentSessions
     @AppStorage(SectionVisibilitySettings.tasksKey) var showsTasksSection = true
     @AppStorage(SectionVisibilitySettings.kanbanKey) var showsKanbanSection = true
     @AppStorage(SectionVisibilitySettings.skillsKey) var showsSkillsSection = true
@@ -76,10 +76,10 @@ struct SessionListView: View {
     // Per-server key (#19): the CLI toggle mirrors the active server's
     // `show_cli_sessions`, so its cached value must not leak across servers.
     // Configured in `init`, where the server URL is known.
-    @AppStorage private var showsCliSessions: Bool
-    @AppStorage private var showsClaudeCodeSessions: Bool
+    @AppStorage var showsCliSessions: Bool
+    @AppStorage var showsClaudeCodeSessions: Bool
     @AppStorage(PrimaryActionTintSettings.isEnabledKey) var tintsPrimaryActions = false
-    @AppStorage(GlassPreference.isEnabledKey) private var isGlassEnabled = GlassPreference.defaultIsEnabled
+    @AppStorage(GlassPreference.isEnabledKey) var isGlassEnabled = GlassPreference.defaultIsEnabled
     @AppStorage(SessionIdentitySettings.displayNameKey) var identityDisplayName = ""
     @AppStorage(SessionIdentitySettings.initialsKey) var identityInitials = ""
     @AppStorage(AppHaptics.isEnabledKey) var isHapticsEnabled = true
@@ -128,277 +128,11 @@ struct SessionListView: View {
         )
     }
 
-    var body: some View {
-        navigationContainer
-            .sheet(
-                isPresented: $isPresentingSessionFilters,
-                onDismiss: presentPendingProjectCreationIfNeeded
-            ) {
-                NavigationStack {
-                    SessionFiltersSheet(
-                        selectedBot: $selectedBot,
-                        pinnedOnly: $pinnedOnly,
-                        scheduledHistoryOnly: $scheduledHistoryOnly,
-                        selectedProjectID: $selectedProjectID,
-                        botOptions: availableBotNames,
-                        projects: viewModel.projects,
-                        projectsEnabled: projectsEnabled && showsProjectsSection,
-                        clearFilters: clearSessionFilters,
-                        createProject: {
-                            shouldPresentProjectCreationAfterFiltersDismissal = true
-                            isPresentingSessionFilters = false
-                        }
-                    )
-                }
-                .presentationDetents([.medium, .large])
-                .adaptiveFormPresentation()
-            }
-            .sheet(item: $sessionExportShareItem) { item in
-                SessionExportShareSheet(fileURL: item.fileURL)
-                    .presentationDetents([.medium, .large])
-                    .adaptiveFormPresentation()
-                    .ignoresSafeArea()
-                    // The temp file lives in its own UUID directory (see
-                    // SessionListViewModel.export); remove the directory once
-                    // the share sheet is gone, shared and cancelled alike.
-                    .onDisappear {
-                        try? FileManager.default.removeItem(
-                            at: item.fileURL.deletingLastPathComponent()
-                        )
-                    }
-            }
-            .sheet(item: $sessionPendingRename) { session in
-                SessionRenameSheet(
-                    initialTitle: SessionRowView.displayTitle(for: session),
-                    isSaving: viewModel.isRenamingSession
-                ) {
-                    sessionPendingRename = nil
-                } onSave: { title in
-                    Task {
-                        guard let session = sessionPendingRename else { return }
-
-                        let didRename = await rename(session, to: title)
-                        if didRename {
-                            sessionPendingRename = nil
-                        }
-                    }
-                }
-                .presentationDetents([.height(180), .medium])
-            }
-            .sheet(item: $sessionPendingProjectCreation) { session in
-                ProjectCreationSheet(
-                    existingProjectCount: viewModel.projects.count,
-                    isSaving: viewModel.isCreatingProject || viewModel.isMovingSession
-                ) {
-                    sessionPendingProjectCreation = nil
-                } onSave: { name, color in
-                    Task {
-                        let didMove = await viewModel.createProject(
-                            named: name,
-                            color: color,
-                            moving: session,
-                            modelContext: modelContext
-                        )
-                        handleLastError()
-
-                        if didMove {
-                            sessionPendingProjectCreation = nil
-                        }
-                    }
-                }
-                .presentationDetents([.medium])
-            }
-            .sheet(isPresented: $isPresentingProjectCreation) {
-                ProjectCreationSheet(
-                    existingProjectCount: viewModel.projects.count,
-                    isSaving: viewModel.isCreatingProject
-                ) {
-                    isPresentingProjectCreation = false
-                } onSave: { name, color in
-                    Task {
-                        let didCreate = await viewModel.createEmptyProject(
-                            named: name,
-                            color: color,
-                            modelContext: modelContext
-                        )
-                        handleLastError()
-
-                        if didCreate {
-                            isPresentingProjectCreation = false
-                        }
-                    }
-                }
-                .presentationDetents([.medium])
-            }
-            .sheet(item: $projectPendingRename) { project in
-                ProjectRenameSheet(
-                    project: project,
-                    isSaving: viewModel.isRenamingProject
-                ) {
-                    projectPendingRename = nil
-                } onSave: { name, color in
-                    Task {
-                        let didRename = await viewModel.rename(project, named: name, color: color)
-                        handleLastError()
-
-                        if didRename {
-                            projectPendingRename = nil
-                        }
-                    }
-                }
-                .presentationDetents([.medium])
-            }
-            .sheet(isPresented: $isPresentingAddServer) {
-                // Reuse #17's add-server flow directly as a power-user shortcut.
-                // On success `addServer` switches the active server, which
-                // rebuilds this stack via ContentView's `.id(server)` (#283).
-                AddServerView(authManager: authManager)
-            }
-            .task {
-                // Paint the saved sidebar before the first network await. This lets
-                // stored-chat restoration begin immediately while the live refresh
-                // reconciles in parallel.
-                viewModel.prepareInitialCachedSessions(modelContext: modelContext)
-
-                // Start the normal refresh immediately so a slow direct session
-                // request cannot leave the sidebar empty. Deep-link resolution still
-                // owns navigation precedence; stored selection restoration happens
-                // after it, but before the network refresh must finish.
-                await SessionListInitialLoad.run(
-                    resolvePendingDeepLink: {
-                        await openPendingDeepLinkedSessionIfNeeded()
-                    },
-                    refreshSessionsAndActiveProfile: {
-                        await refreshSessionsAndActiveProfile(reconcileOpenTranscripts: true)
-                    },
-                    restoreLastSelectedSession: { clearsMissingSelection in
-                        restoreLastSelectedSessionIfNeeded(
-                            clearsMissingSelection: clearsMissingSelection
-                        )
-                    }
-                )
-                guard !Task.isCancelled else { return }
-                didCompleteInitialLoad = true
-            }
-            .onChange(of: scenePhase) { _, newPhase in
-                guard newPhase == .active else {
-                    foregroundRefreshTask?.cancel()
-                    foregroundRefreshTask = nil
-                    return
-                }
-                guard SessionListForegroundRefreshPolicy.shouldRefresh(
-                    didCompleteInitialLoad: didCompleteInitialLoad,
-                    sceneIsActive: true
-                ) else { return }
-
-                foregroundRefreshTask?.cancel()
-                foregroundRefreshTask = Task { @MainActor in
-                    await refreshSessionsAndActiveProfile(reconcileOpenTranscripts: true)
-                    guard !Task.isCancelled, scenePhase == .active else { return }
-                }
-            }
-            .onDisappear {
-                isSessionListVisible = false
-                viewModel.invalidateGatewayObservation()
-                foregroundRefreshTask?.cancel()
-                foregroundRefreshTask = nil
-                newChatCreationTask?.cancel()
-                newChatCreationTask = nil
-            }
-            .task(id: remoteSearchTaskID) {
-                await viewModel.searchSessions(query: searchText, content: true, depth: 5)
-            }
-            .task(id: activeSessionMonitorTaskID) {
-                await monitorActiveSessionRows()
-            }
-            .task(id: returnRefreshID) {
-                guard returnRefreshID != nil else { return }
-                await refreshSessionsAndActiveProfile(reconcileOpenTranscripts: true)
-            }
-            .onAppear {
-#if DEBUG
-                ChatPerformanceCadenceMonitor.end(.back)
-#endif
-                isSessionListVisible = true
-                viewModel.setSidebarEditing(sidebarHasPendingEdit)
-                viewModel.setSidebarDestructiveActionPending(sidebarHasPendingDestructiveAction)
-                viewModel.startGatewayObservation()
-                drainPendingExternalNewChatRequestsIfIdle()
-                refreshAfterReturningIfNeeded()
-                applyPendingSessionFilterIfNeeded()
-                onConversationVisibilityChanged(navigationState.isConversationPresented)
-            }
-            .onChange(of: sidebarHasPendingEdit) { _, editing in
-                viewModel.setSidebarEditing(editing)
-            }
-            .onChange(of: sidebarHasPendingDestructiveAction) { _, pending in
-                viewModel.setSidebarDestructiveActionPending(pending)
-            }
-            .onChange(of: pendingSharedImport) {
-                drainPendingExternalNewChatRequestsIfIdle()
-            }
-            .onChange(of: pendingDeepLinkedSessionID) {
-                Task { await openPendingDeepLinkedSessionIfNeeded() }
-            }
-            .onChange(of: requestedNewChat) {
-                drainPendingExternalNewChatRequestsIfIdle()
-            }
-            .onChange(of: requestedSessionFilter) {
-                applyPendingSessionFilterIfNeeded()
-            }
-            .onChange(of: showsProjectsSection) {
-                // The "All" button that clears a project filter lives in the
-                // Projects header, so hiding the section mid-filter would strand
-                // the list on one project with no way back (#189).
-                guard !showsProjectsSection else { return }
-                selectedProjectID = nil
-            }
-            .onChange(of: shellSurfaceVisitID) { _, newValue in
-                guard usesShellChrome, newValue > 0 else { return }
-                var transaction = Transaction()
-                transaction.disablesAnimations = true
-                withTransaction(transaction) {
-                    navigationState.resetForShellSurfaceSwitch()
-                }
-                persistLastSelectedSession()
-                onConversationVisibilityChanged(false)
-            }
-            .onChange(of: navigationState.destination) { oldValue, newValue in
-                onConversationVisibilityChanged(navigationState.isConversationPresented)
-                if case .session(let session) = newValue {
-                    SessionReadStateStore.shared.markRead(session, server: server)
-                }
-                SessionListNewChatReturn.run(
-                    from: oldValue,
-                    to: newValue,
-                    suppressEmptyPlaceholders: viewModel.removeEmptySidebarPlaceholders,
-                    refreshSessions: refreshAfterReturningIfNeeded
-                )
-            }
-            .refreshable {
-                await refreshSessionsAndActiveProfile(reconcileOpenTranscripts: true)
-            }
-            .modifier(
-                SessionActionConfirmations(
-                    viewModel: viewModel,
-                    sessionPendingDeletion: $sessionPendingDeletion,
-                    projectPendingDeletion: $projectPendingDeletion,
-                    deleteSession: { session in
-                        Task { await delete(session) }
-                    },
-                    deleteProject: { project in
-                        Task { await delete(project) }
-                    }
-                )
-            )
-            .focusedSceneValue(\.hermexSceneActions, sceneActions)
-    }
-
-    private var sidebarHasPendingEdit: Bool {
+    var sidebarHasPendingEdit: Bool {
         sessionPendingRename != nil || projectPendingRename != nil || searchFieldIsFocused
     }
 
-    private var sidebarHasPendingDestructiveAction: Bool {
+    var sidebarHasPendingDestructiveAction: Bool {
         sessionPendingDeletion != nil || projectPendingDeletion != nil
     }
 
@@ -411,12 +145,34 @@ struct SessionListView: View {
         )
     }
 
+    var sidebarSectionVisibility: SidebarSectionVisibility {
+        SidebarSectionVisibility(
+            tasks: showsTasksSection,
+            kanban: showsKanbanSection,
+            skills: showsSkillsSection,
+            memory: showsMemorySection,
+            insights: showsInsightsSection,
+            activeProfile: showsActiveProfileSection,
+            projects: showsProjectsSection
+        )
+    }
+
     var emptySessionsDescription: String? {
         if hasActiveSessionFilter {
             return String(localized: "Try another search or filter.")
         }
 
         return String(localized: "Tap Chat to start.")
+    }
+
+    func isActiveProfile(_ profile: ProfileSummary) -> Bool {
+        guard let profileName = profile.normalizedName else { return false }
+
+        if let activeProfileName = viewModel.activeProfileName {
+            return profileName == activeProfileName
+        }
+
+        return profile.isActive == true
     }
 
     var newSessionButtonSurface: AdaptiveGlassSurface {
@@ -427,6 +183,19 @@ struct SessionListView: View {
         )
     }
 
+    // The glass tint is dropped on the material/opaque fallback surfaces, so a
+    // themed button would otherwise show its contrast-picked foreground over a
+    // neutral material (e.g. black-on-dark for a light theme color). Draw a
+    // solid header-color fill there so the button stays themed and readable;
+    // the liquid-glass surface keeps tinting via `newSessionButtonGlassTint`.
+    var newSessionButtonSolidThemeFill: Color? {
+        guard newSessionButtonUsesThemeColor, newSessionButtonSurface != .liquidGlass else {
+            return nil
+        }
+
+        return selectedHeaderLogoColor
+    }
+
     var newSessionButtonGlassTint: Color {
         if newSessionButtonUsesThemeColor {
             return selectedHeaderLogoColor
@@ -435,7 +204,45 @@ struct SessionListView: View {
         return colorScheme == .dark ? .white : .black
     }
 
-    private var sceneActions: SemrehSceneActions {
+    func refreshSessionsAndActiveProfile(reconcileOpenTranscripts: Bool = false) async {
+        await SidebarLoadOrdering.run(
+            resolveActiveProfile: { await viewModel.loadActiveProfile() },
+            loadSessions: { await loadSessions() }
+        )
+        guard !Task.isCancelled, reconcileOpenTranscripts else { return }
+        _ = await OpenChatSessionStore.shared.refreshOpenSessions(
+            for: server,
+            modelContext: modelContext
+        )
+    }
+
+    // Foreground refresh task lifecycle. The exact source strings below are
+    // asserted by AppIconChoiceTests.testForegroundRefreshTasksAreSceneOwnedAndCancelled,
+    // so this logic must stay in this file.
+    func handleScenePhaseChange(_ newPhase: ScenePhase) {
+        guard newPhase == .active else {
+            foregroundRefreshTask?.cancel()
+            foregroundRefreshTask = nil
+            return
+        }
+        guard SessionListForegroundRefreshPolicy.shouldRefresh(
+            didCompleteInitialLoad: didCompleteInitialLoad,
+            sceneIsActive: true
+        ) else { return }
+
+        foregroundRefreshTask?.cancel()
+        foregroundRefreshTask = Task { @MainActor in
+            await refreshSessionsAndActiveProfile(reconcileOpenTranscripts: true)
+            guard !Task.isCancelled, scenePhase == .active else { return }
+        }
+    }
+
+    func cancelForegroundRefreshTask() {
+        foregroundRefreshTask?.cancel()
+        foregroundRefreshTask = nil
+    }
+
+    var sceneActions: SemrehSceneActions {
         SemrehSceneActions(
             canCreateNewChat: !viewModel.isViewingCachedData
                 && !viewModel.isCreatingSession
@@ -445,9 +252,78 @@ struct SessionListView: View {
         )
     }
 
-    private func refreshAfterReturningIfNeeded() {
+    func refreshAfterReturningIfNeeded() {
         guard didCompleteInitialLoad else { return }
         returnRefreshID = UUID()
+    }
+
+    @MainActor
+    func switchActiveProfile(_ profile: ProfileSummary) async {
+        let didSwitch = await viewModel.switchActiveProfile(profile)
+        handleLastError()
+
+        guard didSwitch else { return }
+
+        withAnimation(SessionListMotion.disclosureAnimation(reduceMotion: reduceMotion)) {
+            profilesAreExpanded = false
+        }
+
+        await loadSessions()
+    }
+
+    func togglePinned(_ session: SessionSummary) async {
+        let didChangePinState = await viewModel.setPinned(
+            !(session.pinned ?? false),
+            for: session,
+            modelContext: modelContext,
+            animation: SessionListMotion.sessionMutationAnimation(reduceMotion: reduceMotion)
+        )
+        handleLastError()
+
+        if didChangePinState {
+            SessionHaptics.pinStateChanged(isEnabled: isHapticsEnabled)
+        }
+    }
+
+    func archive(_ session: SessionSummary) async {
+        let didArchive = await viewModel.archive(
+            session,
+            modelContext: modelContext,
+            animation: SessionListMotion.sessionMutationAnimation(reduceMotion: reduceMotion)
+        )
+        handleLastError()
+
+        if didArchive {
+            removeSessionFromNavigation(session)
+            SessionHaptics.archiveStateChanged(isEnabled: isHapticsEnabled)
+        }
+    }
+
+    func delete(_ session: SessionSummary) async {
+        await SessionHaptics.commitSessionDeletion(isEnabled: isHapticsEnabled) {
+            let didDelete = await viewModel.delete(
+                session,
+                modelContext: modelContext,
+                animation: SessionListMotion.sessionMutationAnimation(reduceMotion: reduceMotion)
+            )
+            handleLastError()
+
+            if didDelete {
+                removeSessionFromNavigation(session)
+            }
+        }
+    }
+
+    func rename(_ session: SessionSummary, to title: String) async -> Bool {
+        let didChangeTitle = normalizedTitle(title) != normalizedTitle(session.title)
+        let didRename = await viewModel.rename(session, to: title, modelContext: modelContext)
+        handleLastError()
+
+        if didRename, didChangeTitle {
+            SessionHaptics.sessionRenamed(isEnabled: isHapticsEnabled)
+        }
+
+        return didRename
     }
 
     func duplicate(_ session: SessionSummary) async {
@@ -456,6 +332,42 @@ struct SessionListView: View {
 
         if let duplicatedSession {
             selectSession(duplicatedSession)
+        }
+    }
+
+    func move(_ session: SessionSummary, to projectID: String?) async {
+        await viewModel.move(session, to: projectID, modelContext: modelContext)
+        handleLastError()
+    }
+
+    func export(_ session: SessionSummary, format: SessionExportFormat) async {
+        let fileURL = await viewModel.export(session, format: format)
+        handleLastError()
+
+        if let fileURL {
+            sessionExportShareItem = SessionExportShareItem(fileURL: fileURL)
+        }
+    }
+
+    func delete(_ project: ProjectSummary) async {
+        let deletedProjectID = project.projectId
+        let didDelete = await viewModel.delete(project, modelContext: modelContext)
+        handleLastError()
+
+        if didDelete, selectedProjectID == deletedProjectID {
+            selectedProjectID = nil
+        }
+    }
+
+    func normalizedTitle(_ title: String?) -> String? {
+        guard let title else { return nil }
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    func handleLastError() {
+        if let lastError = viewModel.lastError {
+            authManager.handleAPIError(lastError)
         }
     }
 

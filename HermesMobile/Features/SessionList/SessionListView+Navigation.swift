@@ -37,7 +37,7 @@ extension SessionListView {
     }
 
     @ViewBuilder
-    private func utilityDestination(_ destination: SessionListUtilityDestination) -> some View {
+    func utilityDestination(_ destination: SessionListUtilityDestination) -> some View {
         Group {
             switch destination {
             case .settings(let scrollTo):
@@ -83,7 +83,7 @@ extension SessionListView {
         .adaptiveSecondaryNavigationTitle()
     }
 
-    private var navigationDestinationBinding: Binding<SessionNavigationDestination?> {
+    var navigationDestinationBinding: Binding<SessionNavigationDestination?> {
         Binding(
             get: { navigationState.destination },
             set: { destination in
