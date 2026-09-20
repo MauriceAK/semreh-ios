@@ -6101,7 +6101,7 @@ extension ChatViewModel {
         var transcriptMessages: [TranscriptMessage] = []
         transcriptMessages.reserveCapacity(messages.count)
         var directFallbackOccurrences: [String: Int] = [:]
-        let fallbackRows = messages.enumerated().compactMap { loadedIndex, message in
+        let fallbackRows: [(loadedIndex: Int, message: ChatMessage)] = messages.enumerated().compactMap { loadedIndex, message in
             guard preferDurableIDs,
                   message.role != "tool",
                   !TranscriptTurnClassifier.isToolResultOnlyMessage(message),
