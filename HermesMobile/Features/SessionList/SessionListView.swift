@@ -24,7 +24,7 @@ struct SessionListView: View {
     @Environment(\.colorScheme) var colorScheme
     @Environment(\.horizontalSizeClass) var horizontalSizeClass
     @Environment(\.accessibilityReduceMotion) var reduceMotion
-    @Environment(\.accessibilityReduceTransparency) var reduceTransparency
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.scenePhase) var scenePhase
     @Environment(\.appColorPalette) var palette
     @Environment(\.appAccent) var accent
@@ -65,21 +65,21 @@ struct SessionListView: View {
     @AppStorage(SessionRowDisplaySettings.showWorkspaceKey) var showsSessionWorkspace = true
     @AppStorage(SessionRowDisplaySettings.showCronSessionsKey) var showsCronSessions = true
     @AppStorage(SessionRowDisplaySettings.showSubagentSessionsKey)
-    var showsSubagentSessions = SessionRowDisplaySettings.defaultShowsSubagentSessions
-    @AppStorage(SectionVisibilitySettings.tasksKey) var showsTasksSection = true
-    @AppStorage(SectionVisibilitySettings.kanbanKey) var showsKanbanSection = true
-    @AppStorage(SectionVisibilitySettings.skillsKey) var showsSkillsSection = true
-    @AppStorage(SectionVisibilitySettings.memoryKey) var showsMemorySection = true
-    @AppStorage(SectionVisibilitySettings.insightsKey) var showsInsightsSection = true
-    @AppStorage(SectionVisibilitySettings.activeProfileKey) var showsActiveProfileSection = true
+    private var showsSubagentSessions = SessionRowDisplaySettings.defaultShowsSubagentSessions
+    @AppStorage(SectionVisibilitySettings.tasksKey) private var showsTasksSection = true
+    @AppStorage(SectionVisibilitySettings.kanbanKey) private var showsKanbanSection = true
+    @AppStorage(SectionVisibilitySettings.skillsKey) private var showsSkillsSection = true
+    @AppStorage(SectionVisibilitySettings.memoryKey) private var showsMemorySection = true
+    @AppStorage(SectionVisibilitySettings.insightsKey) private var showsInsightsSection = true
+    @AppStorage(SectionVisibilitySettings.activeProfileKey) private var showsActiveProfileSection = true
     @AppStorage(SectionVisibilitySettings.projectsKey) var showsProjectsSection = true
     // Per-server key (#19): the CLI toggle mirrors the active server's
     // `show_cli_sessions`, so its cached value must not leak across servers.
     // Configured in `init`, where the server URL is known.
-    @AppStorage var showsCliSessions: Bool
-    @AppStorage var showsClaudeCodeSessions: Bool
+    @AppStorage private var showsCliSessions: Bool
+    @AppStorage private var showsClaudeCodeSessions: Bool
     @AppStorage(PrimaryActionTintSettings.isEnabledKey) var tintsPrimaryActions = false
-    @AppStorage(GlassPreference.isEnabledKey) var isGlassEnabled = GlassPreference.defaultIsEnabled
+    @AppStorage(GlassPreference.isEnabledKey) private var isGlassEnabled = GlassPreference.defaultIsEnabled
     @AppStorage(SessionIdentitySettings.displayNameKey) var identityDisplayName = ""
     @AppStorage(SessionIdentitySettings.initialsKey) var identityInitials = ""
     @AppStorage(AppHaptics.isEnabledKey) var isHapticsEnabled = true
@@ -165,7 +165,7 @@ struct SessionListView: View {
         return String(localized: "Tap Chat to start.")
     }
 
-    func isActiveProfile(_ profile: ProfileSummary) -> Bool {
+    private func isActiveProfile(_ profile: ProfileSummary) -> Bool {
         guard let profileName = profile.normalizedName else { return false }
 
         if let activeProfileName = viewModel.activeProfileName {
@@ -175,7 +175,7 @@ struct SessionListView: View {
         return profile.isActive == true
     }
 
-    var newSessionButtonSurface: AdaptiveGlassSurface {
+    private var newSessionButtonSurface: AdaptiveGlassSurface {
         AdaptiveGlassSurface.resolve(
             liquidGlassAvailable: GlassPreference.isLiquidGlassSupported,
             isGlassEnabled: isGlassEnabled,
@@ -359,7 +359,7 @@ struct SessionListView: View {
         }
     }
 
-    func normalizedTitle(_ title: String?) -> String? {
+    private func normalizedTitle(_ title: String?) -> String? {
         guard let title else { return nil }
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed

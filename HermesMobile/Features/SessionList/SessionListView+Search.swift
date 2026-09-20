@@ -97,7 +97,7 @@ extension SessionListView {
         .accessibilityLabel(searchChromeIsExpanded ? "Session search" : "Search sessions")
     }
 
-    var searchTextField: some View {
+    private var searchTextField: some View {
         TextField("Search sessions", text: $searchText)
             .font(AppFont.subheadline())
             .textInputAutocapitalization(.never)
@@ -112,7 +112,7 @@ extension SessionListView {
             .accessibilityHidden(!searchChromeIsExpanded)
     }
 
-    var searchClearButton: some View {
+    private var searchClearButton: some View {
         Button {
             searchText = ""
             searchFieldIsFocused = true
@@ -128,7 +128,7 @@ extension SessionListView {
         .accessibilityLabel("Clear search")
     }
 
-    var searchTrailingButton: some View {
+    private var searchTrailingButton: some View {
         HapticButton(feedbackStyle: .medium) {
             if searchChromeIsExpanded {
                 closeSearch()
@@ -199,7 +199,7 @@ extension SessionListView {
         }
     }
 
-    func openSearch() {
+    private func openSearch() {
         withAnimation(SessionListMotion.searchChromeAnimation(reduceMotion: reduceMotion)) {
             isSearchVisible = true
             searchChromeIsExpanded = true
