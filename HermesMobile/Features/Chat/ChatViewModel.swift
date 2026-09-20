@@ -5881,16 +5881,35 @@ final class DirectFallbackRenderIdentityLedger {
         }
         var reconciled = fingerprints.map { Entry(fingerprint: $0, renderID: "") }
 
-        if !entries.isEmpty, entries.count <= fingerprints.count {
-            let oldFingerprints = entries.map(\.fingerprint)
-            let candidateStarts = Array(0...(fingerprints.count - entries.count))
-            let starts: [Int] = isOlderPagePrepend ? Array(candidateStarts.reversed()) : candidateStarts
-            if let start = starts.first(where: {
-                Array(fingerprints[$0..<($0 + entries.count)]) == oldFingerprints
-            }) {
-                for oldIndex in entries.indices {
-                    reconciled[start + oldIndex] = entries[oldIndex]
-                }
+        let oldFingerprints = entries.map(\.fingerprint)
+        let sharedCount = min(entries.count, fingerprints.count)
+        let rawPrefixCount = sharedPrefixLength(oldFingerprints, fingerprints)
+        let rawSuffixCount = sharedSuffixLength(oldFingerprints, fingerprints)
+        // Older pages are known head insertions, while a smaller ordinary
+        // window is normally the newest suffix. Favoring that side resolves
+        // equal duplicate rows deterministically without scanning candidate
+        // offsets or allocating an Array slice for every offset.
+        // A middle deletion of indistinguishable ID-less rows has no
+        // recoverable lineage; only the proven prefix/suffix is retained.
+        let preferSuffix = isOlderPagePrepend || fingerprints.count < entries.count
+        let suffixCount: Int
+        let prefixCount: Int
+        if preferSuffix {
+            suffixCount = min(rawSuffixCount, sharedCount)
+            prefixCount = min(rawPrefixCount, sharedCount - suffixCount)
+        } else {
+            prefixCount = min(rawPrefixCount, sharedCount)
+            suffixCount = min(rawSuffixCount, sharedCount - prefixCount)
+        }
+
+        for index in 0..<prefixCount {
+            reconciled[index] = entries[index]
+        }
+        if suffixCount > 0 {
+            let newStart = fingerprints.count - suffixCount
+            let oldStart = entries.count - suffixCount
+            for offset in 0..<suffixCount {
+                reconciled[newStart + offset] = entries[oldStart + offset]
             }
         }
 
@@ -5905,6 +5924,25 @@ final class DirectFallbackRenderIdentityLedger {
         return Dictionary(uniqueKeysWithValues: zip(messages, reconciled).map {
             ($0.0.loadedIndex, $0.1.renderID)
         })
+    }
+
+    private func sharedPrefixLength(_ lhs: [String], _ rhs: [String]) -> Int {
+        let limit = min(lhs.count, rhs.count)
+        var count = 0
+        while count < limit, lhs[count] == rhs[count] {
+            count += 1
+        }
+        return count
+    }
+
+    private func sharedSuffixLength(_ lhs: [String], _ rhs: [String]) -> Int {
+        let limit = min(lhs.count, rhs.count)
+        var count = 0
+        while count < limit,
+              lhs[lhs.count - count - 1] == rhs[rhs.count - count - 1] {
+            count += 1
+        }
+        return count
     }
 
     private func reset() {

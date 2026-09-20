@@ -1902,6 +1902,37 @@ final class ChatViewModelSendTests: XCTestCase {
         XCTAssertTrue(Set(resetScope.map(\.renderID)).isDisjoint(with: Set(appended.map(\.renderID))))
     }
 
+    func testDirectTranscriptFallbackLedgerRetainsUnaffectedRowsAcrossUpdateAndWindowShrink() {
+        let ledger = DirectFallbackRenderIdentityLedger()
+        let first = ChatMessage(role: "assistant", content: "First", timestamp: nil, messageId: nil)
+        let second = ChatMessage(role: "assistant", content: "Second", timestamp: nil, messageId: nil)
+        let changedSecond = ChatMessage(role: "assistant", content: "Second, updated", timestamp: nil, messageId: nil)
+        let third = ChatMessage(role: "assistant", content: "Third", timestamp: nil, messageId: nil)
+        let fourth = ChatMessage(role: "assistant", content: "Fourth", timestamp: nil, messageId: nil)
+
+        func render(_ rows: [ChatMessage]) -> [TranscriptMessage] {
+            ChatViewModel.transcriptMessages(
+                from: rows,
+                hidingStreamingAssistantID: nil,
+                preferDurableIDs: true,
+                fallbackLedger: ledger,
+                fallbackScope: "server|profile|session-update",
+                isOlderPagePrepend: false
+            )
+        }
+
+        let initial = render([first, second, third])
+        let updated = render([first, changedSecond, third])
+        XCTAssertEqual(updated[0].renderID, initial[0].renderID)
+        XCTAssertNotEqual(updated[1].renderID, initial[1].renderID)
+        XCTAssertEqual(updated[2].renderID, initial[2].renderID)
+
+        let expanded = render([first, changedSecond, third, fourth])
+        let shrunk = render([changedSecond, third, fourth])
+        XCTAssertEqual(shrunk.map(\.renderID), Array(expanded.dropFirst()).map(\.renderID))
+        XCTAssertEqual(Set(shrunk.map(\.renderID)).count, shrunk.count)
+    }
+
     @MainActor
     func testPerformanceLabStreamingUpdatesOnlyTheSelectedTranscriptIncrementally() async throws {
         let fixtures = ChatViewModel.makePerformanceLabFixtures(count: 3)
