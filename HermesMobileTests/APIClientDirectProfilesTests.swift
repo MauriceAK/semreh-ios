@@ -3,6 +3,67 @@ import XCTest
 @testable import HermesMobile
 
 final class APIClientDirectProfilesTests: APIClientTestCase {
+    func testSettingsArchiveProfileResolutionUsesTheRunningProfileOnly() async throws {
+        var paths: [String] = []
+        let client = makeClient { request in
+            paths.append(request.url?.path ?? "")
+            XCTAssertEqual(request.url?.path, "/api/profiles/active")
+            return apiTestJSONResponse(
+                #"{"active":"default","current":"  running  "}"#,
+                for: request
+            )
+        }
+
+        let profile = try await SettingsArchivedSessionsProfileResolver.resolve(client: client)
+
+        XCTAssertEqual(profile, "running")
+        XCTAssertEqual(paths, ["/api/profiles/active"])
+    }
+
+    func testSettingsArchiveProfileResolutionRejectsMissingCurrentAndCanRetry() async throws {
+        var responses = [
+            #"{"active":"default","current":"  "}"#,
+            #"{"active":"default","current":"work"}"#
+        ]
+        var requestCount = 0
+        let client = makeClient { request in
+            XCTAssertEqual(request.url?.path, "/api/profiles/active")
+            requestCount += 1
+            return apiTestJSONResponse(responses.removeFirst(), for: request)
+        }
+
+        do {
+            _ = try await SettingsArchivedSessionsProfileResolver.resolve(client: client)
+            XCTFail("A missing current profile must not select default")
+        } catch let error as SettingsArchivedSessionsProfileResolutionError {
+            XCTAssertEqual(error, .missingCurrentProfile)
+        }
+
+        let retryProfile = try await SettingsArchivedSessionsProfileResolver.resolve(client: client)
+
+        XCTAssertEqual(retryProfile, "work")
+        XCTAssertEqual(requestCount, 2)
+    }
+
+    func testSettingsArchiveProfileResolutionPreservesSessionExpiryForAuthHandling() async throws {
+        let client = makeClient { request in
+            let response = HTTPURLResponse(
+                url: try XCTUnwrap(request.url),
+                statusCode: 401,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )
+            return (try XCTUnwrap(response), Data(#"{"error":"session_expired"}"#.utf8))
+        }
+
+        do {
+            _ = try await SettingsArchivedSessionsProfileResolver.resolve(client: client)
+            XCTFail("An expired session must block archive navigation")
+        } catch let error as DirectHermesAuthError {
+            XCTAssertEqual(error, .sessionExpired)
+        }
+    }
+
     @MainActor
     func testFreshProfileWithoutOverridesUsesStockInheritanceWithoutConfigWrite() async throws {
         var paths: [String] = []

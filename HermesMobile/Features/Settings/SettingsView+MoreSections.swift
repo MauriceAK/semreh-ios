@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 
 extension SettingsView {
@@ -139,6 +140,7 @@ extension SettingsView {
 
         SettingsCard(title: String(localized: "Archived Sessions")) {
             SettingsArchivedSessionsLink(server: server, onAPIError: authManager.handleAPIError)
+                .id(server)
         }
         }
     }
@@ -300,29 +302,162 @@ extension SettingsView {
     }
 }
 
-/// Settings entry point for archived sessions. Resolves the running profile
-/// once so the archived list opens on the active profile instead of silently
-/// querying the literal "default" profile (issue #20). Falls back to
-/// "default" when the profile is unreachable, preserving prior behavior.
+enum SettingsArchivedSessionsProfileResolutionError: LocalizedError, Equatable {
+    case missingCurrentProfile
+
+    var errorDescription: String? {
+        switch self {
+        case .missingCurrentProfile:
+            return String(localized: "Hermes did not report the current profile. Try again before opening archived sessions.")
+        }
+    }
+}
+
+enum SettingsArchivedSessionsProfileResolver {
+    static func resolve(client: APIClient) async throws -> String {
+        let activeProfile = try await client.directActiveProfile()
+        guard let current = activeProfile.current?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !current.isEmpty else {
+            throw SettingsArchivedSessionsProfileResolutionError.missingCurrentProfile
+        }
+        return current
+    }
+}
+
+private struct SettingsArchivedSessionsResolutionRequest: Hashable {
+    let server: URL
+    let id: UUID
+}
+
+private struct SettingsArchivedSessionsDestination: Hashable, Identifiable {
+    let server: URL
+    let profile: String
+
+    var id: String {
+        "\(server.absoluteString)|\(profile)"
+    }
+}
+
+private enum SettingsArchivedSessionsLinkState {
+    case idle
+    case resolving(SettingsArchivedSessionsResolutionRequest)
+    case failed(String)
+    case ready(SettingsArchivedSessionsDestination)
+
+    var resolutionRequest: SettingsArchivedSessionsResolutionRequest? {
+        guard case let .resolving(request) = self else { return nil }
+        return request
+    }
+
+    var destination: SettingsArchivedSessionsDestination? {
+        guard case let .ready(destination) = self else { return nil }
+        return destination
+    }
+
+    var isResolving: Bool {
+        resolutionRequest != nil
+    }
+
+    var statusValue: String? {
+        switch self {
+        case .idle, .ready:
+            return nil
+        case .resolving:
+            return String(localized: "Loading…")
+        case .failed:
+            return String(localized: "Try again")
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .failed:
+            return "exclamationmark.triangle"
+        case .idle, .resolving, .ready:
+            return "archivebox"
+        }
+    }
+
+    var errorMessage: String? {
+        guard case let .failed(message) = self else { return nil }
+        return message
+    }
+}
+
 private struct SettingsArchivedSessionsLink: View {
     let server: URL
     let onAPIError: (Error) -> Void
-    @State private var profile: String?
+    @State private var state: SettingsArchivedSessionsLinkState = .idle
 
     var body: some View {
-        NavigationLink {
-            ArchivedSessionsView(server: server, profile: profile ?? "default", onAPIError: onAPIError)
-        } label: {
-            SettingsAccessoryRow(title: String(localized: "Archived Sessions"), systemImage: "archivebox")
-        }
-        .buttonStyle(.plain)
-        .task {
-            guard profile == nil else { return }
-            let current = try? await APIClient(baseURL: server).directActiveProfile().current?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            if let current, !current.isEmpty {
-                profile = current
+        VStack(alignment: .leading, spacing: 8) {
+            Button {
+                beginResolution()
+            } label: {
+                SettingsAccessoryRow(
+                    title: String(localized: "Archived Sessions"),
+                    value: state.statusValue,
+                    systemImage: state.systemImage
+                )
             }
+            .buttonStyle(.plain)
+            .disabled(state.isResolving)
+
+            if let errorMessage = state.errorMessage {
+                Text(errorMessage)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Button(String(localized: "Try Again")) {
+                    beginResolution()
+                }
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(.primary)
+                .buttonStyle(.plain)
+            }
+        }
+
+        .navigationDestination(
+            item: Binding(
+                get: { state.destination },
+                set: { destination in
+                    state = destination.map(SettingsArchivedSessionsLinkState.ready) ?? .idle
+                }
+            )
+        ) { destination in
+            ArchivedSessionsView(
+                server: destination.server,
+                profile: destination.profile,
+                onAPIError: onAPIError
+            )
+        }
+        .task(id: state.resolutionRequest) {
+            guard let request = state.resolutionRequest else { return }
+            await resolve(request)
+        }
+    }
+
+    private func beginResolution() {
+        guard !state.isResolving else { return }
+        state = .resolving(
+            SettingsArchivedSessionsResolutionRequest(server: server, id: UUID())
+        )
+    }
+
+    private func resolve(_ request: SettingsArchivedSessionsResolutionRequest) async {
+        do {
+            let profile = try await SettingsArchivedSessionsProfileResolver.resolve(
+                client: APIClient(baseURL: request.server)
+            )
+            guard !Task.isCancelled else { return }
+            state = .ready(
+                SettingsArchivedSessionsDestination(server: request.server, profile: profile)
+            )
+        } catch {
+            guard !Task.isCancelled else { return }
+            state = .failed(error.localizedDescription)
+            onAPIError(error)
         }
     }
 }
