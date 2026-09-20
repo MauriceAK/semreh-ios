@@ -151,10 +151,10 @@ final class LongChatScrollUITests: XCTestCase {
         defer { clearPasteboard() }
 
         prepareNormalSignIn(app: app)
-        let welcome = app.staticTexts["Control Semreh from iPhone or iPad."]
+        let welcome = containedOnboardingWelcome(app)
         if !app.textFields["onboarding-server-url"].exists {
             XCTAssertTrue(welcome.waitForExistence(timeout: 15), "Normal sign-out must return to Welcome.")
-            let existingServer = app.buttons["Already have a server?"]
+            let existingServer = containedOnboardingEntry(app)
             XCTAssertTrue(existingServer.waitForExistence(timeout: 5))
             existingServer.tap()
         }
@@ -264,10 +264,10 @@ final class LongChatScrollUITests: XCTestCase {
         defer { clearPasteboard() }
 
         prepareNormalSignIn(app: app)
-        let welcome = app.staticTexts["Control Semreh from iPhone or iPad."]
+        let welcome = containedOnboardingWelcome(app)
         if !app.textFields["onboarding-server-url"].exists {
             XCTAssertTrue(welcome.waitForExistence(timeout: 15), "Normal sign-out must return to Welcome.")
-            let existingServer = app.buttons["Already have a server?"]
+            let existingServer = containedOnboardingEntry(app)
             XCTAssertTrue(existingServer.waitForExistence(timeout: 5))
             existingServer.tap()
         }
@@ -1025,10 +1025,10 @@ final class LongChatScrollUITests: XCTestCase {
         defer { clearPasteboard() }
 
         prepareNormalSignIn(app: app)
-        let welcome = app.staticTexts["Control Semreh from iPhone or iPad."]
+        let welcome = containedOnboardingWelcome(app)
         if !app.textFields["onboarding-server-url"].exists {
             XCTAssertTrue(welcome.waitForExistence(timeout: 15), "Normal sign-out must return to Welcome.")
-            let existingServer = app.buttons["Already have a server?"]
+            let existingServer = containedOnboardingEntry(app)
             XCTAssertTrue(existingServer.waitForExistence(timeout: 5))
             existingServer.tap()
         }
@@ -2819,7 +2819,7 @@ final class LongChatScrollUITests: XCTestCase {
     }
 
     private func prepareNormalSignIn(app: XCUIApplication) {
-        let welcome = app.staticTexts["Control Semreh from iPhone or iPad."]
+        let welcome = containedOnboardingWelcome(app)
         if welcome.waitForExistence(timeout: 5) { return }
         // An expired cookie legitimately restores the existing Connect page,
         // rather than the first onboarding page or an authenticated shell.
@@ -2862,6 +2862,20 @@ final class LongChatScrollUITests: XCTestCase {
         XCTAssertTrue(confirmation.waitForExistence(timeout: 5))
         confirmation.buttons["Sign Out"].tap()
         XCTAssertTrue(welcome.waitForExistence(timeout: 20), "Normal sign-out must return to Welcome.")
+    }
+
+    /// The verifier has to tolerate both approved onboarding copy variants:
+    /// older builds expose "Your Hermes companion"/"Get Started", while the
+    /// current surface exposes the explicit server-entry copy. Keep the pair
+    /// exact and fail closed before changing authentication state.
+    private func containedOnboardingWelcome(_ app: XCUIApplication) -> XCUIElement {
+        let current = app.staticTexts["Control Semreh from iPhone or iPad."]
+        return current.exists ? current : app.staticTexts["Your Hermes companion"]
+    }
+
+    private func containedOnboardingEntry(_ app: XCUIApplication) -> XCUIElement {
+        let current = app.staticTexts["Control Semreh from iPhone or iPad."]
+        return current.exists ? app.buttons["Already have a server?"] : app.buttons["Get Started"]
     }
 
     private func replacePublicText(_ field: XCUIElement, with value: String, app: XCUIApplication) {
