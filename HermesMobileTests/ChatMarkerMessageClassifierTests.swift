@@ -39,6 +39,14 @@ final class ChatMarkerMessageClassifierTests: XCTestCase {
         XCTAssertNil(ChatMarkerMessageClassifier.classify(message))
     }
 
+    func testCompactionStemInsideAnOrdinaryWordDoesNotHideUserContent() {
+        let message = makeMessage(
+            role: "user",
+            content: "Context compactional models should preserve this raw request."
+        )
+        XCTAssertNil(ChatMarkerMessageClassifier.classify(message))
+    }
+
     // MARK: - Preserved task list
 
     func testPreservedTaskListPrefixMatchesForUserRole() {
@@ -113,6 +121,15 @@ final class ChatMarkerMessageClassifierTests: XCTestCase {
         let message = makeMessage(
             role: "user",
             content: "Can you check that background process output from the last build?"
+        )
+        XCTAssertNil(ChatMarkerMessageClassifier.classify(message))
+        XCTAssertTrue(TranscriptTurnClassifier.isUserTurnBoundary(message))
+    }
+
+    func testBracketedUserNoteAboutBackgroundProcessesStaysAUserBubble() {
+        let message = makeMessage(
+            role: "user",
+            content: "[IMPORTANT: Background processes need approval before continuing]"
         )
         XCTAssertNil(ChatMarkerMessageClassifier.classify(message))
         XCTAssertTrue(TranscriptTurnClassifier.isUserTurnBoundary(message))
