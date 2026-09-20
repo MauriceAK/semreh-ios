@@ -124,6 +124,10 @@ extension SettingsView {
             )
             .disabled(!cliSessionsSync.showsCliSessions)
 
+            // Only the CLI rows above are per-server; the other session toggles
+            // in this card are global to this device.
+            SettingsFootnote(String(localized: "CLI session visibility is saved on this device for this server."))
+
             SettingsDivider()
 
             SettingsToggleRow(
@@ -131,17 +135,10 @@ extension SettingsView {
                 systemImage: "arrow.triangle.branch",
                 isOn: $showsSubagentSessions
             )
-
-            SettingsFootnote(String(localized: "Session visibility is saved on this device for this server."))
         }
 
         SettingsCard(title: String(localized: "Archived Sessions")) {
-            NavigationLink {
-                ArchivedSessionsView(server: server, onAPIError: authManager.handleAPIError)
-        } label: {
-                SettingsAccessoryRow(title: String(localized: "Archived Sessions"), systemImage: "archivebox")
-            }
-            .buttonStyle(.plain)
+            SettingsArchivedSessionsLink(server: server, onAPIError: authManager.handleAPIError)
         }
         }
     }
@@ -299,6 +296,33 @@ extension SettingsView {
                 isConfirmingReconfigure = true
             }
         }
+        }
+    }
+}
+
+/// Settings entry point for archived sessions. Resolves the running profile
+/// once so the archived list opens on the active profile instead of silently
+/// querying the literal "default" profile (issue #20). Falls back to
+/// "default" when the profile is unreachable, preserving prior behavior.
+private struct SettingsArchivedSessionsLink: View {
+    let server: URL
+    let onAPIError: (Error) -> Void
+    @State private var profile: String?
+
+    var body: some View {
+        NavigationLink {
+            ArchivedSessionsView(server: server, profile: profile ?? "default", onAPIError: onAPIError)
+        } label: {
+            SettingsAccessoryRow(title: String(localized: "Archived Sessions"), systemImage: "archivebox")
+        }
+        .buttonStyle(.plain)
+        .task {
+            guard profile == nil else { return }
+            let current = try? await APIClient(baseURL: server).directActiveProfile().current?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if let current, !current.isEmpty {
+                profile = current
+            }
         }
     }
 }
