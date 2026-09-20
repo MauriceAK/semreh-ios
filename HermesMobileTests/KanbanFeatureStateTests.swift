@@ -221,6 +221,45 @@ final class KanbanFeatureStateTests: XCTestCase {
         XCTAssertFalse(state.isLoading)
     }
 
+    func testRepeatedLoadKeepsSettledBoardVisibleWhileRefreshWaits() async {
+        let client = DeferredReentryBoardClient()
+        let state = KanbanFeatureState(server: URL(string: "https://example.test")!, client: client)
+        await state.load()
+        let settledCards = state.allCards
+
+        let reentry = Task { await state.load() }
+        await client.waitForReentryBoardRead()
+
+        XCTAssertTrue(state.isRefreshing)
+        XCTAssertFalse(state.isLoading)
+        XCTAssertEqual(state.state, .compatible)
+        XCTAssertEqual(state.allCards, settledCards)
+
+        await client.resumeReentryBoardRead()
+        await reentry.value
+
+        XCTAssertEqual(state.allCards.map(\.cardID), ["NEW"])
+        XCTAssertFalse(state.isRefreshing)
+    }
+
+    func testCancelledInitialLoadLateResponseReturnsToIdleForRetry() async {
+        let client = DeferredFirstConfigurationClient()
+        let state = KanbanFeatureState(server: URL(string: "https://example.test")!, client: client)
+
+        let firstLoad = Task { await state.load() }
+        await client.waitForFirstConfiguration()
+        firstLoad.cancel()
+        await client.resumeFirstConfiguration()
+        await firstLoad.value
+
+        XCTAssertEqual(state.state, .idle)
+        XCTAssertFalse(state.isLoading)
+        XCTAssertNil(state.report)
+
+        await state.load()
+        XCTAssertEqual(state.state, .compatible)
+    }
+
     func testStatusSearchUnknownStatusAndClearFiltersUseLoadedBoardData() async {
         let state = KanbanFeatureState(
             server: URL(string: "https://example.test")!,
@@ -2347,6 +2386,39 @@ private actor DeferredFirstConfigurationClient: KanbanDataClient {
     func resumeFirstConfiguration() {
         continuation?.resume(returning: KanbanFixtures.configuration)
         continuation = nil
+    }
+}
+
+private actor DeferredReentryBoardClient: KanbanDataClient {
+    private var boardsCallCount = 0
+    private var boardCallCount = 0
+    private var reentryBoardContinuation: CheckedContinuation<KanbanBoardsResponse, Never>?
+
+    func kanbanConfiguration() -> KanbanConfiguration { KanbanFixtures.configuration }
+
+    func kanbanBoards() async -> KanbanBoardsResponse {
+        boardsCallCount += 1
+        if boardsCallCount == 2 {
+            return await withCheckedContinuation { reentryBoardContinuation = $0 }
+        }
+        return KanbanFixtures.boards
+    }
+
+    func kanbanBoard(_ request: KanbanBoardRequest) -> KanbanBoardSnapshot {
+        boardCallCount += 1
+        return boardCallCount == 1 ? KanbanFixtures.richSnapshot : KanbanFixtures.newSnapshot
+    }
+
+    func kanbanStats(board: String) -> KanbanStats { KanbanFixtures.stats }
+    func kanbanAssignees(board: String) -> KanbanAssigneeHistory { KanbanFixtures.history }
+
+    func waitForReentryBoardRead() async {
+        while reentryBoardContinuation == nil { await Task.yield() }
+    }
+
+    func resumeReentryBoardRead() {
+        reentryBoardContinuation?.resume(returning: KanbanFixtures.boards)
+        reentryBoardContinuation = nil
     }
 }
 
