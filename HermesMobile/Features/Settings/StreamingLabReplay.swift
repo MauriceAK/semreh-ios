@@ -68,40 +68,69 @@ enum StreamingLabReplay {
         case media
     }
 
+    enum FixtureTier: String, CaseIterable {
+        case small
+        case medium
+        case large
+    }
+
+    struct FixtureConfiguration: Equatable {
+        let tier: FixtureTier
+        let conversationCount: Int
+        let messagesPerConversation: Int
+    }
+
     struct CorpusMetadata: Equatable {
+        let tier: FixtureTier
         let conversationCount: Int
         let messagesPerConversation: Int
         let totalMessageCount: Int
-        let approximateUTF8Bytes: Int
+        let utf8ByteCount: Int
         let contentKinds: Set<FixtureContentKind>
 
         var report: String {
             let kinds = contentKinds.map(\.rawValue).sorted().joined(separator: ",")
-            return "synthetic_fixture=true conversations=\(conversationCount) "
+            return "synthetic_fixture=true tier=\(tier.rawValue) conversations=\(conversationCount) "
                 + "messages_per_conversation=\(messagesPerConversation) "
-                + "total_messages=\(totalMessageCount) approximate_utf8_bytes=\(approximateUTF8Bytes) "
+                + "total_messages=\(totalMessageCount) utf8_bytes=\(utf8ByteCount) "
                 + "content_kinds=\(kinds) native_device_acceptance=required_separately"
         }
     }
 
-    static let regressionConversationCount = 12
-    static let regressionMessagesPerConversation = 50
+    /// Stable workload tiers. Every tier intentionally contains multiple
+    /// conversations and at least one rotation through all content templates.
+    static let fixtureMatrix: [FixtureConfiguration] = [
+        FixtureConfiguration(tier: .small, conversationCount: 3, messagesPerConversation: 8),
+        FixtureConfiguration(tier: .medium, conversationCount: 6, messagesPerConversation: 24),
+        FixtureConfiguration(tier: .large, conversationCount: 12, messagesPerConversation: 50)
+    ]
+
+    static let defaultFixtureTier = FixtureTier.large
+
+    static var regressionConversationCount: Int {
+        configuration(for: defaultFixtureTier).conversationCount
+    }
 
     static var fixtureUnitCount: Int {
         StreamingWordDrain.unitCount(in: fixture)
     }
 
     static var corpusMetadata: CorpusMetadata {
-        let templates = regressionMessageTemplates
-        let bytesPerConversation = (0..<regressionMessagesPerConversation).reduce(into: 0) { total, index in
-            total += templates[index % templates.count].payload.utf8.count
+        corpusMetadata(for: defaultFixtureTier)
+    }
+
+    static func corpusMetadata(for tier: FixtureTier) -> CorpusMetadata {
+        let configuration = configuration(for: tier)
+        let byteCount = (0..<configuration.conversationCount).reduce(into: 0) { total, index in
+            total += regressionConversation(at: index, tier: tier).utf8.count
         }
         return CorpusMetadata(
-            conversationCount: regressionConversationCount,
-            messagesPerConversation: regressionMessagesPerConversation,
-            totalMessageCount: regressionConversationCount * regressionMessagesPerConversation,
-            approximateUTF8Bytes: bytesPerConversation * regressionConversationCount,
-            contentKinds: Set(templates.map(\.kind))
+            tier: tier,
+            conversationCount: configuration.conversationCount,
+            messagesPerConversation: configuration.messagesPerConversation,
+            totalMessageCount: configuration.conversationCount * configuration.messagesPerConversation,
+            utf8ByteCount: byteCount,
+            contentKinds: Set(regressionMessageTemplates.map(\.kind))
         )
     }
 
@@ -109,13 +138,21 @@ enum StreamingLabReplay {
     /// The lab still mounts only one conversation at a time so opting in does
     /// not silently turn normal app launch into a performance workload.
     static func regressionConversation(at index: Int) -> String {
-        guard regressionConversationCount > 0 else { return "" }
-        let conversation = min(max(index, 0), regressionConversationCount - 1)
+        regressionConversation(at: index, tier: defaultFixtureTier)
+    }
+
+    static func regressionConversation(at index: Int, tier: FixtureTier) -> String {
+        let configuration = configuration(for: tier)
+        let conversation = min(max(index, 0), configuration.conversationCount - 1)
         let templates = regressionMessageTemplates
-        return (0..<regressionMessagesPerConversation).map { message in
+        return (0..<configuration.messagesPerConversation).map { message in
             let template = templates[(conversation + message) % templates.count]
             return "## Message \(message + 1) · \(template.kind.rawValue)\n\n\(template.payload)"
         }.joined(separator: "\n\n---\n\n")
+    }
+
+    private static func configuration(for tier: FixtureTier) -> FixtureConfiguration {
+        fixtureMatrix.first { $0.tier == tier }!
     }
 
     private static let regressionMessageTemplates: [(kind: FixtureContentKind, payload: String)] = [
