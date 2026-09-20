@@ -5787,10 +5787,42 @@ final class OutgoingInsertionLedger {
 /// collide with the legacy position-based transcript IDs.
 enum TranscriptRenderIdentity {
     static let directPrefix = "transcript:row:"
+    private static let directFallbackPrefix = "transcript:row:fallback:"
 
     static func directID(for canonicalMessageID: String?) -> String? {
-        guard let canonicalMessageID, !canonicalMessageID.isEmpty else { return nil }
+        guard let canonicalMessageID,
+              !canonicalMessageID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return nil }
         return "\(directPrefix)\(canonicalMessageID)"
+    }
+
+    /// Direct history normally supplies a durable message ID, but tolerant
+    /// decoding also admits older/partial rows without one. Falling back to a
+    /// loaded index makes every existing SwiftUI row change identity when an
+    /// older page is prepended, which defeats the measured anchor-preservation
+    /// path. Use a deterministic content fingerprint for those exceptional
+    /// rows instead. The per-fingerprint occurrence suffix keeps duplicate
+    /// rows distinct within a rendered transcript.
+    static func directFallbackID(for message: ChatMessage, occurrence: Int) -> String {
+        var hash: UInt64 = 14_695_981_039_346_656_037
+
+        func combine(_ value: String?) {
+            for byte in (value ?? "<nil>").utf8 {
+                hash ^= UInt64(byte)
+                hash &*= 1_099_511_628_211
+            }
+            // Preserve field boundaries ("ab" + "c" must not equal "a" + "bc").
+            hash ^= 0xff
+            hash &*= 1_099_511_628_211
+        }
+
+        combine(message.role)
+        combine(message.timestamp.map { String($0.bitPattern, radix: 16) })
+        combine(message.content)
+        combine(message.name)
+        combine(message.toolCallId)
+        combine(message.toolUseId)
+        return "\(directFallbackPrefix)\(String(hash, radix: 16)):\(occurrence)"
     }
 }
 
@@ -5977,6 +6009,7 @@ extension ChatViewModel {
         let offset = max(0, messageOffset ?? 0)
         var transcriptMessages: [TranscriptMessage] = []
         transcriptMessages.reserveCapacity(messages.count)
+        var directFallbackOccurrences: [String: Int] = [:]
 
         for (loadedIndex, message) in messages.enumerated() {
             guard message.role != "tool" else { continue }
@@ -5991,8 +6024,22 @@ extension ChatViewModel {
                 messageOffset: messageOffset
             )
             let absoluteIndex = offset + loadedIndex
-            let renderID = transcriptRenderID(for: message, absoluteIndex: absoluteIndex,
-                                              preferDurableID: preferDurableIDs)
+            let renderID: String
+            if preferDurableIDs, TranscriptRenderIdentity.directID(for: message.messageId) == nil {
+                let fallbackKey = TranscriptRenderIdentity.directFallbackID(for: message, occurrence: 0)
+                let occurrence = directFallbackOccurrences[fallbackKey, default: 0]
+                directFallbackOccurrences[fallbackKey] = occurrence + 1
+                renderID = TranscriptRenderIdentity.directFallbackID(
+                    for: message,
+                    occurrence: occurrence
+                )
+            } else {
+                renderID = transcriptRenderID(
+                    for: message,
+                    absoluteIndex: absoluteIndex,
+                    preferDurableID: preferDurableIDs
+                )
+            }
 
             transcriptMessages.append(TranscriptMessage(
                 loadedIndex: loadedIndex,
