@@ -2390,22 +2390,17 @@ private actor DeferredFirstConfigurationClient: KanbanDataClient {
 }
 
 private actor DeferredReentryBoardClient: KanbanDataClient {
-    private var boardsCallCount = 0
     private var boardCallCount = 0
-    private var reentryBoardContinuation: CheckedContinuation<KanbanBoardsResponse, Never>?
+    private var reentryBoardContinuation: CheckedContinuation<KanbanBoardSnapshot, Never>?
 
     func kanbanConfiguration() -> KanbanConfiguration { KanbanFixtures.configuration }
+    func kanbanBoards() -> KanbanBoardsResponse { KanbanFixtures.boards }
 
-    func kanbanBoards() async -> KanbanBoardsResponse {
-        boardsCallCount += 1
-        if boardsCallCount == 2 {
+    func kanbanBoard(_ request: KanbanBoardRequest) async -> KanbanBoardSnapshot {
+        boardCallCount += 1
+        if boardCallCount == 2 {
             return await withCheckedContinuation { reentryBoardContinuation = $0 }
         }
-        return KanbanFixtures.boards
-    }
-
-    func kanbanBoard(_ request: KanbanBoardRequest) -> KanbanBoardSnapshot {
-        boardCallCount += 1
         return boardCallCount == 1 ? KanbanFixtures.richSnapshot : KanbanFixtures.newSnapshot
     }
 
@@ -2417,7 +2412,7 @@ private actor DeferredReentryBoardClient: KanbanDataClient {
     }
 
     func resumeReentryBoardRead() {
-        reentryBoardContinuation?.resume(returning: KanbanFixtures.boards)
+        reentryBoardContinuation?.resume(returning: KanbanFixtures.newSnapshot)
         reentryBoardContinuation = nil
     }
 }
