@@ -98,13 +98,13 @@ struct PinnedSessionStrip: View {
     }
 }
 
-struct PinnedSessionStripItem: View {
+private struct PinnedSessionStripItem: View {
     let viewModel: SessionListViewModel
     let session: SessionSummary
     let server: URL
     let actions: SessionListRowActions
 
-    var actionCapabilities: SessionRowActionPolicy.Capabilities {
+    private var actionCapabilities: SessionRowActionPolicy.Capabilities {
         SessionRowActionPolicy.Capabilities(
             isSearchOnlySession: viewModel.isSearchOnlySession(session),
             isViewingCachedData: viewModel.isViewingCachedData
@@ -149,7 +149,7 @@ struct PinnedSessionStripItem: View {
     }
 
     @ViewBuilder
-    var avatar: some View {
+    private var avatar: some View {
         if let identity = BirdAvatarIdentity(server: server, profile: session.profile) {
             BirdAvatarView(identity: identity)
         } else {
@@ -167,7 +167,7 @@ struct PinnedSessionStripItem: View {
         }
     }
 
-    var fallbackInitials: String {
+    private var fallbackInitials: String {
         let title = SessionRowView.displayTitle(for: session)
         let words = title.split(whereSeparator: { $0 == " " || $0 == "-" || $0 == "_" })
         if words.count > 1 {
@@ -267,14 +267,14 @@ struct SessionFiltersSheet: View {
         }
     }
 
-    var hasActiveFilters: Bool {
+    private var hasActiveFilters: Bool {
         selectedBot != nil
             || pinnedOnly
             || scheduledHistoryOnly
             || selectedProjectID != nil
     }
 
-    func filterChoiceLabel(title: String, systemImage: String, isSelected: Bool) -> some View {
+    private func filterChoiceLabel(title: String, systemImage: String, isSelected: Bool) -> some View {
         HStack(spacing: 10) {
             Image(systemName: systemImage)
                 .foregroundStyle(.secondary)
@@ -293,7 +293,7 @@ struct SessionFiltersSheet: View {
         .frame(minHeight: 30)
     }
 
-    func projectDisplayName(_ project: ProjectSummary) -> String {
+    private func projectDisplayName(_ project: ProjectSummary) -> String {
         let name = project.name?.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let name, !name.isEmpty else {
             return String(localized: "Untitled Project")
