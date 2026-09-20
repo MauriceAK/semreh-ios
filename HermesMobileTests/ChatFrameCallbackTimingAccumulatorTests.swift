@@ -25,6 +25,15 @@ final class ChatFrameCallbackTimingAccumulatorTests: XCTestCase {
         XCTAssertEqual(summary.p99CallbackGapMillisecondBin, 16)
     }
 
+    func testReportExplicitlySeparatesCallbackIntervalsFromHitchesAndFPS() {
+        let report = ChatFrameCallbackTimingAccumulator().summary().formattedReport
+
+        XCTAssertTrue(report.contains("measurement=CADisplayLink main-run-loop callback timing only"))
+        XCTAssertTrue(report.contains("presented_frame_hitches=not_measured"))
+        XCTAssertTrue(report.contains("fps=not_measured"))
+        XCTAssertTrue(report.contains("gpu_timing=not_measured"))
+    }
+
     func testOneHundredTwentyHertzCallbacksAccumulateWithoutEstimatedMisses() {
         let accumulator = ChatFrameCallbackTimingAccumulator()
         let interval = 1.0 / 120.0

@@ -36,6 +36,82 @@ final class StreamingLabReplayTests: XCTestCase {
         XCTAssertGreaterThan(longestLine, 300, "needs a paragraph long enough to wrap several lines")
     }
 
+    // MARK: - Realistic regression corpus
+
+    func testRegressionCorpusDefinesNamedSmallMediumLargeMatrix() {
+        XCTAssertEqual(StreamingLabReplay.fixtureMatrix.map(\.tier), [.small, .medium, .large])
+        XCTAssertEqual(
+            StreamingLabReplay.fixtureMatrix.map { [$0.conversationCount, $0.messagesPerConversation] },
+            [[3, 8], [6, 24], [12, 50]]
+        )
+    }
+
+    func testEveryRegressionTierIsMultiConversationAndReportsExactCounts() {
+        let expectedUTF8Bytes: [StreamingLabReplay.FixtureTier: Int] = [
+            .small: 10_635,
+            .medium: 63_984,
+            .large: 266_808
+        ]
+
+        for configuration in StreamingLabReplay.fixtureMatrix {
+            let metadata = StreamingLabReplay.corpusMetadata(for: configuration.tier)
+            let conversations = (0..<configuration.conversationCount).map {
+                StreamingLabReplay.regressionConversation(at: $0, tier: configuration.tier)
+            }
+
+            XCTAssertGreaterThan(metadata.conversationCount, 1, "\(configuration.tier) collapsed to one conversation")
+            XCTAssertEqual(metadata.conversationCount, configuration.conversationCount)
+            XCTAssertEqual(metadata.messagesPerConversation, configuration.messagesPerConversation)
+            XCTAssertEqual(metadata.totalMessageCount, configuration.conversationCount * configuration.messagesPerConversation)
+            XCTAssertEqual(metadata.utf8ByteCount, conversations.reduce(0) { $0 + $1.utf8.count })
+            XCTAssertEqual(metadata.utf8ByteCount, expectedUTF8Bytes[configuration.tier])
+            XCTAssertEqual(metadata.contentKinds, Set(StreamingLabReplay.FixtureContentKind.allCases))
+        }
+    }
+
+    func testEveryRegressionTierCoversMarkdownCodeToolsAndMedia() {
+        for tier in StreamingLabReplay.FixtureTier.allCases {
+            let conversation = StreamingLabReplay.regressionConversation(at: 0, tier: tier)
+
+            XCTAssertTrue(conversation.contains("# How the fade should feel"), tier.rawValue)
+            XCTAssertTrue(conversation.contains("```swift"), tier.rawValue)
+            XCTAssertTrue(conversation.contains("**Tool activity fixture**"), tier.rawValue)
+            XCTAssertTrue(conversation.contains("```json"), tier.rawValue)
+            XCTAssertTrue(conversation.contains("MEDIA:/fixtures/performance/image-01.png"), tier.rawValue)
+            XCTAssertTrue(conversation.contains("MEDIA:/fixtures/performance/clip-01.m4a"), tier.rawValue)
+            XCTAssertTrue(conversation.contains("MEDIA:/fixtures/performance/document-01.pdf"), tier.rawValue)
+        }
+    }
+
+    func testRegressionConversationSelectionIsDeterministicAndClamped() {
+        for configuration in StreamingLabReplay.fixtureMatrix {
+            let tier = configuration.tier
+            XCTAssertEqual(
+                StreamingLabReplay.regressionConversation(at: -1, tier: tier),
+                StreamingLabReplay.regressionConversation(at: 0, tier: tier)
+            )
+            XCTAssertEqual(
+                StreamingLabReplay.regressionConversation(at: 99, tier: tier),
+                StreamingLabReplay.regressionConversation(at: configuration.conversationCount - 1, tier: tier)
+            )
+            XCTAssertNotEqual(
+                StreamingLabReplay.regressionConversation(at: 0, tier: tier),
+                StreamingLabReplay.regressionConversation(at: 1, tier: tier)
+            )
+        }
+    }
+
+    func testCorpusReportLabelsSyntheticEvidenceAndRequiresNativeAcceptance() {
+        let report = StreamingLabReplay.corpusMetadata.report
+
+        XCTAssertTrue(report.contains("synthetic_fixture=true"))
+        XCTAssertTrue(report.contains("tier=large"))
+        XCTAssertTrue(report.contains("conversations=12"))
+        XCTAssertTrue(report.contains("total_messages=600"))
+        XCTAssertTrue(report.contains("utf8_bytes=266808"))
+        XCTAssertTrue(report.contains("native_device_acceptance=required_separately"))
+    }
+
     // MARK: - Prefix paging
 
     func testPrefixAtTotalUnitCountReproducesTheFixtureExactly() {
