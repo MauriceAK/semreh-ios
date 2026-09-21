@@ -195,6 +195,12 @@ def main():
         fail("BrowserLab project Debug and Release configurations must target iOS")
     if pbxproj.count('SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";') < 2:
         fail("BrowserLab project must advertise device and simulator platforms")
+    for unit_test_only_setting in ("BUNDLE_LOADER", "TEST_HOST ="):
+        if unit_test_only_setting in pbxproj:
+            fail(
+                "BrowserLabUITests must use XCTest's UI runner, not unit-test setting "
+                f"{unit_test_only_setting}"
+            )
 
     # --- 8. SwiftPM manifest target paths exist -----------------------------
     for path in re.findall(r'path: "([^"]+)"', manifest):
