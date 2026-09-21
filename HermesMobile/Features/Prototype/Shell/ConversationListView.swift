@@ -86,7 +86,7 @@ struct ConversationListView: View {
                     .lineLimit(1)
                 Spacer()
                 if let timestamp = Self.lastActivity(of: session) {
-                    Text(Self.relativeFormatter.string(for: timestamp))
+                    Text(Self.relativeFormatter.string(for: timestamp) ?? "")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

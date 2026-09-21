@@ -633,6 +633,7 @@ struct PrototypeChatView: View {
         return formatter.string(from: day)
     }
 
+    @ViewBuilder
     private func transcriptRow(
         _ row: TranscriptRow,
         vm: ChatViewModel,
