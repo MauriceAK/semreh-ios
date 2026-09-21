@@ -1075,6 +1075,7 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         XCTAssertEqual(vm.selectedModelProviderID, "fixture")
         XCTAssertNil(vm.composerConfigurationErrorMessage)
         XCTAssertNil(vm.composerConfigurationDiagnostic)
+        XCTAssertNil(vm.lastError)
         XCTAssertFalse(vm.isLoadingComposerConfiguration)
         XCTAssertTrue(fake.calls().isEmpty)
         await vm.disposeDirectConversation()
@@ -1088,6 +1089,7 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         let firstInventoryStarted = expectation(description: "first inventory started")
         let secondInventoryStarted = expectation(description: "second inventory started")
         let releaseFirstInventory = DispatchSemaphore(value: 0)
+        let releaseSecondInventory = DispatchSemaphore(value: 0)
         let client = makeClient { request in
             let path = request.url?.path ?? ""
             requests.append(path)
@@ -1099,6 +1101,7 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
                     throw URLError(.cancelled)
                 }
                 secondInventoryStarted.fulfill()
+                releaseSecondInventory.wait()
                 return apiTestJSONResponse(
                     #"{"model":"model-new","provider":"fixture","providers":[{"slug":"fixture","models":["model-new"]}]}"#,
                     for: request
@@ -1112,6 +1115,8 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         await fulfillment(of: [firstInventoryStarted], timeout: 2)
         let currentLoad = Task { @MainActor in await vm.loadComposerConfiguration() }
         await fulfillment(of: [secondInventoryStarted], timeout: 2)
+        XCTAssertTrue(vm.isLoadingComposerConfiguration)
+        releaseSecondInventory.signal()
         await currentLoad.value
         releaseFirstInventory.signal()
         await staleLoad.value
@@ -1120,6 +1125,7 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         XCTAssertEqual(vm.selectedModelProviderID, "fixture")
         XCTAssertNil(vm.composerConfigurationErrorMessage)
         XCTAssertNil(vm.composerConfigurationDiagnostic)
+        XCTAssertNil(vm.lastError)
         XCTAssertFalse(vm.isLoadingComposerConfiguration)
         XCTAssertTrue(fake.calls().isEmpty)
         await vm.disposeDirectConversation()
@@ -1277,6 +1283,33 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         XCTAssertEqual(oldFake.calls().filter { $0.method == "config.set" }.count, 1)
         await oldVM.disposeDirectConversation()
         await oldRuntime.stop()
+    }
+
+    func testCancelledExistingChatReasoningReloadPreservesCurrentSettings() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let requests = ChatDirectRequestRecorder()
+        let vm = makeViewModel(
+            client: makeExistingComposerClient(requests: requests),
+            runtime: runtime,
+            sessionID: "durable-1"
+        )
+        await vm.loadComposerConfiguration()
+        XCTAssertTrue(vm.showsReasoningEffortControl)
+        XCTAssertEqual(vm.selectedReasoningEffort, "medium")
+        fake.setReasoningGetCancellation(true)
+
+        await vm.loadComposerConfiguration()
+
+        XCTAssertTrue(vm.showsReasoningEffortControl)
+        XCTAssertTrue(vm.allowsReasoningChangesWhileStreaming)
+        XCTAssertEqual(vm.selectedReasoningEffort, "medium")
+        XCTAssertNil(vm.composerConfigurationErrorMessage)
+        XCTAssertNil(vm.composerConfigurationDiagnostic)
+        XCTAssertNil(vm.lastError)
+        XCTAssertFalse(vm.isLoadingComposerConfiguration)
+        await vm.disposeDirectConversation()
+        await runtime.stop()
     }
 
     func testExistingDirectChatBusyReasoningChangeReportsDeferredAck() async throws {
@@ -4162,6 +4195,7 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
     private var reasoningSetResponse: JSONValue?
     private var reasoningSetGate: ChatDirectAsyncGate?
     private var reasoningSetShouldFail = false
+    private var reasoningGetShouldCancel = false
     private var updatesReasoningReadback = false
     private var sessionStatusResponse: JSONValue = .object([
         "output": .string("Agent Running: No")
@@ -4216,6 +4250,10 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
 
     func setReasoningGetResponse(_ response: JSONValue) {
         withLock { reasoningGetResponse = response }
+    }
+
+    func setReasoningGetCancellation(_ enabled: Bool) {
+        withLock { reasoningGetShouldCancel = enabled }
     }
 
     func setReasoningSetResponse(_ response: JSONValue) {
@@ -4408,6 +4446,9 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
                 "scope": .string("session"), "deferred": .bool(false),
                 "persisted": .bool(true)
             ])
+        }
+        if method == "config.get", withLock({ reasoningGetShouldCancel }) {
+            throw CancellationError()
         }
         if method == "clarify.respond", let gate = behavior.2 {
             await gate.wait()
