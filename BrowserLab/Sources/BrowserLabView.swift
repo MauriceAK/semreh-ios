@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import SemrehRemoteBrowserCore
 import SemrehRemoteBrowserUI
 
@@ -38,6 +39,7 @@ final class BrowserLabState: ObservableObject {
 struct BrowserLabView: View {
     @StateObject private var lab = BrowserLabState()
     @State private var panelVisible = true
+    @State private var fixtureRevision = 0
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -62,6 +64,12 @@ struct BrowserLabView: View {
                 // Real hosts suspend input on backgrounding; the lab mirrors it.
                 lab.viewModel.handleBackground()
             }
+        }
+        .onReceive(lab.fixture.objectWillChange.receive(on: RunLoop.main)) { _ in
+            // BrowserLabState owns the replaceable fixture, while panel values
+            // live on that nested ObservableObject. Invalidate this view after
+            // each fixture change so controls and exact readback stay current.
+            fixtureRevision &+= 1
         }
     }
 

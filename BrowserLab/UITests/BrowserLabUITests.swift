@@ -50,6 +50,16 @@ final class BrowserLabUITests: XCTestCase {
         revealPanelElement(element, file: file, line: line).tap()
     }
 
+    private func waitForLabel(
+        _ element: XCUIElement,
+        toEqual expected: String,
+        timeout: TimeInterval = 10
+    ) {
+        let predicate = NSPredicate(format: "label == %@", expected)
+        expectation(for: predicate, evaluatedWith: element)
+        waitForExpectations(timeout: timeout)
+    }
+
     /// The simulated-session banner is always visible.
     func testSimulatedSessionBannerIsAlwaysVisible() {
         XCTAssertTrue(app.staticTexts["lab.banner"].waitForExistence(timeout: 10))
@@ -122,9 +132,9 @@ final class BrowserLabUITests: XCTestCase {
         app.buttons["Done"].tap()
 
         let insertedText = revealPanelElement(app.staticTexts["lab.lastInsertedText"])
-        XCTAssertEqual(insertedText.label, expectedText)
+        waitForLabel(insertedText, toEqual: expectedText)
         let insertCount = revealPanelElement(app.staticTexts["lab.insertedTextCount"])
-        XCTAssertEqual(insertCount.label, "1")
+        waitForLabel(insertCount, toEqual: "1")
         Thread.sleep(forTimeInterval: 1)
         XCTAssertEqual(insertCount.label, "1", "fixture must accept the Unicode insertion exactly once")
     }
@@ -163,9 +173,9 @@ final class BrowserLabUITests: XCTestCase {
         }
         app.buttons["Done"].tap()
         let insertCount = revealPanelElement(app.staticTexts["lab.insertedTextCount"])
-        XCTAssertEqual(insertCount.label, "1")
+        waitForLabel(insertCount, toEqual: "1")
         let insertedText = revealPanelElement(app.staticTexts["lab.lastInsertedText"])
-        XCTAssertEqual(insertedText.label, expectedText)
+        waitForLabel(insertedText, toEqual: expectedText)
     }
 
     func testReadOnlyAndResumeUnknownStatesAreReachable() {
@@ -173,13 +183,16 @@ final class BrowserLabUITests: XCTestCase {
         let status = app.staticTexts["browser.status"]
         XCTAssertTrue(status.waitForExistence(timeout: 10))
 
-        tapPanelElement(app.switches["lab.controlSupported"])
+        let controlSupported = app.switches["lab.controlSupported"]
+        tapPanelElement(controlSupported)
+        XCTAssertEqual(controlSupported.value as? String, "0")
         let readOnly = NSPredicate(format: "label CONTAINS 'Read-only'")
         expectation(for: readOnly, evaluatedWith: status, handler: nil)
         waitForExpectations(timeout: 10)
         XCTAssertFalse(app.buttons["browser.takeControl"].exists)
 
-        tapPanelElement(app.switches["lab.controlSupported"])
+        tapPanelElement(controlSupported)
+        XCTAssertEqual(controlSupported.value as? String, "1")
         let takeControl = app.buttons["browser.takeControl"]
         XCTAssertTrue(takeControl.waitForExistence(timeout: 10))
         takeControl.tap()
