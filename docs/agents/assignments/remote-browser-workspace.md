@@ -1,6 +1,6 @@
 # B01: Remote browser workspace (issue #44)
 
-Owner: Muse Spark 1.3 via the Astra runtime (provider `astra-runtime`), with bounded local repair ownership. Status: repair candidate; dedicated package/lab CI and native verification pending at the current head.
+Owner: Muse Spark 1.3 via the Astra runtime (provider `astra-runtime`), with bounded local repair ownership. Status: exact-head dedicated package/lab CI and standard PR CI green; signed native verification pending.
 
 ## Outcome
 
@@ -31,7 +31,7 @@ Existing app sources, tests, `HermesMobile.xcodeproj`, and `.github/workflows/pr
 - Bundle ID `com.mauricekenon.semreh.browserlab` (unique; the shipping app is `com.mauricekenon.semreh`). Always shows the persistent simulated-session banner.
 - `SimulatedBrowserAdapter`: synthetic changing frames (moving box, sequence stamps), scripted grants/rejections, delayed or lost acknowledgements (including Resume), surface rotation, accepted-command counters and exact inserted-text readback, and a content-free event log.
 - Control panel makes every required workspace state reachable: delayed connect, connect/disconnect/reconnect, control-supported/read-only capability changes, control grant/reject/hold, ack delay/loss, explicit fresh observation after resume uncertainty, frame start/stop, surface rotation, and terminal end-session.
-- Committed Xcode project + shared `BrowserLab` scheme; focused UI tests (`BrowserLabUITests`): banner presence, take-control flow, keyboard draft insert, stale-frame shield on disconnect.
+- Committed Xcode project + shared `BrowserLab` scheme; focused UI tests (`BrowserLabUITests`): banner presence, take-control flow, exact Unicode draft insertion, ambiguous delivery without duplicate insertion, reachable read-only/resume-unknown states, and stale-frame shielding on disconnect.
 - `BrowserLab/Tools/validate-scope.py`: static scope/project validation (runs on Linux too).
 
 **CI** — `.github/workflows/remote-browser-lab.yml` (additive): static validation, `swift test` on the package, then `xcodebuild build-for-testing` / `test-without-building` for the BrowserLab scheme on an iPhone simulator. The repository's existing PR CI remains separate and unchanged; its green HermesMobile job does not establish BrowserLab acceptance.
