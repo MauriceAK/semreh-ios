@@ -117,6 +117,8 @@ struct ComposerConfigurationLoadOutcome: Equatable {
         let bridgedCancellation = CancellationError() as NSError
         if cocoaError.domain == bridgedCancellation.domain,
            cocoaError.code == bridgedCancellation.code { return true }
+        if let gatewayError = error as? HermesGatewayError,
+           case .cancelled = gatewayError { return true }
         guard let apiError = error as? APIError,
               case .network(let underlying) = apiError else { return false }
         return isCancellation(underlying)
@@ -1173,11 +1175,8 @@ final class ChatViewModel {
             profileOptions = availableProfiles.profiles ?? []
             isSingleProfileMode = availableProfiles.singleProfileMode ?? false
             selectedProfileName = profile
-            do {
-                try loadWorkspaceRoots()
-            } catch {
-                throw ComposerConfigurationLoadFailure(source: .workspaceBookmarks, underlying: error)
-            }
+            await refreshWorkspaceRoots()
+            guard isCurrentComposerConfigurationLoad(identity) else { return }
             // The catalog reports profile defaults, not this stored chat's
             // effective configuration. Only a new local draft inherits them.
             if canonicalSessionID == nil, currentModel == nil {
@@ -2836,8 +2835,6 @@ final class ChatViewModel {
 
     /// Reloads device-local workspace bookmarks after manager changes.
     func refreshWorkspaceRoots() async {
-        workspaceRoots = []
-        workspaceSuggestions = []
         do {
             try loadWorkspaceRoots()
         } catch {
@@ -2847,12 +2844,11 @@ final class ChatViewModel {
     }
 
     private func loadWorkspaceRoots() throws {
-        workspaceRoots = []
-        workspaceSuggestions = []
-        workspaceRoots = try localOrganizerStore.workspaceBookmarks(
+        let roots = try localOrganizerStore.workspaceBookmarks(
             server: server, profile: workspaceOrganizerProfile
         ).map { WorkspaceRoot(path: $0.path, name: $0.name) }
-        workspaceSuggestions = workspaceRoots.compactMap(\.path)
+        workspaceRoots = roots
+        workspaceSuggestions = roots.compactMap(\.path)
     }
 
     func loadWorkspaceSuggestions(prefix: String) async {

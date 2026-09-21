@@ -996,6 +996,33 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         await runtime.stop()
     }
 
+    func testWorkspaceReloadFailurePreservesCurrentBookmarks() async throws {
+        let suite = "ChatViewModelDirectGatewayTests.workspace-failure.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = LocalOrganizerStore(defaults: defaults)
+        try store.addWorkspaceBookmark(path: "/work/scoped", name: "Scoped", server: testServer, profile: "work")
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let vm = makeViewModel(
+            client: makeDirectBlockingTestClient(),
+            runtime: runtime,
+            sessionID: nil,
+            defaults: defaults
+        )
+        await vm.refreshWorkspaceRoots()
+        XCTAssertEqual(vm.workspaceRoots, [WorkspaceRoot(path: "/work/scoped", name: "Scoped")])
+        defaults.set(Data("corrupt organizer".utf8), forKey: "localOrganizer.v1")
+
+        await vm.refreshWorkspaceRoots()
+
+        XCTAssertEqual(vm.workspaceRoots, [WorkspaceRoot(path: "/work/scoped", name: "Scoped")])
+        XCTAssertEqual(vm.workspaceSuggestions, ["/work/scoped"])
+        XCTAssertNotNil(vm.composerConfigurationErrorMessage)
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
     func testDirectComposerReloadDoesNotOverwriteConcurrentDraftWorkspaceSelection() async throws {
         let fake = ChatDirectFakeTransport()
         let runtime = try makeRuntime(fake)
@@ -1087,6 +1114,8 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         let runtime = try makeRuntime(fake)
         let firstInventoryStarted = expectation(description: "first inventory started")
         let secondInventoryStarted = expectation(description: "second inventory started")
+        let staleLoadFinished = expectation(description: "stale load finished")
+        let currentLoadFinished = expectation(description: "current load finished")
         ComposerConfigurationRaceURLProtocol.reset(
             firstInventoryStarted: { firstInventoryStarted.fulfill() },
             secondInventoryStarted: { secondInventoryStarted.fulfill() }
@@ -1100,12 +1129,19 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         )
         let vm = makeViewModel(client: client, runtime: runtime, sessionID: nil)
 
-        let staleLoad = Task { @MainActor in await vm.loadComposerConfiguration() }
+        let staleLoad = Task { @MainActor in
+            await vm.loadComposerConfiguration()
+            staleLoadFinished.fulfill()
+        }
+        defer { staleLoad.cancel() }
         await fulfillment(of: [firstInventoryStarted], timeout: 2)
-        let currentLoad = Task { @MainActor in await vm.loadComposerConfiguration() }
+        let currentLoad = Task { @MainActor in
+            await vm.loadComposerConfiguration()
+            currentLoadFinished.fulfill()
+        }
+        defer { currentLoad.cancel() }
         await fulfillment(of: [secondInventoryStarted], timeout: 2)
-        await currentLoad.value
-        await staleLoad.value
+        await fulfillment(of: [currentLoadFinished, staleLoadFinished], timeout: 2)
 
         XCTAssertEqual(vm.selectedModelID, "model-new")
         XCTAssertEqual(vm.selectedModelProviderID, "fixture")
@@ -1135,6 +1171,18 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         XCTAssertEqual(ComposerConfigurationLoadOutcome(error: CancellationError()).rawValue, "cancelled")
         XCTAssertEqual(
             ComposerConfigurationLoadOutcome(error: CancellationError() as NSError).rawValue,
+            "cancelled"
+        )
+        XCTAssertEqual(
+            ComposerConfigurationLoadOutcome(
+                error: APIError.network(underlying: CancellationError() as NSError)
+            ).rawValue,
+            "cancelled"
+        )
+        XCTAssertEqual(
+            ComposerConfigurationLoadOutcome(
+                error: HermesGatewayError.cancelled(method: "config.get", requestID: "fixture")
+            ).rawValue,
             "cancelled"
         )
         XCTAssertEqual(ComposerConfigurationLoadOutcome(error: DirectHermesAuthError.sessionExpired).rawValue, "auth_session_expired")
@@ -4524,7 +4572,7 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
             ])
         }
         if method == "config.get", withLock({ reasoningGetShouldCancel }) {
-            throw CancellationError()
+            throw HermesGatewayError.cancelled(method: method, requestID: "fixture")
         }
         if method == "clarify.respond", let gate = behavior.2 {
             await gate.wait()
