@@ -1050,6 +1050,82 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         await runtime.stop()
     }
 
+    func testCancelledComposerLoadPreservesDraftWithoutPublishingFailure() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let draft = SessionSummary(
+            title: "New Chat",
+            workspace: "/draft",
+            model: "chosen-model",
+            modelProvider: "fixture",
+            profile: "work"
+        )
+        let client = makeClient { request in
+            if request.url?.path == "/api/model/options" {
+                throw CancellationError()
+            }
+            return apiTestJSONResponse(#"{"profiles":[{"name":"work"}]}"#, for: request)
+        }
+        let vm = makeViewModel(client: client, runtime: runtime, sessionID: nil, session: draft)
+
+        await vm.loadComposerConfiguration()
+
+        XCTAssertEqual(vm.selectedWorkspacePath, "/draft")
+        XCTAssertEqual(vm.selectedModelID, "chosen-model")
+        XCTAssertEqual(vm.selectedModelProviderID, "fixture")
+        XCTAssertNil(vm.composerConfigurationErrorMessage)
+        XCTAssertNil(vm.composerConfigurationDiagnostic)
+        XCTAssertFalse(vm.isLoadingComposerConfiguration)
+        XCTAssertTrue(fake.calls().isEmpty)
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testStaleComposerFailureCannotReplaceNewerSuccessfulSettings() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let requests = ChatDirectRequestRecorder()
+        let firstInventoryStarted = expectation(description: "first inventory started")
+        let secondInventoryStarted = expectation(description: "second inventory started")
+        let releaseFirstInventory = DispatchSemaphore(value: 0)
+        let client = makeClient { request in
+            let path = request.url?.path ?? ""
+            requests.append(path)
+            if path == "/api/model/options" {
+                let inventoryRequestCount = requests.values().filter { $0 == path }.count
+                if inventoryRequestCount == 1 {
+                    firstInventoryStarted.fulfill()
+                    releaseFirstInventory.wait()
+                    throw URLError(.cancelled)
+                }
+                secondInventoryStarted.fulfill()
+                return apiTestJSONResponse(
+                    #"{"model":"model-new","provider":"fixture","providers":[{"slug":"fixture","models":["model-new"]}]}"#,
+                    for: request
+                )
+            }
+            return apiTestJSONResponse(#"{"profiles":[{"name":"work"}]}"#, for: request)
+        }
+        let vm = makeViewModel(client: client, runtime: runtime, sessionID: nil)
+
+        let staleLoad = Task { @MainActor in await vm.loadComposerConfiguration() }
+        await fulfillment(of: [firstInventoryStarted], timeout: 2)
+        let currentLoad = Task { @MainActor in await vm.loadComposerConfiguration() }
+        await fulfillment(of: [secondInventoryStarted], timeout: 2)
+        await currentLoad.value
+        releaseFirstInventory.signal()
+        await staleLoad.value
+
+        XCTAssertEqual(vm.selectedModelID, "model-new")
+        XCTAssertEqual(vm.selectedModelProviderID, "fixture")
+        XCTAssertNil(vm.composerConfigurationErrorMessage)
+        XCTAssertNil(vm.composerConfigurationDiagnostic)
+        XCTAssertFalse(vm.isLoadingComposerConfiguration)
+        XCTAssertTrue(fake.calls().isEmpty)
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
     func testComposerConfigurationFailureDiagnosticUsesOnlyBoundedClassification() throws {
         XCTAssertEqual(ComposerConfigurationLoadOutcome(error: URLError(.notConnectedToInternet)).rawValue, "network")
         XCTAssertEqual(
