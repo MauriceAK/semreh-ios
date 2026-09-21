@@ -197,7 +197,11 @@ final class FramePipelineTests: XCTestCase {
         XCTAssertEqual(captured.count, 1)
         captured.removeFirst()() // in-flight decode finishes after cancel
         XCTAssertEqual(delivered, 0, "teardown must remove callbacks")
-        XCTAssertEqual(decoder.decodeCount, 1)
+        XCTAssertEqual(
+            decoder.decodeCount,
+            0,
+            "work cancelled before execution must skip the full image decode"
+        )
     }
 
     func testDecodeFailureDropsFrameButContinues() {
