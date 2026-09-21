@@ -14,11 +14,12 @@ extension KanbanFeatureState {
             activeLoadID = nil
             isLoading = false
             refreshFailed = false
-            capabilityWarnings = []
-            state = report?.isPartial == true ? .partial : .compatible
+            updatePartialState()
 
-            await refresh()
-            guard !Task.isCancelled else { return }
+            let loadID = UUID()
+            activeLoadID = loadID
+            await refresh(loadID: loadID)
+            guard isCurrentLoad(loadID) else { return }
             if previouslySelectedBoard != nil,
                selectedBoardSlug == nil,
                snapshot == nil {
@@ -41,12 +42,17 @@ extension KanbanFeatureState {
     private func prepareForLoad(preservingSnapshot: Bool) {
         invalidateBoardMutation()
         invalidateDispatch()
-        dispatcherCapabilityIsIncompatible = false
-        unavailableWriteCapabilities = []
         archiveUndoTask?.cancel()
         archiveUndo = nil
         clearSettledMutationPresentation()
+        isRefreshing = false
         resetLiveUpdates(clearCursor: !preservingSnapshot)
+    }
+
+    func isCurrentLoad(_ loadID: UUID?) -> Bool {
+        guard !Task.isCancelled else { return false }
+        guard let loadID else { return true }
+        return activeLoadID == loadID
     }
 
     private func loadHandshake(
@@ -54,6 +60,8 @@ extension KanbanFeatureState {
         previouslySelectedBoardName: String?
     ) async {
         prepareForLoad(preservingSnapshot: false)
+        dispatcherCapabilityIsIncompatible = false
+        unavailableWriteCapabilities = []
         let loadID = UUID()
         activeLoadID = loadID
         activeBoardLoadID = nil
@@ -157,10 +165,13 @@ extension KanbanFeatureState {
         }
     }
 
-    func refresh() async {
+    func refresh(loadID: UUID? = nil) async {
+        guard isCurrentLoad(loadID) else { return }
         let previousRefreshFailed = refreshFailed
         refreshFailed = false
-        let boardCollectionSucceeded = await reconcileBoardCollection()
+        let expectation = loadID.map(KanbanBoardCollectionExpectation.load)
+        let boardCollectionSucceeded = await reconcileBoardCollection(expectation: expectation)
+        guard isCurrentLoad(loadID) else { return }
         guard !Task.isCancelled else {
             refreshFailed = previousRefreshFailed
             return
@@ -173,8 +184,11 @@ extension KanbanFeatureState {
         let succeeded = await refreshBoard(
             usingCursor: false,
             refreshSupplementary: true,
-            preserveRefreshFailure: !boardCollectionSucceeded
+            preserveRefreshFailure: !boardCollectionSucceeded,
+            resetCapabilitiesOnSuccess: loadID != nil,
+            loadID: loadID
         )
+        guard isCurrentLoad(loadID) else { return }
         guard !Task.isCancelled else {
             if boardCollectionSucceeded {
                 refreshFailed = previousRefreshFailed

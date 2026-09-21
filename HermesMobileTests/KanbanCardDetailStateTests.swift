@@ -158,6 +158,32 @@ final class KanbanCardDetailStateTests: XCTestCase {
         XCTAssertEqual(state.workerLogState, .absent)
     }
 
+    func testCancelledMissingDetailReconciliationReturnsToIdle() async {
+        let client = DeferredMissingEntityClient(operation: .detail)
+        let state = makeState(client: client)
+
+        let load = Task { await state.load() }
+        await client.waitForBoards()
+        load.cancel()
+        await client.resumeBoards()
+        await load.value
+
+        XCTAssertEqual(state.loadState, .idle)
+    }
+
+    func testCancelledMissingWorkerLogReconciliationReturnsToIdle() async {
+        let client = DeferredMissingEntityClient(operation: .workerLog)
+        let state = makeState(client: client)
+
+        let load = Task { await state.loadWorkerLog() }
+        await client.waitForBoards()
+        load.cancel()
+        await client.resumeBoards()
+        await load.value
+
+        XCTAssertEqual(state.workerLogState, .idle)
+    }
+
     func testLiveReconciliationKeepsDetailOpenAndAppliesRemoteStatus() async {
         let client = CardDetailClient(details: [.success(.baseline), .success(.done)])
         let state = makeState(client: client)
@@ -381,6 +407,54 @@ private actor DeferredWorkerLogClient: KanbanDataClient {
     func resumeInitialLog() {
         initialLogContinuation?.resume(returning: .absent)
         initialLogContinuation = nil
+    }
+}
+
+private actor DeferredMissingEntityClient: KanbanDataClient {
+    enum Operation: Sendable {
+        case detail
+        case workerLog
+    }
+
+    private let operation: Operation
+    private var boardsContinuation: CheckedContinuation<KanbanBoardsResponse, Never>?
+
+    init(operation: Operation) {
+        self.operation = operation
+    }
+
+    func kanbanConfiguration() -> KanbanConfiguration { decode(#"{"columns":["ready"],"read_only":false}"#) }
+    func kanbanBoards() async -> KanbanBoardsResponse {
+        await withCheckedContinuation { boardsContinuation = $0 }
+    }
+    func kanbanBoard(_ request: KanbanBoardRequest) -> KanbanBoardSnapshot {
+        decode(#"{"changed":true,"columns":[{"name":"ready","tasks":[]}],"read_only":false}"#)
+    }
+    func kanbanStats(board: String) -> KanbanStats { decode("{}") }
+    func kanbanAssignees(board: String) -> KanbanAssigneeHistory { decode("{}") }
+    func kanbanEvents(_ request: KanbanEventsRequest) -> KanbanEventsEnvelope { decode("{}") }
+
+    func kanbanCardDetail(_ request: KanbanCardDetailRequest) throws -> KanbanCardDetailEnvelope {
+        if operation == .detail {
+            throw APIError.http(statusCode: 404, body: #"{"error":"not found"}"#)
+        }
+        return .baseline
+    }
+
+    func kanbanWorkerLog(_ request: KanbanWorkerLogRequest) throws -> KanbanWorkerLog {
+        if operation == .workerLog {
+            throw APIError.http(statusCode: 404, body: #"{"error":"not found"}"#)
+        }
+        return .absent
+    }
+
+    func waitForBoards() async {
+        while boardsContinuation == nil { await Task.yield() }
+    }
+
+    func resumeBoards() {
+        boardsContinuation?.resume(returning: .main)
+        boardsContinuation = nil
     }
 }
 

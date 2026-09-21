@@ -178,6 +178,12 @@ final class KanbanCardDetailState {
             forwardAuthentication(error)
             if isNotFound(error) {
                 await reconcileMissingEntity(loadID: nil)
+                guard !Task.isCancelled, activeWorkerLogID == loadID else {
+                    if activeWorkerLogID == loadID, Task.isCancelled {
+                        workerLogState = .idle
+                    }
+                    return
+                }
             }
             workerLogState = .failed
         }
@@ -209,6 +215,9 @@ final class KanbanCardDetailState {
             forwardAuthentication(error)
             if isNotFound(error) {
                 await reconcileMissingEntity(loadID: loadID)
+                if Task.isCancelled {
+                    resetCancelledDetailLoad(loadID)
+                }
             } else {
                 loadState = .failed
             }
