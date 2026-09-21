@@ -1,5 +1,4 @@
 import SwiftUI
-import Combine
 import SemrehRemoteBrowserCore
 import SemrehRemoteBrowserUI
 
@@ -39,7 +38,6 @@ final class BrowserLabState: ObservableObject {
 struct BrowserLabView: View {
     @StateObject private var lab = BrowserLabState()
     @State private var panelVisible = true
-    @State private var fixtureRevision = 0
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -65,12 +63,6 @@ struct BrowserLabView: View {
                 lab.viewModel.handleBackground()
             }
         }
-        .onReceive(lab.fixture.objectWillChange.receive(on: RunLoop.main)) { _ in
-            // BrowserLabState owns the replaceable fixture, while panel values
-            // live on that nested ObservableObject. Invalidate this view after
-            // each fixture change so controls and exact readback stay current.
-            fixtureRevision &+= 1
-        }
     }
 
     // MARK: - Banner
@@ -89,31 +81,33 @@ struct BrowserLabView: View {
     // MARK: - Control panel
 
     private var controlPanel: some View {
-        VStack(spacing: 0) {
-            scenarioShortcuts
-                .padding(12)
-            Divider()
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    connectionSection
-                    Divider()
-                    framesSection
-                    Divider()
-                    controlSection
-                    Divider()
-                    acknowledgementSection
-                    Divider()
-                    readbackSection
+        FixtureObservedContent(fixture: lab.fixture) {
+            VStack(spacing: 0) {
+                scenarioShortcuts
+                    .padding(12)
+                Divider()
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        connectionSection
+                        Divider()
+                        framesSection
+                        Divider()
+                        controlSection
+                        Divider()
+                        acknowledgementSection
+                        Divider()
+                        readbackSection
+                    }
+                    .padding(12)
                 }
-                .padding(12)
+                .accessibilityIdentifier("lab.panel")
+                Divider()
+                insertionReadback
+                    .padding(12)
             }
-            .accessibilityIdentifier("lab.panel")
-            Divider()
-            insertionReadback
-                .padding(12)
+            .frame(height: 300)
+            .background(Color(.secondarySystemBackground))
         }
-        .frame(height: 300)
-        .background(Color(.secondarySystemBackground))
     }
 
     /// Keep the controls needed to enter safety-critical fixture states fixed
@@ -261,5 +255,25 @@ struct BrowserLabView: View {
             }
         }
         .accessibilityIdentifier("lab.readback")
+    }
+}
+
+/// Re-evaluates the complete fixture panel whenever its nested observable
+/// adapter changes. BrowserLabState owns a replaceable adapter reference, so
+/// observing only the state object would otherwise leave panel values stale.
+private struct FixtureObservedContent<Content: View>: View {
+    @ObservedObject var fixture: SimulatedBrowserAdapter
+    private let content: () -> Content
+
+    init(
+        fixture: SimulatedBrowserAdapter,
+        @ViewBuilder content: @escaping () -> Content
+    ) {
+        self.fixture = fixture
+        self.content = content
+    }
+
+    var body: some View {
+        content()
     }
 }
