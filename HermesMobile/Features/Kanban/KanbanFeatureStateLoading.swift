@@ -9,6 +9,7 @@ extension KanbanFeatureState {
         let previousIsOffline = isOffline
         let previousLiveUpdatesDelayed = liveUpdatesDelayed
         let previousLoadedDetailIsStale = loadedDetailIsStale
+        let hadVisibleLiveUpdates = hasSettledSnapshot && isVisible && sceneIsActive
 
         if hasSettledSnapshot {
             prepareForLoad(preservingSnapshot: true)
@@ -32,6 +33,11 @@ extension KanbanFeatureState {
                 isOffline = previousIsOffline
                 liveUpdatesDelayed = previousLiveUpdatesDelayed
                 loadedDetailIsStale = previousLoadedDetailIsStale
+                resumeLiveUpdatesAfterCancelledLoad(
+                    wasVisible: hadVisibleLiveUpdates,
+                    wasOffline: previousIsOffline,
+                    wasLiveUpdatesDelayed: previousLiveUpdatesDelayed
+                )
                 return
             }
             if previouslySelectedBoard != nil,
@@ -70,6 +76,19 @@ extension KanbanFeatureState {
 
     func isCurrentLoad(_ loadID: UUID?) -> Bool {
         ownsLoad(loadID) && !Task.isCancelled
+    }
+
+    private func resumeLiveUpdatesAfterCancelledLoad(
+        wasVisible: Bool,
+        wasOffline: Bool,
+        wasLiveUpdatesDelayed: Bool
+    ) {
+        guard wasVisible, snapshot != nil, selectedBoardSlug != nil else { return }
+        if wasOffline || wasLiveUpdatesDelayed {
+            startPollingIfNeeded()
+        } else {
+            startLiveUpdatesIfReady()
+        }
     }
 
     private func loadHandshake(
@@ -187,6 +206,11 @@ extension KanbanFeatureState {
         if loadID == nil {
             guard !Task.isCancelled else { return }
             activeLoadID = ownerID
+            // A plain refresh supersedes any reentry board request before its
+            // own board-list read reaches refreshBoard. Do not let that older
+            // response publish through the previous board-load token.
+            activeBoardLoadID = UUID()
+            isRefreshing = false
         } else {
             guard isCurrentLoad(ownerID) else { return }
         }
