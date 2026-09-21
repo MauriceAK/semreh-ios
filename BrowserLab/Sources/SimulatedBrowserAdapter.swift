@@ -13,10 +13,12 @@ import UIKit
 /// development fixture only: it is never referenced from production code
 /// paths, and the lab UI always carries the simulated-session banner.
 final class SimulatedBrowserAdapter: BrowserAdapter, ObservableObject {
-    var capabilities = RemoteBrowserCapabilities(
-        controlSupported: true,
-        stopTaskSupported: true
-    )
+    var capabilities: RemoteBrowserCapabilities {
+        RemoteBrowserCapabilities(
+            controlSupported: controlSupported,
+            stopTaskSupported: true
+        )
+    }
     var onEvent: ((BrowserAdapterEvent) -> Void)?
 
     // MARK: - Script knobs (control panel)
@@ -31,11 +33,15 @@ final class SimulatedBrowserAdapter: BrowserAdapter, ObservableObject {
     @Published var loseNextAck = false
     /// Emit synthetic frames on a timer.
     @Published var framesRunning = false
+    /// Allows the required watching/read-only state to be exercised.
+    @Published private(set) var controlSupported = true
 
     // MARK: - Counters and readback
 
     @Published private(set) var acceptedCommandCount = 0
     @Published private(set) var lastCommandDescription = "—"
+    @Published private(set) var insertedTextCount = 0
+    @Published private(set) var lastInsertedText = "—"
     @Published private(set) var eventLog: [String] = []
 
     private var connection = ConnectionEpoch(generation: 1)
@@ -43,6 +49,8 @@ final class SimulatedBrowserAdapter: BrowserAdapter, ObservableObject {
     private var controlRevision: UInt64 = 1
     private var frameSequence: UInt64 = 0
     private var frameTimer: Timer?
+    private var isConnected = false
+    private var connectionAttempt = UUID()
     private let sourceSize = PixelDimensions(width: 390, height: 844)
 
     var descriptor: RemoteSurfaceDescriptor {
@@ -58,12 +66,23 @@ final class SimulatedBrowserAdapter: BrowserAdapter, ObservableObject {
 
     func connect() {
         connection = ConnectionEpoch(generation: connection.generation + 1)
+        let attempt = UUID()
+        connectionAttempt = attempt
+        isConnected = false
         frameSequence = 0
-        log("connected (connection epoch \(connection.generation))")
-        onEvent?(.connected(descriptor, capabilities))
+        log("connection requested")
+        // Delay the observation so the Connecting state is visibly reachable.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            guard let self, self.connectionAttempt == attempt else { return }
+            self.isConnected = true
+            self.log("connected (connection epoch \(self.connection.generation))")
+            self.onEvent?(.connected(self.descriptor, self.capabilities))
+        }
     }
 
     func disconnect() {
+        connectionAttempt = UUID()
+        isConnected = false
         stopFrames()
         log("disconnected")
         onEvent?(.disconnected)
@@ -74,17 +93,11 @@ final class SimulatedBrowserAdapter: BrowserAdapter, ObservableObject {
         case .requestControl(let requestID):
             handleControlRequest(requestID: requestID)
         case .resumeHermes:
-            log("resumeHermes")
-            acknowledge(commandID)
+            record(action)
+            settle(action, commandID: commandID)
         case .click, .scroll, .insertText, .specialKey, .stopTask:
             record(action)
-            if loseNextAck {
-                loseNextAck = false
-                log("ack lost: \(describe(action))")
-                onEvent?(.acknowledgementLost(commandID))
-            } else {
-                acknowledge(commandID)
-            }
+            settle(action, commandID: commandID)
         }
     }
 
@@ -117,14 +130,36 @@ final class SimulatedBrowserAdapter: BrowserAdapter, ObservableObject {
     }
 
     func endSession() {
+        connectionAttempt = UUID()
+        isConnected = false
         stopFrames()
         log("session ended")
         onEvent?(.sessionEnded)
     }
 
+    func setControlSupported(_ supported: Bool) {
+        guard controlSupported != supported else { return }
+        controlSupported = supported
+        log(supported ? "control capability enabled" : "control capability disabled")
+        guard isConnected else { return }
+        // Capability changes are authoritative observations in a new fixture
+        // connection epoch, so they can never preserve an old manual lease.
+        connection = ConnectionEpoch(generation: connection.generation + 1)
+        frameSequence = 0
+        onEvent?(.connected(descriptor, capabilities))
+    }
+
+    func reportFreshObservation() {
+        guard isConnected else { return }
+        log("fresh quiescent observation")
+        onEvent?(.quiescent)
+    }
+
     // MARK: - Private
 
     private func handleControlRequest(requestID: UUID) {
+        // Control grants require an observation made after this request.
+        onEvent?(.quiescent)
         if rejectNextRequest {
             rejectNextRequest = false
             log("control request rejected (fixture)")
@@ -138,9 +173,15 @@ final class SimulatedBrowserAdapter: BrowserAdapter, ObservableObject {
             log("control request held (auto-grant off)")
             return
         }
+        let requestedConnection = connection
+        let requestedSurface = surface
         // Small delay so the requestPending state is observable.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
-            guard let self else { return }
+            guard let self,
+                  self.isConnected,
+                  self.connection == requestedConnection,
+                  self.surface == requestedSurface
+            else { return }
             self.log("control granted (revision \(self.controlRevision))")
             self.onEvent?(.controlGranted(ControlGrant(
                 requestID: requestID,
@@ -153,14 +194,36 @@ final class SimulatedBrowserAdapter: BrowserAdapter, ObservableObject {
 
     private func record(_ action: BrowserAdapterAction) {
         acceptedCommandCount += 1
+        if case .insertText(let text) = action {
+            insertedTextCount += 1
+            lastInsertedText = text
+        }
         lastCommandDescription = describe(action)
         log("accepted: \(lastCommandDescription)")
     }
 
+    private func settle(_ action: BrowserAdapterAction, commandID: CommandID) {
+        if loseNextAck {
+            loseNextAck = false
+            log("ack lost: \(describe(action))")
+            onEvent?(.acknowledgementLost(commandID))
+        } else {
+            acknowledge(commandID)
+        }
+    }
+
     private func acknowledge(_ commandID: CommandID) {
         let delay = ackDelay
+        let commandConnection = connection
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-            self?.onEvent?(.commandAcknowledged(commandID))
+            guard let self,
+                  self.isConnected,
+                  self.connection == commandConnection
+            else { return }
+            self.onEvent?(.commandAcknowledged(commandID))
+            // This is a separate authoritative observation after the command
+            // acknowledgement. Resume cannot complete on the ack alone.
+            self.onEvent?(.quiescent)
         }
     }
 
@@ -168,7 +231,7 @@ final class SimulatedBrowserAdapter: BrowserAdapter, ObservableObject {
         switch action {
         case .requestControl(let id): return "requestControl \(id.uuidString.prefix(8))"
         case .resumeHermes: return "resumeHermes"
-        case .insertText(let text): return "insertText \"\(text.prefix(24))\""
+        case .insertText(let text): return "insertText (\(text.count) characters)"
         case .click(let point):
             return String(format: "click (%.2f, %.2f)", point.x, point.y)
         case .scroll(let dx, let dy):

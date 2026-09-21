@@ -11,6 +11,7 @@ Checks (no Xcode required, runs on Linux):
   6. No '+' in new filenames (breaks pbxproj parsing unless quoted).
   7. No references to the production HermesMobile target/project.
   8. The SwiftPM manifest's target paths exist.
+  9. The fixture event log cannot include inserted-text contents.
 
 Usage: python3 BrowserLab/Tools/validate-scope.py [--root PATH]
 Exit non-zero on the first failure class with a clear message.
@@ -178,6 +179,14 @@ def main():
         full = os.path.join(pkg_dir, path)
         if not os.path.isdir(full):
             fail(f"Package.swift target path missing: {full}")
+
+    # --- 9. Fixture logs do not expose inserted text -----------------------
+    fixture_path = os.path.join(lab, "Sources", "SimulatedBrowserAdapter.swift")
+    with open(fixture_path, encoding="utf-8") as handle:
+        fixture_source = handle.read()
+    for forbidden in ('text.prefix', 'accepted: insertText "'):
+        if forbidden in fixture_source:
+            fail(f"fixture may log inserted-text contents: {forbidden}")
 
     print("VALIDATE-OK: scope and project references are consistent")
 

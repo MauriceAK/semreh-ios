@@ -12,10 +12,22 @@ public typealias DisplayableImage = UIImage
 public final class UIKitFrameDecoder: FrameDecoder {
     public init() {}
 
+    public func inspectDimensions(of payload: FramePayload) -> PixelDimensions? {
+        guard let source = CGImageSourceCreateWithData(payload.data as CFData, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil)
+                  as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? NSNumber,
+              let height = properties[kCGImagePropertyPixelHeight] as? NSNumber
+        else { return nil }
+        return PixelDimensions(width: width.intValue, height: height.intValue)
+    }
+
     public func decode(_ payload: FramePayload) -> (any DecodedImage)? {
         let data = payload.data
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
-              let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil)
+              let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil),
+              cgImage.width == payload.dimensions.width,
+              cgImage.height == payload.dimensions.height
         else { return nil }
         return UIKitDecodedImage(image: UIImage(cgImage: cgImage))
     }

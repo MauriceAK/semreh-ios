@@ -71,7 +71,14 @@ public final class RemoteBrowserViewModel: ObservableObject {
 
     public func connect() { controller.connect() }
     public func reconnect() { controller.reconnect() }
-    public func close() { controller.close() }
+    public func close() {
+        invalidatePendingTextDelivery()
+        controller.close()
+    }
+    public func handleBackground() {
+        invalidatePendingTextDelivery()
+        controller.handleBackground()
+    }
     public func resumeHermes() { controller.resumeHermes() }
 
     public func requestControl() {
@@ -243,6 +250,7 @@ public final class RemoteBrowserViewModel: ObservableObject {
     private func handleAdapterEvent(_ event: BrowserAdapterEvent) {
         switch event {
         case .connected(let descriptor, _):
+            invalidatePendingTextDelivery()
             pipeline.reset(generation: descriptor.surface.generation)
             hostDisplayName = descriptor.hostDisplayName
             sourceDimensions = descriptor.sourceDimensions
@@ -250,13 +258,17 @@ public final class RemoteBrowserViewModel: ObservableObject {
             displayedImage = nil
             notice = nil
         case .surfaceChanged(let identity):
+            invalidatePendingTextDelivery()
             pipeline.reset(generation: identity.generation)
             surfaceGeneration = identity.generation
             displayedImage = nil
         case .controlRequestRejected(_, let reason):
             notice = "Control request rejected: \(reason)"
         case .connectionFailed(let reason):
+            invalidatePendingTextDelivery()
             notice = reason
+        case .disconnected, .sessionEnded:
+            invalidatePendingTextDelivery()
         case .frameArrived(let payload):
             pipeline.submit(payload)
         default:
@@ -289,5 +301,11 @@ public final class RemoteBrowserViewModel: ObservableObject {
         // confirm it; the draft stays preserved and marked unconfirmed.
         guard pendingTextCommits.contains(commandID) else { return }
         draft.markUnconfirmed()
+    }
+
+    private func invalidatePendingTextDelivery() {
+        guard !pendingTextCommits.isEmpty else { return }
+        pendingTextCommits.removeAll()
+        draft.invalidatePendingDelivery()
     }
 }

@@ -26,6 +26,9 @@ public struct DecodedFrame: Sendable {
 /// Decodes frame payloads. Implementations must run off the main thread;
 /// the pipeline inspects dimensions before allocating.
 public protocol FrameDecoder: AnyObject {
+    /// Reads encoded image properties without allocating the full decoded
+    /// bitmap. Returning nil rejects malformed or unsupported image data.
+    func inspectDimensions(of payload: FramePayload) -> PixelDimensions?
     func decode(_ payload: FramePayload) -> (any DecodedImage)?
 }
 
@@ -84,7 +87,9 @@ public final class FramePipeline {
         currentGeneration = generation
         lastAcceptedSequence = 0
         pending = nil
-        decoding = false
+        // If an old decode is running, keep the one physical decode slot
+        // occupied. A new-generation frame becomes the sole pending frame and
+        // starts only after the old work exits.
     }
 
     public func submit(_ payload: FramePayload) {
@@ -118,7 +123,6 @@ public final class FramePipeline {
         lock.lock()
         defer { lock.unlock() }
         decodeToken &+= 1
-        decoding = false
         pending = nil
         onFrame = nil
     }
@@ -129,14 +133,23 @@ public final class FramePipeline {
     /// Re-validates the token so a reset/cancel that raced the handoff drops
     /// the stale frame instead of delivering it.
     private func decode(_ payload: FramePayload, token: UInt64) {
-        lock.lock()
-        guard token == decodeToken else {
-            lock.unlock()
-            return
-        }
-        lock.unlock()
         decodeExecutor { [weak self] in
             guard let self else { return }
+            self.lock.lock()
+            let isCurrent = token == self.decodeToken
+            self.lock.unlock()
+            guard isCurrent else {
+                self.finishDecode(payload: payload, image: nil, token: token)
+                return
+            }
+            guard let encodedDimensions = self.decoder.inspectDimensions(of: payload),
+                  encodedDimensions == payload.dimensions,
+                  encodedDimensions.isValid,
+                  encodedDimensions.pixelCount <= Ceilings.maxDecodedPixels
+            else {
+                self.finishDecode(payload: payload, image: nil, token: token)
+                return
+            }
             let image = self.decoder.decode(payload)
             self.finishDecode(payload: payload, image: image, token: token)
         }
@@ -148,11 +161,8 @@ public final class FramePipeline {
         token: UInt64
     ) {
         lock.lock()
-        guard token == decodeToken else {
-            lock.unlock()
-            return // Cancelled or reset while decoding.
-        }
-        let callback = onFrame
+        let tokenIsCurrent = token == decodeToken
+        let callback = tokenIsCurrent ? onFrame : nil
         let next = pending
         pending = nil
         let nextToken = decodeToken
@@ -162,7 +172,7 @@ public final class FramePipeline {
         // else: decoding stays true; `next` starts below with nextToken.
         lock.unlock()
 
-        if let image {
+        if tokenIsCurrent, let image {
             callback?(DecodedFrame(
                 sequence: payload.sequence,
                 generation: payload.generation,

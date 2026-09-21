@@ -67,7 +67,7 @@ struct BrowserLabView: View {
         .onChange(of: scenePhase) { _, newPhase in
             if newPhase == .background {
                 // Real hosts suspend input on backgrounding; the lab mirrors it.
-                lab.viewModel.controller.handleBackground()
+                lab.viewModel.handleBackground()
             }
         }
     }
@@ -75,7 +75,7 @@ struct BrowserLabView: View {
     // MARK: - Banner
 
     private var banner: some View {
-        Text("SIMULATED SESSION — not a live Hermes connection")
+        Text("SIMULATED SESSION — NOT CONNECTED TO HERMES")
             .font(.caption)
             .bold()
             .foregroundStyle(.white)
@@ -137,6 +137,11 @@ struct BrowserLabView: View {
             Text("Control grants").font(.headline)
             Toggle("Auto-grant control requests", isOn: $lab.fixture.autoGrantControl)
                 .accessibilityIdentifier("lab.autoGrant")
+            Toggle("Control supported", isOn: Binding(
+                get: { lab.fixture.controlSupported },
+                set: { lab.fixture.setControlSupported($0) }
+            ))
+            .accessibilityIdentifier("lab.controlSupported")
             Button("Reject next request") { lab.fixture.rejectNextRequest = true }
                 .accessibilityIdentifier("lab.rejectNext")
             Text(lab.fixture.rejectNextRequest
@@ -160,9 +165,11 @@ struct BrowserLabView: View {
             }
             Button("Lose next ack") { lab.fixture.loseNextAck = true }
                 .accessibilityIdentifier("lab.loseNextAck")
+            Button("Report fresh observation") { lab.fixture.reportFreshObservation() }
+                .accessibilityIdentifier("lab.freshObservation")
             Text(lab.fixture.loseNextAck
-                 ? "Armed: the next human command's acknowledgement will be lost."
-                 : "Lost acks keep drafts preserved and marked unconfirmed — never resent.")
+                 ? "Armed: the next accepted command's acknowledgement will be lost."
+                 : "Lost acks, including Resume, stay unknown until a fresh observation.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -197,6 +204,14 @@ struct BrowserLabView: View {
             LabeledContent("Last command") {
                 Text(lab.fixture.lastCommandDescription)
                     .accessibilityIdentifier("lab.lastCommand")
+            }
+            LabeledContent("Inserted text commands") {
+                Text("\(lab.fixture.insertedTextCount)")
+                    .accessibilityIdentifier("lab.insertedTextCount")
+            }
+            LabeledContent("Final inserted text") {
+                Text(lab.fixture.lastInsertedText)
+                    .accessibilityIdentifier("lab.lastInsertedText")
             }
             Text("Event log").font(.subheadline)
             ForEach(Array(lab.fixture.eventLog.suffix(8).enumerated()), id: \.offset) { _, line in

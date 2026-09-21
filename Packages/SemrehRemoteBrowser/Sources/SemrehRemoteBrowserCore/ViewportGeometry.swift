@@ -110,6 +110,7 @@ public enum ViewportInputMode: Equatable, Sendable {
 public enum FrameDecision: Equatable, Sendable {
     case accept
     case dropInvalidDimensions
+    case dropInvalidByteCount
     case dropOversized
     case dropStale
     case dropGenerationMismatch
@@ -125,7 +126,12 @@ public func assessFrame(
     lastAcceptedSequence: UInt64
 ) -> FrameDecision {
     guard payload.dimensions.isValid else { return .dropInvalidDimensions }
-    guard payload.compressedByteCount <= FramePipeline.Ceilings.maxCompressedBytes else {
+    guard payload.compressedByteCount >= 0,
+          payload.compressedByteCount == payload.data.count
+    else {
+        return .dropInvalidByteCount
+    }
+    guard payload.data.count <= FramePipeline.Ceilings.maxCompressedBytes else {
         return .dropOversized
     }
     guard payload.dimensions.pixelCount <= FramePipeline.Ceilings.maxDecodedPixels else {

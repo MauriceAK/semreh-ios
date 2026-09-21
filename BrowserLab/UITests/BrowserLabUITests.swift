@@ -13,6 +13,15 @@ final class BrowserLabUITests: XCTestCase {
         app.launch()
     }
 
+    private func tapPanelElement(_ element: XCUIElement) {
+        let panel = app.scrollViews["lab.panel"]
+        for _ in 0..<4 where !element.isHittable {
+            panel.swipeUp()
+        }
+        XCTAssertTrue(element.isHittable, "panel element is not hittable: \(element)")
+        element.tap()
+    }
+
     /// The simulated-session banner is always visible.
     func testSimulatedSessionBannerIsAlwaysVisible() {
         XCTAssertTrue(app.staticTexts["lab.banner"].waitForExistence(timeout: 10))
@@ -56,7 +65,8 @@ final class BrowserLabUITests: XCTestCase {
         let editor = app.textViews["browser.draftEditor"]
         XCTAssertTrue(editor.waitForExistence(timeout: 10))
         editor.tap()
-        editor.typeText("hello lab")
+        let expectedText = "Hello café 👨‍👩‍👧‍👦"
+        editor.typeText(expectedText)
 
         // Insert via the keyboard toolbar when the software keyboard is up,
         // otherwise via the sheet's Insert button.
@@ -81,11 +91,82 @@ final class BrowserLabUITests: XCTestCase {
             "draft was not cleared after acknowledgement (value: \(draftValue ?? "nil"))"
         )
 
-        // Readback shows the accepted insertText command.
-        let lastCommand = app.staticTexts["lab.lastCommand"]
-        XCTAssertTrue(lastCommand.waitForExistence(timeout: 5))
-        let sawInsert = NSPredicate(format: "label CONTAINS 'insertText'")
-        expectation(for: sawInsert, evaluatedWith: lastCommand, handler: nil)
+        app.buttons["Done"].tap()
+
+        let insertedText = app.staticTexts["lab.lastInsertedText"]
+        XCTAssertTrue(insertedText.waitForExistence(timeout: 5))
+        XCTAssertEqual(insertedText.label, expectedText)
+        let insertCount = app.staticTexts["lab.insertedTextCount"]
+        XCTAssertEqual(insertCount.label, "1")
+        Thread.sleep(forTimeInterval: 1)
+        XCTAssertEqual(insertCount.label, "1", "fixture must accept the Unicode insertion exactly once")
+    }
+
+    func testLostTextAcknowledgementCannotDuplicateOrClearDraft() {
+        app.buttons["lab.connect"].tap()
+        let takeControl = app.buttons["browser.takeControl"]
+        XCTAssertTrue(takeControl.waitForExistence(timeout: 10))
+        takeControl.tap()
+        XCTAssertTrue(app.buttons["browser.keyboard"].waitForExistence(timeout: 10))
+
+        tapPanelElement(app.buttons["lab.loseNextAck"])
+        app.buttons["browser.keyboard"].tap()
+        let editor = app.textViews["browser.draftEditor"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 10))
+        let expectedText = "Hello café 👨‍👩‍👧‍👦"
+        editor.tap()
+        editor.typeText(expectedText)
+        let insertButton = app.buttons["browser.insertTextKeyboard"]
+        if insertButton.waitForExistence(timeout: 3) {
+            insertButton.tap()
+        } else {
+            app.buttons["browser.insertText"].tap()
+        }
+
+        let unconfirmed = app.staticTexts["browser.draftStatus"]
+        XCTAssertTrue(unconfirmed.waitForExistence(timeout: 10))
+        XCTAssertTrue(unconfirmed.label.contains("Delivery unconfirmed"))
+        XCTAssertEqual(editor.value as? String, expectedText)
+
+        // A second press cannot resend an ambiguous commit.
+        if insertButton.exists {
+            insertButton.tap()
+        } else {
+            app.buttons["browser.insertText"].tap()
+        }
+        app.buttons["Done"].tap()
+        let insertCount = app.staticTexts["lab.insertedTextCount"]
+        XCTAssertTrue(insertCount.waitForExistence(timeout: 5))
+        XCTAssertEqual(insertCount.label, "1")
+        XCTAssertEqual(app.staticTexts["lab.lastInsertedText"].label, expectedText)
+    }
+
+    func testReadOnlyAndResumeUnknownStatesAreReachable() {
+        app.buttons["lab.connect"].tap()
+        let status = app.staticTexts["browser.status"]
+        XCTAssertTrue(status.waitForExistence(timeout: 10))
+
+        tapPanelElement(app.switches["lab.controlSupported"])
+        let readOnly = NSPredicate(format: "label CONTAINS 'Read-only'")
+        expectation(for: readOnly, evaluatedWith: status, handler: nil)
+        waitForExpectations(timeout: 10)
+        XCTAssertFalse(app.buttons["browser.takeControl"].exists)
+
+        tapPanelElement(app.switches["lab.controlSupported"])
+        let takeControl = app.buttons["browser.takeControl"]
+        XCTAssertTrue(takeControl.waitForExistence(timeout: 10))
+        takeControl.tap()
+        XCTAssertTrue(app.buttons["browser.resume"].waitForExistence(timeout: 10))
+
+        tapPanelElement(app.buttons["lab.loseNextAck"])
+        app.buttons["browser.resume"].tap()
+        let unknown = NSPredicate(format: "label CONTAINS 'Resume status unknown'")
+        expectation(for: unknown, evaluatedWith: status, handler: nil)
+        waitForExpectations(timeout: 10)
+
+        tapPanelElement(app.buttons["lab.freshObservation"])
+        let watching = NSPredicate(format: "label CONTAINS 'Watching Hermes'")
+        expectation(for: watching, evaluatedWith: status, handler: nil)
         waitForExpectations(timeout: 10)
     }
 

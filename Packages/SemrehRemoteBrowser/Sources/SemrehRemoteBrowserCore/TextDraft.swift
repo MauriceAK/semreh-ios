@@ -40,9 +40,17 @@ public struct TextDraft: Equatable, Sendable {
     }
 
     /// Begin transmission of the current text. Returns the text to send,
-    /// or nil when there is nothing to send or a send is already in flight.
+    /// or nil when there is nothing to send, a send is already in flight, or
+    /// the prior delivery is unconfirmed. Retrying an ambiguous commit first
+    /// requires an explicit edit that creates a new local draft.
     public mutating func beginCommit() -> String? {
-        guard delivery != .sending, !text.isEmpty else { return nil }
+        switch delivery {
+        case .idle, .rejected:
+            break
+        case .sending, .unconfirmed, .confirmed:
+            return nil
+        }
+        guard !text.isEmpty else { return nil }
         delivery = .sending
         return text
     }
@@ -63,6 +71,13 @@ public struct TextDraft: Equatable, Sendable {
     public mutating func markRejected(reason: String) {
         guard delivery == .sending || delivery == .unconfirmed else { return }
         delivery = .rejected(reason: reason)
+    }
+
+    /// Authority changed before a pending delivery was authoritatively
+    /// resolved. Preserve the draft and prevent an automatic resend.
+    public mutating func invalidatePendingDelivery() {
+        guard delivery == .sending else { return }
+        delivery = .unconfirmed
     }
 
     /// Clear the draft. Only valid after confirmed receipt.

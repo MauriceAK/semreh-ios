@@ -69,7 +69,12 @@ public final class BrowserSessionController {
 
     /// Commands dispatched but not yet acknowledged, rejected or reported lost.
     private var inflightCommands: [CommandID: BrowserAdapterAction] = [:]
+    /// Commands whose result is ambiguous but may still receive a late,
+    /// authoritative acknowledgement while the same authority epoch is active.
+    private var uncertainCommands: [CommandID: BrowserAdapterAction] = [:]
     private var pendingResumeCommand: CommandID?
+    private var resumeCommandSettled = false
+    private var pendingRequestObservedQuiescence = false
     private var lastSeenRevision: UInt64 = 0
 
     /// Grants ignored because they did not match the pending request,
@@ -124,6 +129,7 @@ public final class BrowserSessionController {
     public func requestControl() -> UUID? {
         guard case .watching(let supported) = state, supported else { return nil }
         let requestID = UUID()
+        pendingRequestObservedQuiescence = false
         transition(to: .requestPending(requestID: requestID))
         adapter.perform(.requestControl(requestID: requestID), commandID: UUID())
         return requestID
@@ -154,9 +160,13 @@ public final class BrowserSessionController {
     /// is dispatched. Success requires the adapter's fresh-observation
     /// acknowledgement; the request is never replayed automatically.
     public func resumeHermes() {
-        guard case .manual(let lease) = state else { return }
+        guard case .manual(let lease) = state,
+              inflightCommands.isEmpty,
+              uncertainCommands.isEmpty
+        else { return }
         let commandID = UUID()
         pendingResumeCommand = commandID
+        resumeCommandSettled = false
         inflightCommands[commandID] = .resumeHermes
         acceptedCommandCount += 1
         transition(to: .resumePending(lease: lease, outcomeKnown: true))
@@ -169,7 +179,10 @@ public final class BrowserSessionController {
         switch state {
         case .manual, .requestPending, .resumePending, .watching, .connecting:
             inflightCommands.removeAll()
+            uncertainCommands.removeAll()
             pendingResumeCommand = nil
+            resumeCommandSettled = false
+            pendingRequestObservedQuiescence = false
             transition(to: .disconnected)
         case .unavailable, .disconnected, .ended:
             break
@@ -180,7 +193,10 @@ public final class BrowserSessionController {
     /// implicit Resume. Terminal until an explicit reconnect.
     public func close() {
         inflightCommands.removeAll()
+        uncertainCommands.removeAll()
         pendingResumeCommand = nil
+        resumeCommandSettled = false
+        pendingRequestObservedQuiescence = false
         adapter.disconnect()
         transition(to: .ended)
     }
@@ -193,45 +209,66 @@ public final class BrowserSessionController {
             handleConnected(descriptor: descriptor, capabilities: caps)
         case .connectionFailed(let reason):
             inflightCommands.removeAll()
+            uncertainCommands.removeAll()
             pendingResumeCommand = nil
+            resumeCommandSettled = false
+            pendingRequestObservedQuiescence = false
             transition(to: .unavailable(reason: reason))
         case .controlGranted(let grant):
             handleGrant(grant)
         case .controlRequestRejected(let requestID, _):
             if case .requestPending(let pending) = state, pending == requestID {
+                pendingRequestObservedQuiescence = false
                 transition(to: .watching(controlSupported: capabilities.controlSupported))
             }
         case .commandAcknowledged(let commandID):
-            inflightCommands.removeValue(forKey: commandID)
+            let wasTracked = inflightCommands.removeValue(forKey: commandID) != nil
+                || uncertainCommands.removeValue(forKey: commandID) != nil
+            guard wasTracked else { break }
             onCommandAcknowledged?(commandID)
             if commandID == pendingResumeCommand,
                case .resumePending = state
             {
-                pendingResumeCommand = nil
-                // Fresh-observation acknowledgement: the success state.
-                transition(to: .watching(controlSupported: capabilities.controlSupported))
+                // A transport acknowledgement alone does not prove that
+                // Hermes has freshly observed the resumed ownership state.
+                // Stay input-disabled until a subsequent `.quiescent` event.
+                resumeCommandSettled = true
             }
         case .commandRejected(let commandID, let reason):
-            inflightCommands.removeValue(forKey: commandID)
+            let wasTracked = inflightCommands.removeValue(forKey: commandID) != nil
+                || uncertainCommands.removeValue(forKey: commandID) != nil
+            guard wasTracked else { break }
             onCommandRejected?(commandID, reason)
             if commandID == pendingResumeCommand,
                case .resumePending(let lease, _) = state
             {
                 pendingResumeCommand = nil
+                resumeCommandSettled = true
                 transition(to: .resumePending(lease: lease, outcomeKnown: false))
             }
         case .acknowledgementLost(let commandID):
-            inflightCommands.removeValue(forKey: commandID)
+            guard let action = inflightCommands.removeValue(forKey: commandID) else { break }
+            uncertainCommands[commandID] = action
             onAcknowledgementLost?(commandID)
             if commandID == pendingResumeCommand,
                case .resumePending(let lease, _) = state
             {
                 // UNKNOWN until reconciled — not automatically paused.
-                pendingResumeCommand = nil
+                resumeCommandSettled = true
                 transition(to: .resumePending(lease: lease, outcomeKnown: false))
             }
         case .quiescent:
-            break
+            if case .requestPending = state {
+                pendingRequestObservedQuiescence = true
+            } else if case .resumePending = state, resumeCommandSettled {
+                if let commandID = pendingResumeCommand {
+                    inflightCommands.removeValue(forKey: commandID)
+                    uncertainCommands.removeValue(forKey: commandID)
+                }
+                pendingResumeCommand = nil
+                resumeCommandSettled = false
+                transition(to: .watching(controlSupported: capabilities.controlSupported))
+            }
         case .frameArrived:
             // Frames are consumed by the viewport pipeline, not the controller.
             break
@@ -241,7 +278,10 @@ public final class BrowserSessionController {
             handleDisconnected()
         case .sessionEnded:
             inflightCommands.removeAll()
+            uncertainCommands.removeAll()
             pendingResumeCommand = nil
+            resumeCommandSettled = false
+            pendingRequestObservedQuiescence = false
             transition(to: .ended)
         }
     }
@@ -273,13 +313,18 @@ public final class BrowserSessionController {
             ignoredGrantCount += 1
             return
         }
+        guard pendingRequestObservedQuiescence else {
+            ignoredGrantCount += 1
+            return
+        }
         // Explicit adapter-reported quiescence: no unacknowledged commands
         // may be outstanding when authority is granted.
-        guard inflightCommands.isEmpty else {
+        guard inflightCommands.isEmpty, uncertainCommands.isEmpty else {
             ignoredGrantCount += 1
             return
         }
         lastSeenRevision = grant.revision
+        pendingRequestObservedQuiescence = false
         let lease = ControlLease(
             leaseID: grant.leaseID,
             requestID: grant.requestID,
@@ -297,12 +342,23 @@ public final class BrowserSessionController {
     ) {
         // `.ended` is terminal until an explicit reconnect.
         if case .ended = state { return }
-        if let current = currentSurface,
-           descriptor.connection != current.connection
+        let reconcilesPendingResume: Bool
+        if case .resumePending = state {
+            reconcilesPendingResume = true
+        } else {
+            reconcilesPendingResume = false
+        }
+        if reconcilesPendingResume
+            || currentSurface.map({ descriptor.connection != $0.connection }) == true
         {
             // New connection epoch: never restore cached human authority.
+            // A fresh same-epoch observation may also reconcile Resume, but
+            // must retire its ambiguous command before control can be sought.
             inflightCommands.removeAll()
+            uncertainCommands.removeAll()
             pendingResumeCommand = nil
+            resumeCommandSettled = false
+            pendingRequestObservedQuiescence = false
         }
         currentSurface = descriptor
         capabilities = caps
@@ -323,7 +379,10 @@ public final class BrowserSessionController {
         case .manual, .requestPending, .resumePending:
             // The lease was bound to the old surface: void it.
             inflightCommands.removeAll()
+            uncertainCommands.removeAll()
             pendingResumeCommand = nil
+            resumeCommandSettled = false
+            pendingRequestObservedQuiescence = false
             transition(to: .watching(controlSupported: capabilities.controlSupported))
         case .watching, .connecting, .disconnected, .unavailable, .ended:
             break
@@ -336,7 +395,10 @@ public final class BrowserSessionController {
             break
         default:
             inflightCommands.removeAll()
+            uncertainCommands.removeAll()
             pendingResumeCommand = nil
+            resumeCommandSettled = false
+            pendingRequestObservedQuiescence = false
             transition(to: .disconnected)
         }
     }

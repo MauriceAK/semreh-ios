@@ -112,14 +112,15 @@ final class ViewportGeometryTests: XCTestCase {
         generation: UInt64 = 1,
         width: Int = 200,
         height: Int = 100,
-        bytes: Int = 1024
+        bytes: Int = 1024,
+        actualBytes: Int? = nil
     ) -> FramePayload {
         FramePayload(
             sequence: sequence,
             generation: generation,
             dimensions: PixelDimensions(width: width, height: height),
             compressedByteCount: bytes,
-            data: Data(repeating: 0, count: min(bytes, 1024))
+            data: Data(repeating: 0, count: actualBytes ?? max(bytes, 0))
         )
     }
 
@@ -159,6 +160,25 @@ final class ViewportGeometryTests: XCTestCase {
                 lastAcceptedSequence: 0
             ),
             .dropOversized
+        )
+    }
+
+    func testLyingOrNegativeByteMetadataRejected() {
+        XCTAssertEqual(
+            assessFrame(
+                payload(sequence: 1, bytes: 1, actualBytes: 1024),
+                currentGeneration: 1,
+                lastAcceptedSequence: 0
+            ),
+            .dropInvalidByteCount
+        )
+        XCTAssertEqual(
+            assessFrame(
+                payload(sequence: 1, bytes: -1, actualBytes: 0),
+                currentGeneration: 1,
+                lastAcceptedSequence: 0
+            ),
+            .dropInvalidByteCount
         )
     }
 

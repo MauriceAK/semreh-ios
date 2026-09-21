@@ -8,6 +8,7 @@ final class FakeBrowserAdapter: BrowserAdapter {
     var onEvent: ((BrowserAdapterEvent) -> Void)?
 
     private(set) var performed: [(action: BrowserAdapterAction, commandID: CommandID)] = []
+    var quiesceControlRequests = true
 
     init(capabilities: RemoteBrowserCapabilities = RemoteBrowserCapabilities(
         controlSupported: true,
@@ -21,6 +22,9 @@ final class FakeBrowserAdapter: BrowserAdapter {
 
     func perform(_ action: BrowserAdapterAction, commandID: CommandID) {
         performed.append((action, commandID))
+        if case .requestControl = action, quiesceControlRequests {
+            onEvent?(.quiescent)
+        }
     }
 
     func emit(_ event: BrowserAdapterEvent) {
@@ -106,6 +110,24 @@ final class OwnershipStateTests: XCTestCase {
         XCTAssertNotNil(commandID)
         XCTAssertEqual(controller.acceptedCommandCount, 1)
         XCTAssertEqual(adapter.performed.count, 2) // requestControl + click
+    }
+
+    func testGrantRequiresQuiescenceObservedAfterRequest() {
+        let (controller, adapter) = makeController()
+        adapter.quiesceControlRequests = false
+        controller.handle(.connected(makeDescriptor(), adapter.capabilities))
+        let requestID = controller.requestControl()!
+        let descriptor = controller.currentSurface!
+
+        adapter.emit(.controlGranted(ControlGrant(
+            requestID: requestID,
+            connection: descriptor.connection,
+            surface: descriptor.surface,
+            revision: 1
+        )))
+
+        XCTAssertFalse(controller.canSendHumanCommands)
+        XCTAssertEqual(controller.ignoredGrantCount, 1)
     }
 
     func testRequestControlRequiresControlSupport() {
@@ -274,13 +296,20 @@ final class OwnershipStateTests: XCTestCase {
         XCTAssertNil(controller.sendHumanCommand(.click(RemotePoint(x: 0.5, y: 0.5))))
     }
 
-    func testResumeAckReturnsToWatching() {
+    func testResumeAckRequiresFreshQuiescentObservation() {
         let (controller, adapter) = makeController()
         _ = makeManual(controller, adapter)
         controller.resumeHermes()
 
         let resumeAction = adapter.performed.last!
         adapter.emit(.commandAcknowledged(resumeAction.commandID))
+
+        XCTAssertFalse(controller.canSendHumanCommands)
+        guard case .resumePending = controller.state else {
+            return XCTFail("transport ack must not finish resume: \(controller.state)")
+        }
+
+        adapter.emit(.quiescent)
         XCTAssertEqual(controller.state, .watching(controlSupported: true))
     }
 
@@ -297,8 +326,8 @@ final class OwnershipStateTests: XCTestCase {
         }
         XCTAssertFalse(known, "lost acknowledgement must be UNKNOWN, not auto-paused")
         XCTAssertFalse(controller.canSendHumanCommands)
-        // A fresh observation reconciles the unknown outcome.
-        controller.handle(.connected(makeDescriptor(), adapter.capabilities))
+        // A fresh quiescent observation reconciles the unknown outcome.
+        adapter.emit(.quiescent)
         XCTAssertEqual(controller.state, .watching(controlSupported: true))
     }
 
@@ -318,6 +347,27 @@ final class OwnershipStateTests: XCTestCase {
             adapter.humanActions.filter { $0 == .resumeHermes }.count,
             resumeCount
         )
+    }
+
+    func testFreshSameConnectionObservationRetiresUnknownResume() {
+        let (controller, adapter) = makeController()
+        _ = makeManual(controller, adapter)
+        let descriptor = controller.currentSurface!
+        controller.resumeHermes()
+        let resumeAction = adapter.performed.last!
+        adapter.emit(.acknowledgementLost(resumeAction.commandID))
+
+        adapter.emit(.connected(descriptor, adapter.capabilities))
+        XCTAssertEqual(controller.state, .watching(controlSupported: true))
+
+        let requestID = controller.requestControl()!
+        adapter.emit(.controlGranted(ControlGrant(
+            requestID: requestID,
+            connection: descriptor.connection,
+            surface: descriptor.surface,
+            revision: 2
+        )))
+        XCTAssertTrue(controller.canSendHumanCommands)
     }
 
     // MARK: - Background / close
@@ -341,6 +391,21 @@ final class OwnershipStateTests: XCTestCase {
 
         XCTAssertEqual(controller.state, .ended)
         XCTAssertFalse(adapter.humanActions.contains(.resumeHermes))
+    }
+
+    func testLateAcknowledgementAfterDisconnectIsIgnored() {
+        let (controller, adapter) = makeController()
+        _ = makeManual(controller, adapter)
+        let commandID = controller.sendHumanCommand(.insertText("new draft"))!
+        adapter.emit(.acknowledgementLost(commandID))
+        adapter.emit(.disconnected)
+
+        var acknowledged: [CommandID] = []
+        controller.onCommandAcknowledged = { acknowledged.append($0) }
+        adapter.emit(.commandAcknowledged(commandID))
+
+        XCTAssertTrue(acknowledged.isEmpty)
+        XCTAssertEqual(controller.state, .disconnected)
     }
 
     // MARK: - Stop task capability

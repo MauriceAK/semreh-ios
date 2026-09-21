@@ -48,6 +48,20 @@ final class TextDraftTests: XCTestCase {
         XCTAssertEqual(draft.delivery, .idle)
     }
 
+    func testAuthorityInvalidationPreservesAndBlocksPendingDraft() {
+        var draft = TextDraft(text: "same text")
+        XCTAssertEqual(draft.beginCommit(), "same text")
+
+        draft.invalidatePendingDelivery()
+
+        XCTAssertEqual(draft.delivery, .unconfirmed)
+        XCTAssertEqual(draft.text, "same text")
+        XCTAssertNil(draft.beginCommit())
+
+        draft.edit("same text")
+        XCTAssertEqual(draft.beginCommit(), "same text")
+    }
+
     func testRejectedDraftPreserved() {
         var draft = TextDraft()
         draft.edit("hello")
