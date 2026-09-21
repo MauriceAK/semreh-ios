@@ -9,7 +9,7 @@ public final class ViewportControl: ObservableObject {
     fileprivate var fitHandler: (@MainActor () -> Void)?
     public init() {}
     /// Reset zoom to 1x and clear the pan offset.
-    public func fit() { fitHandler?() }
+    @MainActor public func fit() { fitHandler?() }
 }
 
 /// SwiftUI wrapper around the gesture-driven viewport.
