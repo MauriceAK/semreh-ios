@@ -81,23 +81,72 @@ struct BrowserLabView: View {
     // MARK: - Control panel
 
     private var controlPanel: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                connectionSection
-                Divider()
-                framesSection
-                Divider()
-                controlSection
-                Divider()
-                acknowledgementSection
-                Divider()
-                readbackSection
+        VStack(spacing: 0) {
+            scenarioShortcuts
+                .padding(12)
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    connectionSection
+                    Divider()
+                    framesSection
+                    Divider()
+                    controlSection
+                    Divider()
+                    acknowledgementSection
+                    Divider()
+                    readbackSection
+                }
+                .padding(12)
             }
-            .padding(12)
+            .accessibilityIdentifier("lab.panel")
+            Divider()
+            insertionReadback
+                .padding(12)
         }
-        .frame(maxHeight: 300)
+        .frame(height: 300)
         .background(Color(.secondarySystemBackground))
-        .accessibilityIdentifier("lab.panel")
+    }
+
+    /// Keep the controls needed to enter safety-critical fixture states fixed
+    /// above the independently scrolling detail panel. This makes lost-ack,
+    /// read-only, and fresh-observation scenarios reachable on compact screens.
+    private var scenarioShortcuts: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle("Control supported", isOn: Binding(
+                get: { lab.fixture.controlSupported },
+                set: { lab.fixture.setControlSupported($0) }
+            ))
+            .accessibilityIdentifier("lab.controlSupported")
+
+            HStack(spacing: 8) {
+                Button("Lose next ack") { lab.fixture.loseNextAck = true }
+                    .accessibilityIdentifier("lab.loseNextAck")
+                Button("Report fresh observation") { lab.fixture.reportFreshObservation() }
+                    .accessibilityIdentifier("lab.freshObservation")
+            }
+        }
+    }
+
+    /// Exact inserted text stays in fixture memory and is exposed here for
+    /// deterministic UI assertions; it is never written to the event log.
+    private var insertionReadback: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Inserted text commands")
+                Spacer()
+                Text("\(lab.fixture.insertedTextCount)")
+                    .accessibilityIdentifier("lab.insertedTextCount")
+            }
+            HStack {
+                Text("Final inserted text")
+                Spacer()
+                Text(lab.fixture.lastInsertedText)
+                    .lineLimit(1)
+                    .accessibilityIdentifier("lab.lastInsertedText")
+            }
+        }
+        .font(.caption)
     }
 
     private var connectionSection: some View {
@@ -133,11 +182,6 @@ struct BrowserLabView: View {
                 set: { lab.fixture.autoGrantControl = $0 }
             ))
                 .accessibilityIdentifier("lab.autoGrant")
-            Toggle("Control supported", isOn: Binding(
-                get: { lab.fixture.controlSupported },
-                set: { lab.fixture.setControlSupported($0) }
-            ))
-            .accessibilityIdentifier("lab.controlSupported")
             Button("Reject next request") { lab.fixture.rejectNextRequest = true }
                 .accessibilityIdentifier("lab.rejectNext")
             Text(lab.fixture.rejectNextRequest
@@ -162,10 +206,6 @@ struct BrowserLabView: View {
                     .monospacedDigit()
                     .frame(minWidth: 44, alignment: .trailing)
             }
-            Button("Lose next ack") { lab.fixture.loseNextAck = true }
-                .accessibilityIdentifier("lab.loseNextAck")
-            Button("Report fresh observation") { lab.fixture.reportFreshObservation() }
-                .accessibilityIdentifier("lab.freshObservation")
             Text(lab.fixture.loseNextAck
                  ? "Armed: the next accepted command's acknowledgement will be lost."
                  : "Lost acks, including Resume, stay unknown until a fresh observation.")
@@ -203,14 +243,6 @@ struct BrowserLabView: View {
             LabeledContent("Last command") {
                 Text(lab.fixture.lastCommandDescription)
                     .accessibilityIdentifier("lab.lastCommand")
-            }
-            LabeledContent("Inserted text commands") {
-                Text("\(lab.fixture.insertedTextCount)")
-                    .accessibilityIdentifier("lab.insertedTextCount")
-            }
-            LabeledContent("Final inserted text") {
-                Text(lab.fixture.lastInsertedText)
-                    .accessibilityIdentifier("lab.lastInsertedText")
             }
             Text("Event log").font(.subheadline)
             ForEach(Array(lab.fixture.eventLog.suffix(8).enumerated()), id: \.offset) { _, line in

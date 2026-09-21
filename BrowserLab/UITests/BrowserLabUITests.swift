@@ -202,7 +202,7 @@ final class BrowserLabUITests: XCTestCase {
         app.buttons["lab.connect"].tap()
         XCTAssertTrue(app.staticTexts["browser.status"].waitForExistence(timeout: 10))
 
-        app.buttons["lab.frames"].tap()
+        tapPanelElement(app.buttons["lab.frames"])
         // Let a couple of synthetic frames arrive.
         sleep(2)
 
