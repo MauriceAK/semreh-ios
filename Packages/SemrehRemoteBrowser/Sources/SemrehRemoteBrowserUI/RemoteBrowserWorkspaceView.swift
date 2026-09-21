@@ -136,8 +136,10 @@ public struct RemoteBrowserWorkspaceView: View {
                                 .padding(8)
                                 .background(.ultraThinMaterial)
                                 .clipShape(RoundedRectangle(cornerRadius: 8))
+                                .accessibilityIdentifier("browser.staleFrameShield")
                         }
                         .accessibilityLabel("Stale frame shielded")
+                        .accessibilityElement(children: .contain)
                 }
             }
             .allowsHitTesting(viewModel.viewportInteractive)

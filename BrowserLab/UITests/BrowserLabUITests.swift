@@ -13,13 +13,41 @@ final class BrowserLabUITests: XCTestCase {
         app.launch()
     }
 
-    private func tapPanelElement(_ element: XCUIElement) {
+    @discardableResult
+    private func revealPanelElement(
+        _ element: XCUIElement,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) -> XCUIElement {
         let panel = app.scrollViews["lab.panel"]
-        for _ in 0..<4 where !element.isHittable {
+        XCTAssertTrue(panel.waitForExistence(timeout: 5), file: file, line: line)
+
+        // Tests can leave the independently scrolling lab panel at either end.
+        // Search in both directions so later controls and readback values remain
+        // reachable without relying on a particular simulator viewport height.
+        for _ in 0..<8 {
+            if element.exists && element.isHittable {
+                return element
+            }
             panel.swipeUp()
         }
-        XCTAssertTrue(element.isHittable, "panel element is not hittable: \(element)")
-        element.tap()
+        for _ in 0..<8 {
+            if element.exists && element.isHittable {
+                return element
+            }
+            panel.swipeDown()
+        }
+
+        XCTFail("panel element is not hittable: \(element)", file: file, line: line)
+        return element
+    }
+
+    private func tapPanelElement(
+        _ element: XCUIElement,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        revealPanelElement(element, file: file, line: line).tap()
     }
 
     /// The simulated-session banner is always visible.
@@ -93,10 +121,9 @@ final class BrowserLabUITests: XCTestCase {
 
         app.buttons["Done"].tap()
 
-        let insertedText = app.staticTexts["lab.lastInsertedText"]
-        XCTAssertTrue(insertedText.waitForExistence(timeout: 5))
+        let insertedText = revealPanelElement(app.staticTexts["lab.lastInsertedText"])
         XCTAssertEqual(insertedText.label, expectedText)
-        let insertCount = app.staticTexts["lab.insertedTextCount"]
+        let insertCount = revealPanelElement(app.staticTexts["lab.insertedTextCount"])
         XCTAssertEqual(insertCount.label, "1")
         Thread.sleep(forTimeInterval: 1)
         XCTAssertEqual(insertCount.label, "1", "fixture must accept the Unicode insertion exactly once")
@@ -135,10 +162,10 @@ final class BrowserLabUITests: XCTestCase {
             app.buttons["browser.insertText"].tap()
         }
         app.buttons["Done"].tap()
-        let insertCount = app.staticTexts["lab.insertedTextCount"]
-        XCTAssertTrue(insertCount.waitForExistence(timeout: 5))
+        let insertCount = revealPanelElement(app.staticTexts["lab.insertedTextCount"])
         XCTAssertEqual(insertCount.label, "1")
-        XCTAssertEqual(app.staticTexts["lab.lastInsertedText"].label, expectedText)
+        let insertedText = revealPanelElement(app.staticTexts["lab.lastInsertedText"])
+        XCTAssertEqual(insertedText.label, expectedText)
     }
 
     func testReadOnlyAndResumeUnknownStatesAreReachable() {
@@ -181,7 +208,7 @@ final class BrowserLabUITests: XCTestCase {
 
         app.buttons["lab.disconnect"].tap()
         XCTAssertTrue(
-            app.staticTexts["Frame may be stale"].waitForExistence(timeout: 10)
+            app.staticTexts["browser.staleFrameShield"].waitForExistence(timeout: 10)
         )
     }
 }
