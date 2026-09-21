@@ -255,7 +255,7 @@ public struct RemoteBrowserWorkspaceView: View {
             }
             .padding()
             .navigationTitle("Keyboard")
-            .navigationBarTitleDisplayMode(.inline)
+            .browserInlineNavigationTitle()
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Done") { showingDraftEditor = false }
@@ -267,5 +267,16 @@ public struct RemoteBrowserWorkspaceView: View {
                 }
             }
         }
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func browserInlineNavigationTitle() -> some View {
+        #if canImport(UIKit)
+        navigationBarTitleDisplayMode(.inline)
+        #else
+        self
+        #endif
     }
 }
