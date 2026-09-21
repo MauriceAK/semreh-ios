@@ -7,6 +7,14 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		F0029E69AE1B347EDC4D4F07 /* SessionListView+Actions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A811259CA07C545AEC6E9A0 /* SessionListView+Actions.swift */; };
+		69CBE32F7DFFDAFC8AB548D5 /* SessionListView+Body.swift in Sources */ = {isa = PBXBuildFile; fileRef = 36AA4FE69DED188AE4D1D9E0 /* SessionListView+Body.swift */; };
+		82C9C87C41722DAC25ACCBF6 /* SessionListView+Components.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9EF6C969EF4E7A3873A1187B /* SessionListView+Components.swift */; };
+		F8A2F708FCB676B668A0C742 /* SessionListView+Content.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF58ACEFC54FF43171289F68 /* SessionListView+Content.swift */; };
+		7394ECF2AA0D7764120CED23 /* SessionListView+Navigation.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2A0FB7584D3574B048CE354 /* SessionListView+Navigation.swift */; };
+		A89888C0D95609B5FCAC312C /* SessionListView+Search.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87DF3E315DCCEBBB9098FA44 /* SessionListView+Search.swift */; };
+		43817029065BFDD6A5FB9E77 /* SessionListView+Surface.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8011BFC62D70004BAEA6A9C5 /* SessionListView+Surface.swift */; };
+		D6B33BF994E097379692B44B /* SessionListTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2D18D0E88151E1380934ACE /* SessionListTypes.swift */; };
 		814BBCCF6E3422CE7EDB4254 /* SessionListActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FAE828EC51BD9F87EB50E8C /* SessionListActions.swift */; };
 		E6E3A8EAEA9415264CB97E10 /* SessionListState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B24A12A6666A5029EBFD47A /* SessionListState.swift */; };
 		01AFAA007B61440A23B9F06D /* SessionListUtilityViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A39745F18FD3347BA4AEA0E0 /* SessionListUtilityViews.swift */; };
@@ -469,6 +477,14 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		1A811259CA07C545AEC6E9A0 /* SessionListView+Actions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SessionListView+Actions.swift"; sourceTree = "<group>"; };
+		36AA4FE69DED188AE4D1D9E0 /* SessionListView+Body.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SessionListView+Body.swift"; sourceTree = "<group>"; };
+		9EF6C969EF4E7A3873A1187B /* SessionListView+Components.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SessionListView+Components.swift"; sourceTree = "<group>"; };
+		EF58ACEFC54FF43171289F68 /* SessionListView+Content.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SessionListView+Content.swift"; sourceTree = "<group>"; };
+		B2A0FB7584D3574B048CE354 /* SessionListView+Navigation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SessionListView+Navigation.swift"; sourceTree = "<group>"; };
+		87DF3E315DCCEBBB9098FA44 /* SessionListView+Search.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SessionListView+Search.swift"; sourceTree = "<group>"; };
+		8011BFC62D70004BAEA6A9C5 /* SessionListView+Surface.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SessionListView+Surface.swift"; sourceTree = "<group>"; };
+		A2D18D0E88151E1380934ACE /* SessionListTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListTypes.swift; sourceTree = "<group>"; };
 		6FAE828EC51BD9F87EB50E8C /* SessionListActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListActions.swift; sourceTree = "<group>"; };
 		4B24A12A6666A5029EBFD47A /* SessionListState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListState.swift; sourceTree = "<group>"; };
 		A39745F18FD3347BA4AEA0E0 /* SessionListUtilityViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListUtilityViews.swift; sourceTree = "<group>"; };
@@ -1314,6 +1330,14 @@
 			isa = PBXGroup;
 			children = (
 				1A2B3C4D5E6F7000000000B7 /* SessionListView.swift */,
+				1A811259CA07C545AEC6E9A0 /* SessionListView+Actions.swift */,
+				36AA4FE69DED188AE4D1D9E0 /* SessionListView+Body.swift */,
+				9EF6C969EF4E7A3873A1187B /* SessionListView+Components.swift */,
+				EF58ACEFC54FF43171289F68 /* SessionListView+Content.swift */,
+				B2A0FB7584D3574B048CE354 /* SessionListView+Navigation.swift */,
+				87DF3E315DCCEBBB9098FA44 /* SessionListView+Search.swift */,
+				8011BFC62D70004BAEA6A9C5 /* SessionListView+Surface.swift */,
+				A2D18D0E88151E1380934ACE /* SessionListTypes.swift */,
 				6FAE828EC51BD9F87EB50E8C /* SessionListActions.swift */,
 				4B24A12A6666A5029EBFD47A /* SessionListState.swift */,
 				A39745F18FD3347BA4AEA0E0 /* SessionListUtilityViews.swift */,
@@ -1962,6 +1986,14 @@
 				C09500000000000000000001 /* AdaptiveGlassModifier.swift in Sources */,
 				C09500000000000000000005 /* AdaptiveGlassDebugFixture.swift in Sources */,
 					1A2B3C4D5E6F7000000000A7 /* SessionListView.swift in Sources */,
+				F0029E69AE1B347EDC4D4F07 /* SessionListView+Actions.swift in Sources */,
+				69CBE32F7DFFDAFC8AB548D5 /* SessionListView+Body.swift in Sources */,
+				82C9C87C41722DAC25ACCBF6 /* SessionListView+Components.swift in Sources */,
+				F8A2F708FCB676B668A0C742 /* SessionListView+Content.swift in Sources */,
+				7394ECF2AA0D7764120CED23 /* SessionListView+Navigation.swift in Sources */,
+				A89888C0D95609B5FCAC312C /* SessionListView+Search.swift in Sources */,
+				43817029065BFDD6A5FB9E77 /* SessionListView+Surface.swift in Sources */,
+				D6B33BF994E097379692B44B /* SessionListTypes.swift in Sources */,
 				814BBCCF6E3422CE7EDB4254 /* SessionListActions.swift in Sources */,
 				E6E3A8EAEA9415264CB97E10 /* SessionListState.swift in Sources */,
 				01AFAA007B61440A23B9F06D /* SessionListUtilityViews.swift in Sources */,
