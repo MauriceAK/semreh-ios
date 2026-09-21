@@ -33,7 +33,9 @@ public struct RemoteBrowserWorkspaceView: View {
     @ObservedObject public var viewModel: RemoteBrowserViewModel
     @StateObject private var viewportControl = ViewportControl()
     @State private var showingDraftEditor = false
-    @State private var workspaceHeight: CGFloat = .greatestFiniteMagnitude
+    // Defaults to compact (safe): the sheet fallback. Updated to the real
+    // allocated height on layout; never defaults to the inline composer.
+    @State private var workspaceHeight: CGFloat = 0
     @FocusState private var draftEditorFocused: Bool
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -43,11 +45,13 @@ public struct RemoteBrowserWorkspaceView: View {
     }
 
     public var body: some View {
-        // The root is a plain VStack (never a root GeometryReader): the
-        // workspace must keep its intrinsic minimum height so embedded hosts
-        // like BrowserLab allocate enough room and the chrome never overlaps
-        // sibling views. The compact-composer decision reads the allocated
-        // height through a background measurement instead.
+        // The root is a plain ZStack/VStack (never a root GeometryReader):
+        // the workspace must keep its intrinsic minimum height so embedded
+        // hosts like BrowserLab allocate enough room and the chrome never
+        // overlaps sibling views. The compact-composer decision reads the
+        // allocated height from the outer ZStack — whose size is set by the
+        // parent proposal and never by our own content — so toggling the
+        // inline composer cannot feed back into the measurement.
         ZStack {
             Color.black.ignoresSafeArea()
             VStack(spacing: 0) {
@@ -68,7 +72,6 @@ public struct RemoteBrowserWorkspaceView: View {
                     )
                 }
             }
-            .background(heightReader)
             .background(BrowserChrome.shell)
             .clipShape(
                 UnevenRoundedRectangle(
@@ -79,6 +82,7 @@ public struct RemoteBrowserWorkspaceView: View {
             )
             .preferredColorScheme(.dark)
         }
+        .background(heightReader)
         .onPreferenceChange(WorkspaceHeightKey.self) { workspaceHeight = $0 }
         .sheet(isPresented: sheetBinding) {
             draftEditorSheet
@@ -204,7 +208,7 @@ public struct RemoteBrowserWorkspaceView: View {
 }
 
 private struct WorkspaceHeightKey: PreferenceKey {
-    static var defaultValue: CGFloat = .greatestFiniteMagnitude
+    static var defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = nextValue()
     }
