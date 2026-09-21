@@ -3561,7 +3561,6 @@ final class GatewayConversationController {
             try self.checkReasoningCapability(capability)
             return [
                 "key": .string("reasoning"),
-                "scope": .string("session"),
                 "session_id": .string(capability.binding.runtimeID),
                 "profile": .string(self.profile)
             ]

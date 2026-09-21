@@ -1227,11 +1227,33 @@ final class GatewayConversationControllerTests: XCTestCase {
         let call = try XCTUnwrap(fake.calls().first(where: { $0.method == "config.get" }))
         XCTAssertEqual(objectFields(call.params), [
             "key": .string("reasoning"),
-            "scope": .string("session"),
             "session_id": .string("runtime-resumed"),
             "profile": .string("work")
         ])
         await runtime.stop()
+    }
+
+    func testConfigGetStrictDoubleRejectsUndeclaredParameters() async throws {
+        let fake = ControllerFakeTransport()
+
+        do {
+            _ = try await fake.request(
+                method: "config.get",
+                params: .object([
+                    "key": .string("reasoning"),
+                    "scope": .string("session")
+                ]),
+                timeout: nil
+            )
+            XCTFail("config.get must reject undeclared parameters")
+        } catch let error as HermesGatewayError {
+            guard case let .server(code, message, _, method, _, _) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertEqual(code, 4000)
+            XCTAssertEqual(method, "config.get")
+            XCTAssertTrue(message.contains("scope"))
+        }
     }
 
     func testDelayedReasoningReadIsInvalidatedByAQueuedWrite() async throws {
@@ -2497,6 +2519,39 @@ private final class ControllerFakeTransport: HermesGatewayTransport, @unchecked 
         withLock { callsValue }
     }
 
+    private static func validateConfigParameters(method: String, params: JSONValue?) throws {
+        let declared: Set<String>
+        switch method {
+        case "config.get":
+            declared = ["key", "cwd", "session_id", "profile"]
+        case "config.set":
+            declared = ["key", "value", "scope", "session_id", "profile"]
+        default:
+            return
+        }
+        guard case let .object(fields) = params else {
+            throw HermesGatewayError.server(
+                code: 4000,
+                message: "\(method) params must be an object",
+                data: nil,
+                method: method,
+                requestID: "fixture",
+                server: "fixture"
+            )
+        }
+        let undeclared = fields.keys.filter { !declared.contains($0) }.sorted()
+        guard undeclared.isEmpty else {
+            throw HermesGatewayError.server(
+                code: 4000,
+                message: "\(method) undeclared parameter(s): \(undeclared.joined(separator: ", "))",
+                data: nil,
+                method: method,
+                requestID: "fixture",
+                server: "fixture"
+            )
+        }
+    }
+
     func connect() async throws {
         withLock {
             generationValue += 1
@@ -2513,6 +2568,7 @@ private final class ControllerFakeTransport: HermesGatewayTransport, @unchecked 
     }
 
     func request(method: String, params: JSONValue?, timeout: Duration?) async throws -> JSONValue? {
+        try Self.validateConfigParameters(method: method, params: params)
         let behavior: (JSONValue?, [HermesGatewayEvent], AsyncGate?, Bool, HermesGatewayError?, JSONValue, JSONValue, HermesGatewayEvent?, Int)
         behavior = withLock {
             callsValue.append(Call(method: method, params: params))

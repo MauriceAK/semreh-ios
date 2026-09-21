@@ -1804,8 +1804,10 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         let calls = fake.calls()
         XCTAssertEqual(calls.filter { $0.method != "config.get" }.map(\.method), ["session.create", "prompt.submit"])
         for call in calls where call.method == "config.get" {
-            XCTAssertEqual(fields(call.params)?["scope"], .string("session"))
-            XCTAssertEqual(fields(call.params)?["session_id"], .string("runtime-1"))
+            let parameters = try XCTUnwrap(fields(call.params))
+            XCTAssertEqual(Set(parameters.keys), Set(["key", "session_id", "profile"]))
+            XCTAssertEqual(parameters["session_id"], .string("runtime-1"))
+            XCTAssertEqual(parameters["profile"], .string("work"))
         }
         XCTAssertEqual(fields(calls[1].params)?["session_id"], .string("runtime-1"))
         XCTAssertEqual(fields(calls[1].params)?["profile"], .string("work"))
@@ -4766,6 +4768,39 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
         withLock { callsValue }
     }
 
+    private static func validateConfigParameters(method: String, params: JSONValue?) throws {
+        let declared: Set<String>
+        switch method {
+        case "config.get":
+            declared = ["key", "cwd", "session_id", "profile"]
+        case "config.set":
+            declared = ["key", "value", "scope", "session_id", "profile"]
+        default:
+            return
+        }
+        guard case let .object(fields) = params else {
+            throw HermesGatewayError.server(
+                code: 4000,
+                message: "\(method) params must be an object",
+                data: nil,
+                method: method,
+                requestID: "fixture",
+                server: "fixture"
+            )
+        }
+        let undeclared = fields.keys.filter { !declared.contains($0) }.sorted()
+        guard undeclared.isEmpty else {
+            throw HermesGatewayError.server(
+                code: 4000,
+                message: "\(method) undeclared parameter(s): \(undeclared.joined(separator: ", "))",
+                data: nil,
+                method: method,
+                requestID: "fixture",
+                server: "fixture"
+            )
+        }
+    }
+
     func connect() async throws {
         withLock {
             generation += 1
@@ -4782,6 +4817,7 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
     }
 
     func request(method: String, params: JSONValue?, timeout: Duration?) async throws -> JSONValue? {
+        try Self.validateConfigParameters(method: method, params: params)
         let requestError = withLock { attachmentErrors[method] ?? blockingErrors[method] }
         let behavior = withLock { () -> (JSONValue?, JSONValue?, ChatDirectAsyncGate?, Bool, JSONValue?, JSONValue?) in
             callsValue.append(Call(method: method, params: params))
