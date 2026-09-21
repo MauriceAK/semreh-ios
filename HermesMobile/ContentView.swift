@@ -119,23 +119,25 @@ struct ContentView: View {
             // Chat-only prototype: when PrototypeConfig.isEnabled the full
             // AppShellView is swapped for the prototype navigation shell.
             // Flipping the flag restores the `else` branch bit-for-bit.
-            if PrototypeConfig.isEnabled {
-                PrototypeRootView(authManager: authManager, server: server)
-            } else {
-                AppShellView(
-                    authManager: authManager,
-                    server: server,
-                    selectedSurface: $selectedSurface,
-                    pendingSharedImport: $pendingSharedImport,
-                    pendingDeepLinkedSessionID: $pendingDeepLinkedSessionID,
-                    pendingNewChatRequest: $pendingNewChatRequest
-                )
-            }
             // Switching the active server keeps us in `.loggedIn`, so without a
             // per-server identity SwiftUI would reuse the same tab stack (and its
             // server-bound SessionListView view model), leaving stale sessions/chat on screen.
             // Keying on the server tears the whole stack down and rebuilds it
             // against the newly active server (#17).
+            Group {
+                if PrototypeConfig.isEnabled {
+                    PrototypeRootView(authManager: authManager, server: server)
+                } else {
+                    AppShellView(
+                        authManager: authManager,
+                        server: server,
+                        selectedSurface: $selectedSurface,
+                        pendingSharedImport: $pendingSharedImport,
+                        pendingDeepLinkedSessionID: $pendingDeepLinkedSessionID,
+                        pendingNewChatRequest: $pendingNewChatRequest
+                    )
+                }
+            }
             .id(server)
         }
     }
