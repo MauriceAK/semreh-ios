@@ -65,6 +65,12 @@ private struct ComposerConfigurationLoadFailure: Error {
     let underlying: Error
 }
 
+private struct ComposerConfigurationLoadIdentity {
+    let generation: Int
+    let profile: String
+    let mutation: Int
+}
+
 struct ComposerConfigurationLoadOutcome: Equatable {
     let rawValue: String
 
@@ -104,9 +110,15 @@ struct ComposerConfigurationLoadOutcome: Equatable {
         }
     }
 
-    private static func isCancellation(_ error: Error) -> Bool {
+    static func isCancellation(_ error: Error) -> Bool {
         if error is CancellationError { return true }
         if let urlError = error as? URLError { return urlError.code == .cancelled }
+        let cocoaError = error as NSError
+        let bridgedCancellation = CancellationError() as NSError
+        if cocoaError.domain == bridgedCancellation.domain,
+           cocoaError.code == bridgedCancellation.code { return true }
+        if let gatewayError = error as? HermesGatewayError,
+           case .cancelled = gatewayError { return true }
         guard let apiError = error as? APIError,
               case .network(let underlying) = apiError else { return false }
         return isCancellation(underlying)
@@ -750,6 +762,7 @@ final class ChatViewModel {
     /// Shared configuration mutation generation. Model and reasoning writes are
     /// optimistic, so a late response must never roll back a newer visible choice.
     private var composerConfigurationMutationToken = 0
+    @ObservationIgnored private var composerConfigurationLoadGeneration = 0
     var showsReasoningEffortControl: Bool {
         ReasoningEffortOption.showsEffortControl(
             supportsReasoningEffort: supportsReasoningEffort,
@@ -1129,14 +1142,23 @@ final class ChatViewModel {
     // MARK: - Direct Hermes native bridge
 
     private func loadDirectComposerConfiguration() async {
-        guard !directInvalidated, !isLoadingComposerConfiguration else { return }
+        guard !directInvalidated, !Task.isCancelled else { return }
         let profile = requestProfileName ?? "default"
         let profileScopePresent = Self.nonEmpty(requestProfileName) != nil
-        let mutation = composerConfigurationMutationToken
+        composerConfigurationLoadGeneration &+= 1
+        let identity = ComposerConfigurationLoadIdentity(
+            generation: composerConfigurationLoadGeneration,
+            profile: profile,
+            mutation: composerConfigurationMutationToken
+        )
         isLoadingComposerConfiguration = true
         composerConfigurationErrorMessage = nil
         composerConfigurationDiagnostic = nil
-        defer { isLoadingComposerConfiguration = false }
+        defer {
+            if identity.generation == composerConfigurationLoadGeneration {
+                isLoadingComposerConfiguration = false
+            }
+        }
         do {
             async let inventoryResult = composerConfigurationResult(source: .modelOptions) {
                 try await client.directModelOptions(profile: profile)
@@ -1147,14 +1169,14 @@ final class ChatViewModel {
             let (inventory, profiles) = await (inventoryResult, profilesResult)
             let options = try inventory.get()
             let availableProfiles = try profiles.get()
-            guard !directInvalidated, profile == (requestProfileName ?? "default"),
-                  mutation == composerConfigurationMutationToken else { return }
+            guard isCurrentComposerConfigurationLoad(identity) else { return }
             directModelOptions = options
             modelCatalogGroups = options.catalogGroups
             profileOptions = availableProfiles.profiles ?? []
             isSingleProfileMode = availableProfiles.singleProfileMode ?? false
             selectedProfileName = profile
             await refreshWorkspaceRoots()
+            guard isCurrentComposerConfigurationLoad(identity) else { return }
             // The catalog reports profile defaults, not this stored chat's
             // effective configuration. Only a new local draft inherits them.
             if canonicalSessionID == nil, currentModel == nil {
@@ -1164,14 +1186,14 @@ final class ChatViewModel {
             applyDirectReasoningGating()
             if canonicalSessionID != nil {
                 do {
-                    try await loadDirectSessionReasoning()
+                    try await loadDirectSessionReasoning(configurationLoad: identity)
                 } catch {
                     throw ComposerConfigurationLoadFailure(source: .sessionReasoning, underlying: error)
                 }
             }
         } catch let failure as ComposerConfigurationLoadFailure {
-            guard !directInvalidated, profile == (requestProfileName ?? "default"),
-                  mutation == composerConfigurationMutationToken else { return }
+            guard isCurrentComposerConfigurationLoad(identity),
+                  !ComposerConfigurationLoadOutcome.isCancellation(failure.underlying) else { return }
             if canonicalSessionID != nil {
                 directSessionReasoningSupported = false
                 isReasoningChangeDeferred = false
@@ -1185,8 +1207,8 @@ final class ChatViewModel {
                 profileScopePresent: profileScopePresent
             )
         } catch {
-            guard !directInvalidated, profile == (requestProfileName ?? "default"),
-                  mutation == composerConfigurationMutationToken else { return }
+            guard isCurrentComposerConfigurationLoad(identity),
+                  !ComposerConfigurationLoadOutcome.isCancellation(error) else { return }
             lastError = error
             recordComposerConfigurationFailure(
                 source: .unknown,
@@ -1195,6 +1217,14 @@ final class ChatViewModel {
                 profileScopePresent: profileScopePresent
             )
         }
+    }
+
+    private func isCurrentComposerConfigurationLoad(_ identity: ComposerConfigurationLoadIdentity) -> Bool {
+        !directInvalidated
+            && !Task.isCancelled
+            && identity.generation == composerConfigurationLoadGeneration
+            && identity.profile == (requestProfileName ?? "default")
+            && identity.mutation == composerConfigurationMutationToken
     }
 
     private func composerConfigurationResult<Value>(
@@ -1243,18 +1273,23 @@ final class ChatViewModel {
         )
     }
 
-    private func loadDirectSessionReasoning() async throws {
+    private func loadDirectSessionReasoning(
+        configurationLoad: ComposerConfigurationLoadIdentity? = nil
+    ) async throws {
         guard !directInvalidated, let expectedID = canonicalSessionID else { return }
         let mutation = composerConfigurationMutationToken
         do {
             let controller = try await ensureDirectConversation()
             let configuration = try await controller.reasoningConfiguration()
             guard !directInvalidated, !Task.isCancelled, expectedID == canonicalSessionID,
-                  mutation == composerConfigurationMutationToken else { return }
+                  mutation == composerConfigurationMutationToken,
+                  configurationLoad.map({ isCurrentComposerConfigurationLoad($0) }) ?? true else { return }
             applyDirectReasoningConfiguration(configuration)
         } catch {
             guard !directInvalidated, !Task.isCancelled, expectedID == canonicalSessionID,
-                  mutation == composerConfigurationMutationToken else { return }
+                  mutation == composerConfigurationMutationToken,
+                  configurationLoad.map({ isCurrentComposerConfigurationLoad($0) }) ?? true else { return }
+            guard !ComposerConfigurationLoadOutcome.isCancellation(error) else { throw error }
             directSessionReasoningSupported = false
             isReasoningChangeDeferred = false
             applyDirectReasoningGating()
@@ -2148,7 +2183,8 @@ final class ChatViewModel {
                     guard let self else { return }
                     do { try await self.loadDirectSessionReasoning() }
                     catch {
-                        guard !self.directInvalidated, !Task.isCancelled else { return }
+                        guard !self.directInvalidated, !Task.isCancelled,
+                              !ComposerConfigurationLoadOutcome.isCancellation(error) else { return }
                         self.composerConfigurationErrorMessage = "Session reasoning controls could not be loaded. Open the model picker to reload chat settings."
                     }
                 }
@@ -2799,8 +2835,6 @@ final class ChatViewModel {
 
     /// Reloads device-local workspace bookmarks after manager changes.
     func refreshWorkspaceRoots() async {
-        workspaceRoots = []
-        workspaceSuggestions = []
         do {
             try loadWorkspaceRoots()
         } catch {
@@ -2810,12 +2844,11 @@ final class ChatViewModel {
     }
 
     private func loadWorkspaceRoots() throws {
-        workspaceRoots = []
-        workspaceSuggestions = []
-        workspaceRoots = try localOrganizerStore.workspaceBookmarks(
+        let roots = try localOrganizerStore.workspaceBookmarks(
             server: server, profile: workspaceOrganizerProfile
         ).map { WorkspaceRoot(path: $0.path, name: $0.name) }
-        workspaceSuggestions = workspaceRoots.compactMap(\.path)
+        workspaceRoots = roots
+        workspaceSuggestions = roots.compactMap(\.path)
     }
 
     func loadWorkspaceSuggestions(prefix: String) async {
