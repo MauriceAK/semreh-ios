@@ -243,6 +243,27 @@ final class KanbanFeatureStateTests: XCTestCase {
         XCTAssertFalse(state.isRefreshing)
     }
 
+    func testCancelledReentryPreservesRefreshAvailabilityState() async {
+        let client = DeferredReentryBoardClient()
+        let state = KanbanFeatureState(server: URL(string: "https://example.test")!, client: client)
+        await state.load()
+        state.refreshFailed = true
+        state.isOffline = true
+        state.liveUpdatesDelayed = true
+        state.loadedDetailIsStale = true
+
+        let reentry = Task { await state.load() }
+        await client.waitForReentryBoardRead()
+        reentry.cancel()
+        await client.resumeReentryBoardRead()
+        await reentry.value
+
+        XCTAssertTrue(state.refreshFailed)
+        XCTAssertTrue(state.isOffline)
+        XCTAssertTrue(state.liveUpdatesDelayed)
+        XCTAssertTrue(state.loadedDetailIsStale)
+    }
+
     func testOlderReentryCannotReplaceNewerBoardCollection() async {
         let client = DeferredOverlappingReentryClient()
         let state = KanbanFeatureState(server: URL(string: "https://example.test")!, client: client)
@@ -261,6 +282,30 @@ final class KanbanFeatureStateTests: XCTestCase {
 
         await client.resumeFirstReentry()
         await olderLoad.value
+
+        XCTAssertEqual(state.selectedBoardSlug, "main")
+        XCTAssertEqual(state.allCards.map(\.cardID), ["NEW"])
+        XCTAssertFalse(state.isRefreshing)
+    }
+
+    func testOlderRefreshCannotReplaceNewerReentryBoardCollection() async {
+        let client = DeferredOverlappingReentryClient()
+        let state = KanbanFeatureState(server: URL(string: "https://example.test")!, client: client)
+        await state.load()
+
+        let olderRefresh = Task { await state.refresh() }
+        await client.waitForFirstReentry()
+
+        let newerLoad = Task { await state.load() }
+        await client.waitForSecondReentry()
+        await client.resumeSecondReentry()
+        await newerLoad.value
+
+        XCTAssertEqual(state.selectedBoardSlug, "main")
+        XCTAssertEqual(state.allCards.map(\.cardID), ["NEW"])
+
+        await client.resumeFirstReentry()
+        await olderRefresh.value
 
         XCTAssertEqual(state.selectedBoardSlug, "main")
         XCTAssertEqual(state.allCards.map(\.cardID), ["NEW"])

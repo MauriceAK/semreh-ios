@@ -5,6 +5,10 @@ extension KanbanFeatureState {
         let previouslySelectedBoard = normalizedOptional(selectedBoardSlug)
         let previouslySelectedBoardName = selectedBoard?.name
         let hasSettledSnapshot = snapshot != nil
+        let previousRefreshFailed = refreshFailed
+        let previousIsOffline = isOffline
+        let previousLiveUpdatesDelayed = liveUpdatesDelayed
+        let previousLoadedDetailIsStale = loadedDetailIsStale
 
         if hasSettledSnapshot {
             prepareForLoad(preservingSnapshot: true)
@@ -13,13 +17,23 @@ extension KanbanFeatureState {
             // stream start cannot publish after this refresh.
             activeLoadID = nil
             isLoading = false
-            refreshFailed = false
+            refreshFailed = previousRefreshFailed
+            isOffline = previousIsOffline
+            liveUpdatesDelayed = previousLiveUpdatesDelayed
+            loadedDetailIsStale = previousLoadedDetailIsStale
             updatePartialState()
 
             let loadID = UUID()
             activeLoadID = loadID
             await refresh(loadID: loadID)
-            guard isCurrentLoad(loadID) else { return }
+            guard ownsLoad(loadID) else { return }
+            guard !Task.isCancelled else {
+                refreshFailed = previousRefreshFailed
+                isOffline = previousIsOffline
+                liveUpdatesDelayed = previousLiveUpdatesDelayed
+                loadedDetailIsStale = previousLoadedDetailIsStale
+                return
+            }
             if previouslySelectedBoard != nil,
                selectedBoardSlug == nil,
                snapshot == nil {
@@ -49,10 +63,13 @@ extension KanbanFeatureState {
         resetLiveUpdates(clearCursor: !preservingSnapshot)
     }
 
-    func isCurrentLoad(_ loadID: UUID?) -> Bool {
-        guard !Task.isCancelled else { return false }
+    func ownsLoad(_ loadID: UUID?) -> Bool {
         guard let loadID else { return true }
         return activeLoadID == loadID
+    }
+
+    func isCurrentLoad(_ loadID: UUID?) -> Bool {
+        ownsLoad(loadID) && !Task.isCancelled
     }
 
     private func loadHandshake(
@@ -166,14 +183,26 @@ extension KanbanFeatureState {
     }
 
     func refresh(loadID: UUID? = nil) async {
-        guard isCurrentLoad(loadID) else { return }
+        let ownerID = loadID ?? UUID()
+        if loadID == nil {
+            guard !Task.isCancelled else { return }
+            activeLoadID = ownerID
+        } else {
+            guard isCurrentLoad(ownerID) else { return }
+        }
         let previousRefreshFailed = refreshFailed
+        let previousIsOffline = isOffline
+        let previousLiveUpdatesDelayed = liveUpdatesDelayed
+        let previousLoadedDetailIsStale = loadedDetailIsStale
         refreshFailed = false
-        let expectation = loadID.map(KanbanBoardCollectionExpectation.load)
+        let expectation = KanbanBoardCollectionExpectation.load(ownerID)
         let boardCollectionSucceeded = await reconcileBoardCollection(expectation: expectation)
-        guard isCurrentLoad(loadID) else { return }
+        guard ownsLoad(ownerID) else { return }
         guard !Task.isCancelled else {
             refreshFailed = previousRefreshFailed
+            isOffline = previousIsOffline
+            liveUpdatesDelayed = previousLiveUpdatesDelayed
+            loadedDetailIsStale = previousLoadedDetailIsStale
             return
         }
         if !boardCollectionSucceeded {
@@ -185,16 +214,19 @@ extension KanbanFeatureState {
             usingCursor: false,
             refreshSupplementary: true,
             preserveRefreshFailure: !boardCollectionSucceeded,
-            resetCapabilitiesOnSuccess: loadID != nil,
-            loadID: loadID
+            resetCapabilitiesOnSuccess: loadID != nil && boardCollectionSucceeded,
+            loadID: ownerID
         )
-        guard isCurrentLoad(loadID) else { return }
+        guard ownsLoad(ownerID) else { return }
         guard !Task.isCancelled else {
             if boardCollectionSucceeded {
                 refreshFailed = previousRefreshFailed
             } else {
                 reportBoardCollectionRefreshFailure()
             }
+            isOffline = previousIsOffline
+            liveUpdatesDelayed = previousLiveUpdatesDelayed
+            loadedDetailIsStale = previousLoadedDetailIsStale
             return
         }
         guard isSameLiveGeneration(board: board, generation: generation) else { return }
