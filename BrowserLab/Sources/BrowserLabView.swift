@@ -115,10 +115,11 @@ struct BrowserLabView: View {
     /// read-only, and fresh-observation scenarios reachable on compact screens.
     private var scenarioShortcuts: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Toggle("Control supported", isOn: Binding(
-                get: { lab.fixture.controlSupported },
-                set: { lab.fixture.setControlSupported($0) }
-            ))
+            Button(lab.fixture.controlSupported
+                   ? "Disable control support"
+                   : "Enable control support") {
+                lab.fixture.setControlSupported(!lab.fixture.controlSupported)
+            }
             .accessibilityIdentifier("lab.controlSupported")
 
             HStack(spacing: 8) {

@@ -60,19 +60,6 @@ final class BrowserLabUITests: XCTestCase {
         waitForExpectations(timeout: timeout)
     }
 
-    private func setPanelSwitch(_ element: XCUIElement, to expected: String) {
-        let visibleSwitch = revealPanelElement(element)
-        if visibleSwitch.value as? String != expected {
-            // Tap the switch control itself rather than its SwiftUI label.
-            visibleSwitch.coordinate(
-                withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)
-            ).tap()
-        }
-        let predicate = NSPredicate(format: "value == %@", expected)
-        expectation(for: predicate, evaluatedWith: visibleSwitch)
-        waitForExpectations(timeout: 10)
-    }
-
     /// The simulated-session banner is always visible.
     func testSimulatedSessionBannerIsAlwaysVisible() {
         XCTAssertTrue(app.staticTexts["lab.banner"].waitForExistence(timeout: 10))
@@ -196,14 +183,16 @@ final class BrowserLabUITests: XCTestCase {
         let status = app.staticTexts["browser.status"]
         XCTAssertTrue(status.waitForExistence(timeout: 10))
 
-        let controlSupported = app.switches["lab.controlSupported"]
-        setPanelSwitch(controlSupported, to: "0")
+        let controlSupported = app.buttons["lab.controlSupported"]
+        tapPanelElement(controlSupported)
+        waitForLabel(controlSupported, toEqual: "Enable control support")
         let readOnly = NSPredicate(format: "label CONTAINS 'Read-only'")
         expectation(for: readOnly, evaluatedWith: status, handler: nil)
         waitForExpectations(timeout: 10)
         XCTAssertFalse(app.buttons["browser.takeControl"].exists)
 
-        setPanelSwitch(controlSupported, to: "1")
+        tapPanelElement(controlSupported)
+        waitForLabel(controlSupported, toEqual: "Disable control support")
         let takeControl = app.buttons["browser.takeControl"]
         XCTAssertTrue(takeControl.waitForExistence(timeout: 10))
         takeControl.tap()
