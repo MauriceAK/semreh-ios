@@ -1050,6 +1050,7 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
             "decoding"
         )
         XCTAssertEqual(ComposerConfigurationLoadOutcome(error: CancellationError()).rawValue, "cancelled")
+        XCTAssertEqual(ComposerConfigurationLoadOutcome(error: DirectHermesAuthError.sessionExpired).rawValue, "auth_session_expired")
         XCTAssertEqual(
             ComposerConfigurationLoadOutcome(error: APIError.network(underlying: URLError(.cancelled))).rawValue,
             "cancelled"
@@ -1079,9 +1080,18 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         let message = try XCTUnwrap(vm.composerConfigurationErrorMessage)
         XCTAssertEqual(
             message,
-            "Hermes chat settings could not be loaded. Your draft was preserved. source=profiles outcome=http_503_server_error has_canonical_session=false profile_scope_present=true"
+            "Hermes chat settings could not be loaded. Your draft was preserved."
         )
         XCTAssertFalse(message.contains("private"))
+        XCTAssertEqual(
+            vm.composerConfigurationDiagnostic,
+            ComposerConfigurationDiagnostic(
+                source: .profiles,
+                outcome: "http_503_server_error",
+                hasCanonicalSession: false,
+                profileScopePresent: true
+            )
+        )
         guard case .http(let statusCode, let reason) = vm.lastError as? DirectHermesRequestError else {
             return XCTFail("The bounded underlying HTTP error must remain available")
         }

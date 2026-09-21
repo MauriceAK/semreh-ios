@@ -74,6 +74,11 @@ struct ComposerConfigurationLoadOutcome: Equatable {
             return
         }
 
+        if error is DirectHermesAuthError {
+            rawValue = "auth_session_expired"
+            return
+        }
+
         if let apiError = error as? APIError {
             switch apiError {
             case .network:
@@ -120,6 +125,15 @@ struct ComposerConfigurationLoadOutcome: Equatable {
         default: "request_failed"
         }
     }
+}
+
+/// Content-free diagnostic for native verification and support telemetry.
+/// Response bodies and server-provided text are deliberately excluded.
+struct ComposerConfigurationDiagnostic: Equatable {
+    let source: ComposerConfigurationLoadSource
+    let outcome: String
+    let hasCanonicalSession: Bool
+    let profileScopePresent: Bool
 }
 
 private enum DirectAttachmentSendFailure: Error {
@@ -348,6 +362,10 @@ final class ChatViewModel {
     private static let olderLoadOutcomeLogger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "HermesMobile",
         category: "TranscriptActivationRecovery"
+    )
+    private static let composerConfigurationDiagnosticLogger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "HermesMobile",
+        category: "ComposerConfiguration"
     )
 #endif
     nonisolated private static let messagePageLimit = 50
@@ -752,6 +770,7 @@ final class ChatViewModel {
     private(set) var isLoadingComposerConfiguration = false
     private(set) var isUpdatingComposerConfiguration = false
     private(set) var composerConfigurationErrorMessage: String?
+    private(set) var composerConfigurationDiagnostic: ComposerConfigurationDiagnostic?
     var pendingAttachments: [PendingAttachment] { attachmentCoordinator.pendingAttachments }
     private(set) var directPendingAttachments: [DirectPendingAttachment] = []
     var directPendingAttachmentDisplayItems: [ComposerAttachmentDisplayItem] {
@@ -1116,6 +1135,7 @@ final class ChatViewModel {
         let mutation = composerConfigurationMutationToken
         isLoadingComposerConfiguration = true
         composerConfigurationErrorMessage = nil
+        composerConfigurationDiagnostic = nil
         defer { isLoadingComposerConfiguration = false }
         do {
             async let inventoryResult = composerConfigurationResult(source: .modelOptions) {
@@ -1134,11 +1154,7 @@ final class ChatViewModel {
             profileOptions = availableProfiles.profiles ?? []
             isSingleProfileMode = availableProfiles.singleProfileMode ?? false
             selectedProfileName = profile
-            do {
-                try loadWorkspaceRoots()
-            } catch {
-                throw ComposerConfigurationLoadFailure(source: .workspaceBookmarks, underlying: error)
-            }
+            await refreshWorkspaceRoots()
             // The catalog reports profile defaults, not this stored chat's
             // effective configuration. Only a new local draft inherits them.
             if canonicalSessionID == nil, currentModel == nil {
@@ -1162,7 +1178,7 @@ final class ChatViewModel {
                 applyDirectReasoningGating()
             }
             lastError = failure.underlying
-            composerConfigurationErrorMessage = Self.composerConfigurationFailureMessage(
+            recordComposerConfigurationFailure(
                 source: failure.source,
                 error: failure.underlying,
                 hasCanonicalSession: canonicalSessionID != nil,
@@ -1172,7 +1188,7 @@ final class ChatViewModel {
             guard !directInvalidated, profile == (requestProfileName ?? "default"),
                   mutation == composerConfigurationMutationToken else { return }
             lastError = error
-            composerConfigurationErrorMessage = Self.composerConfigurationFailureMessage(
+            recordComposerConfigurationFailure(
                 source: .unknown,
                 error: error,
                 hasCanonicalSession: canonicalSessionID != nil,
@@ -1198,10 +1214,33 @@ final class ChatViewModel {
         hasCanonicalSession: Bool,
         profileScopePresent: Bool
     ) -> String {
+        "Hermes chat settings could not be loaded. Your draft was preserved."
+    }
+
+    private func recordComposerConfigurationFailure(
+        source: ComposerConfigurationLoadSource,
+        error: Error,
+        hasCanonicalSession: Bool,
+        profileScopePresent: Bool
+    ) {
         let outcome = ComposerConfigurationLoadOutcome(error: error).rawValue
-        return "Hermes chat settings could not be loaded. Your draft was preserved. "
-            + "source=\(source.rawValue) outcome=\(outcome) "
-            + "has_canonical_session=\(hasCanonicalSession) profile_scope_present=\(profileScopePresent)"
+        composerConfigurationDiagnostic = ComposerConfigurationDiagnostic(
+            source: source,
+            outcome: outcome,
+            hasCanonicalSession: hasCanonicalSession,
+            profileScopePresent: profileScopePresent
+        )
+#if DEBUG
+        Self.composerConfigurationDiagnosticLogger.debug(
+            "composer configuration failure source=\(source.rawValue, privacy: .public) outcome=\(outcome, privacy: .public) canonical=\(hasCanonicalSession, privacy: .public) profile_scope=\(profileScopePresent, privacy: .public)"
+        )
+#endif
+        composerConfigurationErrorMessage = Self.composerConfigurationFailureMessage(
+            source: source,
+            error: error,
+            hasCanonicalSession: hasCanonicalSession,
+            profileScopePresent: profileScopePresent
+        )
     }
 
     private func loadDirectSessionReasoning() async throws {
