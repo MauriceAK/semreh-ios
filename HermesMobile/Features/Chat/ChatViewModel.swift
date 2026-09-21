@@ -1179,6 +1179,10 @@ final class ChatViewModel {
         sessionScopedReasoning = configurable
     }
 
+    var allowsModelAndWorkspaceChanges: Bool {
+        !usesDirectGateway || canonicalSessionID == nil
+    }
+
     private func canConfigureDirectDraft() -> Bool {
         guard !directInvalidated, !isViewingCachedData, !isUpdatingComposerConfiguration,
               activeStreamID == nil else {

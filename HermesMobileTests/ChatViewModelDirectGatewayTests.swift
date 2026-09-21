@@ -4,6 +4,17 @@ import XCTest
 
 @MainActor
 final class ChatViewModelDirectGatewayTests: APIClientTestCase {
+    func testExistingDirectChatExposesReadOnlyModelAndWorkspaceBeforeLoading() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let vm = makeViewModel(client: makeDirectBlockingTestClient(), runtime: runtime, sessionID: "durable-1")
+
+        XCTAssertFalse(vm.allowsModelAndWorkspaceChanges)
+        XCTAssertNil(vm.composerConfigurationErrorMessage)
+        XCTAssertTrue(fake.calls().isEmpty)
+        await runtime.stop()
+    }
+
     func testColdIdleLoadRequestsCurrentContextUsageSnapshot() async throws {
         let fake = ChatDirectFakeTransport()
         fake.setUsageResponse(.object([
@@ -919,6 +930,7 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         let vm = makeViewModel(client: client, runtime: runtime, sessionID: nil)
         await vm.loadComposerConfiguration()
         XCTAssertEqual(vm.selectedModelID, "model-a")
+        XCTAssertTrue(vm.allowsModelAndWorkspaceChanges)
         XCTAssertEqual(vm.selectedModelProviderID, "fixture")
         XCTAssertEqual(vm.selectedProfileName, "work")
         XCTAssertFalse(vm.showsReasoningEffortControl)
@@ -946,6 +958,7 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         XCTAssertEqual(fields(create.params)?["model"], .string("model-b"))
         XCTAssertEqual(fields(create.params)?["provider"], .string("fixture"))
         XCTAssertEqual(fields(create.params)?["reasoning_effort"], .string("high"))
+        XCTAssertFalse(vm.allowsModelAndWorkspaceChanges)
         XCTAssertEqual(Set(requests.values()), ["/api/model/options", "/api/profiles"])
         await vm.disposeDirectConversation()
         await runtime.stop()

@@ -104,6 +104,7 @@ struct MessageComposerView: View {
     let selectedModelID: String?
     let selectedModelProviderID: String?
     let selectedModelTitle: String
+    let allowsModelAndWorkspaceChanges: Bool
     let workspaceRoots: [WorkspaceRoot]
     let selectedWorkspacePath: String?
     let workspaceSuggestions: [String]
@@ -496,6 +497,7 @@ struct MessageComposerView: View {
             if presented == true { prepareForComposerPresentation() }
             }
             .onChange(of: workspacePickerRequest) { _, _ in
+            guard allowsModelAndWorkspaceChanges else { return }
             prepareForComposerPresentation()
             showsWorkspaceSheet = true
             }
@@ -600,7 +602,34 @@ struct MessageComposerView: View {
         .padding(.bottom, keyboardIsVisible ? 10 : 0)
     }
 
+    @ViewBuilder
     private var controlsSheetContent: some View {
+        if allowsModelAndWorkspaceChanges {
+            modelPickerSheetContent
+        } else {
+            NavigationStack {
+                ScrollView {
+                    chatControlsHeader.padding()
+                }
+                .background { SemrehBackdrop().ignoresSafeArea() }
+                .navigationTitle("Chat controls")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("Done") {
+                            controlsPresentation?.wrappedValue = false
+                            showsAllModelsSheet = false
+                        }
+                    }
+                }
+            }
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+            .task { await onModelPickerOpen() }
+        }
+    }
+
+    private var modelPickerSheetContent: some View {
         ComposerModelPickerSheet(
             modelGroups: modelGroups,
             selectedModelID: selectedModelID,
@@ -651,6 +680,7 @@ struct MessageComposerView: View {
             managementProfile: workspaceManagementProfile,
             onLoadSuggestions: onLoadWorkspaceSuggestions,
             onSelect: { path in
+                guard allowsModelAndWorkspaceChanges else { return }
                 optimisticWorkspacePath = path
                 showsWorkspaceSheet = false
                 await onSelectWorkspace(path)
@@ -808,6 +838,19 @@ struct MessageComposerView: View {
                 )
             }
             Text(selectedModelTitle).font(.headline)
+                .accessibilityIdentifier("chatControlsCurrentModel")
+            if !allowsModelAndWorkspaceChanges {
+                Label("Model and workspace are read-only in this chat. Choose them in New Chat before sending your first message.", systemImage: "lock")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("chatControlsConfigurationReadOnly")
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Workspace").font(.subheadline.weight(.medium))
+                    Text(selectedWorkspacePath ?? "Default workspace")
+                        .font(.subheadline)
+                        .textSelection(.enabled)
+                }
+            }
             if showsReasoningControl {
                 ComposerReasoningStepControl(
                     supportedEfforts: supportedReasoningEfforts,
@@ -835,8 +878,10 @@ struct MessageComposerView: View {
             if let configurationErrorMessage {
                 Text(configurationErrorMessage).font(.caption).foregroundStyle(.secondary)
             }
-            Text("Models").font(.headline)
-            if isLoadingModels { ProgressView("Loading models") }
+            if allowsModelAndWorkspaceChanges {
+                Text("Models").font(.headline)
+                if isLoadingModels { ProgressView("Loading models") }
+            }
         }
         .padding(.vertical, 8)
     }
@@ -845,11 +890,11 @@ struct MessageComposerView: View {
         Menu {
             Section("Workspace") {
                 Text(workspaceTitle)
-                Button("Choose workspace path", systemImage: "folder") {
+                Button(allowsModelAndWorkspaceChanges ? "Choose workspace path" : "Workspace is read-only", systemImage: "folder") {
                     prepareForComposerPresentation()
                     showsWorkspaceSheet = true
                 }
-                .disabled(isConfigurationControlDisabled)
+                .disabled(!allowsModelAndWorkspaceChanges || isConfigurationControlDisabled)
             }
 
         } label: {
@@ -881,6 +926,7 @@ struct MessageComposerView: View {
     }
 
     private func selectModel(_ option: ModelCatalogOption) {
+        guard allowsModelAndWorkspaceChanges else { return }
         recentModelKeys = ModelRecentsStore.shared.recordRecent(option)
         onSelectModel(option)
     }

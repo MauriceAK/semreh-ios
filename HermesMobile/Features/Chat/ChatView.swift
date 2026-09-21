@@ -643,6 +643,7 @@ struct ChatView: View {
             selectedModelID: viewModel.selectedModelID,
             selectedModelProviderID: viewModel.selectedModelProviderID,
             selectedModelTitle: viewModel.selectedModelTitle,
+            allowsModelAndWorkspaceChanges: viewModel.allowsModelAndWorkspaceChanges,
             workspaceRoots: viewModel.workspaceRoots,
             selectedWorkspacePath: viewModel.selectedWorkspacePath,
             workspaceSuggestions: viewModel.workspaceSuggestions,
@@ -925,10 +926,10 @@ struct ChatView: View {
                 Button("Files", systemImage: "folder") { showsChatFiles = true }
                     .disabled(viewModel.isViewingCachedData)
             }
-            Button("Choose workspace path", systemImage: "folder.badge.gearshape") {
+            Button(viewModel.allowsModelAndWorkspaceChanges ? "Choose workspace path" : "Workspace is read-only", systemImage: "folder.badge.gearshape") {
                 workspacePickerRequest += 1
             }
-            .disabled(viewModel.isViewingCachedData || viewModel.isStartingChat
+            .disabled(!viewModel.allowsModelAndWorkspaceChanges || viewModel.isViewingCachedData || viewModel.isStartingChat
                 || viewModel.isSendingVoiceNote || viewModel.isCompressingSession
                 || viewModel.activeStreamID != nil || viewModel.isUpdatingComposerConfiguration)
             if viewModel.hasActivatedGoalCommand { goalControlMenu }
