@@ -14,6 +14,13 @@ import time
 from typing import Optional
 
 REASONING_PROBE = False
+RICH_MARKER = 'SEMREH_RICH_FIXTURE'
+RICH_ARCHETYPES = (
+    'headings-lists', 'quotes-links', 'table', 'swift-code',
+    'json-code', 'long-paragraphs', 'inline-formatting', 'mixed-stream',
+)
+RICH_ASSISTANT_BYTES_MIN = 1_024
+RICH_ASSISTANT_BYTES_MAX = 2_048
 MEMORY_ADOPTION_MARKER = 'SEMREH_MEMORY_ADOPTION_BENIGN_V1'
 MEMORY_ADOPTION_REQUEST = 'SEMREH_MEMORY_ADOPTION_REQUEST_V1'
 GOAL_E2E_PREFIX = 'SEMREH_GOAL_E2E_TWO_TURN_'
@@ -32,6 +39,134 @@ CLARIFY_ARGUMENTS = {
     'question': 'Choose a bounded fixture answer',
     'choices': ['answer', 'cancel'],
 }
+
+
+def rich_response(index: int) -> str:
+    """Return bounded deterministic Markdown for one exact rich marker."""
+    archetype = RICH_ARCHETYPES[index % len(RICH_ARCHETYPES)]
+    sections = {
+        'headings-lists': """# Navigation audit
+
+## Visible checks
+
+- Preserve the reader's anchor
+  - compare before and after paging
+  - record the exact row identifier
+- Re-enter two long conversations
+- Background and return without an accessibility query
+
+## Outcome
+
+The transcript remains readable while the app changes surfaces.
+""",
+        'quotes-links': """# Sources and constraints
+
+> A useful replay proves what was persisted, not what a synthetic view happened to draw.
+
+Review the [fixture contract](https://example.invalid/fixture-contract) and the [rendering checklist](https://example.invalid/rendering-checklist). These inert example links exercise link styling without contacting either host.
+""",
+        'table': """# Render matrix
+
+| Surface | Workload | Acceptance |
+|---|---:|---|
+| Chat list | 3 sessions | Stable ordering |
+| Transcript | 128 rows | No blank entry |
+| Paging | 64 turns | Anchor shift at most 12 pt |
+| Return | 60 seconds | First captured frame populated |
+
+The values are deterministic fixture data rather than performance conclusions.
+""",
+        'swift-code': """# Swift sample
+
+```swift
+struct RenderSample: Identifiable {
+    let id: String
+    let title: String
+    let rows: Int
+}
+
+let sample = RenderSample(
+    id: "fixture-042",
+    title: "Persisted transcript",
+    rows: 128
+)
+```
+
+The fenced block is intentionally multiline and includes punctuation, indentation, and a long initializer.
+""",
+        'json-code': """# Event sample
+
+```json
+{
+  "fixture": "semreh-rich-corpus",
+  "sequence": 42,
+  "state": "completed",
+  "checks": ["persisted", "replayed", "visible"],
+  "metadata": {"synthetic_view": false, "external_provider": false}
+}
+```
+
+This block exercises JSON highlighting and horizontal layout without representing a real credential or route.
+""",
+        'long-paragraphs': """# Long-form response
+
+A long conversation stresses layout when paragraphs wrap across many lines, especially after the viewport changes size or the application returns from the background. The fixture repeats meaningful prose rather than opaque filler so screenshots remain reviewable and failures can be localized to a recognizable passage. It is persisted through the real gateway path and replayed through the same history contract used by the product.
+
+A second paragraph describes the bounded acceptance case. The verifier alternates among several conversations, observes a genuine page prepend, and records the foreground return before any accessibility query can influence scrolling. Callback cadence may diagnose main-thread delivery, but it is not reported as rendered frames per second.
+""",
+        'inline-formatting': """# Inline presentation
+
+Use **strong emphasis** for the acceptance boundary, *italics* for context, and `message-row:fixture-042` for a stable identifier. A ~~retired assumption~~ should remain visibly distinct from the current rule. The renderer also receives an escaped value like `https://127.0.0.1:18792/v1/chat/completions` as inert text.
+
+- State: **completed**
+- Source: `deterministic-local-provider`
+- Scope: *approved disposable fixture only*
+""",
+        'mixed-stream': """# Incremental completion
+
+> This response is deliberately delivered in several SSE deltas.
+
+1. Render the heading and quote.
+2. Append a fenced fragment: `let phase = "streaming"`.
+3. Finish with a compact table.
+
+| Phase | Expected state |
+|---|---|
+| First delta | Active |
+| Middle deltas | Growing |
+| Final delta | Completed |
+
+The final persisted message must equal the concatenation of every incremental delta.
+""",
+    }
+    text = sections[archetype]
+    appendix = ("\n\nVerification note: this deterministic passage adds wrapping pressure while "
+                "remaining bounded, repeatable, and free of personal data.")
+    while len(text.encode()) < RICH_ASSISTANT_BYTES_MIN:
+        text += appendix
+    if len(text.encode()) > RICH_ASSISTANT_BYTES_MAX:
+        raise ValueError('rich fixture response exceeded its declared bound')
+    return text
+
+
+def terminal_user_segment(last_user: object) -> object:
+    """Return the current prompt after Hermes merges adjacent user turns."""
+    if not isinstance(last_user, str):
+        return last_user
+    return last_user.rsplit('\n\n', 1)[-1]
+
+
+def rich_index(last_user: object) -> Optional[int]:
+    current_user = terminal_user_segment(last_user)
+    if not isinstance(current_user, str):
+        return None
+    match = re.fullmatch(r'SEMREH_RICH_FIXTURE\s+(\d+)', current_user)
+    return int(match.group(1)) if match else None
+
+
+def is_interrupt_request(last_user: object) -> bool:
+    """Keep a stopped historical prompt from delaying the current turn."""
+    return 'SEMREH_INTERRUPT_FIXTURE' in str(terminal_user_segment(last_user))
 CLARIFY_MULTI_SELECT_MARKER = 'SEMREH_BLOCKING_CLARIFY_MULTI_SELECT'
 CLARIFY_MULTI_SELECT_TOOL_CALL_ID = 'call_semreh_clarify_multi'
 CLARIFY_MULTI_SELECT_ARGUMENTS = {
@@ -242,7 +377,7 @@ def interim_text(body: dict, last_user: object,
 
 
 def stream_chunks(text: str, selected_tool_call: Optional[dict],
-                  interim: str = '') -> list:
+                  interim: str = '', rich: bool = False) -> list:
     """Build the ordered OpenAI-compatible deltas for one streamed response."""
     if selected_tool_call is not None:
         return [
@@ -250,6 +385,14 @@ def stream_chunks(text: str, selected_tool_call: Optional[dict],
             ({'tool_calls': [{'index': 0, **selected_tool_call}]}, None),
             ({}, 'tool_calls'),
         ]
+    if rich:
+        width = max(1, (len(text) + 5) // 6)
+        content_chunks = [text[start:start + width] for start in range(0, len(text), width)]
+        deltas = [
+            ({**({'role': 'assistant'} if index == 0 else {}), 'content': content}, None)
+            for index, content in enumerate(content_chunks)
+        ]
+        return deltas + [({}, 'stop')]
     return [({'role': 'assistant', 'content': text}, None), ({}, 'stop')]
 
 
@@ -327,6 +470,8 @@ def response_text(body: dict, last_user: object) -> str:
     if goal_kind == 'goal_main_1':
         return GOAL_E2E_STEP_1
     if body.get('stream') is True and isinstance(last_user, str):
+        if (index := rich_index(last_user)) is not None:
+            return rich_response(index)
         if COMPRESSION_BULKY_MAIN_RE.fullmatch(last_user):
             return bulky_main_content(last_user)
 
@@ -392,12 +537,13 @@ class Handler(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(length))
         messages = body.get('messages', [])
         last_user = next((m.get('content', '') for m in reversed(messages) if m.get('role') == 'user'), '')
-        if 'SEMREH_INTERRUPT_FIXTURE' in str(last_user):
+        if is_interrupt_request(last_user):
             time.sleep(15)
         # Bulky compression corpus replies are deliberately stream-only and
         # exact-marker-only. Auxiliary non-streaming summaries containing these
         # markers continue to receive the ordinary deterministic ACK.
         text = response_text(body, last_user)
+        rich_stream = body.get('stream') is True and rich_index(last_user) is not None
         tool_call = clarify_tool_call(body, last_user)
         if tool_call is None:
             tool_call = blocking_tool_call(body, last_user)
@@ -416,11 +562,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/event-stream')
                 self.end_headers()
-                chunks = stream_chunks(text, tool_call, interim)
+                chunks = stream_chunks(text, tool_call, interim, rich=rich_stream)
                 for delta, reason in chunks:
                     chunk = {**base, 'object': 'chat.completion.chunk', 'choices': [{'index': 0, 'delta': delta, 'finish_reason': reason}]}
                     self.wfile.write(('data: ' + json.dumps(chunk) + '\n\n').encode())
                     self.wfile.flush()
+                    if delta.get('content') and rich_stream:
+                        time.sleep(0.25)
                 self.wfile.write(b'data: [DONE]\n\n')
             else:
                 # Match the streaming contract: narration accompanying a tool

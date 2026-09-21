@@ -15,6 +15,77 @@ import direct_hermes_model_fixture as fixture
 
 
 class ModelFixtureTests(unittest.TestCase):
+    def test_exact_rich_marker_returns_bounded_multichunk_swift_workload(self) -> None:
+        marker = 'SEMREH_RICH_FIXTURE 800011'
+        text = fixture.response_text({'stream': True}, marker)
+        self.assertGreaterEqual(len(text.encode()), 1_024)
+        self.assertLessEqual(len(text.encode()), 2_048)
+        self.assertIn('struct RenderSample: Identifiable', text)
+        self.assertIn('Verification note: this deterministic passage', text)
+        chunks = fixture.stream_chunks(text, None, rich=True)
+        self.assertGreater(len(chunks), 2)
+        self.assertEqual(''.join(delta.get('content', '') for delta, _ in chunks), text)
+        self.assertEqual(chunks[-1][1], 'stop')
+
+    def test_rich_marker_is_exact_and_ordinary_requests_stay_short(self) -> None:
+        self.assertIsNone(fixture.rich_index('prefix SEMREH_RICH_FIXTURE 800011'))
+        self.assertEqual(
+            fixture.response_text({'stream': True}, 'prefix SEMREH_RICH_FIXTURE 800011'),
+            'SEMREH_SLICE1_ACK',
+        )
+
+    def test_historical_interrupt_then_exact_rich_uses_terminal_segment(self) -> None:
+        merged = (
+            'SEMREH_INTERRUPT_FIXTURE SEMREH_RICH_STOP_OLD\n\n'
+            'SEMREH_RICH_FIXTURE 800011'
+        )
+        self.assertEqual(fixture.rich_index(merged), 800011)
+        self.assertFalse(fixture.is_interrupt_request(merged))
+        text = fixture.response_text({'stream': True}, merged)
+        self.assertGreaterEqual(len(text.encode()), 1_024)
+        self.assertIn('struct RenderSample: Identifiable', text)
+
+    def test_interrupt_delay_uses_only_terminal_merged_segment(self) -> None:
+        current = 'SEMREH_INTERRUPT_FIXTURE SEMREH_RICH_STOP_CURRENT'
+        historical = current + '\n\nordinary current prompt'
+        self.assertTrue(fixture.is_interrupt_request(current))
+        self.assertFalse(fixture.is_interrupt_request(historical))
+
+    def test_historical_rich_then_ordinary_current_prompt_stays_short(self) -> None:
+        merged = 'SEMREH_RICH_FIXTURE 800011\n\nordinary current prompt'
+        self.assertIsNone(fixture.rich_index(merged))
+        self.assertEqual(
+            fixture.response_text({'stream': True}, merged),
+            'SEMREH_SLICE1_ACK',
+        )
+
+    def test_terminal_marker_like_ordinary_text_does_not_select_rich(self) -> None:
+        for prompt in (
+            'prefix SEMREH_RICH_FIXTURE 800011',
+            'SEMREH_RICH_FIXTURE 800011 suffix',
+        ):
+            self.assertIsNone(fixture.rich_index('historical\n\n' + prompt))
+            self.assertEqual(
+                fixture.response_text({'stream': True}, 'historical\n\n' + prompt),
+                'SEMREH_SLICE1_ACK',
+            )
+
+    def test_terminal_segment_fix_preserves_nonrich_chunk_contract(self) -> None:
+        text = fixture.compression_bulky_assistant(7)
+        self.assertIsNone(fixture.rich_index('historical\n\nordinary current prompt'))
+        self.assertEqual(fixture.stream_chunks(text, None), [
+            ({'role': 'assistant', 'content': text}, None),
+            ({}, 'stop'),
+        ])
+
+    def test_nonrich_long_stream_keeps_existing_single_content_delta(self) -> None:
+        text = fixture.compression_bulky_assistant(7)
+        chunks = fixture.stream_chunks(text, None)
+        self.assertEqual(chunks, [
+            ({'role': 'assistant', 'content': text}, None),
+            ({}, 'stop'),
+        ])
+
     def test_actual_nonstreaming_handler_preserves_interim_heading_and_followup(self) -> None:
         server = ThreadingHTTPServer(('127.0.0.1', 0), fixture.Handler)
         thread = Thread(target=server.serve_forever, daemon=True)
