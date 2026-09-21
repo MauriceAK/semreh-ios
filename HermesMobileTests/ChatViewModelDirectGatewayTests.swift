@@ -1159,6 +1159,18 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
     func testComposerConfigurationFailureDiagnosticUsesOnlyBoundedClassification() throws {
         XCTAssertEqual(ComposerConfigurationLoadOutcome(error: URLError(.notConnectedToInternet)).rawValue, "network")
         XCTAssertEqual(
+            ComposerConfigurationLoadOutcome(error: DirectHermesRequestError.http(statusCode: 401, reason: .unauthorized)).rawValue,
+            "http_401_unauthorized"
+        )
+        XCTAssertEqual(
+            ComposerConfigurationLoadOutcome(error: DirectHermesRequestError.http(statusCode: 403, reason: .forbidden)).rawValue,
+            "http_403_forbidden"
+        )
+        XCTAssertEqual(
+            ComposerConfigurationLoadOutcome(error: DirectHermesRequestError.http(statusCode: 404, reason: .other)).rawValue,
+            "http_404_not_found"
+        )
+        XCTAssertEqual(
             ComposerConfigurationLoadOutcome(error: APIError.http(statusCode: 503, body: "private response contents")).rawValue,
             "http_503_server_error"
         )
@@ -1190,7 +1202,60 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
             ComposerConfigurationLoadOutcome(error: APIError.network(underlying: URLError(.cancelled))).rawValue,
             "cancelled"
         )
+        XCTAssertEqual(
+            ComposerConfigurationLoadOutcome(
+                error: HermesGatewayError.transport("private host and token")
+            ).rawValue,
+            "gateway_transport"
+        )
+        XCTAssertEqual(
+            ComposerConfigurationLoadOutcome(
+                error: HermesGatewayError.server(
+                    code: 4002,
+                    message: "private profile and response payload",
+                    data: .object(["secret": .string("private")]),
+                    method: "config.get",
+                    requestID: "private-request-id",
+                    server: "private-host"
+                )
+            ).rawValue,
+            "gateway_server_4002"
+        )
+        XCTAssertEqual(
+            ComposerConfigurationLoadOutcome(error: DirectSessionError.invalidResponse).rawValue,
+            "session_invalid_response"
+        )
         XCTAssertEqual(ComposerConfigurationLoadOutcome(error: CocoaError(.fileReadCorruptFile)).rawValue, "other")
+    }
+
+    func testComposerConfigurationDiagnosticDisplayCodeContainsOnlySourceAndBoundedOutcome() {
+        let diagnostic = ComposerConfigurationDiagnostic(
+            source: .sessionReasoning,
+            outcome: ComposerConfigurationLoadOutcome(
+                error: HermesGatewayError.server(
+                    code: 4002,
+                    message: "private message",
+                    data: .object(["secret": .string("private")]),
+                    method: "config.get",
+                    requestID: "private-id",
+                    server: "private-host"
+                )
+            ).rawValue,
+            hasCanonicalSession: true,
+            profileScopePresent: true
+        )
+
+        XCTAssertEqual(diagnostic.displayCode, "session_reasoning/gateway_server_4002")
+        XCTAssertFalse(diagnostic.displayCode.contains("private"))
+        XCTAssertEqual(
+            ComposerConfigurationDiagnostic(
+                source: .modelOptions,
+                outcome: "private host and token",
+                hasCanonicalSession: false,
+                profileScopePresent: true
+            ).displayCode,
+            "model_options/other"
+        )
     }
 
     func testDirectComposerFailureBannerIdentifiesSourceWithoutResponseContent() async throws {
@@ -1234,6 +1299,149 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         XCTAssertEqual(reason, .unavailable)
         await vm.disposeDirectConversation()
         await runtime.stop()
+    }
+
+    func testDirectComposerModelOptionsFailurePublishesReleaseDiagnosticCode() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let client = makeClient { request in
+            if request.url?.path == "/api/profiles" {
+                return apiTestJSONResponse(#"{"profiles":[]}"#, for: request)
+            }
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 404,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "text/plain"]
+            )!
+            return (response, Data("private model response".utf8))
+        }
+        let vm = makeViewModel(client: client, runtime: runtime, sessionID: nil)
+
+        await vm.loadComposerConfiguration()
+
+        XCTAssertEqual(
+            vm.composerConfigurationErrorMessage,
+            "Hermes chat settings could not be loaded. Your draft was preserved."
+        )
+        XCTAssertEqual(vm.composerConfigurationDiagnostic?.displayCode, "model_options/http_404_not_found")
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testControlsRefreshKeepsFailureCodeVisibleUntilSuccessClearsIt() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        ComposerDiagnosticRefreshURLProtocol.reset(mode: .profilesFailure)
+        defer { ComposerDiagnosticRefreshURLProtocol.clear() }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ComposerDiagnosticRefreshURLProtocol.self]
+        let client = APIClient(
+            baseURL: URL(string: "https://example.test")!,
+            session: URLSession(configuration: configuration)
+        )
+        let vm = makeViewModel(client: client, runtime: runtime, sessionID: nil)
+        await vm.loadComposerConfiguration()
+        XCTAssertEqual(vm.composerConfigurationDiagnostic?.displayCode, "profiles/http_503_server_error")
+
+        let refreshStarted = expectation(description: "controls refresh started")
+        ComposerDiagnosticRefreshURLProtocol.reset(
+            mode: .delayedSuccess,
+            requestStarted: { refreshStarted.fulfill() }
+        )
+        let refresh = Task { @MainActor in await vm.refreshModelCatalogForPickerOpen() }
+        defer { refresh.cancel() }
+        await fulfillment(of: [refreshStarted], timeout: 2)
+
+        XCTAssertTrue(vm.isLoadingComposerConfiguration)
+        XCTAssertNil(vm.composerConfigurationErrorMessage)
+        XCTAssertEqual(vm.composerConfigurationDiagnostic?.displayCode, "profiles/http_503_server_error")
+
+        await refresh.value
+        XCTAssertFalse(vm.isLoadingComposerConfiguration)
+        XCTAssertNil(vm.composerConfigurationDiagnostic)
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testFailedControlsRefreshReplacesPreviousFailureCode() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        ComposerDiagnosticRefreshURLProtocol.reset(mode: .profilesFailure)
+        defer { ComposerDiagnosticRefreshURLProtocol.clear() }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ComposerDiagnosticRefreshURLProtocol.self]
+        let client = APIClient(
+            baseURL: URL(string: "https://example.test")!,
+            session: URLSession(configuration: configuration)
+        )
+        let vm = makeViewModel(client: client, runtime: runtime, sessionID: nil)
+        await vm.loadComposerConfiguration()
+        XCTAssertEqual(vm.composerConfigurationDiagnostic?.displayCode, "profiles/http_503_server_error")
+
+        ComposerDiagnosticRefreshURLProtocol.reset(mode: .modelFailure)
+        await vm.refreshModelCatalogForPickerOpen()
+
+        XCTAssertEqual(vm.composerConfigurationDiagnostic?.displayCode, "model_options/http_404_not_found")
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testExistingChatInvalidReasoningResponsePublishesReleaseDiagnosticCode() async throws {
+        let fake = ChatDirectFakeTransport()
+        fake.setReasoningGetResponse(.object(["value": .string("medium")]))
+        let runtime = try makeRuntime(fake)
+        let requests = ChatDirectRequestRecorder()
+        let vm = makeViewModel(
+            client: makeExistingComposerClient(requests: requests),
+            runtime: runtime,
+            sessionID: "durable-1"
+        )
+
+        await vm.loadComposerConfiguration()
+
+        XCTAssertEqual(
+            vm.composerConfigurationErrorMessage,
+            "Hermes chat settings could not be loaded. Your draft was preserved."
+        )
+        XCTAssertEqual(
+            vm.composerConfigurationDiagnostic?.displayCode,
+            "session_reasoning/session_invalid_response"
+        )
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testComposerDiagnosticIsReachableOnlyInsideExistingChatControlsDetails() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let composerSource = try String(
+            contentsOf: repositoryRoot.appendingPathComponent("HermesMobile/Features/Chat/ChatComposerView.swift"),
+            encoding: .utf8
+        )
+        let chatSource = try String(
+            contentsOf: repositoryRoot.appendingPathComponent("HermesMobile/Features/Chat/ChatView.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(chatSource.contains(
+            "configurationDiagnosticCode: viewModel.composerConfigurationDiagnostic?.displayCode"
+        ))
+        let controlsStart = try XCTUnwrap(composerSource.range(of: "private var chatControlsHeader"))
+        let controlsEnd = try XCTUnwrap(
+            composerSource.range(of: "private var chatOptionsMenu", range: controlsStart.upperBound..<composerSource.endIndex)
+        )
+        let controlsSource = String(composerSource[controlsStart.lowerBound..<controlsEnd.lowerBound])
+        XCTAssertTrue(controlsSource.contains("chatControlsConfigurationDiagnostic"))
+        XCTAssertTrue(controlsSource.contains("Settings diagnostic code"))
+
+        let statusStart = try XCTUnwrap(composerSource.range(of: "private struct ComposerStatusView"))
+        let statusEnd = try XCTUnwrap(
+            composerSource.range(of: "enum ChatComposerAttachPolicy", range: statusStart.upperBound..<composerSource.endIndex)
+        )
+        let persistentStatusSource = String(composerSource[statusStart.lowerBound..<statusEnd.lowerBound])
+        XCTAssertFalse(persistentStatusSource.contains("configurationDiagnosticCode"))
     }
 
     func testExistingDirectChatLoadsScopedReasoningAndWritesOnlyThroughGateway() async throws {
@@ -4163,6 +4371,87 @@ private enum ChatDirectEventFactory {
             params: nil,
             connectionGeneration: connectionGeneration
         )
+    }
+}
+
+private final class ComposerDiagnosticRefreshURLProtocol: URLProtocol {
+    enum Mode: Equatable {
+        case profilesFailure
+        case delayedSuccess
+        case modelFailure
+    }
+
+    private static let lock = NSLock()
+    private static var mode = Mode.profilesFailure
+    private static var requestStarted: (() -> Void)?
+    private static var didNotifyStart = false
+    private var loadingTask: Task<Void, Never>?
+
+    static func reset(mode: Mode, requestStarted: (() -> Void)? = nil) {
+        lock.withLock {
+            self.mode = mode
+            self.requestStarted = requestStarted
+            didNotifyStart = false
+        }
+    }
+
+    static func clear() {
+        lock.withLock {
+            requestStarted = nil
+            didNotifyStart = false
+        }
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let url = request.url else { return }
+        let (mode, started): (Mode, (() -> Void)?) = Self.lock.withLock {
+            let callback = Self.didNotifyStart ? nil : Self.requestStarted
+            Self.didNotifyStart = true
+            return (Self.mode, callback)
+        }
+        started?()
+
+        loadingTask = Task { [weak self] in
+            guard let self else { return }
+            if mode == .delayedSuccess {
+                try? await Task.sleep(for: .milliseconds(150))
+                guard !Task.isCancelled else { return }
+            }
+
+            let statusCode: Int
+            let body: String
+            switch (mode, url.path) {
+            case (.profilesFailure, "/api/profiles"):
+                statusCode = 503
+                body = #"{"error":"private profile response"}"#
+            case (.modelFailure, "/api/model/options"):
+                statusCode = 404
+                body = #"{"error":"private model response"}"#
+            case (_, "/api/model/options"):
+                statusCode = 200
+                body = #"{"model":"model-a","provider":"fixture","providers":[]}"#
+            default:
+                statusCode = 200
+                body = #"{"profiles":[{"name":"work"}]}"#
+            }
+            let response = HTTPURLResponse(
+                url: url,
+                statusCode: statusCode,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: Data(body.utf8))
+            client?.urlProtocolDidFinishLoading(self)
+        }
+    }
+
+    override func stopLoading() {
+        loadingTask?.cancel()
     }
 }
 

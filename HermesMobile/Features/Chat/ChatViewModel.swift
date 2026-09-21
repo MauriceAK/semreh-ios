@@ -101,6 +101,54 @@ struct ComposerConfigurationLoadOutcome: Equatable {
         } else if let requestError = error as? DirectHermesRequestError,
                   case .http(let statusCode, _) = requestError {
             rawValue = "http_\(statusCode)_\(Self.safeHTTPReason(statusCode))"
+        } else if let gatewayError = error as? HermesGatewayError {
+            switch gatewayError {
+            case .invalidGatewayURL:
+                rawValue = "gateway_invalid_url"
+            case .notConnected:
+                rawValue = "gateway_not_connected"
+            case .notReady:
+                rawValue = "gateway_not_ready"
+            case .closed:
+                rawValue = "gateway_closed"
+            case .cancelled:
+                rawValue = "cancelled"
+            case .timeout:
+                rawValue = "gateway_timeout"
+            case .transport:
+                rawValue = "gateway_transport"
+            case .invalidMessage:
+                rawValue = "gateway_invalid_message"
+            case .server(let code, _, _, _, _, _):
+                rawValue = "gateway_server_\(code)"
+            }
+        } else if let sessionError = error as? DirectSessionError {
+            switch sessionError {
+            case .invalidBinding:
+                rawValue = "session_invalid_binding"
+            case .conflictingDurableIDs:
+                rawValue = "session_conflicting_ids"
+            case .stopped:
+                rawValue = "session_stopped"
+            case .staleOperation:
+                rawValue = "session_stale_operation"
+            case .invalidOrigin:
+                rawValue = "session_invalid_origin"
+            case .eventBufferOverflow:
+                rawValue = "session_event_overflow"
+            case .ambiguousPrompt:
+                rawValue = "session_ambiguous_prompt"
+            case .unresolvedAttachment:
+                rawValue = "session_unresolved_attachment"
+            case .attachmentRecoveryUnavailable:
+                rawValue = "session_attachment_recovery_unavailable"
+            case .invalidResponse:
+                rawValue = "session_invalid_response"
+            case .stopUnconfirmed:
+                rawValue = "session_stop_unconfirmed"
+            case .draftCleanupUnconfirmed:
+                rawValue = "session_draft_cleanup_unconfirmed"
+            }
         } else if error is URLError {
             rawValue = "network"
         } else if error is DecodingError {
@@ -146,6 +194,40 @@ struct ComposerConfigurationDiagnostic: Equatable {
     let outcome: String
     let hasCanonicalSession: Bool
     let profileScopePresent: Bool
+
+    var displayCode: String { "\(source.rawValue)/\(Self.releaseSafeOutcome(outcome))" }
+
+    private static let fixedReleaseSafeOutcomes: Set<String> = [
+        "cancelled", "auth_session_expired", "network", "decoding", "other",
+        "gateway_invalid_url", "gateway_not_connected", "gateway_not_ready", "gateway_closed",
+        "gateway_timeout", "gateway_transport", "gateway_invalid_message",
+        "session_invalid_binding", "session_conflicting_ids", "session_stopped",
+        "session_stale_operation", "session_invalid_origin", "session_event_overflow",
+        "session_ambiguous_prompt", "session_unresolved_attachment",
+        "session_attachment_recovery_unavailable", "session_invalid_response",
+        "session_stop_unconfirmed", "session_draft_cleanup_unconfirmed"
+    ]
+
+    private static let fixedHTTPReasons: Set<String> = [
+        "bad_request", "unauthorized", "forbidden", "not_found", "timeout", "conflict",
+        "rate_limited", "server_error", "request_failed"
+    ]
+
+    private static func releaseSafeOutcome(_ value: String) -> String {
+        if fixedReleaseSafeOutcomes.contains(value) { return value }
+        if value.hasPrefix("gateway_server_"),
+           Int(value.dropFirst("gateway_server_".count)) != nil {
+            return value
+        }
+        guard value.hasPrefix("http_") else { return "other" }
+        let statusAndReason = value.dropFirst("http_".count)
+        guard let separator = statusAndReason.firstIndex(of: "_"),
+              Int(statusAndReason[..<separator]) != nil,
+              fixedHTTPReasons.contains(String(statusAndReason[statusAndReason.index(after: separator)...])) else {
+            return "other"
+        }
+        return value
+    }
 }
 
 private enum DirectAttachmentSendFailure: Error {
@@ -1153,7 +1235,6 @@ final class ChatViewModel {
         )
         isLoadingComposerConfiguration = true
         composerConfigurationErrorMessage = nil
-        composerConfigurationDiagnostic = nil
         defer {
             if identity.generation == composerConfigurationLoadGeneration {
                 isLoadingComposerConfiguration = false
@@ -1191,6 +1272,8 @@ final class ChatViewModel {
                     throw ComposerConfigurationLoadFailure(source: .sessionReasoning, underlying: error)
                 }
             }
+            guard isCurrentComposerConfigurationLoad(identity) else { return }
+            composerConfigurationDiagnostic = nil
         } catch let failure as ComposerConfigurationLoadFailure {
             guard isCurrentComposerConfigurationLoad(identity),
                   !ComposerConfigurationLoadOutcome.isCancellation(failure.underlying) else { return }
