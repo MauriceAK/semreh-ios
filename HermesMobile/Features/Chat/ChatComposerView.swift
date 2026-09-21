@@ -98,6 +98,7 @@ struct MessageComposerView: View {
     let isChromeCompact: Bool
     let errorMessage: String?
     let configurationErrorMessage: String?
+    let configurationDiagnosticCode: String?
     let contextWindowSnapshot: ContextWindowSnapshot?
     let gitViewModel: GitWorkspaceAvailabilityViewModel
     let modelGroups: [ModelCatalogGroup]
@@ -877,6 +878,19 @@ struct MessageComposerView: View {
             }
             if let configurationErrorMessage {
                 Text(configurationErrorMessage).font(.caption).foregroundStyle(.secondary)
+            }
+            if let configurationDiagnosticCode {
+                LabeledContent("Diagnostic code") {
+                    Text(configurationDiagnosticCode)
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Settings diagnostic code")
+                .accessibilityValue(configurationDiagnosticCode)
+                .accessibilityIdentifier("chatControlsConfigurationDiagnostic")
             }
             if allowsModelAndWorkspaceChanges {
                 Text("Models").font(.headline)

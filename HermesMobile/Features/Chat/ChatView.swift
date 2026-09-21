@@ -637,6 +637,7 @@ struct ChatView: View {
             isChromeCompact: isComposerChromeCompact,
             errorMessage: viewModel.sendErrorMessage,
             configurationErrorMessage: viewModel.composerConfigurationErrorMessage,
+            configurationDiagnosticCode: viewModel.composerConfigurationDiagnostic?.displayCode,
             contextWindowSnapshot: viewModel.contextWindowSnapshot,
             gitViewModel: gitAvailabilityViewModel,
             modelGroups: viewModel.modelCatalogGroups,
