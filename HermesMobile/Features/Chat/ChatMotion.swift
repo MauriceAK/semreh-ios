@@ -48,6 +48,17 @@ enum ChatMotion {
         reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity)
     }
 
+    /// Message insertion: a short fade with a small rise as new transcript
+    /// rows enter. Streaming text updates reuse row identity, so they never
+    /// trigger this transition — only genuine inserts/removals do.
+    static func messageInsert(reduceMotion: Bool) -> Animation? {
+        reduceMotion ? nil : .smooth(duration: 0.28, extraBounce: 0)
+    }
+
+    static func messageInsertTransition(reduceMotion: Bool) -> AnyTransition {
+        reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .bottom))
+    }
+
     static func disclosureTransition(reduceMotion: Bool) -> AnyTransition {
         reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .top))
     }
