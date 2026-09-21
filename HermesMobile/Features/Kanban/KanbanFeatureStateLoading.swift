@@ -2,21 +2,43 @@ import Foundation
 
 extension KanbanFeatureState {
     func load() async {
-        if snapshot != nil {
+        let previouslySelectedBoard = normalizedOptional(selectedBoardSlug)
+        let previouslySelectedBoardName = selectedBoard?.name
+        let hasSettledSnapshot = snapshot != nil
+
+        if hasSettledSnapshot {
+            prepareForLoad(preservingSnapshot: true)
             // Reentry owns the settled board until the replacement snapshot is
             // ready. Invalidate any older handshake so its optional reads and
             // stream start cannot publish after this refresh.
             activeLoadID = nil
             isLoading = false
-            if state == .checking {
-                state = report?.isPartial == true ? .partial : .compatible
-            }
+            refreshFailed = false
+            capabilityWarnings = []
+            state = report?.isPartial == true ? .partial : .compatible
+
             await refresh()
+            guard !Task.isCancelled else { return }
+            if previouslySelectedBoard != nil,
+               selectedBoardSlug == nil,
+               snapshot == nil {
+                await loadHandshake(
+                    previouslySelectedBoard: previouslySelectedBoard,
+                    previouslySelectedBoardName: previouslySelectedBoardName
+                )
+            } else {
+                startLiveUpdatesIfReady()
+            }
             return
         }
 
-        let previouslySelectedBoard = normalizedOptional(selectedBoardSlug)
-        let previouslySelectedBoardName = selectedBoard?.name
+        await loadHandshake(
+            previouslySelectedBoard: previouslySelectedBoard,
+            previouslySelectedBoardName: previouslySelectedBoardName
+        )
+    }
+
+    private func prepareForLoad(preservingSnapshot: Bool) {
         invalidateBoardMutation()
         invalidateDispatch()
         dispatcherCapabilityIsIncompatible = false
@@ -24,7 +46,14 @@ extension KanbanFeatureState {
         archiveUndoTask?.cancel()
         archiveUndo = nil
         clearSettledMutationPresentation()
-        resetLiveUpdates(clearCursor: true)
+        resetLiveUpdates(clearCursor: !preservingSnapshot)
+    }
+
+    private func loadHandshake(
+        previouslySelectedBoard: String?,
+        previouslySelectedBoardName: String?
+    ) async {
+        prepareForLoad(preservingSnapshot: false)
         let loadID = UUID()
         activeLoadID = loadID
         activeBoardLoadID = nil

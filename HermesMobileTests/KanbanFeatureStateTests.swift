@@ -226,13 +226,14 @@ final class KanbanFeatureStateTests: XCTestCase {
         let state = KanbanFeatureState(server: URL(string: "https://example.test")!, client: client)
         await state.load()
         let settledCards = state.allCards
+        let settledState = state.state
 
         let reentry = Task { await state.load() }
         await client.waitForReentryBoardRead()
 
         XCTAssertTrue(state.isRefreshing)
         XCTAssertFalse(state.isLoading)
-        XCTAssertEqual(state.state, .compatible)
+        XCTAssertEqual(state.state, settledState)
         XCTAssertEqual(state.allCards, settledCards)
 
         await client.resumeReentryBoardRead()
