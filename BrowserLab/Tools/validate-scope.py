@@ -191,6 +191,10 @@ def main():
     for token in ("HermesMobile", "com.mauricekenon.semreh;"):
         if token in pbxproj or token in scheme:
             fail(f"BrowserLab project must not reference production target '{token}'")
+    if pbxproj.count("SDKROOT = iphoneos;") < 2:
+        fail("BrowserLab project Debug and Release configurations must target iOS")
+    if pbxproj.count('SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";') < 2:
+        fail("BrowserLab project must advertise device and simulator platforms")
 
     # --- 8. SwiftPM manifest target paths exist -----------------------------
     for path in re.findall(r'path: "([^"]+)"', manifest):
