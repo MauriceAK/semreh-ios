@@ -26,5 +26,10 @@ let package = Package(
             dependencies: ["SemrehRemoteBrowserCore"],
             path: "Tests/SemrehRemoteBrowserCoreTests"
         ),
+        .testTarget(
+            name: "SemrehRemoteBrowserUITests",
+            dependencies: ["SemrehRemoteBrowserCore", "SemrehRemoteBrowserUI"],
+            path: "Tests/SemrehRemoteBrowserUITests"
+        ),
     ]
 )

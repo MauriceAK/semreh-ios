@@ -24,8 +24,11 @@ public final class RemoteBrowserViewModel: ObservableObject {
     @Published public var draft = TextDraft()
     @Published public var inputMode: ViewportInputMode = .direct
 
-    /// Committed-text commands awaiting acknowledgement.
-    private var pendingTextCommits: Set<CommandID> = []
+    /// Committed-text commands awaiting acknowledgement, correlated to the
+    /// exact local draft revision that dispatched them. An old same-epoch ACK
+    /// can never confirm a newer draft, even when its text is identical.
+    private var pendingTextCommits: [CommandID: UInt64] = [:]
+    private var draftRevision: UInt64 = 0
 
     public init(adapter: BrowserAdapter = UnavailableBrowserAdapter(), decoder: FrameDecoder) {
         let controller = BrowserSessionController(adapter: adapter)
@@ -109,6 +112,8 @@ public final class RemoteBrowserViewModel: ObservableObject {
         set {
             var updated = draft
             updated.edit(newValue)
+            guard updated != draft else { return }
+            draftRevision &+= 1
             draft = updated
         }
     }
@@ -133,7 +138,7 @@ public final class RemoteBrowserViewModel: ObservableObject {
         guard let text = updated.beginCommit() else { return }
         draft = updated
         if let commandID = controller.sendHumanCommand(.insertText(text)) {
-            pendingTextCommits.insert(commandID)
+            pendingTextCommits[commandID] = draftRevision
         } else {
             // Lost the lease between the check and the send: restore the
             // draft to idle with the text preserved.
@@ -286,20 +291,20 @@ public final class RemoteBrowserViewModel: ObservableObject {
     }
 
     private func handleTextAck(_ commandID: CommandID) {
-        guard pendingTextCommits.remove(commandID) != nil else { return }
+        guard pendingTextCommits.removeValue(forKey: commandID) == draftRevision else { return }
         draft.markConfirmed()
         draft.clearAfterConfirmation()
     }
 
     private func handleTextReject(_ commandID: CommandID, reason: String) {
-        guard pendingTextCommits.remove(commandID) != nil else { return }
+        guard pendingTextCommits.removeValue(forKey: commandID) == draftRevision else { return }
         draft.markRejected(reason: reason)
     }
 
     private func handleTextAckLost(_ commandID: CommandID) {
         // Keep the command tracked so a late acknowledgement can still
         // confirm it; the draft stays preserved and marked unconfirmed.
-        guard pendingTextCommits.contains(commandID) else { return }
+        guard pendingTextCommits[commandID] == draftRevision else { return }
         draft.markUnconfirmed()
     }
 
