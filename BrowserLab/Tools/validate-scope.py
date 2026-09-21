@@ -111,6 +111,24 @@ def main():
             fail(f"PBXBuildFile {ref_id} has no fileRef/productRef")
         if target.group(1) not in defined:
             fail(f"PBXBuildFile {ref_id} references undefined {target.group(1)}")
+    package_ref_ids = set(
+        re.findall(
+            r"([0-9A-F]{24}) /\* .*? \*/ = \{\s*isa = XCLocalSwiftPackageReference;",
+            pbxproj,
+        )
+    )
+    for match in re.finditer(
+        r"[0-9A-F]{24} /\* .*? \*/ = \{\s*isa = PBXGroup;\s*children = \((.*?)\);",
+        pbxproj,
+        re.DOTALL,
+    ):
+        child_ids = set(re.findall(r"([0-9A-F]{24})", match.group(1)))
+        invalid_children = child_ids & package_ref_ids
+        if invalid_children:
+            fail(
+                "local package reference must be listed in packageReferences, "
+                f"not as a PBXGroup child: {sorted(invalid_children)}"
+            )
 
     # --- 3. Scheme targets exist ------------------------------------------
     with open(scheme_path, encoding="utf-8") as handle:
