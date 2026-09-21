@@ -38,10 +38,10 @@ struct BrowserOwnershipHeader: View {
 
                 VStack(spacing: 2) {
                     Text(viewModel.title)
-                        .font(.system(size: 17, weight: .medium))
+                        .font(.headline)
                     if let host = viewModel.hostDisplayName, !host.isEmpty {
                         Text(host)
-                            .font(.system(size: 15))
+                            .font(.subheadline)
                             .foregroundStyle(.gray)
                     }
                     if showsSubtitle {
@@ -67,6 +67,13 @@ struct BrowserOwnershipHeader: View {
     }
 
     private var showsSubtitle: Bool {
+        // The normal manual header is the intended compact two-line block
+        // (title + hostname); "Remote input enabled" adds nothing the title
+        // "You're in control" doesn't already say. Every other state's
+        // subtitle carries real status and stays.
+        if viewModel.primaryAction == .resume {
+            return false
+        }
         let subtitle = viewModel.subtitle.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !subtitle.isEmpty else { return false }
         if let host = viewModel.hostDisplayName, !host.isEmpty, subtitle == host {
@@ -110,19 +117,27 @@ struct BrowserOwnershipHeader: View {
             case .takeControl:
                 HStack {
                     Spacer()
-                    Button("Take control") { viewModel.requestControl() }
-                        .buttonStyle(.borderedProminent)
-                        .frame(minHeight: 44)
-                        .accessibilityIdentifier("browser.takeControl")
+                    Button(action: { viewModel.requestControl() }) {
+                        // Sizing lives on the label so the interactive and
+                        // accessibility bounds are genuinely >= 44pt.
+                        Text("Take control")
+                            .frame(minHeight: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier("browser.takeControl")
                     Spacer()
                 }
             case .reconnect:
                 HStack {
                     Spacer()
-                    Button("Reconnect") { viewModel.reconnect() }
-                        .buttonStyle(.borderedProminent)
-                        .frame(minHeight: 44)
-                        .accessibilityIdentifier("browser.reconnect")
+                    Button(action: { viewModel.reconnect() }) {
+                        Text("Reconnect")
+                            .frame(minHeight: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier("browser.reconnect")
                     Spacer()
                 }
             default:

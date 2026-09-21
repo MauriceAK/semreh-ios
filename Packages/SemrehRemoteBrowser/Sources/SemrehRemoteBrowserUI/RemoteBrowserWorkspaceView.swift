@@ -16,7 +16,8 @@ import SemrehRemoteBrowserCore
 /// - Compact floating tool capsule (keyboard, interaction mode, Fit, More)
 ///   plus a separate capability-gated circular Stop Task control.
 /// - Inline local-draft composer above the native keyboard in normal layouts;
-///   the existing sheet remains as the compact-height fallback.
+///   the existing sheet remains as the compact-height fallback (short
+///   allocations, compact vertical size class, accessibility text sizes).
 /// - Required states/copy per the design table; accessibility identifiers
 ///   `browser.close`, `browser.takeControl`, `browser.reconnect`,
 ///   `browser.resume`, `browser.status`, `browser.notice`, `browser.keyboard`,
@@ -32,52 +33,73 @@ public struct RemoteBrowserWorkspaceView: View {
     @ObservedObject public var viewModel: RemoteBrowserViewModel
     @StateObject private var viewportControl = ViewportControl()
     @State private var showingDraftEditor = false
+    @State private var workspaceHeight: CGFloat = .greatestFiniteMagnitude
     @FocusState private var draftEditorFocused: Bool
     @Environment(\.verticalSizeClass) private var verticalSizeClass
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     public init(viewModel: RemoteBrowserViewModel) {
         self.viewModel = viewModel
     }
 
     public var body: some View {
-        GeometryReader { geometry in
-            // Compact layouts (short allocated height, e.g. BrowserLab's
-            // 300pt panel, or compact vertical size class) reuse the sheet
-            // for the draft editor instead of the inline composer.
-            let compactLayout = geometry.size.height < 520 || verticalSizeClass == .compact
-            ZStack {
-                Color.black.ignoresSafeArea()
-                VStack(spacing: 0) {
-                    BrowserOwnershipHeader(viewModel: viewModel)
-                    BrowserNoticeBanner(viewModel: viewModel)
-                    BrowserStage(
-                        viewModel: viewModel,
-                        viewportControl: viewportControl,
-                        composerOpen: showingDraftEditor && !compactLayout,
-                        onToggleComposer: toggleComposer,
-                        onPasteIntoDraft: pasteIntoDraft
-                    )
-                    if showingDraftEditor && !compactLayout {
-                        BrowserDraftComposer(
-                            viewModel: viewModel,
-                            editorFocus: $draftEditorFocused,
-                            onDone: dismissComposer
-                        )
-                    }
-                }
-                .background(BrowserChrome.shell)
-                .clipShape(
-                    UnevenRoundedRectangle(
-                        topLeadingRadius: 32,
-                        topTrailingRadius: 32,
-                        style: .continuous
-                    )
+        // The root is a plain VStack (never a root GeometryReader): the
+        // workspace must keep its intrinsic minimum height so embedded hosts
+        // like BrowserLab allocate enough room and the chrome never overlaps
+        // sibling views. The compact-composer decision reads the allocated
+        // height through a background measurement instead.
+        ZStack {
+            Color.black.ignoresSafeArea()
+            VStack(spacing: 0) {
+                BrowserOwnershipHeader(viewModel: viewModel)
+                BrowserNoticeBanner(viewModel: viewModel)
+                BrowserStage(
+                    viewModel: viewModel,
+                    viewportControl: viewportControl,
+                    composerOpen: showingDraftEditor && !compactLayout,
+                    onToggleComposer: toggleComposer,
+                    onPasteIntoDraft: pasteIntoDraft
                 )
-                .preferredColorScheme(.dark)
+                if showingDraftEditor && !compactLayout {
+                    BrowserDraftComposer(
+                        viewModel: viewModel,
+                        editorFocus: $draftEditorFocused,
+                        onDone: dismissComposer
+                    )
+                }
             }
-            .sheet(isPresented: sheetBinding(compactLayout: compactLayout)) {
-                draftEditorSheet
-            }
+            .background(heightReader)
+            .background(BrowserChrome.shell)
+            .clipShape(
+                UnevenRoundedRectangle(
+                    topLeadingRadius: 32,
+                    topTrailingRadius: 32,
+                    style: .continuous
+                )
+            )
+            .preferredColorScheme(.dark)
+        }
+        .onPreferenceChange(WorkspaceHeightKey.self) { workspaceHeight = $0 }
+        .sheet(isPresented: sheetBinding) {
+            draftEditorSheet
+        }
+    }
+
+    // MARK: - Layout measurement
+
+    /// Compact layouts (short allocated height such as BrowserLab's embedded
+    /// panel, compact vertical size class, or accessibility Dynamic Type
+    /// sizes) reuse the sheet for the draft editor instead of the inline
+    /// composer.
+    private var compactLayout: Bool {
+        workspaceHeight < 520
+            || verticalSizeClass == .compact
+            || dynamicTypeSize.isAccessibilitySize
+    }
+
+    private var heightReader: some View {
+        GeometryReader { geometry in
+            Color.clear.preference(key: WorkspaceHeightKey.self, value: geometry.size.height)
         }
     }
 
@@ -99,7 +121,7 @@ public struct RemoteBrowserWorkspaceView: View {
         draftEditorFocused = false
     }
 
-    private func sheetBinding(compactLayout: Bool) -> Binding<Bool> {
+    private var sheetBinding: Binding<Bool> {
         Binding(
             get: { showingDraftEditor && compactLayout },
             set: { newValue in
@@ -126,6 +148,9 @@ public struct RemoteBrowserWorkspaceView: View {
                     .font(.headline)
                     .accessibilityIdentifier("browser.draftTitle")
                 Text("Native composition edits this draft. Only committed text is sent when you press Insert text — this is committed-text insertion, not a mirrored remote editor.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("Sent only when you tap Insert text.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 TextEditor(text: Binding(
@@ -175,6 +200,13 @@ public struct RemoteBrowserWorkspaceView: View {
             }
         }
         .preferredColorScheme(.dark)
+    }
+}
+
+private struct WorkspaceHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = .greatestFiniteMagnitude
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
     }
 }
 
