@@ -17,6 +17,7 @@ struct KanbanCardDetailView: View {
                 ContentUnavailableView("Unavailable", systemImage: "exclamationmark.triangle")
             }
         }
+        .background { SemrehBackdrop().ignoresSafeArea() }
         .navigationTitle(state?.detail?.card?.title ?? String(localized: "Loading"))
         .navigationBarTitleDisplayMode(.inline)
     }

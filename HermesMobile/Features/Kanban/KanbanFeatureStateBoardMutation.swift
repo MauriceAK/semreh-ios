@@ -97,6 +97,8 @@ extension KanbanFeatureState {
         switch expectation {
         case nil:
             return true
+        case let .load(loadID):
+            return activeLoadID == loadID
         case let .boardMutation(generation):
             return generation == boardMutationGeneration
         case let .dispatch(generation, board, mode):
@@ -120,7 +122,9 @@ extension KanbanFeatureState {
     func refreshBoard(
         usingCursor: Bool,
         refreshSupplementary: Bool = false,
-        preserveRefreshFailure: Bool = false
+        preserveRefreshFailure: Bool = false,
+        resetCapabilitiesOnSuccess: Bool = false,
+        loadID: UUID? = nil
     ) async -> Bool {
         guard let board = selectedBoardSlug else { return false }
         let boardLoadID = UUID()
@@ -156,6 +160,11 @@ extension KanbanFeatureState {
             }
             liveCursor = max(liveCursor, response.latestEventID ?? 0)
             isOffline = false
+            if resetCapabilitiesOnSuccess {
+                dispatcherCapabilityIsIncompatible = false
+                unavailableWriteCapabilities = []
+                capabilityWarnings = []
+            }
             if preserveRefreshFailure {
                 refreshFailed = true
             }
@@ -168,7 +177,10 @@ extension KanbanFeatureState {
         } catch {
             guard isCurrentBoardLoad(boardLoadID, board: board) else { return false }
             if isNotFound(error) {
-                _ = await reconcileBoardCollection()
+                _ = await reconcileBoardCollection(
+                    expectation: loadID.map(KanbanBoardCollectionExpectation.load)
+                )
+                guard isCurrentLoad(loadID) else { return false }
                 if selectedBoardSlug == nil { return false }
             }
             refreshFailed = true

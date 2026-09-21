@@ -344,6 +344,7 @@ extension KanbanFeatureState {
     func handleRemovedBoard(_ boardDisplayName: String) {
         markBoardActivity()
         activeBoardLoadID = nil
+        isRefreshing = false
         resetLiveUpdates(clearCursor: true)
         resetCardSelection()
         archiveUndoTask?.cancel()

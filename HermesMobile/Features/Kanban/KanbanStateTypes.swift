@@ -174,6 +174,7 @@ enum KanbanDispatcherAvailability: Equatable, Sendable {
 }
 
 enum KanbanBoardCollectionExpectation {
+    case load(UUID)
     case boardMutation(generation: Int)
     case dispatch(generation: Int, board: String, mode: KanbanDispatchMode)
 }

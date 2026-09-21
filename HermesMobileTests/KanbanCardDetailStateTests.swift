@@ -125,6 +125,65 @@ final class KanbanCardDetailStateTests: XCTestCase {
         XCTAssertEqual(boardCalls, 0)
     }
 
+    func testCancelledInitialDetailLoadReturnsToIdleAndAllowsReentry() async {
+        let client = DeferredInitialDetailClient()
+        let state = makeState(client: client)
+
+        let firstLoad = Task { await state.load() }
+        await client.waitForInitialDetail()
+        firstLoad.cancel()
+        await client.resumeInitialDetail()
+        await firstLoad.value
+
+        XCTAssertEqual(state.loadState, .idle)
+
+        await state.load()
+        XCTAssertEqual(state.loadState, .loaded)
+        XCTAssertEqual(state.detail?.card?.cardID, "CARD-1")
+    }
+
+    func testCancelledWorkerLogLoadReturnsToIdleAndAllowsRetry() async {
+        let client = DeferredWorkerLogClient()
+        let state = makeState(client: client)
+
+        let firstLoad = Task { await state.loadWorkerLog() }
+        await client.waitForInitialLog()
+        firstLoad.cancel()
+        await client.resumeInitialLog()
+        await firstLoad.value
+
+        XCTAssertEqual(state.workerLogState, .idle)
+
+        await state.loadWorkerLog()
+        XCTAssertEqual(state.workerLogState, .absent)
+    }
+
+    func testCancelledMissingDetailReconciliationReturnsToIdle() async {
+        let client = DeferredMissingEntityClient(operation: .detail)
+        let state = makeState(client: client)
+
+        let load = Task { await state.load() }
+        await client.waitForBoards()
+        load.cancel()
+        await client.resumeBoards()
+        await load.value
+
+        XCTAssertEqual(state.loadState, .idle)
+    }
+
+    func testCancelledMissingWorkerLogReconciliationReturnsToIdle() async {
+        let client = DeferredMissingEntityClient(operation: .workerLog)
+        let state = makeState(client: client)
+
+        let load = Task { await state.loadWorkerLog() }
+        await client.waitForBoards()
+        load.cancel()
+        await client.resumeBoards()
+        await load.value
+
+        XCTAssertEqual(state.workerLogState, .idle)
+    }
+
     func testLiveReconciliationKeepsDetailOpenAndAppliesRemoteStatus() async {
         let client = CardDetailClient(details: [.success(.baseline), .success(.done)])
         let state = makeState(client: client)
@@ -290,6 +349,112 @@ private actor CardDetailClient: KanbanDataClient {
         commentCallCount += 1
         submittedBodies.append(request.body)
         return try commentResult.get()
+    }
+}
+
+private actor DeferredInitialDetailClient: KanbanDataClient {
+    private var detailCallCount = 0
+    private var initialDetailContinuation: CheckedContinuation<KanbanCardDetailEnvelope, Never>?
+
+    func kanbanConfiguration() -> KanbanConfiguration { decode(#"{"columns":["ready"],"read_only":false}"#) }
+    func kanbanBoards() -> KanbanBoardsResponse { .main }
+    func kanbanBoard(_ request: KanbanBoardRequest) -> KanbanBoardSnapshot { decode(#"{"changed":true,"columns":[{"name":"ready","tasks":[]}],"read_only":false}"#) }
+    func kanbanStats(board: String) -> KanbanStats { decode("{}") }
+    func kanbanAssignees(board: String) -> KanbanAssigneeHistory { decode("{}") }
+    func kanbanEvents(_ request: KanbanEventsRequest) -> KanbanEventsEnvelope { decode("{}") }
+
+    func kanbanCardDetail(_ request: KanbanCardDetailRequest) async -> KanbanCardDetailEnvelope {
+        detailCallCount += 1
+        if detailCallCount == 1 {
+            return await withCheckedContinuation { initialDetailContinuation = $0 }
+        }
+        return .baseline
+    }
+
+    func waitForInitialDetail() async {
+        while initialDetailContinuation == nil { await Task.yield() }
+    }
+
+    func resumeInitialDetail() {
+        initialDetailContinuation?.resume(returning: .baseline)
+        initialDetailContinuation = nil
+    }
+}
+
+private actor DeferredWorkerLogClient: KanbanDataClient {
+    private var logCallCount = 0
+    private var initialLogContinuation: CheckedContinuation<KanbanWorkerLog, Never>?
+
+    func kanbanConfiguration() -> KanbanConfiguration { decode(#"{"columns":["ready"],"read_only":false}"#) }
+    func kanbanBoards() -> KanbanBoardsResponse { .main }
+    func kanbanBoard(_ request: KanbanBoardRequest) -> KanbanBoardSnapshot { decode(#"{"changed":true,"columns":[{"name":"ready","tasks":[]}],"read_only":false}"#) }
+    func kanbanStats(board: String) -> KanbanStats { decode("{}") }
+    func kanbanAssignees(board: String) -> KanbanAssigneeHistory { decode("{}") }
+    func kanbanEvents(_ request: KanbanEventsRequest) -> KanbanEventsEnvelope { decode("{}") }
+
+    func kanbanWorkerLog(_ request: KanbanWorkerLogRequest) async -> KanbanWorkerLog {
+        logCallCount += 1
+        if logCallCount == 1 {
+            return await withCheckedContinuation { initialLogContinuation = $0 }
+        }
+        return .absent
+    }
+
+    func waitForInitialLog() async {
+        while initialLogContinuation == nil { await Task.yield() }
+    }
+
+    func resumeInitialLog() {
+        initialLogContinuation?.resume(returning: .absent)
+        initialLogContinuation = nil
+    }
+}
+
+private actor DeferredMissingEntityClient: KanbanDataClient {
+    enum Operation: Sendable {
+        case detail
+        case workerLog
+    }
+
+    private let operation: Operation
+    private var boardsContinuation: CheckedContinuation<KanbanBoardsResponse, Never>?
+
+    init(operation: Operation) {
+        self.operation = operation
+    }
+
+    func kanbanConfiguration() -> KanbanConfiguration { decode(#"{"columns":["ready"],"read_only":false}"#) }
+    func kanbanBoards() async -> KanbanBoardsResponse {
+        await withCheckedContinuation { boardsContinuation = $0 }
+    }
+    func kanbanBoard(_ request: KanbanBoardRequest) -> KanbanBoardSnapshot {
+        decode(#"{"changed":true,"columns":[{"name":"ready","tasks":[]}],"read_only":false}"#)
+    }
+    func kanbanStats(board: String) -> KanbanStats { decode("{}") }
+    func kanbanAssignees(board: String) -> KanbanAssigneeHistory { decode("{}") }
+    func kanbanEvents(_ request: KanbanEventsRequest) -> KanbanEventsEnvelope { decode("{}") }
+
+    func kanbanCardDetail(_ request: KanbanCardDetailRequest) throws -> KanbanCardDetailEnvelope {
+        if operation == .detail {
+            throw APIError.http(statusCode: 404, body: #"{"error":"not found"}"#)
+        }
+        return .baseline
+    }
+
+    func kanbanWorkerLog(_ request: KanbanWorkerLogRequest) throws -> KanbanWorkerLog {
+        if operation == .workerLog {
+            throw APIError.http(statusCode: 404, body: #"{"error":"not found"}"#)
+        }
+        return .absent
+    }
+
+    func waitForBoards() async {
+        while boardsContinuation == nil { await Task.yield() }
+    }
+
+    func resumeBoards() {
+        boardsContinuation?.resume(returning: .main)
+        boardsContinuation = nil
     }
 }
 
