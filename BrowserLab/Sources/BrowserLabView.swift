@@ -8,20 +8,13 @@ final class BrowserLabState: ObservableObject {
     @Published private(set) var fixture: SimulatedBrowserAdapter!
     @Published private(set) var viewModel: RemoteBrowserViewModel!
 
-    /// Nonisolated so SwiftUI view initializers can create it without an
-    /// isolation warning; creation always happens on the main thread.
-    nonisolated init() {
-        let (fixture, viewModel): (SimulatedBrowserAdapter, RemoteBrowserViewModel) =
-            MainActor.assumeIsolated {
-                let fixture = SimulatedBrowserAdapter()
-                let viewModel = RemoteBrowserViewModel(
-                    adapter: fixture,
-                    decoder: UIKitFrameDecoder()
-                )
-                return (fixture, viewModel)
-            }
+    init() {
+        let fixture = SimulatedBrowserAdapter()
         self.fixture = fixture
-        self.viewModel = viewModel
+        self.viewModel = RemoteBrowserViewModel(
+            adapter: fixture,
+            decoder: UIKitFrameDecoder()
+        )
     }
 
     /// Ended sessions are terminal; a new session rebuilds the fixture and
@@ -135,7 +128,10 @@ struct BrowserLabView: View {
     private var controlSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Control grants").font(.headline)
-            Toggle("Auto-grant control requests", isOn: $lab.fixture.autoGrantControl)
+            Toggle("Auto-grant control requests", isOn: Binding(
+                get: { lab.fixture.autoGrantControl },
+                set: { lab.fixture.autoGrantControl = $0 }
+            ))
                 .accessibilityIdentifier("lab.autoGrant")
             Toggle("Control supported", isOn: Binding(
                 get: { lab.fixture.controlSupported },
@@ -157,7 +153,10 @@ struct BrowserLabView: View {
             Text("Acknowledgements").font(.headline)
             HStack {
                 Text("Ack delay")
-                Slider(value: $lab.fixture.ackDelay, in: 0...2, step: 0.1)
+                Slider(value: Binding(
+                    get: { lab.fixture.ackDelay },
+                    set: { lab.fixture.ackDelay = $0 }
+                ), in: 0...2, step: 0.1)
                     .accessibilityIdentifier("lab.ackDelay")
                 Text(String(format: "%.1fs", lab.fixture.ackDelay))
                     .monospacedDigit()
