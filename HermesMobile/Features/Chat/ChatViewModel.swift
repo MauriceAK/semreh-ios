@@ -113,6 +113,10 @@ struct ComposerConfigurationLoadOutcome: Equatable {
     static func isCancellation(_ error: Error) -> Bool {
         if error is CancellationError { return true }
         if let urlError = error as? URLError { return urlError.code == .cancelled }
+        let cocoaError = error as NSError
+        let bridgedCancellation = CancellationError() as NSError
+        if cocoaError.domain == bridgedCancellation.domain,
+           cocoaError.code == bridgedCancellation.code { return true }
         guard let apiError = error as? APIError,
               case .network(let underlying) = apiError else { return false }
         return isCancellation(underlying)

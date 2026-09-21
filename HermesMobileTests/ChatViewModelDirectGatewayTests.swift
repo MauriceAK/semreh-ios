@@ -1085,48 +1085,36 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
     func testStaleComposerFailureCannotReplaceNewerSuccessfulSettings() async throws {
         let fake = ChatDirectFakeTransport()
         let runtime = try makeRuntime(fake)
-        let requests = ChatDirectRequestRecorder()
         let firstInventoryStarted = expectation(description: "first inventory started")
         let secondInventoryStarted = expectation(description: "second inventory started")
-        let releaseFirstInventory = DispatchSemaphore(value: 0)
-        let releaseSecondInventory = DispatchSemaphore(value: 0)
-        let client = makeClient { request in
-            let path = request.url?.path ?? ""
-            requests.append(path)
-            if path == "/api/model/options" {
-                let inventoryRequestCount = requests.values().filter { $0 == path }.count
-                if inventoryRequestCount == 1 {
-                    firstInventoryStarted.fulfill()
-                    releaseFirstInventory.wait()
-                    throw URLError(.cancelled)
-                }
-                secondInventoryStarted.fulfill()
-                releaseSecondInventory.wait()
-                return apiTestJSONResponse(
-                    #"{"model":"model-new","provider":"fixture","providers":[{"slug":"fixture","models":["model-new"]}]}"#,
-                    for: request
-                )
-            }
-            return apiTestJSONResponse(#"{"profiles":[{"name":"work"}]}"#, for: request)
-        }
+        ComposerConfigurationRaceURLProtocol.reset(
+            firstInventoryStarted: { firstInventoryStarted.fulfill() },
+            secondInventoryStarted: { secondInventoryStarted.fulfill() }
+        )
+        defer { ComposerConfigurationRaceURLProtocol.clear() }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ComposerConfigurationRaceURLProtocol.self]
+        let client = APIClient(
+            baseURL: URL(string: "https://example.test")!,
+            session: URLSession(configuration: configuration)
+        )
         let vm = makeViewModel(client: client, runtime: runtime, sessionID: nil)
 
         let staleLoad = Task { @MainActor in await vm.loadComposerConfiguration() }
         await fulfillment(of: [firstInventoryStarted], timeout: 2)
         let currentLoad = Task { @MainActor in await vm.loadComposerConfiguration() }
         await fulfillment(of: [secondInventoryStarted], timeout: 2)
-        XCTAssertTrue(vm.isLoadingComposerConfiguration)
-        releaseSecondInventory.signal()
         await currentLoad.value
-        releaseFirstInventory.signal()
         await staleLoad.value
 
         XCTAssertEqual(vm.selectedModelID, "model-new")
         XCTAssertEqual(vm.selectedModelProviderID, "fixture")
+        XCTAssertEqual(vm.selectedProfileName, "work")
         XCTAssertNil(vm.composerConfigurationErrorMessage)
         XCTAssertNil(vm.composerConfigurationDiagnostic)
         XCTAssertNil(vm.lastError)
         XCTAssertFalse(vm.isLoadingComposerConfiguration)
+        XCTAssertEqual(ComposerConfigurationRaceURLProtocol.inventoryRequestCount, 2)
         XCTAssertTrue(fake.calls().isEmpty)
         await vm.disposeDirectConversation()
         await runtime.stop()
@@ -1145,6 +1133,10 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
             "decoding"
         )
         XCTAssertEqual(ComposerConfigurationLoadOutcome(error: CancellationError()).rawValue, "cancelled")
+        XCTAssertEqual(
+            ComposerConfigurationLoadOutcome(error: CancellationError() as NSError).rawValue,
+            "cancelled"
+        )
         XCTAssertEqual(ComposerConfigurationLoadOutcome(error: DirectHermesAuthError.sessionExpired).rawValue, "auth_session_expired")
         XCTAssertEqual(
             ComposerConfigurationLoadOutcome(error: APIError.network(underlying: URLError(.cancelled))).rawValue,
@@ -4123,6 +4115,90 @@ private enum ChatDirectEventFactory {
             params: nil,
             connectionGeneration: connectionGeneration
         )
+    }
+}
+
+private final class ComposerConfigurationRaceURLProtocol: URLProtocol {
+    private static let lock = NSLock()
+    private static var inventoryRequests = 0
+    private static var firstInventoryStarted: (() -> Void)?
+    private static var secondInventoryStarted: (() -> Void)?
+    private var loadingTask: Task<Void, Never>?
+
+    static var inventoryRequestCount: Int {
+        lock.withLock { inventoryRequests }
+    }
+
+    static func reset(
+        firstInventoryStarted: @escaping () -> Void,
+        secondInventoryStarted: @escaping () -> Void
+    ) {
+        lock.withLock {
+            inventoryRequests = 0
+            self.firstInventoryStarted = firstInventoryStarted
+            self.secondInventoryStarted = secondInventoryStarted
+        }
+    }
+
+    static func clear() {
+        lock.withLock {
+            firstInventoryStarted = nil
+            secondInventoryStarted = nil
+        }
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let url = request.url else { return }
+        let inventoryOrdinal: Int?
+        let started: (() -> Void)?
+        if url.path == "/api/model/options" {
+            (inventoryOrdinal, started) = Self.lock.withLock {
+                Self.inventoryRequests += 1
+                let ordinal = Self.inventoryRequests
+                let callback = ordinal == 1 ? Self.firstInventoryStarted : Self.secondInventoryStarted
+                return (ordinal, callback)
+            }
+        } else {
+            inventoryOrdinal = nil
+            started = nil
+        }
+        started?()
+
+        loadingTask = Task { [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(for: .milliseconds(inventoryOrdinal == 1 ? 200 : 10))
+            guard !Task.isCancelled else { return }
+
+            let statusCode: Int
+            let body: String
+            if inventoryOrdinal == 1 {
+                statusCode = 503
+                body = #"{"error":"stale failure"}"#
+            } else if inventoryOrdinal == 2 {
+                statusCode = 200
+                body = #"{"model":"model-new","provider":"fixture","providers":[{"slug":"fixture","models":["model-new"]}]}"#
+            } else {
+                statusCode = 200
+                body = #"{"profiles":[{"name":"work"}]}"#
+            }
+            let response = HTTPURLResponse(
+                url: url,
+                statusCode: statusCode,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: Data(body.utf8))
+            client?.urlProtocolDidFinishLoading(self)
+        }
+    }
+
+    override func stopLoading() {
+        loadingTask?.cancel()
     }
 }
 
