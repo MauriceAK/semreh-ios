@@ -24,6 +24,17 @@ final class OpenChatSessionStore {
     /// Looking up a retained model during view construction touches this list.
     /// Observing that bookkeeping makes the caller invalidate its own body.
     @ObservationIgnored private var accessOrder: [OpenChatSessionKey] = []
+    /// List refreshes only invalidate retained history. A visible chat consumes
+    /// its own generation, so the list never renders every offscreen transcript.
+    @ObservationIgnored private var staleHistoryGeneration: [OpenChatSessionKey: UInt64] = [:]
+    @ObservationIgnored private var nextHistoryGeneration: UInt64 = 0
+    @ObservationIgnored private var selectedHistoryRefreshes: [OpenChatSessionKey: SelectedHistoryRefresh] = [:]
+    private struct SelectedHistoryRefresh {
+        let id: UUID
+        let generation: UInt64
+        let task: Task<Bool, Never>
+        var isCancelled = false
+    }
     /// One canonical refresh task per server. Foreground, pull-to-refresh, reopen,
     /// and event hints may arrive together; they all await the same reconciliation
     /// instead of issuing duplicate `/api/session` loads for every retained chat.
@@ -56,6 +67,9 @@ final class OpenChatSessionStore {
         adoptedBranchKeys.removeAll()
         gitAvailabilityViewModels.removeAll()
         accessOrder.removeAll()
+        selectedHistoryRefreshes.values.forEach { $0.task.cancel() }
+        selectedHistoryRefreshes.removeAll()
+        staleHistoryGeneration.removeAll()
         refreshTasks.values.forEach { $0.cancel() }
         refreshTasks.removeAll()
         // Invalidate immediately, before any asynchronous close can suspend.
@@ -190,6 +204,14 @@ final class OpenChatSessionStore {
             Task { await displaced.disposeDirectConversation() }
         }
         for key in oldKeys where key != target {
+            if let generation = staleHistoryGeneration.removeValue(forKey: key) {
+                staleHistoryGeneration[target] = max(staleHistoryGeneration[target] ?? 0, generation)
+            }
+            if var refresh = selectedHistoryRefreshes[key] {
+                refresh.task.cancel()
+                refresh.isCancelled = true
+                selectedHistoryRefreshes[key] = refresh
+            }
             try? organizerStore.transferSessionAssignment(
                 from: key.sessionID,
                 to: target.sessionID,
@@ -406,6 +428,111 @@ final class OpenChatSessionStore {
         return await task.value
     }
 
+    /// A successful list/profile refresh makes only matching retained chats
+    /// stale. The next visible owner performs its own canonical load.
+    func markRetainedHistoriesStale(for server: URL, profile: String?) {
+        let origin = OpenChatSessionKey.normalizedServer(server)
+        let normalizedProfile = OpenChatSessionKey.normalizedProfile(profile)
+        nextHistoryGeneration &+= 1
+        let generation = nextHistoryGeneration
+        for (key, model) in viewModels
+            where key.server == origin && key.profile == normalizedProfile && model.hasServerBackedSession {
+            staleHistoryGeneration[key] = generation
+            cancelSelectedHistoryRefresh(for: key)
+        }
+        // A profile switch cannot leave a prior profile's selected load running.
+        for key in Array(selectedHistoryRefreshes.keys)
+            where key.server == origin && key.profile != normalizedProfile {
+            cancelSelectedHistoryRefresh(for: key)
+        }
+    }
+
+    /// Called only by the mounted chat. Concurrent appearances share the same
+    /// per-conversation work; a newer generation waits for cancellation of an
+    /// older load before starting, so its result cannot arrive first.
+    @discardableResult
+    func refreshStaleHistoryIfNeeded(
+        for model: ChatViewModel,
+        session: SessionSummary,
+        server: URL,
+        modelContext: ModelContext? = nil,
+        loader: (@MainActor (ChatViewModel, ModelContext?) async -> Bool)? = nil
+    ) async -> Bool {
+        let requestedKey = OpenChatSessionKey(
+            server: server, sessionID: Self.normalizedSessionID(session), profile: session.profile
+        )
+        let key = canonicalAliases[requestedKey] ?? requestedKey
+        guard viewModels[key] === model,
+              let generation = staleHistoryGeneration[key],
+              model.activeStreamID == nil else { return false }
+
+        if let existing = selectedHistoryRefreshes[key] {
+            if existing.generation == generation && !existing.isCancelled {
+                let succeeded = await existing.task.value
+                guard succeeded, !Task.isCancelled,
+                      selectedHistoryRefreshes[key]?.id == existing.id,
+                      selectedHistoryRefreshes[key]?.isCancelled == false,
+                      staleHistoryGeneration[key] == generation,
+                      viewModels[key] === model else { return false }
+                staleHistoryGeneration.removeValue(forKey: key)
+                return true
+            }
+            existing.task.cancel()
+            _ = await existing.task.value
+            if selectedHistoryRefreshes[key]?.id == existing.id {
+                selectedHistoryRefreshes.removeValue(forKey: key)
+            }
+        }
+        guard !Task.isCancelled,
+              staleHistoryGeneration[key] == generation,
+              viewModels[key] === model else { return false }
+
+        let id = UUID()
+        let task = Task { @MainActor in
+            if let loader {
+                return await loader(model, modelContext)
+            }
+            await model.loadMessages(modelContext: modelContext)
+            return !Task.isCancelled && model.lastError == nil && !model.isViewingCachedData
+        }
+        selectedHistoryRefreshes[key] = SelectedHistoryRefresh(id: id, generation: generation, task: task)
+        let succeeded = await task.value
+        let wasStillCurrent = selectedHistoryRefreshes[key]?.id == id
+            && selectedHistoryRefreshes[key]?.isCancelled == false
+        if selectedHistoryRefreshes[key]?.id == id {
+            selectedHistoryRefreshes.removeValue(forKey: key)
+        }
+        guard succeeded, wasStillCurrent, !Task.isCancelled,
+              staleHistoryGeneration[key] == generation,
+              viewModels[key] === model else { return false }
+        staleHistoryGeneration.removeValue(forKey: key)
+        return true
+    }
+
+    /// Navigation and scene changes cancel the selected work but keep the
+    /// history stale for the next appearance.
+    func cancelSelectedHistoryRefresh(for model: ChatViewModel) {
+        for key in Array(selectedHistoryRefreshes.keys) where viewModels[key] === model {
+            cancelSelectedHistoryRefresh(for: key)
+        }
+    }
+
+    private func cancelSelectedHistoryRefresh(for key: OpenChatSessionKey) {
+        guard var refresh = selectedHistoryRefreshes[key] else { return }
+        refresh.task.cancel()
+        refresh.isCancelled = true
+        selectedHistoryRefreshes[key] = refresh
+    }
+
+#if DEBUG
+    func hasStaleHistoryForTesting(session: SessionSummary, server: URL) -> Bool {
+        let requested = OpenChatSessionKey(
+            server: server, sessionID: Self.normalizedSessionID(session), profile: session.profile
+        )
+        return staleHistoryGeneration[canonicalAliases[requested] ?? requested] != nil
+    }
+#endif
+
     private func refreshOpenSessionsUncoalesced(
         for serverKey: String,
         modelContext: ModelContext?
@@ -453,6 +580,9 @@ final class OpenChatSessionStore {
         canonicalAliases.removeAll()
         adoptedBranchKeys.removeAll()
         accessOrder.removeAll()
+        selectedHistoryRefreshes.values.forEach { $0.task.cancel() }
+        selectedHistoryRefreshes.removeAll()
+        staleHistoryGeneration.removeAll()
         liveOwnershipGeneration = 0
     }
 
@@ -498,6 +628,9 @@ final class OpenChatSessionStore {
         Task { await viewModel.disposeDirectConversation() }
         let aliases = viewModels.keys.filter { viewModels[$0] === viewModel }
         for alias in aliases {
+            selectedHistoryRefreshes[alias]?.task.cancel()
+            selectedHistoryRefreshes.removeValue(forKey: alias)
+            staleHistoryGeneration.removeValue(forKey: alias)
             viewModels.removeValue(forKey: alias)
             gitAvailabilityViewModels.removeValue(forKey: alias)
         }
@@ -540,8 +673,12 @@ private struct OpenChatSessionKey: Hashable {
     init(server: URL, sessionID: String, profile: String? = nil) {
         self.server = Self.normalizedServer(server)
         self.sessionID = sessionID
+        self.profile = Self.normalizedProfile(profile)
+    }
+
+    static func normalizedProfile(_ profile: String?) -> String {
         let normalized = profile?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        self.profile = normalized.isEmpty ? "default" : normalized
+        return normalized.isEmpty ? "default" : normalized
     }
 
     static func normalizedServer(_ server: URL) -> String {

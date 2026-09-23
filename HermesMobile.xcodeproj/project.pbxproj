@@ -93,6 +93,8 @@
 		1A2B3C4D5E6F700000000005 /* MarkdownUI in Frameworks */ = {isa = PBXBuildFile; productRef = 1A2B3C4D5E6F700000000095 /* MarkdownUI */; };
 		1A2B3C4D5E6F700000000006 /* Splash in Frameworks */ = {isa = PBXBuildFile; productRef = 1A2B3C4D5E6F700000000096 /* Splash */; };
 		1A2B3C4D5E6F700000000007 /* Highlightr in Frameworks */ = {isa = PBXBuildFile; productRef = 1A2B3C4D5E6F700000000097 /* Highlightr */; };
+		C0DE340000000000000000A3 /* cmark-gfm in Frameworks */ = {isa = PBXBuildFile; productRef = C92200000000000000000004 /* cmark-gfm */; };
+		C0DE340000000000000000A4 /* cmark-gfm-extensions in Frameworks */ = {isa = PBXBuildFile; productRef = C92200000000000000000002 /* cmark-gfm-extensions */; };
 		1A2B3C4D5E6F700000000008 /* KeychainAccess in Frameworks */ = {isa = PBXBuildFile; productRef = 1A2B3C4D5E6F700000000098 /* KeychainAccess */; };
 		5417A7400000000000000092 /* SwiftMath in Frameworks */ = {isa = PBXBuildFile; productRef = 5417A7400000000000000091 /* SwiftMath */; };
 		1A2B3C4D5E6F7000000000A0 /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F7000000000B0 /* KeychainStore.swift */; };
@@ -197,6 +199,7 @@
 		1A2B3C4D5E6F7000000000D8 /* MessageBubbleView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F7000000000D9 /* MessageBubbleView.swift */; };
 		BEEF02400000000000000001 /* ChatAttachmentPreviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BEEF02400000000000000002 /* ChatAttachmentPreviewView.swift */; };
 		1A2B3C4D5E6F7000000000DA /* MarkdownRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F7000000000DB /* MarkdownRenderer.swift */; };
+		C0DE340000000000000000A1 /* NativeRichRowPrototype.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE340000000000000000A2 /* NativeRichRowPrototype.swift */; };
 		C14300000000000000000001 /* StreamingMarkdownSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = C14300000000000000000002 /* StreamingMarkdownSupport.swift */; };
 		C0DE34000000000000000001 /* TranscriptMedia.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE34000000000000000002 /* TranscriptMedia.swift */; };
 		C0DE34000000000000000006 /* TranscriptMediaView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE34000000000000000005 /* TranscriptMediaView.swift */; };
@@ -379,6 +382,8 @@
 		C15300000000000000000005 /* KanbanCardEditorStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C15300000000000000000006 /* KanbanCardEditorStateTests.swift */; };
 		C15400000000000000000005 /* KanbanCardDetailStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C15400000000000000000006 /* KanbanCardDetailStateTests.swift */; };
 		C21300000000000000000007 /* MarkdownUI in Frameworks */ = {isa = PBXBuildFile; productRef = C21300000000000000000008 /* MarkdownUI */; };
+		C92200000000000000000001 /* cmark-gfm-extensions in Frameworks */ = {isa = PBXBuildFile; productRef = C92200000000000000000002 /* cmark-gfm-extensions */; };
+		C92200000000000000000003 /* cmark-gfm in Frameworks */ = {isa = PBXBuildFile; productRef = C92200000000000000000004 /* cmark-gfm */; };
 		B5A220000000000000000005 /* ChatMarkerMessageClassifierTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5A220000000000000000006 /* ChatMarkerMessageClassifierTests.swift */; };
 		B5A100000000000000000004 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = B5A100000000000000000014 /* PrivacyInfo.xcprivacy */; };
 		B5A100000000000000000005 /* SharedDraftStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5A100000000000000000016 /* SharedDraftStoreTests.swift */; };
@@ -651,6 +656,7 @@
 		1A2B3C4D5E6F7000000000D9 /* MessageBubbleView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageBubbleView.swift; sourceTree = "<group>"; };
 		BEEF02400000000000000002 /* ChatAttachmentPreviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatAttachmentPreviewView.swift; sourceTree = "<group>"; };
 		1A2B3C4D5E6F7000000000DB /* MarkdownRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownRenderer.swift; sourceTree = "<group>"; };
+		C0DE340000000000000000A2 /* NativeRichRowPrototype.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeRichRowPrototype.swift; sourceTree = "<group>"; };
 		C14300000000000000000002 /* StreamingMarkdownSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamingMarkdownSupport.swift; sourceTree = "<group>"; };
 		C0DE34000000000000000002 /* TranscriptMedia.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptMedia.swift; sourceTree = "<group>"; };
 		C0DE34000000000000000005 /* TranscriptMediaView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptMediaView.swift; sourceTree = "<group>"; };
@@ -890,6 +896,8 @@
 				1A2B3C4D5E6F700000000005 /* MarkdownUI in Frameworks */,
 				1A2B3C4D5E6F700000000006 /* Splash in Frameworks */,
 				1A2B3C4D5E6F700000000007 /* Highlightr in Frameworks */,
+				C0DE340000000000000000A3 /* cmark-gfm in Frameworks */,
+				C0DE340000000000000000A4 /* cmark-gfm-extensions in Frameworks */,
 				1A2B3C4D5E6F700000000008 /* KeychainAccess in Frameworks */,
 				5417A7400000000000000092 /* SwiftMath in Frameworks */,
 			);
@@ -900,6 +908,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				C21300000000000000000007 /* MarkdownUI in Frameworks */,
+				C92200000000000000000001 /* cmark-gfm-extensions in Frameworks */,
+				C92200000000000000000003 /* cmark-gfm in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1378,6 +1388,7 @@
 				C21300000000000000000002 /* StreamingTextFade.swift */,
 				C21300000000000000000004 /* StreamingTextFadeRenderer.swift */,
 				1A2B3C4D5E6F7000000000DB /* MarkdownRenderer.swift */,
+				C0DE340000000000000000A2 /* NativeRichRowPrototype.swift */,
 				C14300000000000000000002 /* StreamingMarkdownSupport.swift */,
 				C0DE34000000000000000002 /* TranscriptMedia.swift */,
 				C0DE34000000000000000005 /* TranscriptMediaView.swift */,
@@ -1631,6 +1642,8 @@
 				1A2B3C4D5E6F700000000095 /* MarkdownUI */,
 				1A2B3C4D5E6F700000000096 /* Splash */,
 				1A2B3C4D5E6F700000000097 /* Highlightr */,
+				C92200000000000000000004 /* cmark-gfm */,
+				C92200000000000000000002 /* cmark-gfm-extensions */,
 				1A2B3C4D5E6F700000000098 /* KeychainAccess */,
 				5417A7400000000000000091 /* SwiftMath */,
 			);
@@ -1653,6 +1666,8 @@
 			name = HermesMobileTests;
 			packageProductDependencies = (
 				C21300000000000000000008 /* MarkdownUI */,
+				C92200000000000000000002 /* cmark-gfm-extensions */,
+				C92200000000000000000004 /* cmark-gfm */,
 			);
 			productName = HermesMobileTests;
 			productReference = 1A2B3C4D5E6F700000000015 /* HermesMobileTests.xctest */;
@@ -2006,6 +2021,7 @@
 				1A2B3C4D5E6F7000000000EA /* FilePreviewViewModel.swift in Sources */,
 				BEEF02600000000000000001 /* FileExportSupport.swift in Sources */,
 				1A2B3C4D5E6F7000000000DA /* MarkdownRenderer.swift in Sources */,
+				C0DE340000000000000000A1 /* NativeRichRowPrototype.swift in Sources */,
 				C14300000000000000000001 /* StreamingMarkdownSupport.swift in Sources */,
 				C0DE34000000000000000001 /* TranscriptMedia.swift in Sources */,
 				C0DE34000000000000000006 /* TranscriptMediaView.swift in Sources */,
@@ -2765,6 +2781,14 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		C92200000000000000000004 /* cmark-gfm */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = "cmark-gfm";
+		};
+		C92200000000000000000002 /* cmark-gfm-extensions */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = "cmark-gfm-extensions";
+		};
 		1A2B3C4D5E6F700000000095 /* MarkdownUI */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 1A2B3C4D5E6F700000000091 /* XCRemoteSwiftPackageReference "swift-markdown-ui" */;

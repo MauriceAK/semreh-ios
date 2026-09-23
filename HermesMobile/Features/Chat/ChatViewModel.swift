@@ -3,6 +3,8 @@ import AVFoundation
 import MediaPlayer
 import Observation
 import SwiftData
+import SwiftUI
+import UIKit
 #if DEBUG
 import OSLog
 #endif
@@ -528,7 +530,15 @@ final class ChatViewModel {
     private(set) var isCompressingSession = false
     private(set) var isCancellingStream = false
     private(set) var isViewingCachedData = false
+#if DEBUG
+    private var debugActivityLabActiveStreamID: String? {
+        didSet { transcriptRenderRevision &+= 1 }
+    }
+#endif
     var activeStreamID: String? {
+#if DEBUG
+        if let debugActivityLabActiveStreamID { return debugActivityLabActiveStreamID }
+#endif
         guard usesDirectGateway else { return nil }
         guard !directInvalidated, let controller = directConversation, controller.runState != .idle else { return nil }
         // UI liveness identity only; never a persisted gateway runtime ID.
@@ -1073,6 +1083,9 @@ final class ChatViewModel {
     private var currentModel: String?
     private var currentModelProvider: String?
     private var currentProfile: String?
+#if DEBUG
+    private var isConfigurationLabFixture = false
+#endif
     private let isCLISession: Bool
     private let server: URL
     let client: APIClient
@@ -2244,12 +2257,16 @@ final class ChatViewModel {
                 scope: outgoingInsertionScope, messageID: localID,
                 sequence: outgoingInsertionSequence
             )
-            messages.append(ChatMessage(
-                role: "user",
-                content: text,
-                timestamp: Date().timeIntervalSince1970,
-                messageId: localID
-            ))
+            withAnimation(ChatMotion.outgoingBubble(
+                reduceMotion: UIAccessibility.isReduceMotionEnabled
+            )) {
+                messages.append(ChatMessage(
+                    role: "user",
+                    content: text,
+                    timestamp: Date().timeIntervalSince1970,
+                    messageId: localID
+                ))
+            }
             // The protected interval ends at the optimistic insertion.  Any
             // later empty refresh is no longer the pre-submit race and must
             // retain the ordinary authoritative-empty semantics.
@@ -2898,6 +2915,9 @@ final class ChatViewModel {
 
     /// Refreshes the direct Hermes inventory when a picker opens.
     func refreshModelCatalogForPickerOpen() async {
+#if DEBUG
+        if isConfigurationLabFixture { return }
+#endif
         await loadDirectComposerConfiguration()
     }
     @discardableResult
@@ -5441,9 +5461,13 @@ final class ChatViewModel {
     private func archiveLiveReasoningIfNeeded() {
         guard !liveReasoningText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
 
+        let existingStreamingAnchor = streamingAssistantMessageID.flatMap { id in
+            messages.contains(where: { $0.role == "assistant" && $0.messageId == id }) ? id : nil
+        }
+
         completedReasoningGroups.append(
             ReasoningGroup(
-                anchorMessageID: reasoningAnchorMessageID,
+                anchorMessageID: reasoningAnchorMessageID ?? existingStreamingAnchor,
                 text: liveReasoningText
             )
         )
@@ -6373,9 +6397,15 @@ extension ChatViewModel {
 
         for group in archivedGroups {
             let visibleText = group.anchorMessageID.flatMap { assistantMessagesByID[$0]?.content }
+            // An empty assistant row still owns archived reasoning. Preserve
+            // its concrete anchor instead of turning the group into a loose
+            // bottom card when a later user turn arrives.
+            let existingAnchor = group.anchorMessageID.flatMap { anchor in
+                assistantMessagesByID[anchor] == nil ? nil : anchor
+            }
             append(
                 text: group.text,
-                anchorMessageID: group.anchorMessageID,
+                anchorMessageID: existingAnchor,
                 turnKey: group.anchorMessageID.flatMap { turnKeysByMessageID[$0] } ?? "archived:\(group.anchorMessageID ?? group.id)",
                 visibleText: visibleText,
             )
@@ -6661,7 +6691,9 @@ private struct ReasoningDisplayBuilder {
     }
 
     mutating func append(text: String, anchorMessageID: String?, visibleText: String?) {
-        if let visibleText, !visibleText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if anchorMessageID != nil,
+           self.anchorMessageID == nil
+            || (visibleText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false) {
             self.anchorMessageID = anchorMessageID
         }
 
@@ -6926,6 +6958,70 @@ private final class SpeechSynthesizerDelegate: NSObject, AVSpeechSynthesizerDele
 
 #if DEBUG
 extension ChatViewModel {
+    /// The real ChatView chrome with a local, unanchored historical reasoning
+    /// card and a new active turn. No direct controller or network is started.
+    @MainActor
+    static func makeFullActivityLabFixture(anchoredHistory: Bool = false) -> (
+        session: SessionSummary, server: URL, viewModel: ChatViewModel
+    ) {
+        let server = URL(string: "http://127.0.0.1:9")!
+        let session = SessionSummary(sessionId: "semreh-full-activity-lab", title: "Activity full lab")
+        let model = ChatViewModel(session: session, server: server)
+        model.messages = [
+            ChatMessage(role: "user", content: "Review the prior result.",
+                        timestamp: 1, messageId: "activity-full-old-user"),
+            ChatMessage(role: "assistant", content: anchoredHistory ? "" : "The prior result is available.",
+                        timestamp: 2, messageId: "activity-full-old-assistant"),
+            ChatMessage(role: "user", content: "Inspect the new source.",
+                        timestamp: 3, messageId: "activity-full-current-user")
+        ]
+        model.completedReasoningGroups = [ReasoningGroup(
+            id: "activity-full-history",
+            anchorMessageID: anchoredHistory ? "activity-full-old-assistant" : nil,
+            text: "Earlier unanchored analysis remains available."
+        )]
+        model.debugActivityLabActiveStreamID = "synthetic-active-run"
+        model.isLoading = false
+        model.hasOlderMessages = false
+        return (session, server, model)
+    }
+
+    @MainActor
+    func advanceFullActivityLab(to phase: Int) {
+        let assistantID = "activity-full-current-assistant"
+        switch phase {
+        case 1:
+            guard !messages.contains(where: { $0.messageId == assistantID }) else { return }
+            appendStreamingMessage(ChatMessage(role: "assistant", content: "",
+                                               timestamp: 4, messageId: assistantID))
+            streamingAssistantMessageID = assistantID
+            toolCallAnchorMessageID = assistantID
+            liveToolCalls = [ToolCall(
+                id: "activity-full-search", name: "search_files",
+                preview: "Searching synthetic source.",
+                args: ["query": .string("synthetic source")], isCompleted: false
+            )]
+        case 2:
+            guard let index = messages.firstIndex(where: { $0.messageId == assistantID }) else { return }
+            liveToolCalls = []
+            setCompletedToolCallGroups([ToolCallGroup(
+                id: "activity-full-completed-search", anchorMessageID: assistantID,
+                toolCalls: [ToolCall(
+                    id: "activity-full-search", name: "search_files",
+                    preview: "Synthetic source found.",
+                    args: ["query": .string("synthetic source")], isCompleted: true
+                )]
+            )])
+            replaceStreamingMessage(at: index, with: ChatMessage(
+                role: "assistant", content: "The synthetic source is available.",
+                timestamp: 4, messageId: assistantID
+            ))
+            streamingAssistantMessageID = nil
+        default:
+            break
+        }
+    }
+
     /// Structural reducer coverage only; this does not enable gateway paging during a run.
     func prependMessagesForTesting(_ olderMessages: [ChatMessage]) {
         withBatchedTranscriptDerivedState {
@@ -6936,12 +7032,134 @@ extension ChatViewModel {
 
     /// Server-free fixture that exercises the exact production ChatView,
     /// transcript rows, Markdown renderer, restoration, and bottom-scroll loop.
+#if DEBUG
+    @MainActor
+    func bumpUnchangedTranscriptRevisionForTesting() {
+        transcriptRenderRevision &+= 1
+    }
+
+    /// Replays the production optimistic-insertion order in a local-only
+    /// ChatView fixture. This does not enter the direct-send/controller path.
+    @discardableResult
+    @MainActor
+    func appendOutgoingMotionFixtureMessage() -> UInt64? {
+        guard server.host == "127.0.0.1", server.port == 9,
+              sessionID?.hasPrefix("outgoing-motion-lab-") == true else { return nil }
+        outgoingInsertionSequence += 1
+        let sequence = outgoingInsertionSequence
+        let messageID = "local-motion-\(sequence)"
+        outgoingInsertionEvent = OutgoingInsertionEvent(
+            scope: outgoingInsertionScope, messageID: messageID,
+            sequence: sequence
+        )
+        withAnimation(ChatMotion.outgoingBubble(
+            reduceMotion: UIAccessibility.isReduceMotionEnabled
+        )) {
+            messages.append(ChatMessage(
+                role: "user", content: "Synthetic local send \(sequence).",
+                timestamp: Date().timeIntervalSince1970, messageId: messageID
+            ))
+        }
+        return sequence
+    }
+#endif
+
     @MainActor
     static func makePerformanceLabFixture() -> (
         session: SessionSummary,
         server: URL,
         viewModel: ChatViewModel
     ) {
+#if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--chat-configuration-lab") {
+            let isDraft = ProcessInfo.processInfo.arguments.contains("--chat-configuration-draft")
+            let server = URL(string: "http://127.0.0.1:9")!
+            let session = SessionSummary(
+                sessionId: isDraft ? nil : "configuration-existing",
+                title: isDraft ? "New Chat" : "Configuration fixture",
+                workspace: "/fixture",
+                model: "fixture-balanced",
+                modelProvider: "fixture",
+                profile: "default"
+            )
+            let model = ChatViewModel(session: session, server: server,
+                                      gatewayRuntimeProvider: { _ in throw URLError(.cannotConnectToHost) })
+            model.isConfigurationLabFixture = true
+            model.selectedProfileName = "default"
+            model.modelCatalogGroups = [ModelCatalogGroup(
+                id: "fixture", name: "Fixture models", providerID: "fixture",
+                models: [
+                    ModelCatalogOption(id: "fixture-balanced", displayName: "Balanced", providerID: "fixture"),
+                    ModelCatalogOption(id: "fixture-deep", displayName: "Deep thinking", providerID: "fixture")
+                ]
+            )]
+            model.profileOptions = ["default", "Research"].map {
+                ProfileSummary(name: $0, path: nil, isDefault: $0 == "default", isActive: nil,
+                               gatewayRunning: nil, model: nil, provider: nil, hasEnv: nil, skillCount: nil)
+            }
+            if !isDraft {
+                model.messages = [ChatMessage(role: "assistant", content: "This existing conversation keeps its original profile and model.", timestamp: 0, messageId: "configuration-message")]
+            }
+            return (session, server, model)
+        }
+        if ProcessInfo.processInfo.arguments.contains("--chat-outgoing-motion-lab") {
+            let server = URL(string: "http://127.0.0.1:9")!
+            let session = SessionSummary(
+                sessionId: "outgoing-motion-lab-\(UUID().uuidString)",
+                title: "Outgoing motion lab"
+            )
+            let model = ChatViewModel(session: session, server: server)
+            if ProcessInfo.processInfo.arguments.contains("--chat-outgoing-motion-populated") {
+                model.messages = (0..<12).map { index in
+                    let isAssistant = !index.isMultiple(of: 2)
+                    return ChatMessage(
+                        role: isAssistant ? "assistant" : "user",
+                        content: isAssistant
+                            ? "Prior synthetic answer \(index). This is a local fixture for a settled near-bottom conversation.\nA second line gives the prior row ordinary chat height."
+                            : "Prior synthetic question \(index).",
+                        timestamp: Double(index),
+                        messageId: "motion-history-\(index)"
+                    )
+                }
+            }
+            return (session, server, model)
+        }
+#endif
+        if let argument = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix("--representative-count=") }),
+           let count = Int(argument.split(separator: "=").last ?? ""), [20, 120].contains(count) {
+            let server = URL(string: "http://127.0.0.1:9")!
+            let session = SessionSummary(sessionId: "representative-\(count)", title: "Representative \(count)")
+            TranscriptRestoreStore.shared.save(TranscriptRestorePoint(followingLatest: false, visibleMessageID: "transcript:0"), server: server, sessionID: session.sessionId!)
+            let model = ChatViewModel(session: session, server: server)
+            model.messages = (0..<count).map { index in
+                let assistant = !index.isMultiple(of: 2)
+                let longCode = ((index == count - 1 && ProcessInfo.processInfo.arguments.contains("--native-rich-wrap-fixture"))
+                    || (index == 1 && ProcessInfo.processInfo.arguments.contains("--native-direct-premount-rich-wrap-long")))
+                    ? "\nlet horizontalProbe = \"START\" + " + String(repeating: "\"segment\" + ", count: 15) + "\"FAR_END_MARKER\""
+                    : ""
+                let richLinkBiDi = index == 1
+                    && ProcessInfo.processInfo.arguments.contains("--native-direct-premount-rich-link-bidi")
+                    ? "\n\nالعربية تبدأ السطر مع Unicode 👩🏽‍💻.\n\n[Reference source](https://example.invalid/reference)"
+                    : ""
+                let body = "## Response \(index)\n\nA **readable** explanation with `inline code`, العربية and Unicode 👩🏽‍💻.\n\n- Preserve the current reader position.\n- Keep the completed result available.\n\n```swift\nlet answer = values.map { $0 + \(index) }\nprint(answer)\(longCode)\n```\n\n| Check | State |\n| --- | --- |\n| Rendering | Ready |\(richLinkBiDi)\n\n\(index == count - 1 ? "Representative conversation complete." : "Continue the review.")"
+                return ChatMessage(role: assistant ? "assistant" : "user", content: assistant ? body : "Review response \(index+1).", timestamp: Double(index), messageId: "representative-\(index)", reasoning: assistant ? "Check the relevant evidence and explain the result." : nil)
+            }
+            var toolCalls = [PersistedToolCall(name: "read_file", snippet: "Read the bounded fixture.", tid: "representative-tool", assistantMsgIdx: count-1, args: ["path": .string("fixture.md")])]
+            if ProcessInfo.processInfo.arguments.contains("--native-direct-two-tool-first-fixture") {
+                toolCalls += [
+                    PersistedToolCall(name: "read_file", snippet: "Read the synthetic research note.",
+                                      tid: "first-action-read", assistantMsgIdx: 1,
+                                      args: ["path": .string("fixtures/research.md")]),
+                    PersistedToolCall(name: "web_search", snippet: "Two synthetic source matches found.",
+                                      tid: "first-action-search", assistantMsgIdx: 1,
+                                      args: ["query": .string("synthetic research question")])
+                ]
+            }
+            model.setCompletedToolCallGroups(ToolCallGroup.groups(
+                persistedToolCalls: toolCalls, messages: model.messages, messageOffset: 0))
+            model.isLoading = false; model.hasOlderMessages = false
+            return (session, server, model)
+        }
         let server = URL(string: "http://127.0.0.1:9")!
         let session = SessionSummary(
             sessionId: "semreh-chat-performance-lab",
@@ -6949,8 +7167,9 @@ extension ChatViewModel {
         )
         TranscriptRestoreStore.shared.save(
             TranscriptRestorePoint(
-                followingLatest: false,
-                visibleMessageID: "transcript:20"
+                followingLatest: ProcessInfo.processInfo.arguments.contains("--chat-viewport-follow-latest-open"),
+                visibleMessageID: ProcessInfo.processInfo.arguments.contains("--chat-viewport-follow-latest-open")
+                    ? nil : "transcript:20"
             ),
             server: server,
             sessionID: session.sessionId ?? session.id
@@ -6958,7 +7177,125 @@ extension ChatViewModel {
 
         let viewModel = ChatViewModel(session: session, server: server)
         viewModel.seedPerformanceLab(messageCount: 10_000)
+        if ProcessInfo.processInfo.arguments.contains("--native-direct-mixed-rich-10k") {
+            let calls = [1, 5_001, 9_999].map { index in
+                PersistedToolCall(name: "read_file", snippet: "Read synthetic research evidence.",
+                    tid: "mixed-rich-tool-\(index)", assistantMsgIdx: index,
+                    args: ["path": .string("fixtures/research-\(index).md")])
+            }
+            viewModel.setCompletedToolCallGroups(ToolCallGroup.groups(
+                persistedToolCalls: calls, messages: viewModel.messages, messageOffset: 0))
+        }
         return (session, server, viewModel)
+    }
+
+    /// A few individually very tall rows stress a different lazy-layout path
+    /// from the 10,000 mostly short rows. No gateway or provider is contacted.
+    @MainActor
+    static func makeTallPerformanceLabFixture() -> (
+        session: SessionSummary, server: URL, viewModel: ChatViewModel
+    ) {
+        let server = URL(string: "http://127.0.0.1:9")!
+        let session = SessionSummary(sessionId: "semreh-tall-mixed-lab", title: "Tall mixed transcript lab")
+        TranscriptRestoreStore.shared.save(
+            TranscriptRestorePoint(followingLatest: false, visibleMessageID: "transcript:1"),
+            server: server, sessionID: "semreh-tall-mixed-lab"
+        )
+        let viewModel = ChatViewModel(session: session, server: server)
+        let paragraph = "A deliberately tall paragraph tests real wrapping and measured row height. The reader should see actual scrolling, keep control during an interrupted jump, and never lose the transcript while lazy geometry changes. "
+        viewModel.messages = (0..<24).map { index in
+            let assistant = !index.isMultiple(of: 2)
+            let prose = String(repeating: paragraph, count: 48)
+            let code = String(repeating: "let measuredHeight = rows.reduce(0) { $0 + $1.height }\n", count: 96)
+            let body = "## Mixed response \(index)\n\n\(prose)\n\n```swift\n\(code)```\n\n| State | Owner |\n| --- | --- |\n| Jump | Explicit |\n| Drag | Reader |\n\n\(index == 23 ? "End of tall mixed conversation." : "Section complete.")"
+            return ChatMessage(role: assistant ? "assistant" : "user",
+                               content: assistant ? body : "Inspect mixed response \(index + 1).",
+                               timestamp: Double(index), messageId: "tall-message-\(index)",
+                               reasoning: assistant ? "Check the measured geometry before reporting completion." : nil)
+        }
+        viewModel.setCompletedToolCallGroups(ToolCallGroup.groups(
+            persistedToolCalls: [PersistedToolCall(name: "read_file", snippet: "Read the bounded fixture.",
+                                                  tid: "tall-fixture-tool", assistantMsgIdx: 23,
+                                                  args: ["path": .string("fixture.md")])],
+            messages: viewModel.messages, messageOffset: 0
+        ))
+        viewModel.isLoading = false
+        viewModel.hasOlderMessages = false
+        return (session, server, viewModel)
+    }
+
+    /// Four source-faithful synthetic rows for the few-long-messages viewport
+    /// diagnostic. This uses the normal ChatView and no live server.
+    @MainActor
+    static func makeFourTallPerformanceLabFixture() -> (
+        session: SessionSummary, server: URL, viewModel: ChatViewModel
+    ) {
+        let server = URL(string: "http://127.0.0.1:9")!
+        let session = SessionSummary(sessionId: "semreh-four-tall-lab", title: "Four tall message lab")
+        let followsLatest = ProcessInfo.processInfo.arguments.contains("--chat-viewport-follow-latest-open")
+        TranscriptRestoreStore.shared.save(
+            TranscriptRestorePoint(
+                followingLatest: followsLatest,
+                visibleMessageID: followsLatest ? nil : "transcript:0"
+            ),
+            server: server, sessionID: "semreh-four-tall-lab"
+        )
+
+        let model = ChatViewModel(session: session, server: server)
+        let plainParagraph = "This is a synthetic long research prompt with several observations. Keep every sentence readable while scrolling, retain the selected passage, and return to the same place after reopening. "
+        let richParagraph = "A synthetic research finding has **emphasis**, `inline code`, a [local reference](https://example.invalid/reference), العربية, and Unicode 👩🏽‍💻. Its lines must wrap naturally without losing content. "
+        let firstRich = """
+        ## Long research response
+
+        \(String(repeating: richParagraph, count: 48))
+
+        - Preserve the reader anchor.
+        - Keep the tool result available.
+
+        ```swift
+        \(String(repeating: "let result = records.map { $0.id }\n", count: 96))
+        ```
+
+        | Check | State |
+        | --- | --- |
+        | Markdown | Visible |
+
+        First rich response complete.
+        """
+        let lastRich = """
+        ## Final research response
+
+        \(String(repeating: richParagraph, count: 36))
+
+        ```swift
+        \(String(repeating: "let value = Array(0..<1_000).reduce(0, +)\n", count: 320))
+        let fourTallFinalMarker = "SEMREH_FOUR_TALL_CODE_END"
+        ```
+
+        | Check | State |
+        | --- | --- |
+        | Thinking | Retained |
+        | Tool | Expandable |
+
+        End of four-row mixed conversation.
+        """
+        model.messages = [
+            ChatMessage(role: "user", content: "Initial long research request.\n\n" + String(repeating: plainParagraph, count: 48), timestamp: 0, messageId: "four-tall-message-0"),
+            ChatMessage(role: "assistant", content: firstRich, timestamp: 1, messageId: "four-tall-message-1", reasoning: "Review the first synthetic finding and identify its source."),
+            ChatMessage(role: "user", content: "Follow-up long research request.\n\n" + String(repeating: plainParagraph, count: 48), timestamp: 2, messageId: "four-tall-message-2"),
+            ChatMessage(role: "assistant", content: lastRich, timestamp: 3, messageId: "four-tall-message-3", reasoning: "Compare the synthetic findings before completing the answer.")
+        ]
+        model.setCompletedToolCallGroups(ToolCallGroup.groups(
+            persistedToolCalls: [PersistedToolCall(
+                name: "read_file", snippet: "Read a synthetic research note.",
+                tid: "four-tall-tool", assistantMsgIdx: 3,
+                args: ["path": .string("fixtures/four-tall-research.md")]
+            )],
+            messages: model.messages, messageOffset: 0
+        ))
+        model.isLoading = false
+        model.hasOlderMessages = false
+        return (session, server, model)
     }
 
     /// A bounded multi-owner variant of the server-free performance fixture. Each
@@ -7005,7 +7342,8 @@ extension ChatViewModel {
             performanceLabStreamingTurnInFlight = false
             print("SEMREH_LAB_STREAM elapsed=\(started.duration(to: .now)) rows=\(messages.count) full_recomputes=\(transcriptFullRecomputeCountForTesting - fullRecomputesBefore)")
         }
-        let sequence = (messages.count - 10_000) / 2 + 1
+        let baseline = messages.count >= 10_000 ? 10_000 : 120
+        let sequence = max(1, (messages.count - baseline) / 2 + 1)
         let timestamp = (messages.last?.timestamp ?? 10_000) + 1
         let assistantID = "perf-stream-message-\(sequence)-assistant"
         appendStreamingMessage(ChatMessage(
@@ -7071,6 +7409,27 @@ extension ChatViewModel {
 
                 End of 10,000-row conversation\(conversationIndex == 0 ? "" : " \(conversationIndex)").
                 """
+            } else if ProcessInfo.processInfo.arguments.contains("--native-direct-mixed-rich-10k"),
+                      role == "assistant", [1, 3, 4_999, 5_001, 9_997].contains(index) {
+                content = """
+                ## Research response \(index)
+
+                A **readable** explanation with `inline code`, العربية and Unicode 👩🏽‍💻. [Synthetic reference](https://example.invalid/reference)
+
+                - Preserve the current reader position.
+                - Keep source and code copy available.
+
+                ```swift
+                let evidence = records.map { $0.id + \(index) }
+                print(evidence)
+                ```
+
+                | Check | State |
+                | --- | --- |
+                | Rendering | Ready |
+
+                Continue the research review.
+                """
             } else if role == "assistant", index.isMultiple(of: 251) {
                 content = """
                 ### Checkpoint \(index)
@@ -7091,7 +7450,10 @@ extension ChatViewModel {
                 role: role,
                 content: content,
                 timestamp: Double(index),
-                messageId: String(format: "perf-message-%06d", index)
+                messageId: String(format: "perf-message-%06d", index),
+                reasoning: ProcessInfo.processInfo.arguments.contains("--native-direct-mixed-rich-10k")
+                    && [1, 5_001, 9_999].contains(index)
+                    ? "Check synthetic evidence for response \(index), then explain the result." : nil
             )
         }
         isLoading = false

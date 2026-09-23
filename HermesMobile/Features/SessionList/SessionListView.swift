@@ -1,6 +1,7 @@
 import SwiftUI
 import SwiftData
 import UIKit
+import OSLog
 
 @MainActor
 struct SessionListView: View {
@@ -269,7 +270,7 @@ struct SessionListView: View {
                         await openPendingDeepLinkedSessionIfNeeded()
                     },
                     refreshSessionsAndActiveProfile: {
-                        await refreshSessionsAndActiveProfile(reconcileOpenTranscripts: true)
+                        await refreshSessionsAndActiveProfile(markRetainedHistoriesStale: true)
                     },
                     restoreLastSelectedSession: { clearsMissingSelection in
                         restoreLastSelectedSessionIfNeeded(
@@ -293,7 +294,7 @@ struct SessionListView: View {
 
                 foregroundRefreshTask?.cancel()
                 foregroundRefreshTask = Task { @MainActor in
-                    await refreshSessionsAndActiveProfile(reconcileOpenTranscripts: true)
+                    await refreshSessionsAndActiveProfile(markRetainedHistoriesStale: true)
                     guard !Task.isCancelled, scenePhase == .active else { return }
                 }
             }
@@ -313,7 +314,7 @@ struct SessionListView: View {
             }
             .task(id: returnRefreshID) {
                 guard returnRefreshID != nil else { return }
-                await refreshSessionsAndActiveProfile(reconcileOpenTranscripts: true)
+                await refreshSessionsAndActiveProfile(markRetainedHistoriesStale: true)
             }
             .onAppear {
 #if DEBUG
@@ -376,7 +377,17 @@ struct SessionListView: View {
                 )
             }
             .refreshable {
-                await refreshSessionsAndActiveProfile(reconcileOpenTranscripts: true)
+#if DEBUG
+                let refreshStartedAt = Date()
+                let refreshLogger = Logger(subsystem: "com.maurice.semreh", category: "SessionListRefresh")
+                refreshLogger.debug("event=pull_refresh_started rows=\(viewModel.sessions.count, privacy: .public)")
+#endif
+                // The selected chat will reconcile its own retained history
+                // when opened; the list never reloads offscreen transcripts.
+                await refreshSessionsAndActiveProfile(markRetainedHistoriesStale: true)
+#if DEBUG
+                refreshLogger.debug("event=pull_refresh_list_finished elapsedMs=\(Int(Date().timeIntervalSince(refreshStartedAt) * 1000), privacy: .public) rows=\(viewModel.sessions.count, privacy: .public) failed=\(viewModel.sessionLoadError != nil, privacy: .public)")
+#endif
             }
             .modifier(
                 SessionActionConfirmations(
@@ -448,7 +459,7 @@ struct SessionListView: View {
             }
 
         }
-        .navigationTitle(usesShellChrome ? "Sessions" : "")
+        .navigationTitle(usesShellChrome ? "Chats" : "")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             if usesShellChrome {
@@ -1351,15 +1362,15 @@ struct SessionListView: View {
         )
     }
 
-    private func refreshSessionsAndActiveProfile(reconcileOpenTranscripts: Bool = false) async {
+    private func refreshSessionsAndActiveProfile(markRetainedHistoriesStale: Bool = false) async {
         await SidebarLoadOrdering.run(
             resolveActiveProfile: { await viewModel.loadActiveProfile() },
             loadSessions: { await loadSessions() }
         )
-        guard !Task.isCancelled, reconcileOpenTranscripts else { return }
-        _ = await OpenChatSessionStore.shared.refreshOpenSessions(
-            for: server,
-            modelContext: modelContext
+        guard !Task.isCancelled, markRetainedHistoriesStale,
+              viewModel.sessionLoadError == nil else { return }
+        OpenChatSessionStore.shared.markRetainedHistoriesStale(
+            for: server, profile: viewModel.activeProfileName
         )
     }
 
@@ -1740,6 +1751,9 @@ struct SessionListView: View {
     }
 
     private func selectSession(_ session: SessionSummary) {
+        // The list remains mounted behind the detail. Do not carry its keyboard
+        // focus into the conversation or resurrect it when returning to Chats.
+        searchFieldIsFocused = false
 #if DEBUG
         ChatPerformanceCadenceMonitor.begin(.entry)
 #endif

@@ -412,12 +412,23 @@ struct HermesMobileApp: App {
             // Launch argument hooks for deterministic, server-free simulator diagnosis:
             // `xcrun simctl launch <udid> com.maurice.semreh --streaming-lab`
             // `xcrun simctl launch <udid> com.maurice.semreh --chat-performance-lab`
+            // `xcrun simctl launch <udid> com.maurice.semreh --chat-performance-lab --chat-outgoing-motion-lab`
             // `xcrun simctl launch <udid> com.maurice.semreh --chat-performance-cycle-lab --chat-performance-signposts`
             // `xcrun simctl launch <udid> com.maurice.semreh --chat-performance-app-wide-monitor`
             // `xcrun simctl launch <udid> com.maurice.semreh --sidebar-brand-lab`
             // `xcrun simctl launch <udid> com.maurice.semreh --bird-palette-visual-lab`
             Group {
-                if ProcessInfo.processInfo.arguments.contains("--chat-performance-lab") {
+                if ProcessInfo.processInfo.arguments.contains("--chat-performance-four-tall-lab") {
+                    NavigationStack {
+                        ChatPerformanceLabView(fourTallMessages: true)
+                    }
+                    .semrehAppTheme()
+                } else if ProcessInfo.processInfo.arguments.contains("--chat-performance-tall-lab") {
+                    NavigationStack {
+                        ChatPerformanceLabView(tallMessages: true)
+                    }
+                    .semrehAppTheme()
+                } else if ProcessInfo.processInfo.arguments.contains("--chat-performance-lab") {
                     NavigationStack {
                         ChatPerformanceLabView()
                     }
@@ -425,6 +436,21 @@ struct HermesMobileApp: App {
                 } else if ProcessInfo.processInfo.arguments.contains("--chat-response-motion-components-lab") {
                     NavigationStack {
                         ChatResponseMotionComponentsLabView()
+                    }
+                    .semrehAppTheme()
+                } else if ProcessInfo.processInfo.arguments.contains("--chat-activity-handoff-lab") {
+                    NavigationStack {
+                        ChatActivityHandoffLabView()
+                    }
+                    .semrehAppTheme()
+                } else if ProcessInfo.processInfo.arguments.contains("--chat-full-activity-lab") {
+                    NavigationStack {
+                        ChatFullActivityLabView()
+                    }
+                    .semrehAppTheme()
+                } else if ProcessInfo.processInfo.arguments.contains("--chat-full-activity-anchored-lab") {
+                    NavigationStack {
+                        ChatFullActivityLabView(anchoredHistory: true)
                     }
                     .semrehAppTheme()
                 } else if ProcessInfo.processInfo.arguments.contains("--chat-performance-cycle-lab") {
@@ -605,14 +631,247 @@ private enum ChatPerformanceInstrumentation {
     }
 }
 
-private struct ChatPerformanceLabView: View {
-    private let fixture: (session: SessionSummary, server: URL, viewModel: ChatViewModel)
+/// DEBUG fixtures are intentionally scene-lifetime values. Recreating 10k rows
+/// during SwiftUI body updates distorts the viewport's first-frame measurement.
+@MainActor private enum ChatPerformanceLabFixtureCache {
+    typealias Fixture = (session: SessionSummary, server: URL, viewModel: ChatViewModel)
+    static var standard: Fixture?
+    static var tall: Fixture?
+    static var fourTall: Fixture?
 
-    init() {
-        fixture = ChatViewModel.makePerformanceLabFixture()
+    static func value(tallMessages: Bool, fourTallMessages: Bool) -> Fixture {
+        if fourTallMessages {
+            if let fourTall { return fourTall }
+            let fixture = ChatViewModel.makeFourTallPerformanceLabFixture()
+            fourTall = fixture
+            return fixture
+        }
+        if tallMessages {
+            if let tall { return tall }
+            let fixture = ChatViewModel.makeTallPerformanceLabFixture()
+            tall = fixture
+            return fixture
+        }
+        if let standard { return standard }
+        let fixture = ChatViewModel.makePerformanceLabFixture()
+        standard = fixture
+        return fixture
+    }
+}
+
+private struct ChatPerformanceLabView: View {
+    @State private var fixture: (session: SessionSummary, server: URL, viewModel: ChatViewModel)
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var prepared: [NativePreparedHighlight] = []
+    @State private var preparationComplete = false
+    @State private var nativeRichLifecycleGeneration = 0
+    @State private var nativeRichLifecycleStreaming = false
+    @State private var outgoingMotionMarker: UInt64 = 0
+    @State private var premountRichReady = false
+    @State private var premountRichFailed = false
+
+    private var preparesOneRichBeforeMount: Bool {
+        ProcessInfo.processInfo.arguments.contains("--native-direct-premount-rich-one")
+            && (fixture.session.sessionId == "representative-120"
+                || (fixture.session.sessionId == "semreh-chat-performance-lab"
+                    && (ProcessInfo.processInfo.arguments.contains("--native-direct-windowed-10k-diagnostic")
+                        || ProcessInfo.processInfo.arguments.contains("--native-direct-flight-10k-diagnostic"))))
+    }
+
+    private var nativeRichLifecycleFixture: Bool {
+        ProcessInfo.processInfo.arguments.contains("--native-rich-lifecycle-fixture")
+            && (ProcessInfo.processInfo.arguments.contains("--native-rich-all-eligible-120")
+                || ProcessInfo.processInfo.arguments.contains("--native-direct-two-row-proof")
+                || ProcessInfo.processInfo.arguments.contains("--native-hosted-rich120-gate"))
+            && fixture.session.sessionId == "representative-120"
+    }
+
+    private var outgoingMotionFixture: Bool {
+        ProcessInfo.processInfo.arguments.contains("--chat-outgoing-motion-lab")
+            && fixture.session.sessionId?.hasPrefix("outgoing-motion-lab-") == true
+    }
+
+    private var preparesHighlights: Bool {
+        ProcessInfo.processInfo.arguments.contains("--native-prepared-highlights")
+            && fixture.session.sessionId?.hasPrefix("representative-") == true
+    }
+
+    init(tallMessages: Bool = false, fourTallMessages: Bool = false) {
+        NativeOpeningTrace.shared.begin()
+        _fixture = State(initialValue: ChatPerformanceLabFixtureCache.value(
+            tallMessages: tallMessages, fourTallMessages: fourTallMessages
+        ))
     }
 
     var body: some View {
+        Group {
+            if preparesOneRichBeforeMount && !premountRichReady {
+                if premountRichFailed {
+                    Text("Rich fixture preparation failed")
+                } else {
+                    ProgressView("Preparing rich response")
+                }
+            } else if preparesHighlights && !preparationComplete {
+                ProgressView("Preparing fixture highlighting")
+            } else if outgoingMotionFixture {
+                VStack(spacing: 0) {
+                    HStack(spacing: 12) {
+                        Button("Inject local send") {
+                            if let sequence = fixture.viewModel.appendOutgoingMotionFixtureMessage() {
+                                outgoingMotionMarker = sequence
+                            }
+                        }
+                        .accessibilityIdentifier("outgoing-motion-inject")
+                        Text("motion marker \(outgoingMotionMarker)")
+                            .font(.system(size: 13, weight: .bold, design: .monospaced))
+                            .foregroundStyle(.black)
+                            .frame(width: 144, height: 28)
+                            .background(outgoingMotionMarker.isMultiple(of: 2) ? Color.yellow : Color.green)
+                            .accessibilityIdentifier("outgoing-motion-marker")
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    chat
+                }
+            } else if nativeRichLifecycleFixture {
+                VStack(spacing: 0) {
+                    HStack {
+                        Button("Stream rich test turn") {
+                            guard !nativeRichLifecycleStreaming else { return }
+                            nativeRichLifecycleStreaming = true
+                            Task { @MainActor in
+                                await fixture.viewModel.appendPerformanceLabStreamingTurn()
+                                nativeRichLifecycleStreaming = false
+                            }
+                        }
+                        .disabled(nativeRichLifecycleStreaming)
+                        Button("Reopen rich chat") {
+                            Logger(subsystem: "com.maurice.semreh", category: "NativeRichLifecycle")
+                                .debug("event=fixture_reopen_before rows=\(fixture.viewModel.messages.count, privacy: .public)")
+                            nativeRichLifecycleGeneration += 1
+                        }
+                        .accessibilityValue("\(fixture.viewModel.messages.count) rows")
+                        if ProcessInfo.processInfo.arguments.contains("--native-direct-two-row-proof") {
+                            Button("Refresh rows") {
+                                fixture.viewModel.bumpUnchangedTranscriptRevisionForTesting()
+                            }
+                        }
+                    }
+                    .padding(.vertical, 4)
+                    chat.environment(\.nativePreparedHighlights, prepared)
+                        .id(nativeRichLifecycleGeneration)
+                        .task(id: nativeRichLifecycleGeneration) {
+                            Logger(subsystem: "com.maurice.semreh", category: "NativeRichLifecycle")
+                                .debug("event=fixture_reopen_after rows=\(fixture.viewModel.messages.count, privacy: .public)")
+                        }
+                }
+            } else {
+                chat.environment(\.nativePreparedHighlights, prepared)
+            }
+        }
+        .task {
+            guard preparesOneRichBeforeMount, !premountRichReady, !premountRichFailed else { return }
+            let started = CACurrentMediaTime()
+            let logger = Logger(subsystem: "com.maurice.semreh", category: "ViewportPrototype")
+            NativePremountRichFixtureStore.entry = nil
+            NativePremountRichFixtureStore.target = nil
+            NativePremountRichFixtureStore.path = [:]
+            guard fixture.viewModel.messages.indices.contains(1),
+                  let source = fixture.viewModel.messages[1].content,
+                  let id = fixture.viewModel.messages[1].messageId else {
+                premountRichFailed = true
+                logger.error("event=premount_rich_missing_source")
+                return
+            }
+            let width = Double(UIScreen.main.bounds.width - 80)
+            if ProcessInfo.processInfo.arguments.contains("--native-direct-premount-rich-link-bidi"),
+               let syntheticURL = URL(string: "https://example.invalid/reference") {
+                // The signed fixture exercises the existing card and cache
+                // semantics without issuing a metadata request to the network.
+                await TranscriptLinkPreviewCache.shared.store(
+                    TranscriptLinkPreviewSnapshot(displayURL: syntheticURL), for: syntheticURL)
+            }
+            let dark = colorScheme == .dark
+            let wraps = UserDefaults.standard.bool(forKey: ChatTranscriptDisplaySettings.wrapsCodeBlockLinesKey)
+            let result = await NativeRichRowPreparationActor.shared.prepare(
+                source: source, width: width, dark: dark, wrapsCodeLines: wraps)
+            guard case .ready(let body) = result,
+                  body.sourceBytes == Array(source.utf8),
+                  body.dark == dark, body.wrapsCodeLines == wraps else {
+                premountRichFailed = true
+                logger.error("event=premount_rich_unsupported wallMs=\(Int((CACurrentMediaTime() - started) * 1_000), privacy: .public)")
+                return
+            }
+            NativePremountRichFixtureStore.entry = .init(messageID: id, source: source,
+                bodyWidth: width, snapshot: body)
+            if ProcessInfo.processInfo.arguments.contains("--native-direct-target-first-immediate-diagnostic")
+                || ProcessInfo.processInfo.arguments.contains("--native-direct-windowed-10k-diagnostic")
+                || ProcessInfo.processInfo.arguments.contains("--native-direct-flight-10k-diagnostic") {
+                guard let last = fixture.viewModel.messages.last,
+                      let targetSource = last.content, let targetID = last.messageId,
+                      case .ready(let targetBody) = await NativeRichRowPreparationActor.shared.prepare(
+                        source: targetSource, width: width, dark: dark, wrapsCodeLines: wraps),
+                      targetBody.sourceBytes == Array(targetSource.utf8),
+                      targetBody.dark == dark, targetBody.wrapsCodeLines == wraps else {
+                    premountRichFailed = true
+                    logger.error("event=premount_rich_target_unsupported")
+                    return
+                }
+                NativePremountRichFixtureStore.target = .init(messageID: targetID,
+                    source: targetSource, bodyWidth: width, snapshot: targetBody)
+                logger.debug("event=premount_rich_target_ready wallMs=\(Int((CACurrentMediaTime() - started) * 1_000), privacy: .public) height=\(targetBody.height, privacy: .public)")
+            }
+            if ProcessInfo.processInfo.arguments.contains("--native-direct-bounded-path-immediate-diagnostic")
+                || ProcessInfo.processInfo.arguments.contains("--native-direct-windowed-10k-diagnostic") {
+                // Only measured cold-jump rows in this 120-row synthetic proof;
+                // every snapshot is prepared from its actual source and ID.
+                let pathIndices = ProcessInfo.processInfo.arguments.contains("--native-direct-windowed-10k-diagnostic")
+                    ? [3] : [5, 7, 23, 25, 69, 71, 99, 101, 111, 113, 115, 117]
+                var path: [Int: NativePremountRichFixtureStore.Entry] = [:]
+                for index in pathIndices {
+                    guard fixture.viewModel.messages.indices.contains(index),
+                          let messageSource = fixture.viewModel.messages[index].content,
+                          let messageID = fixture.viewModel.messages[index].messageId,
+                          case .ready(let snapshot) = await NativeRichRowPreparationActor.shared.prepare(
+                            source: messageSource, width: width, dark: dark, wrapsCodeLines: wraps),
+                          snapshot.sourceBytes == Array(messageSource.utf8),
+                          snapshot.dark == dark, snapshot.wrapsCodeLines == wraps else {
+                        premountRichFailed = true
+                        logger.error("event=premount_rich_path_unsupported index=\(index, privacy: .public)")
+                        return
+                    }
+                    path[index] = .init(messageID: messageID, source: messageSource,
+                        bodyWidth: width, snapshot: snapshot)
+                }
+                NativePremountRichFixtureStore.path = path
+                logger.debug("event=premount_rich_path_ready count=\(path.count, privacy: .public) wallMs=\(Int((CACurrentMediaTime() - started) * 1_000), privacy: .public)")
+            }
+            logger.debug("event=premount_rich_ready wallMs=\(Int((CACurrentMediaTime() - started) * 1_000), privacy: .public) width=\(width, privacy: .public) variants=1")
+            premountRichReady = true
+        }
+        .task(id: colorScheme) {
+            guard preparesHighlights else { return }
+            preparationComplete = false
+            let started = CACurrentMediaTime()
+            var values: [NativePreparedHighlight] = []
+            // Exactly the code bytes emitted by this bounded representative fixture,
+            // after MarkdownUI removes its terminal newline. Preparation is visible opening
+            // work and timed in full, not an offscreen target view warm-up.
+            for index in fixture.viewModel.messages.indices where !index.isMultiple(of: 2) {
+                let request = MarkdownCodeHighlightRequest(code: "let answer = values.map { $0 + \(index) }\nprint(answer)", language: "swift", colorScheme: colorScheme, isStreaming: false)
+                if case .highlighted(let code) = await MarkdownCodeHighlightWorker.shared.highlightedCode(for: request) {
+                    values.append(NativePreparedHighlight(request: request, code: code))
+                }
+                guard !Task.isCancelled else { return }
+            }
+            prepared = values
+            preparationComplete = true
+            Logger(subsystem: "com.maurice.semreh", category: "NativeBaseline").debug("event=fixture_preparation count=\(values.count, privacy: .public) elapsedMS=\((CACurrentMediaTime()-started)*1000, privacy: .public)")
+        }
+    }
+
+    private var chat: some View {
         ChatView(
             session: fixture.session,
             server: fixture.server,
@@ -621,6 +880,178 @@ private struct ChatPerformanceLabView: View {
             retainedViewModel: fixture.viewModel,
             disablesExternalLifecycle: true
         )
+    }
+}
+
+/// App-owned, server-free proof of the ordinary transcript's live → retained
+/// activity handoff. Unlike the component lab, this mounts ChatTranscriptView
+/// in the real scene and keeps message/render IDs stable across every update.
+private struct ChatActivityHandoffLabView: View {
+    @State private var liveReasoningText = "Inspecting the current source segment."
+    @State private var phase = 0
+    @State private var updateTask: Task<Void, Never>?
+
+    private let activeAnchor = "activity-handoff-current-assistant"
+    private let bottomAnchor = "activity-handoff-bottom"
+
+    private var messages: [ChatMessage] {
+        [
+            ChatMessage(role: "user", content: "Review the previous result.",
+                        timestamp: 1, messageId: "activity-handoff-old-user"),
+            ChatMessage(role: "assistant", content: "The previous result is available.",
+                        timestamp: 2, messageId: "activity-handoff-old-assistant"),
+            ChatMessage(role: "user", content: "Inspect the source.",
+                        timestamp: 3, messageId: "activity-handoff-current-user"),
+            ChatMessage(role: "assistant", content: "",
+                        timestamp: 4, messageId: activeAnchor)
+        ]
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                Button("Advance activity") { advanceActivity() }
+                    .disabled(updateTask != nil)
+                    .accessibilityIdentifier("activity-handoff-advance")
+
+                Text("activity phase \(phase)")
+                    .font(.system(.caption, design: .monospaced).weight(.semibold))
+                    .frame(width: 150, height: 28)
+                    .background(phase.isMultiple(of: 2) ? Color.yellow : Color.green)
+                    .foregroundStyle(.black)
+                    .accessibilityIdentifier("activity-handoff-phase")
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+
+            ChatTranscriptView(
+                isLoading: false, errorMessage: nil,
+                messages: messages,
+                displayedTranscriptMessages: messages.enumerated().map { index, message in
+                    TranscriptMessage(loadedIndex: index, renderID: message.id,
+                                      anchorID: message.id, message: message)
+                },
+                compressionReferenceCard: nil,
+                reasoningGroupsForAnchor: { anchor in
+                    guard anchor == activeAnchor else { return [] }
+                    return [ReasoningGroup(id: "activity-handoff-retained", anchorMessageID: activeAnchor,
+                                           text: "Retained source analysis.")]
+                },
+                completedToolCallGroupsForAnchor: { anchor in
+                    guard anchor == activeAnchor else { return [] }
+                    return [ToolCallGroup(id: "activity-handoff-tools", anchorMessageID: activeAnchor,
+                                          toolCalls: [ToolCall(
+                                            id: "activity-handoff-read", name: "read_file",
+                                            preview: "Synthetic source content.",
+                                            args: ["path": .string("fixtures/example.md")],
+                                            isCompleted: true, startedAt: 5
+                                          )])]
+                },
+                liveReasoningText: liveReasoningText,
+                reasoningAnchorMessageID: activeAnchor,
+                liveToolCalls: [], toolCallAnchorMessageID: nil,
+                streamingAssistantMessageID: activeAnchor, liveTokensPerSecond: nil,
+                activeStreamRecoveryState: .idle, clarificationPrompt: nil,
+                isRespondingToClarification: false, clarificationErrorMessage: nil,
+                hidesRunStatusAccessibility: false, showsThinkingAndToolCards: true,
+                showsAssistantTypingIndicator: liveReasoningText.isEmpty,
+                showsScrollToBottomButton: false, shouldFollowLatestMessage: true,
+                latestTranscriptMessageRole: "assistant", isScrolledNearBottom: true,
+                activeStreamID: "activity-handoff-synthetic-run", streamingScrollTrigger: 0,
+                cacheFirstReconcileScrollToken: 0, bottomAnchorID: bottomAnchor,
+                transcriptMessageSpacing: 10, transcriptBlockSpacing: 4,
+                transcriptBottomInsetHeight: 0, scrollToBottomButtonBottomPadding: 0,
+                localAttachmentPreviews: [:], listeningMessageID: nil,
+                isViewingCachedData: false, hasOlderMessages: false, isLoadingOlderMessages: false,
+                isRegeneratingMessage: false, isEditingMessage: false, isForkingMessage: false,
+                loadAttachmentImage: { _ in nil }, loadAttachmentData: { _ in nil },
+                loadTranscriptMediaImage: { _ in nil }, loadTranscriptMediaData: { _ in nil },
+                transcriptMediaCacheNamespace: "activity-handoff-synthetic",
+                actionContext: { _, _ in nil },
+                shouldRenderMessageRow: { message in
+                    message.content?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+                },
+                onLoadMessages: {}, onLoadOlderMessages: { _, _ in .noProgress },
+                onUpdateScrollMetrics: { _ in }, onDismissKeyboard: {},
+                onScrollToBottom: { _ in }, onScrollToLatestTranscriptMessage: { _ in },
+                onScrollToLatestContent: { _, _ in },
+                onPreviewAttachment: { _, _ in }, onPreviewTranscriptMedia: { _ in },
+                onToggleListening: { _ in }, onSubmitClarification: { _, _ in },
+                onCancelClarification: { _ in }, onSelectText: { _ in },
+                onRegenerate: { _ in }, onEdit: { _ in }, onFork: { _ in }, onCopy: { _ in },
+                transcriptRenderRevision: phase
+            )
+            .equatable()
+        }
+        .navigationTitle("Activity handoff")
+        .navigationBarTitleDisplayMode(.inline)
+        .onDisappear { updateTask?.cancel() }
+    }
+
+    private func advanceActivity() {
+        guard updateTask == nil else { return }
+        updateTask = Task { @MainActor in
+            for (index, chunk) in [
+                " Checking the retained evidence.",
+                " Comparing the next source segment.",
+                " Preparing a concise result."
+            ].enumerated() {
+                try? await Task.sleep(for: .milliseconds(150))
+                guard !Task.isCancelled else { return }
+                liveReasoningText += chunk
+                phase = index + 1
+            }
+            try? await Task.sleep(for: .milliseconds(350))
+            guard !Task.isCancelled else { return }
+            liveReasoningText = ""
+            phase = 4
+            updateTask = nil
+        }
+    }
+}
+
+/// Local-only activity lifecycle inside the actual ChatView and composer.
+/// The first phase deliberately has old unanchored reasoning and a newer user
+/// turn, so the two statuses must not print the same visible Thinking label.
+private struct ChatFullActivityLabView: View {
+    @State private var fixture: (session: SessionSummary, server: URL, viewModel: ChatViewModel)
+    @State private var phase = 0
+
+    init(anchoredHistory: Bool = false) {
+        _fixture = State(initialValue: ChatViewModel.makeFullActivityLabFixture(
+            anchoredHistory: anchoredHistory
+        ))
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                Button("Advance activity state") {
+                    guard phase < 2 else { return }
+                    phase += 1
+                    fixture.viewModel.advanceFullActivityLab(to: phase)
+                }
+                .disabled(phase >= 2)
+                .accessibilityIdentifier("full-activity-advance")
+
+                Text("full activity phase \(phase)")
+                    .font(.system(.caption, design: .monospaced).weight(.semibold))
+                    .frame(width: 160, height: 28)
+                    .background(phase.isMultiple(of: 2) ? Color.yellow : Color.green)
+                    .foregroundStyle(.black)
+                    .accessibilityIdentifier("full-activity-phase")
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+
+            ChatView(
+                session: fixture.session, server: fixture.server,
+                onAPIError: { _ in }, loadsInitialMessages: false,
+                retainedViewModel: fixture.viewModel, disablesExternalLifecycle: true
+            )
+        }
     }
 }
 

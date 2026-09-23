@@ -5,6 +5,309 @@ import Foundation
 import CoreFoundation
 
 final class LongChatScrollUITests: XCTestCase {
+    func testFullChatActivityLabKeepsDistinctInlineStatusWithoutFloatingPill() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--chat-full-activity-lab"]
+        app.launch()
+
+        let chat = app.otherElements["chat-detail:Activity full lab"]
+        let composer = app.descendants(matching: .any).matching(identifier: "chat-composer-input").firstMatch
+        let advance = app.buttons["full-activity-advance"]
+        let phase = app.staticTexts["full-activity-phase"]
+        let thinking = app.buttons.matching(NSPredicate(format: "label == %@", "Thinking"))
+        let additional = app.buttons.matching(NSPredicate(format: "label == %@", "Additional thinking"))
+        let preparing = app.staticTexts.matching(NSPredicate(
+            format: "label == %@", "Semreh is preparing a response"
+        ))
+        let search = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Search files"))
+        let floating = app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS[c] %@", "Hermes is working"
+        ))
+
+        XCTAssertTrue(chat.waitForExistence(timeout: 15))
+        XCTAssertTrue(composer.exists && advance.isHittable)
+        XCTAssertEqual(phase.label, "full activity phase 0")
+        XCTAssertEqual(additional.count, 1, "Unattributed details should remain available separately.")
+        XCTAssertEqual(thinking.count, 0, "Additional details must not impersonate the live turn.")
+        XCTAssertEqual(preparing.count, 1, "The new run must not print a second Thinking label.")
+        XCTAssertEqual(search.count, 0)
+        XCTAssertEqual(floating.count, 0)
+
+        // Hold the actual app scene through a full shine cycle. The UI test
+        // checks stable AX geometry; a direct Simulator recording checks motion.
+        let pendingFrame = preparing.firstMatch.frame
+        let shineCycle = expectation(description: "Live status shines without row movement")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.1) { shineCycle.fulfill() }
+        wait(for: [shineCycle], timeout: 3)
+        XCTAssertEqual(preparing.count, 1)
+        XCTAssertEqual(preparing.firstMatch.frame.minY, pendingFrame.minY, accuracy: 1)
+        XCTAssertEqual(preparing.firstMatch.frame.height, pendingFrame.height, accuracy: 1)
+
+        advance.tap()
+        XCTAssertEqual(phase.label, "full activity phase 1")
+        XCTAssertEqual(additional.count, 1)
+        XCTAssertEqual(thinking.count, 0)
+        XCTAssertEqual(search.count, 1)
+        XCTAssertEqual(floating.count, 0)
+
+        advance.tap()
+        XCTAssertEqual(phase.label, "full activity phase 2")
+        XCTAssertEqual(additional.count, 1)
+        XCTAssertEqual(thinking.count, 0)
+        XCTAssertEqual(search.count, 1)
+        XCTAssertEqual(floating.count, 0)
+        XCTAssertTrue(composer.exists)
+    }
+
+    func testFullChatActivityAnchorsOlderThinkingBeforeNewTurnAndCurrentToolBesideResponse() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--chat-full-activity-anchored-lab"]
+        app.launch()
+
+        let chat = app.otherElements["chat-detail:Activity full lab"]
+        let advance = app.buttons["full-activity-advance"]
+        let thinking = app.buttons.matching(NSPredicate(format: "label == %@", "Thinking"))
+        let additional = app.buttons.matching(NSPredicate(format: "label == %@", "Additional thinking"))
+        let currentUser = app.staticTexts["message-row:activity-full-current-user"]
+        let currentResponse = app.staticTexts["message-row:activity-full-current-assistant"]
+        let search = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Search files"))
+        let preparing = app.staticTexts.matching(NSPredicate(
+            format: "label == %@", "Semreh is preparing a response"
+        ))
+
+        XCTAssertTrue(chat.waitForExistence(timeout: 15))
+        XCTAssertEqual(thinking.count, 1)
+        XCTAssertEqual(additional.count, 0)
+        XCTAssertEqual(preparing.count, 1, "The new turn must not show a second Thinking label.")
+        XCTAssertTrue(currentUser.exists)
+        XCTAssertLessThan(thinking.firstMatch.frame.maxY, currentUser.frame.minY,
+                          "Old-turn reasoning must stay before the new user turn.")
+
+        advance.tap()
+        advance.tap()
+        XCTAssertEqual(app.staticTexts["full-activity-phase"].label, "full activity phase 2")
+        XCTAssertEqual(thinking.count, 1)
+        XCTAssertEqual(search.count, 1)
+        XCTAssertEqual(preparing.count, 0)
+        XCTAssertTrue(currentResponse.exists)
+        XCTAssertLessThan(thinking.firstMatch.frame.maxY, currentUser.frame.minY)
+        XCTAssertLessThan(currentUser.frame.maxY, search.firstMatch.frame.minY)
+        XCTAssertLessThan(search.firstMatch.frame.maxY, currentResponse.frame.minY)
+        XCTAssertLessThan(currentResponse.frame.minY - search.firstMatch.frame.maxY, 40,
+                          "The tool disclosure should stay adjacent to its own response.")
+    }
+
+    func testAppOwnedActivityHandoffKeepsOneDisclosureAndVisibleTranscript() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--chat-activity-handoff-lab"]
+        app.launch()
+
+        let transcript = app.scrollViews["chat-transcript-scroll"]
+        let advance = app.buttons["activity-handoff-advance"]
+        let phase = app.staticTexts["activity-handoff-phase"]
+        let prompt = app.staticTexts["message-row:activity-handoff-current-user"]
+        let previousAnswer = app.staticTexts["message-row:activity-handoff-old-assistant"]
+        let thinking = app.buttons.matching(NSPredicate(format: "label == %@", "Thinking"))
+        let readFile = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Read file"))
+
+        XCTAssertTrue(transcript.waitForExistence(timeout: 15))
+        XCTAssertTrue(advance.isHittable && phase.exists)
+        XCTAssertTrue(prompt.exists && previousAnswer.exists)
+        XCTAssertEqual(phase.label, "activity phase 0")
+        XCTAssertEqual(thinking.count, 1, "Retained and live reasoning should share one disclosure.")
+        XCTAssertEqual(readFile.count, 1, "The completed read_file action should remain inline.")
+        XCTAssertFalse(app.staticTexts["Semreh is preparing a response"].exists,
+                       "The ordinary bare status should not duplicate retained activity.")
+
+        let promptFrame = prompt.frame
+        let answerFrame = previousAnswer.frame
+        let thinkingFrame = thinking.firstMatch.frame
+        let readFrame = readFile.firstMatch.frame
+        let windowFrame = app.windows.firstMatch.frame
+        for frame in [promptFrame, answerFrame, thinkingFrame, readFrame] {
+            XCTAssertGreaterThanOrEqual(frame.minX, windowFrame.minX - 1)
+            XCTAssertLessThanOrEqual(frame.maxX, windowFrame.maxX + 1)
+        }
+
+        // A direct Simulator video records the uninterrupted handoff. Do not
+        // ask XCTest to draw hierarchy snapshots while live chunks are arriving.
+        let leadIn = expectation(description: "Stable app-window video lead-in")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { leadIn.fulfill() }
+        wait(for: [leadIn], timeout: 2)
+        advance.tap()
+        let settled = expectation(description: "Live chunks finish and retained activity remains")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.3) { settled.fulfill() }
+        wait(for: [settled], timeout: 2)
+
+        XCTAssertEqual(phase.label, "activity phase 4")
+        XCTAssertTrue(prompt.isHittable && previousAnswer.exists)
+        XCTAssertEqual(thinking.count, 1)
+        XCTAssertEqual(readFile.count, 1)
+        XCTAssertFalse(app.staticTexts["Semreh is preparing a response"].exists)
+        XCTAssertEqual(prompt.frame.minY, promptFrame.minY, accuracy: 4,
+                       "Collapsed activity updates should not jump the preceding prompt.")
+        XCTAssertEqual(previousAnswer.frame.minY, answerFrame.minY, accuracy: 4)
+        XCTAssertEqual(thinking.firstMatch.frame.minY, thinkingFrame.minY, accuracy: 4)
+        XCTAssertEqual(readFile.firstMatch.frame.minY, readFrame.minY, accuracy: 4)
+        for frame in [prompt.frame, previousAnswer.frame, thinking.firstMatch.frame, readFile.firstMatch.frame] {
+            XCTAssertGreaterThanOrEqual(frame.minX, windowFrame.minX - 1)
+            XCTAssertLessThanOrEqual(frame.maxX, windowFrame.maxX + 1)
+        }
+        let visibleHold = expectation(description: "Keep scene visible for direct video after handoff")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { visibleHold.fulfill() }
+        wait(for: [visibleHold], timeout: 2)
+    }
+
+    func testMountedOutgoingMotionFromPopulatedBottomStaysNearComposer() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--chat-performance-lab", "--chat-outgoing-motion-lab",
+                               "--chat-outgoing-motion-populated"]
+        app.launch()
+
+        let transcript = app.scrollViews["chat-transcript-scroll"]
+        let priorTail = app.staticTexts["message-row:motion-history-11"]
+        let composer = app.textViews["chat-composer-input"]
+        let inject = app.buttons["outgoing-motion-inject"]
+        let marker = app.staticTexts["outgoing-motion-marker"]
+        let outgoing = app.staticTexts["message-row:local-motion-1"]
+        XCTAssertTrue(transcript.waitForExistence(timeout: 15))
+        XCTAssertTrue(priorTail.waitForExistence(timeout: 15) && priorTail.isHittable)
+        XCTAssertTrue(composer.isHittable && inject.isHittable)
+        XCTAssertEqual(marker.label, "motion marker 0")
+        XCTAssertFalse(outgoing.exists)
+
+        // Match the common send state: keyboard open and the old tail visible.
+        composer.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 10))
+        XCTAssertTrue(priorTail.isHittable)
+        let ready = expectation(description: "Near-bottom viewport settles before video marker")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { ready.fulfill() }
+        wait(for: [ready], timeout: 2)
+
+        let priorTailBottom = priorTail.frame.maxY
+        let baselineGap = composer.frame.minY - priorTailBottom
+        XCTAssertGreaterThanOrEqual(baselineGap, -4)
+        XCTAssertLessThan(baselineGap, 180, "The synthetic history must be near the composer before injection.")
+
+        inject.tap()
+        XCTAssertTrue(outgoing.waitForExistence(timeout: 10) && outgoing.isHittable)
+        XCTAssertEqual(marker.label, "motion marker 1")
+        XCTAssertEqual(app.staticTexts.matching(identifier: "message-row:local-motion-1").count, 1)
+        XCTAssertEqual(app.staticTexts.matching(identifier: "message-row:motion-history-11").count, 1)
+        let outgoingGap = composer.frame.minY - outgoing.frame.maxY
+        XCTAssertGreaterThanOrEqual(outgoingGap, -4)
+        XCTAssertLessThan(outgoingGap, 180, "The new bubble must settle beside the composer, not at the transcript top.")
+        XCTAssertLessThan(priorTail.frame.maxY, priorTailBottom + 4)
+        XCTAssertGreaterThan(priorTail.frame.maxY, priorTailBottom - 200,
+                             "Inserting one bubble must not jump the old tail by a viewport.")
+    }
+
+    func testMountedOutgoingMotionFixtureKeepsOneBubblePerLocalSend() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--chat-performance-lab", "--chat-outgoing-motion-lab"]
+        app.launch()
+
+        let transcript = app.scrollViews["chat-transcript-scroll"]
+        let chat = app.otherElements["chat-detail:Outgoing motion lab"]
+        let inject = app.buttons["outgoing-motion-inject"]
+        let marker = app.staticTexts["outgoing-motion-marker"]
+        let first = app.staticTexts["message-row:local-motion-1"]
+        let second = app.staticTexts["message-row:local-motion-2"]
+        XCTAssertTrue(chat.waitForExistence(timeout: 15))
+        XCTAssertTrue(inject.waitForExistence(timeout: 10) && inject.isHittable)
+        XCTAssertTrue(marker.exists)
+        XCTAssertFalse(first.exists, "The mounted fixture starts with no outgoing row.")
+
+        // Leave the app settled before injection so a separately started
+        // app-window video can align its first 300 ms to the marker flip.
+        let ready = expectation(description: "Mounted app-window video lead-in")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { ready.fulfill() }
+        wait(for: [ready], timeout: 2)
+        inject.tap()
+        XCTAssertTrue(transcript.waitForExistence(timeout: 10))
+        XCTAssertTrue(first.waitForExistence(timeout: 10))
+        XCTAssertEqual(app.staticTexts.matching(identifier: "message-row:local-motion-1").count, 1)
+        XCTAssertEqual(marker.label, "motion marker 1")
+
+        inject.tap()
+        XCTAssertTrue(second.waitForExistence(timeout: 10))
+        XCTAssertEqual(app.staticTexts.matching(identifier: "message-row:local-motion-1").count, 1)
+        XCTAssertEqual(app.staticTexts.matching(identifier: "message-row:local-motion-2").count, 1)
+        XCTAssertEqual(marker.label, "motion marker 2")
+        XCTAssertTrue(first.isHittable && second.isHittable)
+    }
+
+    func testNativeBottomEdgeManualTakeover20And120() {
+        exerciseNativeBottomEdgeManualTakeover(singleSettlement: false)
+    }
+
+    func testNativeSingleSettlementManualTakeover20And120() {
+        exerciseNativeBottomEdgeManualTakeover(singleSettlement: true)
+    }
+
+    private func exerciseNativeBottomEdgeManualTakeover(singleSettlement: Bool) {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        for count in [20, 120] {
+            app.terminate()
+            app.launchArguments = ["--chat-performance-lab", "--representative-count=\(count)", "--native-baseline", "--native-bottom-edge", "--native-refinement-trace"]
+            if singleSettlement { app.launchArguments.append("--native-edge-single-settlement") }
+            app.launch()
+            let scroll = app.scrollViews["native-baseline-scroll"]
+            XCTAssertTrue(scroll.waitForExistence(timeout: 15))
+            app.buttons["native-baseline-jump"].tap()
+            // Submit the real gesture immediately after tap. Phase logs decide
+            // whether it overlapped animation; test success alone must not claim it.
+            scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.2))
+                .press(forDuration: 0.01, thenDragTo: scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.9)), withVelocity: .fast, thenHoldForDuration: 0)
+            let tail = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Representative conversation complete.")).firstMatch
+            XCTAssertFalse(tail.isHittable, "Manual reading moves away from tail")
+            let settled = expectation(description: "Observe no delayed native snap")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { settled.fulfill() }
+            wait(for: [settled], timeout: 2)
+            XCTAssertFalse(tail.isHittable, "Native bottom intent must not snap back after manual reading")
+            attachScreenshot(named: "bottom-edge-manual-\(count)-single-settlement-\(singleSettlement)")
+        }
+    }
+
+    func testNativeBaselineRepresentative20And120() {
+        exerciseRepresentativeNativeControl(native: true)
+    }
+
+    func testProductionRepresentative20And120() {
+        exerciseRepresentativeNativeControl(native: false)
+    }
+
+    private func exerciseRepresentativeNativeControl(native: Bool) {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        for count in [20, 120] {
+            app.terminate()
+            app.launchArguments = ["--chat-performance-lab", "--representative-count=\(count)"]
+            if native { app.launchArguments.append("--native-baseline") }
+            app.launch()
+            let scroll = app.scrollViews[native ? "native-baseline-scroll" : "chat-transcript-scroll"]
+            XCTAssertTrue(scroll.waitForExistence(timeout: 15))
+            let arrow = app.buttons[native ? "native-baseline-jump" : scrollToLatestLabel]
+            for cycle in 0..<2 {
+                if cycle > 0 {
+                    scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.3))
+                        .press(forDuration: 0.05, thenDragTo: scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.75)))
+                }
+                XCTAssertTrue(arrow.waitForExistence(timeout: 10) && arrow.isHittable)
+                arrow.tap()
+                let tail = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Representative conversation complete.")).firstMatch
+                assertHittable(tail, timeout: 10, message: "Representative\(count) native=\(native) cycle=\(cycle) reaches concrete tail")
+                attachScreenshot(named: "representative-\(count)-native-\(native)-cycle-\(cycle)")
+            }
+        }
+    }
+
     private let performanceLabArgument = "--chat-performance-lab"
     private let performanceCycleLabArgument = "--chat-performance-cycle-lab"
     private let performanceSignpostsArgument = "--chat-performance-signposts"
@@ -321,6 +624,46 @@ final class LongChatScrollUITests: XCTestCase {
         }
     }
 
+    func testMuseComposerKeepsDraftAboveKeyboard() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = [performanceLabArgument, "--composer-test-fresh-draft"]
+        app.launch()
+        let composer = app.descendants(matching: .any).matching(identifier: "chat-composer-input").firstMatch
+        XCTAssertTrue(composer.waitForExistence(timeout: 15))
+        composer.tap()
+        // This DEBUG fixture starts with an empty draft without modifying
+        // any persisted drafts from earlier simulator sessions.
+        let clearedDraft = (composer.value as? String) ?? ""
+        XCTAssertTrue(clearedDraft.isEmpty || clearedDraft == composer.placeholderValue)
+        composer.typeText("A short draft\nwith a second line")
+        let keyboard = app.keyboards.firstMatch
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5))
+        XCTAssertLessThanOrEqual(composer.frame.maxY, keyboard.frame.minY + 1)
+        XCTAssertTrue(app.buttons["Composer options"].isHittable)
+        let send = app.buttons["Send"]
+        let voice = app.buttons["Voice input"]
+        XCTAssertTrue(send.isHittable)
+        XCTAssertTrue(voice.isHittable)
+        let twoLineSendY = send.frame.midY
+        let twoLineVoiceY = voice.frame.midY
+        XCTAssertLessThanOrEqual(abs(twoLineSendY - twoLineVoiceY), 3,
+                                 "Send and microphone must share a stable baseline at two lines.")
+        attachScreenshot(named: "muse-composer-keyboard-two-lines")
+
+        composer.typeText("\nthird line\nfourth line")
+        XCTAssertLessThanOrEqual(composer.frame.maxY, keyboard.frame.minY + 1)
+        XCTAssertGreaterThanOrEqual(composer.frame.height, 80,
+                                    "Four draft lines should expand the text field instead of clipping it.")
+        XCTAssertTrue(send.isHittable && voice.isHittable)
+        XCTAssertLessThanOrEqual(abs(send.frame.midY - voice.frame.midY), 3,
+                                 "The controls must stay aligned as the draft grows.")
+        XCTAssertGreaterThan(send.frame.midY, twoLineSendY - 8,
+                             "Growing the draft must not move the controls upward into the text.")
+        attachScreenshot(named: "muse-composer-keyboard-four-lines")
+        // No send: this fixture deliberately has no gateway or credentials.
+    }
+
     func testTenThousandRowChatScrollsAndScrollToLatestReachesEndMarker() {
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -378,6 +721,1152 @@ final class LongChatScrollUITests: XCTestCase {
         attachScreenshot(named: "long-chat-after-scroll-to-latest")
     }
 
+    func testTallMixedTranscriptRepeatedArrowReachesConcreteTail() {
+        exerciseTallMixedTranscriptArrow(disableHighlighting: false)
+    }
+
+    func testFourTallMixedTranscriptColdManualArrowAndReopenDiagnostic() {
+        continueAfterFailure = true
+        let app = XCUIApplication()
+        let terminalText = "End of four-row mixed conversation."
+
+        for followsLatest in [false, true] {
+            let args = ["--chat-performance-four-tall-lab", "--chat-viewport-diagnostic",
+                        "--composer-test-fresh-draft"]
+                + (followsLatest ? ["--chat-viewport-follow-latest-open"] : [])
+            for visit in 1...2 {
+                app.terminate()
+                app.launchArguments = args
+                print("FOUR_TALL_LAUNCH latest=\(followsLatest) visit=\(visit) epoch=\(Date().timeIntervalSince1970)")
+                app.launch()
+                let scroll = app.scrollViews["chat-transcript-scroll"]
+                XCTAssertTrue(scroll.waitForExistence(timeout: 15))
+                let firstRow = app.staticTexts["message-row:four-tall-message-0"]
+                let tail = app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", terminalText)).firstMatch
+                let firstReadable = followsLatest
+                    ? tail.waitForExistence(timeout: 20) && tail.isHittable
+                    : firstRow.waitForExistence(timeout: 20) && firstRow.isHittable
+                print("FOUR_TALL_FIRST_READABLE latest=\(followsLatest) visit=\(visit) visible=\(firstReadable) epoch=\(Date().timeIntervalSince1970)")
+                XCTAssertTrue(firstReadable, "Cold viewport must show its real selected row")
+                guard visit == 1 else { continue }
+
+                let start = scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.96, dy: followsLatest ? 0.25 : 0.82))
+                let end = scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.96, dy: followsLatest ? 0.78 : 0.18))
+                print("FOUR_TALL_MANUAL_BEGIN latest=\(followsLatest) epoch=\(Date().timeIntervalSince1970)")
+                start.press(forDuration: 0.05, thenDragTo: end)
+                print("FOUR_TALL_MANUAL_END latest=\(followsLatest) epoch=\(Date().timeIntervalSince1970)")
+                let arrow = app.buttons[scrollToLatestLabel]
+                XCTAssertTrue(arrow.waitForExistence(timeout: 10) && arrow.isHittable)
+                if arrow.exists && arrow.isHittable {
+                    print("FOUR_TALL_ARROW_TAP latest=\(followsLatest) epoch=\(Date().timeIntervalSince1970)")
+                    arrow.tap()
+                    let reachedTail = tail.waitForExistence(timeout: 20) && tail.isHittable
+                    print("FOUR_TALL_ARROW_TAIL latest=\(followsLatest) visible=\(reachedTail) epoch=\(Date().timeIntervalSince1970)")
+                    XCTAssertTrue(reachedTail, "Arrow must expose the real final rich source")
+                }
+            }
+        }
+        app.terminate()
+    }
+
+    func testFourTallCodePreviewOpensSelectableFullSource() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--chat-performance-four-tall-lab", "--chat-viewport-follow-latest-open",
+                               "--chat-viewport-diagnostic", "--composer-test-fresh-draft"]
+        print("FOUR_TALL_PREVIEW_LAUNCH epoch=\(Date().timeIntervalSince1970)")
+        app.launch()
+        let transcript = app.scrollViews["chat-transcript-scroll"]
+        XCTAssertTrue(transcript.waitForExistence(timeout: 15))
+        let tail = app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS[c] %@", "End of four-row mixed conversation."
+        )).firstMatch
+        XCTAssertTrue(tail.waitForExistence(timeout: 20) && tail.isHittable,
+                      "A previewed giant code block must not blank the cold real tail.")
+        print("FOUR_TALL_PREVIEW_FIRST_READABLE epoch=\(Date().timeIntervalSince1970)")
+        attachScreenshot(named: "four-tall-preview-cold-tail")
+
+        let viewFull = app.buttons["view-full-code"].firstMatch
+        for _ in 0..<8 where !viewFull.isHittable {
+            transcript.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.24))
+                .press(forDuration: 0.05, thenDragTo: transcript.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.78)))
+        }
+        XCTAssertTrue(viewFull.isHittable && viewFull.label.contains("View full code"),
+                      "The compact code preview must expose an explicit full-source action.")
+        viewFull.tap()
+        let fullCode = app.textViews["full-code-text"]
+        XCTAssertTrue(fullCode.waitForExistence(timeout: 10) && fullCode.isHittable)
+        let source = fullCode.value as? String ?? ""
+        XCTAssertTrue(source.contains("SEMREH_FOUR_TALL_CODE_END"),
+                      "The selectable viewer must expose the actual last code line in AX.")
+        XCTAssertEqual(source.components(separatedBy: "let value = Array(0..<1_000).reduce(0, +)").count - 1, 320)
+        app.buttons["Copy full code"].tap()
+        // The UI test runner cannot synchronously read the app's pasteboard on
+        // this Simulator runtime. The production action assigns `content`
+        // directly; the viewer's AX value above checks that full source.
+        let sheetToolbar = app.navigationBars["Swift"]
+        XCTAssertTrue(sheetToolbar.waitForExistence(timeout: 5))
+        let enableWrap = sheetToolbar.buttons["Enable code line wrapping"]
+        let disableWrap = sheetToolbar.buttons["Disable code line wrapping"]
+        let inlineWrap = transcript.buttons["Enable code line wrapping"]
+        XCTAssertFalse(inlineWrap.isHittable,
+                       "The code block behind the modal sheet must not intercept its toolbar controls.")
+        let initiallyWrapped = disableWrap.exists
+        (initiallyWrapped ? disableWrap : enableWrap).tap()
+        XCTAssertTrue((initiallyWrapped ? enableWrap : disableWrap).waitForExistence(timeout: 5))
+        (initiallyWrapped ? enableWrap : disableWrap).tap()
+        XCTAssertEqual(fullCode.value as? String, source,
+                       "Wrap toggles must not change selectable code bytes.")
+        fullCode.press(forDuration: 1)
+        XCTAssertTrue(app.menuItems["Copy"].exists || app.buttons["Copy"].exists,
+                      "The full-code text view must offer native text selection.")
+        attachScreenshot(named: "four-tall-full-code-selection")
+
+        app.buttons["Done"].tap()
+        let dragStart = transcript.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.25))
+        let dragEnd = transcript.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.78))
+        print("FOUR_TALL_PREVIEW_MANUAL_BEGIN epoch=\(Date().timeIntervalSince1970)")
+        dragStart.press(forDuration: 0.05, thenDragTo: dragEnd)
+        print("FOUR_TALL_PREVIEW_MANUAL_END epoch=\(Date().timeIntervalSince1970)")
+        attachScreenshot(named: "four-tall-preview-after-manual-drag")
+        let arrow = app.buttons[scrollToLatestLabel]
+        XCTAssertTrue(arrow.waitForExistence(timeout: 10) && arrow.isHittable)
+        print("FOUR_TALL_PREVIEW_ARROW_TAP epoch=\(Date().timeIntervalSince1970)")
+        arrow.tap()
+        XCTAssertTrue(tail.waitForExistence(timeout: 10) && tail.isHittable,
+                      "Closing the full-code viewer must preserve the real transcript tail.")
+        print("FOUR_TALL_PREVIEW_ARROW_TAIL epoch=\(Date().timeIntervalSince1970)")
+        attachScreenshot(named: "four-tall-preview-return-tail")
+    }
+
+    func testTallMixedTranscriptWithoutHighlightingReachesConcreteTail() {
+        exerciseTallMixedTranscriptArrow(disableHighlighting: true)
+    }
+
+    func testViewportPrototypeTallMixedRepeatedArrow() {
+        exerciseTallMixedTranscriptArrow(disableHighlighting: false, prototype: true)
+    }
+
+    func testViewportPrototypeTenThousandRows() {
+        exerciseViewportPrototypeTenThousandRows()
+    }
+
+    func testOptInStableViewportRepresentative120AndTenThousandRows() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        for count in [120, 10_000] {
+            app.terminate()
+            app.launchArguments = [performanceLabArgument, "--chat-stable-viewport"]
+            if count == 120 { app.launchArguments.append("--representative-count=120") }
+            app.launch()
+            let scroll = app.scrollViews["prototype-transcript-scroll"]
+            XCTAssertTrue(scroll.waitForExistence(timeout: 15), "Production-compiled viewport must be active in normal ChatView.")
+            let arrow = app.buttons["Prototype scroll to latest"]
+            XCTAssertTrue(arrow.waitForExistence(timeout: 10) && arrow.isHittable)
+            arrow.tap()
+            let marker = count == 120 ? "Representative conversation complete." : endMarker
+            let tail = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", marker)).firstMatch
+            assertHittable(tail, timeout: 15, message: "Stable viewport must reach the concrete \(count)-row tail.")
+            XCTAssertFalse(arrow.waitForExistence(timeout: 2))
+            attachScreenshot(named: "stable-viewport-\(count)-tail")
+        }
+    }
+
+    func testOptInSingleNativeRichRepresentativeRowIsMountedInChatView() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = [performanceLabArgument, "--representative-count=120", "--chat-stable-viewport", "--native-rich-row-prototype"]
+        app.launch()
+        let scroll = app.scrollViews["prototype-transcript-scroll"]
+        XCTAssertTrue(scroll.waitForExistence(timeout: 15))
+        let arrow = app.buttons["Prototype scroll to latest"]
+        XCTAssertTrue(arrow.waitForExistence(timeout: 10) && arrow.isHittable)
+        arrow.tap()
+        let native = app.otherElements["native-rich-row-mounted"]
+        XCTAssertTrue(native.waitForExistence(timeout: 15), "One native rich row must replace MarkdownUI in normal ChatView.")
+        let tail = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Representative conversation complete.")).firstMatch
+        assertHittable(tail, timeout: 15, message: "Native rich row must expose the concrete 120-row tail.")
+        attachScreenshot(named: "native-rich-one-row-120-tail")
+        let copy = native.buttons["Copy code"].firstMatch
+        for _ in 0..<5 {
+            if copy.isHittable { break }
+            scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.28))
+                .press(forDuration: 0.05, thenDragTo: scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.76)))
+        }
+        if !copy.isHittable { print("NATIVE_RICH_AX_COPY \(native.debugDescription)") }
+        XCTAssertTrue(copy.isHittable, "Code Copy must be reachable in the mounted native row.")
+        copy.tap()
+        XCTAssertTrue(app.buttons["Copied code"].firstMatch.waitForExistence(timeout: 3))
+        attachScreenshot(named: "native-rich-one-row-code-interaction")
+        let codeLine = native.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "let answer = values.map")).firstMatch
+        if !codeLine.isHittable { print("NATIVE_RICH_AX_LINE \(native.debugDescription)") }
+        XCTAssertTrue(codeLine.isHittable, "Native code must expose its visible text for response actions.")
+        codeLine.press(forDuration: 1)
+        XCTAssertTrue(app.buttons["Select Text"].waitForExistence(timeout: 3))
+        app.buttons["Select Text"].tap()
+        let selection = app.textViews["selectable-response-text"]
+        XCTAssertTrue(selection.waitForExistence(timeout: 3))
+        let fullText = selection.value as? String ?? ""
+        XCTAssertTrue(fullText.contains("## Response 119"))
+        XCTAssertTrue(fullText.contains("Representative conversation complete."))
+    }
+
+    func testOptInDirectTwoRowsPreserveActionsAndDisclosureFallback() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = [performanceLabArgument, "--representative-count=120",
+                               "--chat-stable-viewport", "--native-direct-two-row-proof",
+                               "--native-rich-lifecycle-fixture"]
+        app.launch()
+        let scroll = app.scrollViews["prototype-transcript-scroll"]
+        XCTAssertTrue(scroll.waitForExistence(timeout: 15))
+        let arrow = app.buttons["Prototype scroll to latest"]
+        XCTAssertTrue(arrow.waitForExistence(timeout: 10))
+        arrow.tap()
+        let assistant = app.otherElements.containing(.staticText, identifier: "message-row:representative-119")
+            .matching(identifier: "native-direct-transcript-row").firstMatch
+        let outgoing = app.otherElements.containing(.staticText, identifier: "message-row:representative-118")
+            .matching(identifier: "native-direct-transcript-row").firstMatch
+        if !assistant.waitForExistence(timeout: 15) { print("DIRECT_TWO_AX \(app.debugDescription)") }
+        XCTAssertTrue(assistant.exists, "The rich assistant must mount as a direct row in real ChatView")
+        XCTAssertTrue(outgoing.exists, "The adjacent outgoing bubble must mount directly")
+        XCTAssertEqual(app.staticTexts.matching(identifier: "message-row:representative-119").count, 1,
+                       "VoiceOver must not announce two response summaries")
+        let tail = assistant.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@", "Representative conversation complete.")).firstMatch
+        assertHittable(tail, timeout: 10, message: "Direct response tail must be visible")
+        attachScreenshot(named: "direct-two-tail")
+        let originalHeight = assistant.frame.height
+        app.buttons["Refresh rows"].tap()
+        XCTAssertTrue(assistant.exists, "Unchanged render-revision bump must not tear down a direct row")
+        XCTAssertEqual(assistant.frame.height, originalHeight, accuracy: 0.1,
+                       "Equivalent cache revision must not cause a second height motion")
+        assertHittable(tail, timeout: 10, message: "Revision refresh must preserve the visible response")
+
+        let copyCode = assistant.buttons["Copy code"]
+        XCTAssertTrue(copyCode.exists, "Code Copy must be exposed in the direct row AX tree: \(assistant.debugDescription)")
+        XCTAssertTrue(copyCode.isHittable, "Code Copy must be available; frame=\(copyCode.frame) row=\(assistant.frame) tree=\(assistant.debugDescription)")
+        copyCode.tap()
+        XCTAssertTrue(assistant.buttons["Copied code"].waitForExistence(timeout: 3))
+        let codeLine = assistant.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@", "let answer = values.map")).firstMatch
+        XCTAssertTrue(codeLine.isHittable)
+        codeLine.press(forDuration: 1)
+        XCTAssertTrue(app.buttons["Select Text"].waitForExistence(timeout: 3),
+                      "The direct row must preserve full-response Select Text")
+        app.buttons["Select Text"].tap()
+        let selection = app.textViews["selectable-response-text"]
+        XCTAssertTrue(selection.waitForExistence(timeout: 3))
+        let selectedSource = selection.value as? String ?? ""
+        XCTAssertTrue(selectedSource.contains("## Response 119"))
+        XCTAssertTrue(selectedSource.contains("Representative conversation complete."))
+        app.buttons["Done"].firstMatch.tap()
+
+        let thinking = assistant.buttons["Thinking"]
+        XCTAssertTrue(thinking.isHittable, "Collapsed thinking must have a real disclosure control")
+        thinking.tap()
+        XCTAssertFalse(assistant.exists, "Unsupported expanded detail must visibly fall back to the old row")
+        let detail = app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@", "Check the relevant evidence and explain the result.")).firstMatch
+        XCTAssertTrue(detail.waitForExistence(timeout: 10), "Fallback must expand actual reasoning detail")
+        let fallbackTail = app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@", "Representative conversation complete.")).firstMatch
+        assertHittable(fallbackTail, timeout: 10, message: "Disclosure fallback must preserve bottom reader anchor")
+        attachScreenshot(named: "direct-two-expanded-thinking-fallback")
+    }
+
+    func testOptInBasicFirstVisibleRowsPreserveReadableActions() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = [performanceLabArgument, "--representative-count=120",
+                               "--chat-stable-viewport", "--native-direct-all120-diagnostic",
+                               "--native-direct-first-visible-basic"]
+        app.launch()
+        let scroll = app.scrollViews["prototype-transcript-scroll"]
+        XCTAssertTrue(scroll.waitForExistence(timeout: 15))
+        let first = app.otherElements.containing(.staticText, identifier: "message-row:representative-1")
+            .matching(identifier: "native-direct-transcript-row").firstMatch
+        XCTAssertTrue(first.waitForExistence(timeout: 10), "First readable response must mount native before the first frame")
+        XCTAssertEqual(app.staticTexts.matching(identifier: "message-row:representative-1").count, 1)
+        XCTAssertTrue(first.staticTexts["Response 1"].isHittable)
+        XCTAssertTrue(first.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@", "A readable explanation with")).firstMatch.isHittable)
+        for cell in ["Check", "State", "Rendering", "Ready"] {
+            XCTAssertTrue(first.staticTexts[cell].exists, "Parsed table cell \(cell) must be visible and accessible")
+        }
+        let bodyCanvas = first.otherElements["native-rich-row"].firstMatch
+        XCTAssertTrue(bodyCanvas.exists)
+        XCTAssertFalse(bodyCanvas.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@", "| --- | --- |")).firstMatch.exists,
+            "The table separator must not leak into visible body lines (the full-source AX summary stays intact)")
+        attachScreenshot(named: "direct-basic-first-readable")
+
+        let copyButtons = first.buttons.matching(identifier: "Copy code")
+        XCTAssertEqual(copyButtons.count, 1, "The Swift block must retain its dedicated Copy control")
+        XCTAssertTrue(copyButtons.element(boundBy: 0).isHittable)
+        copyButtons.element(boundBy: 0).tap()
+        XCTAssertTrue(first.buttons["Copied code"].waitForExistence(timeout: 3))
+
+        let codeLine = first.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@", "let answer = values.map")).firstMatch
+        XCTAssertTrue(codeLine.isHittable)
+        codeLine.press(forDuration: 1)
+        XCTAssertTrue(app.buttons["Select Text"].waitForExistence(timeout: 3))
+        app.buttons["Select Text"].tap()
+        let selection = app.textViews["selectable-response-text"]
+        XCTAssertTrue(selection.waitForExistence(timeout: 3))
+        let source = selection.value as? String ?? ""
+        XCTAssertTrue(source.contains("## Response 1"))
+        XCTAssertTrue(source.contains("| Check | State |"))
+        XCTAssertTrue(source.contains("Continue the review."))
+        app.buttons["Done"].firstMatch.tap()
+
+        let thinking = first.buttons["Thinking"]
+        XCTAssertTrue(thinking.isHittable)
+        let collapsedHeight = first.frame.height
+        let anchoredTop = first.frame.minY
+        thinking.tap()
+        XCTAssertTrue(first.exists, "Thinking expansion must retain the native row")
+        let detailFirstLine = first.staticTexts.matching(NSPredicate(
+            format: "label BEGINSWITH %@", "Check the relevant evidence")).firstMatch
+        let detailLastLine = first.staticTexts["result."]
+        XCTAssertTrue(detailFirstLine.waitForExistence(timeout: 10),
+                      "Expanded Thinking source must expose its first visible line to AX")
+        XCTAssertTrue(detailLastLine.isHittable, "Expanded Thinking must expose its wrapped continuation")
+        XCTAssertEqual(detailFirstLine.label + detailLastLine.label,
+                       "Check the relevant evidence and explain the result.",
+                       "AX line order must reconstruct the canonical reasoning source")
+        XCTAssertGreaterThan(first.frame.height, collapsedHeight + 10)
+        XCTAssertEqual(first.frame.minY, anchoredTop, accuracy: 0.5,
+                       "Disclosure must preserve the first visible row anchor")
+        attachScreenshot(named: "direct-basic-native-thinking-expanded")
+        first.buttons["Thinking"].tap()
+        XCTAssertTrue(detailFirstLine.waitForNonExistence(timeout: 10))
+        XCTAssertTrue(detailLastLine.waitForNonExistence(timeout: 10))
+        XCTAssertEqual(first.frame.height, collapsedHeight, accuracy: 0.5,
+                       "Repeating disclosure must return to the exact cached collapsed geometry")
+        XCTAssertEqual(first.frame.minY, anchoredTop, accuracy: 0.5)
+        first.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.58))
+            .press(forDuration: 0.06,
+                   thenDragTo: scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2)),
+                   withVelocity: .fast, thenHoldForDuration: 0)
+        XCTAssertLessThan(first.frame.minY, anchoredTop - 30,
+                          "Vertical drag inside the native response must move its parent transcript")
+    }
+
+    func testOptInPremountRichFirstRowSemanticAndInteractionGate() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = [performanceLabArgument, "--representative-count=120",
+                               "--chat-stable-viewport", "--native-direct-all120-diagnostic",
+                               "--native-direct-first-visible-basic", "--native-direct-premount-rich-one",
+                               "--native-direct-premount-rich-link-bidi"]
+        app.launch()
+        let scroll = app.scrollViews["prototype-transcript-scroll"]
+        XCTAssertTrue(scroll.waitForExistence(timeout: 15))
+        let first = app.otherElements.containing(.staticText, identifier: "message-row:representative-1")
+            .matching(identifier: "native-direct-transcript-row").firstMatch
+        XCTAssertTrue(first.waitForExistence(timeout: 10))
+        XCTAssertEqual(app.staticTexts.matching(identifier: "message-row:representative-1").count, 1)
+        let initialHeight = first.frame.height
+        XCTAssertTrue(first.staticTexts["Response 1"].exists)
+        XCTAssertTrue(first.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@", "العربية تبدأ السطر")).firstMatch.exists)
+        for cell in ["Check", "State", "Rendering", "Ready"] {
+            XCTAssertTrue(first.staticTexts[cell].exists, "Direct-AST table cell \(cell) must retain AX")
+        }
+        XCTAssertTrue(first.buttons["Copy code"].exists)
+        let link = first.links["Reference source"]
+        XCTAssertTrue(link.exists, "Link must be independently discoverable by VoiceOver")
+        XCTAssertTrue(link.isHittable, "Prepared link must be visible at its measured rect")
+        link.tap() // The synthetic URL is intercepted by the DEBUG fixture, not opened externally.
+        XCTAssertEqual(first.frame.height, initialHeight, accuracy: 0.5,
+                       "Link activation must not remount or refine the prepared row")
+        attachScreenshot(named: "premount-rich-first-collapsed")
+
+        let code = first.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@", "let answer = values.map")).firstMatch
+        XCTAssertTrue(code.exists)
+        code.press(forDuration: 1)
+        XCTAssertTrue(app.buttons["Select Text"].waitForExistence(timeout: 3))
+        app.buttons["Select Text"].tap()
+        let selection = app.textViews["selectable-response-text"]
+        XCTAssertTrue(selection.waitForExistence(timeout: 3))
+        let source = selection.value as? String ?? ""
+        XCTAssertTrue(source.contains("## Response 1"))
+        XCTAssertTrue(source.contains("| Check | State |"))
+        XCTAssertTrue(source.contains("[Reference source](https://example.invalid/reference)"))
+        app.buttons["Done"].firstMatch.tap()
+
+        let thinking = first.buttons["Thinking"]
+        XCTAssertTrue(thinking.exists)
+        thinking.tap()
+        XCTAssertTrue(first.staticTexts.matching(NSPredicate(
+            format: "label BEGINSWITH %@", "Check the relevant evidence")).firstMatch.exists)
+        XCTAssertGreaterThan(first.frame.height, initialHeight + 10)
+        attachScreenshot(named: "premount-rich-first-thinking")
+        thinking.tap()
+        XCTAssertEqual(first.frame.height, initialHeight, accuracy: 0.5)
+        first.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.58))
+            .press(forDuration: 0.06,
+                   thenDragTo: scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2)),
+                   withVelocity: .fast, thenHoldForDuration: 0)
+        XCTAssertLessThan(first.frame.minY, 0,
+                          "Vertical drag on rich row must move the parent transcript")
+    }
+
+    func testOptInPremountRichFirstRowCombinedActivityAndGeometryGate() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = [performanceLabArgument, "--representative-count=120",
+                               "--chat-stable-viewport", "--native-direct-all120-diagnostic",
+                               "--native-direct-first-visible-basic", "--native-direct-premount-rich-one",
+                               "--native-direct-premount-rich-link-bidi",
+                               "--native-direct-two-tool-first-fixture"]
+        app.launch()
+        let first = app.otherElements.containing(.staticText, identifier: "message-row:representative-1")
+            .matching(identifier: "native-direct-transcript-row").firstMatch
+        XCTAssertTrue(first.waitForExistence(timeout: 15), "The first rich assistant must mount natively.")
+        let initialHeight = first.frame.height
+        let initialTop = first.frame.minY
+        for _ in 0..<5 {
+            Thread.sleep(forTimeInterval: 0.1)
+            XCTAssertEqual(first.frame.height, initialHeight, accuracy: 0.5,
+                           "A premounted first row must not visibly swap heights while idle.")
+        }
+        XCTAssertEqual(app.staticTexts.matching(identifier: "message-row:representative-1").count, 1)
+        XCTAssertTrue(first.staticTexts["Response 1"].exists)
+        XCTAssertTrue(first.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@", "العربية تبدأ السطر")).firstMatch.exists)
+        for cell in ["Check", "State", "Rendering", "Ready"] {
+            XCTAssertTrue(first.staticTexts[cell].exists, "The native table must expose \(cell).")
+        }
+        let link = first.links["Reference source"]
+        XCTAssertTrue(link.isHittable)
+        link.tap() // The DEBUG fixture intercepts this synthetic URL.
+        XCTAssertEqual(first.frame.height, initialHeight, accuracy: 0.5)
+        XCTAssertTrue(first.buttons["Copy code"].exists)
+        let read = first.buttons["native-tool-action-first-action-read"]
+        let search = first.buttons["native-tool-action-first-action-search"]
+        XCTAssertTrue(read.isHittable && search.isHittable)
+        XCTAssertTrue(first.buttons["Thinking"].isHittable)
+        attachScreenshot(named: "native-one-row-combined-collapsed")
+
+        first.buttons["Copy code"].tap()
+        XCTAssertTrue(first.buttons["Copied code"].waitForExistence(timeout: 3))
+        let code = first.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@", "let answer = values.map")).firstMatch
+        XCTAssertTrue(code.isHittable)
+        code.press(forDuration: 1)
+        XCTAssertTrue(app.buttons["Select Text"].waitForExistence(timeout: 3))
+        app.buttons["Select Text"].tap()
+        let selection = app.textViews["selectable-response-text"]
+        XCTAssertTrue(selection.waitForExistence(timeout: 3))
+        let source = selection.value as? String ?? ""
+        XCTAssertTrue(source.contains("## Response 1"))
+        XCTAssertTrue(source.contains("| Check | State |"))
+        XCTAssertTrue(source.contains("[Reference source](https://example.invalid/reference)"))
+        app.buttons["Done"].firstMatch.tap()
+
+        first.buttons["Thinking"].tap()
+        XCTAssertTrue(first.staticTexts.matching(NSPredicate(
+            format: "label BEGINSWITH %@", "Check the relevant evidence")).firstMatch.exists)
+        XCTAssertGreaterThan(first.frame.height, initialHeight + 10)
+        XCTAssertEqual(first.frame.minY, initialTop, accuracy: 0.5)
+        first.buttons["Thinking"].tap()
+        XCTAssertEqual(first.frame.height, initialHeight, accuracy: 0.5)
+        read.tap()
+        XCTAssertTrue(first.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@", "fixtures/research.md")).firstMatch.exists)
+        XCTAssertEqual(first.buttons.matching(identifier: "Copy code").count, 2)
+        XCTAssertGreaterThan(first.frame.height, initialHeight + 20)
+        XCTAssertEqual(first.frame.minY, initialTop, accuracy: 0.5)
+        search.tap()
+        XCTAssertTrue(first.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@", "synthetic research question")).firstMatch.exists)
+        XCTAssertGreaterThan(first.frame.height, initialHeight + 50)
+        XCTAssertEqual(first.frame.minY, initialTop, accuracy: 0.5)
+        attachScreenshot(named: "native-one-row-combined-activity-expanded")
+        read.tap()
+        search.tap()
+        XCTAssertEqual(first.frame.height, initialHeight, accuracy: 0.5)
+        XCTAssertEqual(first.frame.minY, initialTop, accuracy: 0.5)
+        XCTAssertTrue(first.exists, "Disclosures must not fall back to a legacy host.")
+    }
+
+    func testDebugNativeRichGroupedParityAndPreviewCard() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = [performanceLabArgument, "--representative-count=120",
+                               "--chat-stable-viewport", "--native-direct-all120-diagnostic",
+                               "--native-direct-first-visible-basic", "--native-direct-premount-rich-one",
+                               "--native-direct-premount-rich-link-bidi",
+                               "--native-direct-two-tool-first-fixture", "--native-direct-parity-gate"]
+        app.launch()
+        let first = app.otherElements.containing(.staticText, identifier: "message-row:representative-1")
+            .matching(identifier: "native-direct-transcript-row").firstMatch
+        XCTAssertTrue(first.waitForExistence(timeout: 15))
+        let group = first.buttons["native-tool-action-__native_group__"]
+        XCTAssertTrue(group.isHittable)
+        XCTAssertEqual(group.label, "2 actions")
+        XCTAssertEqual(group.value as? String, "Completed")
+        XCTAssertFalse(first.buttons["native-tool-action-first-action-read"].exists)
+        let preview = first.buttons["Link preview for example.invalid"]
+        XCTAssertTrue(preview.exists, "The exact product preview host must mount in the native row")
+        attachScreenshot(named: "native-grouped-parity-collapsed")
+        group.tap()
+        XCTAssertTrue(first.buttons["native-tool-action-first-action-read"].exists)
+        XCTAssertTrue(first.buttons["native-tool-action-first-action-search"].exists)
+        attachScreenshot(named: "native-grouped-parity-expanded")
+        group.tap()
+        let scroll = app.scrollViews["prototype-transcript-scroll"]
+        scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.72))
+            .press(forDuration: 0.12,
+                   thenDragTo: scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.58)),
+                   withVelocity: .slow, thenHoldForDuration: 0)
+        XCTAssertTrue(preview.isHittable)
+        attachScreenshot(named: "native-grouped-parity-preview")
+    }
+
+    func testOptInPremountRichFirstRowLongCodeWrapGate() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = [performanceLabArgument, "--representative-count=120",
+                               "--chat-stable-viewport", "--native-direct-all120-diagnostic",
+                               "--native-direct-first-visible-basic", "--native-direct-premount-rich-one",
+                               "--native-direct-premount-rich-wrap-long"]
+        app.launch()
+        let first = app.otherElements.containing(.staticText, identifier: "message-row:representative-1")
+            .matching(identifier: "native-direct-transcript-row").firstMatch
+        XCTAssertTrue(first.waitForExistence(timeout: 15))
+        if first.buttons["Disable code line wrapping"].exists {
+            first.buttons["Disable code line wrapping"].tap()
+        }
+        let enable = first.buttons["Enable code line wrapping"]
+        XCTAssertTrue(enable.waitForExistence(timeout: 5))
+        let unwrappedHeight = first.frame.height
+        XCTAssertTrue(first.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@", "FAR_END_MARKER")).firstMatch.exists)
+        enable.tap()
+        XCTAssertTrue(first.buttons["Disable code line wrapping"].waitForExistence(timeout: 5))
+        XCTAssertGreaterThan(first.frame.height, unwrappedHeight + 50)
+        attachScreenshot(named: "premount-rich-first-wrapped")
+        first.buttons["Disable code line wrapping"].tap()
+        XCTAssertTrue(first.buttons["Enable code line wrapping"].waitForExistence(timeout: 5))
+        XCTAssertEqual(first.frame.height, unwrappedHeight, accuracy: 0.5,
+                       "Alternate actor snapshot must return to its exact cached height")
+    }
+
+    func testOptInPremountFourRowWindowPreviewWrapAndWidth() {
+        continueAfterFailure = false
+        defer { XCUIDevice.shared.orientation = .portrait }
+        let app = XCUIApplication()
+        app.launchArguments = [performanceLabArgument, "--representative-count=120",
+                               "--chat-stable-viewport", "--native-direct-premount-window-gate",
+                               "--native-direct-first-visible-basic", "--native-direct-premount-rich-one",
+                               "--native-direct-premount-rich-link-bidi",
+                               "--native-direct-premount-rich-wrap-long"]
+        app.launch()
+        let first = app.otherElements.containing(.staticText, identifier: "message-row:representative-1")
+            .matching(identifier: "native-direct-transcript-row").firstMatch
+        XCTAssertTrue(first.waitForExistence(timeout: 15))
+        let initialWidth = first.frame.width
+        let initialHeight = first.frame.height
+        let preview = first.buttons["Link preview for example.invalid"]
+        XCTAssertTrue(preview.exists, "The existing preview card must remain separately accessible")
+        XCTAssertTrue(preview.isHittable)
+        preview.tap()
+        XCTAssertTrue(first.staticTexts["Response 1"].isHittable,
+                      "The synthetic preview tap must stay inside the chat fixture")
+        XCTAssertTrue(first.staticTexts["Response 1"].isHittable)
+        attachScreenshot(named: "premount-window-preview-portrait")
+
+        if first.buttons["Disable code line wrapping"].exists {
+            first.buttons["Disable code line wrapping"].tap()
+        }
+        let enable = first.buttons["Enable code line wrapping"]
+        XCTAssertTrue(enable.waitForExistence(timeout: 5))
+        let unwrappedHeight = first.frame.height
+        enable.tap()
+        XCTAssertTrue(first.buttons["Disable code line wrapping"].waitForExistence(timeout: 5))
+        XCTAssertGreaterThan(first.frame.height, unwrappedHeight + 50)
+        XCTAssertTrue(preview.exists, "Wrap must retain the reserved preview card")
+        first.buttons["Disable code line wrapping"].tap()
+        XCTAssertTrue(first.buttons["Enable code line wrapping"].waitForExistence(timeout: 5))
+        XCTAssertEqual(first.frame.height, unwrappedHeight, accuracy: 0.5)
+        XCTAssertEqual(first.frame.height, initialHeight, accuracy: 0.5)
+
+        func waitForWidth(_ predicate: (CGFloat) -> Bool) -> Bool {
+            let deadline = Date().addingTimeInterval(15)
+            while Date() < deadline {
+                if predicate(first.frame.width) { return true }
+                RunLoop.current.run(until: Date().addingTimeInterval(0.15))
+            }
+            return false
+        }
+        XCUIDevice.shared.orientation = .landscapeLeft
+        XCTAssertTrue(waitForWidth { $0 > initialWidth + 100 })
+        XCTAssertEqual(app.staticTexts.matching(identifier: "message-row:representative-1").count, 1)
+        XCTAssertTrue(first.staticTexts["Response 1"].exists)
+        XCTAssertTrue(preview.exists)
+        attachScreenshot(named: "premount-window-preview-landscape")
+
+        XCUIDevice.shared.orientation = .portrait
+        XCTAssertTrue(waitForWidth { $0 < initialWidth + 1 })
+        let portraitDeadline = Date().addingTimeInterval(5)
+        while abs(first.frame.height - initialHeight) >= 0.5 && Date() < portraitDeadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        }
+        XCTAssertEqual(first.frame.height, initialHeight, accuracy: 0.5)
+        XCTAssertTrue(first.staticTexts["Response 1"].isHittable)
+        XCTAssertTrue(preview.exists)
+        attachScreenshot(named: "premount-window-preview-return-portrait")
+    }
+
+    func testOptInFirstVisibleNativeToolActionsExpandIndependently() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = [performanceLabArgument, "--representative-count=120",
+                               "--chat-stable-viewport", "--native-direct-all120-diagnostic",
+                               "--native-direct-first-visible-basic",
+                               "--native-direct-two-tool-first-fixture"]
+        app.launch()
+        let scroll = app.scrollViews["prototype-transcript-scroll"]
+        XCTAssertTrue(scroll.waitForExistence(timeout: 15))
+        let first = app.otherElements.containing(.staticText, identifier: "message-row:representative-1")
+            .matching(identifier: "native-direct-transcript-row").firstMatch
+        XCTAssertTrue(first.waitForExistence(timeout: 10))
+        let read = first.buttons["native-tool-action-first-action-read"]
+        let search = first.buttons["native-tool-action-first-action-search"]
+        XCTAssertTrue(read.isHittable)
+        XCTAssertTrue(search.isHittable)
+        XCTAssertEqual(read.label, "Read file")
+        XCTAssertEqual(search.label, "Search web")
+        XCTAssertEqual(read.value as? String, "Completed")
+        XCTAssertEqual(first.buttons.matching(NSPredicate(
+            format: "identifier BEGINSWITH %@", "native-tool-action-")).count, 2,
+            "There must be one compact disclosure per action, not a duplicate group summary")
+        let collapsedHeight = first.frame.height
+        let anchoredTop = first.frame.minY
+        attachScreenshot(named: "direct-two-tool-collapsed")
+
+        read.tap()
+        let path = first.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@", "fixtures/research.md")).firstMatch
+        let readResult = first.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@", "Read the synthetic research note.")).firstMatch
+        XCTAssertTrue(path.waitForExistence(timeout: 10), "Read-file arguments must be native AX text")
+        XCTAssertTrue(readResult.exists, "Read-file result must be native AX text")
+        XCTAssertEqual(first.buttons.matching(identifier: "Copy code").count, 2,
+                       "Tool detail and response code need separate Copy controls")
+        first.buttons.matching(identifier: "Copy code").firstMatch.tap()
+        XCTAssertTrue(first.buttons["Copied code"].waitForExistence(timeout: 3))
+        XCTAssertGreaterThan(first.frame.height, collapsedHeight + 50)
+        XCTAssertEqual(first.frame.minY, anchoredTop, accuracy: 0.5)
+        XCTAssertTrue(search.isHittable, "The second action must remain directly reachable")
+        let afterReadHeight = first.frame.height
+        search.tap()
+        let query = first.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@", "synthetic research question")).firstMatch
+        let searchResult = first.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@", "Two synthetic source matches found.")).firstMatch
+        XCTAssertTrue(query.waitForExistence(timeout: 10))
+        XCTAssertTrue(searchResult.exists)
+        XCTAssertTrue(path.exists, "Opening the second action must not discard the first")
+        XCTAssertGreaterThan(first.frame.height, afterReadHeight + 50)
+        XCTAssertEqual(first.frame.minY, anchoredTop, accuracy: 0.5)
+        attachScreenshot(named: "direct-two-tool-expanded")
+
+        read.tap()
+        XCTAssertTrue(path.waitForNonExistence(timeout: 10))
+        XCTAssertTrue(query.exists, "The other action must stay expanded independently")
+        search.tap()
+        XCTAssertTrue(query.waitForNonExistence(timeout: 10))
+        XCTAssertEqual(first.frame.height, collapsedHeight, accuracy: 0.5)
+        XCTAssertEqual(first.frame.minY, anchoredTop, accuracy: 0.5)
+        first.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6))
+            .press(forDuration: 0.06,
+                   thenDragTo: scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2)),
+                   withVelocity: .fast, thenHoldForDuration: 0)
+        XCTAssertLessThan(first.frame.minY, anchoredTop - 30,
+                          "Vertical drag on a tool-rich row must move the transcript")
+    }
+
+    func testOptInDirectTwoRowsLongCodeWrapAndVerticalDrag() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = [performanceLabArgument, "--representative-count=120",
+                               "--chat-stable-viewport", "--native-direct-two-row-proof",
+                               "--native-rich-wrap-fixture"]
+        app.launch()
+        let scroll = app.scrollViews["prototype-transcript-scroll"]
+        XCTAssertTrue(scroll.waitForExistence(timeout: 15))
+        app.buttons["Prototype scroll to latest"].tap()
+        let assistant = app.otherElements.containing(.staticText, identifier: "message-row:representative-119")
+            .matching(identifier: "native-direct-transcript-row").firstMatch
+        XCTAssertTrue(assistant.waitForExistence(timeout: 15))
+        let tail = assistant.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@", "Representative conversation complete.")).firstMatch
+        assertHittable(tail, timeout: 10, message: "Direct long-code tail must be present")
+        if assistant.buttons["Disable code line wrapping"].exists {
+            assistant.buttons["Disable code line wrapping"].tap()
+        }
+        let enable = assistant.buttons["Enable code line wrapping"]
+        XCTAssertTrue(enable.waitForExistence(timeout: 10))
+        let originalHeight = assistant.frame.height
+        let codeLine = assistant.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@", "FAR_END_MARKER")).firstMatch
+        XCTAssertTrue(codeLine.exists)
+        func horizontalOffset() -> Int {
+            let words = (enable.value as? String ?? "").split(separator: " ")
+            return words.count > 2 ? (Int(words[2]) ?? -1) : -1
+        }
+        XCTAssertEqual(horizontalOffset(), 0)
+        let start = assistant.coordinate(withNormalizedOffset: CGVector(dx: 0.82, dy: 0.58))
+        let end = assistant.coordinate(withNormalizedOffset: CGVector(dx: 0.18, dy: 0.58))
+        for _ in 0..<10 { start.press(forDuration: 0.06, thenDragTo: end) }
+        XCTAssertGreaterThan(horizontalOffset(), 500,
+                             "Horizontal pan must move the actual code scroller, not merely keep its button visible")
+        XCTAssertTrue(enable.isHittable)
+        attachScreenshot(named: "direct-two-long-code-panned")
+
+        enable.tap()
+        XCTAssertTrue(assistant.buttons["Disable code line wrapping"].waitForExistence(timeout: 10))
+        XCTAssertGreaterThan(assistant.frame.height, originalHeight + 50,
+                             "Wrap must grow the direct measured row")
+        assertHittable(tail, timeout: 10, message: "Wrapped direct row must retain the bottom anchor")
+        attachScreenshot(named: "direct-two-long-code-wrapped")
+        assistant.buttons["Disable code line wrapping"].tap()
+        XCTAssertTrue(assistant.buttons["Enable code line wrapping"].waitForExistence(timeout: 10))
+        assertHittable(tail, timeout: 10, message: "Second toggle must keep the tail")
+        let beforeVertical = tail.frame.minY
+        assistant.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.55))
+            .press(forDuration: 0.06,
+                   thenDragTo: scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.9)),
+                   withVelocity: .fast, thenHoldForDuration: 0)
+        XCTAssertGreaterThan(tail.frame.minY - beforeVertical, 30,
+                             "Vertical drag inside direct code must move parent transcript")
+    }
+
+    func testOptInNativeRichLongCodeWrapPanAndSavedPreference() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        let arguments = [performanceLabArgument, "--representative-count=120", "--chat-stable-viewport",
+                         "--native-rich-row-prototype", "--native-rich-wrap-fixture"]
+        app.launchArguments = arguments
+        app.launch()
+        let scroll = app.scrollViews["prototype-transcript-scroll"]
+        XCTAssertTrue(scroll.waitForExistence(timeout: 15))
+        let arrow = app.buttons["Prototype scroll to latest"]
+        XCTAssertTrue(arrow.waitForExistence(timeout: 10))
+        arrow.tap()
+        let native = app.otherElements["native-rich-row-mounted"]
+        XCTAssertTrue(native.waitForExistence(timeout: 15))
+        let tail = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Representative conversation complete.")).firstMatch
+        assertHittable(tail, timeout: 15, message: "Unwrapped long code must not hide the tail")
+
+        // Persisted preference can be left enabled by a previous failed run.
+        if native.buttons["Disable code line wrapping"].exists {
+            native.buttons["Disable code line wrapping"].tap()
+        }
+        let enable = native.buttons["Enable code line wrapping"]
+        XCTAssertTrue(enable.waitForExistence(timeout: 10))
+        let unwrappedHeight = native.frame.height
+        attachScreenshot(named: "native-rich-long-code-unwrapped-start")
+        let longCodeLine = native.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "FAR_END_MARKER")).firstMatch
+        XCTAssertTrue(longCodeLine.exists)
+        let codeLineStartX = longCodeLine.frame.minX
+        let start = native.coordinate(withNormalizedOffset: CGVector(dx: 0.82, dy: 0.56))
+        let end = native.coordinate(withNormalizedOffset: CGVector(dx: 0.18, dy: 0.56))
+        for _ in 0..<10 { start.press(forDuration: 0.06, thenDragTo: end) }
+        XCTAssertLessThan(longCodeLine.frame.minX, codeLineStartX - 500,
+                          "Mounted code AX geometry must shift with the visible horizontal pan")
+        attachScreenshot(named: "native-rich-long-code-unwrapped-panned")
+        XCTAssertTrue(enable.isHittable, "Horizontal code pan must leave header control reachable")
+
+        enable.tap()
+        let disable = native.buttons["Disable code line wrapping"]
+        XCTAssertTrue(disable.waitForExistence(timeout: 10), "Preprepared wrapped snapshot must remain native")
+        XCTAssertGreaterThan(native.frame.height, unwrappedHeight + 50, "Wrapped code must grow the measured row")
+        assertHittable(tail, timeout: 10, message: "Wrap reflow must preserve bottom reader anchor")
+        attachScreenshot(named: "native-rich-long-code-wrapped")
+        let copy = native.buttons["Copy code"]
+        XCTAssertTrue(copy.isHittable)
+        copy.tap()
+        XCTAssertTrue(native.buttons["Copied code"].waitForExistence(timeout: 3))
+
+        app.terminate()
+        app.launchArguments = arguments
+        app.launch()
+        XCTAssertTrue(scroll.waitForExistence(timeout: 15))
+        app.buttons["Prototype scroll to latest"].tap()
+        let reopened = app.otherElements["native-rich-row-mounted"]
+        XCTAssertTrue(reopened.waitForExistence(timeout: 15))
+        XCTAssertTrue(reopened.buttons["Disable code line wrapping"].waitForExistence(timeout: 10),
+                      "Reopen must honor persisted code wrapping")
+        reopened.buttons["Disable code line wrapping"].tap()
+        XCTAssertTrue(reopened.buttons["Enable code line wrapping"].waitForExistence(timeout: 10))
+        assertHittable(tail, timeout: 10, message: "Second toggle must preserve bottom reader anchor")
+        let beforeVertical = tail.frame.minY
+        print("NATIVE_RICH_VERTICAL_BEFORE native=\(reopened.frame) scroll=\(scroll.frame) tailY=\(beforeVertical)")
+        reopened.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.55))
+            .press(forDuration: 0.06, thenDragTo: scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.9)), withVelocity: .fast, thenHoldForDuration: 0)
+        let afterVertical = tail.frame.minY
+        print("NATIVE_RICH_VERTICAL_AFTER tailY=\(afterVertical)")
+        XCTAssertGreaterThan(afterVertical - beforeVertical, 30,
+                             "Vertical drag inside code must move the transcript rather than being captured by horizontal pan")
+    }
+
+    func testOptInAllRich120WrapStreamAndReopenState() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = [performanceLabArgument, "--representative-count=120", "--chat-stable-viewport",
+                               "--native-rich-all-eligible-120", "--native-rich-lifecycle-fixture"]
+        app.launch()
+        let scroll = app.scrollViews["prototype-transcript-scroll"]
+        XCTAssertTrue(scroll.waitForExistence(timeout: 15))
+        let arrow = app.buttons["Prototype scroll to latest"]
+        XCTAssertTrue(arrow.waitForExistence(timeout: 10))
+        arrow.tap()
+        let tail = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Representative conversation complete.")).firstMatch
+        assertHittable(tail, timeout: 15, message: "Native 120-row tail must arrive before lifecycle actions")
+        let native = tail.descendants(matching: .other)
+            .matching(identifier: "native-rich-row-mounted").firstMatch
+        XCTAssertTrue(native.waitForExistence(timeout: 15), "Response 119 must mount its native row")
+        if native.buttons["Disable code line wrapping"].exists {
+            native.buttons["Disable code line wrapping"].tap()
+        }
+        native.buttons["Enable code line wrapping"].tap()
+        XCTAssertTrue(native.buttons["Disable code line wrapping"].waitForExistence(timeout: 10))
+        assertHittable(tail, timeout: 10, message: "Global wrap change must retain bottom anchor")
+        native.buttons["Disable code line wrapping"].tap()
+        XCTAssertTrue(native.buttons["Enable code line wrapping"].waitForExistence(timeout: 10))
+        let codeLine = native.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "let answer = values.map")).firstMatch
+        XCTAssertTrue(codeLine.isHittable)
+        codeLine.press(forDuration: 1)
+        XCTAssertTrue(app.buttons["Select Text"].waitForExistence(timeout: 3))
+        app.buttons["Select Text"].tap()
+        let selection = app.textViews["selectable-response-text"]
+        XCTAssertTrue(selection.waitForExistence(timeout: 3))
+        XCTAssertTrue((selection.value as? String ?? "").contains("## Response 119"))
+        app.buttons["Done"].firstMatch.tap()
+        app.buttons["Stream rich test turn"].tap()
+        let streamEnd = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "SEMREH_MULTI_CHAT_STREAM_1")).firstMatch
+        XCTAssertTrue(streamEnd.waitForExistence(timeout: 15), "Stream must retain its final durable text")
+        XCTAssertEqual(app.buttons["Reopen rich chat"].value as? String, "122 rows")
+        attachScreenshot(named: "native-rich-120-after-stream")
+        app.buttons["Reopen rich chat"].tap()
+        XCTAssertTrue(scroll.waitForExistence(timeout: 15))
+        XCTAssertEqual(app.buttons["Reopen rich chat"].value as? String, "122 rows")
+        if arrow.isHittable { arrow.tap() }
+        assertHittable(streamEnd, timeout: 15, message: "Reopened retained ChatView must keep the streamed tail")
+        attachScreenshot(named: "native-rich-120-after-reopen")
+    }
+
+    func testDebugHostedRich120NativeViewportMotionAndLifecycleGate() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.terminate()
+        app.launchArguments = [performanceLabArgument, "--representative-count=120",
+                               "--chat-stable-viewport", "--native-rich-lifecycle-fixture",
+                               "--native-hosted-rich120-gate"]
+        app.launch()
+        let scroll = app.scrollViews["prototype-transcript-scroll"]
+        XCTAssertTrue(scroll.waitForExistence(timeout: 15))
+        let arrow = app.buttons["Prototype scroll to latest"]
+        XCTAssertTrue(arrow.waitForExistence(timeout: 10))
+        print("SEMREH_HOSTED_RICH_ARROW_TAP at=\(Date())")
+        arrow.tap()
+        let tail = app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@", "Representative conversation complete."
+        )).firstMatch
+        assertHittable(tail, timeout: 15, message: "Native host must reach actual rich response 119.")
+        attachScreenshot(named: "hosted-rich-120-tail")
+        XCTAssertTrue(app.buttons["Copy code"].firstMatch.exists, "Product Markdown code action must survive native hosting.")
+        XCTAssertTrue(app.buttons["Stream rich test turn"].exists)
+        app.buttons["Stream rich test turn"].tap()
+        let streamEnd = app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@", "SEMREH_MULTI_CHAT_STREAM_1"
+        )).firstMatch
+        XCTAssertTrue(streamEnd.waitForExistence(timeout: 15), "Streaming row must be mounted and readable.")
+        attachScreenshot(named: "hosted-rich-120-streamed-tail")
+        app.buttons["Reopen rich chat"].tap()
+        XCTAssertTrue(scroll.waitForExistence(timeout: 15))
+        if arrow.isHittable { arrow.tap() }
+        assertHittable(streamEnd, timeout: 15, message: "Reopen must preserve streamed content and tail.")
+        attachScreenshot(named: "hosted-rich-120-reopened-tail")
+    }
+
+    func testDebugDirectRich120ArrowStreamAndReopenMotionGate() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = [performanceLabArgument, "--representative-count=120",
+                               "--chat-stable-viewport", "--native-direct-all120-diagnostic",
+                               "--native-direct-target-first-immediate-diagnostic",
+                               "--native-direct-premount-rich-one", "--native-direct-first-visible-basic",
+                               "--native-direct-parity-gate", "--native-direct-body-cache-gate",
+                               "--native-rich-lifecycle-fixture", "--native-hosted-rich120-gate"]
+        app.launch()
+        let scroll = app.scrollViews["prototype-transcript-scroll"]
+        XCTAssertTrue(scroll.waitForExistence(timeout: 15))
+        let arrow = app.buttons["Prototype scroll to latest"]
+        XCTAssertTrue(arrow.waitForExistence(timeout: 10))
+        print("SEMREH_DIRECT_RICH120_ARROW_TAP at=\(Date())")
+        arrow.tap()
+        attachScreenshot(named: "direct-rich120-immediate-posttap")
+        XCTAssertFalse(app.staticTexts["native-direct-arrow-unready"].exists,
+                       "A cold far-arrow that cannot animate real prepared rows is NO-GO.")
+        let tail = app.otherElements.containing(.staticText, identifier: "message-row:representative-119")
+            .matching(identifier: "native-direct-transcript-row").firstMatch
+        XCTAssertTrue(tail.waitForExistence(timeout: 15),
+                      "The far tail must be an actual native rich row, not a SwiftUI host or proxy.")
+        XCTAssertTrue(tail.staticTexts["Response 119"].isHittable)
+        XCTAssertTrue(tail.buttons["Copy code"].exists)
+        attachScreenshot(named: "direct-rich120-tail")
+        XCTAssertTrue(app.buttons["Stream rich test turn"].exists)
+        print("SEMREH_DIRECT_RICH120_STREAM_TAP at=\(Date()) tailFrame=\(tail.frame)")
+        app.buttons["Stream rich test turn"].tap()
+        let streamed = app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@", "SEMREH_MULTI_CHAT_STREAM_1")).firstMatch
+        XCTAssertTrue(streamed.waitForExistence(timeout: 15))
+        let outgoing = app.otherElements.containing(.staticText,
+            identifier: "message-row:perf-stream-message-1-user")
+            .matching(identifier: "native-direct-transcript-row").firstMatch
+        let assistant = app.otherElements.containing(.staticText,
+            identifier: "message-row:perf-stream-message-1-assistant")
+            .matching(identifier: "native-direct-transcript-row").firstMatch
+        XCTAssertTrue(outgoing.exists, "Appended outgoing row must remain native and accessible.")
+        XCTAssertTrue(assistant.exists, "Appended assistant row must remain native and accessible.")
+        XCTAssertTrue(streamed.isHittable, "Final observed stream bytes must be visibly readable.")
+        let motionSettled = expectation(for: NSPredicate(
+            format: "value CONTAINS %@", "stream motion settled"), evaluatedWith: scroll)
+        wait(for: [motionSettled], timeout: 5)
+        XCTAssertEqual(scroll.value as? String, "stream motion settled; unexpected moves 0",
+                       "Only the viewport display link may move the unchanged old row while the stream grows.")
+        XCTAssertTrue(tail.exists && tail.buttons["Copy code"].exists,
+                      "The preceding rich row must remain mounted and source-accurate through stream growth.")
+        print("SEMREH_DIRECT_RICH120_STREAM_READY at=\(Date()) tailFrame=\(tail.frame) assistantFrame=\(assistant.frame)")
+        attachScreenshot(named: "direct-rich120-streamed")
+        app.buttons["Reopen rich chat"].tap()
+        XCTAssertTrue(scroll.waitForExistence(timeout: 15))
+        if arrow.isHittable { arrow.tap() }
+        XCTAssertTrue(streamed.waitForExistence(timeout: 15))
+        XCTAssertTrue(streamed.isHittable, "Reopen arrow must visibly return to the native streamed tail.")
+        attachScreenshot(named: "direct-rich120-reopened")
+    }
+
+    func testDebugDirectRich120StreamKeepsReaderAwayAnchored() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = [performanceLabArgument, "--representative-count=120",
+                               "--chat-stable-viewport", "--native-direct-all120-diagnostic",
+                               "--native-direct-target-first-immediate-diagnostic",
+                               "--native-direct-premount-rich-one", "--native-direct-first-visible-basic",
+                               "--native-direct-parity-gate", "--native-direct-body-cache-gate",
+                               "--native-rich-lifecycle-fixture", "--native-hosted-rich120-gate"]
+        app.launch()
+        let scroll = app.scrollViews["prototype-transcript-scroll"]
+        XCTAssertTrue(scroll.waitForExistence(timeout: 15))
+        let first = app.otherElements.containing(.staticText, identifier: "message-row:representative-1")
+            .matching(identifier: "native-direct-transcript-row").firstMatch
+        XCTAssertTrue(first.waitForExistence(timeout: 15))
+        let originalY = first.frame.minY
+        app.buttons["Stream rich test turn"].tap()
+        let count = expectation(for: NSPredicate(format: "value == %@", "122 rows"),
+                                evaluatedWith: app.buttons["Reopen rich chat"])
+        wait(for: [count], timeout: 15)
+        XCTAssertEqual(first.frame.minY, originalY, accuracy: 1,
+                       "Appending below an away reader must preserve the visible native row's screen position.")
+        XCTAssertTrue(first.staticTexts["Response 1"].isHittable)
+        XCTAssertFalse((scroll.value as? String)?.contains("stream motion active") == true,
+                       "An away reader must not enter automatic stream-follow motion.")
+    }
+
+    func testOptInStableViewportStreamsAndReopensLongChat() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.terminate()
+        app.launchArguments = ["--chat-performance-multi-lab", "--chat-stable-viewport"]
+        app.launch()
+
+        let scroll = app.scrollViews["prototype-transcript-scroll"]
+        let arrow = app.buttons["Prototype scroll to latest"]
+        XCTAssertTrue(scroll.waitForExistence(timeout: 15))
+        XCTAssertTrue(arrow.waitForExistence(timeout: 10))
+        arrow.tap()
+        let originalTail = app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@", "End of 10,000-row conversation 1."
+        )).firstMatch
+        assertHittable(originalTail, timeout: 20, message: "Original long-chat tail must be present.")
+
+        app.buttons["Stream test turn"].tap()
+        let streamedTail = app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@", "SEMREH_MULTI_CHAT_STREAM_1"
+        )).firstMatch
+        assertHittable(streamedTail, timeout: 20, message: "Appended stream must stay visible at the bottom.")
+        scroll.swipeDown()
+        XCTAssertTrue(arrow.waitForExistence(timeout: 10))
+        arrow.tap()
+        assertHittable(streamedTail, timeout: 20, message: "Arrow must return to appended stream.")
+
+        app.buttons["Performance chat 2"].tap()
+        XCTAssertTrue(app.otherElements["chat-detail:10,000-row performance lab 2"].waitForExistence(timeout: 15))
+        app.buttons["Performance chat 1"].tap()
+        XCTAssertTrue(app.otherElements["chat-detail:10,000-row performance lab 1"].waitForExistence(timeout: 15))
+        assertHittable(streamedTail, timeout: 20, message: "Reopening must retain the streamed tail and viewport.")
+        attachScreenshot(named: "stable-viewport-stream-reopen-tail")
+    }
+
+    func testViewportPrototypeCostProfile() {
+        exerciseViewportPrototypeTenThousandRows(profilePause: true)
+    }
+
+    private func exerciseViewportPrototypeTenThousandRows(profilePause: Bool = false) {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = [performanceLabArgument, "--chat-viewport-prototype"]
+        app.launch()
+        let arrow = app.buttons["Prototype scroll to latest"]
+        XCTAssertTrue(arrow.waitForExistence(timeout: 15))
+        // Give the external sampler time to attach. This is diagnostic only;
+        // the offscreen final row is not created or prewarmed during the pause.
+        if profilePause { Thread.sleep(forTimeInterval: 15) }
+        for cycle in 1...2 {
+            if cycle > 1 {
+                let transcript = app.scrollViews["prototype-transcript-scroll"]
+                transcript.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.3))
+                    .press(forDuration: 0.05, thenDragTo: transcript.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.7)))
+                XCTAssertTrue(arrow.waitForExistence(timeout: 5))
+            }
+            arrow.tap()
+            let tail = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", endMarker)).firstMatch
+            assertHittable(tail, timeout: 10, message: "Prototype must reach the concrete 10,000-row tail, cycle \(cycle).")
+            XCTAssertFalse(arrow.waitForExistence(timeout: 2))
+        }
+        attachScreenshot(named: "prototype-ten-thousand-tail")
+        if profilePause { Thread.sleep(forTimeInterval: 8) }
+    }
+
+    func testPrototypeVirtualCodeTallRepeatedArrow() {
+        exerciseTallMixedTranscriptArrow(disableHighlighting: false, prototype: true, virtualCode: true)
+    }
+
+    private func exerciseTallMixedTranscriptArrow(disableHighlighting: Bool, prototype: Bool = false, virtualCode: Bool = false) {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.terminate()
+        app.launchArguments = ["--chat-performance-tall-lab"]
+        if prototype { app.launchArguments.append("--chat-viewport-prototype") }
+        if virtualCode { app.launchArguments.append("--viewport-virtual-code") }
+        if disableHighlighting { app.launchArguments.append("--tail-geometry-no-highlight") }
+        app.launch()
+        XCTAssertTrue(app.otherElements["chat-detail:Tall mixed transcript lab"].waitForExistence(timeout: 15))
+        let transcript = app.scrollViews[prototype ? "prototype-transcript-scroll" : "chat-transcript-scroll"]
+        let arrow = app.buttons[prototype ? "Prototype scroll to latest" : scrollToLatestLabel]
+        for cycle in 1...3 {
+            if cycle > 1 {
+                // Isolate the vertical transcript gesture from the nested
+                // horizontally scrolling code block under the viewport center.
+                let start = transcript.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.3))
+                let end = transcript.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.7))
+                start.press(forDuration: 0.05, thenDragTo: end)
+                attachScreenshot(named: "tall-mixed-after-outer-drag-\(cycle)")
+            }
+            XCTAssertTrue(arrow.waitForExistence(timeout: 10) && arrow.isHittable)
+            arrow.tap()
+            let tail = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "End of tall mixed conversation.")).firstMatch
+            assertHittable(tail, timeout: 10, message: "A tall mixed row must reach its actual end, cycle \(cycle).")
+            XCTAssertFalse(arrow.waitForExistence(timeout: 2))
+        }
+        let codeText = app.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS %@", "let measuredHeight = rows.reduce(0)")
+        ).firstMatch
+        XCTAssertTrue(codeText.exists, "Highlighted code must remain exposed as readable accessibility text.")
+        if virtualCode { XCTAssertTrue(app.otherElements["prototype-virtual-code"].firstMatch.exists, "Candidate must actually be mounted.") }
+        attachScreenshot(named: "tall-mixed-real-scroll-tail")
+    }
+
+    func testPrototypeHighlightedCodeSelectionBaseline() {
+        exercisePrototypeCodeSelection(virtualCode: false)
+    }
+
+    func testPrototypeVirtualCodeFullSelection() {
+        exercisePrototypeCodeSelection(virtualCode: true)
+    }
+
+    func testPrototypeVirtualCodeWrapAndOffscreenAccessibility() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--chat-performance-tall-lab", "--chat-viewport-prototype", "--viewport-virtual-code"]
+        app.launch()
+        let arrow = app.buttons["Prototype scroll to latest"]
+        XCTAssertTrue(arrow.waitForExistence(timeout: 15))
+        arrow.tap()
+        let tail = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "End of tall mixed conversation.")).firstMatch
+        assertHittable(tail, timeout: 10, message: "Start at the concrete tall tail.")
+        XCTAssertTrue(app.otherElements["prototype-virtual-code"].firstMatch.exists)
+        let lines = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "let measuredHeight = rows.reduce(0)"))
+        XCTAssertGreaterThanOrEqual(lines.count, 96, "Offscreen logical lines must remain accessible.")
+        let transcript = app.scrollViews["prototype-transcript-scroll"]
+        let enable = app.buttons["Enable code line wrapping"]
+        let disable = app.buttons["Disable code line wrapping"]
+        for _ in 0..<9 {
+            if enable.firstMatch.isHittable || disable.firstMatch.isHittable { break }
+            transcript.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.2))
+                .press(forDuration: 0.05, thenDragTo: transcript.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.8)))
+        }
+        let toggle = enable.firstMatch.isHittable ? enable.firstMatch : disable.firstMatch
+        XCTAssertTrue(toggle.isHittable, "Reach the actual code header with reader gestures.")
+        let initiallyWrapped = disable.firstMatch.isHittable
+        toggle.tap()
+        let reverse = initiallyWrapped ? enable.firstMatch : disable.firstMatch
+        XCTAssertTrue(reverse.waitForExistence(timeout: 5) && reverse.isHittable,
+                      "Wrapping must keep the code header at the reader's anchor.")
+        attachScreenshot(named: "prototype-code-wrap-reader-anchor")
+        reverse.tap()
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5) && toggle.isHittable)
+        let copy = app.buttons["Copy code"].firstMatch
+        XCTAssertTrue(copy.isHittable)
+        copy.tap()
+        XCTAssertTrue(app.buttons["Copied code"].firstMatch.waitForExistence(timeout: 3))
+        XCTAssertTrue(arrow.waitForExistence(timeout: 5))
+        arrow.tap()
+        assertHittable(tail, timeout: 10, message: "Wrap/copy changes must not lose the actual tail.")
+        XCTAssertFalse(arrow.waitForExistence(timeout: 2))
+        attachScreenshot(named: "prototype-code-wrap-tail-return")
+    }
+
+    private func exercisePrototypeCodeSelection(virtualCode: Bool) {
+        let app = XCUIApplication()
+        app.launchArguments = ["--chat-performance-tall-lab", "--chat-viewport-prototype"]
+        if virtualCode { app.launchArguments.append("--viewport-virtual-code") }
+        app.launch()
+        let arrow = app.buttons["Prototype scroll to latest"]
+        XCTAssertTrue(arrow.waitForExistence(timeout: 15))
+        arrow.tap()
+        let tail = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "End of tall mixed conversation.")).firstMatch
+        assertHittable(tail, timeout: 10, message: "Selection baseline needs the concrete tall tail.")
+        if virtualCode { XCTAssertTrue(app.otherElements["prototype-virtual-code"].firstMatch.exists, "Candidate must actually be mounted.") }
+        let lines = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "let measuredHeight = rows.reduce(0)"))
+        guard let visible = lines.allElementsBoundByIndex.last(where: { $0.isHittable }) else {
+            return XCTFail("A visible highlighted line is required for native selection inspection.")
+        }
+        visible.press(forDuration: 1)
+        attachScreenshot(named: "prototype-code-selection-baseline")
+        let copy = app.buttons["Copy"]
+        XCTAssertTrue(copy.firstMatch.waitForExistence(timeout: 3), "Native code selection must offer Copy.")
+        let select = app.buttons["Select Text"]
+        XCTAssertTrue(select.waitForExistence(timeout: 3))
+        select.tap()
+        let selectable = app.textViews["selectable-response-text"]
+        XCTAssertTrue(selectable.waitForExistence(timeout: 3))
+        let fullText = selectable.value as? String ?? ""
+        XCTAssertTrue(fullText.contains("End of tall mixed conversation."))
+        XCTAssertGreaterThan(fullText.components(separatedBy: "let measuredHeight = rows.reduce(0)").count, 90,
+                             "Full logical code must remain selectable, not just visible lines.")
+        attachScreenshot(named: "prototype-full-response-selection-baseline")
+    }
+
     func testRepeatedScrollAwayAndArrowReturnKeepsEndMarkerReachable() {
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -417,6 +1906,108 @@ final class LongChatScrollUITests: XCTestCase {
                 "Cycle \(cycle)'s scroll-to-latest action must clear at the bottom."
             )
         }
+    }
+
+    func testSyntheticProductionOpenFlickAndArrow120And10kMixed() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        for count in [120, 10_000] {
+            app.terminate()
+            app.launchArguments = [performanceLabArgument, "--chat-viewport-diagnostic"]
+            if count == 120 {
+                app.launchArguments.append("--representative-count=120")
+            } else {
+                app.launchArguments.append("--native-direct-mixed-rich-10k")
+            }
+            app.launch()
+
+            let transcript = app.scrollViews["chat-transcript-scroll"]
+            XCTAssertTrue(transcript.waitForExistence(timeout: 20))
+            XCTAssertTrue(app.staticTexts.matching(NSPredicate(
+                format: "identifier BEGINSWITH %@", "message-row:"
+            )).firstMatch.waitForExistence(timeout: 15), "The opened viewport must realize a message row.")
+            attachScreenshot(named: "synthetic-production-\(count)-open")
+
+            for _ in 0..<3 {
+                transcript.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.84))
+                    .press(forDuration: 0.01,
+                           thenDragTo: transcript.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.15)),
+                           withVelocity: .fast, thenHoldForDuration: 0)
+            }
+            XCTAssertTrue(app.staticTexts.matching(NSPredicate(
+                format: "identifier BEGINSWITH %@", "message-row:"
+            )).firstMatch.waitForExistence(timeout: 15), "Fast flicks must leave a realized message row.")
+            attachScreenshot(named: "synthetic-production-\(count)-after-fast-flick")
+
+            let arrow = app.buttons[scrollToLatestLabel]
+            XCTAssertTrue(arrow.waitForExistence(timeout: 15))
+            arrow.tap()
+            let marker = count == 120 ? "Representative conversation complete." : endMarker
+            let tail = app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", marker)).firstMatch
+            assertHittable(tail, timeout: 30, message: "\(count) rich-row arrow must expose its real tail.")
+            attachScreenshot(named: "synthetic-production-\(count)-arrow-tail")
+        }
+    }
+
+    func testDiagnosticColdNearTailOpenAndFarArrowUsesRealizedRows() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.terminate()
+        app.launchArguments = [performanceLabArgument, "--native-direct-mixed-rich-10k",
+                               "--chat-viewport-follow-latest-open", "--chat-viewport-diagnostic",
+                               "--composer-test-fresh-draft"]
+        app.launch()
+
+        let transcript = app.scrollViews["chat-transcript-scroll"]
+        XCTAssertTrue(transcript.waitForExistence(timeout: 20))
+        let tail = app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS[c] %@", endMarker
+        )).firstMatch
+        assertHittable(tail, timeout: 25, message: "Cold bottom restore must reveal the concrete 10k tail.")
+        attachScreenshot(named: "cold-near-tail-open")
+
+        app.terminate()
+
+        let farApp = XCUIApplication()
+        farApp.launchArguments = [performanceLabArgument, "--native-direct-mixed-rich-10k",
+                                  "--chat-viewport-diagnostic", "--composer-test-fresh-draft"]
+        farApp.launch()
+        let farTranscript = farApp.scrollViews["chat-transcript-scroll"]
+        XCTAssertTrue(farTranscript.waitForExistence(timeout: 20))
+        let arrow = farApp.buttons[scrollToLatestLabel]
+        XCTAssertTrue(arrow.waitForExistence(timeout: 15))
+        attachScreenshot(named: "saved-row-20-before-far-arrow")
+        print("SEMREH_FAR_ARROW_TAP at=\(Date())")
+        arrow.tap()
+        let farTail = farApp.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS[c] %@", endMarker
+        )).firstMatch
+        assertHittable(farTail, timeout: 30, message: "Far arrow must reveal the concrete 10k tail.")
+        attachScreenshot(named: "saved-row-20-after-far-arrow")
+    }
+
+    func testDebugBoundedTailWindowFarArrowRichTail() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.terminate()
+        app.launchArguments = [performanceLabArgument, "--native-direct-mixed-rich-10k",
+                               "--chat-viewport-diagnostic", "--chat-debug-bounded-tail-window",
+                               "--composer-test-fresh-draft"]
+        app.launch()
+        let scroll = app.scrollViews["chat-transcript-scroll"]
+        XCTAssertTrue(scroll.waitForExistence(timeout: 20))
+        let arrow = app.buttons[scrollToLatestLabel]
+        XCTAssertTrue(arrow.waitForExistence(timeout: 10))
+        attachScreenshot(named: "bounded-saved-row-before-arrow")
+        print("SEMREH_BOUNDED_FAR_ARROW_TAP at=\(Date())")
+        arrow.tap()
+        let farTail = app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS[c] %@", endMarker
+        )).firstMatch
+        assertHittable(farTail, timeout: 20, message: "Bounded far arrow must show real 10k tail.")
+        XCTAssertTrue(app.buttons["Copy code"].firstMatch.exists,
+                      "Bounded tail must retain rich code actions.")
+        attachScreenshot(named: "bounded-far-arrow-tail")
     }
 
     func testRepeatedMultiChatSwitchingRetainsEachOwnerAndMarker() {
@@ -3169,4 +4760,41 @@ final class LongChatScrollUITests: XCTestCase {
         attachment.lifetime = .keepAlways
         add(attachment)
     }
+
+    func testDebugStrictNative10kColdFarArrowGate() throws {
+        continueAfterFailure = true
+        guard ProcessInfo.processInfo.environment["SEMREH_STRICT_10K_GATE"] == "1" else {
+            throw XCTSkip("The rejected strict 10k viewport diagnostic is opt-in.")
+        }
+        let app = XCUIApplication()
+        app.launchArguments = ["--chat-performance-lab", "--native-direct-mixed-rich-10k",
+                               "--chat-stable-viewport", "--native-direct-strict-10k-gate"]
+        app.launch()
+        let scroll = app.scrollViews["prototype-transcript-scroll"]
+        XCTAssertTrue(scroll.waitForExistence(timeout: 20))
+        let coldRow = app.staticTexts["message-row:perf-message-000020"]
+        let coldAccessible = coldRow.waitForExistence(timeout: 2) && coldRow.isHittable
+        print("SEMREH_STRICT_10K_COLD_AX row20=\(coldAccessible)")
+        attachScreenshot(named: "strict-native-10k-cold")
+        attachAccessibilitySnapshot(named: "strict-native-10k-cold-ax", app: app)
+        let arrow = app.buttons["Prototype scroll to latest"]
+        XCTAssertTrue(arrow.waitForExistence(timeout: 10) && arrow.isHittable)
+        print("SEMREH_STRICT_10K_TAP at=\(Date())")
+        arrow.tap()
+        attachScreenshot(named: "strict-native-10k-post-tap")
+        XCTAssertTrue(coldAccessible,
+                      "The saved row20 must be source-accurate and accessible at cold open.")
+        XCTAssertFalse(app.staticTexts["native-direct-arrow-unready"].exists,
+                       "The real-row corridor must be ready on the first cold far-arrow tap.")
+        let tail = app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@", "End of 10,000-row conversation.")).firstMatch
+        XCTAssertTrue(tail.waitForExistence(timeout: 15) && tail.isHittable,
+                      "The far arrow must visibly reach the real source tail.")
+        XCTAssertTrue(app.otherElements.containing(.staticText,
+            identifier: "message-row:perf-message-009999")
+            .matching(identifier: "native-direct-transcript-row").firstMatch.exists,
+            "The far tail must remain a native row with its real accessibility tree.")
+        attachScreenshot(named: "strict-native-10k-tail")
+    }
+
 }

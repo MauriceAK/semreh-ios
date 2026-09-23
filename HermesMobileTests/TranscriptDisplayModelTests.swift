@@ -526,6 +526,78 @@ final class TranscriptMessageTests: XCTestCase {
         XCTAssertEqual(groups.first?.segments, ["Archived thought.", "Message-derived thought."])
     }
 
+    func testArchivedReasoningStaysOnEmptyAssistantBeforeNextUserTurn() {
+        let messages = [
+            ChatMessage(role: "user", content: "First", timestamp: 1, messageId: "u1"),
+            ChatMessage(role: "assistant", content: "", timestamp: 2, messageId: "a1"),
+            ChatMessage(role: "user", content: "Second", timestamp: 3, messageId: "u2"),
+            ChatMessage(role: "assistant", content: "Second answer", timestamp: 4, messageId: "a2")
+        ]
+        let groups = ChatViewModel.reasoningDisplayGroups(
+            messages: messages,
+            archivedGroups: [ReasoningGroup(anchorMessageID: "a1", text: "First-turn thought.")]
+        )
+
+        XCTAssertEqual(groups.map(\.anchorMessageID), ["a1"])
+        let lookup = ReasoningGroupAnchorLookup(groups: groups)
+        let rendered = ChatTranscriptRenderSequence.filtering(
+            ChatViewModel.transcriptMessages(from: messages),
+            showsThinkingAndToolCards: true, compressionAfterRenderID: nil,
+            reasoningGroupsForAnchor: { lookup.groups(anchorMessageID: $0) },
+            toolCallGroupsForAnchor: { _ in [] }, liveAccessoryAnchorIDs: [],
+            shouldRenderMessage: { !($0.content ?? "").isEmpty }
+        )
+        XCTAssertEqual(rendered.map(\.message.messageId), ["u1", "a1", "u2", "a2"])
+        XCTAssertEqual(lookup.groups(anchorMessageID: "u2").count, 0)
+        XCTAssertEqual(lookup.groups(anchorMessageID: "a2").count, 0)
+    }
+
+    func testSameTurnVisibleAssistantSupersedesEmptyReasoningAnchor() {
+        let messages = [
+            ChatMessage(role: "user", content: "First", timestamp: 1, messageId: "u1"),
+            ChatMessage(role: "assistant", content: "", timestamp: 2, messageId: "a1"),
+            ChatMessage(role: "assistant", content: "First answer", timestamp: 3, messageId: "a1-final"),
+            ChatMessage(role: "user", content: "Second", timestamp: 4, messageId: "u2"),
+            ChatMessage(role: "assistant", content: "Second answer", timestamp: 5, messageId: "a2")
+        ]
+        let groups = ChatViewModel.reasoningDisplayGroups(
+            messages: messages,
+            archivedGroups: [ReasoningGroup(anchorMessageID: "a1", text: "First-turn thought.")]
+        )
+
+        XCTAssertEqual(groups.map(\.anchorMessageID), ["a1-final"])
+        XCTAssertEqual(ReasoningGroupAnchorLookup(groups: groups).groups(anchorMessageID: "a2"), [])
+    }
+
+    func testMessageDerivedReasoningOnEmptyAssistantKeepsItsOwnTurn() {
+        let messages = [
+            ChatMessage(role: "user", content: "First", timestamp: 1, messageId: "u1"),
+            ChatMessage(role: "assistant", content: nil, timestamp: 2,
+                        messageId: "a1", reasoning: "First-turn thought."),
+            ChatMessage(role: "user", content: "Second", timestamp: 3, messageId: "u2"),
+            ChatMessage(role: "assistant", content: "Second answer", timestamp: 4, messageId: "a2")
+        ]
+
+        let groups = ChatViewModel.reasoningDisplayGroups(messages: messages, archivedGroups: [])
+        XCTAssertEqual(groups.map(\.anchorMessageID), ["a1"])
+        XCTAssertEqual(ReasoningGroupAnchorLookup(groups: groups).groups(anchorMessageID: "a2"), [])
+    }
+
+    func testTrulyUnanchoredReasoningRemainsUnlinked() {
+        let messages = [
+            ChatMessage(role: "user", content: "First", timestamp: 1, messageId: "u1"),
+            ChatMessage(role: "assistant", content: "First answer", timestamp: 2, messageId: "a1"),
+            ChatMessage(role: "user", content: "Second", timestamp: 3, messageId: "u2")
+        ]
+        let groups = ChatViewModel.reasoningDisplayGroups(
+            messages: messages,
+            archivedGroups: [ReasoningGroup(anchorMessageID: nil, text: "Unknown-turn thought.")]
+        )
+
+        XCTAssertEqual(groups.count, 1)
+        XCTAssertNil(groups[0].anchorMessageID)
+    }
+
     func testReasoningDisplayGroupIDIsStableAcrossMessageOffsets() {
         let messages = [
             ChatMessage(role: "user", content: "Investigate", timestamp: 1, messageId: "u1"),
@@ -811,6 +883,144 @@ final class AssistantResponseActionPolicyTests: XCTestCase {
             renderID: id,
             anchorID: id,
             message: message
+        )
+    }
+}
+
+final class ChatTranscriptRetainedActivityPolicyTests: XCTestCase {
+    func testLiveReasoningAppendsUnderTheRetainedGroupWithoutLosingSegments() {
+        let retained = ReasoningGroup(
+            id: "reasoning-turn-a1", anchorMessageID: "a1",
+            text: "First thought.\n\nSecond thought.",
+            segments: ["First thought.", "Second thought."]
+        )
+        let presentation = ChatTranscriptReasoningMergePolicy.presentation(
+            retained: retained, liveText: "Current thought."
+        )
+
+        XCTAssertEqual(
+            presentation.segments,
+            ["First thought.", "Second thought.", "Current thought."]
+        )
+        XCTAssertEqual(presentation.text, "First thought.\n\nSecond thought.\n\nCurrent thought.")
+
+        let legacy = ReasoningGroup(anchorMessageID: "a1", text: "Archived thought.")
+        XCTAssertEqual(
+            ChatTranscriptReasoningMergePolicy.presentation(
+                retained: legacy, liveText: "Live thought."
+            ).segments,
+            ["Archived thought.", "Live thought."]
+        )
+    }
+
+    func testEarlierAssistantReasoningOwnsThinkingWithoutAddingBareLine() {
+        let state = activity(
+            rows: [row("user", "u1"), row("assistant", "a1"), row("assistant", "a2")],
+            reasoningAnchors: ["a1"]
+        )
+
+        XCTAssertEqual(state.activeReasoningAnchorID, "a1")
+        XCTAssertFalse(state.activatesLooseReasoning)
+        XCTAssertTrue(state.hasCurrentTurnReasoning)
+        XCTAssertFalse(ChatTranscriptTypingIndicatorPolicy.shouldShowBareIndicator(
+            isEligible: true, hasActiveStream: true, showsActivityCards: true,
+            trailingMessageRole: "assistant",
+            hasTrailingRetainedReasoning: state.hasCurrentTurnReasoning,
+            hasTrailingCompletedTools: state.hasCurrentTurnTools
+        ))
+    }
+
+    func testLooseReasoningOwnsThinkingWhileCurrentAssistantIsTrailing() {
+        let state = activity(
+            rows: [row("user", "u1"), row("assistant", "a1")],
+            reasoningAnchors: ["a1"], hasLooseReasoning: true
+        )
+
+        XCTAssertNil(state.activeReasoningAnchorID, "Only one retained Thinking row should shine")
+        XCTAssertTrue(state.activatesLooseReasoning)
+        XCTAssertTrue(state.hasCurrentTurnReasoning)
+        XCTAssertFalse(ChatTranscriptTypingIndicatorPolicy.shouldShowBareIndicator(
+            isEligible: true, hasActiveStream: true, showsActivityCards: true,
+            trailingMessageRole: "assistant",
+            hasTrailingRetainedReasoning: state.hasCurrentTurnReasoning,
+            hasTrailingCompletedTools: state.hasCurrentTurnTools
+        ))
+    }
+
+    func testNewUserDoesNotInheritEarlierOrLooseThinking() {
+        let state = activity(
+            rows: [row("assistant", "old"), row("user", "new")],
+            reasoningAnchors: ["old"], hasLooseReasoning: true
+        )
+
+        XCTAssertNil(state.activeReasoningAnchorID)
+        XCTAssertFalse(state.activatesLooseReasoning)
+        XCTAssertFalse(state.hasCurrentTurnReasoning)
+        XCTAssertTrue(ChatTranscriptTypingIndicatorPolicy.shouldShowBareIndicator(
+            isEligible: true, hasActiveStream: true, showsActivityCards: true,
+            trailingMessageRole: "user",
+            hasTrailingRetainedReasoning: state.hasCurrentTurnReasoning,
+            hasTrailingCompletedTools: state.hasCurrentTurnTools
+        ))
+        XCTAssertTrue(ChatTranscriptTypingIndicatorPolicy.usesPreparingResponseLabel(
+            hasActiveStream: true, showsActivityCards: true,
+            trailingMessageRole: "user", hasPriorReasoning: true
+        ), "The pending new turn must not print a second visually identical Thinking label")
+        XCTAssertFalse(ChatTranscriptTypingIndicatorPolicy.usesPreparingResponseLabel(
+            hasActiveStream: true, showsActivityCards: true,
+            trailingMessageRole: "assistant", hasPriorReasoning: true
+        ))
+        XCTAssertFalse(ChatTranscriptTypingIndicatorPolicy.usesPreparingResponseLabel(
+            hasActiveStream: true, showsActivityCards: true,
+            trailingMessageRole: "user", hasPriorReasoning: false
+        ))
+    }
+
+    func testAnchoredOlderThinkingUsesDistinctPendingNewTurnLabel() {
+        let state = activity(
+            rows: [row("assistant", "old"), row("user", "new")],
+            reasoningAnchors: ["old"]
+        )
+        XCTAssertNil(state.activeReasoningAnchorID)
+        XCTAssertFalse(state.hasCurrentTurnReasoning)
+        XCTAssertTrue(ChatTranscriptTypingIndicatorPolicy.usesPreparingResponseLabel(
+            hasActiveStream: true, showsActivityCards: true,
+            trailingMessageRole: "user", hasPriorReasoning: true
+        ))
+    }
+
+    func testLiveActivityKeepsRetainedThinkingStatic() {
+        let state = activity(
+            rows: [row("user", "u1"), row("assistant", "a1")],
+            reasoningAnchors: ["a1"], canShowBareThinking: false
+        )
+
+        XCTAssertNil(state.activeReasoningAnchorID)
+        XCTAssertFalse(state.activatesLooseReasoning)
+        XCTAssertTrue(state.hasCurrentTurnReasoning)
+    }
+
+    private func row(_ role: String, _ id: String) -> TranscriptMessage {
+        TranscriptMessage(
+            loadedIndex: 0, renderID: id, anchorID: id,
+            message: ChatMessage(role: role, content: "", timestamp: 0, messageId: id)
+        )
+    }
+
+    private func activity(
+        rows: [TranscriptMessage], reasoningAnchors: Set<String> = [],
+        toolAnchors: Set<String> = [], hasLooseReasoning: Bool = false,
+        hasLooseTools: Bool = false, canShowBareThinking: Bool = true
+    ) -> ChatTranscriptRetainedActivityPolicy.State {
+        ChatTranscriptRetainedActivityPolicy.state(
+            in: rows, hasActiveStream: true, showsActivityCards: true,
+            canShowBareThinking: canShowBareThinking,
+            hasReasoning: { anchor in
+                anchor.map(reasoningAnchors.contains) ?? hasLooseReasoning
+            },
+            hasTools: { anchor in
+                anchor.map(toolAnchors.contains) ?? hasLooseTools
+            }
         )
     }
 }
@@ -1209,122 +1419,21 @@ final class ChatActiveRunStatusPolicyTests: XCTestCase {
         XCTAssertEqual(presentation?.kind, .reconnecting)
     }
 
-    // MARK: Item 4 — elapsed readout on the active-run pill
-
-    func testActiveRunPillStaysHiddenNearBottomBeforeElapsedThreshold() {
-        let startedAt = Date(timeIntervalSince1970: 1_000)
-
+    func testOrdinaryActiveRunNeverAddsFloatingStatus() {
         XCTAssertNil(ChatActiveRunStatusPolicy.presentation(
             isStartingChat: false,
             hasActiveStream: true,
             activeStreamRecoveryState: .idle,
             isCancellingStream: false,
-            isScrolledNearBottom: true,
-            activeRunStartedAt: startedAt,
-            hasActiveRunPassedElapsedThreshold: false
+            isScrolledNearBottom: true
         ))
-    }
-
-    func testActiveRunPillShowsNearBottomAfterElapsedThreshold() {
-        let startedAt = Date(timeIntervalSince1970: 1_000)
-        let presentation = ChatActiveRunStatusPolicy.presentation(
+        XCTAssertNil(ChatActiveRunStatusPolicy.presentation(
             isStartingChat: false,
             hasActiveStream: true,
             activeStreamRecoveryState: .idle,
             isCancellingStream: false,
-            isScrolledNearBottom: true,
-            activeRunStartedAt: startedAt,
-            hasActiveRunPassedElapsedThreshold: true
-        )
-
-        XCTAssertEqual(presentation?.kind, .active)
-        XCTAssertEqual(presentation?.activeRunStartedAt, startedAt)
-        XCTAssertEqual(presentation?.label, "Hermes is working")
-    }
-
-    func testActiveRunPillShowsWhenReaderScrolledAwayEvenBeforeThreshold() {
-        let startedAt = Date(timeIntervalSince1970: 1_000)
-        let presentation = ChatActiveRunStatusPolicy.presentation(
-            isStartingChat: false,
-            hasActiveStream: true,
-            activeStreamRecoveryState: .idle,
-            isCancellingStream: false,
-            isScrolledNearBottom: false,
-            activeRunStartedAt: startedAt,
-            hasActiveRunPassedElapsedThreshold: false
-        )
-
-        XCTAssertEqual(presentation?.kind, .active)
-        XCTAssertEqual(presentation?.activeRunStartedAt, startedAt)
-    }
-
-    func testActiveRunPillStaysHiddenWithoutARecordedStart() {
-        let presentation = ChatActiveRunStatusPolicy.presentation(
-            isStartingChat: false,
-            hasActiveStream: true,
-            activeStreamRecoveryState: .idle,
-            isCancellingStream: false,
-            isScrolledNearBottom: false,
-            hasActiveRunPassedElapsedThreshold: true
-        )
-
-        XCTAssertNil(presentation)
-    }
-}
-
-final class ChatActiveRunElapsedPolicyTests: XCTestCase {
-    private let startedAt = Date(timeIntervalSince1970: 100)
-
-    func testVisibilityThresholdCrossesAtTenSeconds() {
-        XCTAssertFalse(ChatActiveRunElapsedPolicy.hasPassedVisibilityThreshold(
-            activeRunStartedAt: startedAt,
-            now: startedAt.addingTimeInterval(9.99)
+            isScrolledNearBottom: false
         ))
-        XCTAssertTrue(ChatActiveRunElapsedPolicy.hasPassedVisibilityThreshold(
-            activeRunStartedAt: startedAt,
-            now: startedAt.addingTimeInterval(10)
-        ))
-        XCTAssertTrue(ChatActiveRunElapsedPolicy.hasPassedVisibilityThreshold(
-            activeRunStartedAt: startedAt,
-            now: startedAt.addingTimeInterval(45)
-        ))
-    }
-
-    func testVisibilityThresholdNeedsARecordedStart() {
-        XCTAssertFalse(ChatActiveRunElapsedPolicy.hasPassedVisibilityThreshold(
-            activeRunStartedAt: nil,
-            now: startedAt
-        ))
-    }
-
-    func testPillMatrixAcrossStartThresholdAndScroll() {
-        // No start recorded: hidden in every scroll/threshold combination.
-        XCTAssertFalse(ChatActiveRunElapsedPolicy.shouldShowActiveRunPill(
-            activeRunStartedAt: nil, hasPassedElapsedThreshold: true, isScrolledNearBottom: true
-        ))
-        XCTAssertFalse(ChatActiveRunElapsedPolicy.shouldShowActiveRunPill(
-            activeRunStartedAt: nil, hasPassedElapsedThreshold: true, isScrolledNearBottom: false
-        ))
-
-        // Near bottom, below threshold: the one deliberately quiet live case (P04 path).
-        XCTAssertFalse(ChatActiveRunElapsedPolicy.shouldShowActiveRunPill(
-            activeRunStartedAt: startedAt, hasPassedElapsedThreshold: false, isScrolledNearBottom: true
-        ))
-
-        // A long near-bottom run, or any run the reader scrolled away from, shows.
-        XCTAssertTrue(ChatActiveRunElapsedPolicy.shouldShowActiveRunPill(
-            activeRunStartedAt: startedAt, hasPassedElapsedThreshold: true, isScrolledNearBottom: true
-        ))
-        XCTAssertTrue(ChatActiveRunElapsedPolicy.shouldShowActiveRunPill(
-            activeRunStartedAt: startedAt, hasPassedElapsedThreshold: false, isScrolledNearBottom: false
-        ))
-        XCTAssertTrue(ChatActiveRunElapsedPolicy.shouldShowActiveRunPill(
-            activeRunStartedAt: startedAt, hasPassedElapsedThreshold: true, isScrolledNearBottom: false
-        ))
-    }
-
-    func testThresholdMatchesProductionValue() {
-        XCTAssertEqual(ChatActiveRunElapsedPolicy.pillVisibilityThreshold, 10)
     }
 }
 

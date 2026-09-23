@@ -483,10 +483,6 @@ struct ChatView: View {
     @State private var pendingTranscriptRestoreMessageID: String?
     @State private var transcriptRestoreOutcomeState = ChatTranscriptRestoreOutcomeState()
     @State private var isScrolledNearBottom = true
-    /// Set once a live near-bottom run becomes visibly long (~10 s, item 4) so
-    /// the floating elapsed pill can appear without a continuous ticker; reset
-    /// when the run starts or ends.
-    @State private var hasActiveRunPassedElapsedThreshold = false
     @State private var isReadingOlderTranscript = false
     @State private var shouldFollowLatestMessage = true
     @State private var visibleTranscriptRowID: String?
@@ -516,6 +512,9 @@ struct ChatView: View {
     @State private var isLatestTranscriptRowVisible = false
     @State private var isTranscriptBottomVisible = false
     @State private var explicitBottomScrollTask: Task<Void, Never>?
+    @State private var explicitBottomIssueSequence = 0
+    @State private var explicitBottomGeometryToken: ChatExplicitBottomGeometryToken?
+    @State private var confirmedExplicitBottomGeometryToken: ChatExplicitBottomGeometryToken?
     @State private var isExplicitBottomDecelerationActive = false
     @State private var isUserInteractingWithScroll = false
     @State private var isNearBottomForMotion = false
@@ -552,7 +551,6 @@ struct ChatView: View {
     @State private var gitAlert: GitChatAlert?
     @State private var composerHeight: CGFloat = 52
     @State private var showsChatControls = false
-    @State private var showsBotDetails = false
     @State private var showsChatFiles = false
     @State private var workspacePickerRequest = 0
     @State private var gitBranchPickerRequest = 0
@@ -593,9 +591,15 @@ struct ChatView: View {
         self.loadsInitialMessages = loadsInitialMessages
         self.autoStartsVoiceInput = autoStartsVoiceInput
         self.disablesExternalLifecycle = disablesExternalLifecycle
+#if DEBUG
+        let usesFreshSyntheticComposer = ProcessInfo.processInfo.arguments.contains("--chat-performance-lab")
+            && ProcessInfo.processInfo.arguments.contains("--composer-test-fresh-draft")
+#else
+        let usesFreshSyntheticComposer = false
+#endif
         _draftMessage = State(initialValue: ComposerDraftStore.resolvedDraft(
             initialDraft: initialDraft,
-            storedDraft: ComposerDraftStore.shared.load(
+            storedDraft: usesFreshSyntheticComposer ? "" : ComposerDraftStore.shared.load(
                 server: server,
                 sessionID: session.sessionId ?? session.id
             )
@@ -654,7 +658,7 @@ struct ChatView: View {
             agentCommands: viewModel.agentCommands,
             profileOptions: viewModel.profileOptions,
             isSingleProfileMode: viewModel.isSingleProfileMode,
-            selectedProfileName: viewModel.selectedProfileName,
+            selectedProfileName: viewModel.selectedProfileName ?? session.profile,
             selectedProfileTitle: viewModel.selectedProfileTitle,
             isLoadingModels: viewModel.isLoadingComposerConfiguration,
             selectedReasoningEffort: viewModel.selectedReasoningSelection,
@@ -786,6 +790,13 @@ struct ChatView: View {
                 Task { await gitAvailabilityViewModel.loadBranches() }
             },
             controlsPresentation: $showsChatControls,
+            onStartNewChat: {
+                forkedSession = SessionSummary(
+                    title: "New Chat",
+                    createdAt: Date().timeIntervalSince1970,
+                    profile: viewModel.selectedProfileName ?? session.profile
+                )
+            },
             workspacePickerRequest: workspacePickerRequest,
             gitBranchPickerRequest: gitBranchPickerRequest
         )
@@ -830,7 +841,7 @@ struct ChatView: View {
 
     private var chatBotHeader: some View {
         Button {
-            showsBotDetails = true
+            showsChatControls = true
         } label: {
             VStack(spacing: -3) {
                 if let identity = BirdAvatarIdentity(server: server, profile: viewModel.selectedProfileName ?? session.profile) {
@@ -850,9 +861,10 @@ struct ChatView: View {
             }
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("View details for \(viewModel.selectedProfileTitle)")
+        .accessibilityLabel("Configure \(viewModel.selectedProfileTitle)")
         .accessibilityValue(headerSubtitle ?? viewModel.selectedProfileTitle)
-        .accessibilityHint("Shows read-only bot details.")
+        .accessibilityHint("Choose a profile and configure this chat.")
+        .accessibilityIdentifier("chatProfileConfiguration")
     }
 
     private var chatNavigationBar: some View {
@@ -1001,6 +1013,9 @@ struct ChatView: View {
             }
 
             messageComposer
+#if DEBUG
+                .modifier(NativeRefinementProbe(name: "composer"))
+#endif
 
             if let directApprovalPrompt = viewModel.pendingApprovalPrompt {
                 ApprovalRequestOverlay(
@@ -1105,14 +1120,6 @@ struct ChatView: View {
             FileBrowserView(session: session, server: server, onAPIError: onAPIError)
                 .toolbar(.visible, for: .navigationBar)
         }
-        .sheet(isPresented: $showsBotDetails) {
-            NavigationStack {
-                ChatBotDetailsView(
-                    profile: activeProfileDetails,
-                    profileTitle: viewModel.selectedProfileTitle
-                )
-            }
-        }
         .navigationBarTitleDisplayMode(.inline)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("chat-detail:\(viewModel.displayTitle)")
@@ -1145,6 +1152,7 @@ struct ChatView: View {
             }
             .onDisappear {
                 cancelExplicitBottomScroll()
+                OpenChatSessionStore.shared.cancelSelectedHistoryRefresh(for: viewModel)
                 viewModel.setTranscriptPresentationActive(false)
                 composerResizeTask?.cancel()
                 composerResizeTask = nil
@@ -1168,6 +1176,15 @@ struct ChatView: View {
                 foregroundRefreshTask?.cancel()
                 foregroundRefreshTask = Task { @MainActor in
                     guard !Task.isCancelled, scenePhase == .active else { return }
+                    if didCompleteInitialAppearance,
+                       pagingStartupReadyScope == viewModel.outgoingInsertionScope,
+                       loadsInitialMessages {
+                        await OpenChatSessionStore.shared.refreshStaleHistoryIfNeeded(
+                            for: viewModel, session: session, server: server,
+                            modelContext: modelContext
+                        )
+                    }
+                    guard !Task.isCancelled, scenePhase == .active else { return }
                     await viewModel.reconnectStreamIfNeeded(modelContext: modelContext)
                     guard !Task.isCancelled, scenePhase == .active else { return }
 
@@ -1188,28 +1205,14 @@ struct ChatView: View {
                 guard viewModel.responseCompletionHapticTrigger > 0 else { return }
                 handleResponseCompletionSideEffects()
             }
-            // One re-eval per run at the elapsed-visibility threshold (item 4). A
-            // quiet stretch (long tool, no stream events) would otherwise never
-            // re-derive the pill, and a 1 Hz ticker would re-render the chat
-            // constantly for nothing.
-            .task(id: viewModel.activeRunStartedAt) {
-                hasActiveRunPassedElapsedThreshold = false
-                guard let startedAt = viewModel.activeRunStartedAt else { return }
-                guard !ChatActiveRunElapsedPolicy.hasPassedVisibilityThreshold(
-                    activeRunStartedAt: startedAt,
-                    now: Date()
-                ) else {
-                    hasActiveRunPassedElapsedThreshold = true
-                    return
-                }
-                let remaining = ChatActiveRunElapsedPolicy.pillVisibilityThreshold
-                    - Date().timeIntervalSince(startedAt)
-                try? await Task.sleep(for: .seconds(max(0, remaining)))
-                guard !Task.isCancelled, viewModel.activeRunStartedAt == startedAt else { return }
-                hasActiveRunPassedElapsedThreshold = true
-            }
             .navigationDestination(item: $forkedSession) { session in
-                ChatView(session: session, server: server, onAPIError: onAPIError)
+                ChatView(
+                    session: session,
+                    server: server,
+                    onAPIError: onAPIError,
+                    loadsInitialMessages: !disablesExternalLifecycle,
+                    disablesExternalLifecycle: disablesExternalLifecycle
+                )
             }
             .navigationDestination(isPresented: $isShowingDirectBranch) {
                 if let directBranchHandoff {
@@ -1670,6 +1673,24 @@ struct ChatView: View {
                 if isLatestTranscriptRowVisible != latestRow { isLatestTranscriptRowVisible = latestRow }
                 if isTranscriptBottomVisible != bottom { isTranscriptBottomVisible = bottom }
             },
+            onStableViewportJumpToLatest: {
+                transcriptRestoreOutcomeState.acceptUserIntent()
+                didInteractBeforeTranscriptRestore = true
+                isTranscriptRestorePending = false
+                pendingTranscriptRestoreMessageID = nil
+                transcriptRestoreCancellationToken &+= 1
+                userScrollCooldownUntil = nil
+                shouldFollowLatestMessage = true
+                isReadingOlderTranscript = false
+            },
+            explicitBottomGeometryToken: explicitBottomGeometryToken,
+            onExplicitBottomGeometryChange: { token, isVisible in
+                guard isExplicitBottomScrollActive, token == explicitBottomGeometryToken else { return }
+                let confirmation = isVisible ? token : nil
+                if confirmedExplicitBottomGeometryToken != confirmation {
+                    confirmedExplicitBottomGeometryToken = confirmation
+                }
+            },
             onPreviewAttachment: { attachment, localData in
                 presentPreviewRestoringComposerFocusIfNeeded {
                     attachmentPreviewItem = ChatAttachmentPreviewItem(message: attachment, localData: localData)
@@ -1756,8 +1777,14 @@ struct ChatView: View {
 
     private var showsScrollToBottomButton: Bool {
         ChatScrollPolicy.shouldShowScrollToBottomButton(
-            isNearBottom: isScrolledNearBottom && (
-                !isExplicitBottomScrollActive || isLatestTranscriptRowVisible || isTranscriptBottomVisible
+            // A collapsing lazy layout can report the native offset at its
+            // current maximum while no transcript tail is actually realized.
+            // Keep the escape action available until the bottom anchor agrees.
+            isNearBottom: isScrolledNearBottom && isTranscriptBottomVisible && (
+                !isExplicitBottomScrollActive || (
+                    explicitBottomGeometryToken != nil
+                    && explicitBottomGeometryToken == confirmedExplicitBottomGeometryToken
+                )
             ),
             hasExplicitBottomRequest: isExplicitBottomScrollActive,
             hasActiveStream: viewModel.activeStreamID != nil,
@@ -1797,15 +1824,22 @@ struct ChatView: View {
         // The composer already owns the pending-stop label. A second floating
         // copy both repeats it and inserts another 36pt into the transcript.
         guard !viewModel.isCancellingStream else { return nil }
+        // Inline reasoning/tool disclosures already identify ordinary activity.
+        // Keep the floating recovery/connection indication when it is actionable.
+        if showsThinkingAndToolCards,
+           viewModel.activeStreamRecoveryState == .idle,
+           !viewModel.isEstablishingConnection,
+           (!viewModel.liveReasoningText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !viewModel.liveToolCalls.isEmpty) {
+            return nil
+        }
         return ChatActiveRunStatusPolicy.presentation(
             isStartingChat: viewModel.isStartingChat,
             hasActiveStream: viewModel.activeStreamID != nil,
             activeStreamRecoveryState: viewModel.activeStreamRecoveryState,
             isCancellingStream: viewModel.isCancellingStream,
             isScrolledNearBottom: isScrolledNearBottom,
-            isEstablishingConnection: viewModel.isEstablishingConnection,
-            activeRunStartedAt: viewModel.activeRunStartedAt,
-            hasActiveRunPassedElapsedThreshold: hasActiveRunPassedElapsedThreshold
+            isEstablishingConnection: viewModel.isEstablishingConnection
         )
     }
 
@@ -1834,17 +1868,6 @@ struct ChatView: View {
 
     private var displayTitle: String {
         viewModel.displayTitle
-    }
-
-    private var activeProfileDetails: ProfileSummary? {
-        guard let profileName = (viewModel.selectedProfileName ?? session.profile)?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-              !profileName.isEmpty
-        else {
-            return nil
-        }
-
-        return viewModel.profileOptions.first { $0.normalizedName == profileName }
     }
 
     private var headerSubtitle: String? {
@@ -1963,6 +1986,13 @@ struct ChatView: View {
             }
             guard !Task.isCancelled else { return }
         } else {
+            if loadsInitialMessages {
+                await OpenChatSessionStore.shared.refreshStaleHistoryIfNeeded(
+                    for: viewModel, session: session, server: server,
+                    modelContext: modelContext
+                )
+                guard !Task.isCancelled else { return }
+            }
             await viewModel.reconnectStreamIfNeeded(modelContext: modelContext)
             guard !Task.isCancelled else { return }
         }
@@ -2259,12 +2289,10 @@ struct ChatView: View {
             return
         }
 
-        if viewModel.messages.isEmpty {
-            Task { await switchProfile(profile, startNewSession: false) }
-        } else {
-            pendingProfileSelection = profile
-            showProfileNewSessionConfirmation = true
-        }
+        // A profile owns a separate namespace, including before first send.
+        // Keep the existing draft/transcript intact and confirm a new chat.
+        pendingProfileSelection = profile
+        showProfileNewSessionConfirmation = true
     }
 
     private func switchProfile(_ profile: ProfileSummary, startNewSession: Bool) async {
@@ -2526,6 +2554,8 @@ struct ChatView: View {
     private func handleScenePhaseChange(_ phase: ScenePhase) {
         switch phase {
         case .background:
+            cancelExplicitBottomScroll()
+            OpenChatSessionStore.shared.cancelSelectedHistoryRefresh(for: viewModel)
             viewModel.setTranscriptPresentationActive(false)
             persistComposerDraft()
             persistTranscriptRestore()
@@ -2549,6 +2579,8 @@ struct ChatView: View {
                 }
             }
         case .inactive:
+            cancelExplicitBottomScroll()
+            OpenChatSessionStore.shared.cancelSelectedHistoryRefresh(for: viewModel)
             viewModel.setTranscriptPresentationActive(false)
             foregroundRefreshTask?.cancel()
             foregroundRefreshTask = nil
@@ -2693,15 +2725,26 @@ struct ChatView: View {
         responseCompletionBackgroundTask = .invalid
     }
 
+    private var usesStableViewport: Bool {
+#if DEBUG
+        ProcessInfo.processInfo.arguments.contains("--chat-stable-viewport")
+#else
+        false
+#endif
+    }
+
     private func scrollToBottom(_ proxy: ScrollViewProxy) {
+        guard !usesStableViewport else { return }
         transcriptRestoreOutcomeState.acceptUserIntent()
         didInteractBeforeTranscriptRestore = true
         isTranscriptRestorePending = false
         pendingTranscriptRestoreMessageID = nil
+        transcriptRestoreCancellationToken &+= 1
         beginExplicitBottomScroll(proxy)
     }
 
     private func beginExplicitBottomScroll(_ proxy: ScrollViewProxy) {
+        guard !usesStableViewport else { return }
         explicitBottomScrollTask?.cancel()
         explicitBottomScrollGeneration &+= 1
         let generation = explicitBottomScrollGeneration
@@ -2746,18 +2789,14 @@ struct ChatView: View {
         )
 #endif
 
-        // Issue the first effective tick synchronously so the request never
-        // looks settled without delivering its target to UIKit (a stale
-        // near-bottom/tail-visible sample must not complete it first). The
-        // pass opens DIRECT on every path now: the settlement walk is a
-        // bounded sequence of direct re-issues, and the pass's single
-        // ANIMATED issue fires later as a short correction once the tail
-        // region is realized on screen (see the ladder below). Long-range
-        // animated travel across still-unrealized lazy rows re-targets on
-        // every realization pass and never drains (the observed never-idle
-        // wedge), so it is removed entirely; Reduce Motion keeps its
-        // byte-identical direct tick (same call, same timing - UI-B pins it).
-        issueExplicitBottomScroll(proxy, animated: false)
+        // A nearby, already-realized last row can move on the opening tick.
+        // Long-range jumps still realize the destination directly first; an
+        // animation across estimated lazy rows can expose an empty viewport.
+        let canEaseOpening = shouldAnimateInitialJump
+            && isNearBottomForMotion
+            && isLatestTranscriptRowVisible
+            && !isUserInteractingWithScroll
+        issueExplicitBottomScroll(proxy, animated: canEaseOpening)
         guard isExplicitBottomScrollActive else { return }
 
         explicitBottomScrollTask = Task { @MainActor in
@@ -2770,9 +2809,12 @@ struct ChatView: View {
                 else { return }
 
                 if ChatScrollPolicy.shouldFinishExplicitBottomRequest(
+                    requestedGeometry: explicitBottomGeometryToken,
+                    confirmedGeometry: confirmedExplicitBottomGeometryToken,
                     isNearBottom: isScrolledNearBottom,
-                    isTailVisible: isLatestTranscriptRowVisible || isTranscriptBottomVisible,
-                    hasIssuedScroll: hasIssuedExplicitBottomScroll
+                    isTailVisible: isTranscriptBottomVisible,
+                    hasIssuedScroll: hasIssuedExplicitBottomScroll,
+                    hasAnimationInFlight: hasExplicitBottomAnimationInFlight
                 ) {
                     completeExplicitBottomScroll(generation: generation)
                     return
@@ -2814,9 +2856,12 @@ struct ChatView: View {
                 else { return }
 
                 if ChatScrollPolicy.shouldFinishExplicitBottomRequest(
+                    requestedGeometry: explicitBottomGeometryToken,
+                    confirmedGeometry: confirmedExplicitBottomGeometryToken,
                     isNearBottom: isScrolledNearBottom,
-                    isTailVisible: isLatestTranscriptRowVisible || isTranscriptBottomVisible,
-                    hasIssuedScroll: hasIssuedExplicitBottomScroll
+                    isTailVisible: isTranscriptBottomVisible,
+                    hasIssuedScroll: hasIssuedExplicitBottomScroll,
+                    hasAnimationInFlight: hasExplicitBottomAnimationInFlight
                 ) {
                     completeExplicitBottomScroll(generation: generation)
                     return
@@ -2867,6 +2912,13 @@ struct ChatView: View {
             latestMessageIsVisible: isLatestTranscriptRowVisible,
             bottomAnchorID: bottomAnchorID
         )
+        // Each actual issue invalidates prior geometry, including geometry
+        // from an earlier retry in this same request generation.
+        explicitBottomIssueSequence &+= 1
+        explicitBottomGeometryToken = ChatExplicitBottomGeometryToken(
+            generation: explicitBottomScrollGeneration, issue: explicitBottomIssueSequence
+        )
+        confirmedExplicitBottomGeometryToken = nil
 #if DEBUG
         explicitBottomScrollAttemptCount += 1
         Self.transcriptScrollLogger.debug("""
@@ -2876,13 +2928,10 @@ struct ChatView: View {
             latestRowExists=\(latestTranscriptMessageID != nil, privacy: .public) latestRowVisible=\(isLatestTranscriptRowVisible, privacy: .public)
             """)
 #endif
-        // P02 quiescence: only the pass's single ANIMATED correction may
-        // re-arm the easeOut, and the ladder fires it only once the tail
-        // region is realized on screen. The pass-opening tick and every
-        // other re-issue are non-animated: an animated issue into a lazy
-        // transcript that is still realizing re-opens the CA transaction
-        // against a moving target and quiescence never arrives (the
-        // observed never-idle wedge).
+        // Only one issue in the pass may animate, either the nearby opening
+        // tick or the later correction after the tail region is realized.
+        // Other issues stay direct so a changing lazy estimate cannot keep
+        // resetting the animation transaction.
         if animated, !hasIssuedAnimatedExplicitBottomScroll,
            let animation = ChatMotion.scrollToLatest(reduceMotion: reduceMotion) {
             withAnimation(animation) {
@@ -2901,10 +2950,22 @@ struct ChatView: View {
         hasIssuedExplicitBottomScroll = true
     }
 
+    private var hasExplicitBottomAnimationInFlight: Bool {
+        guard hasIssuedAnimatedExplicitBottomScroll, let lastExplicitBottomIssueAt else {
+            return false
+        }
+        return ChatScrollPolicy.shouldDeferExplicitBottomReissue(
+            elapsedSinceLastIssue: Date().timeIntervalSince(lastExplicitBottomIssueAt),
+            reduceMotion: reduceMotion
+        )
+    }
+
     private func finishExplicitBottomScroll(generation: Int? = nil) {
         if let generation, generation != explicitBottomScrollGeneration { return }
         explicitBottomScrollTask?.cancel()
         explicitBottomScrollTask = nil
+        explicitBottomGeometryToken = nil
+        confirmedExplicitBottomGeometryToken = nil
         isExplicitBottomScrollActive = false
         hasIssuedExplicitBottomScroll = false
         hasIssuedAnimatedExplicitBottomScroll = false
@@ -2916,7 +2977,7 @@ struct ChatView: View {
         Self.transcriptScrollLogger.debug("""
             event=explicit_bottom_settled decision=near_bottom_and_tail_visible \
             attempts=\(explicitBottomScrollAttemptCount, privacy: .public) latestRowVisible=\(isLatestTranscriptRowVisible, privacy: .public) \
-            tailVisible=\(isTranscriptBottomVisible, privacy: .public)
+            tailVisible=\(isTranscriptBottomVisible, privacy: .public) issue=\(explicitBottomGeometryToken?.issue ?? -1, privacy: .public) confirmedIssue=\(confirmedExplicitBottomGeometryToken?.issue ?? -1, privacy: .public)
             """)
 #endif
         finishExplicitBottomScroll(generation: generation)
@@ -2951,6 +3012,7 @@ struct ChatView: View {
         animated: Bool = true,
         isUserInitiated: Bool = false
     ) {
+        guard !usesStableViewport else { return }
         guard let latestTranscriptMessageID else { return }
 
         scheduleFollowScroll(
@@ -2967,6 +3029,7 @@ struct ChatView: View {
         animated: Bool = true,
         isUserInitiated: Bool = false
     ) {
+        guard !usesStableViewport else { return }
         let animateAfterComposerResize = shouldAnimateNextFollowAfterComposerResize
         shouldAnimateNextFollowAfterComposerResize = false
         guard !viewModel.messages.isEmpty else { return }
@@ -2985,6 +3048,7 @@ struct ChatView: View {
         messageID: String,
         animated: Bool
     ) {
+        guard !usesStableViewport else { return }
 #if DEBUG
         let targetKey = debugOpaqueTranscriptTargetKey(messageID)
         if let pendingDiagnostic = pendingTranscriptProxyGenerationDiagnostic {
@@ -3401,17 +3465,21 @@ struct ChatView: View {
                 cancelExplicitBottomScroll()
                 cancelledExplicitBottomScroll = true
             } else if ChatScrollPolicy.shouldFinishExplicitBottomRequest(
+                requestedGeometry: explicitBottomGeometryToken,
+                confirmedGeometry: confirmedExplicitBottomGeometryToken,
                 isNearBottom: isNearBottom,
-                isTailVisible: isLatestTranscriptRowVisible || isTranscriptBottomVisible,
-                hasIssuedScroll: hasIssuedExplicitBottomScroll
+                isTailVisible: isTranscriptBottomVisible,
+                hasIssuedScroll: hasIssuedExplicitBottomScroll,
+                hasAnimationInFlight: hasExplicitBottomAnimationInFlight
             ) {
                 completeExplicitBottomScroll()
             }
         }
 
-        let confirmedNearBottom = !cancelledExplicitBottomScroll && isNearBottom && (
-            !isExplicitBottomScrollActive || isLatestTranscriptRowVisible || isTranscriptBottomVisible
-        )
+        // Explicit positioning owns the viewport until its own settlement.
+        // A near-bottom sample must not enqueue a competing follow/rejoin snap.
+        let confirmedNearBottom = !cancelledExplicitBottomScroll
+            && !isExplicitBottomScrollActive && isNearBottom
 
         // Touching the scroll view pauses auto-follow for a short window so
         // streaming layout growth cannot yank the viewport mid-gesture.
@@ -3463,7 +3531,7 @@ struct ChatView: View {
     }
 
     private var isAutoFollowScrollPaused: Bool {
-        ChatScrollPolicy.isAutoScrollPaused(
+        isExplicitBottomScrollActive || ChatScrollPolicy.isAutoScrollPaused(
             isUserInteracting: isUserInteractingWithScroll,
             cooldownUntil: userScrollCooldownUntil
         )
@@ -3477,6 +3545,7 @@ struct ChatView: View {
     }
 
     private func prepareTranscriptForExplicitSend() {
+        cancelExplicitBottomScroll()
         transcriptRestoreOutcomeState.acceptUserIntent()
         didInteractBeforeTranscriptRestore = true
         isTranscriptRestorePending = false
@@ -3596,61 +3665,6 @@ private struct ChatHeaderReadabilityBackdrop: View {
             startPoint: .top,
             endPoint: .bottom
         )
-    }
-}
-
-private struct ChatBotDetailsView: View {
-    let profile: ProfileSummary?
-    let profileTitle: String
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        List {
-            Section("Profile") {
-                LabeledContent("Name", value: profile?.displayName ?? profileTitle)
-                if let provider = nonEmpty(profile?.provider) {
-                    LabeledContent("Provider", value: provider)
-                }
-                if let model = nonEmpty(profile?.model) {
-                    LabeledContent("Model", value: model)
-                }
-            }
-
-            if let profile {
-                Section("Available metadata") {
-                    if let gatewayRunning = profile.gatewayRunning {
-                        LabeledContent("Gateway", value: gatewayRunning ? "Running" : "Stopped")
-                    }
-                    if let hasEnv = profile.hasEnv {
-                        LabeledContent("Environment", value: hasEnv ? "Configured" : "Not configured")
-                    }
-                    if let skillCount = profile.skillCount {
-                        LabeledContent("Skills", value: String(skillCount))
-                    }
-                    if profile.isDefault == true {
-                        LabeledContent("Server default", value: "Yes")
-                    }
-                    if profile.isActive == true {
-                        LabeledContent("Active profile", value: "Yes")
-                    }
-                }
-            }
-        }
-        .navigationTitle(profileTitle)
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .cancellationAction) {
-                Button("Done") { dismiss() }
-            }
-        }
-        .scrollContentBackground(.hidden)
-        .background { SemrehBackdrop().ignoresSafeArea() }
-    }
-
-    private func nonEmpty(_ value: String?) -> String? {
-        guard let value else { return nil }
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
     }
 }
 

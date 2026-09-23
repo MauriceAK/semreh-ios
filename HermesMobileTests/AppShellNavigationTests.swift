@@ -117,9 +117,9 @@ final class AppShellNavigationTests: XCTestCase {
         XCTAssertNil(SessionFilterRoutePolicy.profileHistoryRoute(profileName: "  \n"))
     }
 
-    func testSessionDepartureResetsButIntentionalIncomingRoutesDoNot() {
-        XCTAssertTrue(AppShellSessionReturnPolicy.resetsOnDeparture(from: .sessions, to: .control))
-        XCTAssertTrue(AppShellSessionReturnPolicy.resetsOnDeparture(from: .sessions, to: .you))
+    func testTabDeparturePreservesTheOpenConversation() {
+        XCTAssertFalse(AppShellSessionReturnPolicy.resetsOnDeparture(from: .sessions, to: .control))
+        XCTAssertFalse(AppShellSessionReturnPolicy.resetsOnDeparture(from: .sessions, to: .you))
         XCTAssertFalse(AppShellSessionReturnPolicy.resetsOnDeparture(from: .control, to: .sessions))
         XCTAssertFalse(AppShellSessionReturnPolicy.resetsOnDeparture(from: .you, to: .sessions))
         XCTAssertFalse(AppShellSessionReturnPolicy.resetsOnDeparture(from: .sessions, to: .sessions))
@@ -132,12 +132,12 @@ final class AppShellNavigationTests: XCTestCase {
         XCTAssertTrue(AppShellOrganizerPolicy.showsProjects(isShell: false, hasProjects: false, hasSelection: false))
     }
 
-    func testPrimaryTabsSeparateBotConfigurationFromSessionsAndActivity() {
-        XCTAssertEqual(AppShellSurface.primaryTabs, [.control, .sessions, .you])
+    func testPrimaryTabsExposeBotsAndChats() {
+        XCTAssertEqual(AppShellSurface.primaryTabs, [.control, .sessions])
     }
     func testPrimarySurfacesHaveStableOrderAndLabels() {
         XCTAssertEqual(AppShellSurface.allCases, [.control, .sessions, .you])
-        XCTAssertEqual(AppShellSurface.sessions.title, "Sessions")
+        XCTAssertEqual(AppShellSurface.sessions.title, "Chats")
         XCTAssertEqual(AppShellSurface.control.title, "Bots")
         XCTAssertEqual(AppShellSurface.you.title, "Activity")
     }

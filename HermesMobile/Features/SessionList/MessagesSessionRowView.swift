@@ -281,7 +281,12 @@ enum MessagesSessionRowFormatter {
         liveOwnerSessionIDs: Set<String> = [],
         isUnread: Bool = false
     ) -> String {
-        // 1. Live activity / pending input takes highest priority
+        // Activity has its own row indicator. Keep verified message text stable
+        // while heartbeat/status metadata changes during a refresh or run.
+        if let latestMessagePreview = normalizedLatestMessagePreview(latestMessagePreview) {
+            return latestMessagePreview
+        }
+
         if SessionRowView.isActiveStreaming(session, liveOwnerSessionIDs: liveOwnerSessionIDs) {
             return "Streaming response…"
         }
@@ -289,67 +294,17 @@ enum MessagesSessionRowFormatter {
             return "Waiting for your message…"
         }
 
-        if let latestMessagePreview = normalizedLatestMessagePreview(latestMessagePreview) {
-            return latestMessagePreview
-        }
-
         if isUnread {
             return "New agent reply"
         }
 
-        // 2. Specialized session run context
-        if session.isCronSession {
-            if let workspace = normalizedWorkspace(session.workspace) {
-                return "Scheduled run · \(workspace)"
-            }
-            return "Scheduled run"
-        }
-        if session.isDelegatedSubagentSession {
-            if let workspace = normalizedWorkspace(session.workspace) {
-                return "Subagent run · \(workspace)"
-            }
-            return "Subagent run"
-        }
-        if session.isCliSession == true {
-            if let workspace = normalizedWorkspace(session.workspace) {
-                return "CLI session · \(workspace)"
-            }
-            return "CLI session"
-        }
-
-        // 3. Model in use (provides actionable model context)
-        if let model = session.model?.trimmingCharacters(in: .whitespacesAndNewlines), !model.isEmpty {
-            if let workspace = normalizedWorkspace(session.workspace) {
-                return "\(model) · \(workspace)"
-            } else if let profile = normalizedProfile(session.profile) {
-                return "\(model) · \(profile)"
-            } else {
-                return model
-            }
-        }
-
-        // 4. Secondary fallback: message count, workspace, profile metadata
-        var parts: [String] = []
-        if let count = session.messageCount, count > 0 {
-            parts.append(count == 1 ? "1 message" : "\(count) messages")
-        }
-        if let workspace = normalizedWorkspace(session.workspace) {
-            parts.append(workspace)
-        }
-        if let profile = normalizedProfile(session.profile) {
-            parts.append(profile)
-        }
-
-        if parts.isEmpty {
-            return isViewingCachedData ? "Cached Hermes session" : "Hermes session"
-        }
-
-        return parts.joined(separator: " · ")
+        // Missing preview evidence is not an empty conversation, nor proof of
+        // an in-flight request. Keep one honest placeholder across metadata loads.
+        return "No message preview yet"
     }
 
     /// Keeps the Messages row focused on a real message when one is supplied;
-    /// the metadata fallbacks below remain useful context until a verified
-    /// latest-message source is available for every row.
+    /// a neutral placeholder is used until a verified message is available.
     static func normalizedLatestMessagePreview(_ rawPreview: String?) -> String? {
         guard let rawPreview else { return nil }
         let compact = rawPreview.split(whereSeparator: \.isWhitespace).joined(separator: " ")

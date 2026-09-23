@@ -32,6 +32,7 @@ final class ComposerVoiceNoteRecorder {
 
     private(set) var state: State = .idle
     private(set) var elapsed: TimeInterval = 0
+    private(set) var inputLevel = 0.0
     private(set) var errorMessage: String?
 
     @ObservationIgnored private var recorder: AVAudioRecorder?
@@ -72,6 +73,7 @@ final class ComposerVoiceNoteRecorder {
         guard state == .idle else { return }
         errorMessage = nil
         elapsed = 0
+        inputLevel = 0
         state = .requestingPermission
 
         let granted = await permissionRequester()
@@ -142,6 +144,7 @@ final class ComposerVoiceNoteRecorder {
 
         let url = Self.makeTemporaryFileURL()
         let recorder = try recorderFactory(url)
+        recorder.isMeteringEnabled = true
         recorder.prepareToRecord()
         guard recorder.record() else {
             throw ComposerVoiceNoteRecorderError.couldNotStart
@@ -176,6 +179,7 @@ final class ComposerVoiceNoteRecorder {
     private func resetState() {
         state = .idle
         elapsed = 0
+        inputLevel = 0
     }
 
     private func fail(_ message: String) {
@@ -199,6 +203,9 @@ final class ComposerVoiceNoteRecorder {
     private func tick() {
         guard let recorder, recorder.isRecording else { return }
         elapsed = recorder.currentTime
+        recorder.updateMeters()
+        let level = ComposerVoiceAudioLevel.normalized(decibels: Double(recorder.averagePower(forChannel: 0)))
+        inputLevel = ComposerVoiceAudioLevel.smoothed(previous: inputLevel, incoming: level)
     }
 
     private func stopTicker() {

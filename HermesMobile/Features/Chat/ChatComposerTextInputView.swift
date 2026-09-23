@@ -80,7 +80,10 @@ private struct ComposerTextView: UIViewRepresentable {
         textView.backgroundColor = .clear
         textView.font = .preferredFont(forTextStyle: .body)
         textView.adjustsFontForContentSizeCategory = true
-        textView.isScrollEnabled = true
+        // Let the composer grow with the first few lines. If the text view
+        // scrolls while its SwiftUI frame is still catching up, it can hide
+        // the caret or clip a newly typed line inside the rounded surface.
+        textView.isScrollEnabled = false
         textView.textContainerInset = .zero
         textView.textContainer.lineFragmentPadding = 0
         textView.textContentType = .none
@@ -219,7 +222,15 @@ private struct ComposerTextView: UIViewRepresentable {
 
             let fittingSize = CGSize(width: width, height: .greatestFiniteMagnitude)
             let height = ceil(textView.sizeThatFits(fittingSize).height)
-            onHeightChange(min(96, max(22, height)))
+            let maximumVisibleHeight: CGFloat = 120
+            let shouldScrollInternally = height > maximumVisibleHeight + 0.5
+            if textView.isScrollEnabled != shouldScrollInternally {
+                textView.isScrollEnabled = shouldScrollInternally
+            }
+            if !shouldScrollInternally, textView.contentOffset != .zero {
+                textView.setContentOffset(.zero, animated: false)
+            }
+            onHeightChange(min(maximumVisibleHeight, max(22, height)))
         }
     }
 

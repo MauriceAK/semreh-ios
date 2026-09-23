@@ -44,6 +44,91 @@ private enum P09CalibrationGeometry {
 }
 
 final class DirectSkillUITests: XCTestCase {
+    @MainActor
+    func testChatConfigurationDraftModelAndProfileConfirmation() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--chat-performance-lab", "--chat-configuration-lab", "--chat-configuration-draft",
+                               "-appTheme", "semrehDark", "-AppleInterfaceStyle", "Dark"]
+        app.launch()
+        let header = app.buttons["chatProfileConfiguration"]
+        XCTAssertTrue(header.waitForExistence(timeout: 15) && header.isHittable)
+        header.tap()
+        let model = app.buttons["chatControlsModelButton"]
+        XCTAssertTrue(model.waitForExistence(timeout: 5) && model.isEnabled)
+        model.tap()
+        let search = app.searchFields["Search models"]
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        search.tap()
+        search.typeText("Deep thinking")
+        let choice = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Deep thinking")).firstMatch
+        XCTAssertTrue(choice.waitForExistence(timeout: 5) && choice.isHittable)
+        choice.tap()
+        XCTAssertTrue(app.navigationBars["Chat settings"].waitForExistence(timeout: 5))
+        XCTAssertEqual(model.value as? String, "Deep thinking")
+        retainPreviewScreenshot("Chat configuration selected draft model", app: app)
+        app.buttons["Choose profile"].tap()
+        app.buttons["Research"].tap()
+        let confirmation = app.alerts["Start New Session?"]
+        XCTAssertTrue(confirmation.waitForExistence(timeout: 5))
+        XCTAssertEqual(app.keyboards.count, 0)
+        confirmation.buttons["Cancel"].tap()
+        XCTAssertEqual(header.label, "Configure Default", "Cancel must leave the original draft on its profile.")
+        header.tap()
+        XCTAssertTrue(model.waitForExistence(timeout: 5))
+        XCTAssertEqual(model.value as? String, "Deep thinking", "Cancel must preserve the chosen draft model.")
+        app.buttons["Choose profile"].tap()
+        app.buttons["Research"].tap()
+        XCTAssertTrue(confirmation.waitForExistence(timeout: 5))
+        confirmation.buttons["Start New Session"].tap()
+        let research = app.buttons.matching(NSPredicate(format: "label == %@", "Configure Research")).firstMatch
+        XCTAssertTrue(research.waitForExistence(timeout: 8) && research.isHittable)
+        retainPreviewScreenshot("Chat configuration new profile draft", app: app)
+    }
+
+    @MainActor
+    func testChatHeaderConfigurationSurface() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--chat-performance-lab", "--chat-configuration-lab", "-appTheme", "semrehDark", "-AppleInterfaceStyle", "Dark"]
+        app.launch()
+        let header = app.buttons["chatProfileConfiguration"]
+        XCTAssertTrue(header.waitForExistence(timeout: 15) && header.isHittable)
+        header.tap()
+        let settings = app.navigationBars["Chat settings"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 5))
+        let model = app.buttons["chatControlsModelButton"]
+        XCTAssertTrue(model.exists)
+        XCTAssertFalse(model.isEnabled, "An established conversation must not offer model mutation.")
+        XCTAssertTrue(app.staticTexts["chatControlsConfigurationReadOnly"].exists)
+        XCTAssertTrue(app.buttons["chatControlsNewChat"].exists)
+        retainPreviewScreenshot("Chat configuration dark", app: app)
+        app.buttons["Session details"].tap()
+        XCTAssertTrue(app.staticTexts["Workspace"].waitForExistence(timeout: 3))
+        settings.buttons["Done"].tap()
+        XCTAssertTrue(header.waitForExistence(timeout: 5) && header.isHittable)
+        header.tap()
+        XCTAssertTrue(settings.waitForExistence(timeout: 5))
+        let newChat = app.buttons["chatControlsNewChat"]
+        XCTAssertTrue(newChat.isHittable)
+        newChat.tap()
+        XCTAssertTrue(app.otherElements["chat-detail:New Chat"].waitForExistence(timeout: 8),
+                      "New Chat must navigate only after settings has dismissed.")
+        XCTAssertFalse(settings.exists)
+        app.terminate()
+
+        app.launchArguments = ["--chat-performance-lab", "--chat-configuration-lab", "-appTheme", "semrehLight", "-AppleInterfaceStyle", "Light",
+                               "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityM"]
+        app.launch()
+        XCTAssertTrue(header.waitForExistence(timeout: 15) && header.isHittable)
+        header.tap()
+        XCTAssertTrue(settings.waitForExistence(timeout: 5))
+        XCTAssertTrue(model.exists && !model.isEnabled)
+        retainPreviewScreenshot("Chat configuration light accessibility size", app: app)
+        settings.buttons["Done"].tap()
+        XCTAssertTrue(header.waitForExistence(timeout: 5) && header.isHittable)
+    }
+
     func testP09CalibrationGeometryUsesMeasuredBaselineAndStableViewport() throws {
         let viewport = CGRect(x: 0, y: 0, width: 390, height: 844)
         let before = CGRect(x: 100, y: 144.75, width: 250, height: 37)
@@ -226,7 +311,7 @@ final class DirectSkillUITests: XCTestCase {
         let row = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "SEMREH_SLICE1_ACK #")).firstMatch
         XCTAssertTrue(row.waitForExistence(timeout: 10) && row.isHittable); row.tap()
 
-        let details = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "View details for ")).firstMatch
+        let details = app.buttons["chatProfileConfiguration"]
         XCTAssertTrue(details.waitForExistence(timeout: 10) && details.isHittable); details.tap()
         XCTAssertTrue(app.navigationBars.firstMatch.waitForExistence(timeout: 5))
         retainPreviewScreenshot("Preview bot header details", app: app)
@@ -234,16 +319,17 @@ final class DirectSkillUITests: XCTestCase {
 
         let controls = app.buttons.matching(NSPredicate(format: "label == %@", "Chat controls")).firstMatch
         XCTAssertTrue(controls.waitForExistence(timeout: 5) && controls.isHittable); controls.tap()
-        XCTAssertTrue(app.navigationBars["Chat controls"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["chatControlsCurrentModel"].exists)
+        XCTAssertTrue(app.navigationBars["Chat settings"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["chatControlsModelButton"].exists)
         XCTAssertTrue(app.staticTexts["chatControlsConfigurationReadOnly"].exists)
         XCTAssertFalse(app.staticTexts["Models"].exists)
         XCTAssertFalse(app.staticTexts["Custom endpoint"].exists)
         XCTAssertFalse(app.searchFields["Search models"].exists)
         XCTAssertTrue(app.sliders.firstMatch.exists)
+        app.buttons["Session details"].tap()
         XCTAssertTrue(app.staticTexts["Context usage unavailable"].exists || app.progressIndicators["Context used"].exists)
         retainPreviewScreenshot("Preview chat sliders and context", app: app)
-        app.navigationBars["Chat controls"].buttons["Done"].tap()
+        app.navigationBars["Chat settings"].buttons["Done"].tap()
 
         let options = app.buttons["Chat options"]
         XCTAssertTrue(options.waitForExistence(timeout: 5) && options.isHittable); options.tap()
@@ -291,10 +377,45 @@ final class DirectSkillUITests: XCTestCase {
         XCTAssertEqual(completedActivities.count, 1)
         retainPreviewScreenshot("Preview compact completed activity", app: app)
         completedActivity.tap()
-        XCTAssertEqual(completedActivities.count, 2,
-                       "Expanding the activity group must reveal its completed child action row.")
-        XCTAssertTrue(completedActivities.firstMatch.isSelected)
+        XCTAssertEqual(completedActivities.count, 1,
+                       "A one-action group must not duplicate its action button when expanded.")
+        XCTAssertTrue(app.staticTexts["Arguments"].exists
+                      || app.staticTexts["Result"].exists
+                      || app.staticTexts["Status"].exists,
+                      "Expanding the action must reveal its argument, result, or status detail.")
         retainPreviewScreenshot("Preview expanded completed activity", app: app)
+    }
+
+    @MainActor
+    func testOptInChatsPullRefreshRetainsRows() throws {
+        continueAfterFailure = false
+        try requirePreviewShellFixture()
+        let app = XCUIApplication()
+        app.terminate()
+        app.launchArguments = []
+        app.launch()
+        let detail = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "chat-detail:")
+        ).firstMatch
+        if detail.waitForExistence(timeout: 3) {
+            let back = chatBackButton(app: app)
+            XCTAssertTrue(back.waitForExistence(timeout: 5) && back.isHittable)
+            back.tap()
+        }
+        let chats = app.buttons["Chats"]
+        XCTAssertTrue(chats.waitForExistence(timeout: 10) && chats.isHittable)
+        chats.tap()
+        XCTAssertTrue(app.navigationBars["Chats"].waitForExistence(timeout: 10))
+        let list = app.collectionViews.firstMatch
+        XCTAssertTrue(list.waitForExistence(timeout: 10) && list.isHittable)
+        XCTAssertGreaterThan(app.cells.count, 0)
+        list.swipeDown(velocity: .slow)
+        let pullStart = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
+        let pullEnd = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.8))
+        pullStart.press(forDuration: 0.1, thenDragTo: pullEnd)
+        XCTAssertGreaterThan(app.cells.count, 0, "Pull refresh must retain mounted list rows.")
+        XCTAssertTrue(app.navigationBars["Chats"].exists)
+        retainPreviewScreenshot("Chats pull refresh retains rows — fixture only", app: app)
     }
 
     private func requirePreviewShellFixture() throws {
@@ -2230,12 +2351,12 @@ final class DirectSkillUITests: XCTestCase {
             }
         }
 
-        var sessionsTab = app.buttons["Sessions"]
+        var sessionsTab = app.buttons["Chats"]
         var setupBackEventCount = 0
-        if !sessionsTab.waitForExistence(timeout: 3) {
-            let restoredDetail = app.descendants(matching: .any).matching(
-                NSPredicate(format: "identifier BEGINSWITH %@", "chat-detail:")
-            ).firstMatch
+        let restoredDetail = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "chat-detail:")
+        ).firstMatch
+        if restoredDetail.exists || !sessionsTab.waitForExistence(timeout: 3) {
             let restoredBack = chatBackButton(app: app)
             guard restoredDetail.exists,
                   restoredBack.waitForExistence(timeout: 5),
@@ -2257,6 +2378,14 @@ final class DirectSkillUITests: XCTestCase {
         sessionsTab.tap()
 
         func freshSessionSearchField() -> XCUIElement? {
+            let typingTip = app.staticTexts.matching(
+                NSPredicate(format: "label BEGINSWITH %@", "Speed up your typing by sliding your finger")
+            ).firstMatch
+            if typingTip.exists {
+                let continueButton = app.buttons["Continue"]
+                guard continueButton.isHittable else { return nil }
+                continueButton.tap()
+            }
             var field = app.textFields["Search sessions"]
             if field.waitForExistence(timeout: 2), field.isHittable {
                 return field
@@ -2321,10 +2450,9 @@ final class DirectSkillUITests: XCTestCase {
                     return XCTFail("Rich transcript \(index + 1) cycle \(cycle) must expose the production Back control.")
                 }
                 back.tap()
-                sessionsTab = app.buttons["Sessions"]
+                sessionsTab = app.buttons["Chats"]
                 guard detail.waitForNonExistence(timeout: 10),
-                      sessionsTab.waitForExistence(timeout: 10),
-                      sessionsTab.isHittable else {
+                      app.navigationBars["Chats"].waitForExistence(timeout: 10) else {
                     attachAvailableCadenceReport("return to Sessions")
                     return XCTFail("Back must dismiss the production detail and restore the stable Sessions shell.")
                 }
@@ -4102,7 +4230,7 @@ final class DirectSkillUITests: XCTestCase {
         paste(credentials.password, into: password, app: app)
         app.buttons["Connect"].tap()
 
-        let sessions = app.buttons["Sessions"]
+        let sessions = app.buttons["Chats"]
         let restoredChat = app.otherElements.matching(
             NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
         ).firstMatch

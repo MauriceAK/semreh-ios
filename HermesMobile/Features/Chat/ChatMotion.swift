@@ -17,11 +17,14 @@ enum ChatMotion {
         reduceMotion ? .easeOut(duration: 0.12) : .smooth(duration: 0.22, extraBounce: 0)
     }
 
-    /// Duration of the explicit bottom-jump easeOut. The settlement-churn
-    /// gate shares this same constant so its in-flight window can never
-    /// drift from the animation actually issued.
-    static let scrollToLatestDuration: TimeInterval = 0.20
+    /// Coordinates the optimistic row insertion with its local entrance.
+    /// The transcript's existing bottom anchor supplies the layout movement;
+    /// this adds no independent scroll-offset writer.
+    static func outgoingBubble(reduceMotion: Bool) -> Animation? {
+        reduceMotion ? nil : .smooth(duration: 0.26, extraBounce: 0.03)
+    }
 
+    static let scrollToLatestDuration: TimeInterval = 0.20
     static func scrollToLatest(reduceMotion: Bool) -> Animation? {
         reduceMotion ? nil : .easeOut(duration: scrollToLatestDuration)
     }

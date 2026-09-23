@@ -10,6 +10,19 @@ private struct VisibleTranscriptRowFramesKey: PreferenceKey {
     }
 }
 
+private struct ExplicitBottomGeometrySample: Equatable {
+    var token: ChatExplicitBottomGeometryToken?
+    var frame: CGRect?
+}
+
+private struct ExplicitBottomGeometryKey: PreferenceKey {
+    static var defaultValue = ExplicitBottomGeometrySample()
+    static func reduce(value: inout ExplicitBottomGeometrySample, nextValue: () -> ExplicitBottomGeometrySample) {
+        let next = nextValue()
+        if next.token != nil { value = next }
+    }
+}
+
 #if DEBUG
 /// One bounded, in-memory observation for an automatic prepend. The raw row
 /// ID is retained only long enough to match the next realized preference; logs
@@ -28,6 +41,7 @@ private struct ChatTranscriptPagingDebugEvidence {
     var postCommandObservationCounts: [String: Int] = [:]
     var loggedSilentGuardReasons = Set<String>()
 }
+
 #endif
 
 /// Owns the ScrollView's one native position binding for the initial saved
@@ -161,6 +175,92 @@ enum ChatTranscriptRenderSequence {
     }
 }
 
+enum ChatTranscriptTypingIndicatorPolicy {
+    /// Keep prior reasoning readable when a new user turn begins, but
+    /// distinguish the new run's pending status from the older disclosure
+    /// instead of printing Thinking twice.
+    static func usesPreparingResponseLabel(
+        hasActiveStream: Bool,
+        showsActivityCards: Bool,
+        trailingMessageRole: String?,
+        hasPriorReasoning: Bool
+    ) -> Bool {
+        hasActiveStream && showsActivityCards
+            && trailingMessageRole == "user" && hasPriorReasoning
+    }
+
+    static func shouldShowBareIndicator(
+        isEligible: Bool,
+        hasActiveStream: Bool,
+        showsActivityCards: Bool,
+        trailingMessageRole: String?,
+        hasTrailingRetainedReasoning: Bool,
+        hasTrailingCompletedTools: Bool
+    ) -> Bool {
+        guard isEligible else { return false }
+        guard hasActiveStream, showsActivityCards, trailingMessageRole == "assistant" else {
+            return true
+        }
+        return !hasTrailingRetainedReasoning && !hasTrailingCompletedTools
+    }
+}
+
+/// Retained activity can be anchored to an earlier assistant message in the
+/// current turn, or have no message anchor at all. Pick one visible Thinking
+/// disclosure to carry the active treatment before deciding whether a second,
+/// bare typing line is needed. Activity before the latest user row is history.
+enum ChatTranscriptRetainedActivityPolicy {
+    struct State {
+        let activeReasoningAnchorID: String?
+        let activatesLooseReasoning: Bool
+        let hasCurrentTurnReasoning: Bool
+        let hasCurrentTurnTools: Bool
+    }
+
+    static func state(
+        in renderedMessages: [TranscriptMessage],
+        hasActiveStream: Bool,
+        showsActivityCards: Bool,
+        canShowBareThinking: Bool,
+        hasReasoning: (String?) -> Bool,
+        hasTools: (String?) -> Bool
+    ) -> State {
+        let empty = State(activeReasoningAnchorID: nil, activatesLooseReasoning: false,
+                          hasCurrentTurnReasoning: false, hasCurrentTurnTools: false)
+        guard hasActiveStream, showsActivityCards,
+              renderedMessages.last?.message.role == "assistant" else { return empty }
+
+        let start = renderedMessages.lastIndex { $0.message.role == "user" }.map { $0 + 1 } ?? 0
+        let currentAssistantRows = renderedMessages[start...].filter { $0.message.role == "assistant" }
+        let latestReasoningAnchor = currentAssistantRows.last { hasReasoning($0.anchorID) }?.anchorID
+        let hasAnchoredTools = currentAssistantRows.contains { hasTools($0.anchorID) }
+        let hasLooseReasoning = hasReasoning(nil)
+        let hasLooseTools = hasTools(nil)
+        let activatesLooseReasoning = canShowBareThinking && hasLooseReasoning
+
+        return State(
+            activeReasoningAnchorID: canShowBareThinking && !activatesLooseReasoning
+                ? latestReasoningAnchor : nil,
+            activatesLooseReasoning: activatesLooseReasoning,
+            hasCurrentTurnReasoning: latestReasoningAnchor != nil || hasLooseReasoning,
+            hasCurrentTurnTools: hasAnchoredTools || hasLooseTools
+        )
+    }
+}
+
+enum ChatTranscriptReasoningMergePolicy {
+    struct Presentation {
+        let text: String
+        let segments: [String]
+    }
+
+    static func presentation(retained group: ReasoningGroup, liveText: String) -> Presentation {
+        let retainedSegments = group.segments.isEmpty ? [group.text] : group.segments
+        let segments = retainedSegments + [liveText]
+        return Presentation(text: segments.joined(separator: "\n\n"), segments: segments)
+    }
+}
+
 /// Preference and UIKit metrics arrive at frame/layout frequency. Keep their
 /// small amount of bookkeeping in a stable reference so recording an anchor
 /// does not invalidate the entire transcript body on every sample.
@@ -171,6 +271,10 @@ private final class ChatTranscriptViewportTracker {
     var viewportHeight: CGFloat = 0
     var activationRecoveryState = ChatTranscriptActivationRecoveryState()
     var latestFrames: [String: CGRect] = [:]
+#if DEBUG
+    var diagnosticRowHeights: [String: CGFloat] = [:]
+    var lastViewportDiagnosticAt: TimeInterval = 0
+#endif
     var framesGeneration = 0
     var activationBaselineFramesGeneration = 0
     var latestScrollMetrics: ChatScrollMetrics?
@@ -213,6 +317,7 @@ private final class ChatTranscriptViewportTracker {
         measuredLayoutFollowTask?.cancel()
     }
 }
+
 
 struct ChatTranscriptActivationRecoveryState: Equatable {
     private(set) var hasObservedRows = false
@@ -448,7 +553,13 @@ struct ChatTranscriptPagingReconciliationState: Equatable {
 struct ChatTranscriptView: View, Equatable {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.openURL) private var openURL
+    @Environment(\.appColorPalette) private var nativeViewportPalette
+    @Environment(\.appAccent) private var nativeViewportAccent
+    @AppStorage(ChatTranscriptDisplaySettings.wrapsCodeBlockLinesKey) private var wrapsCodeBlockLines = false
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.self) private var prototypeEnvironment
 
     let isLoading: Bool
     let errorMessage: String?
@@ -508,6 +619,9 @@ struct ChatTranscriptView: View, Equatable {
     var onScrollToTranscriptMessage: (ScrollViewProxy, String, Bool) -> Void = { _, _, _ in }
     var onVisibleTranscriptRowIDChange: (String?) -> Void = { _ in }
     var onTranscriptTailVisibilityChange: (_ latestRow: Bool, _ bottom: Bool) -> Void = { _, _ in }
+    var onStableViewportJumpToLatest: () -> Void = {}
+    var explicitBottomGeometryToken: ChatExplicitBottomGeometryToken? = nil
+    var onExplicitBottomGeometryChange: (ChatExplicitBottomGeometryToken?, Bool) -> Void = { _, _ in }
     let onPreviewAttachment: (MessageAttachment, Data?) -> Void
     let onPreviewTranscriptMedia: (TranscriptMediaReference) -> Void
     let onToggleListening: (MessageActionContext) -> Void
@@ -553,6 +667,8 @@ struct ChatTranscriptView: View, Equatable {
     @State private var pendingMessageCountDiagnostic: Int?
     @State private var hasLoggedExplicitBottomTarget = false
     @State private var hasLoggedFirstStreamingAssistantLayout = false
+    @State private var debugWindowRange: Range<Int>?
+    @State private var debugWindowGeneration = 0
 #endif
     private static let transcriptCoordinateSpaceName = "chatTranscript"
 #if DEBUG
@@ -563,8 +679,8 @@ struct ChatTranscriptView: View, Equatable {
     private static let maximumPagingDiagnosticEvents = 24
 #endif
 
-    private var renderedTranscriptMessages: [TranscriptMessage] {
-        return ChatTranscriptRenderSequence.filtering(
+    private var allRenderedTranscriptMessages: [TranscriptMessage] {
+        ChatTranscriptRenderSequence.filtering(
             displayedTranscriptMessages,
             showsThinkingAndToolCards: showsThinkingAndToolCards,
             compressionAfterRenderID: compressionReferenceCard?.afterRenderID,
@@ -574,6 +690,38 @@ struct ChatTranscriptView: View, Equatable {
             shouldRenderMessage: shouldRenderMessageRow
         )
     }
+
+    private var renderedTranscriptMessages: [TranscriptMessage] {
+        let allRows = allRenderedTranscriptMessages
+#if DEBUG
+        guard debugBoundedTailWindowEnabled else { return allRows }
+        let selection = debugWindowRange ?? ChatDebugTranscriptWindowPolicy.opening(
+            renderIDs: allRows.map(\.renderID),
+            followingLatest: shouldFollowLatestMessage,
+            savedAnchorID: initialRestoreMessageID
+        ).range
+        guard selection.lowerBound >= 0, selection.upperBound <= allRows.count else {
+            return Array(allRows.suffix(ChatDebugTranscriptWindowPolicy.defaultLimit))
+        }
+        return Array(allRows[selection])
+#else
+        return allRows
+#endif
+    }
+
+#if DEBUG
+    private var debugBoundedTailWindowEnabled: Bool {
+        ProcessInfo.processInfo.arguments.contains("--chat-debug-bounded-tail-window")
+    }
+
+    private var debugEffectiveWindowRange: Range<Int> {
+        let allIDs = allRenderedTranscriptMessages.map(\.renderID)
+        return debugWindowRange ?? ChatDebugTranscriptWindowPolicy.opening(
+            renderIDs: allIDs, followingLatest: shouldFollowLatestMessage,
+            savedAnchorID: initialRestoreMessageID
+        ).range
+    }
+#endif
 
     private var liveAccessoryAnchorIDs: Set<String> {
         guard showsThinkingAndToolCards, activeStreamID != nil else { return [] }
@@ -723,7 +871,22 @@ struct ChatTranscriptView: View, Equatable {
                 onDismissKeyboard()
             }
         } else {
+#if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("--native-baseline")
+                && (ProcessInfo.processInfo.arguments.contains("--chat-performance-lab")
+                    || ProcessInfo.processInfo.arguments.contains("--chat-performance-tall-lab")) {
+                nativeBaselineTranscript
+            } else if ProcessInfo.processInfo.arguments.contains("--chat-stable-viewport")
+                || (ProcessInfo.processInfo.arguments.contains("--chat-viewport-prototype")
+                    && (ProcessInfo.processInfo.arguments.contains("--chat-performance-tall-lab")
+                        || ProcessInfo.processInfo.arguments.contains("--chat-performance-lab"))) {
+                prototypeTranscript
+            } else {
+                transcriptScrollView
+            }
+#else
             transcriptScrollView
+#endif
         }
         }
         .onAppear { insertionLedger.mount(scope: outgoingInsertionScope, through: outgoingInsertionEvent?.sequence ?? 0) }
@@ -784,6 +947,118 @@ struct ChatTranscriptView: View, Equatable {
         }
     }
 
+#if DEBUG
+    private var nativeBaselineTranscript: some View {
+        let rows = renderedTranscriptMessages
+        let retainedActivity = retainedActivityState(in: rows)
+        let latest = AssistantResponseActionPolicy.latestCompletedAssistantRenderID(
+            in: rows, hasActiveStream: activeStreamID != nil,
+            streamingAssistantMessageID: streamingAssistantMessageID)
+        // Native target namespace must not collide with the retained production
+        // message block's inner renderID. One unique outer target per data row.
+        return NativeBaselineTranscript(firstID: rows.first.map { "native-row:\($0.renderID)" }, lastID: rows.last.map { "native-row:\($0.renderID)" }, bottomID: "native-tail:\(bottomAnchorID)",
+                                        bottomInset: transcriptBottomInsetHeight,
+                                        spacing: transcriptMessageSpacing, reduceMotion: reduceMotion) {
+            ForEach(rows) { row in
+                transcriptMessageRow(
+                    row, latestCompletedAssistantRenderID: latest,
+                    isTrailingCurrentActivity: retainedActivity.activeReasoningAnchorID == row.anchorID,
+                    observesGeometry: false
+                )
+                    .modifier(NativeRefinementProbe(name: row.renderID == rows.last?.renderID ? "last-row" : "row-\(row.renderID)"))
+                    .id("native-row:\(row.renderID)")
+            }
+        }
+    }
+#endif
+
+    private var prototypeTranscript: some View { viewportInput }
+
+    private var viewportInput: ChatStableViewportPrototype {
+        let rows = renderedTranscriptMessages
+        let retainedActivity = retainedActivityState(in: rows)
+        let latest = AssistantResponseActionPolicy.latestCompletedAssistantRenderID(
+            in: rows, hasActiveStream: activeStreamID != nil,
+            streamingAssistantMessageID: streamingAssistantMessageID
+        )
+        return ChatStableViewportPrototype(
+            ids: rows.map(\.renderID),
+            revisionAt: { index in
+                let row = rows[index]
+                let isReasoningAnchor = reasoningAnchorMessageID == row.anchorID
+                let isToolCallAnchor = toolCallAnchorMessageID == row.anchorID
+                let isStreamingRow = streamingAssistantMessageID == row.message.messageId
+                return StableViewportRowRevision(
+                    message: row, latestCompletedAssistantRenderID: latest,
+                    outgoingInsertionEvent: outgoingInsertionEvent?.messageID == row.message.id ? outgoingInsertionEvent : nil,
+                    allowsOutgoingMotion: ChatTranscriptRestorePolicy.shouldAllowOutgoingInsertionMotion(
+                        shouldFollowLatestMessage: shouldFollowLatestMessage,
+                        isRestoreInProgress: isInitialRestoreInProgress || restoreSettlementTask != nil
+                    ),
+                    reasoningGroups: reasoningGroupsForAnchor(row.anchorID),
+                    toolCallGroups: completedToolCallGroupsForAnchor(row.anchorID),
+                    liveReasoningText: isReasoningAnchor ? liveReasoningText : "",
+                    liveToolCalls: isToolCallAnchor ? liveToolCalls : [],
+                    streamingAssistantMessageID: isStreamingRow ? streamingAssistantMessageID : nil,
+                    liveTokensPerSecond: isStreamingRow ? liveTokensPerSecond : nil,
+                    localAttachmentPreviews: localAttachmentPreviews[row.message.id],
+                    compressionReferenceCard: compressionReferenceCard?.afterRenderID == row.renderID ? compressionReferenceCard : nil,
+                    listeningMessageID: listeningMessageID,
+                    showsThinkingAndToolCards: showsThinkingAndToolCards,
+                    isViewingCachedData: isViewingCachedData,
+                    hasActiveStream: activeStreamID != nil,
+                    isRegeneratingMessage: isRegeneratingMessage,
+                    isEditingMessage: isEditingMessage,
+                    isForkingMessage: isForkingMessage,
+                    transcriptMediaCacheNamespace: transcriptMediaCacheNamespace
+                )
+            },
+            revision: transcriptRenderRevision,
+            typeKey: "\(dynamicTypeSize)|\(colorScheme)|wrap:\(wrapsCodeBlockLines)",
+            bottomInset: transcriptBottomInsetHeight, spacing: transcriptMessageSpacing,
+            reduceMotion: reduceMotion, initialID: initialRestoreMessageID,
+            startsAtBottom: shouldFollowLatestMessage,
+            onJumpToLatest: onStableViewportJumpToLatest,
+            onScrollState: { metrics, visibleID, latestVisible, bottomVisible in
+                onUpdateScrollMetrics(metrics)
+                onVisibleTranscriptRowIDChange(visibleID)
+                onTranscriptTailVisibilityChange(latestVisible, bottomVisible)
+            },
+            nativeRichDark: colorScheme == .dark, nativeRichWrapsCodeLines: wrapsCodeBlockLines,
+            nativePromptFillHex: SemrehVisualTheme.promptBubbleBackgroundHex(for: colorScheme, palette: nativeViewportPalette, accent: nativeViewportAccent),
+            nativePromptForegroundHex: SemrehVisualTheme.promptBubbleForegroundHex(for: nativeViewportPalette, accent: nativeViewportAccent),
+            nativePromptBorderHex: SemrehVisualTheme.promptBubbleBorderHex(for: colorScheme, palette: nativeViewportPalette, accent: nativeViewportAccent),
+            onDirectSelectText: { index in
+                let row = rows[index]
+                if let context = actionContext(row.message, row.loadedIndex) { onSelectText(context) }
+            },
+            onDirectCopy: { index in
+                let row = rows[index]
+                if let context = actionContext(row.message, row.loadedIndex) { onCopy(context) }
+            },
+            onDirectOpenURL: { url in
+#if DEBUG
+                if ProcessInfo.processInfo.arguments.contains("--native-direct-premount-rich-link-bidi"),
+                   url.absoluteString == "https://example.invalid/reference" {
+                    Logger(subsystem: "com.maurice.semreh", category: "ViewportPrototype")
+                        .debug("event=premount_rich_fixture_link_activated")
+                    return
+                }
+#endif
+                openURL(url)
+            },
+            makeRow: { index, viewport in
+                var environment = prototypeEnvironment
+                environment.prototypeCodeViewport = viewport
+                return AnyView(transcriptMessageRow(
+                    rows[index], latestCompletedAssistantRenderID: latest,
+                    isTrailingCurrentActivity: retainedActivity.activeReasoningAnchorID == rows[index].anchorID
+                )
+                    .environment(\.self, environment))
+            }
+        )
+    }
+
     private var transcriptScrollView: some View {
         ScrollViewReader { proxy in
             GeometryReader { viewport in
@@ -836,6 +1111,9 @@ struct ChatTranscriptView: View, Equatable {
                     .scrollDismissesKeyboard(.interactively)
                     .coordinateSpace(name: Self.transcriptCoordinateSpaceName)
                     .accessibilityIdentifier("chat-transcript-scroll")
+#if DEBUG
+                    .id(debugBoundedTailWindowEnabled ? debugWindowGeneration : 0)
+#endif
                     .safeAreaInset(edge: .bottom, spacing: 0) {
                         Color.clear
                             .frame(height: transcriptBottomInsetHeight)
@@ -877,6 +1155,24 @@ struct ChatTranscriptView: View, Equatable {
                                     )
 #endif
                                     cancelTranscriptRestore(reason: "explicit_bottom")
+#if DEBUG
+                                    if debugBoundedTailWindowEnabled {
+                                        let count = allRenderedTranscriptMessages.count
+                                        let tail = max(0, count - ChatDebugTranscriptWindowPolicy.defaultLimit)..<count
+                                        if debugEffectiveWindowRange != tail {
+                                            debugWindowRange = tail
+                                            debugWindowGeneration &+= 1
+                                            Self.activationRecoveryLogger.debug(
+                                                "event=debug_window_tail decision=explicit_arrow total=\(count, privacy: .public) start=\(tail.lowerBound, privacy: .public)"
+                                            )
+                                            Task { @MainActor in
+                                                await Task.yield()
+                                                onScrollToBottom(proxy)
+                                            }
+                                            return
+                                        }
+                                    }
+#endif
                                     onScrollToBottom(proxy)
                                 }
                             )
@@ -896,6 +1192,12 @@ struct ChatTranscriptView: View, Equatable {
                     viewportTracker.activationRecoveryState.armForActivation()
                     viewportTracker.activationBaselineFramesGeneration = viewportTracker.framesGeneration
 #if DEBUG
+                    if ProcessInfo.processInfo.arguments.contains("--chat-viewport-diagnostic") {
+                        logTranscriptScrollSnapshot(
+                            event: "diagnostic_appear", decision: "model_and_realization",
+                            viewportHeight: viewport.size.height
+                        )
+                    }
                     if viewportTracker.activationRecoveryState.isArmed {
                         logTranscriptScrollSnapshot(
                             event: "appear_armed",
@@ -1098,9 +1400,40 @@ struct ChatTranscriptView: View, Equatable {
                     guard shouldFollowLatestMessage, isScrolledNearBottom else { return }
                     onScrollToLatestContent(proxy, false)
                 }
+                .onPreferenceChange(ExplicitBottomGeometryKey.self) { sample in
+                    let attached = scenePhase == .active && viewportTracker.scrollView?.window != nil
+                    let visible = attached && ChatTranscriptVisibilityPolicy.isVisible(
+                        frame: sample.frame, viewportHeight: viewport.size.height,
+                        bottomInset: transcriptBottomInsetHeight
+                    )
+                    onExplicitBottomGeometryChange(sample.token ?? explicitBottomGeometryToken, visible)
+                }
                 .onPreferenceChange(VisibleTranscriptRowFramesKey.self) { frames in
+#if DEBUG
+                    if ProcessInfo.processInfo.arguments.contains("--chat-performance-tall-lab") {
+                        let rowFrames = frames.filter { $0.key != bottomAnchorID }
+                        let changed = rowFrames.compactMap { key, frame -> CGFloat? in
+                            guard let previous = viewportTracker.diagnosticRowHeights[key],
+                                  abs(previous - frame.height) > 0.5 else { return nil }
+                            return frame.height - previous
+                        }
+                        let newCount = rowFrames.keys.filter { viewportTracker.diagnosticRowHeights[$0] == nil }.count
+                        for (key, frame) in rowFrames { viewportTracker.diagnosticRowHeights[key] = frame.height }
+                        let scroll = viewportTracker.scrollView
+                        let last = latestRenderedID.flatMap { frames[$0] }
+                        Logger(subsystem: "com.maurice.semreh", category: "TailGeometry").debug("sample explicit=\(hasExplicitBottomScrollRequest, privacy: .public) rows=\(rowFrames.count, privacy: .public) new=\(newCount, privacy: .public) changed=\(changed.count, privacy: .public) maxHeightDelta=\(changed.max(by: { abs($0) < abs($1) }) ?? 0, privacy: .public) lastHeight=\(last?.height ?? -1, privacy: .public) lastY=\(last?.minY ?? -1, privacy: .public) tailY=\(frames[bottomAnchorID]?.maxY ?? -1, privacy: .public) offset=\(scroll?.contentOffset.y ?? -1, privacy: .public) extent=\(scroll?.contentSize.height ?? -1, privacy: .public)")
+                    }
+#endif
                     viewportTracker.latestFrames = frames
                     viewportTracker.framesGeneration += 1
+#if DEBUG
+                    if ProcessInfo.processInfo.arguments.contains("--chat-viewport-diagnostic") {
+                        logTranscriptScrollSnapshot(
+                            event: "diagnostic_preference", decision: "realized_row_sample",
+                            viewportHeight: viewport.size.height
+                        )
+                    }
+#endif
                     let latestFrame = latestRenderedID.flatMap { frames[$0] }
 #if DEBUG
                     logFirstStreamingAssistantLayoutIfNeeded(
@@ -2109,6 +2442,7 @@ struct ChatTranscriptView: View, Equatable {
         contentWidth: CGFloat,
         renderedMessages: [TranscriptMessage]
     ) -> some View {
+        let retainedActivity = retainedActivityState(in: renderedMessages)
         let latestCompletedAssistantRenderID = AssistantResponseActionPolicy.latestCompletedAssistantRenderID(
             in: renderedMessages,
             hasActiveStream: activeStreamID != nil,
@@ -2122,88 +2456,28 @@ struct ChatTranscriptView: View, Equatable {
                 compressionReferenceCardView(compressionReferenceCard)
             }
 
+            unlinkedReasoningBlocks
+
             ForEach(renderedMessages) { transcriptMessage in
-                // Scope live-streaming state to the row that actually displays it.
-                // Non-anchor / non-streaming rows receive stable empty/nil values so
-                // their inputs don't change on every ~16ms flush; combined with the
-                // `.equatable()` wrapper below, SwiftUI then skips re-evaluating their
-                // (markdown-heavy) bodies while a response streams in.
-                let isReasoningAnchor = reasoningAnchorMessageID == transcriptMessage.anchorID
-                let isToolCallAnchor = toolCallAnchorMessageID == transcriptMessage.anchorID
-                let isStreamingRow = streamingAssistantMessageID != nil
-                    && transcriptMessage.message.messageId == streamingAssistantMessageID
-
-                // One lazy child per transcript item, even when it owns a
-                // compression card. Variable child counts force eager discovery.
-                VStack(alignment: .leading, spacing: transcriptMessageSpacing) {
-                    ChatTranscriptMessageBlock(
-                        transcriptMessage: transcriptMessage,
-                        latestCompletedAssistantRenderID: latestCompletedAssistantRenderID,
-                        outgoingInsertionEvent: outgoingInsertionEvent?.messageID == transcriptMessage.message.id
-                            ? outgoingInsertionEvent : nil,
-                        insertionLedger: insertionLedger,
-                        allowsOutgoingMotion: ChatTranscriptRestorePolicy.shouldAllowOutgoingInsertionMotion(
-                            shouldFollowLatestMessage: shouldFollowLatestMessage,
-                            isRestoreInProgress: isInitialRestoreInProgress || restoreSettlementTask != nil
-                        ),
-                        transcriptBlockSpacing: transcriptBlockSpacing,
-                        showsThinkingAndToolCards: showsThinkingAndToolCards,
-                        reasoningGroups: reasoningGroupsForAnchor(transcriptMessage.anchorID),
-                        toolCallGroups: completedToolCallGroupsForAnchor(transcriptMessage.anchorID),
-                        liveReasoningText: isReasoningAnchor ? liveReasoningText : "",
-                        reasoningAnchorMessageID: isReasoningAnchor ? reasoningAnchorMessageID : nil,
-                        liveToolCalls: isToolCallAnchor ? liveToolCalls : [],
-                        toolCallAnchorMessageID: isToolCallAnchor ? toolCallAnchorMessageID : nil,
-                        streamingAssistantMessageID: isStreamingRow ? streamingAssistantMessageID : nil,
-                        liveTokensPerSecond: isStreamingRow ? liveTokensPerSecond : nil,
-                        localAttachmentPreviews: localAttachmentPreviews[transcriptMessage.message.id],
-                        listeningMessageID: listeningMessageID,
-                        isViewingCachedData: isViewingCachedData,
-                        hasActiveStream: activeStreamID != nil,
-                        isRegeneratingMessage: isRegeneratingMessage,
-                        isEditingMessage: isEditingMessage,
-                        isForkingMessage: isForkingMessage,
-                        loadAttachmentImage: loadAttachmentImage,
-                        loadAttachmentData: loadAttachmentData,
-                        loadTranscriptMediaImage: loadTranscriptMediaImage,
-                        loadTranscriptMediaData: loadTranscriptMediaData,
-                        transcriptMediaCacheNamespace: transcriptMediaCacheNamespace,
-                        actionContext: actionContext,
-                        shouldRenderMessageRow: shouldRenderMessageRow,
-                        onPreviewAttachment: onPreviewAttachment,
-                        onPreviewTranscriptMedia: onPreviewTranscriptMedia,
-                        onToggleListening: onToggleListening,
-                        onSelectText: onSelectText,
-                        onRegenerate: onRegenerate,
-                        onEdit: onEdit,
-                        onFork: onFork,
-                        onCopy: onCopy
-                    )
-                    .equatable()
-                    .background {
-                        GeometryReader { rowProxy in
-                            Color.clear.preference(
-                                key: VisibleTranscriptRowFramesKey.self,
-                                value: [
-                                    transcriptMessage.renderID: rowProxy.frame(
-                                        in: .named(Self.transcriptCoordinateSpaceName)
-                                    )
-                                ]
-                            )
-                        }
-                    }
-                    .id(transcriptMessage.renderID)
-
-                    if let compressionReferenceCard,
-                       compressionReferenceCard.afterRenderID == transcriptMessage.renderID {
-                        compressionReferenceCardView(compressionReferenceCard)
-                    }
-                }
+                transcriptMessageRow(
+                    transcriptMessage, latestCompletedAssistantRenderID: latestCompletedAssistantRenderID,
+                    isTrailingCurrentActivity: retainedActivity.activeReasoningAnchorID == transcriptMessage.anchorID
+                )
             }
+
+#if DEBUG
+            if debugBoundedTailWindowEnabled,
+               debugEffectiveWindowRange.upperBound < allRenderedTranscriptMessages.count {
+                Button("Newer loaded messages") {
+                    debugMoveLoadedWindow(proxy: proxy, older: false)
+                }
+                .accessibilityIdentifier("chat-debug-newer-loaded")
+            }
+#endif
 
             transcriptAccessoryBlocks(renderedMessages: renderedMessages)
             inlineClarificationCard
-            typingIndicator
+            typingIndicator(renderedMessages: renderedMessages)
             turnChangesCard
             inlineCommitButton
 
@@ -2215,6 +2489,10 @@ struct ChatTranscriptView: View, Equatable {
                             key: VisibleTranscriptRowFramesKey.self,
                             value: [bottomAnchorID: anchorProxy.frame(in: .named(Self.transcriptCoordinateSpaceName))]
                         )
+                        .preference(key: ExplicitBottomGeometryKey.self, value: ExplicitBottomGeometrySample(
+                            token: explicitBottomGeometryToken,
+                            frame: anchorProxy.frame(in: .named(Self.transcriptCoordinateSpaceName))
+                        ))
                     }
                 }
                 .id(bottomAnchorID)
@@ -2250,6 +2528,91 @@ struct ChatTranscriptView: View, Equatable {
             .accessibilityHidden(true)
         }
     }
+
+
+    @ViewBuilder
+    private func transcriptMessageRow(_ transcriptMessage: TranscriptMessage, latestCompletedAssistantRenderID: String?, isTrailingCurrentActivity: Bool, observesGeometry: Bool = true) -> some View {
+        // Scope live-streaming state to the row that actually displays it.
+        // Non-anchor / non-streaming rows receive stable empty/nil values so
+        // their inputs don't change on every ~16ms flush; combined with the
+        // `.equatable()` wrapper below, SwiftUI then skips re-evaluating their
+        // (markdown-heavy) bodies while a response streams in.
+        let isReasoningAnchor = reasoningAnchorMessageID == transcriptMessage.anchorID
+        let isToolCallAnchor = toolCallAnchorMessageID == transcriptMessage.anchorID
+        let isStreamingRow = streamingAssistantMessageID != nil
+            && transcriptMessage.message.messageId == streamingAssistantMessageID
+
+        // One lazy child per transcript item, even when it owns a
+        // compression card. Variable child counts force eager discovery.
+        VStack(alignment: .leading, spacing: transcriptMessageSpacing) {
+            ChatTranscriptMessageBlock(
+                transcriptMessage: transcriptMessage,
+                latestCompletedAssistantRenderID: latestCompletedAssistantRenderID,
+                outgoingInsertionEvent: outgoingInsertionEvent?.messageID == transcriptMessage.message.id
+                    ? outgoingInsertionEvent : nil,
+                insertionLedger: insertionLedger,
+                allowsOutgoingMotion: ChatTranscriptRestorePolicy.shouldAllowOutgoingInsertionMotion(
+                    shouldFollowLatestMessage: shouldFollowLatestMessage,
+                    isRestoreInProgress: isInitialRestoreInProgress || restoreSettlementTask != nil
+                ),
+                transcriptBlockSpacing: transcriptBlockSpacing,
+                showsThinkingAndToolCards: showsThinkingAndToolCards,
+                isTrailingCurrentActivity: isTrailingCurrentActivity,
+                reasoningGroups: reasoningGroupsForAnchor(transcriptMessage.anchorID),
+                toolCallGroups: completedToolCallGroupsForAnchor(transcriptMessage.anchorID),
+                liveReasoningText: isReasoningAnchor ? liveReasoningText : "",
+                reasoningAnchorMessageID: isReasoningAnchor ? reasoningAnchorMessageID : nil,
+                liveToolCalls: isToolCallAnchor ? liveToolCalls : [],
+                toolCallAnchorMessageID: isToolCallAnchor ? toolCallAnchorMessageID : nil,
+                streamingAssistantMessageID: isStreamingRow ? streamingAssistantMessageID : nil,
+                liveTokensPerSecond: isStreamingRow ? liveTokensPerSecond : nil,
+                localAttachmentPreviews: localAttachmentPreviews[transcriptMessage.message.id],
+                listeningMessageID: listeningMessageID,
+                isViewingCachedData: isViewingCachedData,
+                hasActiveStream: activeStreamID != nil,
+                isRegeneratingMessage: isRegeneratingMessage,
+                isEditingMessage: isEditingMessage,
+                isForkingMessage: isForkingMessage,
+                loadAttachmentImage: loadAttachmentImage,
+                loadAttachmentData: loadAttachmentData,
+                loadTranscriptMediaImage: loadTranscriptMediaImage,
+                loadTranscriptMediaData: loadTranscriptMediaData,
+                transcriptMediaCacheNamespace: transcriptMediaCacheNamespace,
+                actionContext: actionContext,
+                shouldRenderMessageRow: shouldRenderMessageRow,
+                onPreviewAttachment: onPreviewAttachment,
+                onPreviewTranscriptMedia: onPreviewTranscriptMedia,
+                onToggleListening: onToggleListening,
+                onSelectText: onSelectText,
+                onRegenerate: onRegenerate,
+                onEdit: onEdit,
+                onFork: onFork,
+                onCopy: onCopy
+            )
+            .equatable()
+            .background {
+                if observesGeometry {
+                GeometryReader { rowProxy in
+                    Color.clear.preference(
+                        key: VisibleTranscriptRowFramesKey.self,
+                        value: [
+                            transcriptMessage.renderID: rowProxy.frame(
+                                in: .named(Self.transcriptCoordinateSpaceName)
+                            )
+                        ]
+                    )
+                }
+                }
+            }
+            .id(transcriptMessage.renderID)
+
+            if let compressionReferenceCard,
+               compressionReferenceCard.afterRenderID == transcriptMessage.renderID {
+                compressionReferenceCardView(compressionReferenceCard)
+            }
+        }
+    }
+
 
     private func compressionReferenceCardView(_ card: CompressionReferenceCard) -> some View {
         MarkerMessageCardView(kind: .compressionReference, content: card.referenceText)
@@ -2576,6 +2939,16 @@ struct ChatTranscriptView: View, Equatable {
 
     private func handleScrollMetrics(_ metrics: ChatScrollMetrics) {
 #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--chat-viewport-diagnostic") {
+            let now = ProcessInfo.processInfo.systemUptime
+            if now - viewportTracker.lastViewportDiagnosticAt >= 0.05 {
+                viewportTracker.lastViewportDiagnosticAt = now
+                logTranscriptScrollSnapshot(
+                    event: "diagnostic_metrics", decision: "model_and_realization",
+                    viewportHeight: viewportTracker.viewportHeight
+                )
+            }
+        }
         recordPagingPostCommandObservation(source: "metrics", frames: viewportTracker.latestFrames)
 #endif
         viewportTracker.latestScrollMetrics = metrics
@@ -2614,12 +2987,44 @@ struct ChatTranscriptView: View, Equatable {
 
     @ViewBuilder
     private func olderMessagesButton(proxy: ScrollViewProxy) -> some View {
+#if DEBUG
+        if debugBoundedTailWindowEnabled && debugEffectiveWindowRange.lowerBound > 0 {
+            Button("Earlier loaded messages") {
+                debugMoveLoadedWindow(proxy: proxy, older: true)
+            }
+            .accessibilityIdentifier("chat-debug-older-loaded")
+        }
+#endif
         if hasOlderMessages {
             LoadOlderMessagesButton(isLoading: isLoadingOlderMessages) {
                 Task { await loadOlderMessagesPreservingPosition(proxy: proxy, intent: .explicitUserRequest) }
             }
         }
     }
+
+#if DEBUG
+    private func debugMoveLoadedWindow(proxy: ScrollViewProxy, older: Bool) {
+        guard debugBoundedTailWindowEnabled else { return }
+        let current = debugEffectiveWindowRange
+        let count = allRenderedTranscriptMessages.count
+        let next = older
+            ? ChatDebugTranscriptWindowPolicy.older(current: current, totalCount: count)
+            : ChatDebugTranscriptWindowPolicy.newer(current: current, totalCount: count)
+        guard next != current else { return }
+        let anchorID = viewportTracker.visibleRowID
+        debugWindowRange = next
+        Self.activationRecoveryLogger.debug(
+            "event=debug_window_page decision=\(older ? "older" : "newer", privacy: .public) total=\(count, privacy: .public) start=\(next.lowerBound, privacy: .public) end=\(next.upperBound, privacy: .public)"
+        )
+        if let anchorID, allRenderedTranscriptMessages[next].contains(where: { $0.renderID == anchorID }) {
+            Task { @MainActor in
+                await Task.yield()
+                proxy.scrollTo(anchorID, anchor: older ? .top : .bottom)
+            }
+        }
+    }
+
+#endif
 
     private func currentTranscriptViewportAnchor() -> ChatTranscriptViewportAnchor? {
         if let visibleRowID = viewportTracker.visibleRowID {
@@ -3316,9 +3721,26 @@ struct ChatTranscriptView: View, Equatable {
         viewportTracker.pendingOlderMessagesBaselineFirstLoadedRowID = nil
     }
 
+    private var hasUnlinkedReasoningBlocks: Bool {
+        showsThinkingAndToolCards && !reasoningGroupsForAnchor(nil).isEmpty
+    }
+
     private var hasLooseTranscriptBlocks: Bool {
         showsThinkingAndToolCards
-            && (!reasoningGroupsForAnchor(nil).isEmpty || !completedToolCallGroupsForAnchor(nil).isEmpty)
+            && !completedToolCallGroupsForAnchor(nil).isEmpty
+    }
+
+    private func retainedActivityState(
+        in renderedMessages: [TranscriptMessage]
+    ) -> ChatTranscriptRetainedActivityPolicy.State {
+        ChatTranscriptRetainedActivityPolicy.state(
+            in: renderedMessages,
+            hasActiveStream: activeStreamID != nil,
+            showsActivityCards: showsThinkingAndToolCards,
+            canShowBareThinking: showsAssistantTypingIndicator,
+            hasReasoning: { !reasoningGroupsForAnchor($0).isEmpty },
+            hasTools: { !completedToolCallGroupsForAnchor($0).isEmpty }
+        )
     }
 
     private func hasLiveResponseBlocks(in renderedMessages: [TranscriptMessage]) -> Bool {
@@ -3358,8 +3780,21 @@ struct ChatTranscriptView: View, Equatable {
     private var transcriptLooseBlocks: some View {
         if hasLooseTranscriptBlocks {
             VStack(alignment: .leading, spacing: transcriptBlockSpacing) {
-                reasoningBlocks(anchorMessageID: nil)
                 toolCallGroups(anchorMessageID: nil)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var unlinkedReasoningBlocks: some View {
+        if hasUnlinkedReasoningBlocks {
+            VStack(alignment: .leading, spacing: transcriptBlockSpacing) {
+                ForEach(reasoningGroupsForAnchor(nil)) { group in
+                    ReasoningBlockView(
+                        text: group.text, segments: group.segments,
+                        title: String(localized: "Additional thinking")
+                    )
+                }
             }
         }
     }
@@ -3417,12 +3852,44 @@ struct ChatTranscriptView: View, Equatable {
         }
     }
 
+    private func shouldShowBareTypingIndicator(in renderedMessages: [TranscriptMessage]) -> Bool {
+        let trailingMessage = renderedMessages.last
+        let retainedActivity = retainedActivityState(in: renderedMessages)
+        // Completed activity can remain in the current assistant row after
+        // the live buffers clear. Its Thinking/tool surface already conveys
+        // progress; adding a second bare "Thinking" row repeats the status.
+        return ChatTranscriptTypingIndicatorPolicy.shouldShowBareIndicator(
+            isEligible: showsAssistantTypingIndicator,
+            hasActiveStream: activeStreamID != nil,
+            showsActivityCards: showsThinkingAndToolCards,
+            trailingMessageRole: trailingMessage?.message.role,
+            hasTrailingRetainedReasoning: retainedActivity.hasCurrentTurnReasoning,
+            hasTrailingCompletedTools: retainedActivity.hasCurrentTurnTools
+        )
+    }
+
     @ViewBuilder
-    private var typingIndicator: some View {
-        if showsAssistantTypingIndicator {
-            AssistantTypingIndicatorView()
-                .frame(maxWidth: .infinity, alignment: .leading)
+    private func typingIndicator(renderedMessages: [TranscriptMessage]) -> some View {
+        if shouldShowBareTypingIndicator(in: renderedMessages) {
+            if ChatTranscriptTypingIndicatorPolicy.usesPreparingResponseLabel(
+                hasActiveStream: activeStreamID != nil,
+                showsActivityCards: showsThinkingAndToolCards,
+                trailingMessageRole: renderedMessages.last?.message.role,
+                hasPriorReasoning: !reasoningGroupsForAnchor(nil).isEmpty
+                    || renderedMessages.dropLast().contains {
+                        !reasoningGroupsForAnchor($0.anchorID).isEmpty
+                    }
+            ) {
+                TranscriptActivityInlineStatusLabel(
+                    symbol: "sparkles", title: String(localized: "Preparing response"),
+                    accessibilityLabel: "Semreh is preparing a response"
+                )
                 .accessibilityHidden(hidesRunStatusAccessibility)
+            } else {
+                AssistantTypingIndicatorView()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityHidden(hidesRunStatusAccessibility)
+            }
         }
     }
 
@@ -3465,10 +3932,14 @@ struct ChatTranscriptView: View, Equatable {
     }
 
     @ViewBuilder
-    private func reasoningBlocks(anchorMessageID: String?) -> some View {
+    private func reasoningBlocks(anchorMessageID: String?, isActive: Bool = false) -> some View {
         if showsThinkingAndToolCards {
-            ForEach(reasoningGroupsForAnchor(anchorMessageID)) { group in
-                ReasoningBlockView(text: group.text, segments: group.segments)
+            let groups = reasoningGroupsForAnchor(anchorMessageID)
+            ForEach(groups) { group in
+                ReasoningBlockView(
+                    text: group.text, segments: group.segments,
+                    isActive: isActive && group.id == groups.last?.id
+                )
             }
         }
     }
@@ -3491,6 +3962,7 @@ extension ChatTranscriptView {
     /// transcript row.
     static func == (lhs: ChatTranscriptView, rhs: ChatTranscriptView) -> Bool {
         lhs.outgoingInsertionEvent == rhs.outgoingInsertionEvent &&
+            lhs.explicitBottomGeometryToken == rhs.explicitBottomGeometryToken &&
             lhs.outgoingInsertionScope == rhs.outgoingInsertionScope &&
             lhs.transcriptRenderRevision == rhs.transcriptRenderRevision &&
             lhs.isLoading == rhs.isLoading &&
@@ -3549,6 +4021,7 @@ private struct ChatTranscriptMessageBlock: View, Equatable {
     let allowsOutgoingMotion: Bool
     let transcriptBlockSpacing: CGFloat
     let showsThinkingAndToolCards: Bool
+    let isTrailingCurrentActivity: Bool
     let reasoningGroups: [ReasoningGroup]
     let toolCallGroups: [ToolCallGroup]
     let liveReasoningText: String
@@ -3592,6 +4065,7 @@ private struct ChatTranscriptMessageBlock: View, Equatable {
         lhs.latestCompletedAssistantRenderID == rhs.latestCompletedAssistantRenderID &&
         lhs.transcriptBlockSpacing == rhs.transcriptBlockSpacing &&
         lhs.showsThinkingAndToolCards == rhs.showsThinkingAndToolCards &&
+        lhs.isTrailingCurrentActivity == rhs.isTrailingCurrentActivity &&
         lhs.reasoningGroups == rhs.reasoningGroups &&
         lhs.toolCallGroups == rhs.toolCallGroups &&
         lhs.liveReasoningText == rhs.liveReasoningText &&
@@ -3676,14 +4150,26 @@ private struct ChatTranscriptMessageBlock: View, Equatable {
     private var reasoningBlocks: some View {
         if showsThinkingAndToolCards {
             ForEach(reasoningGroups) { group in
-                ReasoningBlockView(text: group.text, segments: group.segments)
+                let isLatestGroup = group.id == reasoningGroups.last?.id
+                let includesLiveSegment = isLatestGroup && shouldRenderLiveReasoningBlock
+                let presentation = includesLiveSegment
+                    ? ChatTranscriptReasoningMergePolicy.presentation(
+                        retained: group, liveText: liveReasoningText
+                    )
+                    : ChatTranscriptReasoningMergePolicy.Presentation(
+                        text: group.text, segments: group.segments
+                    )
+                ReasoningBlockView(
+                    text: presentation.text, segments: presentation.segments,
+                    isActive: includesLiveSegment || (isTrailingCurrentActivity && isLatestGroup)
+                )
             }
         }
     }
 
     @ViewBuilder
     private var liveReasoningBlock: some View {
-        if shouldRenderLiveReasoningBlock {
+        if shouldRenderLiveReasoningBlock && reasoningGroups.isEmpty {
             ReasoningBlockView(text: liveReasoningText, isActive: true)
         }
     }
@@ -3837,32 +4323,43 @@ private struct ChatTranscriptMessageRow: View {
     }
 }
 
-private struct OutgoingBubbleInsertionModifier: ViewModifier {
+struct OutgoingBubbleInsertionModifier: ViewModifier {
     let event: OutgoingInsertionEvent?
     let message: ChatMessage
     let ledger: OutgoingInsertionLedger
     let isAllowed: Bool
+    let reduceMotionOverride: Bool?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var settled: Bool
+    @State private var claimedEventID: UUID?
+    @State private var entranceTask: Task<Void, Never>?
 
     init(event: OutgoingInsertionEvent?, message: ChatMessage,
-         ledger: OutgoingInsertionLedger, isAllowed: Bool) {
+         ledger: OutgoingInsertionLedger, isAllowed: Bool,
+         reduceMotionOverride: Bool? = nil) {
         self.event = event
         self.message = message
         self.ledger = ledger
         self.isAllowed = isAllowed
+        self.reduceMotionOverride = reduceMotionOverride
         _settled = State(initialValue: !ledger.isEligible(
             event, messageID: message.id, role: message.role,
             allowed: isAllowed
         ))
     }
 
+    private var prefersReducedMotion: Bool {
+        reduceMotionOverride ?? reduceMotion
+    }
+
     private var shouldAnimate: Bool {
-        !settled && !reduceMotion && ledger.isEligible(
-            event,
-            messageID: message.id,
-            role: message.role,
-            allowed: isAllowed
+        guard !settled, !prefersReducedMotion, isAllowed, message.role == "user",
+              let event, event.messageID == message.id else { return false }
+        // The ledger consumes the event on appearance. Keep this one row in
+        // its entrance pose until its own animation settles; otherwise a
+        // re-render between claim and animation snaps it visible.
+        return claimedEventID == event.id || ledger.isEligible(
+            event, messageID: message.id, role: message.role, allowed: isAllowed
         )
     }
 
@@ -3872,22 +4369,42 @@ private struct OutgoingBubbleInsertionModifier: ViewModifier {
             // initial state. If a lazy row is reused after follow/restore is
             // withdrawn, it must become visible immediately rather than retain
             // a stale opacity-zero state.
-            .opacity(shouldAnimate ? 0 : 1)
-            .offset(y: shouldAnimate ? 8 : 0)
+            // Keep the new bubble readable in its first mounted frame. A
+            // delayed display transaction must never leave an empty row.
+            .opacity(shouldAnimate ? 0.80 : 1)
+            .scaleEffect(shouldAnimate ? 0.94 : 1, anchor: .bottomTrailing)
+            .offset(y: shouldAnimate ? 20 : 0)
             .onAppear {
                 let accepted = ledger.claim(event, messageID: message.id, role: message.role,
                                             allowed: isAllowed)
-                if accepted && !reduceMotion {
-                    withAnimation(.easeOut(duration: 0.18)) { settled = true }
+                if accepted && !prefersReducedMotion {
+                    claimedEventID = event?.id
+                    entranceTask?.cancel()
+                    entranceTask = Task { @MainActor in
+                        // Let the mounted, measured row present once before
+                        // changing its transform. The row already occupies
+                        // its final layout space, so scroll height stays put.
+                        try? await Task.sleep(for: .milliseconds(16))
+                        guard !Task.isCancelled else { return }
+                        withAnimation(ChatMotion.outgoingBubble(reduceMotion: false)) {
+                            settled = true
+                        }
+                    }
                 } else {
                     settled = true
                 }
             }
-            .onChange(of: reduceMotion) { _, enabled in
-                if enabled { settled = true }
+            .onChange(of: prefersReducedMotion) { _, enabled in
+                if enabled {
+                    entranceTask?.cancel()
+                    settled = true
+                }
             }
             .onChange(of: isAllowed) { _, allowed in
-                if !allowed { settled = true }
+                if !allowed {
+                    entranceTask?.cancel()
+                    settled = true
+                }
             }
             .onChange(of: event) { _, _ in
                 if !ledger.isEligible(
@@ -3895,11 +4412,15 @@ private struct OutgoingBubbleInsertionModifier: ViewModifier {
                     messageID: message.id,
                     role: message.role,
                     allowed: isAllowed
-                ) {
+                ), claimedEventID != event?.id {
+                    entranceTask?.cancel()
                     settled = true
                 }
             }
-            .onDisappear { settled = true }
+            .onDisappear {
+                entranceTask?.cancel()
+                settled = true
+            }
     }
 }
 

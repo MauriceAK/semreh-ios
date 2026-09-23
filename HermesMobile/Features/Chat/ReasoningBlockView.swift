@@ -314,6 +314,7 @@ enum ReasoningDisplayText {
 
 struct ReasoningBlockView: View {
     let text: String
+    let title: String
     /// Reasoning arrivals retained as separate segments; the expanded view
     /// renders one quiet sub-block per entry. Empty for legacy single-blob
     /// callers (and the live streaming path) — `text` is then the one block.
@@ -325,23 +326,33 @@ struct ReasoningBlockView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage(ChatTranscriptDisplaySettings.thinkingCardsStartExpandedKey) private var startsExpanded = false
     @State private var userToggledExpansion: Bool?
+#if DEBUG
+    @Environment(\.prototypeCodeViewport) private var directViewport
+#endif
 
-    init(text: String, segments: [String] = [], isActive: Bool = false) {
+    init(text: String, segments: [String] = [], isActive: Bool = false,
+         title: String = String(localized: "Thinking")) {
         self.text = text
+        self.title = title
         self.segments = segments
         self.isActive = isActive
     }
 
     private var isExpanded: Bool {
-        ChatTranscriptDisplaySettings.isCardExpanded(
+#if DEBUG
+        if directViewport?.forceExpandThinking == true, userToggledExpansion == nil { return true }
+#endif
+        return ChatTranscriptDisplaySettings.isCardExpanded(
             userToggled: userToggledExpansion,
             startsExpanded: startsExpanded
         )
     }
 
     var body: some View {
-        let latestActivity = isExpanded ? nil : ReasoningDisplayText.latestActivity(in: text)
-        let fullMarkdownSource = isExpanded || (!isActive && latestActivity == nil)
+        // Streaming prose belongs behind the disclosure, never in a rapidly
+        // changing one-line ticker beside the stable activity label.
+        let latestActivity: String? = nil
+        let fullMarkdownSource = isExpanded || !isActive
             ? ReasoningDisplayText.markdownSource(text)
             : nil
         let shouldDisplay = ReasoningDisplayText.shouldDisplayDisclosure(
@@ -356,10 +367,11 @@ struct ReasoningBlockView: View {
                 Button {
                     toggleExpansion()
                 } label: {
-                    header(latestActivity: latestActivity)
+                    header
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel(String(localized: "Thinking"))
+                .chatMinimumHitTarget(horizontalPadding: 0, verticalPadding: 5, in: Rectangle())
+                .accessibilityLabel(title)
                 .accessibilityHint(isExpanded ? "Double tap to collapse details." : "Double tap to expand details.")
 
                 if isExpanded {
@@ -410,30 +422,15 @@ struct ReasoningBlockView: View {
         }
     }
 
-    private func header(latestActivity: String?) -> some View {
-        HStack(alignment: .center, spacing: 6) {
-            titleText
-            if let latestActivity {
-                Text("· \(latestActivity)")
-                    .font(AppFont.caption())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
-            Image(systemName: isExpanded ? "chevron.down" : "chevron.forward")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .frame(minHeight: 44)
-        .contentShape(Rectangle())
-    }
-
-    private var titleText: some View {
-        Text("Thinking")
-            .font(AppFont.subheadline())
-            .lineLimit(1)
-            .modifier(ReasoningTextShineModifier(isActive: isActive))
+    private var header: some View {
+        TranscriptActivityDisclosureLabel(
+            symbol: "ellipsis.bubble",
+            title: title,
+            status: nil,
+            isExpanded: isExpanded,
+            isActive: isActive,
+            isCompact: true
+        )
     }
 
     private var disclosureTransition: AnyTransition {
@@ -452,6 +449,112 @@ struct ReasoningBlockView: View {
     }
 }
 
+/// Shared inline language for live and retained intermediate work. Details are
+/// revealed deliberately; status changes never stream raw payload into the row.
+struct TranscriptActivityDisclosureLabel: View {
+    let symbol: String
+    let title: String
+    let status: String?
+    let isExpanded: Bool
+    var isFailure = false
+    var isActive = false
+    var isCompact = false
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 5) {
+            identity
+            Image(systemName: isExpanded ? "chevron.down" : "chevron.forward")
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+                .frame(width: 12)
+
+            Spacer(minLength: 0)
+            if !dynamicTypeSize.isAccessibilitySize, let status {
+                statusText(status)
+                    .frame(width: 86, alignment: .trailing)
+            }
+        }
+        .frame(
+            maxWidth: .infinity,
+            minHeight: isCompact && !dynamicTypeSize.isAccessibilitySize ? 34 : 44,
+            alignment: .leading
+        )
+        .contentShape(Rectangle())
+    }
+
+    private var identity: some View {
+        HStack(alignment: .center, spacing: 8) {
+            if isFailure {
+                Image(systemName: symbol)
+                    .font(.system(size: 16, weight: .regular))
+                    .foregroundStyle(.red)
+                    .frame(width: 20)
+            } else {
+                Image(systemName: symbol)
+                    .font(.system(size: 16, weight: .regular))
+                    .frame(width: 20)
+            }
+
+            if dynamicTypeSize.isAccessibilitySize {
+                VStack(alignment: .leading, spacing: 2) {
+                    titleText
+                    if let status { statusText(status) }
+                }
+            } else {
+                titleText
+            }
+        }
+        // One sweep crosses the icon and title as a single wave, without
+        // changing either view's size or moving the disclosure chevron.
+        .modifier(ReasoningTextShineModifier(isActive: isActive && !isFailure))
+    }
+
+    private var titleText: some View {
+        Text(title)
+            .font(AppFont.subheadline())
+            .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
+            .truncationMode(.tail)
+    }
+
+    private func statusText(_ value: String) -> some View {
+        Text(value)
+            .font(AppFont.caption())
+            .foregroundStyle(isFailure ? Color.red : Color.secondary)
+            .lineLimit(1)
+            .truncationMode(.tail)
+    }
+}
+
+/// A live status uses the same compact icon/title rhythm as disclosures, but
+/// has no chevron or tap affordance because there are no details to expand.
+struct TranscriptActivityInlineStatusLabel: View {
+    let symbol: String
+    let title: String
+    let accessibilityLabel: String
+
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 8) {
+            Image(systemName: symbol)
+                .font(.system(size: 16, weight: .regular))
+                .frame(width: 20)
+                .accessibilityHidden(true)
+            Text(title)
+                .font(AppFont.subheadline())
+                .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
+                .accessibilityLabel(accessibilityLabel)
+        }
+        .modifier(ReasoningTextShineModifier(isActive: true))
+        .frame(
+            maxWidth: .infinity,
+            minHeight: dynamicTypeSize.isAccessibilitySize ? 44 : 34,
+            alignment: .leading
+        )
+    }
+}
+
 /// A low-contrast repeating sweep makes an active reasoning disclosure legible
 /// without turning completed history into an animated surface. The caller owns
 /// lifecycle truth (`isActive`); the view does not infer it from text contents.
@@ -461,6 +564,7 @@ struct ReasoningTextShineModifier: ViewModifier {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var shinePosition = -1.0
     @State private var isShining = false
+    @State private var animationGeneration = 0
 
     func body(content: Content) -> some View {
         Group {
@@ -495,19 +599,35 @@ struct ReasoningTextShineModifier: ViewModifier {
     }
 
     private func updateShine() {
+        animationGeneration += 1
         guard ReasoningDisplayText.shouldAnimateShine(isActive: isActive, reduceMotion: reduceMotion) else {
             stopShine()
             return
         }
 
-        shinePosition = -1
+        // Commit the visible leading highlight before starting the sweep. A
+        // same-pass state change can coalesce its endpoints and leave the first
+        // mounted frame looking static until the row is later reconstructed.
+        shinePosition = 0
         isShining = true
-        withAnimation(.linear(duration: 2).repeatForever(autoreverses: false)) {
-            shinePosition = 2
+        let generation = animationGeneration
+        Task { @MainActor in
+            // Allow one display frame for the initial highlight. Scheduling the
+            // repeat in the same transaction can leave the first frame static.
+            try? await Task.sleep(for: .milliseconds(16))
+            guard isShining,
+                  animationGeneration == generation,
+                  ReasoningDisplayText.shouldAnimateShine(isActive: isActive, reduceMotion: reduceMotion),
+                  shinePosition == 0
+            else { return }
+            withAnimation(.linear(duration: 1.8).repeatForever(autoreverses: false)) {
+                shinePosition = 2
+            }
         }
     }
 
     private func stopShine() {
+        animationGeneration += 1
         var transaction = Transaction()
         transaction.disablesAnimations = true
         withTransaction(transaction) {
