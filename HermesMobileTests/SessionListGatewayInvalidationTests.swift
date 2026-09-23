@@ -154,6 +154,7 @@ final class SessionListGatewayInvalidationTests: APIClientTestCase {
         )
 
         try await startObservation(for: viewModel)
+        try await waitForReady(firstRuntime)
         let firstLoad = await viewModel.load()
         XCTAssertTrue(firstLoad)
         let afterFirstVisibleListLoad = requests.visibleListValue
@@ -162,6 +163,7 @@ final class SessionListGatewayInvalidationTests: APIClientTestCase {
         selectedRuntime = secondRuntime
         viewModel.invalidateGatewayObservation()
         try await startObservation(for: viewModel)
+        try await waitForReady(secondRuntime)
         let secondLoad = await viewModel.load()
         XCTAssertTrue(secondLoad)
         let afterRebindVisibleListLoad = requests.visibleListValue
@@ -169,7 +171,13 @@ final class SessionListGatewayInvalidationTests: APIClientTestCase {
 
         firstTransport.emit(event: sessionsChanged(sequence: 1))
         secondTransport.emit(event: sessionsChanged(sequence: 1))
-        try await Task.sleep(for: .milliseconds(550))
+        try await waitForRequestCounts(
+            requests, visible: afterRebindVisibleListLoad + 1,
+            archived: afterRebindArchiveCountLoad + 1
+        )
+        // Also allow the debounce window to close so a stale observer cannot
+        // cause a second, late refresh that an eventual-count check would miss.
+        try await Task.sleep(for: .milliseconds(350))
 
         XCTAssertEqual(afterRebindVisibleListLoad, afterFirstVisibleListLoad + 1)
         XCTAssertEqual(afterRebindArchiveCountLoad, afterFirstArchiveCountLoad + 1)
@@ -289,6 +297,24 @@ final class SessionListGatewayInvalidationTests: APIClientTestCase {
     private func startObservation(for viewModel: SessionListViewModel) async throws {
         viewModel.startGatewayObservation()
         try await Task.sleep(for: .milliseconds(75))
+    }
+
+    private func waitForReady(_ runtime: HermesServerRuntime) async throws {
+        for _ in 0..<500 {
+            if runtime.state == .ready { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTFail("Gateway observation did not reach ready state")
+    }
+
+    private func waitForRequestCounts(
+        _ requests: SessionListRequestCounter, visible: Int, archived: Int
+    ) async throws {
+        for _ in 0..<500 {
+            if requests.visibleListValue >= visible && requests.archiveCountValue >= archived { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTFail("Session list refresh did not reach the expected request counts")
     }
 
     private func sessionsChanged(sequence: Int) -> HermesGatewayEvent {

@@ -263,6 +263,12 @@ final class AuthManagerStateTests: XCTestCase {
 
         manager.handleAPIError(DirectHermesAuthError.sessionExpired)
         await waitForProbe(expiringProbe, count: 1)
+        // Seeing the probe start is not the same as its result being applied.
+        // CI may resume this test before the expiry-validation task commits state.
+        for _ in 0..<500 {
+            if manager.state == .loggedOut(server: server) { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
         XCTAssertEqual(manager.state, .loggedOut(server: server))
 
         await manager.configure(serverURLString: server.absoluteString, username: "test-user", password: "wrong")
