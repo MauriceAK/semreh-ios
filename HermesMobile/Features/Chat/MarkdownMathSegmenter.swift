@@ -7,6 +7,13 @@ enum MarkdownMathSegment: Equatable {
 
 struct MarkdownMathSegmenter {
     static func segments(in content: String) -> [MarkdownMathSegment] {
+        // No display delimiter can open without one of these literal tokens.
+        // Avoid allocating per-character code-protection masks for the common
+        // prose/code-only case. Inline formatting still uses its normal rules.
+        if MarkdownMathScanPolicy.fastPathsEnabled,
+           !content.contains("$$"), !content.contains(#"\["#) {
+            return [.markdown(MarkdownMathFormatter.replacingInlineMath(in: content))]
+        }
         let characters = Array(content)
         guard characters.count >= 4 else {
             return [.markdown(MarkdownMathFormatter.replacingInlineMath(in: content))]
@@ -85,6 +92,17 @@ struct MarkdownMathSegmenter {
         guard !trimmed.isEmpty else { return }
         segments.append(.displayMath(trimmed))
     }
+}
+
+enum MarkdownMathScanPolicy {
+    static let fastPathsEnabled: Bool = {
+#if DEBUG
+        // Same-build diagnostic control; never changes syntax/rendering policy.
+        !ProcessInfo.processInfo.arguments.contains("--math-preprocessing-baseline")
+#else
+        true
+#endif
+    }()
 }
 
 private enum DisplayDelimiter: CaseIterable {

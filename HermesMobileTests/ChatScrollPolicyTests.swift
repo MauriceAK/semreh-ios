@@ -1154,6 +1154,32 @@ final class ChatScrollPolicyTests: XCTestCase {
         )
     }
 
+    func testFalseBottomWithoutVisibleTailKeepsEscapeArrowAvailable() {
+        func showsArrow(
+            nearBottom: Bool, tailVisible: Bool,
+            explicitRequest: Bool = false, geometryConfirmed: Bool = false
+        ) -> Bool {
+            let confirmedBottom = nearBottom && tailVisible
+                && (!explicitRequest || geometryConfirmed)
+            return ChatScrollPolicy.shouldShowScrollToBottomButton(
+                isNearBottom: confirmedBottom,
+                hasExplicitBottomRequest: explicitRequest,
+                hasActiveStream: false,
+                shouldFollowLatestMessage: true
+            )
+        }
+
+        XCTAssertTrue(showsArrow(nearBottom: true, tailVisible: false),
+                      "Offset-at-bottom must not hide the escape action when the tail is missing.")
+        XCTAssertFalse(showsArrow(nearBottom: true, tailVisible: true),
+                       "Confirmed visible bottom should still hide the arrow.")
+        XCTAssertTrue(showsArrow(nearBottom: true, tailVisible: true,
+                                 explicitRequest: true, geometryConfirmed: false),
+                      "An explicit jump remains active until its geometry is confirmed.")
+        XCTAssertFalse(showsArrow(nearBottom: true, tailVisible: true,
+                                  explicitRequest: true, geometryConfirmed: true))
+    }
+
     func testExplicitBottomJumpRetriesAcrossLazyLayoutSettlement() {
         XCTAssertGreaterThanOrEqual(ChatScrollPolicy.explicitBottomSettlementDelays.count, 4)
         XCTAssertEqual(ChatScrollPolicy.explicitBottomSettlementDelays.first, 0)
@@ -1221,7 +1247,7 @@ final class ChatScrollPolicyTests: XCTestCase {
                 reTapGeneration = tap()
             }
             guard firstPass == liveGeneration else { continue }
-            if ChatScrollPolicy.shouldFinishExplicitBottomRequest(
+            if ChatScrollPolicy.shouldFinishExplicitBottomRequest(requestedGeometry: .init(generation: 1, issue: 1), confirmedGeometry: .init(generation: 1, issue: 1),
                 isNearBottom: false, isTailVisible: false
             ) {
                 firstPassCompletions += 1
@@ -1238,7 +1264,7 @@ final class ChatScrollPolicyTests: XCTestCase {
         // (completeExplicitBottomScroll guards `generation ==`), so the old
         // pass stays a no-op no matter how settled the viewport becomes.
         XCTAssertTrue(
-            ChatScrollPolicy.shouldFinishExplicitBottomRequest(isNearBottom: true, isTailVisible: true)
+            ChatScrollPolicy.shouldFinishExplicitBottomRequest(requestedGeometry: .init(generation: 1, issue: 1), confirmedGeometry: .init(generation: 1, issue: 1), isNearBottom: true, isTailVisible: true)
         )
         XCTAssertFalse(
             firstPass == liveGeneration,
@@ -1255,7 +1281,7 @@ final class ChatScrollPolicyTests: XCTestCase {
             guard restartedPass == liveGeneration else { continue }
             restartedElapsedMilliseconds += delay
             let tailSettled = guardIndex == retryDelaysMilliseconds.count - 1
-            if ChatScrollPolicy.shouldFinishExplicitBottomRequest(
+            if ChatScrollPolicy.shouldFinishExplicitBottomRequest(requestedGeometry: .init(generation: 1, issue: 1), confirmedGeometry: .init(generation: 1, issue: 1),
                 isNearBottom: tailSettled, isTailVisible: tailSettled
             ) {
                 restartedCompletions += 1
@@ -1316,41 +1342,78 @@ final class ChatScrollPolicyTests: XCTestCase {
 
     func testExplicitBottomRequestFinishesOnlyWhenMetricsAndTailAgree() {
         XCTAssertTrue(
-            ChatScrollPolicy.shouldFinishExplicitBottomRequest(
+            ChatScrollPolicy.shouldFinishExplicitBottomRequest(requestedGeometry: .init(generation: 1, issue: 1), confirmedGeometry: .init(generation: 1, issue: 1),
                 isNearBottom: true,
                 isTailVisible: true
             )
         )
         XCTAssertFalse(
-            ChatScrollPolicy.shouldFinishExplicitBottomRequest(
+            ChatScrollPolicy.shouldFinishExplicitBottomRequest(requestedGeometry: .init(generation: 1, issue: 1), confirmedGeometry: .init(generation: 1, issue: 1),
                 isNearBottom: true,
                 isTailVisible: false
             )
         )
         XCTAssertFalse(
-            ChatScrollPolicy.shouldFinishExplicitBottomRequest(
+            ChatScrollPolicy.shouldFinishExplicitBottomRequest(requestedGeometry: .init(generation: 1, issue: 1), confirmedGeometry: .init(generation: 1, issue: 1),
                 isNearBottom: false,
                 isTailVisible: true
             )
         )
         XCTAssertFalse(
-            ChatScrollPolicy.shouldFinishExplicitBottomRequest(
+            ChatScrollPolicy.shouldFinishExplicitBottomRequest(requestedGeometry: .init(generation: 1, issue: 1), confirmedGeometry: .init(generation: 1, issue: 1),
                 isNearBottom: false,
                 isTailVisible: false
             )
         )
     }
 
+    func testExplicitBottomWaitsForTheVisibleEaseToFinish() {
+        let token = ChatExplicitBottomGeometryToken(generation: 3, issue: 2)
+        XCTAssertFalse(ChatScrollPolicy.shouldFinishExplicitBottomRequest(
+            requestedGeometry: token, confirmedGeometry: token,
+            isNearBottom: true, isTailVisible: true,
+            hasAnimationInFlight: true
+        ))
+        XCTAssertTrue(ChatScrollPolicy.shouldFinishExplicitBottomRequest(
+            requestedGeometry: token, confirmedGeometry: token,
+            isNearBottom: true, isTailVisible: true,
+            hasAnimationInFlight: false
+        ))
+    }
+
+    func testExplicitBottomRequiresCurrentIssueSentinelRatherThanVisibleTallRow() {
+        let request = ChatExplicitBottomGeometryToken(generation: 7, issue: 3)
+        XCTAssertFalse(ChatScrollPolicy.shouldFinishExplicitBottomRequest(
+            requestedGeometry: request, confirmedGeometry: request,
+            isNearBottom: true, isTailVisible: false
+        ), "A partially visible 7,780pt final row is not bottom confirmation.")
+        for stale in [nil, ChatExplicitBottomGeometryToken(generation: 6, issue: 3),
+                      ChatExplicitBottomGeometryToken(generation: 7, issue: 2)] {
+            XCTAssertFalse(ChatScrollPolicy.shouldFinishExplicitBottomRequest(
+                requestedGeometry: request, confirmedGeometry: stale,
+                isNearBottom: true, isTailVisible: true
+            ))
+        }
+        XCTAssertTrue(ChatScrollPolicy.shouldFinishExplicitBottomRequest(
+            requestedGeometry: request, confirmedGeometry: request,
+            isNearBottom: true, isTailVisible: true
+        ))
+        XCTAssertFalse(ChatScrollPolicy.shouldFinishExplicitBottomRequest(
+            requestedGeometry: nil, confirmedGeometry: request,
+            isNearBottom: true, isTailVisible: true
+        ), "Cancellation must invalidate even a subsequently delivered visible sample.")
+    }
+
     func testExplicitBottomRequestCannotFinishBeforeItsFirstTargetIsIssued() {
         XCTAssertFalse(
-            ChatScrollPolicy.shouldFinishExplicitBottomRequest(
+            ChatScrollPolicy.shouldFinishExplicitBottomRequest(requestedGeometry: .init(generation: 1, issue: 1), confirmedGeometry: .init(generation: 1, issue: 1),
                 isNearBottom: true,
                 isTailVisible: true,
                 hasIssuedScroll: false
             )
         )
         XCTAssertTrue(
-            ChatScrollPolicy.shouldFinishExplicitBottomRequest(
+            ChatScrollPolicy.shouldFinishExplicitBottomRequest(requestedGeometry: .init(generation: 1, issue: 1), confirmedGeometry: .init(generation: 1, issue: 1),
                 isNearBottom: true,
                 isTailVisible: true,
                 hasIssuedScroll: true
@@ -1360,14 +1423,14 @@ final class ChatScrollPolicyTests: XCTestCase {
 
     func testDirectTouchWinsOverNearBottomGeometryWhenExplicitJumpIsSettling() {
         XCTAssertFalse(
-            ChatScrollPolicy.shouldFinishExplicitBottomRequest(
+            ChatScrollPolicy.shouldFinishExplicitBottomRequest(requestedGeometry: .init(generation: 1, issue: 1), confirmedGeometry: .init(generation: 1, issue: 1),
                 isNearBottom: true,
                 isTailVisible: true,
                 isDirectlyInteracting: true
             )
         )
         XCTAssertTrue(
-            ChatScrollPolicy.shouldFinishExplicitBottomRequest(
+            ChatScrollPolicy.shouldFinishExplicitBottomRequest(requestedGeometry: .init(generation: 1, issue: 1), confirmedGeometry: .init(generation: 1, issue: 1),
                 isNearBottom: true,
                 isTailVisible: true,
                 isDirectlyInteracting: false
@@ -2146,5 +2209,82 @@ final class ChatScrollPolicyTests: XCTestCase {
         XCTAssertTrue(appSource.contains("ChatPerformanceLabView"))
         XCTAssertTrue(viewModelSource.contains("seedPerformanceLab(messageCount: 10_000)"))
     }
+
+#if DEBUG
+    func testDebugTranscriptWindowOpensAtBoundedRealTailFor20_120And10000Rows() {
+        for count in [20, 120, 10_000] {
+            let ids = (0..<count).map { "render:\($0)" }
+            let window = ChatDebugTranscriptWindowPolicy.opening(
+                renderIDs: ids, followingLatest: true, savedAnchorID: "render:20"
+            )
+            XCTAssertEqual(window.range, max(0, count - 120)..<count)
+            XCTAssertEqual(window.range.count, min(count, 120))
+            XCTAssertFalse(window.savedAnchorFound)
+            XCTAssertEqual(window.hasOlderLoadedRows, count > 120)
+        }
+    }
+
+    func testDebugTranscriptWindowKeepsSavedStableAnchorAndFallsBackWhenMissing() {
+        let ids = (0..<10_000).map { "render:\($0)" }
+        let nearStart = ChatDebugTranscriptWindowPolicy.opening(
+            renderIDs: ids, followingLatest: false, savedAnchorID: "render:20"
+        )
+        XCTAssertEqual(nearStart.range, 0..<120)
+        XCTAssertTrue(nearStart.savedAnchorFound)
+
+        let middle = ChatDebugTranscriptWindowPolicy.opening(
+            renderIDs: ids, followingLatest: false, savedAnchorID: "render:5000"
+        )
+        XCTAssertEqual(middle.range, 4960..<5080)
+        XCTAssertTrue(middle.range.contains(5000))
+        XCTAssertTrue(middle.savedAnchorFound)
+
+        let missing = ChatDebugTranscriptWindowPolicy.opening(
+            renderIDs: ids, followingLatest: false, savedAnchorID: "render:missing"
+        )
+        XCTAssertEqual(missing.range, 9880..<10_000)
+        XCTAssertFalse(missing.savedAnchorFound)
+    }
+
+    func testDebugTranscriptWindowMovesOlderWithOverlapAndCanReturnToTail() {
+        let tail = 9880..<10_000
+        let older = ChatDebugTranscriptWindowPolicy.older(current: tail, totalCount: 10_000)
+        XCTAssertEqual(older, 9784..<9904)
+        XCTAssertEqual(older.count, 120)
+        XCTAssertEqual(older.clamped(to: tail).count, 24)
+        XCTAssertEqual(
+            ChatDebugTranscriptWindowPolicy.newer(current: older, totalCount: 10_000), tail
+        )
+        XCTAssertEqual(
+            ChatDebugTranscriptWindowPolicy.older(current: 0..<120, totalCount: 10_000), 0..<120
+        )
+        XCTAssertEqual(
+            ChatDebugTranscriptWindowPolicy.newer(current: tail, totalCount: 10_000), tail
+        )
+    }
+
+    func testDebugTranscriptWindowRespectsSmallLimitsWithoutExceedingBounds() {
+        let ids = (0..<20).map { "render:\($0)" }
+        XCTAssertEqual(
+            ChatDebugTranscriptWindowPolicy.opening(
+                renderIDs: ids, followingLatest: true, savedAnchorID: nil, limit: 8
+            ).range, 12..<20
+        )
+        let older = ChatDebugTranscriptWindowPolicy.older(
+            current: 12..<20, totalCount: 20, limit: 8, overlap: 2
+        )
+        XCTAssertEqual(older, 6..<14)
+        XCTAssertEqual(
+            ChatDebugTranscriptWindowPolicy.newer(
+                current: older, totalCount: 20, limit: 8, overlap: 2
+            ), 12..<20
+        )
+        XCTAssertEqual(
+            ChatDebugTranscriptWindowPolicy.opening(
+                renderIDs: [], followingLatest: true, savedAnchorID: nil
+            ).range, 0..<0
+        )
+    }
+#endif
 
 }

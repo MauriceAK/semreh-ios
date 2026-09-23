@@ -16,11 +16,11 @@ private struct ShellTabReveal: ViewModifier {
 /// Raw values remain stable for existing routes; labels describe the actual destinations.
 enum AppShellSurface: String, CaseIterable, Hashable, Identifiable {
     case control, sessions, you
-    static let primaryTabs: [Self] = [.control, .sessions, .you]
+    static let primaryTabs: [Self] = [.control, .sessions]
     var id: String { rawValue }
     var title: String {
         switch self {
-        case .sessions: "Sessions"
+        case .sessions: "Chats"
         case .control: "Bots"
         case .you: "Activity"
         }
@@ -55,7 +55,7 @@ enum AppShellOrganizerPolicy {
 
 enum AppShellSessionReturnPolicy {
     static func resetsOnDeparture(from previous: AppShellSurface, to next: AppShellSurface) -> Bool {
-        previous == .sessions && next != .sessions
+        false
     }
 }
 
@@ -137,8 +137,8 @@ struct AppShellView: View {
     @Environment(\.appColorPalette) private var palette
 
     var body: some View {
-        // Keep each tab's identity stable while explicitly resetting the Sessions
-        // conversation when leaving that tab; drafts remain owned by their chat.
+        // Keep each tab and its open conversation mounted across tab switches.
+        // Explicit back navigation and incoming routes still own destination changes.
         TabView(selection: $selectedSurface) {
             NavigationStack {
                 AppShellBotsView(
@@ -164,6 +164,7 @@ struct AppShellView: View {
             .tabItem {
                 Image(uiImage: selectedSurface == .control ? BirdTabIcon.selectedImage : BirdTabIcon.image)
                     .accessibilityLabel("Bots")
+                Text("Bots")
             }
             .tag(AppShellSurface.control)
 
@@ -182,29 +183,15 @@ struct AppShellView: View {
                 onAccount: { showsSettings = true }
             )
             .modifier(ShellTabReveal(isSelected: selectedSurface == .sessions))
-            .toolbar(isSessionConversationPresented ? .hidden : .visible, for: .tabBar)
+            .toolbar(.visible, for: .tabBar)
             .tabItem {
                 Image(systemName: AppShellSurface.sessions.tabBarSystemImage(isSelected: selectedSurface == .sessions))
-                    .accessibilityLabel("Sessions")
+                    .accessibilityLabel("Chats")
                     .environment(\.symbolVariants, .none)
+                Text("Chats")
             }
             .tag(AppShellSurface.sessions)
 
-            NavigationStack {
-                AppShellActivityView(server: server, onAPIError: authManager.handleAPIError)
-                    .navigationTitle("Activity")
-                    .navigationBarTitleDisplayMode(.inline)
-                    .toolbar { ToolbarItem(placement: .topBarTrailing) { accountButton } }
-                    .toolbarBackground(SemrehVisualTheme.canvas(for: colorScheme, palette: palette), for: .navigationBar)
-                    .toolbarBackground(.visible, for: .navigationBar)
-            }
-            .modifier(ShellTabReveal(isSelected: selectedSurface == .you))
-            .tabItem {
-                Image(systemName: AppShellSurface.you.tabBarSystemImage(isSelected: selectedSurface == .you))
-                    .accessibilityLabel("Activity")
-                    .environment(\.symbolVariants, .none)
-            }
-            .tag(AppShellSurface.you)
         }
         .onChange(of: selectedSurface) { oldValue, newValue in
             // Reset the inactive stack on departure, not on return: a bot or

@@ -2,6 +2,11 @@ import Foundation
 
 struct MarkdownMathFormatter {
     static func replacingInlineMath(in markdown: String) -> String {
+        // Dollar and backslash-parenthesis are the only inline openers. This
+        // check is deliberately conservative: escaped/code-protected tokens
+        // still take the existing scanner, preserving all delimiter semantics.
+        if MarkdownMathScanPolicy.fastPathsEnabled,
+           !markdown.contains("$"), !markdown.contains(#"\("#) { return markdown }
         let characters = Array(markdown)
         guard characters.count >= 3 else { return markdown }
 

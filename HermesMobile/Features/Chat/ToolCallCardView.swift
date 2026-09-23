@@ -2,10 +2,16 @@ import SwiftUI
 
 struct ToolCallCardView: View {
     let toolCall: ToolCall
+    let showsHeader: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @AppStorage(ChatTranscriptDisplaySettings.toolCardsStartExpandedKey) private var startsExpanded = false
     @State private var userToggledExpansion: Bool?
+
+    init(toolCall: ToolCall, showsHeader: Bool = true) {
+        self.toolCall = toolCall
+        self.showsHeader = showsHeader
+    }
 
     private var isExpanded: Bool {
         ChatTranscriptDisplaySettings.isCardExpanded(
@@ -17,29 +23,33 @@ struct ToolCallCardView: View {
     var body: some View {
         let statusDisplay = ToolCallStatusDisplay(toolCall: toolCall)
 
-        VStack(alignment: .leading, spacing: isExpanded ? 8 : 0) {
-            Button {
-                toggleExpansion()
-            } label: {
-                header(statusDisplay: statusDisplay)
-            }
-            .buttonStyle(.plain)
-            .chatMinimumHitTarget(horizontalPadding: 9, verticalPadding: 8, in: Rectangle())
-            .accessibilityLabel(String(localized: "\(actionTitle), \(statusDisplay.detailText)"))
-            .accessibilityHint(isExpanded ? "Double tap to collapse details." : "Double tap to expand details.")
+        Group {
+            if showsHeader {
+                VStack(alignment: .leading, spacing: isExpanded ? 8 : 0) {
+                    Button {
+                        toggleExpansion()
+                    } label: {
+                        header(statusDisplay: statusDisplay)
+                    }
+                    .buttonStyle(.plain)
+                    .chatMinimumHitTarget(horizontalPadding: 0, verticalPadding: 5, in: Rectangle())
+                    .accessibilityLabel(String(localized: "\(actionTitle), \(statusDisplay.detailText)"))
+                    .accessibilityHint(isExpanded ? "Double tap to collapse details." : "Double tap to expand details.")
 
-            if isExpanded {
+                    if isExpanded {
+                        expandedContent(statusDisplay: statusDisplay)
+                            .padding(.leading, 28)
+                            .transition(disclosureTransition)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                // A one-action group already names the action in its parent
+                // disclosure. Keep the detail at its natural width so it cannot
+                // widen the group and push the parent's chevron offscreen.
                 expandedContent(statusDisplay: statusDisplay)
-                    .transition(disclosureTransition)
             }
         }
-        .padding(.horizontal, 9)
-        .padding(.vertical, isExpanded ? 8 : 6)
-        .chatTimelineAccessorySurface(
-            fallbackMaterial: .thinMaterial,
-            cornerRadius: 9
-        )
-        .frame(maxWidth: .infinity, alignment: .leading)
         // Tool-call bodies are commands, JSON, file paths, and results — code-like
         // content that must stay left-to-right inside an RTL message (#259). The
         // group's summary header above (ToolActivityGroupView) still mirrors.
@@ -79,59 +89,20 @@ struct ToolCallCardView: View {
         }
     }
 
+    private func header(statusDisplay: ToolCallStatusDisplay) -> some View {
+        TranscriptActivityDisclosureLabel(
+            symbol: statusIcon,
+            title: actionTitle,
+            status: toolCall.isError == true ? statusDisplay.collapsedText : nil,
+            isExpanded: isExpanded,
+            isFailure: toolCall.isError == true,
+            isActive: !toolCall.isCompleted && toolCall.isError != true,
+            isCompact: true
+        )
+    }
+
     private var usesStackedHeader: Bool {
         dynamicTypeSize.isAccessibilitySize
-    }
-
-    private func header(statusDisplay: ToolCallStatusDisplay) -> some View {
-        HStack(alignment: usesStackedHeader ? .top : .center, spacing: 8) {
-            Image(systemName: statusIcon)
-                .font(.system(size: 14, weight: .regular))
-                .foregroundStyle(statusColor)
-                .frame(width: 18, height: 18)
-
-            if usesStackedHeader {
-                VStack(alignment: .leading, spacing: 3) {
-                    titleText
-                    if let collapsedText = statusDisplay.collapsedText {
-                        collapsedStatus(text: collapsedText)
-                    }
-                }
-            } else {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    titleText
-                    if let collapsedText = statusDisplay.collapsedText {
-                        collapsedStatus(text: collapsedText)
-                    }
-                }
-            }
-
-            Image(systemName: isExpanded ? "chevron.down" : "chevron.forward")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        // Standard sizes keep a compact visual row; accessibility sizes keep
-        // the full 44pt minimum. The button's `chatMinimumHitTarget` slop
-        // restores ~44pt of touch height without consuming row space.
-        .frame(minHeight: usesStackedHeader ? 44 : 28)
-        .contentShape(Rectangle())
-    }
-
-    @ViewBuilder
-    private func collapsedStatus(text: String) -> some View {
-        if toolCall.isError == true {
-            TranscriptStatusPill(text: text, color: statusColor)
-        } else {
-            ToolCallStatusCaption(text: text, color: statusColor)
-        }
-    }
-
-    private var titleText: some View {
-        Text(actionTitle)
-            .font(AppFont.subheadline())
-            .lineLimit(1)
-            .modifier(ReasoningTextShineModifier(isActive: !toolCall.isCompleted))
     }
 
     private var actionTitle: String {
@@ -237,19 +208,6 @@ struct ToolCallCardView: View {
     }
 }
 
-private struct ToolCallStatusCaption: View {
-    let text: String
-    let color: Color
-
-    var body: some View {
-        Text(text)
-            .font(AppFont.caption2(weight: .semibold))
-            .foregroundStyle(color)
-            .lineLimit(1)
-            .truncationMode(.tail)
-    }
-}
-
 struct ToolCallStatusDisplay: Equatable {
     let collapsedText: String?
     let detailText: String
@@ -273,20 +231,5 @@ struct ToolCallStatusDisplay: Equatable {
 
         collapsedText = String(localized: "Running")
         detailText = String(localized: "Running")
-    }
-}
-
-struct TranscriptStatusPill: View {
-    let text: String
-    let color: Color
-
-    var body: some View {
-        Text(text)
-            .font(AppFont.caption2(weight: .semibold))
-            .foregroundStyle(color)
-            .lineLimit(1)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(color.opacity(0.12), in: Capsule())
     }
 }

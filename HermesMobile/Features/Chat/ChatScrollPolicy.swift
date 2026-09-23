@@ -2,6 +2,71 @@ import CoreGraphics
 import Foundation
 import SwiftUI
 
+struct ChatExplicitBottomGeometryToken: Equatable {
+    let generation: Int
+    let issue: Int
+}
+
+#if DEBUG
+/// Pure selection for the opt-in mounted-window experiment. The canonical
+/// transcript remains loaded; only the range offered to the view is bounded.
+struct ChatDebugTranscriptWindow: Equatable {
+    let range: Range<Int>
+    let savedAnchorFound: Bool
+
+    var hasOlderLoadedRows: Bool { range.lowerBound > 0 }
+}
+
+enum ChatDebugTranscriptWindowPolicy {
+    static let defaultLimit = 120
+    static let defaultOverlap = 24
+
+    static func opening(
+        renderIDs: [String], followingLatest: Bool, savedAnchorID: String?,
+        limit: Int = defaultLimit
+    ) -> ChatDebugTranscriptWindow {
+        let count = renderIDs.count
+        let size = min(count, max(1, limit))
+        let tailStart = count - size
+        guard !followingLatest, let savedAnchorID,
+              let anchorIndex = renderIDs.firstIndex(of: savedAnchorID) else {
+            return ChatDebugTranscriptWindow(
+                range: tailStart..<count, savedAnchorFound: false
+            )
+        }
+        // Leave some real rows above the saved reader anchor, without asking
+        // LazyVStack to estimate the entire loaded history below it.
+        let start = min(max(0, anchorIndex - size / 3), tailStart)
+        return ChatDebugTranscriptWindow(
+            range: start..<(start + size), savedAnchorFound: true
+        )
+    }
+
+    static func older(
+        current: Range<Int>, totalCount: Int,
+        limit: Int = defaultLimit, overlap: Int = defaultOverlap
+    ) -> Range<Int> {
+        guard current.lowerBound > 0, current.upperBound <= totalCount else { return current }
+        let size = max(1, limit)
+        let retained = min(max(1, overlap), current.count, size - 1)
+        let end = current.lowerBound + retained
+        return max(0, end - size)..<end
+    }
+
+    static func newer(
+        current: Range<Int>, totalCount: Int,
+        limit: Int = defaultLimit, overlap: Int = defaultOverlap
+    ) -> Range<Int> {
+        guard current.upperBound < totalCount, current.lowerBound >= 0 else { return current }
+        let size = max(1, limit)
+        let retained = min(max(1, overlap), current.count, size - 1)
+        let start = current.upperBound - retained
+        return start..<min(totalCount, start + size)
+    }
+}
+
+#endif
+
 /// Pure decision rules for the chat transcript's auto-scroll behavior.
 ///
 /// The transcript keeps app-owned follow-bottom intent separate from
@@ -183,14 +248,19 @@ enum ChatScrollPolicy {
     }
 
     /// Explicit bottom settlement is complete only after a target was issued
-    /// and both the scroll metrics and concrete tail-row geometry agree.
+    /// and both the scroll metrics and current-issue bottom sentinel agree.
     static func shouldFinishExplicitBottomRequest(
+        requestedGeometry: ChatExplicitBottomGeometryToken?,
+        confirmedGeometry: ChatExplicitBottomGeometryToken?,
         isNearBottom: Bool,
         isTailVisible: Bool,
         isDirectlyInteracting: Bool = false,
-        hasIssuedScroll: Bool = true
+        hasIssuedScroll: Bool = true,
+        hasAnimationInFlight: Bool = false
     ) -> Bool {
-        hasIssuedScroll && !isDirectlyInteracting && isNearBottom && isTailVisible
+        hasIssuedScroll && !isDirectlyInteracting && !hasAnimationInFlight
+            && isNearBottom && isTailVisible
+            && requestedGeometry != nil && requestedGeometry == confirmedGeometry
     }
 
     /// Keep the affordance visible until UIKit reports that the viewport

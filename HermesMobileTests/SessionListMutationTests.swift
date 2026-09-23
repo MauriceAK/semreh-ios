@@ -273,6 +273,13 @@ final class SessionListMutationTests: XCTestCase {
             viewModel.cachedSessionPreviews[CachedSessionPreviewIdentity(profile: "maurice", sessionID: "maurice-row")]?.text,
             "Maurice latest answer"
         )
+
+        // Metadata refreshes without a cache context must not flash a fallback
+        // or discard either profile's last verified message preview.
+        let previousPreviews = viewModel.cachedSessionPreviews
+        let reloaded = await viewModel.load()
+        XCTAssertTrue(reloaded)
+        XCTAssertEqual(viewModel.cachedSessionPreviews, previousPreviews)
     }
 
     @MainActor

@@ -5,15 +5,82 @@ struct ComposerVoiceStatus: Equatable {
     let text: String
     let systemImage: String
     let isError: Bool
+    var inputLevel: Double? = nil
+    var isTranscribing = false
 }
 
 struct ComposerVoiceStatusView: View {
     let status: ComposerVoiceStatus
 
     var body: some View {
-        Label(status.text, systemImage: status.systemImage)
-            .font(.caption)
-            .foregroundStyle(status.isError ? Color.red : Color.secondary)
+        HStack(spacing: 8) {
+            if let inputLevel = status.inputLevel {
+                ComposerVoiceLevelBars(level: inputLevel)
+            } else if status.isTranscribing {
+                ProgressView()
+                    .controlSize(.mini)
+                    .frame(width: 24, height: 19)
+            } else {
+                Image(systemName: status.systemImage)
+                    .frame(width: 24, height: 19)
+            }
+
+            Text(status.text)
+                .lineLimit(2)
+        }
+        .font(.caption.weight(.medium))
+        .foregroundStyle(status.isError ? Color.red : Color.secondary)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(.regularMaterial, in: Capsule())
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(status.text)
+    }
+}
+
+/// Owns the 20 Hz level observation so microphone activity only redraws this
+/// small view, rather than the whole composer and transcript layout.
+struct ComposerVoiceLiveStatusView: View {
+    let input: ComposerVoiceInputController
+
+    var body: some View {
+        let status: ComposerVoiceStatus
+        switch input.state {
+        case .listening, .serverListening:
+            status = ComposerVoiceStatus(
+                text: String(localized: "Listening..."), systemImage: "waveform",
+                isError: false, inputLevel: input.inputLevel
+            )
+        case .transcribing:
+            status = ComposerVoiceStatus(
+                text: String(localized: "Transcribing..."), systemImage: "waveform",
+                isError: false, isTranscribing: true
+            )
+        case .idle, .requestingPermission:
+            status = ComposerVoiceStatus(text: "", systemImage: "waveform", isError: false)
+        }
+        return ComposerVoiceStatusView(status: status)
+    }
+}
+
+/// The microphone meter is driven by measured audio power. A fixed footprint
+/// keeps the composer from moving as bars change; Reduce Motion disables tweening.
+struct ComposerVoiceLevelBars: View {
+    let level: Double
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private let barScales: [Double] = [0.55, 0.8, 1, 0.72, 0.48]
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 2) {
+            ForEach(barScales.indices, id: \.self) { index in
+                Capsule()
+                    .frame(width: 3, height: 4 + 14 * min(1, max(0, level)) * barScales[index])
+            }
+        }
+        .frame(width: 23, height: 19)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.08), value: level)
+        .accessibilityHidden(true)
     }
 }
 
@@ -130,7 +197,7 @@ struct ComposerVoiceControlButton: View {
 /// once the cancel threshold is armed. Exposes explicit VoiceOver actions because
 /// the hold-to-talk gesture isn't reachable with VoiceOver on.
 struct ComposerVoiceRecordingBar: View {
-    let elapsed: TimeInterval
+    let recorder: ComposerVoiceNoteRecorder
     let isCancelArmed: Bool
     let onStop: () -> Void
     let onCancel: () -> Void
@@ -142,7 +209,10 @@ struct ComposerVoiceRecordingBar: View {
                 .frame(width: 10, height: 10)
                 .opacity(isCancelArmed ? 0.4 : 1)
 
-            Text(AudioDurationFormatter.string(from: elapsed))
+            ComposerVoiceLevelBars(level: recorder.inputLevel)
+                .foregroundStyle(Color.red)
+
+            Text(AudioDurationFormatter.string(from: recorder.elapsed))
                 .font(.callout.monospacedDigit())
                 .foregroundStyle(.primary)
 
@@ -164,7 +234,7 @@ struct ComposerVoiceRecordingBar: View {
                 .fill(Color(.secondarySystemBackground))
         )
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Text("Recording voice note, \(AudioDurationFormatter.string(from: elapsed))"))
+        .accessibilityLabel(Text("Recording voice note, \(AudioDurationFormatter.string(from: recorder.elapsed))"))
         .accessibilityAddTraits(.updatesFrequently)
         .accessibilityAction(named: Text("Stop and send"), onStop)
         .accessibilityAction(named: Text("Cancel recording"), onCancel)

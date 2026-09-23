@@ -53,6 +53,9 @@ struct MarkdownRenderer: View {
     /// the trailing text opacity reveal can finish before switching to the
     /// solid static renderer.
     @State private var lingersAfterStreaming = false
+#if DEBUG
+    @Environment(\.prototypeCodeViewport) private var nativeRichViewport
+#endif
 
     var body: some View {
         Group {
@@ -66,7 +69,22 @@ struct MarkdownRenderer: View {
                     reason: fallbackReason
                 )
             } else {
+#if DEBUG
+                if (ProcessInfo.processInfo.arguments.contains("--native-rich-row-prototype")
+                    || ProcessInfo.processInfo.arguments.contains("--native-rich-20-row-pilot")
+                    || ProcessInfo.processInfo.arguments.contains("--native-rich-all-eligible-120")),
+                   content.hasPrefix("## Response "), !isThinkingBody,
+                   let snapshot = nativeRichViewport?.nativeRichSnapshot,
+                   snapshot.sourceBytes == Array(content.utf8) {
+                    NativeRichRowMountedView(snapshot: snapshot,
+                                             onToggleCodeWrap: { nativeRichViewport?.nativeRichToggleCodeWrap?() })
+                        .accessibilityIdentifier("native-rich-row-mounted")
+                } else {
+                    markdownContent
+                }
+#else
                 markdownContent
+#endif
             }
         }
         .environment(\.markdownBodyStyle, isThinkingBody ? .thinking : .standard)
@@ -82,6 +100,7 @@ struct MarkdownRenderer: View {
             lingersAfterStreaming = false
         }
     }
+
 
     @ViewBuilder
     private var markdownContent: some View {
@@ -489,6 +508,7 @@ private struct ChatMarkdownView: View, Equatable {
                     .fixedSize(horizontal: false, vertical: true)
                     .relativeLineSpacing(.em(markdownBodyStyle.paragraphLeadingEm))
                     .markdownMargin(top: 0, bottom: 8)
+                    .prototypeMeasuredBlock("paragraph")
             }
     }
 }
@@ -516,15 +536,77 @@ private struct MathFenceOrCodeBlock: View {
     }
 }
 
+private extension View {
+    @ViewBuilder func prototypeMeasuredBlock(_ kind: String) -> some View {
+#if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--viewport-block-costs") {
+            PrototypeTimedBlockLayout(kind: kind) { self }
+        } else {
+            self
+        }
+#else
+        self
+#endif
+    }
+}
+
+#if DEBUG
+/// Diagnostic-only pass-through layout. Unlike a standalone synthetic host,
+/// this measures the actual child under the production Markdown proposal.
+private struct PrototypeTimedBlockLayout: Layout {
+    let kind: String
+    private static let logger = Logger(subsystem: "com.maurice.semreh", category: "ViewportPrototype")
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard let child = subviews.first else { return .zero }
+        let start = CACurrentMediaTime()
+        let result = child.sizeThatFits(proposal)
+        let milliseconds = (CACurrentMediaTime() - start) * 1_000
+        if milliseconds >= 1 {
+            Self.logger.debug("event=prototype_block_measure kind=\(kind, privacy: .public) elapsedMs=\(milliseconds, privacy: .public) width=\(proposal.width ?? -1, privacy: .public) height=\(result.height, privacy: .public)")
+        }
+        return result
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        subviews.first?.place(at: bounds.origin, anchor: .topLeading, proposal: proposal)
+    }
+}
+#endif
+
+enum ChatCodeInlinePreviewPolicy {
+    static let maximumVisibleLines = 32
+
+    static func displaySource(for content: String) -> String {
+        guard MarkdownHighlightPolicy.lineCount(in: content, stoppingAfter: maximumVisibleLines) > maximumVisibleLines else {
+            return content
+        }
+        var completedLines = 0
+        for index in content.indices where content[index].isNewline {
+            completedLines += 1
+            if completedLines == maximumVisibleLines {
+                return String(content[...index])
+            }
+        }
+        return content
+    }
+}
+
 private struct ChatCodeBlock: View {
     let language: String?
     let content: String
     let isStreaming: Bool
+    var allowsInlinePreview = true
 
     @Environment(\.colorScheme) private var colorScheme
     @AppStorage(ChatTranscriptDisplaySettings.wrapsCodeBlockLinesKey) private var wrapsCodeBlockLines = false
     @State private var didCopy = false
-    @State private var highlightedCode: NSAttributedString?
+    @State private var highlightedCode: MarkdownPreparedCode?
+    @State private var showsFullCode = false
+#if DEBUG
+    @Environment(\.prototypeCodeViewport) private var prototypeViewport
+    @Environment(\.nativePreparedHighlights) private var nativePreparedHighlights
+#endif
 
     private let logger = Logger.hermesMarkdownRendering
 
@@ -574,8 +656,29 @@ private struct ChatCodeBlock: View {
                     styledCodeText(fixedHorizontal: true)
                 }
             }
+
+            if isInlinePreview {
+                Button {
+                    showsFullCode = true
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        Text("View full code (\(logicalLineCount) lines)")
+                    }
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 4)
+                    .padding(.bottom, 14)
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("view-full-code")
+            }
         }
         .background(codeBlockBackground)
+#if DEBUG
+        .modifier(NativeRefinementProbe(name: "code-\(content.count)-\(displayHighlightedCode == nil ? "plain" : "highlighted")"))
+#endif
         .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 24, style: .continuous)
@@ -586,6 +689,9 @@ private struct ChatCodeBlock: View {
         }
         .task(id: highlightRequest) {
             await updateHighlightedCode(for: highlightRequest)
+        }
+        .sheet(isPresented: $showsFullCode) {
+            FullCodeSheet(language: language, content: content)
         }
         // Code (and diff) blocks must never mirror inside an RTL message (#259):
         // the language header, copy/wrap controls, and the source itself stay LTR.
@@ -600,11 +706,42 @@ private struct ChatCodeBlock: View {
 
     @ViewBuilder
     private var codeText: some View {
-        if let highlightedCode {
+#if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--viewport-virtual-code"), let prototypeViewport {
+            PrototypeVirtualCodeText(source: content, prepared: highlightedCode, wraps: wrapsCodeBlockLines, viewport: prototypeViewport)
+        } else {
+            originalCodeText
+        }
+#else
+        originalCodeText
+#endif
+    }
+
+    @ViewBuilder private var originalCodeText: some View {
+        if let highlightedCode = displayHighlightedCode {
             HighlightedCodeBlockText(content: highlightedCode, wraps: wrapsCodeBlockLines)
         } else {
-            PlainCodeBlockText(content: content, wraps: wrapsCodeBlockLines)
+            PlainCodeBlockText(content: inlineCode, wraps: wrapsCodeBlockLines)
         }
+    }
+
+    private var logicalLineCount: Int {
+        MarkdownHighlightPolicy.lineCount(in: content)
+    }
+
+    private var isInlinePreview: Bool {
+        allowsInlinePreview && logicalLineCount > ChatCodeInlinePreviewPolicy.maximumVisibleLines
+    }
+
+    private var inlineCode: String {
+        isInlinePreview ? ChatCodeInlinePreviewPolicy.displaySource(for: content) : content
+    }
+
+    private var displayHighlightedCode: MarkdownPreparedCode? {
+#if DEBUG
+        if let prepared = nativePreparedHighlights.first(where: { $0.request == highlightRequest }) { return prepared.code }
+#endif
+        return highlightedCode
     }
 
     /// The code body with its shared monospaced styling and padding. `fixedHorizontal`
@@ -625,7 +762,7 @@ private struct ChatCodeBlock: View {
 
     private var highlightRequest: MarkdownCodeHighlightRequest {
         MarkdownCodeHighlightRequest(
-            code: content,
+            code: inlineCode,
             language: language,
             colorScheme: colorScheme,
             isStreaming: isStreaming
@@ -634,6 +771,16 @@ private struct ChatCodeBlock: View {
 
     @MainActor
     private func updateHighlightedCode(for request: MarkdownCodeHighlightRequest) async {
+#if DEBUG
+        if nativePreparedHighlights.contains(where: { $0.request == request }) {
+            Logger(subsystem: "com.maurice.semreh", category: "NativeBaseline").debug("event=highlight_prepared_hit")
+            return
+        }
+        if ProcessInfo.processInfo.arguments.contains("--viewport-virtual-code") {
+            Logger(subsystem: "com.maurice.semreh", category: "ViewportPrototype").debug("event=virtual_code_gate hasViewport=\(self.prototypeViewport != nil, privacy: .public)")
+        }
+        if ProcessInfo.processInfo.arguments.contains("--tail-geometry-no-highlight") { return }
+#endif
         highlightedCode = nil
         await Task.yield()
 
@@ -645,6 +792,11 @@ private struct ChatCodeBlock: View {
         switch result {
         case .highlighted(let attributedString):
             highlightedCode = attributedString
+#if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("--native-refinement-trace") {
+                Logger(subsystem: "com.maurice.semreh", category: "NativeBaseline").debug("event=highlight_applied characters=\(request.code.count, privacy: .public)")
+            }
+#endif
         case .plain(let reason, let normalizedLanguage):
             highlightedCode = nil
             logFallback(
@@ -691,6 +843,156 @@ private struct ChatCodeBlock: View {
     }
 }
 
+/// Very long code stays source-complete without making the transcript row itself
+/// thousands of points tall. The separate native text view owns scrolling and
+/// selection; highlighting only changes attributes, never its source or font.
+private struct FullCodeSheet: View {
+    let language: String?
+    let content: String
+
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var colorScheme
+    @AppStorage(ChatTranscriptDisplaySettings.wrapsCodeBlockLinesKey) private var wrapsCodeBlockLines = false
+    @State private var prepared: MarkdownPreparedCode?
+    @State private var preparedRevision = 0
+
+    var body: some View {
+        NavigationStack {
+            FullCodeTextView(
+                source: content,
+                prepared: prepared,
+                preparedRevision: preparedRevision,
+                wraps: wrapsCodeBlockLines,
+                colorScheme: colorScheme
+            )
+            .accessibilityIdentifier("full-code-text")
+            .navigationTitle(language?.capitalized ?? "Code")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Done") { dismiss() }
+                }
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    Button {
+                        wrapsCodeBlockLines.toggle()
+                    } label: {
+                        Image(systemName: wrapsCodeBlockLines ? "arrow.turn.down.left" : "arrow.left.and.right")
+                    }
+                    .accessibilityLabel(wrapsCodeBlockLines ? "Disable code line wrapping" : "Enable code line wrapping")
+
+                    Button {
+                        UIPasteboard.general.string = content
+                    } label: {
+                        Image(systemName: "square.on.square")
+                    }
+                    .accessibilityLabel("Copy full code")
+                }
+            }
+        }
+        .task(id: highlightRequest) {
+            prepared = nil
+            preparedRevision &+= 1
+            let result = await MarkdownCodeHighlightWorker.shared.highlightedCode(for: highlightRequest)
+            guard !Task.isCancelled else { return }
+            if case .highlighted(let value) = result {
+                prepared = value
+                preparedRevision &+= 1
+            }
+        }
+    }
+
+    private var highlightRequest: MarkdownCodeHighlightRequest {
+        MarkdownCodeHighlightRequest(
+            code: content,
+            language: language,
+            colorScheme: colorScheme,
+            isStreaming: false
+        )
+    }
+}
+
+private struct FullCodeTextView: UIViewRepresentable {
+    let source: String
+    let prepared: MarkdownPreparedCode?
+    let preparedRevision: Int
+    let wraps: Bool
+    let colorScheme: ColorScheme
+
+    final class Coordinator {
+        var source = ""
+        var preparedRevision = -1
+        var colorScheme: ColorScheme?
+        var wraps: Bool?
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeUIView(context: Context) -> UITextView {
+        let view = UITextView()
+        view.isEditable = false
+        view.isSelectable = true
+        view.isScrollEnabled = true
+        view.alwaysBounceVertical = true
+        view.dataDetectorTypes = []
+        view.semanticContentAttribute = .forceLeftToRight
+        view.textContainerInset = UIEdgeInsets(top: 20, left: 16, bottom: 20, right: 16)
+        view.accessibilityLabel = "Full code"
+        view.accessibilityIdentifier = "full-code-text"
+        return view
+    }
+
+    func updateUIView(_ view: UITextView, context: Context) {
+        let coordinator = context.coordinator
+        let appearanceChanged = coordinator.colorScheme != colorScheme
+        view.backgroundColor = colorScheme == .dark
+            ? UIColor(red: 0.04, green: 0.05, blue: 0.07, alpha: 1)
+            : .secondarySystemBackground
+
+        if coordinator.source != source || coordinator.preparedRevision != preparedRevision || appearanceChanged {
+            let priorOffset = view.contentOffset
+            let priorSelection = view.selectedRange
+            let monospacedFont = UIFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+            if let prepared, String(prepared.fullText.characters) == source {
+                let attributed = NSMutableAttributedString(attributedString: NSAttributedString(prepared.fullText))
+                attributed.addAttribute(.font, value: monospacedFont, range: NSRange(location: 0, length: attributed.length))
+                view.attributedText = attributed
+            } else {
+                view.attributedText = NSAttributedString(
+                    string: source,
+                    attributes: [
+                        .font: monospacedFont,
+                        .foregroundColor: UIColor.label
+                    ]
+                )
+            }
+            view.selectedRange = NSRange(
+                location: min(priorSelection.location, (source as NSString).length),
+                length: min(priorSelection.length, max(0, (source as NSString).length - priorSelection.location))
+            )
+            if coordinator.source == source {
+                view.contentOffset = priorOffset
+            }
+            coordinator.source = source
+            coordinator.preparedRevision = preparedRevision
+            coordinator.colorScheme = colorScheme
+        }
+
+        if coordinator.wraps != wraps {
+            view.textContainer.widthTracksTextView = wraps
+            if wraps {
+                view.textContainer.size = CGSize(width: max(view.bounds.width, 1), height: .greatestFiniteMagnitude)
+            } else {
+                let longestLine = source.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
+                    .map(\.utf16.count).max() ?? 0
+                view.textContainer.size = CGSize(width: max(view.bounds.width, CGFloat(longestLine) * 8 + 32), height: .greatestFiniteMagnitude)
+            }
+            view.alwaysBounceHorizontal = !wraps
+            view.showsHorizontalScrollIndicator = !wraps
+            coordinator.wraps = wraps
+        }
+    }
+}
+
 private struct PlainCodeBlockText: View {
     let content: String
     /// When `true`, each line's 500-char segments are concatenated into a single
@@ -730,19 +1032,181 @@ private struct PlainCodeBlockText: View {
     }
 }
 
+#if DEBUG
+actor PrototypeCodeGeometryWorker {
+    static let shared = PrototypeCodeGeometryWorker()
+    func sizes(_ lines: [MarkdownPreparedCode.Line], width: CGFloat?, scale: CGFloat) throws -> [CGSize] {
+        try lines.map { line in
+            try Task.checkCancellation()
+            let text = NSMutableAttributedString(string: "")
+            for segment in line.segments { text.append(NSAttributedString(segment.text)) }
+            text.enumerateAttribute(.font, in: NSRange(location: 0, length: text.length)) { value, range, _ in
+                if value == nil { text.addAttribute(.font, value: UIFont.monospacedSystemFont(ofSize: 13, weight: .regular), range: range) }
+            }
+            let size = text.boundingRect(with: CGSize(width: width ?? 100_000, height: 1_000_000), options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil).size
+            return CGSize(width: ceil(size.width * scale) / scale, height: max(1, ceil(size.height * scale) / scale))
+        }
+    }
+}
+
+@MainActor private final class PrototypeCodeLineModel: ObservableObject {
+    @Published var revision = 0
+    var lines: [MarkdownPreparedCode.Line] = []
+    var positions: [CGFloat] = [0]
+    var maxWidth: CGFloat = 1
+    var origin: CGFloat = 0
+    var width: CGFloat = 340
+    var source = ""
+    var prepared: MarkdownPreparedCode?
+    var wraps = false
+    var task: Task<Void, Never>?
+    var sizesCache: [CGFloat: [CGSize]] = [:]
+    var viewport: PrototypeCodeViewport
+    var scale: CGFloat
+
+    init(source: String, prepared: MarkdownPreparedCode?, wraps: Bool, viewport: PrototypeCodeViewport, scale: CGFloat) {
+        self.viewport = viewport
+        self.scale = scale
+        update(source: source, prepared: prepared, wraps: wraps, force: true)
+    }
+
+    var height: CGFloat { max(1, (positions.last ?? 3) - 3) }
+    func index(at value: CGFloat) -> Int {
+        var low = 0, high = min(lines.count, max(0, positions.count - 1))
+        while low + 1 < high {
+            let middle = (low + high) / 2
+            if positions[middle] <= value { low = middle } else { high = middle }
+        }
+        return low
+    }
+
+    func update(source: String, prepared: MarkdownPreparedCode?, wraps: Bool, force: Bool = false) {
+        guard force || self.source != source || self.prepared != prepared || self.wraps != wraps else { return }
+        let changedContent = self.source != source || self.prepared != prepared
+        self.source = source; self.prepared = prepared; self.wraps = wraps
+        if changedContent || force {
+            lines = prepared?.lines ?? MarkdownPlainCodeFormatter.lines(in: source).map { line in
+                MarkdownPreparedCode.Line(id: line.id, segments: line.segments.map { MarkdownPreparedCode.Segment(id: $0.id, text: AttributedString($0.text)) })
+            }
+            sizesCache.removeAll()
+        }
+        let estimatedLineHeight = ceil(UIFont.monospacedSystemFont(ofSize: 13, weight: .regular).lineHeight * scale) / scale
+        let estimates = lines.map { line -> CGSize in
+            let count = line.segments.reduce(0) { $0 + $1.text.characters.count }
+            let naturalWidth = CGFloat(max(1, count)) * 13
+            let visualLines = wraps ? max(1, ceil(naturalWidth / max(1, width))) : 1
+            return CGSize(width: naturalWidth, height: estimatedLineHeight * visualLines)
+        }
+        apply(estimates, compensate: !force)
+        measure()
+    }
+
+    func measure() {
+        task?.cancel()
+        let cacheKey: CGFloat = wraps ? width : -1
+        if let cached = sizesCache[cacheKey] { apply(cached); return }
+        let lines = lines, measuredWidth: CGFloat? = wraps ? width : nil, scale = scale
+        task = Task { [weak self] in
+            guard let sizes = try? await PrototypeCodeGeometryWorker.shared.sizes(lines, width: measuredWidth, scale: scale), !Task.isCancelled,
+                  let self else { return }
+            if self.sizesCache.count >= 2 { self.sizesCache.removeAll() }
+            self.sizesCache[cacheKey] = sizes
+            self.apply(sizes)
+        }
+    }
+
+    func apply(_ sizes: [CGSize], compensate: Bool = true) {
+        let localTop = viewport.rect.minY - origin
+        let anchor = index(at: max(0, localTop))
+        let oldPosition = positions.indices.contains(anchor) ? positions[anchor] : 0
+        positions = [0]
+        for size in sizes { positions.append(positions.last! + size.height + 3) }
+        maxWidth = max(1, sizes.map(\.width).max() ?? 1)
+        if compensate, localTop >= 0, positions.indices.contains(anchor) {
+            viewport.correctAnchor(positions[anchor] - oldPosition)
+        }
+        revision += 1
+    }
+
+    deinit { task?.cancel() }
+}
+
+private struct PrototypeVirtualCodeText: View {
+    let source: String
+    let prepared: MarkdownPreparedCode?
+    let wraps: Bool
+    @ObservedObject var viewport: PrototypeCodeViewport
+    @Environment(\.displayScale) private var displayScale
+    @StateObject private var model: PrototypeCodeLineModel
+
+    init(source: String, prepared: MarkdownPreparedCode?, wraps: Bool, viewport: PrototypeCodeViewport) {
+        self.source = source; self.prepared = prepared; self.wraps = wraps; self.viewport = viewport
+        _model = StateObject(wrappedValue: PrototypeCodeLineModel(source: source, prepared: prepared, wraps: wraps, viewport: viewport, scale: 3))
+    }
+
+    var body: some View {
+        let _ = model.revision
+        let top = viewport.rect.minY - model.origin
+        let bottom = viewport.rect.maxY - model.origin
+        let first = model.index(at: max(0, top - 100))
+        let last = model.index(at: max(0, bottom + 100))
+        ZStack(alignment: .topLeading) {
+            if !model.lines.isEmpty, bottom >= -100, top <= model.height + 100 {
+                ForEach(first...max(first, last), id: \.self) { index in
+                    codeLine(model.lines[index])
+                        .offset(y: model.positions[index])
+                }
+            }
+        }
+        .frame(width: wraps ? nil : model.maxWidth, height: model.height, alignment: .topLeading)
+        .frame(maxWidth: wraps ? .infinity : nil, alignment: .leading)
+        .font(.system(size: 13, weight: .regular, design: .monospaced))
+        .foregroundStyle(.primary)
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .named("prototype-row")) } action: { frame in
+            if abs(model.origin - frame.minY) > 0.5 { model.origin = frame.minY; model.revision += 1 }
+            if wraps, frame.width > 1, abs(model.width - frame.width) > 0.5 { model.width = frame.width; model.measure() }
+        }
+        .onChange(of: source) { _, _ in model.update(source: source, prepared: prepared, wraps: wraps) }
+        .onChange(of: prepared) { _, _ in model.update(source: source, prepared: prepared, wraps: wraps) }
+        .onChange(of: wraps) { _, _ in model.update(source: source, prepared: prepared, wraps: wraps) }
+        .onChange(of: displayScale, initial: true) { _, scale in
+            if model.scale != scale { model.scale = scale; model.sizesCache.removeAll(); model.measure() }
+        }
+        .accessibilityRepresentation {
+            if let prepared {
+                HighlightedCodeBlockText(content: prepared, wraps: wraps)
+            } else {
+                PlainCodeBlockText(content: source, wraps: wraps)
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("prototype-virtual-code")
+    }
+
+    @ViewBuilder private func codeLine(_ line: MarkdownPreparedCode.Line) -> some View {
+        if wraps {
+            line.segments.reduce(Text(verbatim: "")) { $0 + Text($1.text) }
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            HStack(alignment: .firstTextBaseline, spacing: 0) {
+                ForEach(line.segments) { Text($0.text) }
+            }.fixedSize()
+        }
+    }
+}
+
+#endif
+
 private struct HighlightedCodeBlockText: View {
-    let content: NSAttributedString
+    let content: MarkdownPreparedCode
     /// See `PlainCodeBlockText.wraps`; the concatenated `Text` preserves each
     /// segment's syntax-highlight attributes.
     var wraps = false
 
-    private var lines: [MarkdownAttributedCodeLine] {
-        MarkdownAttributedCodeFormatter.lines(in: content)
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
-            ForEach(lines) { line in
+            ForEach(content.lines) { line in
                 if wraps {
                     combinedText(for: line)
                         .fixedSize(horizontal: false, vertical: true)
@@ -751,7 +1215,7 @@ private struct HighlightedCodeBlockText: View {
                 } else {
                     HStack(alignment: .firstTextBaseline, spacing: 0) {
                         ForEach(line.segments) { segment in
-                            Text(AttributedString(segment.attributedText))
+                            Text(segment.text)
                         }
                     }
                 }
@@ -759,9 +1223,38 @@ private struct HighlightedCodeBlockText: View {
         }
     }
 
-    private func combinedText(for line: MarkdownAttributedCodeLine) -> Text {
+    private func combinedText(for line: MarkdownPreparedCode.Line) -> Text {
         line.segments.reduce(Text(verbatim: "")) { partial, segment in
-            partial + Text(AttributedString(segment.attributedText))
+            partial + Text(segment.text)
+        }
+    }
+}
+
+/// One immutable display-ready revision, owned by the mounted code block.
+/// Preparation runs on the existing highlight actor, not in SwiftUI bodies.
+/// There is no process-wide cache: replacement/unmount releases this value.
+/// Wrapping and environment layout reuse the same attributes and stable IDs;
+/// content/language/theme/streaming changes restart the existing request task.
+struct MarkdownPreparedCode: Equatable, Sendable {
+    struct Segment: Equatable, Identifiable, Sendable {
+        let id: Int
+        let text: AttributedString
+    }
+
+    struct Line: Equatable, Identifiable, Sendable {
+        let id: Int
+        let segments: [Segment]
+    }
+
+    let lines: [Line]
+    let fullText: AttributedString
+
+    init(_ source: NSAttributedString) {
+        fullText = AttributedString(source)
+        lines = MarkdownAttributedCodeFormatter.lines(in: source).map { line in
+            Line(id: line.id, segments: line.segments.map { segment in
+                Segment(id: segment.id, text: AttributedString(segment.attributedText))
+            })
         }
     }
 }
@@ -952,7 +1445,7 @@ enum MarkdownHighlightEngine: Equatable {
     case highlightr
 }
 
-enum MarkdownHighlightFallbackReason: String, Equatable {
+enum MarkdownHighlightFallbackReason: String, Equatable, Sendable {
     case streaming
     case empty
     case missingLanguage
@@ -1180,6 +1673,23 @@ enum MarkdownHighlightPolicy {
     }
 }
 
+#if DEBUG
+/// Per-mount, bounded representative-fixture payload. No production cache.
+struct NativePreparedHighlight: Sendable {
+    let request: MarkdownCodeHighlightRequest
+    let code: MarkdownPreparedCode
+}
+private struct NativePreparedHighlightsKey: EnvironmentKey {
+    static let defaultValue: [NativePreparedHighlight] = []
+}
+extension EnvironmentValues {
+    var nativePreparedHighlights: [NativePreparedHighlight] {
+        get { self[NativePreparedHighlightsKey.self] }
+        set { self[NativePreparedHighlightsKey.self] = newValue }
+    }
+}
+#endif
+
 struct MarkdownCodeHighlightRequest: Equatable, @unchecked Sendable {
     let code: String
     let language: String?
@@ -1189,6 +1699,11 @@ struct MarkdownCodeHighlightRequest: Equatable, @unchecked Sendable {
 
 enum MarkdownCodeHighlightResult: @unchecked Sendable {
     case highlighted(NSAttributedString)
+    case plain(reason: MarkdownHighlightFallbackReason, normalizedLanguage: String?)
+}
+
+enum MarkdownPreparedCodeResult: Sendable {
+    case highlighted(MarkdownPreparedCode)
     case plain(reason: MarkdownHighlightFallbackReason, normalizedLanguage: String?)
 }
 
@@ -1230,8 +1745,19 @@ enum MarkdownCodeHighlighter {
 actor MarkdownCodeHighlightWorker {
     static let shared = MarkdownCodeHighlightWorker()
 
-    func highlightedCode(for request: MarkdownCodeHighlightRequest) -> MarkdownCodeHighlightResult {
+#if DEBUG
+    func rawHighlightedCode(for request: MarkdownCodeHighlightRequest) -> MarkdownCodeHighlightResult {
         MarkdownCodeHighlighter.highlightedCode(for: request)
+    }
+#endif
+
+    func highlightedCode(for request: MarkdownCodeHighlightRequest) -> MarkdownPreparedCodeResult {
+        switch MarkdownCodeHighlighter.highlightedCode(for: request) {
+        case .highlighted(let source):
+            return .highlighted(MarkdownPreparedCode(source))
+        case .plain(let reason, let language):
+            return .plain(reason: reason, normalizedLanguage: language)
+        }
     }
 }
 
@@ -1325,6 +1851,7 @@ private extension MarkdownUI.Theme {
                     isStreaming: isStreaming
                 )
                 .markdownMargin(top: 4, bottom: 12)
+                .prototypeMeasuredBlock("code")
             }
             .table { configuration in
                 ChatMarkdownTable(
@@ -1332,6 +1859,7 @@ private extension MarkdownUI.Theme {
                     colorScheme: colorScheme
                 )
                 .markdownMargin(top: 0, bottom: 16)
+                .prototypeMeasuredBlock("table")
             }
             .tableCell { configuration in
                 TableCellWidthCap(

@@ -554,7 +554,8 @@ final class SessionListViewModel {
 
     private func refreshCachedSessionPreviews(modelContext: ModelContext?) {
         guard let modelContext else {
-            cachedSessionPreviews = [:]
+            // A metadata-only refresh has no new preview evidence. Keep the
+            // last successful, server/profile-scoped snapshot until a real read.
             return
         }
 
@@ -564,7 +565,6 @@ final class SessionListViewModel {
                 in: modelContext
             )
         } catch {
-            cachedSessionPreviews = [:]
             cacheErrorMessage = error.localizedDescription
         }
     }

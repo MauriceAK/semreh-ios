@@ -122,6 +122,9 @@ struct MessageBubbleView: View {
 
             linkPreview
         }
+        .padding(12)
+        .background(Color(.secondarySystemBackground).opacity(0.8), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .padding(.trailing, dynamicTypeSize.isAccessibilitySize ? 0 : 24)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, 2)
     }

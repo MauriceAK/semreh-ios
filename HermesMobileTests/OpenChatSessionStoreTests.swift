@@ -3,6 +3,35 @@ import Observation
 @testable import HermesMobile
 
 @MainActor
+private final class SelectedHistoryLoadRecorder {
+    private(set) var ids: [String] = []
+    func record(_ id: String) { ids.append(id) }
+}
+
+private actor SelectedHistoryLoadGate {
+    private var releaseWaiter: CheckedContinuation<Bool, Never>?
+    private var startWaiter: CheckedContinuation<Void, Never>?
+
+    func waitForRelease() async -> Bool {
+        await withCheckedContinuation { continuation in
+            releaseWaiter = continuation
+            startWaiter?.resume()
+            startWaiter = nil
+        }
+    }
+
+    func waitUntilStarted() async {
+        guard releaseWaiter == nil else { return }
+        await withCheckedContinuation { continuation in startWaiter = continuation }
+    }
+
+    func release() {
+        releaseWaiter?.resume(returning: true)
+        releaseWaiter = nil
+    }
+}
+
+@MainActor
 final class OpenChatSessionStoreTests: XCTestCase {
     func testExistingGitModelLookupDoesNotInvalidateItsObservingView() throws {
         let server = try XCTUnwrap(URL(string: "https://example.test"))
@@ -955,6 +984,85 @@ final class OpenChatSessionStoreTests: XCTestCase {
         XCTAssertEqual(sessionFetches, 1)
         await viewModel.disposeDirectConversation()
         await runtime.stop()
+    }
+
+    func testListRefreshOnlyLoadsSelectedRetainedConversation() async throws {
+        let server = try XCTUnwrap(URL(string: "https://example.test"))
+        let store = OpenChatSessionStore()
+        let first = SessionSummary(sessionId: "first", profile: "default")
+        let second = SessionSummary(sessionId: "second", profile: "default")
+        let otherProfile = SessionSummary(sessionId: "first", profile: "research")
+        let firstModel = store.viewModel(session: first, server: server)
+        let secondModel = store.viewModel(session: second, server: server)
+        _ = store.viewModel(session: otherProfile, server: server)
+        let calls = SelectedHistoryLoadRecorder()
+
+        store.markRetainedHistoriesStale(for: server, profile: "default")
+        XCTAssertEqual(calls.ids, [], "Refreshing the list must not load offscreen histories")
+        XCTAssertTrue(store.hasStaleHistoryForTesting(session: first, server: server))
+        XCTAssertTrue(store.hasStaleHistoryForTesting(session: second, server: server))
+        XCTAssertFalse(store.hasStaleHistoryForTesting(session: otherProfile, server: server))
+
+        let firstLoaded = await store.refreshStaleHistoryIfNeeded(
+            for: firstModel, session: first, server: server,
+            loader: { model, _ in calls.record(model === firstModel ? "first" : "wrong"); return true }
+        )
+        XCTAssertTrue(firstLoaded)
+        XCTAssertEqual(calls.ids, ["first"])
+        XCTAssertFalse(store.hasStaleHistoryForTesting(session: first, server: server))
+        XCTAssertTrue(store.hasStaleHistoryForTesting(session: second, server: server))
+
+        let duplicate = await store.refreshStaleHistoryIfNeeded(
+            for: firstModel, session: first, server: server,
+            loader: { _, _ in calls.record("duplicate"); return true }
+        )
+        XCTAssertFalse(duplicate)
+        XCTAssertEqual(calls.ids, ["first"])
+
+        let secondLoaded = await store.refreshStaleHistoryIfNeeded(
+            for: secondModel, session: second, server: server,
+            loader: { model, _ in calls.record(model === secondModel ? "second" : "wrong"); return true }
+        )
+        XCTAssertTrue(secondLoaded)
+        XCTAssertEqual(calls.ids, ["first", "second"])
+    }
+
+    func testNewerSelectedRefreshWaitsForCancelledOldGeneration() async throws {
+        let server = try XCTUnwrap(URL(string: "https://example.test"))
+        let store = OpenChatSessionStore()
+        let session = SessionSummary(sessionId: "first", profile: "default")
+        let model = store.viewModel(session: session, server: server)
+        let gate = SelectedHistoryLoadGate()
+        let calls = SelectedHistoryLoadRecorder()
+        store.markRetainedHistoriesStale(for: server, profile: "default")
+
+        let old = Task { @MainActor in
+            await store.refreshStaleHistoryIfNeeded(
+                for: model, session: session, server: server,
+                loader: { _, _ in
+                    calls.record("old-start")
+                    let result = await gate.waitForRelease()
+                    calls.record("old-end")
+                    return result // Deliberately ignores cancellation like a late server result.
+                }
+            )
+        }
+        await gate.waitUntilStarted()
+        store.markRetainedHistoriesStale(for: server, profile: "default")
+        let newer = Task { @MainActor in
+            await store.refreshStaleHistoryIfNeeded(
+                for: model, session: session, server: server,
+                loader: { _, _ in calls.record("new-start"); return true }
+            )
+        }
+        await gate.release()
+
+        let oldResult = await old.value
+        let newerResult = await newer.value
+        XCTAssertFalse(oldResult, "The old result must not consume a newer generation")
+        XCTAssertTrue(newerResult)
+        XCTAssertEqual(calls.ids, ["old-start", "old-end", "new-start"])
+        XCTAssertFalse(store.hasStaleHistoryForTesting(session: session, server: server))
     }
 
     @MainActor

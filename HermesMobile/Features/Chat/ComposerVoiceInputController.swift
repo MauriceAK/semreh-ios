@@ -19,6 +19,7 @@ final class ComposerVoiceInputController {
     private(set) var state: State = .idle
     private(set) var errorMessage: String?
     private(set) var liveTranscript = ""
+    private(set) var inputLevel = 0.0
 
     private let speechRecognizerFactory: () -> SFSpeechRecognizer?
     private let audioEngineFactory: () -> AVAudioEngine
@@ -33,9 +34,12 @@ final class ComposerVoiceInputController {
     private var suppressNextRecognitionError = false
     private var activatedAudioSessionForRecording = false
     private var audioTapInstalled = false
+    @ObservationIgnored private var meterTimer: Timer?
     @ObservationIgnored private var transcriptionTask: Task<Void, Never>?
     @ObservationIgnored private var serverRecordingTimeoutTask: Task<Void, Never>?
+    @ObservationIgnored private var recognitionFinalizationTask: Task<Void, Never>?
     private var activeTranscriptionID: UUID?
+    private var activeRecognitionID: UUID?
     private let logger = Logger.hermesVoiceInput
 
     @ObservationIgnored var apiClient: APIClient?
@@ -51,6 +55,12 @@ final class ComposerVoiceInputController {
     ) {
         self.speechRecognizerFactory = speechRecognizerFactory
         self.audioEngineFactory = audioEngineFactory
+    }
+
+    deinit {
+        meterTimer?.invalidate()
+        recognitionFinalizationTask?.cancel()
+        serverRecordingTimeoutTask?.cancel()
     }
 
     var isListening: Bool {
@@ -83,12 +93,14 @@ final class ComposerVoiceInputController {
         switch state {
         case .serverListening:
             stopServerRecordingAndTranscribe()
+        case .listening:
+            finishOnDeviceRecognition()
         case .transcribing:
             cancelServerTranscription()
             stopAcceptingDraftUpdates()
             stopAudio(cancelTask: true)
             state = .idle
-        case .idle, .requestingPermission, .listening:
+        case .idle, .requestingPermission:
             stopAcceptingDraftUpdates()
             stopAudio(cancelTask: false)
             state = .idle
@@ -100,6 +112,7 @@ final class ComposerVoiceInputController {
         cancelServerTranscription()
         stopAcceptingDraftUpdates()
         discardServerRecording()
+        activeRecognitionID = nil
         stopAudio(cancelTask: true)
         state = .idle
     }
@@ -111,6 +124,7 @@ final class ComposerVoiceInputController {
         recordingProfileName = Self.profileScope(selected: profileName, session: nil)
         errorMessage = nil
         liveTranscript = ""
+        inputLevel = 0
         suppressNextRecognitionError = false
         cancelServerTranscription()
         discardServerRecording()
@@ -174,6 +188,7 @@ final class ComposerVoiceInputController {
             try startServerRecording()
             state = .serverListening
         } catch {
+            stopAudio(cancelTask: true)
             await fallbackOrFail(
                 from: .server,
                 message: error.localizedDescription,
@@ -227,6 +242,7 @@ final class ComposerVoiceInputController {
             try startRecognition(speechRecognizer: speechRecognizer)
             state = .listening
         } catch {
+            stopAudio(cancelTask: true)
             await fallbackOrFail(
                 from: .onDevice,
                 message: error.localizedDescription,
@@ -308,6 +324,7 @@ final class ComposerVoiceInputController {
             .appendingPathComponent("hermex-composer-stt-\(UUID().uuidString)")
             .appendingPathExtension("wav")
         let recorder = try AVAudioRecorder(url: recordingURL, settings: Self.serverRecordingSettings)
+        recorder.isMeteringEnabled = true
         recorder.prepareToRecord()
         guard recorder.record() else {
             try? FileManager.default.removeItem(at: recordingURL)
@@ -317,6 +334,7 @@ final class ComposerVoiceInputController {
         self.recordingURL = recordingURL
         audioRecorder = recorder
         ComposerAudioCaptureState.shared.setCapturing(true)
+        startMeterTimer()
         startServerRecordingTimeout()
         logger.info("Server voice input recording started")
     }
@@ -351,6 +369,7 @@ final class ComposerVoiceInputController {
         }
         audioRecorder = nil
         ComposerAudioCaptureState.shared.setCapturing(false)
+        stopMeterTimer()
 
         if activatedAudioSessionForRecording {
             try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
@@ -589,8 +608,16 @@ final class ComposerVoiceInputController {
         logger.info(
             "Voice input installing audio tap sampleRate=\(recordingFormat.sampleRate, privacy: .public) channels=\(recordingFormat.channelCount, privacy: .public)"
         )
-        inputNode.installTap(onBus: 0, bufferSize: 1_024, format: recordingFormat) { [weak request] buffer, _ in
+        let recognitionID = UUID()
+        activeRecognitionID = recognitionID
+        inputNode.installTap(onBus: 0, bufferSize: 1_024, format: recordingFormat) { [weak self, weak request] buffer, _ in
             request?.append(buffer)
+            let level = ComposerVoiceAudioLevel.normalized(buffer: buffer)
+            Task { @MainActor [weak self] in
+                guard let self, self.state == .listening,
+                      self.activeRecognitionID == recognitionID else { return }
+                self.inputLevel = ComposerVoiceAudioLevel.smoothed(previous: self.inputLevel, incoming: level)
+            }
         }
         audioTapInstalled = true
         logger.info("Voice input audio tap installed")
@@ -599,7 +626,7 @@ final class ComposerVoiceInputController {
 
         recognitionTask = speechRecognizer.recognitionTask(with: request) { [weak self] result, error in
             Task { @MainActor in
-                self?.handleRecognition(result: result, error: error)
+                self?.handleRecognition(result: result, error: error, recognitionID: recognitionID)
             }
         }
 
@@ -608,7 +635,10 @@ final class ComposerVoiceInputController {
         logger.info("Voice input audio engine started")
     }
 
-    private func handleRecognition(result: SFSpeechRecognitionResult?, error: Error?) {
+    private func handleRecognition(result: SFSpeechRecognitionResult?, error: Error?, recognitionID: UUID) {
+        guard activeRecognitionID == recognitionID,
+              state == .listening || state == .transcribing else { return }
+
         if let result {
             liveTranscript = result.bestTranscription.formattedString
             if let composedDraft = draftUpdateSession.composedDraft(for: liveTranscript) {
@@ -617,19 +647,45 @@ final class ComposerVoiceInputController {
         }
 
         if let error {
-            stopAcceptingDraftUpdates()
-            stopAudio(cancelTask: false)
-            state = .idle
-            if suppressNextRecognitionError {
-                suppressNextRecognitionError = false
-                return
-            }
-            errorMessage = error.localizedDescription
+            completeOnDeviceRecognition(error: error)
         } else if result?.isFinal == true {
-            stopAcceptingDraftUpdates()
-            stopAudio(cancelTask: false)
-            state = .idle
-            suppressNextRecognitionError = false
+            completeOnDeviceRecognition(error: nil)
+        }
+    }
+
+    /// Let Speech flush its final words after the user stops talking. Partial
+    /// text is already in the draft, so a slow final cannot make it disappear.
+    private func finishOnDeviceRecognition() {
+        guard state == .listening else { return }
+        state = .transcribing
+        stopAudio(cancelTask: false, preserveRecognitionTask: true)
+        recognitionFinalizationTask?.cancel()
+        let recognitionID = activeRecognitionID
+        recognitionFinalizationTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard let self, self.activeRecognitionID == recognitionID,
+                      self.state == .transcribing else { return }
+                self.completeOnDeviceRecognition(error: nil)
+            }
+        }
+    }
+
+    private func completeOnDeviceRecognition(error: Error?) {
+        recognitionFinalizationTask?.cancel()
+        recognitionFinalizationTask = nil
+        let shouldReportError = liveTranscript.isEmpty
+        let wasStoppedByUser = suppressNextRecognitionError
+        activeRecognitionID = nil
+        stopAcceptingDraftUpdates()
+        stopAudio(cancelTask: true)
+        state = .idle
+        suppressNextRecognitionError = false
+        if shouldReportError {
+            errorMessage = error != nil && !wasStoppedByUser
+                ? error?.localizedDescription
+                : String(localized: "No speech recognized. Try again.")
         }
     }
 
@@ -638,8 +694,14 @@ final class ComposerVoiceInputController {
         updateDraft = nil
     }
 
-    private func stopAudio(cancelTask: Bool) {
+    private func stopAudio(cancelTask: Bool, preserveRecognitionTask: Bool = false) {
         ComposerAudioCaptureState.shared.setCapturing(false)
+        stopMeterTimer()
+        if !preserveRecognitionTask {
+            recognitionFinalizationTask?.cancel()
+            recognitionFinalizationTask = nil
+            activeRecognitionID = nil
+        }
         serverRecordingTimeoutTask?.cancel()
         serverRecordingTimeoutTask = nil
 
@@ -670,7 +732,9 @@ final class ComposerVoiceInputController {
             recognitionTask?.cancel()
         }
 
-        recognitionTask = nil
+        if !preserveRecognitionTask {
+            recognitionTask = nil
+        }
         recognitionRequest = nil
 
         if activatedAudioSessionForRecording {
@@ -681,6 +745,7 @@ final class ComposerVoiceInputController {
     }
 
     private func discardServerRecording() {
+        stopMeterTimer()
         serverRecordingTimeoutTask?.cancel()
         serverRecordingTimeoutTask = nil
 
@@ -738,9 +803,30 @@ final class ComposerVoiceInputController {
         stopAcceptingDraftUpdates()
         cancelServerTranscription()
         discardServerRecording()
+        activeRecognitionID = nil
         stopAudio(cancelTask: true)
         state = .idle
         errorMessage = message
+    }
+
+    private func startMeterTimer() {
+        stopMeterTimer()
+        let timer = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.state == .serverListening, let recorder = self.audioRecorder else { return }
+                recorder.updateMeters()
+                let level = ComposerVoiceAudioLevel.normalized(decibels: Double(recorder.averagePower(forChannel: 0)))
+                self.inputLevel = ComposerVoiceAudioLevel.smoothed(previous: self.inputLevel, incoming: level)
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        meterTimer = timer
+    }
+
+    private func stopMeterTimer() {
+        meterTimer?.invalidate()
+        meterTimer = nil
+        inputLevel = 0
     }
 
     private func requestSpeechAuthorization() async -> SFSpeechRecognizerAuthorizationStatus {
@@ -902,6 +988,43 @@ enum ComposerVoiceInputPreflight {
             sampleRate: recordingFormat.sampleRate,
             channelCount: recordingFormat.channelCount
         )
+    }
+}
+
+/// A bounded, privacy-preserving display level. Only the scalar level reaches
+/// SwiftUI; no microphone samples are retained by the meter.
+enum ComposerVoiceAudioLevel {
+    static func normalized(decibels: Double) -> Double {
+        guard decibels.isFinite else { return 0 }
+        return min(1, max(0, (decibels + 50) / 42))
+    }
+
+    static func normalized(buffer: AVAudioPCMBuffer) -> Double {
+        guard let channels = buffer.floatChannelData, buffer.frameLength > 0 else { return 0 }
+        let channelCount = Int(buffer.format.channelCount)
+        let frameCount = Int(buffer.frameLength)
+        guard channelCount > 0 else { return 0 }
+
+        var sum = 0.0
+        var samples = 0
+        for channel in 0..<channelCount {
+            let data = channels[channel]
+            for frame in stride(from: 0, to: frameCount, by: 8) {
+                let sample = Double(data[frame])
+                sum += sample * sample
+                samples += 1
+            }
+        }
+        guard samples > 0 else { return 0 }
+        let rms = sqrt(sum / Double(samples))
+        return normalized(decibels: 20 * log10(max(rms, 0.000_001)))
+    }
+
+    static func smoothed(previous: Double, incoming: Double) -> Double {
+        let boundedIncoming = min(1, max(0, incoming.isFinite ? incoming : 0))
+        let boundedPrevious = min(1, max(0, previous.isFinite ? previous : 0))
+        let weight = boundedIncoming > boundedPrevious ? 0.55 : 0.16
+        return boundedPrevious + (boundedIncoming - boundedPrevious) * weight
     }
 }
 

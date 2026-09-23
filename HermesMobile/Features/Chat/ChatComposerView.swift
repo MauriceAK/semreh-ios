@@ -86,7 +86,7 @@ struct MessageComposerView: View {
     @ScaledMetric(relativeTo: .footnote) private var actionIconSize: CGFloat = 13
     @ScaledMetric(relativeTo: .footnote) private var actionButtonSize: CGFloat = 30
     @ScaledMetric(relativeTo: .title3) private var plusIconSize: CGFloat = 24
-    @ScaledMetric(relativeTo: .title3) private var plusButtonSize: CGFloat = 50
+    @ScaledMetric(relativeTo: .title3) private var plusButtonSize: CGFloat = 44
 
     @Binding var draftMessage: String
     @Binding var isFocused: Bool
@@ -174,6 +174,7 @@ struct MessageComposerView: View {
     let onCreateGitBranch: (GitCheckoutTarget) -> Void
     let onRefreshGitBranches: () -> Void
     var controlsPresentation: Binding<Bool>? = nil
+    var onStartNewChat: (() -> Void)? = nil
     var workspacePickerRequest = 0
     var gitBranchPickerRequest = 0
 
@@ -181,6 +182,9 @@ struct MessageComposerView: View {
     @State private var textInputHeight: CGFloat = 22
     @State private var noticeMessage: String?
     @State private var showsAllModelsSheet = false
+    @State private var showsConfigurationModelPicker = false
+    @State private var pendingConfigurationProfile: ProfileSummary?
+    @State private var startsNewChatAfterControlsDismiss = false
     @State private var showsWorkspaceSheet = false
     @State private var showsGitBranchSheet = false
     @State private var optimisticWorkspacePath: String?
@@ -290,7 +294,7 @@ struct MessageComposerView: View {
                 VStack(spacing: 6) {
                 if voiceNoteRecorder.isRecording {
                     ComposerVoiceRecordingBar(
-                        elapsed: voiceNoteRecorder.elapsed,
+                        recorder: voiceNoteRecorder,
                         isCancelArmed: voiceNoteCancelArmed,
                         onStop: { finishVoiceNote(translationHeight: 0) },
                         onCancel: cancelVoiceNote
@@ -298,7 +302,7 @@ struct MessageComposerView: View {
                     .padding(.horizontal, 16)
                 } else if let voiceNoteStatus {
                     ComposerVoiceStatusView(status: voiceNoteStatus)
-                } else if let voiceStatus {
+                } else if let voiceStatus, !voiceInput.isListening {
                     ComposerVoiceStatusView(status: voiceStatus)
                 } else if let composerStatus {
                     ComposerStatusView(
@@ -374,6 +378,13 @@ struct MessageComposerView: View {
                                 .padding(.bottom, 4)
                         }
 
+                        if voiceInput.isListening {
+                            ComposerVoiceLiveStatusView(input: voiceInput)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 14)
+                                .padding(.top, 8)
+                        }
+
                         HStack(alignment: isComposerExpanded ? .bottom : .center, spacing: 2) {
                             ComposerTextInputView(
                                 text: $draftMessage,
@@ -420,7 +431,8 @@ struct MessageComposerView: View {
                             }
                         }
                         .padding(.trailing, 8)
-                        .padding(.vertical, 4)
+                        .padding(.top, 2)
+                        .padding(.bottom, isComposerExpanded ? 8 : 2)
                     }
                     .adaptiveGlass(
                         .regular,
@@ -482,7 +494,7 @@ struct MessageComposerView: View {
                 finishVoiceNote(translationHeight: 0)
             }
             }
-            .sheet(isPresented: controlsPresentation ?? $showsAllModelsSheet, onDismiss: restoreFocusAfterPresentationIfNeeded) {
+            .sheet(isPresented: controlsPresentation ?? $showsAllModelsSheet, onDismiss: finishControlsDismissal) {
             controlsSheetContent
             }
             .toolbar {
@@ -603,30 +615,44 @@ struct MessageComposerView: View {
         .padding(.bottom, keyboardIsVisible ? 10 : 0)
     }
 
-    @ViewBuilder
     private var controlsSheetContent: some View {
-        if allowsModelAndWorkspaceChanges {
-            modelPickerSheetContent
-        } else {
-            NavigationStack {
-                ScrollView {
-                    chatControlsHeader.padding()
-                }
-                .background { SemrehBackdrop().ignoresSafeArea() }
-                .navigationTitle("Chat controls")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Button("Done") {
-                            controlsPresentation?.wrappedValue = false
-                            showsAllModelsSheet = false
-                        }
-                    }
+        NavigationStack {
+            ScrollView {
+                chatControlsHeader.padding(20)
+            }
+            .background { SemrehBackdrop().ignoresSafeArea() }
+            .navigationTitle("Chat settings")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done", action: dismissControls)
                 }
             }
-            .presentationDetents([.medium, .large])
-            .presentationDragIndicator(.visible)
-            .task { await onModelPickerOpen() }
+            .sheet(isPresented: $showsConfigurationModelPicker) {
+                modelPickerSheetContent
+            }
+        }
+        .presentationDetents(usesAccessibilityLayout ? [.large] : [.height(580), .large])
+        .presentationDragIndicator(.visible)
+        .task { await onModelPickerOpen() }
+    }
+
+    private func dismissControls() {
+        controlsPresentation?.wrappedValue = false
+        showsAllModelsSheet = false
+    }
+
+    private func finishControlsDismissal() {
+        if let profile = pendingConfigurationProfile {
+            pendingConfigurationProfile = nil
+            shouldRestoreFocusAfterPresentation = false
+            onSelectProfile(profile)
+        } else if startsNewChatAfterControlsDismiss {
+            startsNewChatAfterControlsDismiss = false
+            shouldRestoreFocusAfterPresentation = false
+            onStartNewChat?()
+        } else {
+            restoreFocusAfterPresentationIfNeeded()
         }
     }
 
@@ -647,14 +673,10 @@ struct MessageComposerView: View {
                 favoriteModelKeys = ModelFavoritesStore.shared.removeFavorite(for: option)
                 recentModelKeys = ModelRecentsStore.shared.removeRecent(for: option)
             },
-            controlsHeader: AnyView(chatControlsHeader),
             selectionDisabled: isConfigurationControlDisabled
         )
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
-        .task {
-            await onModelPickerOpen()
-        }
     }
 
     private var gitBranchSheetContent: some View {
@@ -732,10 +754,7 @@ struct MessageComposerView: View {
     }
 
     private var composerPlusMenu: some View {
-        // Item 5: the label's `chatMinimumHitTarget(in: Circle())` is decorative
-        // where this UIKit menu backer wins hit-testing, so the backer must get
-        // the same 8 pt expansion (the SwiftUI modifier's defaults) — otherwise
-        // the ring around the 50 pt circle is dead and edge taps do nothing.
+        // Match the UIKit menu backer's hit region to the SwiftUI expansion.
         ChatUIKitMenuButton(horizontalPadding: 8, verticalPadding: 8) {
             Image(systemName: "plus")
                 .font(.system(size: plusIconSize, weight: .regular))
@@ -822,59 +841,126 @@ struct MessageComposerView: View {
     }
 
     private var chatControlsHeader: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            if !isSingleProfileMode {
-                ComposerProfileSelectorMenu(
-                    profileOptions: profileOptions,
-                    selectedProfileName: selectedProfileName,
-                    selectedProfileTitle: selectedProfileTitle,
-                    isDisabled: isConfigurationControlDisabled,
-                    lineLimit: usesAccessibilityLayout ? 2 : 1,
-                    verticalPadding: 8,
-                    horizontalPadding: 10,
-                    color: metaControlColor,
-                    controlFont: .subheadline,
-                    chevronFont: .caption,
-                    onSelectProfile: onSelectProfile
-                )
-            }
-            Text(selectedModelTitle).font(.headline)
-                .accessibilityIdentifier("chatControlsCurrentModel")
-            if !allowsModelAndWorkspaceChanges {
-                Label("Model and workspace are read-only in this chat. Choose them in New Chat before sending your first message.", systemImage: "lock")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("chatControlsConfigurationReadOnly")
+        VStack(alignment: .leading, spacing: 20) {
+            HStack(spacing: 14) {
+                if let server = workspaceManagementServer,
+                   let identity = BirdAvatarIdentity(server: server, profile: selectedProfileName) {
+                    BirdAvatarView(identity: identity)
+                        .frame(width: 62, height: 62)
+                        .accessibilityHidden(true)
+                }
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Workspace").font(.subheadline.weight(.medium))
-                    Text(selectedWorkspacePath ?? "Default workspace")
-                        .font(.subheadline)
-                        .textSelection(.enabled)
+                    Text(selectedProfileTitle)
+                        .font(AppFont.title2(weight: .semibold))
+                    Text("Profile & model")
+                        .font(AppFont.subheadline())
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+            }
+
+            VStack(spacing: 0) {
+                if !isSingleProfileMode {
+                    Menu {
+                        ForEach(profileOptions, id: \.self) { profile in
+                            Button {
+                                guard profile.normalizedName != selectedProfileName else { return }
+                                pendingConfigurationProfile = profile
+                                dismissControls()
+                            } label: {
+                                if profile.normalizedName == selectedProfileName {
+                                    Label(profile.displayName, systemImage: "checkmark")
+                                } else {
+                                    Text(profile.displayName)
+                                }
+                            }
+                        }
+                    } label: {
+                        configurationRow("Profile", value: selectedProfileTitle, icon: "person.crop.circle", accessory: "chevron.up.chevron.down")
+                    }
+                    .disabled(isConfigurationControlDisabled || profileOptions.isEmpty)
+                    .accessibilityLabel("Choose profile")
+                    .accessibilityValue(selectedProfileTitle)
+                    Divider().padding(.leading, 52)
+                }
+                Button {
+                    showsConfigurationModelPicker = true
+                } label: {
+                    configurationRow("Model", value: selectedModelTitle, icon: "sparkles", accessory: allowsModelAndWorkspaceChanges ? "chevron.right" : "lock")
+                }
+                .disabled(!allowsModelAndWorkspaceChanges || isConfigurationControlDisabled)
+                .accessibilityIdentifier("chatControlsModelButton")
+                .accessibilityLabel("Model")
+                .accessibilityValue(selectedModelTitle)
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 14)
+            .adaptiveGlass(.regular, isInteractive: false, fallbackMaterial: .thinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+
+            if !allowsModelAndWorkspaceChanges {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("This chat keeps its original model and workspace. Start a new chat to choose different ones.")
+                        .font(AppFont.subheadline())
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("chatControlsConfigurationReadOnly")
+                    if onStartNewChat != nil {
+                        Button {
+                            startsNewChatAfterControlsDismiss = true
+                            dismissControls()
+                        } label: {
+                            Label("New chat with \(selectedProfileTitle)", systemImage: "square.and.pencil")
+                                .font(AppFont.subheadline(weight: .semibold))
+                                .frame(maxWidth: .infinity, minHeight: 44)
+                        }
+                        .buttonStyle(.bordered)
+                        .buttonBorderShape(.capsule)
+                        .disabled(isConfigurationControlDisabled)
+                        .accessibilityIdentifier("chatControlsNewChat")
+                    }
                 }
             }
+
             if showsReasoningControl {
-                ComposerReasoningStepControl(
-                    supportedEfforts: supportedReasoningEfforts,
-                    selectedEffort: selectedReasoningEffort,
-                    allowsInheritance: allowsReasoningInheritance,
-                    isDisabled: isReasoningControlDisabled,
-                    isDeferred: isReasoningChangeDeferred,
-                    onSelect: onSelectReasoningEffort
-                )
-                .id("\(selectedModelProviderID ?? "")|\(selectedModelID ?? "")")
-            }
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Context").font(.subheadline.weight(.medium))
-                if let snapshot = contextWindowSnapshot,
-                   let used = snapshot.tokensUsed, used >= 0,
-                   let limit = snapshot.contextLength, limit > 0 {
-                    Text(ContextWindowFormatter.tokensLabel(from: snapshot) + " tokens")
-                    ProgressView(value: min(Double(used) / Double(limit), 1))
-                        .accessibilityLabel("Context used")
-                        .accessibilityValue(ContextWindowFormatter.tokensLabel(from: snapshot))
-                } else {
-                    Text("Context usage unavailable").foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 10) {
+                    Label("Thinking", systemImage: "brain")
+                        .font(AppFont.subheadline(weight: .semibold))
+                    ComposerReasoningStepControl(
+                        supportedEfforts: supportedReasoningEfforts,
+                        selectedEffort: selectedReasoningEffort,
+                        allowsInheritance: allowsReasoningInheritance,
+                        isDisabled: isReasoningControlDisabled,
+                        isDeferred: isReasoningChangeDeferred,
+                        onSelect: onSelectReasoningEffort
+                    )
+                    .id("\(selectedModelProviderID ?? "")|\(selectedModelID ?? "")")
                 }
+            }
+            DisclosureGroup {
+                VStack(alignment: .leading, spacing: 14) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Workspace").font(AppFont.caption(weight: .semibold))
+                        Text(selectedWorkspacePath ?? "Default workspace")
+                            .font(AppFont.subheadline())
+                            .textSelection(.enabled)
+                    }
+                    if let snapshot = contextWindowSnapshot,
+                       let used = snapshot.tokensUsed, used >= 0,
+                       let limit = snapshot.contextLength, limit > 0 {
+                        Text(ContextWindowFormatter.tokensLabel(from: snapshot) + " tokens")
+                        ProgressView(value: min(Double(used) / Double(limit), 1))
+                            .accessibilityLabel("Context used")
+                            .accessibilityValue(ContextWindowFormatter.tokensLabel(from: snapshot))
+                    } else {
+                        Text("Context usage unavailable")
+                            .font(AppFont.caption())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.top, 12)
+            } label: {
+                Label("Session details", systemImage: "info.circle")
+                    .font(AppFont.subheadline())
             }
             if let configurationErrorMessage {
                 Text(configurationErrorMessage).font(.caption).foregroundStyle(.secondary)
@@ -892,12 +978,33 @@ struct MessageComposerView: View {
                 .accessibilityValue(configurationDiagnosticCode)
                 .accessibilityIdentifier("chatControlsConfigurationDiagnostic")
             }
-            if allowsModelAndWorkspaceChanges {
-                Text("Models").font(.headline)
-                if isLoadingModels { ProgressView("Loading models") }
-            }
+            if isLoadingModels { ProgressView("Loading settings").font(AppFont.caption()) }
         }
+        .tint(.primary)
+    }
+
+    private func configurationRow(_ title: String, value: String, icon: String, accessory: String) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 19, weight: .regular))
+                .foregroundStyle(.secondary)
+                .frame(width: 26)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).font(AppFont.caption()).foregroundStyle(.secondary)
+                Text(value)
+                    .font(AppFont.body(weight: .medium))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier(title == "Model" ? "chatControlsCurrentModel" : "chatControlsCurrentProfile")
+            }
+            Spacer(minLength: 8)
+            Image(systemName: accessory)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.tertiary)
+        }
+        .foregroundStyle(.primary)
+        .frame(maxWidth: .infinity, minHeight: 64, alignment: .leading)
         .padding(.vertical, 8)
+        .contentShape(Rectangle())
     }
 
     private var chatOptionsMenu: some View {
@@ -973,12 +1080,8 @@ struct MessageComposerView: View {
 
     private var voiceStatus: ComposerVoiceStatus? {
         switch voiceInput.state {
-        case .listening:
-            return ComposerVoiceStatus(text: String(localized: "Listening..."), systemImage: "waveform", isError: false)
-        case .serverListening:
-            return ComposerVoiceStatus(text: String(localized: "Recording..."), systemImage: "mic.fill", isError: false)
-        case .transcribing:
-            return ComposerVoiceStatus(text: String(localized: "Transcribing..."), systemImage: "waveform", isError: false)
+        case .listening, .serverListening, .transcribing:
+            return nil
         case .requestingPermission:
             return ComposerVoiceStatus(
                 text: String(localized: "Requesting voice permissions..."),
@@ -1122,11 +1225,13 @@ struct MessageComposerView: View {
     }
 
     private var isComposerExpanded: Bool {
-        draftMessage.contains("\n") || textFieldHeight > 44
+        // A wrapped second line needs the same bottom-anchored controls as an
+        // explicit newline. Waiting for three lines made the mic/send jump.
+        draftMessage.contains("\n") || textFieldHeight > 26
     }
 
     private var composerCornerRadius: CGFloat {
-        isComposerExpanded ? 26 : 22
+        isComposerExpanded ? 20 : 24
     }
 
     private var textFieldVerticalPadding: CGFloat {

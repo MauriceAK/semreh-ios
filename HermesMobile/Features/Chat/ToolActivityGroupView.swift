@@ -3,44 +3,48 @@ import SwiftUI
 struct ToolActivityGroupView: View {
     let group: ToolCallGroup
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @AppStorage(ChatTranscriptDisplaySettings.toolCardsStartExpandedKey) private var startsExpanded = false
     @State private var userToggledExpansion: Bool?
+#if DEBUG
+    @Environment(\.prototypeCodeViewport) private var directViewport
+#endif
 
     private var isExpanded: Bool {
-        ChatTranscriptDisplaySettings.isCardExpanded(
+#if DEBUG
+        if directViewport?.forceExpandTool == true, userToggledExpansion == nil { return true }
+#endif
+        return ChatTranscriptDisplaySettings.isCardExpanded(
             userToggled: userToggledExpansion,
             startsExpanded: startsExpanded
         )
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: isExpanded ? 4 : 0) {
+        VStack(alignment: .leading, spacing: isExpanded ? 2 : 0) {
             Button {
                 toggleExpansion()
             } label: {
                 header
             }
             .buttonStyle(.plain)
-            .chatMinimumHitTarget(horizontalPadding: 10, verticalPadding: 8, in: Rectangle())
+            .chatMinimumHitTarget(horizontalPadding: 0, verticalPadding: 5, in: Rectangle())
             .accessibilityLabel(activityAccessibilityLabel)
             .accessibilityHint(isExpanded ? "Double tap to collapse details." : "Double tap to expand details.")
 
             if isExpanded {
                 VStack(alignment: .leading, spacing: 4) {
-                    ForEach(group.toolCalls) { toolCall in
-                        ToolCallCardView(toolCall: toolCall)
+                    if group.toolCalls.count == 1, let toolCall = group.toolCalls.first {
+                        ToolCallCardView(toolCall: toolCall, showsHeader: false)
+                    } else {
+                        ForEach(group.toolCalls) { toolCall in
+                            ToolCallCardView(toolCall: toolCall)
+                        }
                     }
                 }
+                .padding(.leading, 28)
                 .transition(disclosureTransition)
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, isExpanded ? 8 : 6)
-        .chatTimelineAccessorySurface(
-            fallbackMaterial: .thinMaterial,
-            cornerRadius: 10
-        )
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .contain)
         .transaction { transaction in
@@ -50,62 +54,16 @@ struct ToolActivityGroupView: View {
         }
     }
 
-    private var usesStackedHeader: Bool {
-        dynamicTypeSize.isAccessibilitySize
-    }
-
     private var header: some View {
-        HStack(alignment: usesStackedHeader ? .top : .center, spacing: 8) {
-            Image(systemName: activityIcon)
-                .font(.system(size: 14, weight: .regular))
-                .foregroundStyle(activityColor)
-                .frame(width: 18, height: 18)
-
-            if usesStackedHeader {
-                VStack(alignment: .leading, spacing: 3) {
-                    titleText
-                    if let collapsedStateText {
-                        collapsedStatus(text: collapsedStateText)
-                    }
-                }
-            } else {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    titleText
-                    if let collapsedStateText {
-                        collapsedStatus(text: collapsedStateText)
-                    }
-                }
-            }
-
-            Image(systemName: isExpanded ? "chevron.down" : "chevron.forward")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        // Compact visual row for standard sizes; accessibility sizes keep the
-        // full 44pt minimum (touch height restored by the button slop above).
-        .frame(minHeight: usesStackedHeader ? 44 : 28)
-        .contentShape(Rectangle())
-    }
-
-    @ViewBuilder
-    private func collapsedStatus(text: String) -> some View {
-        if group.hasFailedTool {
-            TranscriptStatusPill(text: text, color: activityColor)
-        } else {
-            Text(text)
-                .font(AppFont.caption2(weight: .semibold))
-                .foregroundStyle(activityColor)
-                .lineLimit(1)
-                .truncationMode(.tail)
-        }
-    }
-
-    private var titleText: some View {
-        Text(actionSummary)
-            .font(AppFont.subheadline())
-            .lineLimit(1)
-            .modifier(ReasoningTextShineModifier(isActive: !group.isComplete))
+        TranscriptActivityDisclosureLabel(
+            symbol: activityIcon,
+            title: actionSummary,
+            status: group.hasFailedTool ? collapsedStateText : nil,
+            isExpanded: isExpanded,
+            isFailure: group.hasFailedTool,
+            isActive: !group.isComplete && !group.hasFailedTool,
+            isCompact: true
+        )
     }
 
     private var actionSummary: String {
@@ -118,14 +76,6 @@ struct ToolActivityGroupView: View {
         }
 
         return ToolActivityGroupPresentation.icon(for: group)
-    }
-
-    private var activityColor: Color {
-        if group.hasFailedTool {
-            return .red
-        }
-
-        return .secondary
     }
 
     private var collapsedStateText: String? {
@@ -158,11 +108,15 @@ enum ToolActivityGroupPresentation {
         guard let latestToolCall = group.toolCalls.last else {
             return String(localized: "No actions")
         }
+        if group.toolCalls.count > 1 {
+            return String(localized: "\(group.toolCalls.count) actions")
+        }
         return ToolCallPresentationLabel.title(for: latestToolCall)
     }
 
     static func icon(for group: ToolCallGroup) -> String {
-        ToolCallPresentationLabel.icon(for: group.toolCalls.last?.name)
+        if group.toolCalls.count > 1 { return "square.stack.3d.up" }
+        return ToolCallPresentationLabel.icon(for: group.toolCalls.last?.name)
     }
 
     /// Reflects the most recent action without estimating a group duration.
@@ -174,6 +128,9 @@ enum ToolActivityGroupPresentation {
         }
         guard !group.toolCalls.isEmpty else { return nil }
         guard group.isComplete else { return String(localized: "Running") }
+
+        // A latest-action duration is not the duration of an entire group.
+        guard group.toolCalls.count == 1 else { return String(localized: "Completed") }
 
         if let duration = group.toolCalls.last?.duration,
            duration.isFinite,

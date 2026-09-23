@@ -481,13 +481,13 @@ final class MessagesSessionRowFormatterTests: XCTestCase {
         )
         XCTAssertEqual(
             MessagesSessionRowFormatter.previewText(for: cronSession),
-            "Scheduled run · goku-ios"
+            "No message preview yet"
         )
 
         let cronWithoutWorkspace = SessionSummary(sessionId: "cron_plain")
         XCTAssertEqual(
             MessagesSessionRowFormatter.previewText(for: cronWithoutWorkspace),
-            "Scheduled run"
+            "No message preview yet"
         )
 
         let subagentSession = SessionSummary(
@@ -497,7 +497,7 @@ final class MessagesSessionRowFormatterTests: XCTestCase {
         )
         XCTAssertEqual(
             MessagesSessionRowFormatter.previewText(for: subagentSession),
-            "Subagent run · goku-ios"
+            "No message preview yet"
         )
 
         let cliSession = SessionSummary(
@@ -507,7 +507,7 @@ final class MessagesSessionRowFormatterTests: XCTestCase {
         )
         XCTAssertEqual(
             MessagesSessionRowFormatter.previewText(for: cliSession),
-            "CLI session · goku-ios"
+            "No message preview yet"
         )
     }
 
@@ -520,7 +520,7 @@ final class MessagesSessionRowFormatterTests: XCTestCase {
         )
         XCTAssertEqual(
             MessagesSessionRowFormatter.previewText(for: modelWithWorkspace),
-            "claude-3-5-sonnet · goku-ios"
+            "No message preview yet"
         )
 
         let modelWithProfile = SessionSummary(
@@ -530,7 +530,7 @@ final class MessagesSessionRowFormatterTests: XCTestCase {
         )
         XCTAssertEqual(
             MessagesSessionRowFormatter.previewText(for: modelWithProfile),
-            "gpt-4o · Chabby"
+            "No message preview yet"
         )
 
         let modelOnly = SessionSummary(
@@ -539,7 +539,7 @@ final class MessagesSessionRowFormatterTests: XCTestCase {
         )
         XCTAssertEqual(
             MessagesSessionRowFormatter.previewText(for: modelOnly),
-            "gemini-2.0-flash"
+            "No message preview yet"
         )
     }
 
@@ -558,6 +558,15 @@ final class MessagesSessionRowFormatterTests: XCTestCase {
             ),
             "The latest reply uses two lines."
         )
+        XCTAssertEqual(
+            MessagesSessionRowFormatter.previewText(
+                for: session,
+                latestMessagePreview: "The latest reply",
+                liveOwnerSessionIDs: ["latest-message"],
+                isUnread: true
+            ),
+            "The latest reply"
+        )
     }
 
     func testPreviewTextBoundsLongLatestMessageAndKeepsMetadataFallback() {
@@ -573,7 +582,7 @@ final class MessagesSessionRowFormatterTests: XCTestCase {
         )
         XCTAssertEqual(
             MessagesSessionRowFormatter.previewText(for: session),
-            "fixture-model · hermes-mobile"
+            "No message preview yet"
         )
     }
 
@@ -639,7 +648,7 @@ final class MessagesSessionRowFormatterTests: XCTestCase {
         )
         XCTAssertEqual(
             MessagesSessionRowFormatter.previewText(for: singleMessage),
-            "1 message · goku-ios"
+            "No message preview yet"
         )
 
         let multipleMessagesWithProfile = SessionSummary(
@@ -650,17 +659,17 @@ final class MessagesSessionRowFormatterTests: XCTestCase {
         )
         XCTAssertEqual(
             MessagesSessionRowFormatter.previewText(for: multipleMessagesWithProfile),
-            "5 messages · goku-ios · Chabby"
+            "No message preview yet"
         )
 
         let emptySession = SessionSummary(sessionId: "f3")
         XCTAssertEqual(
             MessagesSessionRowFormatter.previewText(for: emptySession, isViewingCachedData: false),
-            "Hermes session"
+            "No message preview yet"
         )
         XCTAssertEqual(
             MessagesSessionRowFormatter.previewText(for: emptySession, isViewingCachedData: true),
-            "Cached Hermes session"
+            "No message preview yet"
         )
     }
 

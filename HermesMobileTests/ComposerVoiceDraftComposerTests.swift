@@ -1,4 +1,5 @@
 import AVFoundation
+import SwiftUI
 import UIKit
 import XCTest
 @testable import HermesMobile
@@ -62,6 +63,48 @@ final class ComposerVoiceDraftComposerTests: XCTestCase {
         XCTAssertNoThrow(
             try ComposerVoiceInputPreflight.validate(sampleRate: 44_100, channelCount: 1)
         )
+    }
+
+    func testVoiceLevelMapsSilenceSpeechAndInvalidPowerIntoBoundedRange() {
+        XCTAssertEqual(ComposerVoiceAudioLevel.normalized(decibels: -.infinity), 0)
+        XCTAssertEqual(ComposerVoiceAudioLevel.normalized(decibels: -60), 0)
+        XCTAssertGreaterThan(ComposerVoiceAudioLevel.normalized(decibels: -25), 0.5)
+        XCTAssertEqual(ComposerVoiceAudioLevel.normalized(decibels: 0), 1)
+    }
+
+    func testVoiceLevelReadsSyntheticAudioWithoutKeepingSamples() {
+        let format = AVAudioFormat(standardFormatWithSampleRate: 44_100, channels: 1)!
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 32)!
+        buffer.frameLength = 32
+        let samples = buffer.floatChannelData![0]
+        for index in 0..<32 { samples[index] = 0 }
+        XCTAssertEqual(ComposerVoiceAudioLevel.normalized(buffer: buffer), 0)
+
+        for index in 0..<32 { samples[index] = 0.2 }
+        XCTAssertGreaterThan(ComposerVoiceAudioLevel.normalized(buffer: buffer), 0.6)
+    }
+
+    func testVoiceLevelAttacksFasterThanItDecays() {
+        let attack = ComposerVoiceAudioLevel.smoothed(previous: 0, incoming: 1)
+        let decay = ComposerVoiceAudioLevel.smoothed(previous: 1, incoming: 0)
+        XCTAssertGreaterThan(attack, 1 - decay)
+        XCTAssertTrue((0...1).contains(ComposerVoiceAudioLevel.smoothed(previous: .nan, incoming: .infinity)))
+    }
+
+    @MainActor
+    func testVoiceStatusMeterAndTranscribingKeepTheSameHeight() {
+        let sizes = [
+            ComposerVoiceStatus(text: "Listening...", systemImage: "waveform", isError: false, inputLevel: 0),
+            ComposerVoiceStatus(text: "Listening...", systemImage: "waveform", isError: false, inputLevel: 1),
+            ComposerVoiceStatus(text: "Transcribing...", systemImage: "waveform", isError: false, isTranscribing: true)
+        ].map { status in
+            UIHostingController(rootView: ComposerVoiceStatusView(status: status))
+                .sizeThatFits(in: CGSize(width: 240, height: 100))
+        }
+
+        XCTAssertGreaterThan(sizes[0].height, 0)
+        XCTAssertEqual(sizes[0].height, sizes[1].height, accuracy: 1)
+        XCTAssertEqual(sizes[1].height, sizes[2].height, accuracy: 1)
     }
 
     func testVoiceInputPreflightRejectsZeroSampleRate() {
