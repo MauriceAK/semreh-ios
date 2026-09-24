@@ -393,10 +393,13 @@ struct HermesMobileApp: App {
     @AppStorage(AppTheme.storageKey) private var appThemeRawValue = AppTheme.system.rawValue
 
     init() {
-        // Route taps on "response complete" notifications into the app's existing
-        // deep-link path (item 4). Set during app init so a cold-launch tap on a
-        // killed app still lands before the first scene connects.
-        UNUserNotificationCenter.current().delegate = ResponseCompletionNotificationDelegate.shared
+        // Chat-only prototype (INVENTORY §7 item 1): routing taps on
+        // "response complete" notifications into deep links is non-chat
+        // background work, so it stays disabled while the prototype shell is
+        // active. Everything else here is chat- or auth-critical and stays on.
+        if !PrototypeConfig.isEnabled {
+            UNUserNotificationCenter.current().delegate = ResponseCompletionNotificationDelegate.shared
+        }
 #if DEBUG
         // This is intentionally before ContentView/ChatViewModel creation so
         // the normal persisted restore reader consumes the seeded row.

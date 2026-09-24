@@ -211,6 +211,12 @@
 		C0DE12000000000000000005 /* TranscriptLinkPreviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE12000000000000000006 /* TranscriptLinkPreviewView.swift */; };
 		C0DE20000000000000000001 /* ChatTactileButtonStyle.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE20000000000000000002 /* ChatTactileButtonStyle.swift */; };
 		C0DE21000000000000000001 /* ChatMotion.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE21000000000000000002 /* ChatMotion.swift */; };
+		P701C0DE0000000000000001 /* PrototypeConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = P701C0DE0000000000000002 /* PrototypeConfig.swift */; };
+		P701C0DE0000000000000011 /* PrototypeRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = P701C0DE0000000000000012 /* PrototypeRootView.swift */; };
+		P701C0DE0000000000000021 /* BotListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = P701C0DE0000000000000022 /* BotListView.swift */; };
+		P701C0DE0000000000000031 /* ConversationListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = P701C0DE0000000000000032 /* ConversationListView.swift */; };
+		P701C0DE0000000000000041 /* NewChatFlow.swift in Sources */ = {isa = PBXBuildFile; fileRef = P701C0DE0000000000000042 /* NewChatFlow.swift */; };
+		P701C0DE0000000000000051 /* PrototypeChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = P701C0DE0000000000000052 /* PrototypeChatView.swift */; };
 		C0DE25000000000000000001 /* ChatScrollPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE25000000000000000002 /* ChatScrollPolicy.swift */; };
 		C0DE25000000000000000003 /* ChatScrollPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE25000000000000000004 /* ChatScrollPolicyTests.swift */; };
 		F21000000000000000000001 /* ChatFrameCallbackTimingProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = F21000000000000000000002 /* ChatFrameCallbackTimingProbe.swift */; };
@@ -668,6 +674,12 @@
 		C0DE12000000000000000006 /* TranscriptLinkPreviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptLinkPreviewView.swift; sourceTree = "<group>"; };
 		C0DE20000000000000000002 /* ChatTactileButtonStyle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatTactileButtonStyle.swift; sourceTree = "<group>"; };
 		C0DE21000000000000000002 /* ChatMotion.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatMotion.swift; sourceTree = "<group>"; };
+		P701C0DE0000000000000002 /* PrototypeConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrototypeConfig.swift; sourceTree = "<group>"; };
+		P701C0DE0000000000000012 /* PrototypeRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrototypeRootView.swift; sourceTree = "<group>"; };
+		P701C0DE0000000000000022 /* BotListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BotListView.swift; sourceTree = "<group>"; };
+		P701C0DE0000000000000032 /* ConversationListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationListView.swift; sourceTree = "<group>"; };
+		P701C0DE0000000000000042 /* NewChatFlow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewChatFlow.swift; sourceTree = "<group>"; };
+		P701C0DE0000000000000052 /* PrototypeChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrototypeChatView.swift; sourceTree = "<group>"; };
 		C0DE25000000000000000002 /* ChatScrollPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatScrollPolicy.swift; sourceTree = "<group>"; };
 		C0DE25000000000000000004 /* ChatScrollPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatScrollPolicyTests.swift; sourceTree = "<group>"; };
 		F21000000000000000000002 /* ChatFrameCallbackTimingProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatFrameCallbackTimingProbe.swift; sourceTree = "<group>"; };
@@ -1240,8 +1252,38 @@
 				D50000000000000000000003 /* Teams */,
 				D51000000000000000000003 /* AppShell */,
 				D51100000000000000000003 /* You */,
+				P701C0DE0000000000000100 /* Prototype */,
 			);
 			path = Features;
+			sourceTree = "<group>";
+		};
+		P701C0DE0000000000000100 /* Prototype */ = {
+			isa = PBXGroup;
+			children = (
+				P701C0DE0000000000000002 /* PrototypeConfig.swift */,
+				P701C0DE0000000000000110 /* Shell */,
+				P701C0DE0000000000000120 /* Chat */,
+			);
+			path = Prototype;
+			sourceTree = "<group>";
+		};
+		P701C0DE0000000000000110 /* Shell */ = {
+			isa = PBXGroup;
+			children = (
+				P701C0DE0000000000000022 /* BotListView.swift */,
+				P701C0DE0000000000000032 /* ConversationListView.swift */,
+				P701C0DE0000000000000042 /* NewChatFlow.swift */,
+				P701C0DE0000000000000012 /* PrototypeRootView.swift */,
+			);
+			path = Shell;
+			sourceTree = "<group>";
+		};
+		P701C0DE0000000000000120 /* Chat */ = {
+			isa = PBXGroup;
+			children = (
+				P701C0DE0000000000000052 /* PrototypeChatView.swift */,
+			);
+			path = Chat;
 			sourceTree = "<group>";
 		};
 		1A2B3C4D5E6F7000000000C4 /* Onboarding */ = {
@@ -2033,6 +2075,12 @@
 				C0DE12000000000000000005 /* TranscriptLinkPreviewView.swift in Sources */,
 				C0DE20000000000000000001 /* ChatTactileButtonStyle.swift in Sources */,
 				C0DE21000000000000000001 /* ChatMotion.swift in Sources */,
+				P701C0DE0000000000000001 /* PrototypeConfig.swift in Sources */,
+				P701C0DE0000000000000011 /* PrototypeRootView.swift in Sources */,
+				P701C0DE0000000000000021 /* BotListView.swift in Sources */,
+				P701C0DE0000000000000031 /* ConversationListView.swift in Sources */,
+				P701C0DE0000000000000041 /* NewChatFlow.swift in Sources */,
+				P701C0DE0000000000000051 /* PrototypeChatView.swift in Sources */,
 				C0DE25000000000000000001 /* ChatScrollPolicy.swift in Sources */,
 				F21000000000000000000001 /* ChatFrameCallbackTimingProbe.swift in Sources */,
 				C0DE22000000000000000001 /* ChatHaptics.swift in Sources */,
