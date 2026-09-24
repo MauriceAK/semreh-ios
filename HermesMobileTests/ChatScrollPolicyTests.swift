@@ -2287,4 +2287,17 @@ final class ChatScrollPolicyTests: XCTestCase {
     }
 #endif
 
+    func testDebugTranscriptWindowPolicyHalfOverlapStepping() {
+        // Windowed-eager prototype contract: paging steps by half the window
+        // with the top half retained as overlap for anchor preservation.
+        let older = ChatDebugTranscriptWindowPolicy.older(current: 20..<60, totalCount: 60, limit: 40, overlap: 20)
+        XCTAssertEqual(older, 0..<40)
+        let newer = ChatDebugTranscriptWindowPolicy.newer(current: 0..<40, totalCount: 60, limit: 40, overlap: 20)
+        XCTAssertEqual(newer, 20..<60)
+        let topClamp = ChatDebugTranscriptWindowPolicy.older(current: 0..<40, totalCount: 60, limit: 40, overlap: 20)
+        XCTAssertEqual(topClamp, 0..<40, "Paging older at the top of loaded history must not move.")
+        let tailClamp = ChatDebugTranscriptWindowPolicy.newer(current: 20..<60, totalCount: 60, limit: 40, overlap: 20)
+        XCTAssertEqual(tailClamp, 20..<60, "Paging newer at the tail must not move.")
+    }
+
 }

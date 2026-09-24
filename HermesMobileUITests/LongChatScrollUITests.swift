@@ -2010,6 +2010,401 @@ final class LongChatScrollUITests: XCTestCase {
         attachScreenshot(named: "bounded-far-arrow-tail")
     }
 
+    // MARK: - Windowed-eager prototype (flag-gated experiment, 2026-09-24)
+
+    private let rich30Marker = "SEMREH_RICH30_END"
+
+    func testWindowedEagerFourTallColdTailSingleTapArrow() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.terminate()
+        app.launchArguments = ["--chat-performance-four-tall-lab", "--chat-windowed-eager",
+                               "--chat-viewport-follow-latest-open", "--chat-viewport-diagnostic",
+                               "--composer-test-fresh-draft"]
+        app.launch()
+        let transcript = app.scrollViews["chat-transcript-scroll"]
+        XCTAssertTrue(transcript.waitForExistence(timeout: 20))
+        print("SEMREH_WIN_EAGER_FOURTALL_LAUNCH at=\(Date())")
+        let tail = app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS[c] %@", "SEMREH_FOUR_TALL_CODE_END"
+        )).firstMatch
+        assertHittable(tail, timeout: 25, message: "Windowed-eager cold open must reveal the four-tall tail.")
+        print("SEMREH_WIN_EAGER_FOURTALL_FIRST_READABLE at=\(Date())")
+        attachScreenshot(named: "win-eager-four-tall-cold-tail")
+        XCTAssertTrue(app.buttons["View full code (322 lines)"].firstMatch.exists
+                      || app.buttons["Copy code"].firstMatch.exists,
+                      "Rich code affordances must be retained in the windowed-eager transcript.")
+        transcript.swipeDown()
+        transcript.swipeDown()
+        let arrow = app.buttons[scrollToLatestLabel]
+        XCTAssertTrue(arrow.waitForExistence(timeout: 10),
+                      "Arrow must appear after scrolling away from the four-tall tail.")
+        attachScreenshot(named: "win-eager-four-tall-away")
+        print("SEMREH_WIN_EAGER_FOURTALL_ARROW_TAP at=\(Date())")
+        arrow.tap()
+        assertHittable(tail, timeout: 15, message: "Single arrow tap must land on the four-tall tail.")
+        print("SEMREH_WIN_EAGER_FOURTALL_ARROW_TAIL at=\(Date())")
+        attachScreenshot(named: "win-eager-four-tall-arrow-tail")
+    }
+
+    func testWindowedEagerRich30ColdOpenScrollArrow() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.terminate()
+        app.launchArguments = ["--chat-performance-rich30-lab", "--chat-windowed-eager",
+                               "--chat-viewport-follow-latest-open", "--chat-viewport-diagnostic",
+                               "--composer-test-fresh-draft"]
+        app.launch()
+        let transcript = app.scrollViews["chat-transcript-scroll"]
+        XCTAssertTrue(transcript.waitForExistence(timeout: 20))
+        print("SEMREH_WIN_EAGER_RICH30_LAUNCH at=\(Date())")
+        let tail = app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS[c] %@", rich30Marker
+        )).firstMatch
+        assertHittable(tail, timeout: 30, message: "Rich30 cold open must reveal the tail marker.")
+        print("SEMREH_WIN_EAGER_RICH30_FIRST_READABLE at=\(Date())")
+        attachScreenshot(named: "win-eager-rich30-cold-tail")
+        transcript.swipeDown()
+        transcript.swipeDown()
+        let arrow = app.buttons[scrollToLatestLabel]
+        XCTAssertTrue(arrow.waitForExistence(timeout: 10),
+                      "Arrow must appear after scrolling away from the rich30 tail.")
+        print("SEMREH_WIN_EAGER_RICH30_ARROW_TAP at=\(Date())")
+        arrow.tap()
+        assertHittable(tail, timeout: 15, message: "Rich30 arrow must land on the tail.")
+        print("SEMREH_WIN_EAGER_RICH30_ARROW_TAIL at=\(Date())")
+        attachScreenshot(named: "win-eager-rich30-arrow-tail")
+    }
+
+    func testWindowedEagerPagingContractSlidesAndReturns() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.terminate()
+        app.launchArguments = ["--chat-performance-rich30-lab", "--chat-windowed-eager",
+                               "--chat-windowed-rows=40", "--chat-viewport-follow-latest-open",
+                               "--chat-viewport-diagnostic", "--composer-test-fresh-draft"]
+        app.launch()
+        let transcript = app.scrollViews["chat-transcript-scroll"]
+        XCTAssertTrue(transcript.waitForExistence(timeout: 20))
+        let tail = app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", rich30Marker)).firstMatch
+        assertHittable(tail, timeout: 30, message: "Paging: cold open must reveal the tail.")
+        attachScreenshot(named: "win-eager-paging-tail")
+
+        // The bounded window must expose its in-transcript Load earlier affordance.
+        XCTAssertTrue(app.buttons["chat-debug-older-loaded"].waitForExistence(timeout: 8),
+                      "The bounded window must expose its Load earlier affordance.")
+
+        let firstRow = app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", "Rich group")).firstMatch
+        XCTAssertTrue(firstRow.exists, "Reader must start on readable rich content.")
+        let beforeLabel = firstRow.label
+
+        // Repeated paging: slide the bounded window older several times.
+        let pageOlder = app.buttons["windowed-page-older"]
+        XCTAssertTrue(pageOlder.waitForExistence(timeout: 8), "Debug paging seam must be available.")
+        var slides = 0
+        for _ in 0..<3 {
+            print("SEMREH_WIN_EAGER_PAGE_OLDER_\(slides) at=\(Date())")
+            pageOlder.tap()
+            slides += 1
+            Thread.sleep(forTimeInterval: 0.8)
+        }
+        XCTAssertEqual(slides, 3, "Repeated paging taps must all dispatch.")
+        let slidRow = app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", "Rich group")).firstMatch
+        XCTAssertTrue(slidRow.exists, "Sliding must leave readable rich content (no blank region).")
+        XCTAssertNotEqual(slidRow.label, beforeLabel,
+                          "The bounded window must actually slide to older content.")
+        attachScreenshot(named: "win-eager-paging-older-readable")
+
+        // Return to latest from the old region: single arrow tap.
+        let arrow = app.buttons[scrollToLatestLabel]
+        XCTAssertTrue(arrow.waitForExistence(timeout: 10), "Arrow must be available from the older region.")
+        print("SEMREH_WIN_EAGER_PAGE_ARROW_TAP at=\(Date())")
+        arrow.tap()
+        assertHittable(tail, timeout: 15, message: "Arrow must return from the old region to the concrete tail.")
+        print("SEMREH_WIN_EAGER_PAGE_ARROW_TAIL at=\(Date())")
+        attachScreenshot(named: "win-eager-paging-return-tail")
+    }
+
+    func testWindowedEagerStreamingDoesNotDisplaceReader() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.terminate()
+        app.launchArguments = ["--chat-performance-rich30-lab", "--chat-windowed-eager",
+                               "--chat-windowed-rows=40", "--chat-viewport-follow-latest-open",
+                               "--chat-viewport-diagnostic", "--composer-test-fresh-draft"]
+        app.launch()
+        let transcript = app.scrollViews["chat-transcript-scroll"]
+        XCTAssertTrue(transcript.waitForExistence(timeout: 20))
+        let tail = app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", rich30Marker)).firstMatch
+        assertHittable(tail, timeout: 30, message: "Streaming: cold open must reveal the tail.")
+
+        // Park the reader in an older region via the debug paging seam.
+        let pageOlder = app.buttons["windowed-page-older"]
+        XCTAssertTrue(pageOlder.waitForExistence(timeout: 8), "Debug paging seam must be available.")
+        pageOlder.tap()
+        Thread.sleep(forTimeInterval: 0.8)
+        attachScreenshot(named: "win-eager-stream-reader-old-region")
+        let readerRow = app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", "Rich group")).firstMatch
+        XCTAssertTrue(readerRow.exists, "Reader must be parked on readable rich content before streaming.")
+        let before = String(readerRow.label.prefix(40))
+
+        // Stream a turn while the reader is parked.
+        let streamButton = app.buttons["rich30-stream-turn"]
+        XCTAssertTrue(streamButton.waitForExistence(timeout: 8), "Stream trigger must be available.")
+        print("SEMREH_WIN_EAGER_STREAM_START at=\(Date())")
+        streamButton.tap()
+        Thread.sleep(forTimeInterval: 2.5)
+        let afterRow = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", before)).firstMatch
+        XCTAssertTrue(afterRow.exists,
+                      "Streaming must not displace a reader parked in an older region.")
+        attachScreenshot(named: "win-eager-stream-reader-unchanged")
+
+        // Return to latest: a single arrow tap must reveal the streamed turn.
+        let arrow = app.buttons[scrollToLatestLabel]
+        XCTAssertTrue(arrow.waitForExistence(timeout: 10), "Arrow must be available after streaming.")
+        arrow.tap()
+        let streamTail = app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS[c] %@", "SEMREH_MULTI_CHAT_STREAM_1"
+        )).firstMatch
+        assertHittable(streamTail, timeout: 15, message: "Returning to latest must reveal the streamed turn.")
+        attachScreenshot(named: "win-eager-stream-tail")
+    }
+
+    func testWindowedEagerTailStaysLiveWhileFollowing() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.terminate()
+        app.launchArguments = ["--chat-performance-rich30-lab", "--chat-windowed-eager",
+                               "--chat-viewport-follow-latest-open", "--chat-viewport-diagnostic",
+                               "--composer-test-fresh-draft"]
+        app.launch()
+        let transcript = app.scrollViews["chat-transcript-scroll"]
+        XCTAssertTrue(transcript.waitForExistence(timeout: 20))
+        let tail = app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", rich30Marker)).firstMatch
+        assertHittable(tail, timeout: 30, message: "Tail-live: cold open must reveal the tail.")
+        let streamButton = app.buttons["rich30-stream-turn"]
+        XCTAssertTrue(streamButton.waitForExistence(timeout: 8), "Stream trigger must be available.")
+        print("SEMREH_WIN_EAGER_TAILLIVE_STREAM at=\(Date())")
+        streamButton.tap()
+        let streamTail = app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS[c] %@", "SEMREH_MULTI_CHAT_STREAM_1"
+        )).firstMatch
+        assertHittable(streamTail, timeout: 15,
+                       message: "A following reader at the tail must see the streamed turn arrive without extra taps.")
+        print("SEMREH_WIN_EAGER_TAILLIVE_VISIBLE at=\(Date())")
+        attachScreenshot(named: "win-eager-taillive-stream")
+    }
+
+    func testWindowedEagerTenThousandPagingWalk() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.terminate()
+        app.launchArguments = [performanceLabArgument, "--native-direct-mixed-rich-10k",
+                               "--chat-windowed-eager", "--chat-windowed-rows=40",
+                               "--chat-viewport-follow-latest-open", "--chat-viewport-diagnostic",
+                               "--composer-test-fresh-draft"]
+        app.launch()
+        let transcript = app.scrollViews["chat-transcript-scroll"]
+        XCTAssertTrue(transcript.waitForExistence(timeout: 20))
+        print("SEMREH_WIN_EAGER_10K_LAUNCH at=\(Date())")
+        let tail = app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", endMarker)).firstMatch
+        assertHittable(tail, timeout: 40, message: "10k windowed cold open must reveal the end marker.")
+        print("SEMREH_WIN_EAGER_10K_FIRST_READABLE at=\(Date())")
+        attachScreenshot(named: "win-eager-10k-cold-tail")
+        let pageOlder = app.buttons["windowed-page-older"]
+        XCTAssertTrue(pageOlder.waitForExistence(timeout: 8), "Debug paging seam must be available.")
+        var slides = 0
+        for _ in 0..<5 {
+            print("SEMREH_WIN_EAGER_10K_PAGE_\(slides) at=\(Date())")
+            pageOlder.tap()
+            slides += 1
+            Thread.sleep(forTimeInterval: 0.8)
+        }
+        XCTAssertEqual(slides, 5, "Repeated paging must dispatch on the 10k transcript.")
+        let anyRow = app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS[c] %@", "quick brown fox"
+        )).firstMatch
+        XCTAssertTrue(anyRow.exists, "Paging on 10k must leave readable rows (no blank region).")
+        attachScreenshot(named: "win-eager-10k-paging")
+        let arrow = app.buttons[scrollToLatestLabel]
+        XCTAssertTrue(arrow.waitForExistence(timeout: 10), "Arrow must be available from the 10k old region.")
+        print("SEMREH_WIN_EAGER_10K_ARROW_TAP at=\(Date())")
+        arrow.tap()
+        assertHittable(tail, timeout: 20, message: "Arrow must return to the concrete 10k tail.")
+        print("SEMREH_WIN_EAGER_10K_ARROW_TAIL at=\(Date())")
+        attachScreenshot(named: "win-eager-10k-return-tail")
+    }
+
+    func testWindowedEagerRich30SmallWindowColdOpen() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.terminate()
+        app.launchArguments = ["--chat-performance-rich30-lab", "--chat-windowed-eager",
+                               "--chat-windowed-rows=24", "--chat-viewport-follow-latest-open",
+                               "--chat-viewport-diagnostic", "--composer-test-fresh-draft"]
+        app.launch()
+        let transcript = app.scrollViews["chat-transcript-scroll"]
+        XCTAssertTrue(transcript.waitForExistence(timeout: 20))
+        print("SEMREH_WIN_EAGER_SMALL_LAUNCH at=\(Date())")
+        let tail = app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS[c] %@", rich30Marker
+        )).firstMatch
+        assertHittable(tail, timeout: 30, message: "Small-window rich30 cold open must reveal the tail marker.")
+        print("SEMREH_WIN_EAGER_SMALL_FIRST_READABLE at=\(Date())")
+        attachScreenshot(named: "win-eager-small-cold-tail")
+    }
+
+    func testWindowedEagerBackSmallWindowResponsiveness() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.terminate()
+        app.launchArguments = ["--chat-performance-rich30-lab", "--chat-windowed-eager",
+                               "--chat-windowed-rows=24", "--chat-performance-rich30-back-lab",
+                               "--chat-viewport-follow-latest-open", "--composer-test-fresh-draft"]
+        app.launch()
+        let open = app.buttons["Open rich30 chat"].firstMatch
+        XCTAssertTrue(open.waitForExistence(timeout: 20), "Back lab must expose the chat entry row.")
+        let transcript = app.scrollViews["chat-transcript-scroll"]
+        let back = app.buttons["Back"]
+        for attempt in 1...3 {
+            open.tap()
+            _ = transcript.waitForExistence(timeout: 10)
+            print("SEMREH_WIN_EAGER_BACKSMALL_TAP_\(attempt) at=\(Date())")
+            if back.waitForExistence(timeout: 6) {
+                back.tap()
+            }
+            XCTAssertTrue(open.waitForExistence(timeout: 12),
+                          "Small-window Back must return to the list (attempt \(attempt)).")
+            print("SEMREH_WIN_EAGER_BACKSMALL_RETURNED_\(attempt) at=\(Date())")
+        }
+    }
+
+    // MARK: - Flag-off baselines (same build, windowed-eager disabled)
+
+    func testBaselineFourTallFlagOffColdTailSingleTapArrow() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.terminate()
+        app.launchArguments = ["--chat-performance-four-tall-lab",
+                               "--chat-viewport-follow-latest-open", "--chat-viewport-diagnostic",
+                               "--composer-test-fresh-draft"]
+        app.launch()
+        let transcript = app.scrollViews["chat-transcript-scroll"]
+        XCTAssertTrue(transcript.waitForExistence(timeout: 20))
+        print("SEMREH_BASE_FOURTALL_LAUNCH at=\(Date())")
+        let tail = app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS[c] %@", "SEMREH_FOUR_TALL_CODE_END"
+        )).firstMatch
+        assertHittable(tail, timeout: 25, message: "Baseline cold open must reveal the four-tall tail.")
+        print("SEMREH_BASE_FOURTALL_FIRST_READABLE at=\(Date())")
+        attachScreenshot(named: "base-four-tall-cold-tail")
+        transcript.swipeDown()
+        transcript.swipeDown()
+        let arrow = app.buttons[scrollToLatestLabel]
+        XCTAssertTrue(arrow.waitForExistence(timeout: 10),
+                      "Baseline arrow must appear after scrolling away.")
+        print("SEMREH_BASE_FOURTALL_ARROW_TAP at=\(Date())")
+        arrow.tap()
+        assertHittable(tail, timeout: 15, message: "Baseline single arrow tap must land on the tail.")
+        print("SEMREH_BASE_FOURTALL_ARROW_TAIL at=\(Date())")
+        attachScreenshot(named: "base-four-tall-arrow-tail")
+    }
+
+    func testBaselineRich30FlagOffColdOpenScrollArrow() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.terminate()
+        app.launchArguments = ["--chat-performance-rich30-lab",
+                               "--chat-viewport-follow-latest-open", "--chat-viewport-diagnostic",
+                               "--composer-test-fresh-draft"]
+        app.launch()
+        let transcript = app.scrollViews["chat-transcript-scroll"]
+        XCTAssertTrue(transcript.waitForExistence(timeout: 20))
+        print("SEMREH_BASE_RICH30_LAUNCH at=\(Date())")
+        let tail = app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS[c] %@", rich30Marker
+        )).firstMatch
+        assertHittable(tail, timeout: 30, message: "Baseline rich30 cold open must reveal the tail marker.")
+        print("SEMREH_BASE_RICH30_FIRST_READABLE at=\(Date())")
+        attachScreenshot(named: "base-rich30-cold-tail")
+        transcript.swipeDown()
+        transcript.swipeDown()
+        let arrow = app.buttons[scrollToLatestLabel]
+        XCTAssertTrue(arrow.waitForExistence(timeout: 10),
+                      "Baseline rich30 arrow must appear after scrolling away.")
+        print("SEMREH_BASE_RICH30_ARROW_TAP at=\(Date())")
+        arrow.tap()
+        assertHittable(tail, timeout: 15, message: "Baseline rich30 arrow must land on the tail.")
+        print("SEMREH_BASE_RICH30_ARROW_TAIL at=\(Date())")
+        attachScreenshot(named: "base-rich30-arrow-tail")
+    }
+
+    func testBaselineBackFlagOffResponsiveness() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.terminate()
+        app.launchArguments = ["--chat-performance-rich30-back-lab",
+                               "--chat-viewport-follow-latest-open", "--chat-viewport-diagnostic",
+                               "--composer-test-fresh-draft"]
+        app.launch()
+        let open = app.buttons["Open rich30 chat"].firstMatch
+        XCTAssertTrue(open.waitForExistence(timeout: 20), "Baseline back lab must expose the chat entry row.")
+        for attempt in 1...3 {
+            open.tap()
+            let transcript = app.scrollViews["chat-transcript-scroll"]
+            XCTAssertTrue(transcript.waitForExistence(timeout: 15))
+            print("SEMREH_BASE_BACK_TAP_PREP_\(attempt) at=\(Date())")
+            let back = app.buttons["Back"]
+            XCTAssertTrue(back.waitForExistence(timeout: 10))
+            back.tap()
+            XCTAssertTrue(open.waitForExistence(timeout: 10),
+                          "Baseline back during preparation must return to the chat list (attempt \(attempt)).")
+            print("SEMREH_BASE_BACK_RETURNED_PREP_\(attempt) at=\(Date())")
+            attachScreenshot(named: "base-back-prep-\(attempt)")
+        }
+    }
+
+    func testWindowedEagerBackResponsivenessPrepAndStreaming() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.terminate()
+        app.launchArguments = ["--chat-performance-rich30-back-lab", "--chat-windowed-eager",
+                               "--chat-viewport-follow-latest-open", "--chat-viewport-diagnostic",
+                               "--composer-test-fresh-draft"]
+        app.launch()
+        let open = app.buttons["Open rich30 chat"].firstMatch
+        XCTAssertTrue(open.waitForExistence(timeout: 20), "Back lab must expose the chat entry row.")
+
+        for attempt in 1...3 {
+            open.tap()
+            let transcript = app.scrollViews["chat-transcript-scroll"]
+            XCTAssertTrue(transcript.waitForExistence(timeout: 15))
+            print("SEMREH_WIN_EAGER_BACK_TAP_PREP_\(attempt) at=\(Date())")
+            let back = app.buttons["Back"]
+            XCTAssertTrue(back.waitForExistence(timeout: 10))
+            back.tap()
+            XCTAssertTrue(open.waitForExistence(timeout: 10),
+                          "Back during preparation must return to the chat list (attempt \(attempt)).")
+            print("SEMREH_WIN_EAGER_BACK_RETURNED_PREP_\(attempt) at=\(Date())")
+            attachScreenshot(named: "win-eager-back-prep-\(attempt)")
+        }
+
+        open.tap()
+        let transcript = app.scrollViews["chat-transcript-scroll"]
+        XCTAssertTrue(transcript.waitForExistence(timeout: 15))
+        let streamButton = app.buttons["rich30-stream-turn"]
+        XCTAssertTrue(streamButton.waitForExistence(timeout: 10), "Stream trigger must be available.")
+        streamButton.tap()
+        print("SEMREH_WIN_EAGER_BACK_TAP_STREAM at=\(Date())")
+        let back = app.buttons["Back"]
+        XCTAssertTrue(back.waitForExistence(timeout: 5))
+        back.tap()
+        XCTAssertTrue(open.waitForExistence(timeout: 10),
+                      "Back during streaming must return to the chat list.")
+        print("SEMREH_WIN_EAGER_BACK_RETURNED_STREAM at=\(Date())")
+        attachScreenshot(named: "win-eager-back-stream")
+    }
+
     func testRepeatedMultiChatSwitchingRetainsEachOwnerAndMarker() {
         continueAfterFailure = false
         let app = XCUIApplication()

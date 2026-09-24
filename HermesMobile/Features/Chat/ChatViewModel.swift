@@ -7399,6 +7399,80 @@ extension ChatViewModel {
         return (session, server, model)
     }
 
+    /// Thirty genuinely rich synthetic groups for the windowed-eager prototype:
+    /// long code with wrapping, tables, reasoning, and tool cards.
+    @MainActor
+    static func makeRichThirtyPerformanceLabFixture() -> (
+        session: SessionSummary, server: URL, viewModel: ChatViewModel
+    ) {
+        let server = URL(string: "http://127.0.0.1:9")!
+        let session = SessionSummary(sessionId: "semreh-rich30-lab", title: "Rich 30-group lab")
+        let followsLatest = ProcessInfo.processInfo.arguments.contains("--chat-viewport-follow-latest-open")
+        TranscriptRestoreStore.shared.save(
+            TranscriptRestorePoint(
+                followingLatest: followsLatest,
+                visibleMessageID: followsLatest ? nil : "transcript:0"
+            ),
+            server: server, sessionID: "semreh-rich30-lab"
+        )
+
+        let model = ChatViewModel(session: session, server: server)
+        let prose = "A synthetic rich-group finding has **emphasis**, `inline code`, a [local reference](https://example.invalid/reference), العربية, and Unicode 👩🏽‍💻. Its lines must wrap naturally without losing content. "
+        var messages: [ChatMessage] = []
+        for index in 0..<30 {
+            let group = index + 1
+            let codeLines = 40 + (index % 5) * 12
+            var code = String(repeating: "let row\(index) = records.filter { $0.group == \(index) }.map { $0.id }\n", count: codeLines)
+            if index % 3 == 0 {
+                code += String(repeating: "let wrapMarker\(index) = \"a deliberately long wrapping line that must wrap across the viewport without losing its tail marker \(index)\"\n", count: 3)
+            }
+            let body = """
+            ## Rich group \(group)
+
+            \(String(repeating: prose, count: 8))
+
+            ```swift
+            \(code)```
+
+            | Check | State |
+            | --- | --- |
+            | Group | \(group) |
+            | Window | Bounded |
+
+            Rich group \(group) complete.\(index == 29 ? " SEMREH_RICH30_END" : "")
+            """
+            messages.append(ChatMessage(
+                role: "user",
+                content: "Rich group \(group) request.\n\n" + String(repeating: prose, count: 3),
+                timestamp: Double(index * 2),
+                messageId: "rich30-message-\(index * 2)"
+            ))
+            messages.append(ChatMessage(
+                role: "assistant",
+                content: body,
+                timestamp: Double(index * 2 + 1),
+                messageId: "rich30-message-\(index * 2 + 1)",
+                reasoning: "Group \(group): check the bounded window before reporting completion. " + String(repeating: "reasoning detail ", count: 8)
+            ))
+        }
+        model.messages = messages
+        model.setCompletedToolCallGroups(ToolCallGroup.groups(
+            persistedToolCalls: (0..<6).map { toolIndex in
+                PersistedToolCall(
+                    name: "read_file",
+                    snippet: "Read rich fixture group \(toolIndex * 5 + 1).",
+                    tid: "rich30-tool-\(toolIndex)",
+                    assistantMsgIdx: toolIndex * 10 + 1,
+                    args: ["path": .string("fixtures/rich30-group-\(toolIndex * 5 + 1).md")]
+                )
+            },
+            messages: model.messages, messageOffset: 0
+        ))
+        model.isLoading = false
+        model.hasOlderMessages = false
+        return (session, server, model)
+    }
+
     /// A bounded multi-owner variant of the server-free performance fixture. Each
     /// owner is a real ChatView/ChatTranscriptView with an independent 10,000-row
     /// model; this remains presentation evidence, not direct-gateway proof.

@@ -423,6 +423,16 @@ struct HermesMobileApp: App {
                         ChatPerformanceLabView(fourTallMessages: true)
                     }
                     .semrehAppTheme()
+                } else if ProcessInfo.processInfo.arguments.contains("--chat-performance-rich30-back-lab") {
+                    NavigationStack {
+                        ChatPerformanceLabView(richThirtyMessages: true)
+                    }
+                    .semrehAppTheme()
+                } else if ProcessInfo.processInfo.arguments.contains("--chat-performance-rich30-lab") {
+                    NavigationStack {
+                        ChatPerformanceLabView(richThirtyMessages: true)
+                    }
+                    .semrehAppTheme()
                 } else if ProcessInfo.processInfo.arguments.contains("--chat-performance-tall-lab") {
                     NavigationStack {
                         ChatPerformanceLabView(tallMessages: true)
@@ -638,8 +648,15 @@ private enum ChatPerformanceInstrumentation {
     static var standard: Fixture?
     static var tall: Fixture?
     static var fourTall: Fixture?
+    static var richThirty: Fixture?
 
-    static func value(tallMessages: Bool, fourTallMessages: Bool) -> Fixture {
+    static func value(tallMessages: Bool, fourTallMessages: Bool, richThirtyMessages: Bool = false) -> Fixture {
+        if richThirtyMessages {
+            if let richThirty { return richThirty }
+            let fixture = ChatViewModel.makeRichThirtyPerformanceLabFixture()
+            richThirty = fixture
+            return fixture
+        }
         if fourTallMessages {
             if let fourTall { return fourTall }
             let fixture = ChatViewModel.makeFourTallPerformanceLabFixture()
@@ -686,6 +703,32 @@ private struct ChatPerformanceLabView: View {
             && fixture.session.sessionId == "representative-120"
     }
 
+    private var richThirtyStreamingFixture: Bool {
+        ProcessInfo.processInfo.arguments.contains("--chat-performance-rich30-lab")
+            && fixture.session.sessionId == "semreh-rich30-lab"
+    }
+
+    private var richThirtyBackLabFixture: Bool {
+        ProcessInfo.processInfo.arguments.contains("--chat-performance-rich30-back-lab")
+            && fixture.session.sessionId == "semreh-rich30-lab"
+    }
+
+    @ViewBuilder
+    private var windowedPageControls: some View {
+        HStack(spacing: 12) {
+            Button("Page older (debug)") {
+                NotificationCenter.default.post(name: .semrehWindowedTranscriptPageOlder, object: nil)
+            }
+            .accessibilityIdentifier("windowed-page-older")
+            Button("Page newer (debug)") {
+                NotificationCenter.default.post(name: .semrehWindowedTranscriptPageNewer, object: nil)
+            }
+            .accessibilityIdentifier("windowed-page-newer")
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 4)
+    }
+
     private var outgoingMotionFixture: Bool {
         ProcessInfo.processInfo.arguments.contains("--chat-outgoing-motion-lab")
             && fixture.session.sessionId?.hasPrefix("outgoing-motion-lab-") == true
@@ -696,10 +739,11 @@ private struct ChatPerformanceLabView: View {
             && fixture.session.sessionId?.hasPrefix("representative-") == true
     }
 
-    init(tallMessages: Bool = false, fourTallMessages: Bool = false) {
+    init(tallMessages: Bool = false, fourTallMessages: Bool = false, richThirtyMessages: Bool = false) {
         NativeOpeningTrace.shared.begin()
         _fixture = State(initialValue: ChatPerformanceLabFixtureCache.value(
-            tallMessages: tallMessages, fourTallMessages: fourTallMessages
+            tallMessages: tallMessages, fourTallMessages: fourTallMessages,
+            richThirtyMessages: richThirtyMessages
         ))
     }
 
@@ -765,6 +809,55 @@ private struct ChatPerformanceLabView: View {
                             Logger(subsystem: "com.maurice.semreh", category: "NativeRichLifecycle")
                                 .debug("event=fixture_reopen_after rows=\(fixture.viewModel.messages.count, privacy: .public)")
                         }
+                }
+            } else if richThirtyBackLabFixture {
+                NavigationStack {
+                    List {
+                        NavigationLink("Open rich30 chat") {
+                            VStack(spacing: 0) {
+                                windowedPageControls
+                                HStack {
+                                    Button("Stream rich test turn") {
+                                        guard !nativeRichLifecycleStreaming else { return }
+                                        nativeRichLifecycleStreaming = true
+                                        Task { @MainActor in
+                                            await fixture.viewModel.appendPerformanceLabStreamingTurn()
+                                            nativeRichLifecycleStreaming = false
+                                        }
+                                    }
+                                    .disabled(nativeRichLifecycleStreaming)
+                                    .accessibilityIdentifier("rich30-stream-turn")
+                                    Spacer(minLength: 0)
+                                }
+                                .padding(.vertical, 4)
+                                chat.environment(\.nativePreparedHighlights, prepared)
+                            }
+                        }
+                    }
+                }
+            } else if richThirtyStreamingFixture {
+                VStack(spacing: 0) {
+                    windowedPageControls
+                    HStack {
+                        Button("Stream rich test turn") {
+                            guard !nativeRichLifecycleStreaming else { return }
+                            nativeRichLifecycleStreaming = true
+                            Task { @MainActor in
+                                await fixture.viewModel.appendPerformanceLabStreamingTurn()
+                                nativeRichLifecycleStreaming = false
+                            }
+                        }
+                        .disabled(nativeRichLifecycleStreaming)
+                        .accessibilityIdentifier("rich30-stream-turn")
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.vertical, 4)
+                    chat.environment(\.nativePreparedHighlights, prepared)
+                }
+            } else if ProcessInfo.processInfo.arguments.contains("--chat-windowed-eager") {
+                VStack(spacing: 0) {
+                    windowedPageControls
+                    chat.environment(\.nativePreparedHighlights, prepared)
                 }
             } else {
                 chat.environment(\.nativePreparedHighlights, prepared)

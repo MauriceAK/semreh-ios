@@ -550,6 +550,15 @@ struct ChatTranscriptPagingReconciliationState: Equatable {
     }
 }
 
+#if DEBUG
+/// Debug-only seams for the windowed-eager prototype: let UI tests drive the
+/// bounded-window paging without scrolling to the in-transcript affordance.
+extension Notification.Name {
+    static let semrehWindowedTranscriptPageOlder = Notification.Name("semreh.windowed.pageOlder")
+    static let semrehWindowedTranscriptPageNewer = Notification.Name("semreh.windowed.pageNewer")
+}
+#endif
+
 struct ChatTranscriptView: View, Equatable {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -669,6 +678,7 @@ struct ChatTranscriptView: View, Equatable {
     @State private var hasLoggedFirstStreamingAssistantLayout = false
     @State private var debugWindowRange: Range<Int>?
     @State private var debugWindowGeneration = 0
+    @State private var debugWindowParkedOlder = false
 #endif
     private static let transcriptCoordinateSpaceName = "chatTranscript"
 #if DEBUG
@@ -694,18 +704,39 @@ struct ChatTranscriptView: View, Equatable {
     private var renderedTranscriptMessages: [TranscriptMessage] {
         let allRows = allRenderedTranscriptMessages
 #if DEBUG
-        guard debugBoundedTailWindowEnabled else { return allRows }
+        guard debugBoundedTailWindowEnabled || windowedEagerTranscriptEnabled else { return allRows }
         let selection = debugWindowRange ?? ChatDebugTranscriptWindowPolicy.opening(
             renderIDs: allRows.map(\.renderID),
             followingLatest: shouldFollowLatestMessage,
-            savedAnchorID: initialRestoreMessageID
+            savedAnchorID: initialRestoreMessageID,
+            limit: boundedWindowLimit
         ).range
         guard selection.lowerBound >= 0, selection.upperBound <= allRows.count else {
-            return Array(allRows.suffix(ChatDebugTranscriptWindowPolicy.defaultLimit))
+            return Array(allRows.suffix(boundedWindowLimit))
         }
         return Array(allRows[selection])
 #else
         return allRows
+#endif
+    }
+
+    /// Rendered-row count feeding the bounded window (source for the
+    /// windowed-eager tail-advance observation).
+    private var windowedEagerSourceCount: Int { allRenderedTranscriptMessages.count }
+
+    /// Bounded-eager prototype (flag-gated, DEBUG only): windowed rows render
+    /// in a plain VStack so every row offered to the viewport is realized;
+    /// the default path keeps the LazyVStack.
+    @ViewBuilder
+    private func transcriptRowsStack<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+#if DEBUG
+        if windowedEagerTranscriptEnabled {
+            VStack(spacing: transcriptMessageSpacing, content: content)
+        } else {
+            LazyVStack(spacing: transcriptMessageSpacing, content: content)
+        }
+#else
+        LazyVStack(spacing: transcriptMessageSpacing, content: content)
 #endif
     }
 
@@ -714,11 +745,34 @@ struct ChatTranscriptView: View, Equatable {
         ProcessInfo.processInfo.arguments.contains("--chat-debug-bounded-tail-window")
     }
 
+    /// Flag-gated bounded-eager prototype master switch. Experiment only.
+    private var windowedEagerTranscriptEnabled: Bool {
+        ProcessInfo.processInfo.arguments.contains("--chat-windowed-eager")
+    }
+
+    /// Prototype window size in rows; `--chat-windowed-rows=N` overrides
+    /// (default 60 rows ~= 30 rich turns).
+    private var windowedEagerWindowLimit: Int {
+        if let argument = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix("--chat-windowed-rows=") }),
+           let value = Int(argument.dropFirst("--chat-windowed-rows=".count)), value >= 2 {
+            return value
+        }
+        return 60
+    }
+
+    private var boundedWindowEnabled: Bool {
+        debugBoundedTailWindowEnabled || windowedEagerTranscriptEnabled
+    }
+
+    private var boundedWindowLimit: Int {
+        windowedEagerTranscriptEnabled ? windowedEagerWindowLimit : ChatDebugTranscriptWindowPolicy.defaultLimit
+    }
+
     private var debugEffectiveWindowRange: Range<Int> {
         let allIDs = allRenderedTranscriptMessages.map(\.renderID)
         return debugWindowRange ?? ChatDebugTranscriptWindowPolicy.opening(
             renderIDs: allIDs, followingLatest: shouldFollowLatestMessage,
-            savedAnchorID: initialRestoreMessageID
+            savedAnchorID: initialRestoreMessageID, limit: boundedWindowLimit
         ).range
     }
 #endif
@@ -1112,7 +1166,39 @@ struct ChatTranscriptView: View, Equatable {
                     .coordinateSpace(name: Self.transcriptCoordinateSpaceName)
                     .accessibilityIdentifier("chat-transcript-scroll")
 #if DEBUG
-                    .id(debugBoundedTailWindowEnabled ? debugWindowGeneration : 0)
+                    .onChange(of: windowedEagerSourceCount) { oldCount, newCount in
+                        // Bounded-eager prototype: a tail-anchored window keeps
+                        // advancing with new content only while the reader
+                        // follows; a reader parked in an older region, or
+                        // scrolled up inside the tail window, stays frozen so
+                        // streaming never displaces it.
+                        guard windowedEagerTranscriptEnabled, newCount > oldCount else { return }
+                        guard !debugWindowParkedOlder, shouldFollowLatestMessage else { return }
+                        if debugEffectiveWindowRange.upperBound == oldCount {
+                            debugWindowRange = max(0, newCount - windowedEagerWindowLimit)..<newCount
+                        }
+                    }
+                    .onChange(of: shouldFollowLatestMessage) { _, isFollowing in
+                        // Returning to the tail of a stale frozen tail window
+                        // resumes live content; an explicitly parked older
+                        // region is never yanked away.
+                        guard windowedEagerTranscriptEnabled, isFollowing, !debugWindowParkedOlder else { return }
+                        let count = windowedEagerSourceCount
+                        if debugEffectiveWindowRange.upperBound < count {
+                            debugWindowRange = max(0, count - windowedEagerWindowLimit)..<count
+                        }
+                    }
+                    .onReceive(NotificationCenter.default.publisher(for: .semrehWindowedTranscriptPageOlder)) { _ in
+                        guard windowedEagerTranscriptEnabled else { return }
+                        debugMoveLoadedWindow(proxy: proxy, older: true)
+                    }
+                    .onReceive(NotificationCenter.default.publisher(for: .semrehWindowedTranscriptPageNewer)) { _ in
+                        guard windowedEagerTranscriptEnabled else { return }
+                        debugMoveLoadedWindow(proxy: proxy, older: false)
+                    }
+#endif
+#if DEBUG
+                    .id(boundedWindowEnabled ? debugWindowGeneration : 0)
 #endif
                     .safeAreaInset(edge: .bottom, spacing: 0) {
                         Color.clear
@@ -1128,7 +1214,7 @@ struct ChatTranscriptView: View, Equatable {
                     )
 
                     ZStack {
-                        if showsScrollToBottomButton {
+                        if showsScrollToBottomButton || (boundedWindowEnabled && debugWindowParkedOlder) {
                             ChatScrollToBottomButton(
                                 bottomPadding: scrollToBottomButtonBottomPadding,
                                 onTap: {
@@ -1156,9 +1242,10 @@ struct ChatTranscriptView: View, Equatable {
 #endif
                                     cancelTranscriptRestore(reason: "explicit_bottom")
 #if DEBUG
-                                    if debugBoundedTailWindowEnabled {
+                                    if boundedWindowEnabled {
                                         let count = allRenderedTranscriptMessages.count
-                                        let tail = max(0, count - ChatDebugTranscriptWindowPolicy.defaultLimit)..<count
+                                        let tail = max(0, count - boundedWindowLimit)..<count
+                                        debugWindowParkedOlder = false
                                         if debugEffectiveWindowRange != tail {
                                             debugWindowRange = tail
                                             debugWindowGeneration &+= 1
@@ -2449,7 +2536,7 @@ struct ChatTranscriptView: View, Equatable {
             streamingAssistantMessageID: streamingAssistantMessageID
         )
 
-        return LazyVStack(spacing: transcriptMessageSpacing) {
+        return transcriptRowsStack {
             olderMessagesButton(proxy: proxy)
 
             if let compressionReferenceCard, compressionReferenceCard.afterRenderID == nil {
@@ -2988,7 +3075,7 @@ struct ChatTranscriptView: View, Equatable {
     @ViewBuilder
     private func olderMessagesButton(proxy: ScrollViewProxy) -> some View {
 #if DEBUG
-        if debugBoundedTailWindowEnabled && debugEffectiveWindowRange.lowerBound > 0 {
+        if boundedWindowEnabled && debugEffectiveWindowRange.lowerBound > 0 {
             Button("Earlier loaded messages") {
                 debugMoveLoadedWindow(proxy: proxy, older: true)
             }
@@ -3004,15 +3091,19 @@ struct ChatTranscriptView: View, Equatable {
 
 #if DEBUG
     private func debugMoveLoadedWindow(proxy: ScrollViewProxy, older: Bool) {
-        guard debugBoundedTailWindowEnabled else { return }
+        guard boundedWindowEnabled else { return }
         let current = debugEffectiveWindowRange
         let count = allRenderedTranscriptMessages.count
+        let stepOverlap = windowedEagerTranscriptEnabled
+            ? max(1, boundedWindowLimit / 2)
+            : ChatDebugTranscriptWindowPolicy.defaultOverlap
         let next = older
-            ? ChatDebugTranscriptWindowPolicy.older(current: current, totalCount: count)
-            : ChatDebugTranscriptWindowPolicy.newer(current: current, totalCount: count)
+            ? ChatDebugTranscriptWindowPolicy.older(current: current, totalCount: count, limit: boundedWindowLimit, overlap: stepOverlap)
+            : ChatDebugTranscriptWindowPolicy.newer(current: current, totalCount: count, limit: boundedWindowLimit, overlap: stepOverlap)
         guard next != current else { return }
         let anchorID = viewportTracker.visibleRowID
         debugWindowRange = next
+        debugWindowParkedOlder = older || next.upperBound < count
         Self.activationRecoveryLogger.debug(
             "event=debug_window_page decision=\(older ? "older" : "newer", privacy: .public) total=\(count, privacy: .public) start=\(next.lowerBound, privacy: .public) end=\(next.upperBound, privacy: .public)"
         )
