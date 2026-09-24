@@ -123,6 +123,12 @@ final class GatewayConversationController {
         let supportsSessionChanges: Bool
     }
 
+    struct ModelSelection: Equatable, Sendable {
+        let model: String
+        let deferred: Bool
+        let confirmationMessage: String?
+    }
+
     private struct ReasoningCapability {
         let binding: GatewaySessionBinding
         let bindingEpoch: Int
@@ -130,6 +136,13 @@ final class GatewayConversationController {
         let lifecycle: Int
         let extendedContract: Bool
         let configuration: ReasoningConfiguration
+    }
+
+    private struct SessionConfigurationIdentity {
+        let binding: GatewaySessionBinding
+        let bindingEpoch: Int
+        let connectionGeneration: Int
+        let lifecycle: Int
     }
 
     private static let reasoningEfforts: Set<String> = [
@@ -161,6 +174,7 @@ final class GatewayConversationController {
     private(set) var unresolvedAttachmentMarkerToken: UUID?
     var hasUnresolvedAttachmentMarker: Bool { attachmentRecoveryNeedsReset }
     private(set) var pendingReasoningEffort: String?
+    private var modelSelectionInFlight = false
     /// One renderer-facing blocking prompt. It is transient and always scoped
     /// to the exact server/runtime/connection/request identity below.
     private(set) var pendingBlockingPrompt: GatewayBlockingPrompt?
@@ -2408,6 +2422,77 @@ final class GatewayConversationController {
         return try await operation.value
     }
 
+    /// A model pick belongs to this runtime session, never to the profile's
+    /// global default. Hermes may defer it until the next turn when one is
+    /// already running, or require an explicit second request for a warning.
+    func selectModel(
+        _ model: String,
+        provider: String,
+        currentProvider: String?,
+        confirmWarning: Bool = false
+    ) async throws -> ModelSelection {
+        let model = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        let provider = provider.trimmingCharacters(in: .whitespacesAndNewlines)
+        let currentProvider = currentProvider?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !model.isEmpty, !provider.isEmpty,
+              !model.contains(where: \.isWhitespace), !provider.contains(where: \.isWhitespace),
+              !disposed, !branchInFlight, !modelSelectionInFlight,
+              hasSubmittedPrompt, storedID != nil, !promptInFlight,
+              runState == .idle || runState == .running else {
+            throw DirectSessionError.invalidResponse
+        }
+
+        modelSelectionInFlight = true
+        defer { modelSelectionInFlight = false }
+        try await ensureBinding(create: [:])
+        let identity = try sessionConfigurationIdentity()
+        // A colon target is not a provider selection in Hermes: the gateway
+        // can treat it as the literal model ID. Same-provider picks must use
+        // the bare model; a provider change uses the parser's explicit flag.
+        let rawSelection = provider == currentProvider
+            ? "\(model) --session"
+            : "\(model) --provider \(provider) --session"
+        let result = try await runtime.request("config.set", parameters: {
+            try self.checkSessionConfigurationIdentity(identity)
+            guard self.runState == .idle || self.runState == .running else {
+                throw DirectSessionError.invalidResponse
+            }
+            return [
+                "key": .string("model"),
+                // Explicitly opt out of the profile's persist-by-default policy.
+                "value": .string(rawSelection),
+                "session_id": .string(identity.binding.runtimeID),
+                "profile": .string(self.profile),
+                "confirm_expensive_model": .bool(confirmWarning)
+            ]
+        })
+        try checkSessionConfigurationIdentity(identity)
+        guard let fields = result?.gatewayFields,
+              fields["key"] == .string("model"),
+              fields["scope"] == .string("session"),
+              let selectedModel = fields["value"]?.gatewayString,
+              !selectedModel.isEmpty,
+              case .bool(let confirmationRequired) = fields["confirm_required"] else {
+            throw DirectSessionError.invalidResponse
+        }
+        if confirmationRequired {
+            guard !confirmWarning,
+                  let message = fields["confirm_message"]?.gatewayString,
+                  !message.isEmpty else {
+                throw DirectSessionError.invalidResponse
+            }
+            return ModelSelection(model: selectedModel, deferred: false, confirmationMessage: message)
+        }
+        let deferred: Bool
+        if let deferredValue = fields["deferred"] {
+            guard case .bool(let value) = deferredValue else { throw DirectSessionError.invalidResponse }
+            deferred = value
+        } else {
+            deferred = false
+        }
+        return ModelSelection(model: selectedModel, deferred: deferred, confirmationMessage: nil)
+    }
+
     func steer(_ text: String) async throws -> SteerOutcome {
         guard !compressionOutcomeUnknown else { throw DirectSessionCompressionError.outcomeUnknown }
         guard !disposed, !branchInFlight, binding != nil, runState == .running,
@@ -3964,6 +4049,28 @@ final class GatewayConversationController {
               bindingEpoch == capability.bindingEpoch,
               runtime.connectionGeneration == capability.connectionGeneration,
               binding == capability.binding else {
+            throw DirectSessionError.staleOperation
+        }
+    }
+
+    private func sessionConfigurationIdentity() throws -> SessionConfigurationIdentity {
+        guard !disposed, hasSubmittedPrompt, let storedID, let binding,
+              storedID == binding.storedID, binding.profile == profile else {
+            throw DirectSessionError.invalidBinding
+        }
+        return SessionConfigurationIdentity(
+            binding: binding,
+            bindingEpoch: bindingEpoch,
+            connectionGeneration: runtime.connectionGeneration,
+            lifecycle: lifecycle
+        )
+    }
+
+    private func checkSessionConfigurationIdentity(_ identity: SessionConfigurationIdentity) throws {
+        guard !disposed, lifecycle == identity.lifecycle,
+              bindingEpoch == identity.bindingEpoch,
+              runtime.connectionGeneration == identity.connectionGeneration,
+              binding == identity.binding else {
             throw DirectSessionError.staleOperation
         }
     }

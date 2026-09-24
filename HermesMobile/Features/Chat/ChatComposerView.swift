@@ -105,7 +105,10 @@ struct MessageComposerView: View {
     let selectedModelID: String?
     let selectedModelProviderID: String?
     let selectedModelTitle: String
+    let allowsModelChanges: Bool
     let allowsModelAndWorkspaceChanges: Bool
+    let isModelChangeDeferred: Bool
+    let modelConfirmationMessage: String?
     let workspaceRoots: [WorkspaceRoot]
     let selectedWorkspacePath: String?
     let workspaceSuggestions: [String]
@@ -130,6 +133,7 @@ struct MessageComposerView: View {
     let isReasoningChangeDeferred: Bool
     /// When false the model has no effort control — hide the reasoning menu.
     let showsReasoningControl: Bool
+    let reasoningUnavailableMessage: String
     let isUpdatingConfiguration: Bool
     let pendingAttachments: [PendingAttachment]
     /// Optional direct-mode projection. Legacy callers may continue supplying
@@ -150,6 +154,8 @@ struct MessageComposerView: View {
     let onSendVoiceNote: (Data, String) -> Void
     let onCancel: () -> Void
     let onSelectModel: (ModelCatalogOption) -> Void
+    let onConfirmModelSelection: () async -> Void
+    let onCancelModelSelection: () -> Void
     let onModelPickerOpen: () async -> Void
     let onLoadWorkspaceSuggestions: (String) async -> Void
     let onWorkspaceRegistryChanged: () async -> Void
@@ -183,6 +189,7 @@ struct MessageComposerView: View {
     @State private var noticeMessage: String?
     @State private var showsAllModelsSheet = false
     @State private var showsConfigurationModelPicker = false
+    @State private var showsModelConfirmation = false
     @State private var pendingConfigurationProfile: ProfileSummary?
     @State private var startsNewChatAfterControlsDismiss = false
     @State private var showsWorkspaceSheet = false
@@ -632,6 +639,18 @@ struct MessageComposerView: View {
                 modelPickerSheetContent
             }
         }
+        .onChange(of: showsConfigurationModelPicker) { _, presented in
+            if !presented && modelConfirmationMessage != nil { showsModelConfirmation = true }
+        }
+        .onChange(of: modelConfirmationMessage) { _, message in
+            if message != nil && !showsConfigurationModelPicker { showsModelConfirmation = true }
+        }
+        .alert("Confirm model switch", isPresented: $showsModelConfirmation) {
+            Button("Cancel") { onCancelModelSelection() }
+            Button("Switch model") { Task { await onConfirmModelSelection() } }
+        } message: {
+            Text(modelConfirmationMessage ?? "")
+        }
         .presentationDetents(usesAccessibilityLayout ? [.large] : [.height(580), .large])
         .presentationDragIndicator(.visible)
         .task { await onModelPickerOpen() }
@@ -673,7 +692,7 @@ struct MessageComposerView: View {
                 favoriteModelKeys = ModelFavoritesStore.shared.removeFavorite(for: option)
                 recentModelKeys = ModelRecentsStore.shared.removeRecent(for: option)
             },
-            selectionDisabled: isConfigurationControlDisabled
+            selectionDisabled: isModelControlDisabled
         )
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
@@ -876,7 +895,12 @@ struct MessageComposerView: View {
                             }
                         }
                     } label: {
-                        configurationRow("Profile", value: selectedProfileTitle, icon: "person.crop.circle", accessory: "chevron.up.chevron.down")
+                        configurationRow(
+                            allowsModelAndWorkspaceChanges ? "Profile" : "New chat profile",
+                            value: selectedProfileTitle,
+                            icon: "person.crop.circle",
+                            accessory: "chevron.up.chevron.down"
+                        )
                     }
                     .disabled(isConfigurationControlDisabled || profileOptions.isEmpty)
                     .accessibilityLabel("Choose profile")
@@ -886,9 +910,9 @@ struct MessageComposerView: View {
                 Button {
                     showsConfigurationModelPicker = true
                 } label: {
-                    configurationRow("Model", value: selectedModelTitle, icon: "sparkles", accessory: allowsModelAndWorkspaceChanges ? "chevron.right" : "lock")
+                    configurationRow("Model", value: selectedModelTitle, icon: "sparkles", accessory: allowsModelChanges ? "chevron.right" : "lock")
                 }
-                .disabled(!allowsModelAndWorkspaceChanges || isConfigurationControlDisabled)
+                .disabled(!allowsModelChanges || isModelControlDisabled)
                 .accessibilityIdentifier("chatControlsModelButton")
                 .accessibilityLabel("Model")
                 .accessibilityValue(selectedModelTitle)
@@ -897,9 +921,16 @@ struct MessageComposerView: View {
             .padding(.horizontal, 14)
             .adaptiveGlass(.regular, isInteractive: false, fallbackMaterial: .thinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
 
+            if isModelChangeDeferred {
+                Text("Model switch queued for the next turn.")
+                    .font(AppFont.subheadline())
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("chatControlsModelDeferred")
+            }
+
             if !allowsModelAndWorkspaceChanges {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("This chat keeps its original model and workspace. Start a new chat to choose different ones.")
+                    Text("This chat keeps its workspace. You can change its model for the next turn. Changing profiles starts a separate chat so this transcript stays with its original profile.")
                         .font(AppFont.subheadline())
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -935,6 +966,19 @@ struct MessageComposerView: View {
                     )
                     .id("\(selectedModelProviderID ?? "")|\(selectedModelID ?? "")")
                 }
+            } else {
+                VStack(alignment: .leading, spacing: 10) {
+                    Label("Thinking", systemImage: "brain")
+                        .font(AppFont.subheadline(weight: .semibold))
+                    Text(reasoningUnavailableMessage)
+                        .font(AppFont.subheadline())
+                        .foregroundStyle(.secondary)
+                    Button("Retry reasoning settings") {
+                        Task { await onModelPickerOpen() }
+                    }
+                    .disabled(isConfigurationControlDisabled)
+                }
+                .accessibilityIdentifier("chatControlsReasoningUnavailable")
             }
             DisclosureGroup {
                 VStack(alignment: .leading, spacing: 14) {
@@ -1047,7 +1091,7 @@ struct MessageComposerView: View {
     }
 
     private func selectModel(_ option: ModelCatalogOption) {
-        guard allowsModelAndWorkspaceChanges else { return }
+        guard allowsModelChanges else { return }
         recentModelKeys = ModelRecentsStore.shared.recordRecent(option)
         onSelectModel(option)
     }
@@ -1152,6 +1196,10 @@ struct MessageComposerView: View {
 
     private var isConfigurationControlDisabled: Bool {
         isOfflineReadOnly || isSending || isCompressingSession || isWaitingForStream || isUpdatingConfiguration
+    }
+
+    private var isModelControlDisabled: Bool {
+        isOfflineReadOnly || isSending || isCompressingSession || isUpdatingConfiguration
     }
 
     private var isAttachMenuDisabled: Bool {

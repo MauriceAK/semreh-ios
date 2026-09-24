@@ -99,8 +99,12 @@ final class DirectSkillUITests: XCTestCase {
         XCTAssertTrue(settings.waitForExistence(timeout: 5))
         let model = app.buttons["chatControlsModelButton"]
         XCTAssertTrue(model.exists)
-        XCTAssertFalse(model.isEnabled, "An established conversation must not offer model mutation.")
+        XCTAssertTrue(model.isEnabled, "An established conversation should offer a session-scoped model switch.")
         XCTAssertTrue(app.staticTexts["chatControlsConfigurationReadOnly"].exists)
+        model.tap()
+        XCTAssertTrue(app.searchFields["Search models"].waitForExistence(timeout: 5))
+        app.navigationBars["Choose Model"].buttons["Done"].tap()
+        XCTAssertTrue(settings.waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["chatControlsNewChat"].exists)
         retainPreviewScreenshot("Chat configuration dark", app: app)
         app.buttons["Session details"].tap()
@@ -123,10 +127,58 @@ final class DirectSkillUITests: XCTestCase {
         XCTAssertTrue(header.waitForExistence(timeout: 15) && header.isHittable)
         header.tap()
         XCTAssertTrue(settings.waitForExistence(timeout: 5))
-        XCTAssertTrue(model.exists && !model.isEnabled)
+        XCTAssertTrue(model.exists && model.isEnabled)
         retainPreviewScreenshot("Chat configuration light accessibility size", app: app)
         settings.buttons["Done"].tap()
         XCTAssertTrue(header.waitForExistence(timeout: 5) && header.isHittable)
+    }
+
+    @MainActor
+    func testStoredChatGuardedModelConfirmationAndProfileSafety() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--chat-performance-lab", "--chat-configuration-lab",
+                               "--chat-configuration-warning", "-appTheme", "semrehDark"]
+        app.launch()
+        let header = app.buttons["chatProfileConfiguration"]
+        XCTAssertTrue(header.waitForExistence(timeout: 15) && header.isHittable)
+        header.tap()
+        let model = app.buttons["chatControlsModelButton"]
+        XCTAssertTrue(model.waitForExistence(timeout: 5) && model.isEnabled)
+        model.tap()
+        let picker = app.navigationBars["Choose Model"]
+        XCTAssertTrue(picker.waitForExistence(timeout: 5))
+        let search = app.searchFields["Search models"]
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        search.tap()
+        search.typeText("Deep thinking")
+        let deep = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Deep thinking")).firstMatch
+        XCTAssertTrue(deep.waitForExistence(timeout: 5) && deep.isHittable)
+        deep.tap()
+        let warning = app.alerts["Confirm model switch"]
+        XCTAssertTrue(warning.waitForExistence(timeout: 5),
+                      "The warning must survive dismissal of the model picker.")
+        warning.buttons["Cancel"].tap()
+        XCTAssertEqual(model.value as? String, "Balanced")
+        model.tap()
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        if !deep.exists {
+            search.tap()
+            search.typeText("Deep thinking")
+        }
+        XCTAssertTrue(deep.waitForExistence(timeout: 5) && deep.isHittable)
+        deep.tap()
+        XCTAssertTrue(warning.waitForExistence(timeout: 5))
+        warning.buttons["Switch model"].tap()
+        XCTAssertEqual(model.value as? String, "Deep thinking")
+
+        app.buttons["Choose profile"].tap()
+        app.buttons["Research"].tap()
+        let confirmation = app.alerts["Start New Session?"]
+        XCTAssertTrue(confirmation.waitForExistence(timeout: 5))
+        confirmation.buttons["Cancel"].tap()
+        XCTAssertEqual(header.label, "Configure Default",
+                       "Changing a profile must not relabel the existing chat on cancellation.")
     }
 
     func testP09CalibrationGeometryUsesMeasuredBaselineAndStableViewport() throws {
