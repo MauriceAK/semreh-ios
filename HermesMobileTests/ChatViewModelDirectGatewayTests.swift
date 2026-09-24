@@ -10,8 +10,89 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         let vm = makeViewModel(client: makeDirectBlockingTestClient(), runtime: runtime, sessionID: "durable-1")
 
         XCTAssertFalse(vm.allowsModelAndWorkspaceChanges)
+        XCTAssertTrue(vm.allowsModelChanges)
         XCTAssertNil(vm.composerConfigurationErrorMessage)
         XCTAssertTrue(fake.calls().isEmpty)
+        await runtime.stop()
+    }
+
+    func testExistingChatModelSwitchKeepsProfileAndTranscriptIdentity() async throws {
+        let fake = ChatDirectFakeTransport()
+        fake.setModelResponse(.object([
+            "key": .string("model"), "value": .string("model-a"),
+            "scope": .string("session"), "confirm_required": .bool(false)
+        ]))
+        let runtime = try makeRuntime(fake)
+        let vm = makeViewModel(client: makeExistingComposerClient(requests: ChatDirectRequestRecorder()),
+                               runtime: runtime, sessionID: "durable-1")
+        await vm.loadComposerConfiguration()
+        let option = try XCTUnwrap(vm.modelCatalogGroups.flatMap(\.models).first { $0.id == "model-a" })
+
+        let didSwitch = await vm.selectComposerModel(option)
+        XCTAssertTrue(didSwitch)
+        XCTAssertEqual(vm.selectedModelID, "model-a")
+        XCTAssertEqual(vm.selectedProfileName, "work")
+        XCTAssertFalse(vm.isModelChangeDeferred)
+        let set = try XCTUnwrap(fake.calls().last { $0.method == "config.set" })
+        XCTAssertEqual(fields(set.params)?["key"], .string("model"))
+        XCTAssertEqual(fields(set.params)?["value"], .string("model-a --session"))
+        XCTAssertEqual(fields(set.params)?["session_id"], .string("runtime-1"))
+        XCTAssertEqual(fields(set.params)?["profile"], .string("work"))
+        XCTAssertFalse(fake.calls().contains { $0.method == "session.create" })
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testExistingChatModelWarningNeedsSecondConfirmedWrite() async throws {
+        let fake = ChatDirectFakeTransport()
+        fake.setModelResponse(.object([
+            "key": .string("model"), "value": .string("model-a"),
+            "scope": .string("session"), "confirm_required": .bool(true),
+            "confirm_message": .string("Model cost warning")
+        ]))
+        let runtime = try makeRuntime(fake)
+        let vm = makeViewModel(client: makeExistingComposerClient(requests: ChatDirectRequestRecorder()),
+                               runtime: runtime, sessionID: "durable-1")
+        await vm.loadComposerConfiguration()
+        let option = try XCTUnwrap(vm.modelCatalogGroups.flatMap(\.models).first { $0.id == "model-a" })
+
+        let didSwitchBeforeConfirmation = await vm.selectComposerModel(option)
+        XCTAssertFalse(didSwitchBeforeConfirmation)
+        XCTAssertEqual(vm.modelConfirmationMessage, "Model cost warning")
+        XCTAssertEqual(vm.selectedModelID, "model-b")
+        fake.setModelResponse(.object([
+            "key": .string("model"), "value": .string("model-a"),
+            "scope": .string("session"), "confirm_required": .bool(false),
+            "deferred": .bool(true)
+        ]))
+        let didConfirm = await vm.confirmPendingModelSelection()
+        XCTAssertTrue(didConfirm)
+        XCTAssertEqual(vm.selectedModelID, "model-a")
+        XCTAssertTrue(vm.isModelChangeDeferred)
+        XCTAssertNil(vm.modelConfirmationMessage)
+        let writes = fake.calls().filter { $0.method == "config.set" }
+        XCTAssertEqual(writes.count, 2)
+        XCTAssertEqual(writes.map { fields($0.params)?["confirm_expensive_model"] },
+                       [.bool(false), .bool(true)])
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testStoredReasoningControlUsesSuccessfulSessionReadWhenCatalogOmitsCapability() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let client = makeExistingComposerClient(
+            requests: ChatDirectRequestRecorder(),
+            modelOptions: #"{"model":"model-a","provider":"fixture","providers":[{"slug":"fixture","name":"Fixture","authenticated":true,"models":["model-a","model-b"]}]}"#
+        )
+        let vm = makeViewModel(client: client, runtime: runtime, sessionID: "durable-1")
+
+        await vm.loadComposerConfiguration()
+
+        XCTAssertTrue(vm.showsReasoningEffortControl)
+        XCTAssertEqual(vm.selectedReasoningEffort, "medium")
+        XCTAssertTrue(fake.calls().contains { $0.method == "config.get" })
+        await vm.disposeDirectConversation()
         await runtime.stop()
     }
 
@@ -4284,13 +4365,16 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         }
     }
 
-    private func makeExistingComposerClient(requests: ChatDirectRequestRecorder) -> APIClient {
+    private func makeExistingComposerClient(
+        requests: ChatDirectRequestRecorder,
+        modelOptions: String? = nil
+    ) -> APIClient {
         makeClient { request in
             let path = request.url?.path ?? "nil"
             requests.append(path)
             switch path {
             case "/api/model/options":
-                return apiTestJSONResponse(#"{"model":"model-a","provider":"fixture","providers":[{"slug":"fixture","name":"Fixture","authenticated":true,"models":["model-a","model-b"],"capabilities":{"model-a":{"reasoning":false},"model-b":{"reasoning":true,"can_disable_reasoning":false}}}]}"#, for: request)
+                return apiTestJSONResponse(modelOptions ?? #"{"model":"model-a","provider":"fixture","providers":[{"slug":"fixture","name":"Fixture","authenticated":true,"models":["model-a","model-b"],"capabilities":{"model-a":{"reasoning":false},"model-b":{"reasoning":true,"can_disable_reasoning":false}}}]}"#, for: request)
             case "/api/profiles":
                 return apiTestJSONResponse(#"{"profiles":[{"name":"work"}],"active":"work"}"#, for: request)
             default:
@@ -4608,6 +4692,7 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
         "deferred": .bool(false)
     ])
     private var reasoningSetResponse: JSONValue?
+    private var modelSetResponse: JSONValue?
     private var reasoningSetGate: ChatDirectAsyncGate?
     private var reasoningSetShouldFail = false
     private var reasoningGetShouldCancel = false
@@ -4673,6 +4758,10 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
 
     func setReasoningSetResponse(_ response: JSONValue) {
         withLock { reasoningSetResponse = response }
+    }
+
+    func setModelResponse(_ response: JSONValue) {
+        withLock { modelSetResponse = response }
     }
 
     func setReasoningSetGate(_ gate: ChatDirectAsyncGate) {
@@ -4774,7 +4863,9 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
         case "config.get":
             declared = ["key", "cwd", "session_id", "profile"]
         case "config.set":
-            declared = ["key", "value", "scope", "session_id", "profile"]
+            declared = params?.gatewayFields["key"] == .string("model")
+                ? ["key", "value", "session_id", "profile", "confirm_expensive_model"]
+                : ["key", "value", "scope", "session_id", "profile"]
         default:
             return
         }
@@ -4836,6 +4927,9 @@ private final class ChatDirectFakeTransport: HermesGatewayTransport, @unchecked 
             case "config.get":
                 return (reasoningGetResponse, nil, nil, false, nil, nil)
             case "config.set":
+                if params?.gatewayFields["key"] == .string("model") {
+                    return (modelSetResponse, modelSetResponse, nil, false, nil, params)
+                }
                 return (reasoningSetResponse, reasoningSetResponse, reasoningSetGate,
                         reasoningSetShouldFail, nil, params)
             case "prompt.submit":

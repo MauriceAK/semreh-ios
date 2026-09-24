@@ -648,7 +648,10 @@ struct ChatView: View {
             selectedModelID: viewModel.selectedModelID,
             selectedModelProviderID: viewModel.selectedModelProviderID,
             selectedModelTitle: viewModel.selectedModelTitle,
+            allowsModelChanges: viewModel.allowsModelChanges,
             allowsModelAndWorkspaceChanges: viewModel.allowsModelAndWorkspaceChanges,
+            isModelChangeDeferred: viewModel.isModelChangeDeferred,
+            modelConfirmationMessage: viewModel.modelConfirmationMessage,
             workspaceRoots: viewModel.workspaceRoots,
             selectedWorkspacePath: viewModel.selectedWorkspacePath,
             workspaceSuggestions: viewModel.workspaceSuggestions,
@@ -667,6 +670,7 @@ struct ChatView: View {
             allowsReasoningChangesWhileStreaming: viewModel.allowsReasoningChangesWhileStreaming,
             isReasoningChangeDeferred: viewModel.isReasoningChangeDeferred,
             showsReasoningControl: viewModel.showsReasoningEffortControl,
+            reasoningUnavailableMessage: viewModel.reasoningUnavailableMessage,
             isUpdatingConfiguration: viewModel.isUpdatingComposerConfiguration,
             pendingAttachments: viewModel.pendingAttachments,
             displayAttachments: viewModel.usesDirectGateway
@@ -705,6 +709,15 @@ struct ChatView: View {
                         ChatHaptics.configurationSelected(isEnabled: isHapticsEnabled)
                     }
                 }
+            },
+            onConfirmModelSelection: {
+                let didSelect = await viewModel.confirmPendingModelSelection()
+                if didSelect {
+                    ChatHaptics.configurationSelected(isEnabled: isHapticsEnabled)
+                }
+            },
+            onCancelModelSelection: {
+                viewModel.cancelPendingModelConfirmation()
             },
             onModelPickerOpen: {
                 await viewModel.refreshModelCatalogForPickerOpen()

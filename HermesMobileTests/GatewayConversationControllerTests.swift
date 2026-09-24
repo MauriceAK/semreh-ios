@@ -1233,6 +1233,89 @@ final class GatewayConversationControllerTests: XCTestCase {
         await runtime.stop()
     }
 
+    func testStoredChatModelSwitchTargetsOnlyItsRuntimeAndProfile() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setModelResponses([.object([
+            "key": .string("model"), "value": .string("gpt-6-luna"),
+            "scope": .string("session"), "confirm_required": .bool(false),
+            "deferred": .bool(false)
+        ])])
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime, storedID: "stored-chat", profile: "work")
+
+        let selection = try await controller.selectModel(
+            "gpt-6-luna", provider: "openai-codex", currentProvider: "openai-codex"
+        )
+
+        XCTAssertEqual(selection, .init(model: "gpt-6-luna", deferred: false, confirmationMessage: nil))
+        let call = try XCTUnwrap(fake.calls().first { $0.method == "config.set" })
+        XCTAssertEqual(objectFields(call.params), [
+            "key": .string("model"),
+            "value": .string("gpt-6-luna --session"),
+            "session_id": .string("runtime-resumed"),
+            "profile": .string("work"),
+            "confirm_expensive_model": .bool(false)
+        ])
+        await runtime.stop()
+    }
+
+    func testRunningModelSwitchDefersAndWarningNeedsExplicitConfirmation() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setModelResponses([
+            .object([
+                "key": .string("model"), "value": .string("gpt-6-astra"),
+                "scope": .string("session"), "confirm_required": .bool(true),
+                "confirm_message": .string("This model may cost more."),
+                "deferred": .bool(false)
+            ]),
+            .object([
+                "key": .string("model"), "value": .string("gpt-6-astra"),
+                "scope": .string("session"), "confirm_required": .bool(false),
+                "deferred": .bool(true)
+            ])
+        ])
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime, storedID: "stored-chat")
+        try await controller.open()
+        fake.emit(event(sessionID: "runtime-resumed", type: "message.start", sequence: 1))
+        await Task.yield()
+
+        let warning = try await controller.selectModel(
+            "gpt-6-astra", provider: "openai-codex", currentProvider: "openai-codex"
+        )
+        XCTAssertEqual(warning.confirmationMessage, "This model may cost more.")
+        XCTAssertEqual(controller.runState, .running)
+        let selected = try await controller.selectModel(
+            "gpt-6-astra", provider: "openai-codex", currentProvider: "openai-codex",
+            confirmWarning: true
+        )
+        XCTAssertEqual(selected, .init(model: "gpt-6-astra", deferred: true, confirmationMessage: nil))
+        XCTAssertEqual(fake.calls().filter { $0.method == "config.set" }.map {
+            objectFields($0.params)?["confirm_expensive_model"]
+        }, [.bool(false), .bool(true)])
+        await runtime.stop()
+    }
+
+    func testCrossProviderModelSwitchUsesExplicitProviderFlag() async throws {
+        let fake = ControllerFakeTransport()
+        fake.setModelResponses([.object([
+            "key": .string("model"), "value": .string("gpt-6-luna"),
+            "scope": .string("session"), "confirm_required": .bool(false)
+        ])])
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime, storedID: "stored-chat")
+
+        let selection = try await controller.selectModel(
+            "gpt-6-luna", provider: "openai-codex", currentProvider: "fixture"
+        )
+
+        XCTAssertEqual(selection.model, "gpt-6-luna")
+        let call = try XCTUnwrap(fake.calls().first { $0.method == "config.set" })
+        XCTAssertEqual(objectFields(call.params)?["value"],
+                       .string("gpt-6-luna --provider openai-codex --session"))
+        await runtime.stop()
+    }
+
     func testConfigGetStrictDoubleRejectsUndeclaredParameters() async throws {
         let fake = ControllerFakeTransport()
 
@@ -2406,6 +2489,7 @@ private final class ControllerFakeTransport: HermesGatewayTransport, @unchecked 
     private var reasoningGetGate: AsyncGate?
     private var reasoningSetResponse: JSONValue?
     private var reasoningSetGate: AsyncGate?
+    private var modelSetResponses: [JSONValue] = []
     private var sessionStatusResponse: JSONValue = .object([
         "output": .string("Agent Running: No")
     ])
@@ -2503,6 +2587,10 @@ private final class ControllerFakeTransport: HermesGatewayTransport, @unchecked 
         withLock { reasoningSetGate = gate }
     }
 
+    func setModelResponses(_ responses: [JSONValue]) {
+        withLock { modelSetResponses = responses }
+    }
+
     func setSessionStatusResponse(_ response: JSONValue) {
         withLock { sessionStatusResponse = response }
     }
@@ -2525,7 +2613,9 @@ private final class ControllerFakeTransport: HermesGatewayTransport, @unchecked 
         case "config.get":
             declared = ["key", "cwd", "session_id", "profile"]
         case "config.set":
-            declared = ["key", "value", "scope", "session_id", "profile"]
+            declared = params?.gatewayFields["key"] == .string("model")
+                ? ["key", "value", "session_id", "profile", "confirm_expensive_model"]
+                : ["key", "value", "scope", "session_id", "profile"]
         default:
             return
         }
@@ -2659,6 +2749,11 @@ private final class ControllerFakeTransport: HermesGatewayTransport, @unchecked 
             if let gate { await gate.wait() }
             return response
         case "config.set":
+            if params?.gatewayFields["key"] == .string("model") {
+                return withLock {
+                    modelSetResponses.isEmpty ? .object([:]) : modelSetResponses.removeFirst()
+                }
+            }
             let (response, gate) = withLock {
                 let gate = reasoningSetGate
                 reasoningSetGate = nil

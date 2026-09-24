@@ -833,6 +833,9 @@ final class ChatViewModel {
     private var directModelOptions: DirectHermesModelOptions?
     private var directSessionReasoningSupported = false
     private(set) var isReasoningChangeDeferred = false
+    private(set) var isModelChangeDeferred = false
+    private(set) var modelConfirmationMessage: String?
+    private var pendingModelConfirmationOption: ModelCatalogOption?
     @ObservationIgnored private var directReasoningRefreshTask: Task<Void, Never>?
     private(set) var agentCommands: [AgentCommand] = []
     private(set) var workspaceRoots: [WorkspaceRoot] = []
@@ -860,6 +863,14 @@ final class ChatViewModel {
             supportsReasoningEffort: supportsReasoningEffort,
             supportedEfforts: supportedReasoningEfforts
         )
+    }
+    var reasoningUnavailableMessage: String {
+        let capability = directModelOptions?.providers?.first { $0.slug == currentModelProvider }?
+            .capabilities?[currentModel ?? ""]
+        if capability?.reasoning == false {
+            return "This model does not offer an adjustable reasoning effort."
+        }
+        return "Reasoning settings for this chat could not be confirmed. Retry to load them."
     }
     var selectedReasoningSelection: String? {
         if usesDirectGateway, canonicalSessionID != nil { return selectedReasoningEffort }
@@ -1470,12 +1481,19 @@ final class ChatViewModel {
         supportedReasoningEfforts = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
             .filter { $0 != "none" || capability?.canDisableReasoning != false }
         let configurable = canonicalSessionID == nil || directSessionReasoningSupported
-        supportsReasoningEffort = capability?.reasoning == true && configurable
+        // An older or incomplete catalog is not proof that this session lacks
+        // reasoning. A successful session-scoped config read is authoritative;
+        // only an explicit capability denial hides the control.
+        supportsReasoningEffort = capability?.reasoning != false && configurable
         sessionScopedReasoning = configurable
     }
 
     var allowsModelAndWorkspaceChanges: Bool {
         !usesDirectGateway || canonicalSessionID == nil
+    }
+
+    var allowsModelChanges: Bool {
+        usesDirectGateway || canonicalSessionID == nil
     }
 
     private func canConfigureDirectDraft() -> Bool {
@@ -2922,18 +2940,101 @@ final class ChatViewModel {
     }
     @discardableResult
     func selectComposerModel(_ option: ModelCatalogOption) async -> Bool {
-        guard canConfigureDirectDraft(),
-              modelCatalogGroups.flatMap(\.models).contains(option),
+        await selectComposerModel(option, confirmWarning: false)
+    }
+
+    func cancelPendingModelConfirmation() {
+        pendingModelConfirmationOption = nil
+        modelConfirmationMessage = nil
+    }
+
+    @discardableResult
+    func confirmPendingModelSelection() async -> Bool {
+        guard let option = pendingModelConfirmationOption else { return false }
+        cancelPendingModelConfirmation()
+        return await selectComposerModel(option, confirmWarning: true)
+    }
+
+    @discardableResult
+    private func selectComposerModel(_ option: ModelCatalogOption, confirmWarning: Bool) async -> Bool {
+        guard modelCatalogGroups.flatMap(\.models).contains(option),
               !option.matchesSelection(modelID: currentModel, providerID: currentModelProvider) else {
             return false
         }
-        composerConfigurationMutationToken &+= 1
-        currentModel = option.id
-        currentModelProvider = option.providerID
-        sessionReasoningEffort = nil
-        selectedReasoningEffort = nil
-        applyDirectReasoningGating()
-        return true
+        if canonicalSessionID == nil {
+            guard canConfigureDirectDraft() else { return false }
+            composerConfigurationMutationToken &+= 1
+            currentModel = option.id
+            currentModelProvider = option.providerID
+            sessionReasoningEffort = nil
+            selectedReasoningEffort = nil
+            applyDirectReasoningGating()
+            return true
+        }
+
+#if DEBUG
+        // Deterministic mounted-UI exercise of the warning/confirmation sheet.
+        // The production path below is covered by the strict gateway fake.
+        if isConfigurationLabFixture,
+           ProcessInfo.processInfo.arguments.contains("--chat-configuration-warning") {
+            if !confirmWarning {
+                pendingModelConfirmationOption = option
+                modelConfirmationMessage = "This model may cost more."
+                return false
+            }
+            cancelPendingModelConfirmation()
+            currentModel = option.id
+            currentModelProvider = option.providerID
+            applyDirectReasoningGating()
+            return true
+        }
+#endif
+
+        guard !directInvalidated, !isViewingCachedData, !isUpdatingComposerConfiguration,
+              !isStartingChat, !isCompressingSession, let expectedID = canonicalSessionID,
+              let provider = option.providerID, !provider.isEmpty else { return false }
+        let mutation = composerConfigurationMutationToken &+ 1
+        composerConfigurationMutationToken = mutation
+        isUpdatingComposerConfiguration = true
+        composerConfigurationErrorMessage = nil
+        defer {
+            if mutation == composerConfigurationMutationToken { isUpdatingComposerConfiguration = false }
+        }
+        do {
+            let controller = try await ensureDirectConversation()
+            guard controller.storedID == expectedID, controller.profile == requestProfileName else {
+                throw DirectSessionError.staleOperation
+            }
+            let selection = try await controller.selectModel(
+                option.id, provider: provider, currentProvider: currentModelProvider,
+                confirmWarning: confirmWarning
+            )
+            guard !directInvalidated, canonicalSessionID == expectedID,
+                  mutation == composerConfigurationMutationToken else { return false }
+            if let warning = selection.confirmationMessage {
+                pendingModelConfirmationOption = option
+                modelConfirmationMessage = warning
+                return false
+            }
+            cancelPendingModelConfirmation()
+            currentModel = selection.model
+            currentModelProvider = provider
+            isModelChangeDeferred = selection.deferred
+            applyDirectReasoningGating()
+            // The model may have a different reasoning vocabulary. Read the
+            // session's actual setting; a failure does not undo an ACKed model.
+            try? await loadDirectSessionReasoning()
+            return true
+        } catch {
+            guard !directInvalidated, canonicalSessionID == expectedID,
+                  mutation == composerConfigurationMutationToken else { return false }
+            // config.set can have taken effect even if the acknowledgement was
+            // lost. Never replay it automatically or display a guessed model.
+            composerConfigurationErrorMessage =
+                "Model change could not be confirmed. Reopen chat settings to reload before trying again."
+            lastError = error
+            return false
+        }
     }
 
     /// Reloads device-local workspace bookmarks after manager changes.
