@@ -1,0 +1,405 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		B1AB0000000000000000001B /* BrowserLabApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1AB00000000000000000008 /* BrowserLabApp.swift */; };
+		B1AB0000000000000000001C /* BrowserLabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1AB00000000000000000009 /* BrowserLabView.swift */; };
+		B1AB0000000000000000001D /* SimulatedBrowserAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1AB0000000000000000000A /* SimulatedBrowserAdapter.swift */; };
+		B1AB0000000000000000001E /* SemrehRemoteBrowserUI in Frameworks */ = {isa = PBXBuildFile; productRef = B1AB0000000000000000000E /* SemrehRemoteBrowserUI */; };
+		B1AB0000000000000000001F /* SemrehRemoteBrowserCore in Frameworks */ = {isa = PBXBuildFile; productRef = B1AB0000000000000000000F /* SemrehRemoteBrowserCore */; };
+		B1AB00000000000000000020 /* BrowserLabUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1AB0000000000000000000B /* BrowserLabUITests.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		B1AB00000000000000000021 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = B1AB00000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = B1AB00000000000000000010;
+			remoteInfo = BrowserLab;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		B1AB00000000000000000008 /* BrowserLabApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserLabApp.swift; sourceTree = "<group>"; };
+		B1AB00000000000000000009 /* BrowserLabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserLabView.swift; sourceTree = "<group>"; };
+		B1AB0000000000000000000A /* SimulatedBrowserAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulatedBrowserAdapter.swift; sourceTree = "<group>"; };
+		B1AB0000000000000000000B /* BrowserLabUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserLabUITests.swift; sourceTree = "<group>"; };
+		B1AB0000000000000000000C /* BrowserLab.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = BrowserLab.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		B1AB0000000000000000000D /* BrowserLabUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = BrowserLabUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		B1AB00000000000000000015 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B1AB0000000000000000001E /* SemrehRemoteBrowserUI in Frameworks */,
+				B1AB0000000000000000001F /* SemrehRemoteBrowserCore in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B1AB00000000000000000018 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		B1AB00000000000000000002 /* BrowserLab */ = {
+			isa = PBXGroup;
+			children = (
+				B1AB00000000000000000005 /* Sources */,
+				B1AB00000000000000000006 /* UITests */,
+				B1AB00000000000000000003 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		B1AB00000000000000000003 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				B1AB0000000000000000000C /* BrowserLab.app */,
+				B1AB0000000000000000000D /* BrowserLabUITests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		B1AB00000000000000000005 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				B1AB00000000000000000008 /* BrowserLabApp.swift */,
+				B1AB00000000000000000009 /* BrowserLabView.swift */,
+				B1AB0000000000000000000A /* SimulatedBrowserAdapter.swift */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		B1AB00000000000000000006 /* UITests */ = {
+			isa = PBXGroup;
+			children = (
+				B1AB0000000000000000000B /* BrowserLabUITests.swift */,
+			);
+			path = UITests;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		B1AB00000000000000000010 /* BrowserLab */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B1AB00000000000000000012 /* Build configuration list for PBXNativeTarget "BrowserLab" */;
+			buildPhases = (
+				B1AB00000000000000000014 /* Sources */,
+				B1AB00000000000000000015 /* Frameworks */,
+				B1AB00000000000000000016 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = BrowserLab;
+			packageProductDependencies = (
+				B1AB0000000000000000000E /* SemrehRemoteBrowserUI */,
+				B1AB0000000000000000000F /* SemrehRemoteBrowserCore */,
+			);
+			productName = BrowserLab;
+			productReference = B1AB0000000000000000000C /* BrowserLab.app */;
+			productType = "com.apple.product-type.application";
+		};
+		B1AB00000000000000000011 /* BrowserLabUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B1AB00000000000000000013 /* Build configuration list for PBXNativeTarget "BrowserLabUITests" */;
+			buildPhases = (
+				B1AB00000000000000000017 /* Sources */,
+				B1AB00000000000000000018 /* Frameworks */,
+				B1AB00000000000000000019 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				B1AB0000000000000000001A /* PBXTargetDependency */,
+			);
+			name = BrowserLabUITests;
+			productName = BrowserLabUITests;
+			productReference = B1AB0000000000000000000D /* BrowserLabUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		B1AB00000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			buildConfigurationList = B1AB00000000000000000004 /* Build configuration list for PBXProject "BrowserLab" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+			);
+			mainGroup = B1AB00000000000000000002 /* BrowserLab */;
+			packageReferences = (
+				B1AB00000000000000000007 /* XCLocalSwiftPackageReference "../Packages/SemrehRemoteBrowser" */,
+			);
+			productRefGroup = B1AB00000000000000000003 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				B1AB00000000000000000010 /* BrowserLab */,
+				B1AB00000000000000000011 /* BrowserLabUITests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		B1AB00000000000000000016 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B1AB00000000000000000019 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		B1AB00000000000000000014 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B1AB0000000000000000001D /* SimulatedBrowserAdapter.swift in Sources */,
+				B1AB0000000000000000001B /* BrowserLabApp.swift in Sources */,
+				B1AB0000000000000000001C /* BrowserLabView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B1AB00000000000000000017 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B1AB00000000000000000020 /* BrowserLabUITests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		B1AB0000000000000000001A /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = B1AB00000000000000000010 /* BrowserLab */;
+			targetProxy = B1AB00000000000000000021 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		B1AB00000000000000000022 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		B1AB00000000000000000023 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+			};
+			name = Release;
+		};
+		B1AB00000000000000000024 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEFINES_MODULE = YES;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				ENABLE_TESTABILITY = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
+				MARKETING_VERSION = 1.0;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = com.mauricekenon.semreh.browserlab;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		B1AB00000000000000000025 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEFINES_MODULE = YES;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.mauricekenon.semreh.browserlab;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		B1AB00000000000000000026 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_TESTABILITY = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MARKETING_VERSION = 1.0;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = com.mauricekenon.semreh.browserlab.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = BrowserLab;
+			};
+			name = Debug;
+		};
+		B1AB00000000000000000027 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.mauricekenon.semreh.browserlab.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = BrowserLab;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		B1AB00000000000000000004 /* Build configuration list for PBXProject "BrowserLab" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B1AB00000000000000000022 /* Debug */,
+				B1AB00000000000000000023 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		B1AB00000000000000000012 /* Build configuration list for PBXNativeTarget "BrowserLab" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B1AB00000000000000000024 /* Debug */,
+				B1AB00000000000000000025 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		B1AB00000000000000000013 /* Build configuration list for PBXNativeTarget "BrowserLabUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B1AB00000000000000000026 /* Debug */,
+				B1AB00000000000000000027 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		B1AB00000000000000000007 /* XCLocalSwiftPackageReference "../Packages/SemrehRemoteBrowser" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../Packages/SemrehRemoteBrowser;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		B1AB0000000000000000000E /* SemrehRemoteBrowserUI */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = B1AB00000000000000000007 /* XCLocalSwiftPackageReference "../Packages/SemrehRemoteBrowser" */;
+			productName = SemrehRemoteBrowserUI;
+		};
+		B1AB0000000000000000000F /* SemrehRemoteBrowserCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = B1AB00000000000000000007 /* XCLocalSwiftPackageReference "../Packages/SemrehRemoteBrowser" */;
+			productName = SemrehRemoteBrowserCore;
+		};
+/* End XCSwiftPackageProductDependency section */
+
+	};
+	rootObject = B1AB00000000000000000001 /* Project object */;
+}

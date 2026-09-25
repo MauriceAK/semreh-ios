@@ -1,0 +1,103 @@
+name: Remote Browser Lab
+
+on:
+  pull_request:
+    paths:
+      - "Packages/SemrehRemoteBrowser/**"
+      - "BrowserLab/**"
+      - ".github/workflows/remote-browser-lab.yml"
+      - "docs/agents/assignments/remote-browser-workspace.md"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: remote-browser-lab-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  package-and-lab:
+    name: Package and BrowserLab tests
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      PROJECT_PATH: BrowserLab/BrowserLab.xcodeproj
+      SCHEME: BrowserLab
+      DERIVED_DATA_PATH: BrowserLabDerivedData
+      RESULT_BUNDLE_PATH: BrowserLabTests.xcresult
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+
+      - name: Show toolchain versions
+        run: |
+          swift --version
+          xcodebuild -version
+
+      - name: Validate standalone scope
+        run: python3 BrowserLab/Tools/validate-scope.py
+
+      - name: Run package tests
+        run: swift test --package-path Packages/SemrehRemoteBrowser
+
+      - name: Select simulator
+        id: sim
+        run: |
+          set -euo pipefail
+          name=$(xcrun simctl list devices available --json | python3 -c '
+          import json, sys
+          data = json.load(sys.stdin)
+          phones = [
+              device["name"]
+              for runtime, devices in data["devices"].items()
+              if "iOS" in runtime
+              for device in devices
+              if device.get("isAvailable") and device["name"].startswith("iPhone")
+          ]
+          preferred = "iPhone 17"
+          print(preferred if preferred in phones else phones[0] if phones else "")
+          ')
+          if [[ -z "${name}" ]]; then
+            echo "No available iPhone simulator found" >&2
+            xcrun simctl list devices available >&2
+            exit 1
+          fi
+          echo "Using simulator: ${name}"
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+
+      - name: Build BrowserLab for testing
+        env:
+          SIMULATOR_NAME: ${{ steps.sim.outputs.name }}
+        run: |
+          set -euo pipefail
+          xcodebuild build-for-testing \
+            -project "${PROJECT_PATH}" \
+            -scheme "${SCHEME}" \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,name=${SIMULATOR_NAME}" \
+            -derivedDataPath "${DERIVED_DATA_PATH}" \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Run BrowserLab UI tests
+        env:
+          SIMULATOR_NAME: ${{ steps.sim.outputs.name }}
+        run: |
+          set -euo pipefail
+          xcodebuild test-without-building \
+            -project "${PROJECT_PATH}" \
+            -scheme "${SCHEME}" \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,name=${SIMULATOR_NAME}" \
+            -derivedDataPath "${DERIVED_DATA_PATH}" \
+            -resultBundlePath "${RESULT_BUNDLE_PATH}" \
+            -parallel-testing-enabled NO \
+            -collect-test-diagnostics never \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Upload BrowserLab test results on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: browser-lab-test-results
+          path: ${{ env.RESULT_BUNDLE_PATH }}
+          if-no-files-found: ignore
