@@ -1206,8 +1206,9 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             guard motionLink === link, !stopped, !presentationSuspended,
                   generation == epoch, presentationEpoch == presentation, input.scope == scope else { return }
             let elapsed = max(0, link.timestamp - motionStarted)
-            let t = min(1, CGFloat(elapsed / 0.55))
-            let eased = 1 - pow(1 - t, 3)
+            let t = min(1, CGFloat(elapsed / ChatMotion.scrollToLatestDuration))
+            // Zero velocity at both ends avoids the abrupt cubic ease-out launch.
+            let eased = t * t * (3 - 2 * t)
             let fraction = motionProgress < 1 ? min(1, (eased - motionProgress) / (1 - motionProgress)) : 1
             motionProgress = eased
             let current = collection.contentOffset.y
