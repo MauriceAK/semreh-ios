@@ -127,6 +127,51 @@ extension ButtonStyle where Self == ChatTactileButtonStyle {
     }
 }
 
+/// A UIKit action surface above the decorative SwiftUI label. Critical chat
+/// controls must not participate in SwiftUI's transcript tap/press arbitration.
+/// Keep the button outside the scroll view, with one touch-up action and native
+/// accessibility activation (no competing tap gesture or retry dispatch).
+struct ChatChromeActionButton<Label: View>: View {
+    let accessibilityLabel: String
+    var accessibilityIdentifier: String = ""
+    let action: () -> Void
+    @ViewBuilder let label: () -> Label
+
+    var body: some View {
+        label()
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+            .overlay {
+                ChatChromeActionSurface(label: accessibilityLabel,
+                    identifier: accessibilityIdentifier, action: action)
+            }
+    }
+}
+
+private struct ChatChromeActionSurface: UIViewRepresentable {
+    @Environment(\.isEnabled) private var isEnabled
+    let label: String
+    let identifier: String
+    let action: () -> Void
+
+    func makeUIView(context: Context) -> UIButton {
+        let button = UIButton(type: .custom)
+        button.backgroundColor = .clear
+        return button
+    }
+
+    func updateUIView(_ button: UIButton, context: Context) {
+        button.isEnabled = isEnabled
+        button.accessibilityLabel = label
+        button.accessibilityIdentifier = identifier
+        button.removeTarget(nil, action: nil, for: .touchUpInside)
+        button.removeAction(identifiedBy: UIAction.Identifier("chat-chrome-action"), for: .touchUpInside)
+        button.addAction(UIAction(identifier: UIAction.Identifier("chat-chrome-action")) { _ in
+            action()
+        }, for: .touchUpInside)
+    }
+}
+
 struct ChatUIKitMenuButton<Label: View>: View {
     @Environment(\.isEnabled) private var isEnabled
 

@@ -911,9 +911,8 @@ struct ChatView: View {
             .frame(minHeight: 96, alignment: .center)
 
             HStack(alignment: .top, spacing: 8) {
-                Button {
-                    handleBackNavigation()
-                } label: {
+                ChatChromeActionButton(accessibilityLabel: "Back",
+                    accessibilityIdentifier: "chat-back", action: handleBackNavigation) {
                     Image(systemName: "chevron.left")
                         .font(.system(size: 20, weight: .medium))
                         .frame(width: 44, height: 44)
