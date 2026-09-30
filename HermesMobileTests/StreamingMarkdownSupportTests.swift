@@ -1,5 +1,6 @@
 import XCTest
 import SwiftUI
+import UIKit
 @testable import HermesMobile
 
 final class ReasoningDisplayTextTests: XCTestCase {
@@ -435,6 +436,130 @@ final class StreamingMarkdownBlockSplitterTests: XCTestCase {
 }
 
 final class StreamingMarkdownBlockAccumulatorTests: XCTestCase {
+    @MainActor
+    func testMountedChunkObservesCanonicalByteReplacementBeforeNextAppend() async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousKey = scene.windows.first(where: \.isKeyWindow)
+        let model = ByteExactStreamingChunkModel()
+        let window = UIWindow(windowScene: scene)
+        window.frame = scene.coordinateSpace.bounds
+        let host = UIHostingController(rootView: ByteExactStreamingChunkRoot(model: model))
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        host.view.frame = window.bounds
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previousKey?.makeKey()
+        }
+        let composed = "é paragraph.\n\npending"
+        let decomposed = "e\u{301} paragraph.\n\npending"
+        XCTAssertEqual(composed, decomposed)
+        XCTAssertFalse(composed.utf8.elementsEqual(decomposed.utf8))
+        for content in [composed, decomposed, decomposed + "\n\nTail", composed, composed + " appended"] {
+            let prior = model.observations
+            model.content = content
+            let deadline = CACurrentMediaTime() + 2
+            repeat {
+                try await Task.sleep(for: .milliseconds(20))
+                host.view.setNeedsLayout()
+                host.view.layoutIfNeeded()
+            } while (!model.observed.utf8.elementsEqual(content.utf8) || model.observations <= prior)
+                && CACurrentMediaTime() < deadline
+            XCTAssertGreaterThan(model.observations, prior, "The actual mounted chunk must observe this revision")
+            XCTAssertTrue(model.observed.utf8.elementsEqual(content.utf8), "Stored segments must match exact source bytes")
+        }
+    }
+
+
+    func testLongPendingParagraphAppendsMatchReferenceAtEveryUpdate() {
+        assertAppendsMatchReference(
+            ["Completed paragraph.\n\n"]
+                + Array(repeating: String(repeating: "long prose 👩🏽‍💻 ", count: 80), count: 32)
+                + ["\n", "\n", "Next paragraph", "\n\n", "Tail"]
+        )
+    }
+
+    func testLongOpenFenceLineAppendsMatchReferenceAtEveryUpdate() {
+        assertAppendsMatchReference(
+            ["Introduction\n\n```swift\n"]
+                + Array(repeating: String(repeating: "let value = 42; ", count: 100), count: 32)
+                + ["\n", "```", "\n", "Tail", "\n\n", "More"]
+        )
+    }
+
+    func testUnicodeScalarAppendsMatchReferenceAcrossExtendedGraphemes() {
+        let text = "# e\u{301}\n\n👩🏽‍💻 family 👩‍👩‍👧‍👦\r\n"
+            + "```\nvalue e\u{301} 👩🏽‍💻\n```\n\u{301}\n\nTail"
+        assertAppendsMatchReference(text.unicodeScalars.map { String($0) })
+    }
+
+    func testSplitCRLFAppendsPreserveReferenceCharacterSemantics() {
+        assertAppendsMatchReference([
+            "# Heading", "\r", "\n", "body", "\r", "\n",
+            "\n", "\n", "```", "\r", "\n", "value",
+            "\n", "```", "\r", "\n", "tail", "\n", "\n", "More"
+        ])
+    }
+
+    func testTerminalLFAndProvisionalBlankBoundariesMatchReference() {
+        assertAppendsMatchReference([
+            "\n", "", "\n", "# Heading", "\n", "", "\u{301}",
+            "\n", "\n", "", "Paragraph", "\n", " ", "\n", "",
+            "Tail", "\n```\nvalue\n```", "", "\n", "", "Next"
+        ])
+    }
+
+    func testLongPendingLineNoChangeShrinkReplacementAndResetMatchReference() {
+        var accumulator = StreamingMarkdownBlockAccumulator()
+        let long = "Sealed.\n\n" + String(repeating: "pending 👩🏽‍💻 ", count: 2_000)
+        for text in [long, long, "Short", "Short\n\nTail"] {
+            assertMatchesReference(accumulator.update(text, appendOnly: true), text: text)
+        }
+        let replacement = "# Replacement\n" + String(repeating: "x", count: 40_000)
+        assertMatchesReference(accumulator.update(replacement, appendOnly: false), text: replacement)
+        accumulator.reset()
+        assertMatchesReference(accumulator.update("\n\nNew", appendOnly: true), text: "\n\nNew")
+        assertMatchesReference(accumulator.update("", appendOnly: true), text: "")
+
+        // Mirror the renderer gate: canonical equality must not reuse byte offsets.
+        let composed = "# é\n\n" + String(repeating: "pending", count: 1_000)
+        let decomposed = "# e\u{301}\n\n" + String(repeating: "pending", count: 1_000)
+        assertMatchesReference(accumulator.update(composed, appendOnly: false), text: composed)
+        XCTAssertTrue(decomposed.hasPrefix(composed))
+        let appendOnly = decomposed.utf8.starts(with: composed.utf8)
+        XCTAssertFalse(appendOnly)
+        assertMatchesReference(accumulator.update(decomposed, appendOnly: appendOnly), text: decomposed)
+        let extended = decomposed + "\n\nTail"
+        assertMatchesReference(accumulator.update(extended, appendOnly: true), text: extended)
+    }
+
+    private func assertAppendsMatchReference(
+        _ appends: [String], file: StaticString = #filePath, line: UInt = #line
+    ) {
+        var accumulator = StreamingMarkdownBlockAccumulator()
+        var text = ""
+        for append in appends {
+            text += append
+            assertMatchesReference(
+                accumulator.update(text, appendOnly: true), text: text, file: file, line: line
+            )
+        }
+    }
+
+    private func assertMatchesReference(
+        _ actual: StreamingMarkdownBlockSegments, text: String,
+        file: StaticString = #filePath, line: UInt = #line
+    ) {
+        let expected = StreamingMarkdownBlockSplitter.split(text)
+        XCTAssertEqual(actual, expected, file: file, line: line)
+        XCTAssertEqual(
+            actual.stableChunks.map { Array($0.text.utf8) },
+            expected.stableChunks.map { Array($0.text.utf8) }, file: file, line: line
+        )
+        XCTAssertEqual(Array(actual.activeMarkdown.utf8), Array(expected.activeMarkdown.utf8), file: file, line: line)
+    }
+
     func testAppendOnlyUpdatesMatchReferenceSplitter() {
         let text = (0..<120)
             .map { "Paragraph \($0) is complete.\n\n" }
@@ -482,6 +607,25 @@ final class StreamingMarkdownBlockAccumulatorTests: XCTestCase {
     }
 }
 
+
+@MainActor
+private final class ByteExactStreamingChunkModel: ObservableObject {
+    @Published var content = ""
+    var observed = ""
+    var observations = 0
+}
+
+private struct ByteExactStreamingChunkRoot: View {
+    @ObservedObject var model: ByteExactStreamingChunkModel
+
+    var body: some View {
+        StreamingMarkdownChunkedView(content: model.content, colorScheme: .light) { _, segments in
+            model.observed = segments.stableChunks.map(\.text).joined() + segments.activeMarkdown
+            model.observations += 1
+        }
+    }
+}
+
 /// Width resolution for chat markdown table cells (issue #233). The layout
 /// itself needs a render pass to verify; this covers the pure clamp that
 /// decides the wrap width the cell height is measured at.
@@ -522,5 +666,65 @@ final class TableCellWidthCapTests: XCTestCase {
             idealWidth: 40, proposedWidth: 999, minWidth: minWidth, maxWidth: maxWidth
         )
         XCTAssertEqual(width, maxWidth)
+    }
+
+    func testProposedWidthExperimentSkipsOnlyUnusedIdealMeasurement() {
+        for proposed: CGFloat in [0, 40, 96, 150, 260, 999, .infinity] {
+            var baselineProposals: [ProposedViewSize] = []
+            var candidateProposals: [ProposedViewSize] = []
+            func measure(_ proposal: ProposedViewSize) -> CGSize {
+                // A long cell grows vertically when its column narrows.
+                CGSize(width: proposal.width ?? 1_200,
+                       height: ceil(1_200 / (proposal.width ?? 1_200)) * 20)
+            }
+            let baseline = TableCellWidthCap.measuredSize(
+                proposedWidth: proposed, minWidth: minWidth, maxWidth: maxWidth,
+                skipsRedundantIdealMeasurement: false
+            ) { baselineProposals.append($0); return measure($0) }
+            let candidate = TableCellWidthCap.measuredSize(
+                proposedWidth: proposed, minWidth: minWidth, maxWidth: maxWidth,
+                skipsRedundantIdealMeasurement: true
+            ) { candidateProposals.append($0); return measure($0) }
+            XCTAssertEqual(candidate, baseline)
+            XCTAssertEqual(baselineProposals.count, 2)
+            XCTAssertNil(baselineProposals.first?.width)
+            XCTAssertEqual(candidateProposals.count, 1)
+            XCTAssertEqual(candidateProposals.first?.width, candidate.width)
+            XCTAssertNil(candidateProposals.first?.height)
+        }
+    }
+
+    func testUnspecifiedWidthExperimentRetainsIdealAndWrappedHeightMeasurements() {
+        for ideal: CGFloat in [40, 150, 1_200] {
+            var proposals: [ProposedViewSize] = []
+            let size = TableCellWidthCap.measuredSize(
+                proposedWidth: nil, minWidth: minWidth, maxWidth: maxWidth,
+                skipsRedundantIdealMeasurement: true
+            ) {
+                proposals.append($0)
+                return CGSize(width: $0.width ?? ideal, height: $0.width == nil ? 20 : 80)
+            }
+            XCTAssertEqual(proposals.count, 2)
+            XCTAssertNil(proposals.first?.width)
+            XCTAssertEqual(proposals.last?.width, min(max(ideal, minWidth), maxWidth))
+            XCTAssertNil(proposals.last?.height)
+            XCTAssertEqual(size.height, 80)
+        }
+    }
+
+    func testProposedWidthExperimentRemeasuresChangedContentAndWidth() {
+        var calls = 0
+        for (width, height): (CGFloat, CGFloat) in [(200, 40), (200, 100), (120, 180)] {
+            let size = TableCellWidthCap.measuredSize(
+                proposedWidth: width, minWidth: minWidth, maxWidth: maxWidth,
+                skipsRedundantIdealMeasurement: true
+            ) {
+                calls += 1
+                XCTAssertEqual($0.width, width)
+                return CGSize(width: width, height: height)
+            }
+            XCTAssertEqual(size, CGSize(width: width, height: height))
+        }
+        XCTAssertEqual(calls, 3)
     }
 }

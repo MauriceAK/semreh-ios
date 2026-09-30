@@ -2,6 +2,58 @@ import XCTest
 @testable import HermesMobile
 
 final class StreamingWordDrainTests: XCTestCase {
+    func testBufferKeepsExactCountAndContentAcrossSmallDrainsAndAppends() {
+        var buffer = StreamingWordDrain.Buffer()
+        let chunks = ["  alpha ", "beta  ", "gamma\n", "delta ", "epsilon"]
+        var received = ""
+        var revealed = ""
+        for chunk in chunks {
+            buffer.append(chunk)
+            received += chunk
+            XCTAssertEqual(buffer.unitCount, StreamingWordDrain.unitCount(in: buffer.text))
+            if buffer.unitCount > 1 {
+                revealed += buffer.drain(maxUnits: 1)
+                XCTAssertEqual(buffer.unitCount, StreamingWordDrain.unitCount(in: buffer.text))
+            }
+        }
+        revealed += buffer.drainAll()
+        XCTAssertEqual(revealed, received)
+        XCTAssertTrue(buffer.isEmpty)
+        XCTAssertEqual(buffer.unitCount, 0)
+    }
+
+    func testBufferPreservesUnicodeAcrossChunkBoundaryAndReplay() {
+        var buffer = StreamingWordDrain.Buffer()
+        let chunks = ["cafe", "\u{301} ", "👩‍", "👩‍👧‍👦 ", "🇫", "🇷 end"]
+        for chunk in chunks {
+            buffer.append(chunk)
+            XCTAssertEqual(buffer.unitCount, StreamingWordDrain.unitCount(in: buffer.text))
+        }
+        let first = buffer.drain(maxUnits: 1)
+        XCTAssertEqual(first, "cafe\u{301} ")
+        XCTAssertEqual(first + buffer.drainAll(), chunks.joined())
+
+        buffer.append("new reply ")
+        XCTAssertEqual(buffer.unitCount, 2)
+        buffer.clear() // stop/session replacement must discard the old tail
+        buffer.append("fresh reply")
+        XCTAssertEqual(buffer.drainAll(), "fresh reply")
+    }
+
+    func testBufferHandlesLargeBacklogWithoutRecountingOnEachDrain() {
+        var buffer = StreamingWordDrain.Buffer()
+        let input = String(repeating: "word ", count: 4_000)
+        buffer.append(input)
+        XCTAssertEqual(buffer.unitCount, 4_000)
+        var output = ""
+        for remaining in stride(from: 4_000, through: 1, by: -1) {
+            XCTAssertEqual(buffer.unitCount, remaining)
+            output += buffer.drain(maxUnits: 1)
+        }
+        XCTAssertEqual(output, input)
+        XCTAssertTrue(buffer.isEmpty)
+    }
+
     // MARK: - unitCount
 
     func testUnitCountEmptyTextIsZero() {

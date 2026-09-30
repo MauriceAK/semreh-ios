@@ -190,10 +190,20 @@ struct SelectableTextPresentationView: View {
 }
 
 struct SelectableTextView: UIViewRepresentable {
+    @Environment(\.internalChatRendererEnabled) private var internalChatRendererEnabled
     let text: String
 
     func makeUIView(context: Context) -> UITextView {
-        let textView = UITextView()
+        let textView: UITextView
+        #if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
+        if internalChatRendererEnabled {
+            textView = ParagraphSelectableTextView()
+        } else {
+            textView = UITextView()
+        }
+        #else
+        textView = UITextView()
+        #endif
         textView.isEditable = false
         textView.isSelectable = true
         textView.backgroundColor = .systemBackground
@@ -215,6 +225,44 @@ struct SelectableTextView: UIViewRepresentable {
         }
     }
 }
+
+#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
+/// Add explicit paragraph selection to the experimental read-only surface.
+/// Keep selection, handles, Copy and the remaining edit actions owned by UIKit.
+final class ParagraphSelectableTextView: UITextView {
+    private let paragraphMenu = UIEditMenuInteraction(delegate: nil)
+
+    override init(frame: CGRect, textContainer: NSTextContainer?) {
+        super.init(frame: frame, textContainer: textContainer)
+        let paragraphTap = UITapGestureRecognizer(target: self, action: #selector(selectParagraph(_:)))
+        paragraphTap.numberOfTapsRequired = 3
+        addGestureRecognizer(paragraphTap)
+        addInteraction(paragraphMenu)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    @objc private func selectParagraph(_ gesture: UITapGestureRecognizer) {
+        guard gesture.state == .ended, isSelectable,
+              let position = closestPosition(to: gesture.location(in: self)) else { return }
+        let source = (text ?? "") as NSString
+        guard source.length > 0 else { return }
+        let location = min(source.length - 1, max(0, offset(from: beginningOfDocument, to: position)))
+        var range = source.paragraphRange(for: NSRange(location: location, length: 0))
+        // Select content exactly, preserving spaces and composed Unicode; a
+        // paragraph terminator belongs to the boundary, not the copied passage.
+        while range.length > 0,
+              [10, 13, 0x2028, 0x2029].contains(source.character(at: NSMaxRange(range) - 1)) {
+            range.length -= 1
+        }
+        guard range.length > 0, becomeFirstResponder() else { return }
+        selectedRange = range
+        paragraphMenu.presentEditMenu(with: UIEditMenuConfiguration(
+            identifier: nil, sourcePoint: gesture.location(in: self)
+        ))
+    }
+}
+#endif
 
 struct EditMessageSheet: View {
     @Environment(\.dismiss) private var dismiss

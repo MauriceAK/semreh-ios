@@ -718,7 +718,7 @@ final class TranscriptMessageTests: XCTestCase {
             .appendingPathComponent("HermesMobile/Features/Chat/ChatViewModel.swift")
         let source = try String(contentsOf: sourceURL, encoding: .utf8)
 
-        XCTAssertTrue(source.contains("pendingAssistantTextBuffer: String"))
+        XCTAssertTrue(source.contains("pendingAssistantTextBuffer = StreamingWordDrain.Buffer()"))
         XCTAssertFalse(
             source.contains("pendingAssistantTokenChunks.joined()"),
             "Joining every queued token for dedup and pacing repeatedly copies the pending response."
@@ -770,16 +770,19 @@ final class TranscriptMessageTests: XCTestCase {
             source.range(of: "private func compressionReferenceCardView", range: contentStart.upperBound..<source.endIndex)
         )
         let scrollContent = source[contentStart.lowerBound..<contentEnd.lowerBound]
-        let constructionLines = scrollContent.split(separator: "\n").map { line in
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            return trimmed.hasPrefix("return ") ? String(trimmed.dropFirst(7)) : trimmed
-        }
-
-        XCTAssertTrue(
-            constructionLines.contains { $0.hasPrefix("LazyVStack(spacing: transcriptMessageSpacing)") },
-            "Long conversations must lazily instantiate transcript rows instead of building the full history eagerly."
-        )
-        XCTAssertFalse(constructionLines.contains { $0.hasPrefix("VStack(spacing: transcriptMessageSpacing)") })
+        XCTAssertTrue(scrollContent.contains("return transcriptRowsStack {"))
+        let stackStart = try XCTUnwrap(source.range(of: "private func transcriptRowsStack<"))
+        let stackEnd = try XCTUnwrap(source.range(of: "\n    }", range: stackStart.upperBound..<source.endIndex))
+        let stack = String(source[stackStart.lowerBound..<stackEnd.lowerBound])
+        XCTAssertTrue(stack.contains("#if DEBUG\n        if windowedEagerTranscriptEnabled"),
+                      "Eager construction is only an explicit DEBUG experiment")
+        let releaseStart = try XCTUnwrap(stack.range(of: "#else"))
+        let releaseStack = stack[releaseStart.upperBound...]
+        XCTAssertTrue(releaseStack.contains("LazyVStack(spacing: transcriptMessageSpacing, content: content)"),
+                      "The production legacy transcript must instantiate rows lazily")
+        XCTAssertFalse(releaseStack.split(separator: "\n").contains {
+            $0.trimmingCharacters(in: .whitespaces).hasPrefix("VStack(")
+        })
     }
 }
 
@@ -1504,3 +1507,151 @@ final class ResponseSpeedFormatterTests: XCTestCase {
         XCTAssertNil(ResponseSpeedFormatter.compactText(.nan))
     }
 }
+
+#if DEBUG
+final class ChatNativeTranscriptMetadataCacheTests: XCTestCase {
+    private typealias Cache = ChatNativeTranscriptMetadataCache
+    private let scope = UUID()
+
+    private func key(
+        generation: Int = 1, nativeScope: String = "session-a",
+        outgoingScope: UUID? = nil, unscoped: Bool = false,
+        active: Bool = false, streamingID: String? = nil,
+        cards: Bool = true, bareThinking: Bool = true
+    ) -> Cache.Key {
+        .init(renderedGeneration: generation, nativeScope: nativeScope,
+              outgoingInsertionScope: unscoped ? nil : (outgoingScope ?? scope),
+              hasActiveStream: active, streamingAssistantMessageID: streamingID,
+              showsThinkingAndToolCards: cards,
+              showsAssistantTypingIndicator: bareThinking)
+    }
+
+    private func row(_ id: String, role: String = "assistant", content: String = "Answer") -> TranscriptMessage {
+        TranscriptMessage(loadedIndex: 0, renderID: id, anchorID: id,
+                          message: ChatMessage(role: role, content: content, timestamp: 0, messageId: id))
+    }
+
+    private func activity(
+        _ key: Cache.Key, rows: [TranscriptMessage],
+        reasoning: Set<String> = [], tools: Set<String> = [], loose: Bool = false
+    ) -> ChatTranscriptRetainedActivityPolicy.State {
+        ChatTranscriptRetainedActivityPolicy.state(
+            in: rows, hasActiveStream: key.hasActiveStream,
+            showsActivityCards: key.showsThinkingAndToolCards,
+            canShowBareThinking: key.showsAssistantTypingIndicator,
+            hasReasoning: { $0.map(reasoning.contains) ?? loose },
+            hasTools: { $0.map(tools.contains) ?? loose }
+        )
+    }
+
+    private func oracle(
+        _ key: Cache.Key, rows: [TranscriptMessage],
+        reasoning: Set<String> = [], tools: Set<String> = [], loose: Bool = false
+    ) -> Cache.Metadata {
+        .init(renderIDs: rows.map(\.renderID),
+              latestCompletedAssistantRenderID: AssistantResponseActionPolicy.latestCompletedAssistantRenderID(
+                in: rows, hasActiveStream: key.hasActiveStream,
+                streamingAssistantMessageID: key.streamingAssistantMessageID),
+              retainedActivity: activity(key, rows: rows, reasoning: reasoning, tools: tools, loose: loose))
+    }
+
+    func testRepeatedPreparationCacheOffVersusOn() throws {
+        let rows = (0..<1000).map { row("row-\($0)", role: $0.isMultiple(of: 2) ? "user" : "assistant") }
+        let request = key(active: true, streamingID: "row-999")
+        let off = Cache()
+        let on = Cache()
+        let expected = oracle(request, rows: rows, reasoning: ["row-999"], tools: ["row-999"])
+        var offActivityDerivations = 0
+        var onActivityDerivations = 0
+        for _ in 0..<120 {
+            let uncached = off.metadata(for: request, rows: rows, cachingEnabled: false) {
+                offActivityDerivations += 1
+                return self.activity(request, rows: rows, reasoning: ["row-999"], tools: ["row-999"])
+            }
+            let cached = on.metadata(for: request, rows: rows) {
+                onActivityDerivations += 1
+                return self.activity(request, rows: rows, reasoning: ["row-999"], tools: ["row-999"])
+            }
+            XCTAssertEqual(uncached, expected)
+            XCTAssertEqual(cached, expected)
+        }
+        XCTAssertEqual(off.derivationCount, 120)
+        XCTAssertEqual(on.derivationCount, 1)
+        XCTAssertEqual(offActivityDerivations, 120)
+        XCTAssertEqual(onActivityDerivations, 1)
+        let evidence: [String: Any] = [
+            "rows": rows.count, "requests": 120,
+            "cacheOffDerivations": off.derivationCount, "cacheOnDerivations": on.derivationCount,
+            "cacheOffRetainedActivityDerivations": offActivityDerivations,
+            "cacheOnRetainedActivityDerivations": onActivityDerivations,
+            "scope": "metadata preparation only; no frame-time or FPS measurement"
+        ]
+        let attachment = XCTAttachment(data: try JSONSerialization.data(withJSONObject: evidence, options: [.sortedKeys]),
+                                       uniformTypeIdentifier: "public.json")
+        attachment.name = "r47-native-preparation-ab"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    func testInvalidatesEveryPreparationDependencyAgainstExistingPolicies() {
+        let cache = Cache()
+        let original = [row("old"), row("user", role: "user"), row("current")]
+        let revised = [row("old"), row("user", role: "user"), row("current", content: "")]
+        var requests = 0
+        func check(_ key: Cache.Key, _ rows: [TranscriptMessage],
+                   reasoning: Set<String> = [], tools: Set<String> = [], loose: Bool = false) {
+            requests += 1
+            let expected = oracle(key, rows: rows, reasoning: reasoning, tools: tools, loose: loose)
+            for _ in 0..<2 {
+                XCTAssertEqual(cache.metadata(for: key, rows: rows) {
+                    self.activity(key, rows: rows, reasoning: reasoning, tools: tools, loose: loose)
+                }, expected)
+            }
+            XCTAssertEqual(cache.derivationCount, requests)
+        }
+        check(key(), original)
+        // Same count and IDs, but the latest response is no longer copyable.
+        check(key(generation: 2), revised)
+        check(key(generation: 2, active: true), revised)
+        // Accessory changes also advance the model-owned filtered generation.
+        check(key(generation: 3, active: true), revised, reasoning: ["current"])
+        check(key(generation: 4, active: true), revised, reasoning: ["current"], tools: ["current"])
+        check(key(generation: 4, active: true, bareThinking: false), revised, reasoning: ["current"], tools: ["current"])
+        check(key(generation: 4, active: true, cards: false, bareThinking: false), revised, reasoning: ["current"], tools: ["current"])
+        check(key(generation: 4, active: true, cards: false), revised, reasoning: ["current"], tools: ["current"])
+        check(key(generation: 4, active: true), revised, reasoning: ["current"], tools: ["current"])
+        check(key(generation: 4, active: true, streamingID: "current"), revised, reasoning: ["current"], tools: ["current"])
+        check(key(generation: 4, streamingID: "current"), revised, reasoning: ["current"], tools: ["current"])
+        check(key(generation: 4, nativeScope: "session-b", streamingID: "current"), revised)
+        check(key(generation: 4, nativeScope: "session-b", outgoingScope: UUID(), streamingID: "current"), revised)
+        check(key(generation: 5, active: true), original, loose: true)
+        // Actual ID ordering and data change, not just a synthetic generation.
+        check(key(generation: 6), [row("new"), row("old")])
+        // With no user boundary, streaming ID exclusion changes the Copy target.
+        check(key(generation: 6, active: true, streamingID: "old"), [row("new"), row("old")])
+        check(key(generation: 6, active: true, streamingID: "new"), [row("new"), row("old")])
+    }
+
+    func testUnscopedRequestsRefreshSameIDRowsAndDiscardPriorEntry() {
+        let cache = Cache()
+        let rows = [row("same")]
+        let changed = [row("same", content: "")]
+        let scoped = key(active: true)
+        let unscoped = key(unscoped: true, active: true)
+        XCTAssertEqual(cache.metadata(for: scoped, rows: rows) {
+            self.activity(scoped, rows: rows)
+        }, oracle(scoped, rows: rows))
+        XCTAssertEqual(cache.metadata(for: unscoped, rows: rows) {
+            self.activity(unscoped, rows: rows)
+        }, oracle(unscoped, rows: rows))
+        XCTAssertEqual(cache.metadata(for: unscoped, rows: changed) {
+            self.activity(unscoped, rows: changed, reasoning: ["same"], loose: true)
+        }, oracle(unscoped, rows: changed, reasoning: ["same"], loose: true))
+        // Re-enter the exact former key; the unscoped call cleared its entry.
+        XCTAssertEqual(cache.metadata(for: scoped, rows: changed) {
+            self.activity(scoped, rows: changed, reasoning: ["same"])
+        }, oracle(scoped, rows: changed, reasoning: ["same"]))
+        XCTAssertEqual(cache.derivationCount, 4)
+    }
+}
+#endif

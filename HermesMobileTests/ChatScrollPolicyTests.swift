@@ -774,6 +774,33 @@ final class ChatScrollPolicyTests: XCTestCase {
             "an unrelated visible row cannot release the saved restore"
         )
         XCTAssertFalse(
+            ChatTranscriptRestorePagingOwnershipPolicy.hasConfirmedVisibleInitialTarget(
+                initialRestoreTargetID: "saved-row",
+                firstVisibleMessageID: "saved-row",
+                isScrollViewAttached: true,
+                isSceneActive: false
+            ),
+            "an attached preference from an inactive scene cannot finish restore"
+        )
+        XCTAssertFalse(
+            ChatTranscriptRestorePagingOwnershipPolicy.hasConfirmedVisibleInitialTarget(
+                initialRestoreTargetID: "saved-row",
+                firstVisibleMessageID: "saved-row",
+                isScrollViewAttached: true,
+                isRestoreCancelled: true
+            ),
+            "a late row sample cannot reclaim a cancelled restore"
+        )
+        XCTAssertFalse(
+            ChatTranscriptRestorePagingOwnershipPolicy.hasConfirmedVisibleInitialTarget(
+                initialRestoreTargetID: "saved-row",
+                firstVisibleMessageID: "saved-row",
+                isScrollViewAttached: true,
+                isDirectlyInteracting: true
+            ),
+            "a finger drag owns the viewport even if the saved row is still visible"
+        )
+        XCTAssertFalse(
             ChatTranscriptRestorePagingOwnershipPolicy.shouldKeepRestoreOwner(
                 hasSettlementTask: true,
                 isInitialRestoreInProgress: true,
@@ -1134,6 +1161,32 @@ final class ChatScrollPolicyTests: XCTestCase {
         XCTAssertTrue(ChatScrollPolicy.shouldAnimateExplicitBottomJump(reduceMotion: false))
         XCTAssertFalse(ChatScrollPolicy.shouldAnimateExplicitBottomJump(reduceMotion: true))
     }
+
+    #if DEBUG
+    func testEagerArrowMotionRequiresOptInAndSameMountedWindow() {
+        func decision(_ requested: Bool, _ eager: Bool, _ same: Bool,
+                      reduceMotion: Bool = false, direct: Bool = false,
+                      decelerating: Bool = false) -> ChatScrollPolicy.EagerArrowMotionDecision {
+            ChatScrollPolicy.eagerArrowMotionDecision(
+                requested: requested, windowedEager: eager, sameMountedWindow: same,
+                reduceMotion: reduceMotion, isDirectlyInteracting: direct,
+                isDecelerating: decelerating
+            )
+        }
+        XCTAssertEqual(decision(false, true, true), .flagOff)
+        XCTAssertEqual(decision(true, false, true), .nonEager)
+        XCTAssertEqual(decision(true, true, false), .replacedWindow)
+        XCTAssertEqual(decision(true, true, true), .animate)
+        XCTAssertEqual(decision(true, true, true, reduceMotion: true), .reduceMotion)
+        XCTAssertEqual(decision(true, true, true, direct: true), .directInteraction)
+        XCTAssertEqual(decision(true, true, true, decelerating: true), .animate,
+                       "Inherited deceleration at tap must not silently keep the experiment direct.")
+        XCTAssertTrue(ChatScrollPolicy.shouldCancelExplicitBottomRequest(
+            isDirectlyInteracting: true, isDecelerating: false))
+        XCTAssertFalse(ChatScrollPolicy.shouldCancelExplicitBottomRequest(
+            isDirectlyInteracting: false, isDecelerating: true))
+    }
+    #endif
 
     func testExplicitBottomJumpStaysVisibleUntilViewportActuallyArrives() {
         XCTAssertTrue(
@@ -1697,6 +1750,100 @@ final class ChatScrollPolicyTests: XCTestCase {
                 isScrollViewAttached: true
             )
         )
+    }
+
+    func testReaderHandoffRepublishesRowRejectedBeforeDragMetrics() {
+        let scope = UUID()
+        let request = ChatTranscriptRestoreRequest(
+            scope: scope, generation: 1, target: .message(id: "transcript:0")
+        )
+        var outcome = ChatTranscriptRestoreOutcomeState()
+        outcome.begin(request)
+        var parentRow = "transcript:0"
+        let observedRow = "transcript:1"
+        // The child has already observed row 1, but the parent is still
+        // protecting row 0. No subsequent row-ID change is required to occur.
+        if outcome.pending == nil { parentRow = observedRow }
+        XCTAssertEqual(parentRow, "transcript:0")
+
+        outcome.acceptUserIntent()
+        if let replay = ChatTranscriptVisibilityPolicy.visibleMessageIDForReaderHandoff(
+            observedID: observedRow, wasDirectlyInteracting: false,
+            isDirectlyInteracting: true, isAttachedToActiveScene: true
+        ), outcome.pending == nil {
+            parentRow = replay
+        }
+        XCTAssertEqual(parentRow, "transcript:1")
+        XCTAssertFalse(outcome.preservesDurableTarget)
+        XCTAssertEqual(
+            ChatTranscriptRestorePolicy.target(wasFollowingLatest: false, lastVisibleMessageID: parentRow),
+            .message(id: "transcript:1")
+        )
+    }
+
+    func testReaderHandoffDoesNotReplayForLayoutDecelerationOrDetachedViewport() {
+        for (wasInteracting, isInteracting, attached) in [
+            (false, false, true), (true, false, true),
+            (true, true, true), (false, true, false)
+        ] {
+            XCTAssertNil(ChatTranscriptVisibilityPolicy.visibleMessageIDForReaderHandoff(
+                observedID: "transcript:1", wasDirectlyInteracting: wasInteracting,
+                isDirectlyInteracting: isInteracting, isAttachedToActiveScene: attached
+            ))
+        }
+        XCTAssertNil(ChatTranscriptVisibilityPolicy.visibleMessageIDForReaderHandoff(
+            observedID: nil, wasDirectlyInteracting: false,
+            isDirectlyInteracting: true, isAttachedToActiveScene: true
+        ))
+    }
+
+    func testInitialMeasuredAlignmentOnlyCorrectsAnAttachedProvisionalViewport() {
+        let scope = UUID()
+        let measured = ChatInitialMeasuredTarget(
+            id: "transcript:10", scope: scope, restoreToken: 7,
+            renderRevision: 3, viewportWidth: 390,
+            frame: CGRect(x: 16, y: 574.333, width: 358, height: 40.333)
+        )
+        func offset(
+            sample: ChatInitialMeasuredTarget? = nil, targetID: String? = "transcript:10",
+            scope currentScope: UUID? = nil, token: Int = 7, revision: Int = 3,
+            width: CGFloat = 390, nativeWidth: CGFloat = 390,
+            currentOffset: CGFloat = -62, attached: Bool = true,
+            active: Bool = true, cancelled: Bool = false, interacting: Bool = false
+        ) -> CGFloat? {
+            ChatInitialMeasuredTarget.initialOffset(
+                for: sample ?? measured, targetID: targetID,
+                scope: currentScope ?? scope, restoreToken: token,
+                renderRevision: revision, viewportWidth: width,
+                nativeWidth: nativeWidth, nativeHeight: 844,
+                contentHeight: 2250.333, currentOffset: currentOffset,
+                topInset: 62, bottomInset: 4, isAttached: attached,
+                restoreActive: active, isCancelled: cancelled,
+                isDirectlyInteracting: interacting
+            )
+        }
+
+        XCTAssertEqual(offset() ?? .nan, 512.333, accuracy: 0.01)
+        XCTAssertNil(offset(currentOffset: 512.333), "an already aligned row must not shift twice")
+        XCTAssertNil(offset(currentOffset: 1070.667), "SwiftUI's native alignment owns the far row")
+        XCTAssertNil(offset(attached: false), "pre-window geometry cannot move a viewport")
+        XCTAssertNil(offset(interacting: true))
+        XCTAssertNil(offset(cancelled: true))
+        XCTAssertNil(offset(active: false), "latest mode has no saved-row correction")
+        XCTAssertNil(offset(targetID: nil))
+        XCTAssertNil(offset(scope: UUID()))
+        XCTAssertNil(offset(token: 8))
+        XCTAssertNil(offset(revision: 4))
+        XCTAssertNil(offset(width: 430))
+        XCTAssertNil(offset(nativeWidth: 430))
+        for invalidWidth in [CGFloat.zero, CGFloat.nan, CGFloat.infinity] {
+            let invalid = ChatInitialMeasuredTarget(
+                id: measured.id, scope: scope, restoreToken: 7,
+                renderRevision: 3, viewportWidth: 390,
+                frame: CGRect(x: 16, y: 574.333, width: invalidWidth, height: 40.333)
+            )
+            XCTAssertNil(offset(sample: invalid), "collapsed or non-finite row geometry cannot move the viewport")
+        }
     }
 
     func testSavedMessageGeometryBeforeRestoreTokenAvoidsProxyFallback() {
@@ -2300,4 +2447,45 @@ final class ChatScrollPolicyTests: XCTestCase {
         XCTAssertEqual(tailClamp, 20..<60, "Paging newer at the tail must not move.")
     }
 
+}
+
+final class InternalChatRendererPolicyTests: XCTestCase {
+    func testCompiledAvailability() {
+#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
+        XCTAssertTrue(InternalChatRendererPolicy.isAvailable)
+#else
+        XCTAssertFalse(InternalChatRendererPolicy.isAvailable)
+#endif
+    }
+
+    func testDefaultOffPersistenceAndSelectionChangesOnlyOnReopen() throws {
+        let suite = "InternalChatRendererPolicyTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let firstOpen = InternalChatRendererPolicy.capture(defaults: defaults, arguments: [])
+        XCTAssertFalse(firstOpen)
+        defaults.set(true, forKey: InternalChatRendererPolicy.storageKey)
+        let readback = try XCTUnwrap(UserDefaults(suiteName: suite))
+        XCTAssertTrue(readback.bool(forKey: InternalChatRendererPolicy.storageKey))
+        XCTAssertFalse(firstOpen, "Mounted chat retains the captured stable selection")
+        let secondOpen = InternalChatRendererPolicy.capture(defaults: readback, arguments: [])
+        XCTAssertEqual(secondOpen, InternalChatRendererPolicy.isAvailable)
+        defaults.set(false, forKey: InternalChatRendererPolicy.storageKey)
+        XCTAssertEqual(secondOpen, InternalChatRendererPolicy.isAvailable,
+                       "Turning off cannot swap an active transcript")
+        XCTAssertFalse(InternalChatRendererPolicy.capture(defaults: defaults, arguments: []))
+    }
+
+    func testLaunchExperimentsRemainDebugOnly() throws {
+        let suite = "InternalChatRendererArgumentsTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let selection = InternalChatRendererPolicy.capture(
+            defaults: defaults, arguments: ["--chat-native-transcript-v2"])
+#if DEBUG
+        XCTAssertTrue(selection)
+#else
+        XCTAssertFalse(selection)
+#endif
+    }
 }

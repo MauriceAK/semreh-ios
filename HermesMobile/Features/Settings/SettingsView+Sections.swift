@@ -48,6 +48,17 @@ extension SettingsView {
 
     var chatSection: some View {
         SettingsCategory(title: "Chat", subtitle: "Responses, dictation, and transcript details", systemImage: "bubble.left.and.bubble.right") {
+        if InternalChatRendererPolicy.isAvailable {
+            SettingsCard(title: String(localized: "Preview")) {
+                SettingsToggleRow(
+                    title: String(localized: "Experimental chat renderer"),
+                    systemImage: "bubble.left.and.text.bubble.right",
+                    isOn: $experimentalChatRenderer
+                )
+                .accessibilityIdentifier(InternalChatRendererPolicy.toggleIdentifier)
+                SettingsFootnote(String(localized: "Try the internal chat preview on this device. Reopen the chat to apply changes. Turn off and reopen to return to the stable renderer."))
+            }
+        }
         SettingsCard(title: String(localized: "Interaction")) {
             SettingsToggleRow(
                 title: String(localized: "Haptic Feedback"),

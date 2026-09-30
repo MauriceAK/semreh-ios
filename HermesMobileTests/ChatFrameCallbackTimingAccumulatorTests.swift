@@ -3,6 +3,32 @@ import XCTest
 @testable import HermesMobile
 
 final class ChatFrameCallbackTimingAccumulatorTests: XCTestCase {
+    @MainActor
+    func testInvalidationProbeRingClockAndExportSchema() throws {
+        let probe = ChatPerformanceInvalidationProbe(capacity: 3)
+        probe.record("body", at: 10.125, a: 30, b: 7)
+        probe.record("preference_callback", at: 10.250, a: 1)
+        probe.record("stream_row_replaced", at: 10.375, a: 29)
+        probe.record("display_link_gap_end", at: 10.500, a: 125)
+        probe.record("ignored_nonfinite", at: .infinity)
+
+        XCTAssertEqual(probe.count, 3)
+        XCTAssertEqual(probe.droppedCount, 1)
+        XCTAssertEqual(probe.events().map(\.kind), ["preference_callback", "stream_row_replaced", "display_link_gap_end"])
+        XCTAssertEqual(probe.events().map(\.time), [10.250, 10.375, 10.500])
+
+        let runID = UUID(uuidString: "00000000-0000-0000-0000-000000000012")!
+        let data = try JSONEncoder().encode(probe.report(runID: runID, processID: 42))
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(json["schema"] as? String, "semreh.chat.invalidation.v1")
+        XCTAssertEqual(json["runID"] as? String, runID.uuidString)
+        XCTAssertEqual(json["processID"] as? Int, 42)
+        XCTAssertEqual(json["clockDomain"] as? String, "CACurrentMediaTime mach_absolute_seconds")
+        XCTAssertEqual(json["capacity"] as? Int, 3)
+        XCTAssertEqual(json["droppedCount"] as? Int, 1)
+        XCTAssertEqual((json["events"] as? [[String: Any]])?.count, 3)
+    }
+
     func testSixtyHertzCallbacksAccumulateWithoutEstimatedMisses() {
         let accumulator = ChatFrameCallbackTimingAccumulator()
         let interval = 1.0 / 60.0
@@ -72,6 +98,25 @@ final class ChatFrameCallbackTimingAccumulatorTests: XCTestCase {
         XCTAssertEqual(summary.p99TargetIntervalsBetweenCallbacks, 2)
         XCTAssertEqual(summary.p95CallbackGapMillisecondBin, 33)
         XCTAssertEqual(summary.p99CallbackGapMillisecondBin, 33)
+    }
+
+    func testExportedProxyFieldsUseObservedTargetAndStrictStallThresholds() {
+        let accumulator = ChatFrameCallbackTimingAccumulator()
+        let interval = 1.0 / 60.0
+        for offset in [0.0, interval, interval + 0.049, interval + 0.150] {
+            accumulator.record(callbackTime: offset, targetInterval: interval)
+        }
+        let summary = accumulator.summary()
+        XCTAssertEqual(summary.callbackCount, 4)
+        XCTAssertEqual(summary.callbackGapCount, 3)
+        XCTAssertTrue((48...49).contains(summary.p50CallbackGapMillisecondBin ?? -1))
+        XCTAssertEqual(summary.callbackGapsOver50Milliseconds, 1)
+        XCTAssertEqual(summary.callbackGapsOver100Milliseconds, 1)
+        XCTAssertEqual(summary.minimumObservedTargetIntervalMilliseconds ?? 0, 1000 / 60, accuracy: 0.001)
+        XCTAssertEqual(summary.maximumObservedTargetIntervalMilliseconds ?? 0, 1000 / 60, accuracy: 0.001)
+        XCTAssertTrue(summary.formattedReport.contains("effective_callback_hz_proxy="))
+        XCTAssertTrue(summary.formattedReport.contains("fps=not_measured"))
+        XCTAssertTrue(summary.formattedReport.contains("callback_gaps_over_100_ms=1"))
     }
 
     func testSixtyAndOneHundredTwentyHertzCadenceChangesRebaseWithoutFalseMisses() {
@@ -263,6 +308,51 @@ final class ChatFrameCallbackTimingAccumulatorTests: XCTestCase {
         XCTAssertTrue(summary.formattedReport.contains("p99_callback_gap_ms_upper_bin="))
     }
 
+    func testOverlappingPhasesKeepIndependentCallbackCoverageAndCloseOnCancellation() {
+        let monitor = ChatPerformanceCadenceMonitor()
+        let interval = 1.0 / 60.0
+        monitor.startSampling(at: 0)
+        monitor.beginPhase(.streamFollow, at: 0)
+        monitor.beginPhase(.scroll, at: interval)
+        for tick in 0...5 {
+            monitor.record(callbackTime: Double(tick) * interval, targetInterval: interval)
+        }
+        monitor.endPhase(.scroll, at: 6 * interval)
+        monitor.record(callbackTime: 6 * interval, targetInterval: interval)
+        monitor.endPhase(.streamFollow, at: 7 * interval)
+        let summary = monitor.stopSampling(at: 8 * interval)
+        XCTAssertEqual(summary.phasesOpenAtStop, 0)
+        XCTAssertEqual(summary.phaseEventCounts[.streamFollow], 1)
+        XCTAssertEqual(summary.phaseEventCounts[.scroll], 1)
+        XCTAssertGreaterThan(summary.phaseSummaries[.streamFollow]?.callbackGapCount ?? 0, 0)
+        XCTAssertGreaterThan(summary.phaseSummaries[.scroll]?.callbackGapCount ?? 0, 0)
+        XCTAssertEqual(summary.phaseTimings[.scroll]?.eventsWithoutCallback, 0)
+        XCTAssertEqual(summary.phaseTimings[.streamFollow]?.eventsWithoutCallback, 0)
+
+        monitor.startSampling(at: 10)
+        monitor.beginPhase(.arrow, at: 10)
+        XCTAssertEqual(monitor.stopSampling(at: 11).phasesOpenAtStop, 1,
+                       "A missing completion cannot look like a valid phase.")
+    }
+
+    @MainActor
+    func testRichSwitchFixturesHaveDistinctIdentitiesAndAllThirtyGroups() {
+        let first = ChatViewModel.makeRichThirtyPerformanceLabFixture(identity: 1)
+        let second = ChatViewModel.makeRichThirtyPerformanceLabFixture(identity: 2)
+        XCTAssertNotEqual(first.session.sessionId, second.session.sessionId)
+        XCTAssertNotEqual(first.viewModel.selectedModelID, second.viewModel.selectedModelID)
+        XCTAssertEqual(first.viewModel.messages.count, 60)
+        XCTAssertEqual(second.viewModel.messages.count, 60)
+        for group in 1...30 {
+            XCTAssertTrue(first.viewModel.messages.contains {
+                $0.content?.contains("Rich group \(group) complete.") == true
+            })
+            XCTAssertTrue(second.viewModel.messages.contains {
+                $0.content?.contains("Rich group \(group) complete.") == true
+            })
+        }
+    }
+
     func testMonitorCorrelatesWorstGapAcrossPhaseEndWithRelativeMonotonicTimestamps() throws {
         let monitor = ChatPerformanceCadenceMonitor()
         let interval = 1.0 / 60.0
@@ -355,8 +445,26 @@ final class ChatFrameCallbackTimingAccumulatorTests: XCTestCase {
         XCTAssertEqual(monitor.histogramStorageCount, fixedStorageCount)
         XCTAssertEqual(
             fixedStorageCount,
-            ChatFrameCallbackTimingAccumulator.histogramStorageBinCount * 4
+            ChatFrameCallbackTimingAccumulator.histogramStorageBinCount
+                * (ChatPerformanceCadencePhase.allCases.count + 1)
         )
+    }
+
+    func testNamedMotionPhaseExportsCallbackCoverageWithoutPresentedFrameClaim() {
+        let monitor = ChatPerformanceCadenceMonitor()
+        let interval = 1.0 / 60.0
+        monitor.startSampling(at: 0)
+        monitor.beginPhase(.scroll, at: 0)
+        for frame in 0..<3 {
+            monitor.record(callbackTime: Double(frame) * interval, targetInterval: interval)
+        }
+        monitor.endPhase(.scroll, at: 3 * interval)
+        let result = monitor.stopSampling(at: 3 * interval)
+        XCTAssertEqual(result.phaseSummaries[.scroll]?.callbackCount, 3)
+        XCTAssertEqual(result.phaseSummaries[.scroll]?.callbackGapCount, 2)
+        XCTAssertEqual(result.phaseTimings[.scroll]?.eventCount, 1)
+        XCTAssertTrue(result.formattedReport.contains("phase=scroll phase_events=1"))
+        XCTAssertTrue(result.formattedReport.contains("presented_frame_hitches=not_measured"))
     }
 
     func testMonitorKeepsPhaseBoundaryCorrelationRecordsBoundedAndResettable() {

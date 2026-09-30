@@ -430,6 +430,10 @@ private struct ListenPlaybackBar: View {
 }
 
 struct ChatView: View {
+    @State private var internalChatRendererSelection: Bool?
+    private var internalChatRendererEnabled: Bool {
+        internalChatRendererSelection ?? InternalChatRendererPolicy.capture()
+    }
     private let bottomAnchorID = "chat-bottom-anchor"
     /// Keep ordinary transcript messages separated while compacting adjacent
     /// Thinking/tool/action status blocks to the same restrained rhythm.
@@ -468,6 +472,8 @@ struct ChatView: View {
     let onAPIError: (Error) -> Void
     let onParentBack: (() -> Void)?
     let loadsInitialMessages: Bool
+    let isPresentationActive: Bool
+    let onPresentationActivation: (() -> Void)?
     let disablesExternalLifecycle: Bool
     /// When true, the composer auto-starts voice dictation on appear — set by the
     /// "New Chat with Voice" App Intent (#338). Defaults to false for normal opens.
@@ -477,6 +483,7 @@ struct ChatView: View {
     @State private var followRejoinScrollToken = 0
     @State private var restoreScrollToken = 0
     @State private var transcriptRestoreCancellationToken = 0
+    @State private var didPersistTranscriptBeforeBack = false
     @State private var didRequestTranscriptRestore = false
     @State private var didInteractBeforeTranscriptRestore = false
     @State private var isTranscriptRestorePending = false
@@ -504,6 +511,8 @@ struct ChatView: View {
     /// an immediate direct re-issue cannot reset an animation that is not
     /// running.
     @State private var lastExplicitBottomIssueAt: Date?
+    @State private var debugEagerArrowDecision = "state=idle"
+    @State private var debugEagerArrowEligible = false
 #if DEBUG
     @State private var explicitBottomScrollAttemptCount = 0
     @State private var hasLoggedComposerCollapseForResize = false
@@ -511,6 +520,8 @@ struct ChatView: View {
 #endif
     @State private var isLatestTranscriptRowVisible = false
     @State private var isTranscriptBottomVisible = false
+    @State private var presentationOwnership = ChatPresentationOwnership()
+    @State private var isChatPresented = false
     @State private var explicitBottomScrollTask: Task<Void, Never>?
     @State private var explicitBottomIssueSequence = 0
     @State private var explicitBottomGeometryToken: ChatExplicitBottomGeometryToken?
@@ -582,7 +593,9 @@ struct ChatView: View {
         loadsInitialMessages: Bool = true,
         autoStartsVoiceInput: Bool = false,
         retainedViewModel: ChatViewModel? = nil,
-        disablesExternalLifecycle: Bool = false
+        disablesExternalLifecycle: Bool = false,
+        isPresentationActive: Bool = true,
+        onPresentationActivation: (() -> Void)? = nil
     ) {
         self.session = session
         self.server = server
@@ -590,9 +603,12 @@ struct ChatView: View {
         self.onParentBack = onParentBack
         self.loadsInitialMessages = loadsInitialMessages
         self.autoStartsVoiceInput = autoStartsVoiceInput
+        self.onPresentationActivation = onPresentationActivation
+        self.isPresentationActive = isPresentationActive
         self.disablesExternalLifecycle = disablesExternalLifecycle
 #if DEBUG
-        let usesFreshSyntheticComposer = ProcessInfo.processInfo.arguments.contains("--chat-performance-lab")
+        let usesFreshSyntheticComposer = (ProcessInfo.processInfo.arguments.contains("--chat-performance-lab")
+            || ProcessInfo.processInfo.arguments.contains("--chat-performance-rich30-back-lab"))
             && ProcessInfo.processInfo.arguments.contains("--composer-test-fresh-draft")
 #else
         let usesFreshSyntheticComposer = false
@@ -638,6 +654,9 @@ struct ChatView: View {
             isWaitingForStream: viewModel.activeStreamID != nil,
             isCancellingStream: viewModel.isCancellingStream,
             isOfflineReadOnly: viewModel.isViewingCachedData,
+            isPresentationActive: effectivePresentationActive,
+            isPresentationSelected: isPresentationActive,
+            isParentPresentationOpen: hasOwnedModalPresentation,
             isChromeCompact: isComposerChromeCompact,
             errorMessage: viewModel.sendErrorMessage,
             configurationErrorMessage: viewModel.composerConfigurationErrorMessage,
@@ -706,14 +725,14 @@ struct ChatView: View {
                 Task {
                     let didSelect = await viewModel.selectComposerModel(option)
                     if didSelect {
-                        ChatHaptics.configurationSelected(isEnabled: isHapticsEnabled)
+                        ChatHaptics.configurationSelected(isEnabled: isHapticsEnabled && presentationOwnership.isActive)
                     }
                 }
             },
             onConfirmModelSelection: {
                 let didSelect = await viewModel.confirmPendingModelSelection()
                 if didSelect {
-                    ChatHaptics.configurationSelected(isEnabled: isHapticsEnabled)
+                    ChatHaptics.configurationSelected(isEnabled: isHapticsEnabled && presentationOwnership.isActive)
                 }
             },
             onCancelModelSelection: {
@@ -734,7 +753,7 @@ struct ChatView: View {
             onSelectWorkspace: { path in
                 let didSelect = await viewModel.selectWorkspacePath(path)
                 if didSelect {
-                    ChatHaptics.configurationSelected(isEnabled: isHapticsEnabled)
+                    ChatHaptics.configurationSelected(isEnabled: isHapticsEnabled && presentationOwnership.isActive)
                 }
             },
             onSelectProfile: { profile in
@@ -744,7 +763,7 @@ struct ChatView: View {
                 Task {
                     let didSelect = await viewModel.selectReasoningEffort(effort)
                     if didSelect {
-                        ChatHaptics.configurationSelected(isEnabled: isHapticsEnabled)
+                        ChatHaptics.configurationSelected(isEnabled: isHapticsEnabled && presentationOwnership.isActive)
                     }
                 }
             },
@@ -942,6 +961,9 @@ struct ChatView: View {
 #if DEBUG
         ChatPerformanceCadenceMonitor.begin(.back)
 #endif
+        persistTranscriptRestore()
+        didPersistTranscriptBeforeBack = true
+        viewModel.warmTranscriptReaderMemory?.suspendCapture()
         onParentBack?()
         dismiss()
     }
@@ -1045,7 +1067,7 @@ struct ChatView: View {
                                 )
                                 if response == .accepted,
                                    let legacyChoice = ApprovalChoice(rawValue: choice.rawValue) {
-                                    ChatHaptics.approvalSubmitted(legacyChoice, isEnabled: isHapticsEnabled)
+                                    ChatHaptics.approvalSubmitted(legacyChoice, isEnabled: isHapticsEnabled && presentationOwnership.isActive)
                                 }
                             } catch {
                                 // The VM keeps an identity-scoped error visible
@@ -1087,6 +1109,9 @@ struct ChatView: View {
 
         }
         .safeAreaInset(edge: .top, spacing: 0) { chatNavigationBar }
+#if DEBUG
+        .modifier(ChatNavigationTimingProbe(onBack: handleBackNavigation))
+#endif
         .background {
             SemrehBackdrop().ignoresSafeArea()
                 .onChange(of: draftMessage) {
@@ -1139,12 +1164,20 @@ struct ChatView: View {
         .task(id: didCompleteInitialAppearance) {
             await handleInitialAppearanceTask()
         }
+        .onChange(of: effectivePresentationActive) { _, _ in
+            updatePresentationActivity()
+        }
         .onChange(of: scenePhase) {
                 handleScenePhaseChange(scenePhase)
             }
             .onChange(of: viewModel.activeStreamID) {
                 handleActiveStreamChange()
             }
+#if DEBUG
+            .onChange(of: viewModel.isPerformanceLabStreamingTurnInFlight) {
+                markStreamingCadencePhase()
+            }
+#endif
             .onChange(of: viewModel.cacheFirstReconcileScrollToken) {
                 // Open a brief snap window so the cache-first reconcile re-pin (and any
                 // message-count auto-follow racing it) lands without an animated jump (#289).
@@ -1164,6 +1197,15 @@ struct ChatView: View {
                 viewModel.setShowsLiveActivityResponseExcerpts(showsLiveActivityResponseExcerpts)
             }
             .onDisappear {
+                isChatPresented = false
+                updatePresentationActivity()
+#if DEBUG
+                // The destination left before any in-flight motion could settle.
+                for phase in [ChatPerformanceCadencePhase.entry, .scroll, .arrow, .paging,
+                              .streamFollow, .streamParked] {
+                    ChatPerformanceCadenceMonitor.end(phase)
+                }
+#endif
                 cancelExplicitBottomScroll()
                 OpenChatSessionStore.shared.cancelSelectedHistoryRefresh(for: viewModel)
                 viewModel.setTranscriptPresentationActive(false)
@@ -1181,10 +1223,15 @@ struct ChatView: View {
                 viewModel.stopListening()
             }
             .onAppear {
-#if DEBUG
-                ChatPerformanceCadenceMonitor.end(.entry)
-#endif
-                viewModel.setTranscriptPresentationActive(true)
+                // NavigationLink may construct a destination before Settings changes.
+                // Capture at first presentation, then retain through covers/backgrounding.
+                if internalChatRendererSelection == nil {
+                    internalChatRendererSelection = InternalChatRendererPolicy.capture()
+                }
+                didPersistTranscriptBeforeBack = false
+                viewModel.warmTranscriptReaderMemory?.resumeCapture()
+                isChatPresented = true
+                updatePresentationActivity()
                 guard !disablesExternalLifecycle else { return }
                 foregroundRefreshTask?.cancel()
                 foregroundRefreshTask = Task { @MainActor in
@@ -1218,6 +1265,18 @@ struct ChatView: View {
                 guard viewModel.responseCompletionHapticTrigger > 0 else { return }
                 handleResponseCompletionSideEffects()
             }
+            .onChange(of: viewModel.streamProgressHapticTrigger) { _, trigger in
+                guard trigger > 0,
+                      StreamingHapticEligibility.shouldEmit(
+                        isSceneActive: scenePhase == .active,
+                        isChatPresented: effectivePresentationActive,
+                        isLatestTranscriptRowVisible: isLatestTranscriptRowVisible,
+                        isTranscriptBottomVisible: isTranscriptBottomVisible,
+                        shouldFollowLatestMessage: shouldFollowLatestMessage
+                      )
+                else { return }
+                ChatHaptics.streamProgress(isEnabled: isHapticsEnabled && presentationOwnership.isActive)
+            }
             .navigationDestination(item: $forkedSession) { session in
                 ChatView(
                     session: session,
@@ -1246,6 +1305,7 @@ struct ChatView: View {
             }
             .fullScreenCover(item: $selectableResponseText) { selectableText in
                 SelectableTextPresentationView(selection: selectableText)
+                    .environment(\.internalChatRendererEnabled, internalChatRendererEnabled)
             }
             .sheet(item: $attachmentPreviewItem) { item in
                 ChatAttachmentPreviewView(
@@ -1291,6 +1351,14 @@ struct ChatView: View {
 
     var body: some View {
         chatBaseView
+            // Keep the additional ownership observers outside the large base
+            // expression so Swift can type-check each modifier chain separately.
+            .onChange(of: isPresentationActive) { _, _ in
+                updatePresentationActivity()
+            }
+            .onChange(of: canFocusComposer) { _, canFocus in
+                if canFocus { restoreComposerFocusAfterPreviewIfNeeded() }
+            }
             .alert(
                 "Discard Later Messages?",
                 isPresented: $showEditDiscardConfirmation
@@ -1300,7 +1368,7 @@ struct ChatView: View {
                     editDraft = ""
                 }
                 Button("Discard & Edit", role: .destructive) {
-                    ChatHaptics.destructiveConfirmationAccepted(isEnabled: isHapticsEnabled)
+                    ChatHaptics.destructiveConfirmationAccepted(isEnabled: isHapticsEnabled && presentationOwnership.isActive)
                     showEditSheet = true
                 }
             } message: {
@@ -1315,7 +1383,7 @@ struct ChatView: View {
                 }
                 Button("Discard & Regenerate", role: .destructive) {
                     if let context = regenerateContext {
-                        ChatHaptics.destructiveConfirmationAccepted(isEnabled: isHapticsEnabled)
+                        ChatHaptics.destructiveConfirmationAccepted(isEnabled: isHapticsEnabled && presentationOwnership.isActive)
                         Task { await submitRegenerate(context) }
                     }
                 }
@@ -1437,7 +1505,7 @@ struct ChatView: View {
             writesDisabled: gitWriteAvailability.writesDisabled,
             isRunningAction: gitAvailabilityViewModel.isRunningGitAction,
             onTap: {
-                HapticButtonHaptics.tap(isEnabled: isHapticsEnabled)
+                HapticButtonHaptics.tap(isEnabled: isHapticsEnabled && presentationOwnership.isActive)
             },
             onChanges: {
                 activeGitSheet = .changes
@@ -1560,6 +1628,7 @@ struct ChatView: View {
     @ViewBuilder
     private var messageContent: some View {
         ChatTranscriptView(
+            internalChatRendererEnabled: internalChatRendererEnabled,
             isLoading: viewModel.isLoading,
             errorMessage: viewModel.errorMessage,
             messages: viewModel.messages,
@@ -1661,7 +1730,11 @@ struct ChatView: View {
             },
             onUpdateScrollMetrics: updateScrollMetrics,
             onDismissKeyboard: dismissKeyboard,
-            onScrollToBottom: scrollToBottom,
+            onScrollToBottom: { proxy, sameMountedWindow, directlyInteracting, decelerating in
+                scrollToBottom(proxy, sameMountedWindow: sameMountedWindow,
+                               directlyInteracting: directlyInteracting, decelerating: decelerating)
+            },
+            debugArrowMotionStatus: debugEagerArrowDecision,
             onScrollToLatestTranscriptMessage: { proxy in
                 scrollToLatestTranscriptMessage(proxy)
             },
@@ -1672,6 +1745,7 @@ struct ChatView: View {
                 scrollToTranscriptMessage(proxy, messageID: messageID, animated: animated)
             },
             onVisibleTranscriptRowIDChange: { rowID in
+                guard !didPersistTranscriptBeforeBack else { return }
                 if isTranscriptRestorePending {
                     guard let rowID, rowID == pendingTranscriptRestoreMessageID else {
                         return
@@ -1680,11 +1754,24 @@ struct ChatView: View {
                     pendingTranscriptRestoreMessageID = nil
                 }
                 guard visibleTranscriptRowID != rowID else { return }
+#if DEBUG
+                ChatPerformanceInvalidationProbe.shared?.record("visible_row_changed", a: rowID == nil ? 0 : 1)
+#endif
                 visibleTranscriptRowID = rowID
             },
             onTranscriptTailVisibilityChange: { latestRow, bottom in
-                if isLatestTranscriptRowVisible != latestRow { isLatestTranscriptRowVisible = latestRow }
-                if isTranscriptBottomVisible != bottom { isTranscriptBottomVisible = bottom }
+                if isLatestTranscriptRowVisible != latestRow {
+#if DEBUG
+                    ChatPerformanceInvalidationProbe.shared?.record("tail_state_changed", a: 1, b: latestRow ? 1 : 0)
+#endif
+                    isLatestTranscriptRowVisible = latestRow
+                }
+                if isTranscriptBottomVisible != bottom {
+#if DEBUG
+                    ChatPerformanceInvalidationProbe.shared?.record("tail_state_changed", a: 2, b: bottom ? 1 : 0)
+#endif
+                    isTranscriptBottomVisible = bottom
+                }
             },
             onStableViewportJumpToLatest: {
                 transcriptRestoreOutcomeState.acceptUserIntent()
@@ -1723,7 +1810,7 @@ struct ChatView: View {
                         expectedIdentity: identity
                     )
                     if didRespond {
-                        ChatHaptics.clarificationSubmitted(isEnabled: isHapticsEnabled)
+                        ChatHaptics.clarificationSubmitted(isEnabled: isHapticsEnabled && presentationOwnership.isActive)
                     }
                 }
             },
@@ -1735,7 +1822,7 @@ struct ChatView: View {
                         expectedIdentity: identity
                     )
                     if didRespond {
-                        ChatHaptics.clarificationSubmitted(isEnabled: isHapticsEnabled)
+                        ChatHaptics.clarificationSubmitted(isEnabled: isHapticsEnabled && presentationOwnership.isActive)
                     }
                 }
             },
@@ -1759,6 +1846,7 @@ struct ChatView: View {
             onOpenTurnFileDiff: { file in
                 turnDiffPresentation = .file(file)
             },
+            warmReaderMemory: viewModel.warmTranscriptReaderMemory,
             restoreScrollToken: restoreScrollToken,
             restoreTarget: viewModel.transcriptRestoreTarget,
             initialRestoreRequest: transcriptRestoreOutcomeState.pending,
@@ -1779,6 +1867,7 @@ struct ChatView: View {
             outgoingInsertionEvent: viewModel.outgoingInsertionEvent
         )
         .equatable()
+        .environment(\.internalChatRendererEnabled, internalChatRendererEnabled)
     }
 
     /// The chat-canvas layout direction. Driven by the manual Settings → Chat
@@ -2075,6 +2164,10 @@ struct ChatView: View {
     }
 
     private func loadOlderMessages(intent: ChatTranscriptOlderLoadIntent) async -> Bool {
+#if DEBUG
+        ChatPerformanceCadenceMonitor.begin(.paging)
+        defer { ChatPerformanceCadenceMonitor.end(.paging) }
+#endif
         if intent.acceptsUserIntent {
 #if DEBUG
             let previousFollowLatest = shouldFollowLatestMessage
@@ -2129,6 +2222,7 @@ struct ChatView: View {
 #endif
         let submittedDraft = draftMessage
         let shouldRestoreFocusAfterSend = composerIsFocused
+        let focusGeneration = presentationOwnership.generation
 
         if submittedDraft.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("/") {
             let parsedCommand = SlashCommandExecutor.parse(submittedDraft)?.command
@@ -2156,9 +2250,9 @@ struct ChatView: View {
             didStart = await sendStandardMessage(submittedDraft)
         }
 
-        if didStart {
-            ChatHaptics.messageSent(isEnabled: isHapticsEnabled)
-            if shouldRestoreFocusAfterSend {
+        if didStart, presentationOwnership.owns(focusGeneration) {
+            ChatHaptics.messageSent(isEnabled: isHapticsEnabled && presentationOwnership.isActive)
+            if shouldRestoreFocusAfterSend, presentationOwnership.owns(focusGeneration) {
                 requestComposerFocusIfPossible()
             } else {
                 composerIsFocused = false
@@ -2183,7 +2277,7 @@ struct ChatView: View {
         )
 
         if didSend {
-            ChatHaptics.messageSent(isEnabled: isHapticsEnabled)
+            ChatHaptics.messageSent(isEnabled: isHapticsEnabled && presentationOwnership.isActive)
         }
 
         if let lastError = viewModel.lastError {
@@ -2277,7 +2371,7 @@ struct ChatView: View {
     private func cancelStream() async {
         let didCancel = await viewModel.cancelActiveStream()
         if didCancel {
-            ChatHaptics.streamCancelled(isEnabled: isHapticsEnabled)
+            ChatHaptics.streamCancelled(isEnabled: isHapticsEnabled && presentationOwnership.isActive)
         }
 
         if let lastError = viewModel.lastError {
@@ -2317,7 +2411,7 @@ struct ChatView: View {
         }
 
         if outcome != nil {
-            ChatHaptics.configurationSelected(isEnabled: isHapticsEnabled)
+            ChatHaptics.configurationSelected(isEnabled: isHapticsEnabled && presentationOwnership.isActive)
         }
 
         if let session = outcome?.session {
@@ -2564,7 +2658,43 @@ struct ChatView: View {
         return nil
     }
 
+    private var effectivePresentationActive: Bool {
+        isPresentationActive && isChatPresented && scenePhase == .active
+    }
+
+    private func updatePresentationActivity() {
+        let wasActive = presentationOwnership.isActive
+        presentationOwnership.update(isActive: effectivePresentationActive, isSelected: isPresentationActive)
+        viewModel.setTranscriptPresentationActive(effectivePresentationActive)
+        if effectivePresentationActive, !wasActive {
+            onPresentationActivation?()
+            applyInitialComposerFocusPolicyIfNeeded()
+            restoreComposerFocusAfterPreviewIfNeeded()
+        }
+        guard !effectivePresentationActive else { return }
+        composerIsFocused = false
+        // Scene inactivity and full-screen covers suspend effects, not ownership.
+        if !isPresentationActive {
+            shouldRestoreComposerFocusAfterPreview = false
+            showsChatControls = false
+            attachmentPreviewItem = nil
+            transcriptMediaPreviewItem = nil
+            selectableResponseText = nil
+        }
+        cancelExplicitBottomScroll()
+        followScrollGeneration += 1
+        composerResizeGeneration += 1
+        composerResizeTask?.cancel()
+        composerResizeTask = nil
+        isComposerResizing = false
+        composerResizeFollowIntent = false
+        shouldAnimateNextFollowAfterComposerResize = false
+        foregroundRefreshTask?.cancel()
+        foregroundRefreshTask = nil
+    }
+
     private func handleScenePhaseChange(_ phase: ScenePhase) {
+        updatePresentationActivity()
         switch phase {
         case .background:
             cancelExplicitBottomScroll()
@@ -2578,6 +2708,7 @@ struct ChatView: View {
                 beginResponseCompletionBackgroundTask()
             }
         case .active:
+            guard effectivePresentationActive else { return }
             viewModel.setTranscriptPresentationActive(true)
             viewModel.refreshListenPlaybackProgressAfterSceneActivation()
             endResponseCompletionBackgroundTask()
@@ -2603,6 +2734,9 @@ struct ChatView: View {
     }
 
     private func handleActiveStreamChange() {
+#if DEBUG
+        markStreamingCadencePhase()
+#endif
         guard viewModel.activeStreamID == nil else { return }
 
         if responseCompletionNotificationTracker.shouldEndBackgroundTaskOnStreamInactive(
@@ -2615,6 +2749,19 @@ struct ChatView: View {
         // the response finishes.
         Task { await gitAvailabilityViewModel.refreshAfterExternalMutation() }
     }
+
+#if DEBUG
+    private func markStreamingCadencePhase() {
+        if viewModel.activeStreamID != nil || viewModel.isPerformanceLabStreamingTurnInFlight {
+            let phase: ChatPerformanceCadencePhase = shouldFollowLatestMessage ? .streamFollow : .streamParked
+            ChatPerformanceCadenceMonitor.end(phase == .streamFollow ? .streamParked : .streamFollow)
+            ChatPerformanceCadenceMonitor.begin(phase)
+        } else {
+            ChatPerformanceCadenceMonitor.end(.streamFollow)
+            ChatPerformanceCadenceMonitor.end(.streamParked)
+        }
+    }
+#endif
 
 #if DEBUG
     private func debugOpaqueTranscriptTargetKey(_ targetID: String) -> String {
@@ -2690,6 +2837,7 @@ struct ChatView: View {
 #endif
 
     private func handleResponseCompletionSideEffects() {
+        guard isPresentationActive, isChatPresented else { return }
         if !viewModel.responseCompletionNeedsTranscriptRefresh {
             viewModel.cacheCompletedResponse(modelContext: modelContext)
         }
@@ -2701,8 +2849,9 @@ struct ChatView: View {
             return
         }
 
-        ChatHaptics.assistantResponseCompleted(isEnabled: isHapticsEnabled)
+        ChatHaptics.assistantResponseCompleted(isEnabled: isHapticsEnabled && presentationOwnership.isActive)
 
+        let generation = presentationOwnership.generation
         Task { @MainActor in
             defer { endResponseCompletionBackgroundTask() }
 
@@ -2710,6 +2859,7 @@ struct ChatView: View {
                 await loadMessages()
             }
 
+            guard generation == presentationOwnership.generation else { return }
             await ResponseCompletionNotificationService.scheduleResponseCompletedIfAllowed(
                 sessionID: session.sessionId,
                 preferenceEnabled: isResponseCompletionNotificationsEnabled,
@@ -2746,18 +2896,28 @@ struct ChatView: View {
 #endif
     }
 
-    private func scrollToBottom(_ proxy: ScrollViewProxy) {
+    private func scrollToBottom(
+        _ proxy: ScrollViewProxy, sameMountedWindow: Bool,
+        directlyInteracting: Bool, decelerating: Bool
+    ) {
         guard !usesStableViewport else { return }
         transcriptRestoreOutcomeState.acceptUserIntent()
         didInteractBeforeTranscriptRestore = true
         isTranscriptRestorePending = false
         pendingTranscriptRestoreMessageID = nil
         transcriptRestoreCancellationToken &+= 1
-        beginExplicitBottomScroll(proxy)
+        beginExplicitBottomScroll(proxy, sameMountedWindow: sameMountedWindow,
+                                  directlyInteracting: directlyInteracting, decelerating: decelerating)
     }
 
-    private func beginExplicitBottomScroll(_ proxy: ScrollViewProxy) {
+    private func beginExplicitBottomScroll(
+        _ proxy: ScrollViewProxy, sameMountedWindow: Bool,
+        directlyInteracting: Bool, decelerating: Bool
+    ) {
         guard !usesStableViewport else { return }
+#if DEBUG
+        ChatPerformanceCadenceMonitor.begin(.arrow)
+#endif
         explicitBottomScrollTask?.cancel()
         explicitBottomScrollGeneration &+= 1
         let generation = explicitBottomScrollGeneration
@@ -2765,6 +2925,16 @@ struct ChatView: View {
             reduceMotion: reduceMotion
         )
 #if DEBUG
+        let motionRequested = ProcessInfo.processInfo.arguments.contains("--chat-eager-arrow-motion")
+        let motionDecision = ChatScrollPolicy.eagerArrowMotionDecision(
+            requested: motionRequested,
+            windowedEager: ProcessInfo.processInfo.arguments.contains("--chat-windowed-eager"),
+            sameMountedWindow: sameMountedWindow, reduceMotion: reduceMotion,
+            isDirectlyInteracting: directlyInteracting, isDecelerating: decelerating
+        )
+        debugEagerArrowEligible = motionDecision.isEligible
+        debugEagerArrowDecision = "requested=\(motionRequested) eligible=\(motionDecision.isEligible) sameMountedWindow=\(sameMountedWindow) nearMotionBand=\(isNearBottomForMotion) animated=false reason=\(motionDecision.rawValue) state=started"
+        Self.transcriptScrollLogger.debug("event=eager_arrow_decision \(debugEagerArrowDecision, privacy: .public)")
         explicitBottomScrollAttemptCount = 0
         Self.transcriptScrollLogger.debug("""
             event=explicit_bottom_start decision=\(shouldAnimateInitialJump ? "animate" : "reduce_motion_snap", privacy: .public) \
@@ -2809,7 +2979,11 @@ struct ChatView: View {
             && isNearBottomForMotion
             && isLatestTranscriptRowVisible
             && !isUserInteractingWithScroll
+#if DEBUG
+        issueExplicitBottomScroll(proxy, animated: canEaseOpening || debugEagerArrowEligible)
+#else
         issueExplicitBottomScroll(proxy, animated: canEaseOpening)
+#endif
         guard isExplicitBottomScrollActive else { return }
 
         explicitBottomScrollTask = Task { @MainActor in
@@ -2947,6 +3121,11 @@ struct ChatView: View {
         // resetting the animation transaction.
         if animated, !hasIssuedAnimatedExplicitBottomScroll,
            let animation = ChatMotion.scrollToLatest(reduceMotion: reduceMotion) {
+#if DEBUG
+            debugEagerArrowDecision = debugEagerArrowDecision.replacingOccurrences(of: "animated=false", with: "animated=true")
+                .replacingOccurrences(of: "state=started", with: "state=issued")
+            Self.transcriptScrollLogger.debug("event=eager_arrow_issue \(debugEagerArrowDecision, privacy: .public)")
+#endif
             withAnimation(animation) {
                 proxy.scrollTo(target, anchor: .bottom)
             }
@@ -2975,6 +3154,9 @@ struct ChatView: View {
 
     private func finishExplicitBottomScroll(generation: Int? = nil) {
         if let generation, generation != explicitBottomScrollGeneration { return }
+#if DEBUG
+        ChatPerformanceCadenceMonitor.end(.arrow)
+#endif
         explicitBottomScrollTask?.cancel()
         explicitBottomScrollTask = nil
         explicitBottomGeometryToken = nil
@@ -2987,6 +3169,10 @@ struct ChatView: View {
     private func completeExplicitBottomScroll(generation: Int? = nil) {
         guard generation == nil || generation == explicitBottomScrollGeneration else { return }
 #if DEBUG
+        debugEagerArrowDecision = debugEagerArrowDecision
+            .replacingOccurrences(of: "state=issued", with: "state=settled")
+            .replacingOccurrences(of: "state=started", with: "state=settled")
+        Self.transcriptScrollLogger.debug("event=eager_arrow_settle \(debugEagerArrowDecision, privacy: .public)")
         Self.transcriptScrollLogger.debug("""
             event=explicit_bottom_settled decision=near_bottom_and_tail_visible \
             attempts=\(explicitBottomScrollAttemptCount, privacy: .public) latestRowVisible=\(isLatestTranscriptRowVisible, privacy: .public) \
@@ -3010,6 +3196,10 @@ struct ChatView: View {
 
     private func cancelExplicitBottomScroll() {
 #if DEBUG
+        debugEagerArrowDecision = debugEagerArrowDecision
+            .replacingOccurrences(of: "state=issued", with: "state=cancelled")
+            .replacingOccurrences(of: "state=started", with: "state=cancelled")
+        Self.transcriptScrollLogger.debug("event=eager_arrow_cancel \(debugEagerArrowDecision, privacy: .public)")
         Self.transcriptScrollLogger.debug("""
             event=explicit_bottom_cancelled decision=direct_interaction \
             attempts=\(explicitBottomScrollAttemptCount, privacy: .public)
@@ -3061,7 +3251,7 @@ struct ChatView: View {
         messageID: String,
         animated: Bool
     ) {
-        guard !usesStableViewport else { return }
+        guard presentationOwnership.isActive, !usesStableViewport else { return }
 #if DEBUG
         let targetKey = debugOpaqueTranscriptTargetKey(messageID)
         if let pendingDiagnostic = pendingTranscriptProxyGenerationDiagnostic {
@@ -3108,7 +3298,7 @@ struct ChatView: View {
                 return
             }
 #else
-            guard !Task.isCancelled, generation == followScrollGeneration else { return }
+            guard !Task.isCancelled, presentationOwnership.isActive, generation == followScrollGeneration else { return }
 #endif
 
             if animated {
@@ -3139,6 +3329,7 @@ struct ChatView: View {
         animated: Bool,
         isUserInitiated: Bool
     ) {
+        guard presentationOwnership.isActive else { return }
 #if DEBUG
         let targetKind = targetID == bottomAnchorID ? "latest_content" : "latest_row"
 #endif
@@ -3168,6 +3359,13 @@ struct ChatView: View {
         followScrollGeneration += 1
         let generation = followScrollGeneration
 #if DEBUG
+        ChatPerformanceInvalidationProbe.shared?.record(
+            "follow_request", a: min(generation, 1_000_000),
+            b: targetID == bottomAnchorID ? 1 : 2,
+            c: isUserInitiated ? 1 : 0
+        )
+#endif
+#if DEBUG
         logChatScrollBoundary(
             event: "follow_state_transition",
             decision: isUserInitiated ? "user_follow_scroll" : "automatic_follow_scroll",
@@ -3185,7 +3383,7 @@ struct ChatView: View {
         Task { @MainActor in
             await Task.yield()
             try? await Task.sleep(nanoseconds: 16_000_000)
-            guard !Task.isCancelled, generation == followScrollGeneration else {
+            guard !Task.isCancelled, presentationOwnership.isActive, generation == followScrollGeneration else {
 #if DEBUG
                 Self.transcriptScrollLogger.debug("""
                     event=follow_scroll_cancelled decision=generation_changed targetKind=\(targetKind, privacy: .public) \
@@ -3216,6 +3414,13 @@ struct ChatView: View {
                 && isNearBottomForMotion
                 && !isCacheFirstSnapWindow
                 && !reduceMotion
+#if DEBUG
+            ChatPerformanceInvalidationProbe.shared?.record(
+                "follow_fire", a: min(generation, 1_000_000),
+                b: targetID == bottomAnchorID ? 1 : 2,
+                c: shouldAnimate ? 1 : 0
+            )
+#endif
 #if DEBUG
             Self.transcriptScrollLogger.debug("""
                 event=follow_scroll_command decision=proxy_scroll targetKind=\(targetKind, privacy: .public) \
@@ -3249,13 +3454,25 @@ struct ChatView: View {
         )
     }
 
+    private var hasOwnedModalPresentation: Bool {
+        showsChatControls || attachmentPreviewItem != nil || transcriptMediaPreviewItem != nil
+            || selectableResponseText != nil || activeGitSheet != nil || turnDiffPresentation != nil
+            || gitAlert != nil || showsGoalSheet
+    }
+
     private var canFocusComposer: Bool {
-        !viewModel.isViewingCachedData
+        effectivePresentationActive && presentationOwnership.isActive && !hasOwnedModalPresentation && !viewModel.isViewingCachedData
             && !viewModel.isUploadingAttachment
             && viewModel.uploadAttachmentErrorMessage == nil
     }
 
     private func handleInitialAppearanceCompletion() {
+#if DEBUG
+        // UIKit appearance completion includes the push/switch transition;
+        // this remains a lifecycle proxy, never a presented-frame timestamp.
+        ChatPerformanceCadenceMonitor.end(.entry)
+        ChatPerformanceCadenceMonitor.end(.switchChat)
+#endif
         didCompleteInitialAppearance = true
         applyInitialComposerFocusPolicyIfNeeded()
     }
@@ -3275,6 +3492,7 @@ struct ChatView: View {
     }
 
     private func presentPreviewRestoringComposerFocusIfNeeded(_ present: () -> Void) {
+        guard presentationOwnership.isActive else { return }
         shouldRestoreComposerFocusAfterPreview = composerIsFocused
         if composerIsFocused {
             composerIsFocused = false
@@ -3284,16 +3502,20 @@ struct ChatView: View {
 
     private func restoreComposerFocusAfterPreviewIfNeeded() {
         guard shouldRestoreComposerFocusAfterPreview else { return }
-        shouldRestoreComposerFocusAfterPreview = false
-        requestComposerFocusIfPossible()
+        requestComposerFocusIfPossible(restoringPreview: true)
     }
 
-    private func requestComposerFocusIfPossible() {
+    private func requestComposerFocusIfPossible(restoringPreview: Bool = false) {
         guard canFocusComposer else { return }
 
+        let generation = presentationOwnership.generation
         Task { @MainActor in
             await Task.yield()
-            guard canFocusComposer else { return }
+            guard presentationOwnership.owns(generation), canFocusComposer else { return }
+            if restoringPreview {
+                guard shouldRestoreComposerFocusAfterPreview else { return }
+                shouldRestoreComposerFocusAfterPreview = false
+            }
             composerIsFocused = true
         }
     }
@@ -3307,6 +3529,7 @@ struct ChatView: View {
     }
 
     private func handleComposerHeightChange(_ height: CGFloat) {
+        guard presentationOwnership.isActive else { return }
         guard abs(composerHeight - height) > 0.5 else { return }
 
 #if DEBUG
@@ -3352,6 +3575,7 @@ struct ChatView: View {
     }
 
     private func persistTranscriptRestore() {
+        guard !didPersistTranscriptBeforeBack else { return }
         guard !transcriptRestoreOutcomeState.preservesDurableTarget else { return }
         guard didRequestTranscriptRestore || didInteractBeforeTranscriptRestore else {
             // The durable point remains authoritative until appearance
@@ -3412,6 +3636,7 @@ struct ChatView: View {
     private func updateScrollMetrics(_ metrics: ChatScrollMetrics) {
 #if DEBUG
         let previousFollowLatest = shouldFollowLatestMessage
+        let wasUserScrolling = isUserInteractingWithScroll
 #endif
         if metrics.isDirectlyInteracting {
             transcriptRestoreOutcomeState.acceptUserIntent()
@@ -3460,6 +3685,18 @@ struct ChatView: View {
             isExplicitBottomScrollContext: isExplicitBottomScrollContext
         )
         isUserInteractingWithScroll = isEffectiveUserInteraction
+#if DEBUG
+        if isEffectiveUserInteraction && !wasUserScrolling {
+            ChatPerformanceCadenceMonitor.begin(.scroll)
+        } else if !isEffectiveUserInteraction && wasUserScrolling {
+            ChatPerformanceCadenceMonitor.end(.scroll)
+        }
+        if viewModel.activeStreamID != nil || viewModel.isPerformanceLabStreamingTurnInFlight {
+            let phase: ChatPerformanceCadencePhase = isNearBottom ? .streamFollow : .streamParked
+            ChatPerformanceCadenceMonitor.end(phase == .streamFollow ? .streamParked : .streamFollow)
+            ChatPerformanceCadenceMonitor.begin(phase)
+        }
+#endif
 
         guard ChatTranscriptRestorePolicy.shouldApplyScrollMetricsBeforeRestore(
             hasRequestedRestore: didRequestTranscriptRestore,
@@ -3564,6 +3801,8 @@ struct ChatView: View {
         isTranscriptRestorePending = false
         pendingTranscriptRestoreMessageID = nil
         transcriptRestoreCancellationToken &+= 1
+        // Send is a fresh rejoin command even when the same update cancels restore.
+        followRejoinScrollToken &+= 1
 #if DEBUG
         let previousFollowLatest = shouldFollowLatestMessage
 #endif

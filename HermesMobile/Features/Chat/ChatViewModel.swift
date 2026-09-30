@@ -504,8 +504,10 @@ final class ChatViewModel {
     /// re-running the full classification pass on every body evaluation.
     @ObservationIgnored private var transcriptDerivedStateBatchDepth = 0
     @ObservationIgnored private var transcriptDerivedStateNeedsRecompute = false
+    @ObservationIgnored private var reasoningDerivedStateNeedsRecompute = false
 #if DEBUG
     private(set) var transcriptDerivedStateRecomputeCountForTesting = 0
+    @ObservationIgnored private(set) var reasoningDerivedStateRecomputeCountForTesting = 0
 #endif
     @ObservationIgnored private(set) var displayedTranscriptMessages: [TranscriptMessage] = []
     @ObservationIgnored private var displayedTranscriptRowIndexByLoadedIndex: [Int: Int] = [:]
@@ -531,6 +533,7 @@ final class ChatViewModel {
     private(set) var isCancellingStream = false
     private(set) var isViewingCachedData = false
 #if DEBUG
+    @ObservationIgnored private(set) var pacedPerformanceLabEvidence: [String: Any]?
     private var debugActivityLabActiveStreamID: String? {
         didSet { transcriptRenderRevision &+= 1 }
     }
@@ -560,6 +563,20 @@ final class ChatViewModel {
 
     private(set) var savedFollowingLatest = true
     private var savedVisibleMessageID: String?
+    private let retainedWarmReaderMemory = ChatWarmReaderMemory()
+
+    var warmTranscriptReaderMemory: ChatWarmReaderMemory? {
+        guard let canonicalSessionID else {
+            retainedWarmReaderMemory.bind(to: nil)
+            return nil
+        }
+        retainedWarmReaderMemory.bind(to: .init(
+            server: server, profile: Self.nonEmpty(currentProfile) ?? "default",
+            sessionID: canonicalSessionID
+        ))
+        return retainedWarmReaderMemory
+    }
+
     private let restoreStore: TranscriptRestoreStore
     private let localOrganizerStore: LocalOrganizerStore
 
@@ -599,7 +616,9 @@ final class ChatViewModel {
     private var messagesBeforeCacheFirstPlaceholder: [ChatMessage] = []
     private var messagesOffsetBeforeCacheFirstPlaceholder = 0
     @ObservationIgnored private var pendingStreamingScrollTriggerTask: Task<Void, Never>?
-    @ObservationIgnored private var pendingAssistantTextBuffer: String = ""
+    @ObservationIgnored private var pendingAssistantTextBuffer = StreamingWordDrain.Buffer()
+    @ObservationIgnored private var streamingHapticPulseGate = StreamingHapticPulseGate()
+    @ObservationIgnored private var suppressedProgressUnitsRemaining = 0
     @ObservationIgnored private var pendingReasoningTextBuffer: String = ""
     @ObservationIgnored private var pendingStreamingContentFlushTask: Task<Void, Never>?
     @ObservationIgnored private var isTranscriptPresentationActive = true
@@ -647,15 +666,17 @@ final class ChatViewModel {
         update()
         transcriptDerivedStateBatchDepth -= 1
 
-        guard transcriptDerivedStateBatchDepth == 0,
-              transcriptDerivedStateNeedsRecompute
-        else {
-            return
-        }
+        guard transcriptDerivedStateBatchDepth == 0 else { return }
 
-        transcriptDerivedStateNeedsRecompute = false
-        incrementalTranscriptMessageIndex = nil
-        recomputeDisplayedTranscriptMessages()
+        if transcriptDerivedStateNeedsRecompute {
+            transcriptDerivedStateNeedsRecompute = false
+            incrementalTranscriptMessageIndex = nil
+            // The full transcript pass also derives reasoning from the final
+            // rows and archived groups, consuming both invalidations once.
+            recomputeDisplayedTranscriptMessages()
+        } else if reasoningDerivedStateNeedsRecompute {
+            recomputeDisplayedReasoningGroups()
+        }
     }
 
     private func replaceStreamingMessage(at index: Int, with message: ChatMessage) {
@@ -751,6 +772,14 @@ final class ChatViewModel {
     }
 
     private func recomputeDisplayedReasoningGroups() {
+        guard transcriptDerivedStateBatchDepth == 0 else {
+            reasoningDerivedStateNeedsRecompute = true
+            return
+        }
+        reasoningDerivedStateNeedsRecompute = false
+#if DEBUG
+        reasoningDerivedStateRecomputeCountForTesting &+= 1
+#endif
         let groups = Self.reasoningDisplayGroups(
             messages: messages,
             messageOffset: messagesOffset,
@@ -828,6 +857,7 @@ final class ChatViewModel {
         didSet { contextUsageRevision &+= 1 }
     }
     private(set) var responseCompletionHapticTrigger = 0
+    private(set) var streamProgressHapticTrigger = 0
     private(set) var responseCompletionNeedsTranscriptRefresh = false
     private(set) var modelCatalogGroups: [ModelCatalogGroup] = []
     private var directModelOptions: DirectHermesModelOptions?
@@ -2136,12 +2166,15 @@ final class ChatViewModel {
             // WebUI's forward absolute offset is not the direct backwards cursor.
             // Stable durable row IDs own transcript identity on this path.
             messagesOffset = 0
+            // Canonical rows replace archived live reasoning. Clear it before
+            // the batch derives display groups to avoid a second full scan and
+            // publication of groups that are immediately superseded.
+            completedReasoningGroups = []
         }
         let returned = page.pagination?.returned ?? page.messages.count
         directOlderOffset = (page.pagination?.offset ?? (older ? directOlderOffset : 0)) + returned + retainedPrefix.count
         hasOlderMessages = !retainedPrefix.isEmpty ? previouslyHadOlder : returned >= (page.pagination?.limit ?? 120)
         setCompletedToolCallGroups(ToolCallGroup.groups(persistedToolCalls: [], messages: messages, messageOffset: 0))
-        completedReasoningGroups = []
         streamingAssistantMessageID = nil
         streamingAssistantMessageIndex = nil
         sealedInterimAssistantMessageIDs.removeAll()
@@ -2702,6 +2735,12 @@ final class ChatViewModel {
 
     func rememberTranscriptRestorePoint(followingLatest: Bool, visibleMessageID: String?) {
         savedFollowingLatest = followingLatest
+        let memory = warmTranscriptReaderMemory
+        // The caller's current visible row owns persistence. During settlement
+        // warm capture is suppressed, so its older row cannot override this ID.
+        if followingLatest || memory?.point?.messageID != visibleMessageID {
+            memory?.point = nil
+        }
         savedVisibleMessageID = followingLatest ? nil : visibleMessageID
         restoreStore.save(
             TranscriptRestorePoint(
@@ -2850,12 +2889,19 @@ final class ChatViewModel {
         guard isTranscriptPresentationActive else { return }
         var didMutate = false
         let quota = StreamingWordDrain.drainQuota(
-            backlogUnitCount: StreamingWordDrain.unitCount(in: pendingAssistantTextBuffer),
+            backlogUnitCount: pendingAssistantTextBuffer.unitCount,
             cadenceNanoseconds: streamingWordRevealCadenceNanoseconds,
             maxLagNanoseconds: streamingMaxRevealLagNanoseconds
         )
         if flushAssistantTokens(maxWordUnits: quota) {
             didMutate = true
+            if suppressedProgressUnitsRemaining > 0 {
+                suppressedProgressUnitsRemaining = max(0, suppressedProgressUnitsRemaining - quota)
+            } else if streamingHapticPulseGate.recordVisibleUnits(
+                quota, at: ProcessInfo.processInfo.systemUptime
+            ) {
+                streamProgressHapticTrigger += 1
+            }
         }
         if flushReasoningChunks() {
             didMutate = true
@@ -2884,9 +2930,15 @@ final class ChatViewModel {
 
         if isActive {
             if !pendingAssistantTextBuffer.isEmpty || !pendingReasoningTextBuffer.isEmpty {
+                // The extra unit conservatively covers a word that spans the
+                // background/foreground chunk boundary. Fresh visible progress
+                // can pulse even when a live stream never fully empties its queue.
+                suppressedProgressUnitsRemaining = pendingAssistantTextBuffer.unitCount + 1
                 scheduleStreamingContentFlush(afterNanoseconds: 0)
             }
         } else {
+            streamingHapticPulseGate.reset()
+            suppressedProgressUnitsRemaining = 0
             cancelPendingStreamingContentFlush()
             cancelPendingStreamingScrollTrigger()
         }
@@ -2894,7 +2946,9 @@ final class ChatViewModel {
 
     private func resetPendingStreamingContentBuffers() {
         cancelPendingStreamingContentFlush()
-        pendingAssistantTextBuffer = ""
+        pendingAssistantTextBuffer.clear()
+        streamingHapticPulseGate.reset()
+        suppressedProgressUnitsRemaining = 0
         pendingReasoningTextBuffer = ""
     }
 
@@ -5713,16 +5767,12 @@ final class ChatViewModel {
 
         // A word-unit limit moves only the head of the buffer into the visible
         // message; the tail stays pending so paced rendering retains received text.
-        let pendingText = pendingAssistantTextBuffer
         let appendedContent: String
         if let maxWordUnits {
-            let (head, tail) = StreamingWordDrain.splitAtUnitBoundary(pendingText, unitCount: maxWordUnits)
-            guard !head.isEmpty else { return false }
-            appendedContent = head
-            pendingAssistantTextBuffer = tail
+            appendedContent = pendingAssistantTextBuffer.drain(maxUnits: maxWordUnits)
+            guard !appendedContent.isEmpty else { return false }
         } else {
-            appendedContent = pendingText
-            pendingAssistantTextBuffer = ""
+            appendedContent = pendingAssistantTextBuffer.drainAll()
         }
 
         let messageID = ensureStreamingAssistantMessage()
@@ -5752,6 +5802,13 @@ final class ChatViewModel {
                     turnTps: existing.turnTps
                 )
             )
+#if DEBUG
+            ChatPerformanceInvalidationProbe.shared?.record(
+                "stream_row_replaced", a: min(index, 100_000),
+                b: min(appendedContent.utf8.count, 100_000),
+                c: min(transcriptRenderRevision, 1_000_000)
+            )
+#endif
             return true
         }
 
@@ -7402,21 +7459,28 @@ extension ChatViewModel {
     /// Thirty genuinely rich synthetic groups for the windowed-eager prototype:
     /// long code with wrapping, tables, reasoning, and tool cards.
     @MainActor
-    static func makeRichThirtyPerformanceLabFixture() -> (
+    static func makeRichThirtyPerformanceLabFixture(identity: Int = 0) -> (
         session: SessionSummary, server: URL, viewModel: ChatViewModel
     ) {
         let server = URL(string: "http://127.0.0.1:9")!
-        let session = SessionSummary(sessionId: "semreh-rich30-lab", title: "Rich 30-group lab")
+        let sessionID = identity == 0 ? "semreh-rich30-lab" : "semreh-rich30-lab-\(identity)"
+        let session = SessionSummary(sessionId: sessionID,
+                                     title: identity == 0 ? "Rich 30-group lab" : "Rich 30-group lab \(identity)")
         let followsLatest = ProcessInfo.processInfo.arguments.contains("--chat-viewport-follow-latest-open")
         TranscriptRestoreStore.shared.save(
             TranscriptRestorePoint(
                 followingLatest: followsLatest,
                 visibleMessageID: followsLatest ? nil : "transcript:0"
             ),
-            server: server, sessionID: "semreh-rich30-lab"
+            server: server, sessionID: sessionID
         )
 
         let model = ChatViewModel(session: session, server: server)
+        if identity > 0 {
+            model.currentModel = "synthetic-rich-model-\(identity)"
+            model.currentModelProvider = "synthetic-provider-\(identity)"
+        }
+        let pagingSpread = ProcessInfo.processInfo.arguments.contains("--chat-performance-rich30-paging-spread")
         let prose = "A synthetic rich-group finding has **emphasis**, `inline code`, a [local reference](https://example.invalid/reference), العربية, and Unicode 👩🏽‍💻. Its lines must wrap naturally without losing content. "
         var messages: [ChatMessage] = []
         for index in 0..<30 {
@@ -7425,6 +7489,9 @@ extension ChatViewModel {
             var code = String(repeating: "let row\(index) = records.filter { $0.group == \(index) }.map { $0.id }\n", count: codeLines)
             if index % 3 == 0 {
                 code += String(repeating: "let wrapMarker\(index) = \"a deliberately long wrapping line that must wrap across the viewport without losing its tail marker \(index)\"\n", count: 3)
+            }
+            if index == 29 {
+                code += "let richGroupFinalSourceLine30 = \"SEMREH_RICH30_CODE_END\"\n"
             }
             let body = """
             ## Rich group \(group)
@@ -7444,16 +7511,25 @@ extension ChatViewModel {
             messages.append(ChatMessage(
                 role: "user",
                 content: "Rich group \(group) request.\n\n" + String(repeating: prose, count: 3),
-                timestamp: Double(index * 2),
-                messageId: "rich30-message-\(index * 2)"
+                timestamp: Double(index * (pagingSpread ? 5 : 2)),
+                messageId: identity == 0 ? "rich30-message-\(index * 2)" : "rich30-\(identity)-message-\(index * 2)"
             ))
             messages.append(ChatMessage(
                 role: "assistant",
                 content: body,
-                timestamp: Double(index * 2 + 1),
-                messageId: "rich30-message-\(index * 2 + 1)",
+                timestamp: Double(index * (pagingSpread ? 5 : 2) + 1),
+                messageId: identity == 0 ? "rich30-message-\(index * 2 + 1)" : "rich30-\(identity)-message-\(index * 2 + 1)",
                 reasoning: "Group \(group): check the bounded window before reporting completion. " + String(repeating: "reasoning detail ", count: 8)
             ))
+            if pagingSpread && index < 29 {
+                for spacer in 0..<3 {
+                    messages.append(ChatMessage(
+                        role: "assistant", content: "Paging spacer \(spacer + 1) after rich group \(group).",
+                        timestamp: Double(index * 5 + spacer + 2),
+                        messageId: identity == 0 ? "rich30-spacer-\(index)-\(spacer)" : "rich30-\(identity)-spacer-\(index)-\(spacer)"
+                    ))
+                }
+            }
         }
         model.messages = messages
         model.setCompletedToolCallGroups(ToolCallGroup.groups(
@@ -7461,11 +7537,16 @@ extension ChatViewModel {
                 PersistedToolCall(
                     name: "read_file",
                     snippet: "Read rich fixture group \(toolIndex * 5 + 1).",
-                    tid: "rich30-tool-\(toolIndex)",
-                    assistantMsgIdx: toolIndex * 10 + 1,
+                    tid: identity == 0 ? "rich30-tool-\(toolIndex)" : "rich30-\(identity)-tool-\(toolIndex)",
+                    assistantMsgIdx: toolIndex * (pagingSpread ? 25 : 10) + 1,
                     args: ["path": .string("fixtures/rich30-group-\(toolIndex * 5 + 1).md")]
                 )
-            },
+            } + [PersistedToolCall(
+                name: "read_file", snippet: "Read rich fixture group 30.",
+                tid: identity == 0 ? "rich30-tool-30" : "rich30-\(identity)-tool-30",
+                assistantMsgIdx: pagingSpread ? 146 : 59,
+                args: ["path": .string("fixtures/rich30-group-30.md")]
+            )],
             messages: model.messages, messageOffset: 0
         ))
         model.isLoading = false
@@ -7507,8 +7588,99 @@ extension ChatViewModel {
 
     /// Appends one deterministic user/assistant turn in small chunks so the
     /// multi-chat lab exercises the same rendered transcript while content grows.
+#if DEBUG
+    var isPerformanceLabStreamingTurnInFlight: Bool { performanceLabStreamingTurnInFlight }
+#endif
+#if DEBUG
+    /// Server-free input through the production event/buffer/reveal path, unlike
+    /// the older lab's whole-message replacements. Synthetic liveness is explicit.
+    @MainActor
+    private func appendPacedPerformanceLabStreamingTurn() async {
+        guard !performanceLabStreamingTurnInFlight else { return }
+        performanceLabStreamingTurnInFlight = true
+        debugActivityLabActiveStreamID = "paced-lab-\(UUID().uuidString)"
+        defer {
+            performanceLabStreamingTurnInFlight = false
+            debugActivityLabActiveStreamID = nil
+        }
+        let start = ProcessInfo.processInfo.systemUptime
+        let modelPulsesBefore = streamProgressHapticTrigger
+        let dispatchedBefore = ChatHaptics.performedStreamProgressCount
+        var sequence = 0
+        func emit(_ type: String, _ payload: [String: JSONValue] = [:]) {
+            sequence += 1
+            handleDirectEventForTesting(HermesGatewayEvent(
+                method: "event", type: type, sessionID: sessionID,
+                sequence: sequence, payload: .object(payload), params: nil,
+                connectionGeneration: 1
+            ))
+        }
+        appendStreamingMessage(ChatMessage(
+            role: "user", content: "Show a paced rich response with subtle haptics.",
+            timestamp: Date().timeIntervalSince1970,
+            messageId: "paced-lab-user-\(UUID().uuidString)"
+        ))
+        emit("message.start")
+        let response = """
+        ## Smooth streaming check
+
+        This response arrives through the real token buffer and paced publication path. Text should grow steadily while the header and composer stay stable. Haptic feedback belongs only to a visible, followed tail—not an older conversation region.
+
+        ```swift
+        let message = "Unicode stays intact: café 👩🏽‍💻 العربية"
+        let evidence = ["text", "scroll", "haptics"]
+        for item in evidence {
+            print(item)
+        }
+        ```
+
+        The fence is complete, all source is preserved, and the response can still be selected and copied. SEMREH_PACED_STREAM_END
+        """
+        let characters = Array(response)
+        var observations: [[String: Any]] = []
+        for offset in stride(from: 0, to: characters.count, by: 12) {
+            do { try await Task.sleep(for: .milliseconds(65)) }
+            catch { break }
+            guard !Task.isCancelled else { break }
+            emit("message.delta", ["text": .string(String(characters[offset..<min(offset + 12, characters.count)]))])
+            observations.append([
+                "uptime_seconds": ProcessInfo.processInfo.systemUptime,
+                "published_utf8_bytes": messages.last?.content?.utf8.count ?? 0,
+                "model_progress_triggers": streamProgressHapticTrigger - modelPulsesBefore,
+                "enabled_ui_haptic_dispatches": ChatHaptics.performedStreamProgressCount - dispatchedBefore
+            ])
+        }
+        let deadline = ProcessInfo.processInfo.systemUptime + 3
+        while !Task.isCancelled, messages.last?.content != response,
+              ProcessInfo.processInfo.systemUptime < deadline {
+            do { try await Task.sleep(for: .milliseconds(30)) }
+            catch { break }
+        }
+        emit("message.complete", ["status": .string(Task.isCancelled ? "cancelled" : "complete")])
+        let actual = messages.last?.content ?? ""
+        pacedPerformanceLabEvidence = [
+            "scope": "synthetic direct-event input through real model, buffer, ChatView and renderer; enabled UIKit dispatch count, not physical haptic feel or live transport",
+            "started_uptime_seconds": start,
+            "finished_uptime_seconds": ProcessInfo.processInfo.systemUptime,
+            "outcome": Task.isCancelled ? "cancelled" : "complete",
+            "source_utf8_bytes": response.utf8.count,
+            "published_utf8_bytes": actual.utf8.count,
+            "exact_source": actual.utf8.elementsEqual(response.utf8),
+            "model_progress_triggers": streamProgressHapticTrigger - modelPulsesBefore,
+            "enabled_ui_haptic_dispatches": ChatHaptics.performedStreamProgressCount - dispatchedBefore,
+            "observations": observations
+        ]
+    }
+#endif
+
     @MainActor
     func appendPerformanceLabStreamingTurn() async {
+#if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--chat-performance-paced-stream") {
+            await appendPacedPerformanceLabStreamingTurn()
+            return
+        }
+#endif
         guard !messages.isEmpty, !performanceLabStreamingTurnInFlight else { return }
         performanceLabStreamingTurnInFlight = true
         let started = ContinuousClock.now
@@ -7534,15 +7706,27 @@ extension ChatViewModel {
             messageId: assistantID
         ))
 
-        let chunks = [
+        let ordinaryChunks = [
             "Streaming turn \(sequence): first chunk. ",
             "Streaming turn \(sequence): first chunk. second chunk. ",
             "Streaming turn \(sequence): first chunk. second chunk. final chunk. ",
             "Streaming turn \(sequence): first chunk. second chunk. final chunk. SEMREH_MULTI_CHAT_STREAM_\(sequence)"
         ]
+        // Opt-in only: publish an unclosed fence over several actual model
+        // mutations, then close it and complete the same assistant message.
+        let richCodeChunks = [
+            "Streaming turn \(sequence): wrapped code follows.\n\n```swift\n",
+            "Streaming turn \(sequence): wrapped code follows.\n\n```swift\nlet lineOne = \"a long synthetic line that wraps across the viewport and remains readable while the fence is open\"\n",
+            "Streaming turn \(sequence): wrapped code follows.\n\n```swift\nlet lineOne = \"a long synthetic line that wraps across the viewport and remains readable while the fence is open\"\nlet lineTwo = \"another long synthetic line that grows the open code block while the reader is parked away from the tail\"\n",
+            "Streaming turn \(sequence): wrapped code follows.\n\n```swift\nlet lineOne = \"a long synthetic line that wraps across the viewport and remains readable while the fence is open\"\nlet lineTwo = \"another long synthetic line that grows the open code block while the reader is parked away from the tail\"\nlet finalSourceLine = \"SEMREH_STREAM_CODE_END_\(sequence)\"\n```\n\nSEMREH_MULTI_CHAT_STREAM_\(sequence)"
+        ]
+        let chunks = ProcessInfo.processInfo.arguments.contains("--chat-performance-stream-rich-code")
+            ? richCodeChunks : ordinaryChunks
+        let chunkDelay: UInt64 = ProcessInfo.processInfo.arguments.contains("--chat-performance-stream-rich-code")
+            ? 300_000_000 : 80_000_000
         for chunk in chunks {
             do {
-                try await Task.sleep(nanoseconds: 80_000_000)
+                try await Task.sleep(nanoseconds: chunkDelay)
             } catch {
                 return
             }
@@ -7634,6 +7818,43 @@ extension ChatViewModel {
         isLoading = false
         errorMessage = nil
         hasOlderMessages = false
+    }
+}
+#endif
+
+#if SEMREH_INTERNAL_CHAT_PREVIEW && targetEnvironment(simulator) && !DEBUG
+extension ChatViewModel {
+    @MainActor
+    static func makeInternalChatPreviewSmokeFixture() -> (
+        session: SessionSummary, server: URL, viewModel: ChatViewModel
+    ) {
+        let server = URL(staticString: "https://internal-preview.invalid")
+        let session = SessionSummary(sessionId: "internal-renderer-smoke", title: "Renderer smoke")
+        let model = ChatViewModel(session: session, server: server,
+                                  gatewayRuntimeProvider: { _ in throw URLError(.cannotConnectToHost) })
+        model.messages = (0..<6).map { index in
+            ChatMessage(role: index.isMultiple(of: 2) ? "user" : "assistant",
+                        content: index.isMultiple(of: 2) ? "Show a rich response \(index)." : """
+                        ## Renderer preview
+                        A **bold** paragraph with a [link](https://example.com).
+
+                        - First item
+                        - Second item
+
+                        | Item | Value |
+                        | --- | --- |
+                        | Preview | Enabled |
+
+                        ```swift
+                        let preview = true
+                        print(preview)
+                        ```
+
+                        A second paragraph for text selection.
+                        """,
+                        timestamp: Double(index + 1), messageId: "internal-smoke-\(index)")
+        }
+        return (session, server, model)
     }
 }
 #endif

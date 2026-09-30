@@ -1,4 +1,6 @@
 import XCTest
+import SwiftUI
+import UIKit
 @testable import HermesMobile
 
 @MainActor
@@ -491,5 +493,362 @@ final class LiveRunBookmarkStoreTests: XCTestCase {
         )
         store.remove(server: server, sessionID: "session-a")
         XCTAssertNil(store.load(server: server, sessionID: "session-a"))
+    }
+}
+
+@MainActor
+private func makeComposerSizingView(_ text: String = "A short draft") -> UITextView {
+    let view = ComposerTextView.PastingTextView(frame: CGRect(x: 0, y: 0, width: 280, height: 120))
+    view.font = .systemFont(ofSize: 17)
+    view.textContainerInset = .zero
+    view.textContainer.lineFragmentPadding = 0
+    view.isScrollEnabled = false
+    view.text = text
+    return view
+}
+
+@MainActor
+private func makeComposerSizingCoordinator(onHeight: @escaping (CGFloat) -> Void = { _ in }) -> ComposerTextView.Coordinator {
+    ComposerTextView.Coordinator(text: .constant(""), isFocused: .constant(false), onHeightChange: onHeight)
+}
+
+@MainActor
+final class ComposerProposalSizingTests: XCTestCase {
+    func testLongDraftHonorsProposedWidthAndCapsHeightAcrossRelayout() async throws {
+        let draft = String(repeating: "Preserved draft with selectable words and wrapping. ", count: 100)
+        var reportedHeight: CGFloat = 0
+        let input = ComposerTextView(
+            text: .constant(draft),
+            isFocused: .constant(false),
+            isDisabled: false,
+            isKeyboardSendEnabled: false,
+            onKeyboardSend: {},
+            onHeightChange: { reportedHeight = $0 },
+            onPasteFileProviders: { _ in },
+            onPasteFileURLs: { _ in },
+            onPasteImageProviders: { _ in },
+            onPasteImages: { _ in }
+        )
+        let host = UIHostingController(rootView: input)
+        host.safeAreaRegions = []
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            .first(where: { $0.activationState == .foregroundActive }))
+        let previous = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        window.frame = scene.coordinateSpace.bounds
+        let container = UIViewController()
+        window.rootViewController = container
+        window.makeKeyAndVisible()
+        container.addChild(host)
+        container.view.addSubview(host.view)
+        host.didMove(toParent: container)
+        defer {
+            host.willMove(toParent: nil)
+            host.view.removeFromSuperview()
+            host.removeFromParent()
+            window.isHidden = true
+            window.rootViewController = nil
+            previous?.makeKeyAndVisible()
+        }
+
+        for width in [CGFloat(280), 160, 340] {
+            host.view.frame = CGRect(x: 0, y: 100, width: width, height: 120)
+            host.view.setNeedsLayout()
+            host.view.layoutIfNeeded()
+            try await Task.sleep(for: .milliseconds(100))
+            let size = host.sizeThatFits(in: CGSize(width: width, height: 1_000))
+            XCTAssertEqual(size.width, width, accuracy: 0.5, "A persisted draft must not expand the proposal")
+            XCTAssertEqual(size.height, 120, accuracy: 0.5, "Long drafts must scroll within the existing height cap")
+            host.view.frame = CGRect(origin: .zero, size: size)
+            host.view.setNeedsLayout()
+            host.view.layoutIfNeeded()
+            let textView = try XCTUnwrap(findTextView(in: host.view))
+            textView.setNeedsLayout()
+            textView.layoutIfNeeded()
+            XCTAssertEqual(textView.bounds.width, width, accuracy: 0.5)
+            XCTAssertEqual(reportedHeight, size.height, accuracy: 0.5)
+            XCTAssertTrue(textView.isScrollEnabled)
+            XCTAssertFalse(textView.scrollsToTop, "The capped composer must not compete with transcript status-bar scrolling")
+            XCTAssertTrue(textView.isSelectable)
+            XCTAssertEqual(textView.text, draft)
+        }
+    }
+
+    func testAlternatingWidthsMatchUIKitWithFewerMeasurementsAB() {
+        let draft = String(repeating: "Unicode 👩🏽‍💻 العربية 漢字 e\u{301} wrapping ", count: 12)
+        let widths: [CGFloat] = [160, 280, 160, 280, 160, 280]
+        var rows = ["capacity,request,width,utf16_count,measurement_calls,height,UIKit_height"]
+        defer {
+            let attachment = XCTAttachment(string: rows.joined(separator: "\n"))
+            attachment.name = "R53 actual UIKit calls and exact heights (not app latency)"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+        for capacity in [1, 4] {
+            let view = makeComposerSizingView(draft)
+            let coordinator = ComposerTextView.Coordinator(text: .constant(""), isFocused: .constant(false),
+                onHeightChange: { _ in }, measurementCacheCapacity: capacity)
+            var calls = 0
+            coordinator.measureContentHeight = { view, width in
+                calls += 1
+                return ComposerTextView.contentHeight(for: view, width: width)
+            }
+            let selection = view.selectedRange
+            let focus = view.isFirstResponder
+            for (request, width) in widths.enumerated() {
+                let before = calls
+                let actual = coordinator.contentHeight(for: view, width: width)
+                let oracle = ComposerTextView.contentHeight(for: view, width: width)
+                XCTAssertEqual(actual, oracle)
+                XCTAssertLessThanOrEqual(coordinator.cachedMeasurementEntryCount, capacity)
+                rows.append("\(capacity),\(request),\(width),\(draft.utf16.count),\(calls - before),\(actual),\(oracle)")
+            }
+            XCTAssertEqual(calls, capacity == 1 ? widths.count : 2)
+            XCTAssertEqual(view.text, draft)
+            XCTAssertEqual(view.selectedRange, selection)
+            XCTAssertEqual(view.isFirstResponder, focus)
+        }
+    }
+
+    func testProposalAndPostLayoutWidthsRetainBothMeasurements() {
+        let view = makeComposerSizingView()
+        var reports: [CGFloat] = []
+        let coordinator = ComposerTextView.Coordinator(text: .constant(""), isFocused: .constant(false),
+            onHeightChange: { reports.append($0) }, measurementCacheCapacity: 4)
+        var calls = 0
+        coordinator.measureContentHeight = { view, width in
+            calls += 1
+            return ComposerTextView.contentHeight(for: view, width: width)
+        }
+        for _ in 0..<6 {
+            XCTAssertEqual(coordinator.contentHeight(for: view, width: 160),
+                           ComposerTextView.contentHeight(for: view, width: 160))
+            coordinator.reportHeight(for: view)
+        }
+        XCTAssertEqual(calls, 2)
+        XCTAssertEqual(coordinator.cachedMeasurementEntryCount, 2)
+        XCTAssertEqual(reports, [min(120, max(22, ComposerTextView.contentHeight(for: view, width: 280)))])
+    }
+
+    func testMeasurementCachePressurePromotesHitsAndBoundsCapacity() {
+        let view = makeComposerSizingView()
+        let coordinator = ComposerTextView.Coordinator(text: .constant(""), isFocused: .constant(false),
+            onHeightChange: { _ in }, measurementCacheCapacity: 4)
+        var calls = 0
+        coordinator.measureContentHeight = { view, width in
+            calls += 1
+            return ComposerTextView.contentHeight(for: view, width: width)
+        }
+        for width in [CGFloat(160), 180, 200, 220, 160, 240, 160] {
+            XCTAssertEqual(coordinator.contentHeight(for: view, width: width),
+                           ComposerTextView.contentHeight(for: view, width: width))
+            XCTAssertLessThanOrEqual(coordinator.cachedMeasurementEntryCount, 4)
+        }
+        XCTAssertEqual(calls, 5, "A hit must promote 160 ahead of the evicted 180 entry")
+        XCTAssertEqual(coordinator.cachedMeasurementEntryCount, 4)
+        XCTAssertEqual(coordinator.contentHeight(for: view, width: 180),
+                       ComposerTextView.contentHeight(for: view, width: 180))
+        XCTAssertEqual(calls, 6)
+        XCTAssertEqual(coordinator.cachedMeasurementEntryCount, 4)
+    }
+
+    func testViewChangeAndUnsupportedContentClearAllCachedEntries() {
+        let first = makeComposerSizingView()
+        let second = makeComposerSizingView()
+        let coordinator = ComposerTextView.Coordinator(text: .constant(""), isFocused: .constant(false),
+            onHeightChange: { _ in }, measurementCacheCapacity: 4)
+        var calls = 0
+        coordinator.measureContentHeight = { view, width in
+            calls += 1
+            return ComposerTextView.contentHeight(for: view, width: width)
+        }
+        for width in [CGFloat(160), 280] { _ = coordinator.contentHeight(for: first, width: width) }
+        XCTAssertEqual(coordinator.cachedMeasurementEntryCount, 2)
+        _ = coordinator.contentHeight(for: second, width: 160)
+        XCTAssertEqual(calls, 3)
+        XCTAssertEqual(coordinator.cachedMeasurementEntryCount, 1)
+        _ = coordinator.contentHeight(for: first, width: 160)
+        XCTAssertEqual(calls, 4)
+        first.textStorage.addAttribute(.kern, value: 2, range: NSRange(location: 0, length: 1))
+        for _ in 0..<2 {
+            XCTAssertEqual(coordinator.contentHeight(for: first, width: 160),
+                           ComposerTextView.contentHeight(for: first, width: 160))
+            XCTAssertEqual(coordinator.cachedMeasurementEntryCount, 0)
+        }
+        XCTAssertEqual(calls, 6)
+        first.textStorage.removeAttribute(.kern, range: NSRange(location: 0, length: 1))
+        _ = coordinator.contentHeight(for: first, width: 160)
+        XCTAssertEqual(calls, 7, "Unsupported content must discard the previously supported entries")
+        XCTAssertEqual(coordinator.cachedMeasurementEntryCount, 1)
+        first.setMarkedText("候補", selectedRange: NSRange(location: 0, length: 0))
+        XCTAssertNotNil(first.markedTextRange)
+        _ = coordinator.contentHeight(for: first, width: 160)
+        XCTAssertEqual(coordinator.cachedMeasurementEntryCount, 0)
+        XCTAssertEqual(calls, 8)
+        first.unmarkText()
+    }
+
+    private func findTextView(in view: UIView) -> UITextView? {
+        if let textView = view as? UITextView { return textView }
+        return view.subviews.lazy.compactMap { self.findTextView(in: $0) }.first
+    }
+}
+
+@MainActor
+final class ComposerMeasurementReuseTests: XCTestCase {
+    func testIdenticalProposalAndReportReuseRealMeasurement() {
+        let view = makeComposerSizingView()
+        var reports: [CGFloat] = []
+        let coordinator = makeComposerSizingCoordinator { reports.append($0) }
+        var operations = 0
+        coordinator.measureContentHeight = { view, width in
+            operations += 1
+            return ComposerTextView.contentHeight(for: view, width: width)
+        }
+        let oracle = ComposerTextView.contentHeight(for: view, width: 280)
+        let proposal = coordinator.contentHeight(for: view, width: 280)
+        for _ in 0..<12 {
+            XCTAssertEqual(coordinator.contentHeight(for: view, width: 280), oracle)
+            coordinator.reportHeight(for: view)
+        }
+        XCTAssertEqual(proposal, oracle)
+        XCTAssertEqual(operations, 1)
+        XCTAssertEqual(reports, [min(120, max(22, oracle))])
+    }
+
+    func testSizingMutationsInvalidateWithoutChangingUIKitGeometry() {
+        let view = makeComposerSizingView(String(repeating: "مرحبا 👩🏽‍💻 e\u{301} words ", count: 20))
+        let coordinator = makeComposerSizingCoordinator()
+        var operations = 0
+        coordinator.measureContentHeight = { view, width in
+            operations += 1
+            return ComposerTextView.contentHeight(for: view, width: width)
+        }
+        _ = coordinator.contentHeight(for: view, width: view.bounds.width)
+        let mutations: [(String, () -> Void)] = [
+            ("programmatic replacement", { view.text = "Replacement\n" + view.text }),
+            ("typing/paste", { view.insertText(" pasted 🧑‍🚀") }),
+            ("width", { view.bounds.size.width = 160 }),
+            ("same-size font", { view.font = .monospacedSystemFont(ofSize: 17, weight: .bold) }),
+            ("paragraph style", {
+                let style = NSMutableParagraphStyle()
+                style.lineSpacing = 13
+                view.textStorage.addAttribute(.paragraphStyle, value: style,
+                    range: NSRange(location: 0, length: view.textStorage.length))
+            }),
+            ("insets", { view.textContainerInset.top = 11 }),
+            ("padding", { view.textContainer.lineFragmentPadding = 9 }),
+            ("RTL", { view.semanticContentAttribute = .forceRightToLeft; view.textAlignment = .right }),
+            ("traits", {
+                view.traitOverrides.preferredContentSizeCategory = .accessibilityExtraExtraExtraLarge
+                view.updateTraitsIfNeeded()
+                XCTAssertEqual(view.traitCollection.preferredContentSizeCategory, .accessibilityExtraExtraExtraLarge)
+            }),
+            ("line limit", { view.textContainer.maximumNumberOfLines = 3 }),
+            ("line break", { view.textContainer.lineBreakMode = .byTruncatingTail })
+        ]
+        for (name, mutate) in mutations {
+            mutate()
+            let before = operations
+            let actual = coordinator.contentHeight(for: view, width: view.bounds.width)
+            XCTAssertEqual(operations, before + 1, name)
+            XCTAssertEqual(actual, ComposerTextView.contentHeight(for: view, width: view.bounds.width), name)
+        }
+        // Unsupported runs and IME composition deliberately never reuse a result.
+        view.textStorage.addAttribute(.kern, value: 2, range: NSRange(location: 0, length: 1))
+        var before = operations
+        for _ in 0..<2 { _ = coordinator.contentHeight(for: view, width: view.bounds.width) }
+        XCTAssertEqual(operations, before + 2)
+        view.text = "composition"
+        view.setMarkedText("候補", selectedRange: NSRange(location: 0, length: 0))
+        XCTAssertNotNil(view.markedTextRange)
+        before = operations
+        for _ in 0..<2 { _ = coordinator.contentHeight(for: view, width: view.bounds.width) }
+        XCTAssertEqual(operations, before + 2)
+        view.unmarkText()
+    }
+
+    func testIndependentViewLifetimesAndRestoredUnicodeDraftPreserveState() {
+        let draft = String(repeating: "👨‍👩‍👧‍👦 مرحبا e\u{301} 漢字\n", count: 150)
+        let coordinator = makeComposerSizingCoordinator()
+        var operations = 0
+        coordinator.measureContentHeight = { view, width in
+            operations += 1
+            return ComposerTextView.contentHeight(for: view, width: width)
+        }
+        weak var released: UITextView?
+        do {
+            let first = makeComposerSizingView(draft)
+            released = first
+            _ = coordinator.contentHeight(for: first, width: 280)
+        }
+        XCTAssertNil(released, "The cache must not retain a text view")
+        let restored = makeComposerSizingView(draft)
+        restored.selectedRange = NSRange(location: 4, length: 0)
+        let selection = restored.selectedRange
+        let focus = restored.isFirstResponder
+        let before = operations
+        let height = coordinator.contentHeight(for: restored, width: 280)
+        XCTAssertEqual(operations, before + 1)
+        XCTAssertEqual(height, ComposerTextView.contentHeight(for: restored, width: 280))
+        var reported: CGFloat = 0
+        coordinator.onHeightChange = { reported = $0 }
+        coordinator.reportHeight(for: restored)
+        XCTAssertEqual(reported, 120)
+        XCTAssertTrue(restored.isScrollEnabled)
+        XCTAssertEqual(restored.text, draft)
+        XCTAssertEqual(restored.selectedRange, selection)
+        XCTAssertEqual(restored.isFirstResponder, focus)
+        let independent = makeComposerSizingCoordinator()
+        var independentOperations = 0
+        independent.measureContentHeight = { view, width in
+            independentOperations += 1
+            return ComposerTextView.contentHeight(for: view, width: width)
+        }
+        _ = independent.contentHeight(for: restored, width: 280)
+        XCTAssertEqual(independentOperations, 1)
+        restored.text = ""
+        coordinator.reportHeight(for: restored)
+        XCTAssertEqual(reported, max(22, min(120, ComposerTextView.contentHeight(for: restored, width: 280))))
+        XCTAssertFalse(restored.isScrollEnabled)
+    }
+
+    func testBoundedSameProcessMeasurementABAttachment() {
+        let draft = String(repeating: "Unicode 👩🏽‍💻 العربية 漢字 e\u{301} wrapping\n", count: 150)
+        var rows = ["round,mode,iteration,duration_ns,measurement_count,height"]
+        defer {
+            let attachment = XCTAttachment(string: rows.joined(separator: "\n"))
+            attachment.name = "R49 real UIKit measurement AB raw iterations (not UI FPS)"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+        for round in 0..<4 {
+            for cached in (round.isMultiple(of: 2) ? [false, true] : [true, false]) {
+                let view = makeComposerSizingView(draft)
+                let coordinator = makeComposerSizingCoordinator()
+                var operations = 0
+                coordinator.measureContentHeight = { view, width in
+                    operations += 1
+                    return ComposerTextView.contentHeight(for: view, width: width)
+                }
+                let oracle = ComposerTextView.contentHeight(for: view, width: 280)
+                for iteration in 0..<20 {
+                    let before = operations
+                    let start = DispatchTime.now().uptimeNanoseconds
+                    let height: CGFloat
+                    if cached {
+                        height = coordinator.contentHeight(for: view, width: 280)
+                    } else {
+                        operations += 1
+                        height = ComposerTextView.contentHeight(for: view, width: 280)
+                    }
+                    let duration = DispatchTime.now().uptimeNanoseconds - start
+                    rows.append("\(round),\(cached ? "cached" : "uncached"),\(iteration),\(duration),\(operations - before),\(height)")
+                    XCTAssertEqual(height, oracle)
+                }
+                XCTAssertEqual(operations, cached ? 1 : 20)
+                XCTAssertEqual(view.text, draft)
+            }
+        }
     }
 }

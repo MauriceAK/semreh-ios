@@ -3,8 +3,257 @@ import UIKit
 import UniformTypeIdentifiers
 import Foundation
 import CoreFoundation
+import QuartzCore
 
 final class LongChatScrollUITests: XCTestCase {
+    func testInternalReleaseRendererTogglePersistenceAndFallback() throws {
+#if !SEMREH_INTERNAL_CHAT_PREVIEW || DEBUG
+        throw XCTSkip("Requires the internal-preview Release Simulator build")
+#else
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--internal-chat-preview-smoke"]
+        app.launch()
+        func root() {
+            let open = app.buttons["internal-preview-open-chat"]
+            if !open.exists {
+                let back = app.navigationBars.buttons.firstMatch
+                if back.exists { back.tap() } else { app.buttons["Back"].firstMatch.tap() }
+            }
+            XCTAssertTrue(open.waitForExistence(timeout: 8))
+        }
+        func setPreview(_ enabled: Bool) {
+            root()
+            app.buttons["internal-preview-settings"].tap()
+            let toggle = app.switches["experimental-chat-renderer-toggle"]
+            XCTAssertTrue(toggle.waitForExistence(timeout: 8))
+            if (toggle.value as? String == "1") != enabled { toggle.tap() }
+            XCTAssertEqual(toggle.value as? String, enabled ? "1" : "0")
+            root()
+        }
+        func openChat(native: Bool) {
+            app.buttons["internal-preview-open-chat"].tap()
+            let composer = app.textViews["chat-composer-input"]
+            XCTAssertTrue(composer.waitForExistence(timeout: 10))
+            let viewport = app.collectionViews["chat-native-transcript-v2"]
+            if native {
+                XCTAssertTrue(viewport.waitForExistence(timeout: 8))
+                let code = app.textViews["native-inline-code-text"].firstMatch
+                XCTAssertTrue(code.waitForExistence(timeout: 8))
+                let source = code.value as? String ?? ""
+                XCTAssertTrue(source.contains("let preview = true\nprint(preview)"))
+                viewport.swipeDown()
+                viewport.swipeUp()
+                XCTAssertTrue(composer.exists)
+            } else {
+                XCTAssertFalse(viewport.exists)
+                XCTAssertTrue(app.scrollViews["chat-transcript-scroll"].exists)
+            }
+            attachScreenshot(named: native ? "internal-release-native" : "internal-release-stable")
+        }
+        setPreview(false)
+        openChat(native: false)
+        setPreview(true)
+        openChat(native: true)
+        app.terminate()
+        app.launch()
+        root()
+        openChat(native: true)
+        setPreview(false)
+        openChat(native: false)
+#endif
+    }
+
+    func testNativeParagraphSelectionCopiesOnlySelectedPassage() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--chat-performance-tall-lab", "--chat-performance-four-tall-lab",
+                               "--chat-native-transcript-v2", "--chat-rich-native-code-text",
+                               "--chat-full-inline-code", "--chat-viewport-follow-latest-open",
+                               "--composer-test-fresh-draft"]
+        app.launch()
+        XCTAssertTrue(app.otherElements["chat-native-transcript-v2"].exists ||
+                      app.staticTexts["chat-native-transcript-v2"].waitForExistence(timeout: 15))
+        let tail = app.staticTexts.matching(NSPredicate(
+            format: "label == %@", "End of four-row mixed conversation."
+        )).firstMatch
+        XCTAssertTrue(tail.waitForExistence(timeout: 15))
+        tail.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 1)
+        XCTAssertTrue(app.buttons["Select Text"].waitForExistence(timeout: 3))
+        app.buttons["Select Text"].tap()
+        let selection = app.textViews["selectable-response-text"]
+        XCTAssertTrue(selection.waitForExistence(timeout: 5))
+        let paragraph = String(repeating: "A synthetic research finding has **emphasis**, `inline code`, a [local reference](https://example.invalid/reference), العربية, and Unicode 👩🏽‍💻. Its lines must wrap naturally without losing content. ", count: 36)
+        let source = selection.value as? String ?? ""
+        XCTAssertTrue(source.contains(paragraph))
+        XCTAssertTrue(source.contains("SEMREH_FOUR_TALL_CODE_END"))
+        // Exercise the product's real triple-tap paragraph gesture. This test
+        // never injects selectedRange or clipboard contents.
+        let passage = selection.descendants(matching: .textView).matching(NSPredicate(
+            format: "label BEGINSWITH %@", "A synthetic research finding has"
+        )).firstMatch
+        XCTAssertTrue(passage.exists)
+        passage.tap(withNumberOfTaps: 3, numberOfTouches: 1)
+        attachScreenshot(named: "r42-native-paragraph-highlight")
+        XCTAssertTrue(app.buttons["Look Up"].exists || app.menuItems["Look Up"].exists,
+                      "Require UIKit's selected-text menu, not the message context menu")
+        let copyItem = app.menuItems["Copy"]
+        let copyButton = app.buttons.matching(NSPredicate(
+            format: "label == %@ AND identifier != %@", "Copy", "assistant-response-copy"
+        )).firstMatch
+        XCTAssertTrue(copyItem.waitForExistence(timeout: 2) || copyButton.waitForExistence(timeout: 2),
+                      "Only the native edit menu may satisfy Copy; not the covered response action")
+        if copyItem.exists { copyItem.tap() } else { copyButton.tap() }
+        app.buttons["Done"].firstMatch.tap()
+        XCTAssertTrue(selection.waitForNonExistence(timeout: 5))
+        let composer = app.textViews["chat-composer-input"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        composer.tap()
+        if let draft = composer.value as? String, !draft.isEmpty, draft != composer.placeholderValue {
+            composer.typeKey("a", modifierFlags: .command)
+            composer.typeText(XCUIKeyboardKey.delete.rawValue)
+        }
+        XCTAssertTrue((composer.value as? String ?? "").isEmpty || composer.value as? String == composer.placeholderValue,
+                      "Clear the fixture draft before exact paste comparison")
+        composer.press(forDuration: 1)
+        let pasteItem = app.menuItems["Paste"]
+        let pasteButton = app.buttons["Paste"].firstMatch
+        XCTAssertTrue(pasteItem.waitForExistence(timeout: 2) || pasteButton.waitForExistence(timeout: 2))
+        if pasteItem.exists { pasteItem.tap() } else { pasteButton.tap() }
+        let pasted = composer.value as? String ?? ""
+        let evidence = XCTAttachment(string: pasted)
+        evidence.name = "r42-actual-native-paragraph-paste"
+        evidence.lifetime = .keepAlways
+        add(evidence)
+        attachScreenshot(named: "r42-native-paragraph-pasted")
+        XCTAssertEqual(pasted, paragraph, "Native Copy must preserve exactly the selected paragraph, not the entire response")
+    }
+
+    func testFullResponseSelectionSurvivesDisappearanceAndBackground() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--chat-performance-four-tall-lab", "--chat-windowed-eager",
+                               "--chat-full-inline-code", "--chat-rich-native-code-text",
+                               "--chat-viewport-follow-latest-open", "--composer-test-fresh-draft"]
+        app.launch()
+        // The native viewport is a UICollectionView; the legacy path is a ScrollView.
+        let transcript = app.descendants(matching: .any)["chat-transcript-scroll"]
+        XCTAssertTrue(transcript.waitForExistence(timeout: 20))
+        let tail = app.staticTexts.matching(NSPredicate(
+            format: "label == %@", "End of four-row mixed conversation."
+        )).firstMatch
+        assertHittable(tail, timeout: 25, message: "The actual terminal paragraph must be reachable")
+        XCTAssertTrue(transcript.frame.contains(tail.frame))
+        // Use the actual response context menu, never a presentation injection.
+        tail.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 1)
+        XCTAssertTrue(app.buttons["Select Text"].waitForExistence(timeout: 3))
+        app.buttons["Select Text"].tap()
+        let selection = app.textViews["selectable-response-text"]
+        XCTAssertTrue(selection.waitForExistence(timeout: 5))
+        let source = selection.value as? String ?? ""
+        let expectedCode = String(repeating: "let value = Array(0..<1_000).reduce(0, +)\n", count: 320)
+            + "\nlet fourTallFinalMarker = \"SEMREH_FOUR_TALL_CODE_END\""
+        XCTAssertTrue(source.contains(expectedCode), "Selection must contain all code, including offscreen lines")
+        XCTAssertTrue(source.contains("End of four-row mixed conversation."))
+        XCTAssertFalse(selection.waitForNonExistence(timeout: 2),
+                       "Underlying ChatView disappearance must not dismiss its own cover")
+        XCUIDevice.shared.press(.home)
+        XCTAssertTrue(app.wait(for: .runningBackground, timeout: 5))
+        app.activate()
+        XCTAssertTrue(selection.waitForExistence(timeout: 5))
+        XCTAssertEqual(selection.value as? String, source)
+        XCTAssertFalse(app.keyboards.firstMatch.exists, "Foreground must not focus beneath selection")
+        attachScreenshot(named: "r35-selection-after-foreground")
+        app.buttons["Done"].firstMatch.tap()
+        XCTAssertTrue(selection.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(transcript.waitForExistence(timeout: 5))
+        let composer = app.textViews["chat-composer-input"]
+        assertHittable(composer, timeout: 5, message: "Dismissing selection must return to the composer")
+        composer.tap()
+        composer.typeText("R35 after selection")
+        XCTAssertTrue((composer.value as? String ?? "").contains("R35 after selection"))
+    }
+
+    func testRetainedRootControlsSurviveBackgroundAndRestoreFocusAfterDismissal() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--chat-performance-rich-switch-lab",
+                               "--chat-performance-retained-roots", "--chat-windowed-eager",
+                               "--chat-windowed-rows=12", "--composer-test-fresh-draft"]
+        app.launch()
+        let composer = app.textViews["chat-composer-input"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 30))
+        composer.tap()
+        composer.typeText("R35 controls draft")
+        app.buttons["Chat controls"].tap()
+        let done = app.buttons["Done"].firstMatch
+        XCTAssertTrue(done.waitForExistence(timeout: 5))
+        XCUIDevice.shared.press(.home)
+        XCTAssertTrue(app.wait(for: .runningBackground, timeout: 5))
+        app.activate()
+        XCTAssertTrue(done.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.keyboards.firstMatch.exists)
+        done.tap()
+        XCTAssertTrue(done.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5),
+                      "Preserved focus intent must resume after the controls dismiss")
+        app.buttons["Performance chat 2"].tap()
+        XCTAssertFalse(app.keyboards.firstMatch.waitForExistence(timeout: 1),
+                       "A hidden root must not restore its keyboard")
+        app.buttons["Performance chat 1"].tap()
+        XCTAssertTrue((composer.value as? String ?? "").contains("R35 controls draft"))
+        XCTAssertFalse(app.keyboards.firstMatch.waitForExistence(timeout: 1),
+                       "A-B-A must not replay consumed focus intent")
+    }
+
+    func testRetainedRichRootsKeepKeyboardAndAccessibilityWithActiveComposer() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--chat-performance-rich-switch-lab",
+                               "--chat-performance-retained-roots", "--chat-windowed-eager",
+                               "--chat-windowed-rows=12", "--chat-full-inline-code",
+                               "--chat-rich-native-code-text"]
+        app.launch()
+        let inputs = app.textViews.matching(identifier: "chat-composer-input")
+        let first = app.buttons["Performance chat 1"]
+        let second = app.buttons["Performance chat 2"]
+        XCTAssertTrue(inputs.firstMatch.waitForExistence(timeout: 30))
+        XCTAssertEqual(inputs.count, 1)
+        inputs.firstMatch.tap()
+        inputs.firstMatch.typeText("R34 root A draft")
+        XCTAssertTrue(app.keyboards.firstMatch.exists)
+        second.tap()
+        XCTAssertTrue(inputs.firstMatch.waitForExistence(timeout: 10))
+        if inputs.count != 1 {
+            attachScreenshot(named: "r35-hidden-composer-failure")
+            attachAccessibilitySnapshot(named: "r35-hidden-composer-hierarchy", app: app)
+        }
+        XCTAssertEqual(inputs.count, 1, "Hidden retained root must be excluded from AX")
+        XCTAssertEqual(app.scrollViews.matching(identifier: "chat-transcript-scroll").count, 1,
+                       "Hidden retained transcript must also be excluded from AX")
+        inputs.firstMatch.tap()
+        inputs.firstMatch.typeText("R34 root B draft")
+        first.tap()
+        XCTAssertTrue(NSPredicate(format: "value CONTAINS %@", "R34 root A draft")
+            .evaluate(with: inputs.firstMatch))
+        inputs.firstMatch.tap()
+        inputs.firstMatch.typeText(" active")
+        second.tap()
+        XCTAssertEqual(inputs.count, 1)
+        XCTAssertTrue(NSPredicate(format: "value CONTAINS %@", "R34 root B draft")
+            .evaluate(with: inputs.firstMatch))
+        XCTAssertFalse((inputs.firstMatch.value as? String ?? "").contains(" active"))
+        // Foregrounding must not expose/reactivate the hidden root's input.
+        XCUIDevice.shared.press(.home)
+        app.activate()
+        XCTAssertTrue(inputs.firstMatch.waitForExistence(timeout: 10))
+        XCTAssertEqual(inputs.count, 1)
+        inputs.firstMatch.tap()
+        inputs.firstMatch.typeText(" foreground")
+        first.tap()
+        XCTAssertFalse((inputs.firstMatch.value as? String ?? "").contains(" foreground"))
+    }
+
     func testFullChatActivityLabKeepsDistinctInlineStatusWithoutFloatingPill() {
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -5154,6 +5403,1511 @@ final class LongChatScrollUITests: XCTestCase {
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)
+    }
+
+    // Opt-in smoothness battery. Each selector is a real XCTest selector so
+    // -only-testing cannot silently report a zero-test success. The attachment
+    // records wall and monotonic event times; it is not a presented-frame trace.
+    private func smoothnessEnabled() throws {
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("The smoothness fixture is Simulator-only.")
+        #endif
+    }
+
+    private func smoothnessArguments(_ fixture: String, candidate: Bool,
+                                     fullInline: Bool = true, richStream: Bool = false) -> [String] {
+        var arguments = [fixture, "--chat-performance-app-wide-monitor",
+                         "--chat-viewport-follow-latest-open", "--chat-viewport-diagnostic",
+                         "--composer-test-fresh-draft"]
+        arguments += ["--chat-windowed-eager", "--chat-windowed-rows=60"]
+        if candidate { arguments.append("--chat-rich-native-code-text") }
+        if fullInline { arguments.append("--chat-full-inline-code") }
+        if richStream { arguments.append("--chat-performance-stream-rich-code") }
+        return arguments
+    }
+
+    private func smoothnessEvent(_ name: String, into events: inout [[String: Any]]) {
+        events.append(["event": name, "wall_time_utc": ISO8601DateFormatter().string(from: Date()),
+                       "clock_domain": "mach_absolute_seconds",
+                       "mach_absolute_seconds": CACurrentMediaTime()])
+    }
+
+    private func attachSmoothnessEvidence(_ app: XCUIApplication, scenario: String,
+                                          events: [[String: Any]]) {
+        let stop = app.buttons["chat-performance-app-wide-monitor-stop"]
+        XCTAssertTrue(stop.waitForExistence(timeout: 10) && stop.isHittable)
+        stop.tap()
+        let report = app.staticTexts["chat-performance-app-wide-monitor-summary"]
+        XCTAssertTrue(report.waitForExistence(timeout: 10))
+        XCTAssertTrue(report.label.contains("callback_gaps_over_100_ms="))
+        attachPlainText(report.label, named: "smoothness-\(scenario)-callback-report")
+        if let data = try? JSONSerialization.data(withJSONObject: ["scenario": scenario,
+            "clock_domain": "mach_absolute_seconds", "events": events],
+                                                  options: [.sortedKeys]),
+           let text = String(data: data, encoding: .utf8) {
+            attachPlainText(text, named: "smoothness-\(scenario)-events-json")
+        } else {
+            XCTFail("The smoothness event attachment must serialize.")
+        }
+    }
+
+    // Keep the rich30 timeline even when a disclosure or a streaming phase fails
+    // before the normal monitor stop. Hierarchy collection is deliberately only
+    // on failure: it can perturb the callback measurements during motion.
+    private func attachRich30StreamEvidence(_ app: XCUIApplication, events: [[String: Any]],
+                                            phase: String, failed: Bool) {
+        attachScreenshot(named: "smoothness-rich30-\(phase)-screen")
+        if let data = try? JSONSerialization.data(withJSONObject: [
+            "scenario": "rich30_stream", "phase": phase,
+            "clock_domain": "mach_absolute_seconds", "events": events
+        ], options: [.sortedKeys]), let text = String(data: data, encoding: .utf8) {
+            attachPlainText(text, named: phase == "complete"
+                ? "smoothness-rich30_stream-events-json"
+                : "smoothness-rich30-\(phase)-events-json")
+        }
+        if failed {
+            attachAccessibilitySnapshot(named: "smoothness-rich30-\(phase)-failure-hierarchy", app: app)
+        }
+    }
+
+    private func rich30Visible(_ element: XCUIElement, in scroll: XCUIElement) -> Bool {
+        guard element.exists else { return false }
+        let visibleFrame = element.frame.intersection(scroll.frame)
+        return !visibleFrame.isNull && visibleFrame.width > 0 && visibleFrame.height > 0
+    }
+
+    @MainActor
+    func testOptInSmoothnessFourTallMotionBaseline() throws {
+        try exerciseSmoothnessFourTallMotion(candidate: false, fullInline: false)
+    }
+
+    @MainActor
+    func testOptInSmoothnessFourTallMotionCandidate() throws {
+        try exerciseSmoothnessFourTallMotion(candidate: true, fullInline: false)
+    }
+
+    @MainActor
+    func testOptInSmoothnessFourTallFullInlineBaseline() throws {
+        try exerciseSmoothnessFourTallMotion(candidate: false, fullInline: true)
+    }
+
+    @MainActor
+    func testOptInSmoothnessFourTallFullInlineCandidate() throws {
+        try exerciseSmoothnessFourTallMotion(candidate: true, fullInline: true)
+    }
+
+    @MainActor
+    func testOptInSmoothnessFourTallEagerArrowBaseline() throws {
+        try exerciseSmoothnessFourTallMotion(candidate: true, fullInline: true, eagerArrowMotion: false)
+    }
+
+    @MainActor
+    func testOptInSmoothnessFourTallEagerArrowCandidate() throws {
+        try exerciseSmoothnessFourTallMotion(candidate: true, fullInline: true, eagerArrowMotion: true)
+    }
+
+    // Motion observation deliberately ends before the independent selection gate.
+    // Both variants retain native rendering and the complete full-inline fixture.
+    @MainActor
+    func testOptInSmoothnessFourTallEagerArrowMotionOnlyBaseline() throws {
+        try exerciseSmoothnessFourTallMotion(candidate: true, fullInline: true,
+                                            eagerArrowMotion: false, motionOnly: true)
+    }
+
+    @MainActor
+    func testOptInSmoothnessFourTallEagerArrowMotionOnlyCandidate() throws {
+        try exerciseSmoothnessFourTallMotion(candidate: true, fullInline: true,
+                                            eagerArrowMotion: true, motionOnly: true)
+    }
+
+    @MainActor
+    private func exerciseSmoothnessFourTallMotion(candidate: Bool, fullInline: Bool,
+                                                eagerArrowMotion: Bool? = nil,
+                                                motionOnly: Bool = false) throws {
+        try smoothnessEnabled()
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = smoothnessArguments("--chat-performance-four-tall-lab", candidate: candidate,
+                                                  fullInline: fullInline)
+        if eagerArrowMotion == true { app.launchArguments.append("--chat-eager-arrow-motion") }
+        var events: [[String: Any]] = []
+        let initialFailureCount = testRun?.failureCount ?? 0
+        defer {
+            if eagerArrowMotion != nil && (testRun?.failureCount ?? 0) > initialFailureCount {
+                attachScreenshot(named: "smoothness-four-tall-eager-arrow-failure")
+                if let data = try? JSONSerialization.data(withJSONObject: events, options: [.sortedKeys]),
+                   let value = String(data: data, encoding: .utf8) {
+                    attachPlainText(value, named: "smoothness-four-tall-eager-arrow-failure-events")
+                }
+                attachAccessibilitySnapshot(named: "smoothness-four-tall-eager-arrow-failure-hierarchy", app: app)
+            }
+        }
+        smoothnessEvent("process_launch_request", into: &events)
+        app.launch()
+        let scroll = app.scrollViews["chat-transcript-scroll"]
+        let tail = app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", "End of four-row mixed conversation.")).firstMatch
+        let scenario = eagerArrowMotion != nil
+            ? (motionOnly ? "four_tall_eager_arrow_motion_only" : "four_tall_eager_arrow_motion")
+            : (fullInline ? "four_tall_full_inline" : "four_tall_motion")
+        let eagerFinalRow = app.staticTexts["message-row:four-tall-message-3"]
+        func validFrame(_ frame: CGRect) -> Bool {
+            !frame.isNull && frame.origin.x.isFinite && frame.origin.y.isFinite
+                && frame.width.isFinite && frame.height.isFinite
+                && frame.maxX.isFinite && frame.maxY.isFinite
+                && frame.width > 0 && frame.height > 0
+        }
+        func endpointGeometry() -> (row: CGRect, viewport: CGRect, valid: Bool, readable: Bool, far: Bool) {
+            let rowExists = eagerFinalRow.exists
+            let viewportExists = scroll.exists
+            let row = rowExists ? eagerFinalRow.frame : .null
+            let viewport = viewportExists ? scroll.frame : .null
+            let valid = rowExists && viewportExists && validFrame(row) && validFrame(viewport)
+            // The AX label covers the entire giant row. Its trailing edge tracks
+            // the terminal paragraph; a hittable slice of code does not.
+            let readable = valid && row.maxX > viewport.minX && row.minX < viewport.maxX
+                && row.maxY <= viewport.maxY && row.maxY >= viewport.minY + 120
+            let far = valid && row.maxY - viewport.maxY >= viewport.height
+            return (row, viewport, valid, readable, far)
+        }
+        func checkEagerEndpoint(_ phase: String, farRequired: Bool) -> Bool {
+            let geometry = endpointGeometry()
+            smoothnessEvent("\(phase)_endpoint_geometry", into: &events)
+            events[events.count - 1]["row_frame"] = String(describing: geometry.row)
+            events[events.count - 1]["viewport_frame"] = String(describing: geometry.viewport)
+            events[events.count - 1]["frames_valid"] = geometry.valid
+            if geometry.valid {
+                events[events.count - 1]["row_end_below_viewport_points"] = geometry.row.maxY - geometry.viewport.maxY
+            }
+            events[events.count - 1]["endpoint_readable"] = geometry.readable
+            events[events.count - 1]["endpoint_far"] = geometry.far
+            let terminalLabelPresent = tail.exists
+            events[events.count - 1]["terminal_label_present"] = terminalLabelPresent
+            let passed = terminalLabelPresent && (farRequired ? geometry.far : geometry.readable)
+            guard passed else {
+                smoothnessEvent("\(phase)_endpoint_failure", into: &events)
+                attachScreenshot(named: "smoothness-four-tall-eager-arrow-\(phase)-failure-screen")
+                if let data = try? JSONSerialization.data(withJSONObject: events, options: [.sortedKeys]),
+                   let value = String(data: data, encoding: .utf8) {
+                    attachPlainText(value, named: "smoothness-four-tall-eager-arrow-\(phase)-failure-events")
+                }
+                attachAccessibilitySnapshot(named: "smoothness-four-tall-eager-arrow-\(phase)-failure-hierarchy", app: app)
+                XCTFail(farRequired
+                        ? "The row endpoint must be at least one viewport beyond the mounted window before the arrow tap."
+                        : "The terminal paragraph must be within the transcript viewport at \(phase).")
+                return false
+            }
+            return true
+        }
+        func waitForReadableEndpoint(timeout: TimeInterval) {
+            let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                endpointGeometry().readable
+            }, object: eagerFinalRow)
+            _ = XCTWaiter.wait(for: [ready], timeout: timeout)
+        }
+        XCTAssertTrue(scroll.waitForExistence(timeout: 25))
+        smoothnessEvent("transcript_constructed", into: &events)
+        if eagerArrowMotion != nil {
+            waitForReadableEndpoint(timeout: 30)
+            guard checkEagerEndpoint("cold", farRequired: false) else { return }
+        } else {
+            assertHittable(tail, timeout: 30, message: "Four-tall cold tail must be readable.")
+        }
+        if fullInline {
+            let finalRow = app.staticTexts["message-row:four-tall-message-3"]
+            XCTAssertTrue(finalRow.waitForExistence(timeout: 10),
+                          "The final assistant row must expose its real accessibility label.")
+            let expected = String(repeating: "let value = Array(0..<1_000).reduce(0, +)\n", count: 320)
+                + "\nlet fourTallFinalMarker = \"SEMREH_FOUR_TALL_CODE_END\""
+            let label = finalRow.label
+            XCTAssertEqual(label.components(separatedBy: "```swift\n").count, 2,
+                           "The final row must have exactly one fenced Swift block in its accessibility label.")
+            let openingFence = try XCTUnwrap(label.range(of: "```swift\n"))
+            let afterOpeningFence = label[openingFence.upperBound...]
+            let closingFence = try XCTUnwrap(afterOpeningFence.range(of: "\n```"))
+            XCTAssertEqual(String(afterOpeningFence[..<closingFence.lowerBound]), expected,
+                           "The real row accessibility label must contain the complete exact multiline Swift source.")
+            XCTAssertFalse(finalRow.buttons.matching(NSPredicate(
+                format: "identifier == %@ OR label BEGINSWITH %@", "view-full-code", "View full code ("
+            )).firstMatch.exists, "Full-inline code must not show the 32-line View full code preview affordance.")
+            if candidate {
+                let codeLeaves = finalRow.textViews.matching(identifier: "native-inline-code-text")
+                let code = codeLeaves.element(boundBy: 0)
+                XCTAssertTrue(code.waitForExistence(timeout: 10),
+                              "The native full-inline code view must be exposed to accessibility.")
+                XCTAssertEqual(codeLeaves.count, 1, "The final code block must have one native accessibility leaf.")
+                let returnedValue = try XCTUnwrap(code.value as? String)
+                attachPlainText(returnedValue, named: "smoothness-four-tall-full-inline-native-code-ax-value")
+                // The formatter renders each empty source line as one ASCII space.
+                let expectedDisplayedValue = expected.components(separatedBy: "\n")
+                    .map { $0.isEmpty ? " " : $0 }
+                    .joined(separator: "\n")
+                XCTAssertEqual(returnedValue, expectedDisplayedValue,
+                               "The native code leaf must expose the complete formatted display text.")
+            }
+        }
+        // launch-to-readable includes the AX observer queries above; only the
+        // drag/arrow events below bracket motion, so it is not pure opening latency.
+        smoothnessEvent("first_readable_tail", into: &events)
+        attachScreenshot(named: "smoothness-four-tall-before-motion")
+        smoothnessEvent("drag_begin", into: &events)
+        scroll.swipeDown()
+        scroll.swipeDown()
+        let arrow = app.buttons[scrollToLatestLabel]
+        XCTAssertTrue(arrow.waitForExistence(timeout: 10) && arrow.isHittable)
+        if eagerArrowMotion != nil {
+            guard checkEagerEndpoint("before-arrow", farRequired: true) else { return }
+        }
+        smoothnessEvent("drag_end_arrow_visible", into: &events)
+        attachScreenshot(named: "smoothness-four-tall-away")
+        smoothnessEvent("arrow_tap_request", into: &events)
+        arrow.tap()
+        if eagerArrowMotion != nil {
+            waitForReadableEndpoint(timeout: 20)
+            guard checkEagerEndpoint("after-arrow", farRequired: false) else { return }
+        } else {
+            assertHittable(tail, timeout: 20, message: "One arrow tap must reach the four-tall tail.")
+        }
+        if let eagerArrowMotion {
+            let decision = app.staticTexts["chat-eager-arrow-motion-decision"]
+            XCTAssertTrue(decision.waitForExistence(timeout: 5), "The DEBUG motion decision must be observable.")
+            let settled = XCTNSPredicateExpectation(
+                predicate: NSPredicate(format: "label CONTAINS %@", "state=settled"), object: decision
+            )
+            XCTAssertEqual(XCTWaiter.wait(for: [settled], timeout: 5), .completed,
+                           "Arrival must be confirmed by the current bottom-geometry token.")
+            XCTAssertTrue(decision.label.contains("requested=\(eagerArrowMotion)"), decision.label)
+            XCTAssertTrue(decision.label.contains("eligible=\(eagerArrowMotion)"), decision.label)
+            XCTAssertTrue(decision.label.contains("sameMountedWindow=true"), decision.label)
+            XCTAssertTrue(decision.label.contains("nearMotionBand=false"), decision.label)
+            XCTAssertTrue(decision.label.contains("animated=true") || decision.label.contains("animated=false"),
+                          decision.label)
+            if eagerArrowMotion {
+                XCTAssertTrue(decision.label.contains("animated=true"), decision.label)
+            }
+            XCTAssertTrue(decision.label.contains("reason=\(eagerArrowMotion ? "animate" : "flag_off")"), decision.label)
+            attachPlainText(decision.label, named: "smoothness-four-tall-eager-arrow-decision")
+            let finalRow = app.staticTexts["message-row:four-tall-message-3"]
+            XCTAssertTrue(finalRow.exists)
+            XCTAssertTrue(finalRow.label.contains("SEMREH_FOUR_TALL_CODE_END"),
+                          "Arrow settlement must preserve the complete final source row.")
+        }
+        smoothnessEvent("arrow_tail_readable", into: &events)
+        attachScreenshot(named: "smoothness-four-tall-tail")
+        smoothnessEvent("motion_scored_interval_end", into: &events)
+        if eagerArrowMotion != nil && !motionOnly {
+            // The arrow phase is already settled. Stop publishes an undismissable,
+            // selectable report over the transcript, so selection MUST precede it.
+            // Aggregate callbacks include this separate correctness leg; only the
+            // completed scroll/arrow phases describe motion in this combined test.
+            XCTAssertFalse(app.staticTexts["chat-performance-app-wide-monitor-summary"].exists,
+                           "The diagnostic report must not occlude the real message gesture.")
+            smoothnessEvent("selection_correctness_begin", into: &events)
+            func checkSelection(_ passed: Bool, phase: String, message: String) -> Bool {
+                guard !passed else { return true }
+                attachScreenshot(named: "smoothness-four-tall-selection-\(phase)-failure-screen")
+                attachAccessibilitySnapshot(named: "smoothness-four-tall-selection-\(phase)-failure-hierarchy", app: app)
+                XCTFail(message)
+                return false
+            }
+            let tailLeaves = app.staticTexts.matching(NSPredicate(
+                format: "label == %@", "End of four-row mixed conversation."
+            ))
+            guard checkSelection(tailLeaves.count == 1, phase: "unique-leaf",
+                                 message: "The exact terminal paragraph must be a unique accessibility leaf.") else { return }
+            let tailLeaf = tailLeaves.element(boundBy: 0)
+            guard checkSelection(tailLeaf.label == "End of four-row mixed conversation.", phase: "leaf-label",
+                                 message: "The selection leaf must retain the exact terminal paragraph.") else { return }
+            let leafFrame = tailLeaf.frame
+            let rowFrame = eagerFinalRow.frame
+            let viewportFrame = scroll.frame
+            let windowFrame = app.frame
+            smoothnessEvent("selection_pre_press_geometry", into: &events)
+            events[events.count - 1]["leaf_frame"] = String(describing: leafFrame)
+            events[events.count - 1]["row_frame"] = String(describing: rowFrame)
+            events[events.count - 1]["viewport_frame"] = String(describing: viewportFrame)
+            events[events.count - 1]["window_frame"] = String(describing: windowFrame)
+            attachPlainText(String(describing: events[events.count - 1]),
+                            named: "smoothness-four-tall-selection-pre-press-geometry")
+            guard checkSelection(validFrame(leafFrame) && validFrame(rowFrame)
+                                 && validFrame(viewportFrame) && validFrame(windowFrame),
+                                 phase: "valid-geometry",
+                                 message: "Selection requires finite positive leaf, row, viewport, and app-window bounds.") else { return }
+            guard checkSelection(leafFrame.height < 80, phase: "small-leaf",
+                                 message: "Selection must target the small terminal paragraph, not the giant row.") else { return }
+            guard checkSelection(rowFrame.contains(leafFrame), phase: "final-row",
+                                 message: "The terminal paragraph must belong to the final assistant row.") else { return }
+            guard checkSelection(viewportFrame.contains(leafFrame) && windowFrame.contains(leafFrame),
+                                 phase: "visible-leaf",
+                                 message: "The complete terminal paragraph must be within the transcript viewport and app window.") else { return }
+            let pressPoint = CGPoint(x: leafFrame.midX, y: leafFrame.midY)
+            let innerLeaf = leafFrame.insetBy(dx: leafFrame.width / 4, dy: leafFrame.height / 4)
+            guard checkSelection(validFrame(innerLeaf) && innerLeaf.contains(pressPoint),
+                                 phase: "press-point",
+                                 message: "The measured press point must be clearly inside the visible terminal paragraph.") else { return }
+            let localOffset = CGVector(dx: pressPoint.x - windowFrame.minX,
+                                       dy: pressPoint.y - windowFrame.minY)
+            events[events.count - 1]["press_point"] = String(describing: pressPoint)
+            events[events.count - 1]["app_local_offset"] = String(describing: localOffset)
+            attachPlainText(String(describing: events[events.count - 1]),
+                            named: "smoothness-four-tall-selection-pre-press-coordinate")
+            attachScreenshot(named: "smoothness-four-tall-selection-before-press")
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
+                .withOffset(localOffset).press(forDuration: 1)
+            guard checkSelection(app.buttons["Select Text"].waitForExistence(timeout: 3),
+                                 phase: "select-text-menu",
+                                 message: "The real terminal-paragraph press must offer Select Text.") else { return }
+            app.buttons["Select Text"].tap()
+            let selection = app.textViews["selectable-response-text"]
+            guard checkSelection(selection.waitForExistence(timeout: 3), phase: "selection-view",
+                                 message: "Select Text must open the selectable full response.") else { return }
+            let source = selection.value as? String ?? ""
+            let expectedCode = String(repeating: "let value = Array(0..<1_000).reduce(0, +)\n", count: 320)
+                + "\nlet fourTallFinalMarker = \"SEMREH_FOUR_TALL_CODE_END\""
+            guard checkSelection(source.contains(expectedCode), phase: "full-code-source",
+                                 message: "Select Text must retain the exact full code source.") else { return }
+            guard checkSelection(source.contains("End of four-row mixed conversation."),
+                                 phase: "terminal-source",
+                                 message: "Select Text must retain the terminal paragraph.") else { return }
+            attachPlainText(source, named: "smoothness-four-tall-eager-arrow-selected-source")
+            let done = app.buttons["Done"]
+            guard checkSelection(done.exists && done.isHittable, phase: "dismiss-selection",
+                                 message: "The real selection sheet must offer Done.") else { return }
+            done.tap()
+            guard checkSelection(selection.waitForNonExistence(timeout: 3), phase: "selection-dismissed",
+                                 message: "Done must dismiss selection before publishing the report.") else { return }
+            smoothnessEvent("selection_correctness_complete", into: &events)
+        }
+        attachSmoothnessEvidence(app, scenario: scenario, events: events)
+    }
+
+    @MainActor
+    func testOptInSmoothnessRich30StreamBaseline() throws {
+        try exerciseSmoothnessRich30Stream(candidate: false)
+    }
+
+    @MainActor
+    func testOptInSmoothnessRich30StreamCandidate() throws {
+        try exerciseSmoothnessRich30Stream(candidate: true)
+    }
+
+    @MainActor
+    private func exerciseSmoothnessRich30Stream(candidate: Bool) throws {
+        try smoothnessEnabled()
+        continueAfterFailure = true
+        let app = XCUIApplication()
+        app.launchArguments = smoothnessArguments("--chat-performance-rich30-lab", candidate: candidate,
+                                                  richStream: true)
+        var events: [[String: Any]] = []
+        var phase = "launch"
+        var recordedFailure = false
+        let initialFailureCount = testRun?.failureCount ?? 0
+        func check(_ condition: Bool, _ message: String) -> Bool {
+            guard condition else {
+                recordedFailure = true
+                smoothnessEvent("failure_\(phase)", into: &events)
+                attachRich30StreamEvidence(app, events: events, phase: phase, failed: true)
+                XCTFail(message)
+                return false
+            }
+            return true
+        }
+        defer {
+            if !recordedFailure {
+                attachRich30StreamEvidence(app, events: events, phase: phase,
+                                           failed: (testRun?.failureCount ?? 0) > initialFailureCount)
+            }
+        }
+        smoothnessEvent("process_launch_request", into: &events)
+        app.launch()
+        let scroll = app.scrollViews["chat-transcript-scroll"]
+        let tail = app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", rich30Marker)).firstMatch
+        guard check(scroll.waitForExistence(timeout: 25), "Rich30 transcript must mount.") else { return }
+        smoothnessEvent("transcript_constructed", into: &events)
+        let tailReady = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == true AND hittable == true"), object: tail
+        )
+        guard check(XCTWaiter.wait(for: [tailReady], timeout: 35) == .completed,
+                    "Rich30 cold tail must be readable.") else { return }
+        let finalCodeLine = app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS[c] %@", "SEMREH_RICH30_CODE_END")).firstMatch
+        guard check(finalCodeLine.waitForExistence(timeout: 10),
+                    "Full-inline late code must be mounted in both variants.") else { return }
+        smoothnessEvent("first_readable_tail", into: &events)
+        phase = "reach-group-30-thinking"
+        attachScreenshot(named: "smoothness-rich30-first-readable-tail")
+        let groupUser = app.staticTexts["message-row:rich30-message-58"]
+        let groupAssistant = app.staticTexts["message-row:rich30-message-59"]
+        guard check(groupUser.waitForExistence(timeout: 10) && groupAssistant.waitForExistence(timeout: 10),
+                    "The stable group-30 user and assistant rows must be mounted.") else { return }
+        func group30Button(containing label: String) -> XCUIElement? {
+            scroll.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", label))
+                .allElementsBoundByIndex.last { button in
+                    button.exists && button.frame.minY >= groupUser.frame.maxY - 8
+                        && button.frame.maxY <= groupAssistant.frame.minY + 8
+                }
+        }
+        let preparationDeadline = Date().addingTimeInterval(65)
+        var thinking: XCUIElement?
+        for gesture in 0..<40 {
+            let current = group30Button(containing: "Thinking")
+            if let current, rich30Visible(current, in: scroll), current.isHittable {
+                thinking = current
+                break
+            }
+            guard Date() < preparationDeadline else { break }
+            smoothnessEvent("reasoning_scroll_\(gesture + 1)", into: &events)
+            scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.96, dy: 0.28))
+                .press(forDuration: 0.05,
+                       thenDragTo: scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.96, dy: 0.72)))
+        }
+        guard check(thinking != nil, "Group-30 Thinking was not visible after 40 bounded upward gestures (65 s).") else { return }
+        smoothnessEvent("reasoning_disclosure_visible", into: &events)
+        phase = "expand-group-30-thinking"
+        guard let thinking else { return }
+        thinking.tap()
+        let reasoningBody = app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS[c] %@", "Group 30: check the bounded window")).firstMatch
+        guard check(reasoningBody.waitForExistence(timeout: 10),
+                    "Expanded group-30 reasoning must expose its real visible body.") else { return }
+        for _ in 0..<4 where !rich30Visible(reasoningBody, in: scroll) {
+            scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.96, dy: 0.70))
+                .press(forDuration: 0.05,
+                       thenDragTo: scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.96, dy: 0.42)))
+        }
+        guard check(rich30Visible(reasoningBody, in: scroll),
+                    "Expanded group-30 reasoning body must enter the viewport.") else { return }
+        smoothnessEvent("reasoning_expanded", into: &events)
+        attachScreenshot(named: "smoothness-rich30-expanded-reasoning")
+        phase = "reach-group-30-tool"
+        var tool: XCUIElement?
+        let toolDeadline = Date().addingTimeInterval(25)
+        for gesture in 0..<16 {
+            let current = group30Button(containing: "Read file")
+            if let current, rich30Visible(current, in: scroll), current.isHittable {
+                tool = current
+                break
+            }
+            guard Date() < toolDeadline else { break }
+            smoothnessEvent("tool_scroll_\(gesture + 1)", into: &events)
+            scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.96, dy: 0.72))
+                .press(forDuration: 0.05,
+                       thenDragTo: scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.96, dy: 0.28)))
+        }
+        guard check(tool != nil, "Group-30 Read file was not visible after 16 bounded downward gestures (25 s).") else { return }
+        smoothnessEvent("tool_disclosure_visible", into: &events)
+        phase = "expand-group-30-tool"
+        guard let tool else { return }
+        tool.tap()
+        let toolBody = app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS[c] %@", "fixtures/rich30-group-30.md")).firstMatch
+        guard check(toolBody.waitForExistence(timeout: 10),
+                    "Expanded group-30 tool must expose its real visible argument body.") else { return }
+        for _ in 0..<4 where !rich30Visible(toolBody, in: scroll) {
+            scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.96, dy: 0.70))
+                .press(forDuration: 0.05,
+                       thenDragTo: scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.96, dy: 0.42)))
+        }
+        guard check(rich30Visible(toolBody, in: scroll),
+                    "Expanded group-30 tool argument body must enter the viewport.") else { return }
+        smoothnessEvent("tool_body_expanded", into: &events)
+        attachScreenshot(named: "smoothness-rich30-expanded-tool")
+        phase = "return-from-disclosures"
+        let returnFromReasoning = app.buttons[scrollToLatestLabel]
+        guard check(returnFromReasoning.waitForExistence(timeout: 10) && returnFromReasoning.isHittable,
+                    "The return-to-latest arrow must be tappable after expanding group 30.") else { return }
+        returnFromReasoning.tap()
+        guard check(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == true AND hittable == true"), object: tail
+        )], timeout: 20) == .completed,
+                    "The expanded rich transcript must return to the tail with one tap.") else { return }
+        smoothnessEvent("return_from_disclosures_readable", into: &events)
+        phase = "stream-open-fence"
+        let stream = app.buttons["rich30-stream-turn"]
+        guard check(stream.waitForExistence(timeout: 10) && stream.isHittable,
+                    "The rich streaming button must be tappable.") else { return }
+        smoothnessEvent("stream_follow_request", into: &events)
+        stream.tap()
+        let firstStreamRow = app.staticTexts["message-row:perf-stream-message-1-assistant"]
+        let openFenceLine = app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS[c] %@", "let lineOne =")).firstMatch
+        let firstFinalCode = app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS[c] %@", "SEMREH_STREAM_CODE_END_1")).firstMatch
+        guard check(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label CONTAINS %@", "let lineOne ="), object: firstStreamRow
+        )], timeout: 10) == .completed
+                    && firstStreamRow.label.contains("```swift\nlet lineOne =")
+                    && !firstStreamRow.label.contains("SEMREH_STREAM_CODE_END_1")
+                    && openFenceLine.exists && !firstFinalCode.exists,
+                    "The first open code fence must be observed before its completed source line; XCTest may have consumed the intermediate chunks.") else { return }
+        smoothnessEvent("stream_open_code_mounted", into: &events)
+        attachScreenshot(named: "smoothness-rich30-open-code")
+        phase = "stream-follow-tail"
+        let streamed = app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", "SEMREH_MULTI_CHAT_STREAM_1")).firstMatch
+        guard check(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == true AND hittable == true"), object: streamed
+        )], timeout: 20) == .completed, "Following stream must reach the tail.") else { return }
+        guard check(firstFinalCode.exists, "Completed streamed code must retain its final source line.") else { return }
+        smoothnessEvent("stream_follow_tail", into: &events)
+        attachScreenshot(named: "smoothness-rich30-followed-stream-tail")
+        phase = "parked-reader"
+        scroll.swipeDown()
+        scroll.swipeDown()
+        let arrow = app.buttons[scrollToLatestLabel]
+        guard check(arrow.waitForExistence(timeout: 10) && arrow.isHittable,
+                    "A parked reader must have a tappable return arrow.") else { return }
+        let parkedAnchor = groupAssistant
+        guard check(parkedAnchor.exists && rich30Visible(parkedAnchor, in: scroll),
+                    "Parked reading needs the visible stable group-30 assistant row.") else { return }
+        let parkedAnchorY = parkedAnchor.frame.minY
+        smoothnessEvent("parked_older", into: &events)
+        attachScreenshot(named: "smoothness-rich30-parked-before-stream")
+        guard check(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+                predicate: NSPredicate(format: "enabled == true"), object: stream
+            )], timeout: 5) == .completed,
+                    "The first streamed turn must finish before the parked stream starts.") else { return }
+        phase = "stream-while-parked"
+        smoothnessEvent("stream_parked_request", into: &events)
+        stream.tap()
+        let secondStreamRow = app.staticTexts["message-row:perf-stream-message-2-assistant"]
+        let secondFinalCode = app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS[c] %@", "SEMREH_STREAM_CODE_END_2")).firstMatch
+        guard check(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label CONTAINS %@", "let lineOne ="), object: secondStreamRow
+        )], timeout: 10) == .completed
+                    && secondStreamRow.label.contains("```swift\nlet lineOne =")
+                    && !secondStreamRow.label.contains("SEMREH_STREAM_CODE_END_2")
+                    && !secondFinalCode.exists,
+                    "The parked second stream must expose an intermediate open fence before completion; XCTest may have consumed the chunks.") else { return }
+        guard check(arrow.exists && parkedAnchor.exists && rich30Visible(parkedAnchor, in: scroll)
+                    && abs(parkedAnchor.frame.minY - parkedAnchorY) <= 8,
+                    "A parked reader must keep the same visible group-30 row and position during appends.") else { return }
+        smoothnessEvent("stream_parked_open_code_observed", into: &events)
+        guard check(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "enabled == true"), object: stream
+        )], timeout: 10) == .completed,
+                    "The parked second stream must complete.") else { return }
+        guard check(arrow.exists && parkedAnchor.exists && rich30Visible(parkedAnchor, in: scroll)
+                    && abs(parkedAnchor.frame.minY - parkedAnchorY) <= 8,
+                    "A parked reader must retain the same visible row position after completion.") else { return }
+        smoothnessEvent("stream_parked_observed", into: &events)
+        attachScreenshot(named: "smoothness-rich30-parked-after-stream")
+        phase = "return-latest"
+        smoothnessEvent("return_latest_tap_request", into: &events)
+        arrow.tap()
+        let secondStream = app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS[c] %@", "SEMREH_MULTI_CHAT_STREAM_2"
+        )).firstMatch
+        guard check(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == true AND hittable == true"), object: secondStream
+        )], timeout: 20) == .completed,
+                    "One tap must return to the second turn streamed while parked.") else { return }
+        guard check(secondFinalCode.exists, "Completed parked stream must mount full source content.") else { return }
+        smoothnessEvent("return_latest_readable", into: &events)
+        attachScreenshot(named: "smoothness-rich30-stream-tail")
+        phase = "monitor-report"
+        let stop = app.buttons["chat-performance-app-wide-monitor-stop"]
+        guard check(stop.waitForExistence(timeout: 10) && stop.isHittable,
+                    "The rich30 callback monitor stop must be tappable.") else { return }
+        stop.tap()
+        let report = app.staticTexts["chat-performance-app-wide-monitor-summary"]
+        guard check(report.waitForExistence(timeout: 10)
+                    && report.label.contains("callback_gaps_over_100_ms="),
+                    "The rich30 callback monitor must publish its gap report.") else { return }
+        attachPlainText(report.label, named: "smoothness-rich30_stream-callback-report")
+        phase = "complete"
+    }
+
+    @MainActor
+    func testOptInSmoothnessRich30OpenBackBaseline() throws {
+        try exerciseSmoothnessRich30OpenBack(candidate: false)
+    }
+
+    @MainActor
+    func testOptInSmoothnessRich30OpenBackCandidate() throws {
+        try exerciseSmoothnessRich30OpenBack(candidate: true)
+    }
+
+    @MainActor
+    func testR24Window12RichHistoryJourney() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--chat-performance-rich30-back-lab", "--composer-test-fresh-draft",
+                               "--chat-windowed-eager", "--chat-windowed-rows=12",
+                               "--chat-rich-native-code-text", "--chat-full-inline-code",
+                               "--chat-viewport-follow-latest-open"]
+        let scroll = app.scrollViews["chat-transcript-scroll"]
+        let open = app.buttons["Open rich30 chat"].firstMatch
+        let older = app.buttons["windowed-page-older"]
+        let arrow = app.buttons[scrollToLatestLabel]
+        var phase = "open"
+        var readback: [String] = []
+        func check(_ condition: Bool, _ message: String) -> Bool {
+            guard condition else {
+                // Capture before XCTFail: continueAfterFailure=false can abort immediately.
+                attachScreenshot(named: "r24-\(phase)-failure")
+                attachAccessibilitySnapshot(named: "r24-\(phase)-failure-hierarchy", app: app)
+                attachPlainText(readback.joined(separator: "\n"), named: "r24-failure-readback")
+                XCTFail(message)
+                return false
+            }
+            return true
+        }
+        func wait(_ element: XCUIElement, _ predicate: String, timeout: TimeInterval = 15) -> Bool {
+            XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+                predicate: NSPredicate(format: predicate), object: element
+            )], timeout: timeout) == .completed
+        }
+        // One immutable application snapshot per boundary: window membership,
+        // labels, leaf values and production shell geometry share the same instant.
+        func boundary(_ name: String) throws -> (rows: [XCUIElementSnapshot], nodes: [XCUIElementSnapshot], readable: CGRect) {
+            phase = name
+            let root: XCUIElementSnapshot
+            do { root = try app.snapshot() }
+            catch {
+                _ = check(false, "Unable to capture \(name): \(error)")
+                throw error
+            }
+            var nodes: [XCUIElementSnapshot] = []
+            func visit(_ node: XCUIElementSnapshot) {
+                nodes.append(node)
+                node.children.forEach(visit)
+            }
+            visit(root)
+            let transcript = nodes.first { $0.identifier == "chat-transcript-scroll" }?.frame ?? .zero
+            let back = nodes.first { $0.elementType == .button && $0.label == "Back" }?.frame ?? .zero
+            let composer = nodes.first { $0.identifier == "chat-composer-input" }?.frame ?? .zero
+            // ChatView.chatNavigationBar: Back is inset 4pt into a 96pt header;
+            // its readability backdrop extends another 24pt below that header.
+            // Exclude composer input plus its surrounding top padding conservatively.
+            let top = max(transcript.minY, back.minY - 4 + 96 + 24)
+            let bottom = min(transcript.maxY, composer.minY - 12)
+            let readable = CGRect(x: transcript.minX, y: top, width: transcript.width,
+                                  height: max(0, bottom - top))
+            let rows = nodes.filter { $0.elementType == .staticText && $0.identifier.hasPrefix("message-row:") }
+            readback.append("\(name): ids=\(rows.map(\.identifier)) count=\(rows.count) transcript=\(transcript) back=\(back) composer=\(composer) readable=\(readable)")
+            for row in rows where row.frame.intersects(readable) {
+                readback.append("  readable \(row.identifier) frame=\(row.frame)")
+            }
+            attachPlainText(readback.suffix(rows.count + 1).joined(separator: "\n"), named: "r24-\(name)-boundary")
+            _ = check(back.height > 0 && composer.height > 0 && readable.height > 0,
+                      "Production header/composer must define a nonempty readable region.")
+            _ = check(!rows.isEmpty && rows.count <= 12, "Every boundary must mount 1...12 display rows.")
+            return (rows, nodes, readable)
+        }
+        func readableRow(_ rows: [XCUIElementSnapshot], in region: CGRect) -> XCUIElementSnapshot? {
+            rows.filter { $0.frame.intersection(region).height > 20 && $0.frame.intersection(region).width > 0 }
+                .sorted { $0.frame.minY < $1.frame.minY }.first
+        }
+        func numbers(_ rows: [XCUIElementSnapshot]) -> Set<Int> {
+            Set(rows.compactMap { Int($0.identifier.replacingOccurrences(of: "message-row:rich30-message-", with: "")) })
+        }
+        func dragOlder() {
+            scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.96, dy: 0.30))
+                .press(forDuration: 0.05, thenDragTo: scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.96, dy: 0.76)))
+        }
+        defer { attachPlainText(readback.joined(separator: "\n"), named: "r24-coverage-and-readback") }
+        app.launch()
+        guard check(open.waitForExistence(timeout: 25) && open.isHittable, "The genuine rich30 list entry must be reachable.") else { return }
+        open.tap()
+        guard check(scroll.waitForExistence(timeout: 25), "Open must mount the transcript.") else { return }
+        let tail = app.staticTexts.matching(NSPredicate(format: "label == %@", "Rich group 30 complete. SEMREH_RICH30_END")).firstMatch
+        guard check(wait(tail, "exists == true AND hittable == true", timeout: 35), "The full terminal paragraph must be readable.") else { return }
+        let cold = try boundary("cold-tail")
+        guard check(numbers(cold.rows) == Set(48..<60), "Opening must mount the actual final 12 of 60 rows.") else { return }
+        guard let finalRow = cold.rows.first(where: { $0.identifier == "message-row:rich30-message-59" }) else {
+            _ = check(false, "Final rich row missing."); return
+        }
+        let expectedFinalCode = String(repeating: "let row29 = records.filter { $0.group == 29 }.map { $0.id }\n", count: 88)
+            + "let richGroupFinalSourceLine30 = \"SEMREH_RICH30_CODE_END\""
+        let finalLabel = app.staticTexts[finalRow.identifier].label
+        guard check(finalLabel.contains("```swift\n" + expectedFinalCode + "\n```"), "Final row must retain all 88 code lines and its terminal source marker.") else { return }
+        let finalCode = app.staticTexts[finalRow.identifier].textViews["native-inline-code-text"].firstMatch
+        guard check((finalCode.value as? String) == expectedFinalCode,
+                    "Full native inline code must expose the exact terminal block, without preview truncation.") else { return }
+        guard check(!cold.nodes.contains { $0.identifier == "view-full-code" || $0.label.hasPrefix("View full code (") },
+                    "The full-inline journey must not substitute collapsed code.") else { return }
+        attachScreenshot(named: "r24-before-real-drag")
+        dragOlder()
+        let moved = try boundary("after-real-drag")
+        guard check(moved.rows.contains { row in
+            cold.rows.contains { $0.identifier == row.identifier && abs($0.frame.minY - row.frame.minY) > 20 }
+        }, "A real drag must move mounted content by more than 20pt.") else { return }
+        attachScreenshot(named: "r24-after-real-drag")
+
+        // Mirrors the existing policy, not a hidden state injection:
+        // debugMoveLoadedWindow uses overlap=max(1, limit/2); older() retains
+        // min(overlap,current.count,limit-1), then clips only the lower edge.
+        let limit = 12
+        let total = 60
+        let overlap = max(1, limit / 2)
+        let maximumReplacements = (total - limit + (limit - overlap) - 1) / (limit - overlap)
+        var expected = (total - limit)..<total
+        var covered = numbers(cold.rows)
+        var groups = Set<Int>()
+        func collectGroups(_ rows: [XCUIElementSnapshot], nodes: [XCUIElementSnapshot]) {
+            for number in numbers(rows) where number % 2 == 1 {
+                if nodes.contains(where: { $0.elementType == .staticText && $0.label.hasPrefix("Rich group \(number / 2 + 1) complete.") }) {
+                    groups.insert(number / 2 + 1)
+                }
+            }
+        }
+        collectGroups(cold.rows, nodes: cold.nodes)
+        for page in 1...maximumReplacements {
+            phase = "page-\(page)"
+            guard check(older.exists && older.isHittable, "Existing older-page lab control must be reachable.") else { return }
+            let retained = min(overlap, expected.count, limit - 1)
+            let end = expected.lowerBound + retained
+            expected = max(0, end - limit)..<end
+            older.tap()
+            let newFirst = app.staticTexts["message-row:rich30-message-\(expected.lowerBound)"]
+            guard check(newFirst.waitForExistence(timeout: 15), "Replacement must expose its expected first row.") else { return }
+            let pageState = try boundary(phase)
+            guard check(numbers(pageState.rows) == Set(expected), "Actual replacement IDs must match the bounded policy range \(expected).") else { return }
+            guard check(readableRow(pageState.rows, in: pageState.readable) != nil, "Completed replacement must leave readable transcript content.") else { return }
+            covered.formUnion(numbers(pageState.rows))
+            collectGroups(pageState.rows, nodes: pageState.nodes)
+        }
+        guard check(covered == Set(0..<total) && groups == Set(1...30), "All 60 distinct display rows and all 30 complete rich groups must be observed.") else { return }
+        readback.append("coverage rows=\(covered.sorted()) groups=\(groups.sorted()) replacements=\(maximumReplacements); oldest=\(expected); no partial page exists for 60 rows / half-step 6")
+        older.tap()
+        let oldest = try boundary("oldest-no-op")
+        guard check(numbers(oldest.rows) == Set(0..<12), "Paging beyond oldest must retain the first window.") else { return }
+        attachScreenshot(named: "r24-oldest-window")
+
+        // Reach an existing long-code toolbar through real scrolling. Group 1
+        // has 40 ordinary lines plus three deliberately long wrapping lines.
+        let firstAssistant = app.staticTexts["message-row:rich30-message-1"]
+        let enable = firstAssistant.buttons["Enable code line wrapping"]
+        let disable = firstAssistant.buttons["Disable code line wrapping"]
+        phase = "reach-long-code"
+        // Wrapping is a real persisted preference: the same full fixture can
+        // place this toolbar ~15,700 or ~22,300pt away. Bound traversal by the
+        // measured distance, not an assumed unwrapped height. No state reset.
+        let toolbar = enable.exists ? enable : disable
+        guard check(toolbar.exists, "Group 1 must expose its real wrapping control.") else { return }
+        let viewportFrame = scroll.frame
+        let initialDistance = oldest.readable.midY - toolbar.frame.midY
+        guard check(initialDistance.isFinite && viewportFrame.height.isFinite && viewportFrame.height > 0,
+                    "Toolbar traversal needs finite measured distance and viewport height.") else { return }
+        let projectedFlings = min(44, abs(initialDistance) / max(viewportFrame.height * 0.75, 1))
+        let seekBudget = min(48, max(24, Int(ceil(projectedFlings)) + 4))
+        readback.append("wrap-seek-budget=\(seekBudget) initialDistance=\(initialDistance) viewport=\(viewportFrame)")
+        var reached = false
+        for attempt in 0..<seekBudget {
+            if toolbar.isHittable { reached = true; break }
+            // Resolve the unchanged wrap state once; query fresh endpoint
+            // geometry per gesture without repeatedly snapshotting all leaves.
+            let toolbarFrame = toolbar.frame
+            let distance = oldest.readable.midY - toolbarFrame.midY
+            readback.append("wrap-seek-\(attempt): toolbar=\(toolbarFrame) distance=\(distance)")
+            if abs(distance) > viewportFrame.height {
+                // The first run made real progress but 24 short drags stopped
+                // 3,410pt before this toolbar. Use normal fast flings while far.
+                if distance > 0 { scroll.swipeDown(velocity: .fast) }
+                else { scroll.swipeUp(velocity: .fast) }
+            } else {
+                // Settle the actual endpoint into readable space without inertia.
+                let translation = max(-0.30, min(0.30, distance / viewportFrame.height))
+                scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.96, dy: 0.55))
+                    .press(forDuration: 0.05,
+                           thenDragTo: scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.96, dy: 0.55 + translation)),
+                           withVelocity: .slow, thenHoldForDuration: 0.15)
+            }
+        }
+        reached = reached || toolbar.isHittable
+        guard check(reached, "Group 1's real long-code wrap toolbar was unreachable after \(seekBudget) gestures; no substitute fixture used.") else { return }
+        if disable.exists && disable.isHittable { disable.tap() }
+        guard check(wait(enable, "exists == true AND hittable == true"), "Unwrapped code toolbar must be tappable.") else { return }
+        _ = try boundary("long-code-unwrapped")
+        let code = firstAssistant.textViews["native-inline-code-text"].firstMatch
+        let source = String(repeating: "let row0 = records.filter { $0.group == 0 }.map { $0.id }\n", count: 40)
+            + Array(repeating: "let wrapMarker0 = \"a deliberately long wrapping line that must wrap across the viewport without losing its tail marker 0\"", count: 3).joined(separator: "\n")
+        // Resolve one exact leaf, then request its complete value. Archived AX
+        // snapshots can truncate long strings; they remain the geometry oracle.
+        guard check((code.value as? String) == source, "Group 1 must expose every source line before wrapping.") else { return }
+        let beforeCodeFrame = code.frame
+        attachScreenshot(named: "r24-before-wrap")
+        enable.tap()
+        guard check(wait(disable, "exists == true"), "Real wrapping action must change the toolbar state.") else { return }
+        _ = try boundary("long-code-wrapped")
+        let afterCodeFrame = code.frame
+        guard check((code.value as? String) == source && afterCodeFrame.height > beforeCodeFrame.height + 20,
+                    "Wrapping must retain the exact long-line endpoint and increase native code height.") else { return }
+        guard check(code.exists, "Wrapped source must remain in the actual native code leaf.") else { return }
+        attachScreenshot(named: "r24-after-wrap")
+
+        // A real reader gesture precedes real production Back, never a callback.
+        dragOlder()
+        let beforeBack = try boundary("before-back")
+        guard let selected = readableRow(beforeBack.rows, in: beforeBack.readable) else {
+            _ = check(false, "No reader target in the production readable region before Back."); return
+        }
+        readback.append("selected-before-back id=\(selected.identifier) frame=\(selected.frame) readable=\(beforeBack.readable)")
+        attachScreenshot(named: "r24-before-back")
+        app.buttons["Back"].tap()
+        phase = "back-list"
+        guard check(open.waitForExistence(timeout: 20) && open.isHittable && !scroll.exists,
+                    "Actual Back must remove the transcript and return to the list.") else { return }
+        attachScreenshot(named: "r24-back-list")
+        open.tap()
+        guard check(scroll.waitForExistence(timeout: 20), "Reopen must restore the retained chat.") else { return }
+        let reopened = try boundary("after-reopen")
+        let restored = reopened.rows.first { $0.identifier == selected.identifier }
+        readback.append("selected-after-reopen id=\(selected.identifier) frame=\(String(describing: restored?.frame)) readable=\(reopened.readable)")
+        attachScreenshot(named: "r24-after-reopen")
+        guard check(restored != nil && restored!.frame.intersection(reopened.readable).height > 20
+                    && readableRow(reopened.rows, in: reopened.readable)?.identifier == selected.identifier,
+                    "The selected reader target must remain first in the readable region after Back/reopen.") else { return }
+
+        let beforeReadingOffset = selected.frame.minY - beforeBack.readable.minY
+        let afterReadingOffset = restored!.frame.minY - reopened.readable.minY
+        readback.append("reading-offset before=\(beforeReadingOffset) after=\(afterReadingOffset) delta=\(afterReadingOffset - beforeReadingOffset); beforeRow=\(selected.frame) beforeViewport=\(beforeBack.readable) afterRow=\(restored!.frame) afterViewport=\(reopened.readable)")
+        guard check(abs(afterReadingOffset - beforeReadingOffset) <= 24,
+                    "Back/reopen must preserve the viewport-relative intra-message reading offset within 24pt.") else { return }
+
+        let stream = app.buttons["rich30-stream-turn"]
+        phase = "parked-stream"
+        guard check(stream.exists && stream.isHittable && stream.isEnabled, "The existing shared stream action must be reachable while parked.") else { return }
+        attachScreenshot(named: "r24-before-parked-stream")
+        stream.tap()
+        // This short existing fixture may finish before AX observes disabled.
+        // Completion plus continuity is asserted; no intermediate-frame claim.
+        guard check(wait(stream, "enabled == true"), "Shared stream action must finish.") else { return }
+        let parked = try boundary("after-parked-stream")
+        let continued = parked.rows.first { $0.identifier == selected.identifier }
+        guard check(numbers(parked.rows) == numbers(reopened.rows) && continued != nil
+                    && continued!.frame.intersection(parked.readable).height > 20
+                    && abs(continued!.frame.minY - restored!.frame.minY) < 24,
+                    "Streaming while parked must retain the mounted older window and reader position.") else { return }
+        attachScreenshot(named: "r24-after-parked-stream")
+        guard check(arrow.exists && arrow.isHittable, "The real down arrow must remain available while parked old.") else { return }
+        arrow.tap() // Exactly one return-to-latest action after the entire history walk.
+        let streamTail = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "SEMREH_MULTI_CHAT_STREAM_1")).firstMatch
+        guard check(wait(streamTail, "exists == true AND hittable == true", timeout: 20), "One arrow tap must expose the completed streamed terminal content.") else { return }
+        let latest = try boundary("latest-after-one-arrow")
+        guard check(latest.rows.contains { $0.identifier == "message-row:perf-stream-message-1-assistant" && $0.label.contains("final chunk. SEMREH_MULTI_CHAT_STREAM_1") },
+                    "Completed stream must leave a nonempty transcript with its complete terminal row.") else { return }
+        guard check(latest.rows.contains { $0.identifier == finalRow.identifier }
+                    && app.staticTexts[finalRow.identifier].label == finalLabel,
+                    "Returning to latest must preserve the entire original rich terminal row.") else { return }
+        attachScreenshot(named: "r24-latest-after-one-arrow")
+    }
+
+    @MainActor
+    func testOptInNativeV2FourTallSingleLatestJourney() throws {
+        try exerciseNativeV2Journey(readerReopen: false)
+    }
+
+    @MainActor
+    func testOptInNativeV2Rich30ReaderBackReopenJourney() throws {
+        try exerciseNativeV2Journey(readerReopen: true)
+    }
+
+    @MainActor
+    func testOptInNativeV2Rich30MotionReaderJourney() throws {
+        try exerciseNativeV2Journey(readerReopen: true, motionJourney: true)
+    }
+
+    @MainActor
+    func testOptInNativeV2Rich30FarLatestComprehensiveJourney() throws {
+        try exerciseNativeV2Journey(readerReopen: true, motionJourney: true, farLatest: true)
+    }
+
+    @MainActor
+    func testOptInNativeV2LatestAfterFastFling() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--chat-performance-rich30-back-lab", "--chat-native-transcript-v2",
+            "--chat-rich-native-code-text", "--chat-full-inline-code", "--chat-viewport-follow-latest-open",
+            "--composer-test-fresh-draft"]
+        app.terminate()
+        app.launch()
+        let open = app.buttons["Open rich30 chat"].firstMatch
+        XCTAssertTrue(open.waitForExistence(timeout: 25))
+        open.tap()
+        let scroll = app.collectionViews["chat-transcript-scroll"]
+        let marker = app.descendants(matching: .any).matching(identifier: "chat-native-transcript-v2").firstMatch
+        let tail = app.staticTexts.matching(NSPredicate(format: "label == %@",
+            "Rich group 30 complete. SEMREH_RICH30_END")).firstMatch
+        let arrow = app.buttons[scrollToLatestLabel]
+        func wait(_ element: XCUIElement, _ predicate: String, timeout: TimeInterval = 15) -> Bool {
+            XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: predicate),
+                object: element)], timeout: timeout) == .completed
+        }
+        func fields(_ value: String) -> [String: String] {
+            value.split(separator: ";").reduce(into: [:]) { result, field in
+                let pair = field.split(separator: "=", maxSplits: 1)
+                if pair.count == 2 { result[String(pair[0])] = String(pair[1]) }
+            }
+        }
+        XCTAssertTrue(scroll.waitForExistence(timeout: 25) && marker.waitForExistence(timeout: 10))
+        XCTAssertTrue(wait(tail, "exists == true AND hittable == true"))
+        scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.96, dy: 0.30))
+            .press(forDuration: 0.08, thenDragTo: scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.96, dy: 0.76)))
+        XCTAssertTrue(wait(arrow, "exists == true AND hittable == true"))
+        let before = marker.value as? String ?? ""
+        let beforeFields = fields(before)
+        let beforeCompleted = try XCTUnwrap(beforeFields["motionCompleted"].flatMap(Int.init))
+        let beforeTakeovers = try XCTUnwrap(beforeFields["decelerationTakeovers"].flatMap(Int.init))
+        let button = arrow.frame
+        let tap = app.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: button.midX, dy: button.midY))
+        attachScreenshot(named: "r44-before-fast-fling")
+        // No AX query between the fast fling and tap. Public XCUI still may wait
+        // for quiescence; only the latched UIKit counter establishes takeover.
+        scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.96, dy: 0.25))
+            .press(forDuration: 0.01, thenDragTo: scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.96, dy: 0.80)),
+                   withVelocity: .fast, thenHoldForDuration: 0)
+        tap.tap()
+        let reached = wait(tail, "exists == true AND hittable == true", timeout: 20)
+        let idle = wait(marker, "value CONTAINS 'motion=idle'", timeout: 5)
+        let after = marker.value as? String ?? ""
+        let afterFields = fields(after)
+        let afterTakeovers = try XCTUnwrap(afterFields["decelerationTakeovers"].flatMap(Int.init))
+        attachPlainText("before: \(before)\nafter: \(after)\nphysicalDecelerationTakeoverObserved=\(afterTakeovers > beforeTakeovers)\nXCUI may deliver the tap after momentum ends; false leaves physical takeover unverified.",
+                        named: "r44-fast-fling-readback")
+        attachScreenshot(named: "r44-after-fast-fling-latest")
+        XCTAssertTrue(reached && idle, "One latest tap after a fast fling must settle at the terminal paragraph.")
+        XCTAssertEqual(afterFields["state"], "following")
+        XCTAssertEqual(afterFields["motionCompleted"].flatMap(Int.init), beforeCompleted + 1)
+        let composer = app.descendants(matching: .any).matching(identifier: "chat-composer-input").firstMatch.frame
+        let endpoint = tail.frame
+        XCTAssertGreaterThan(endpoint.height, 0)
+        XCTAssertLessThan(endpoint.height, 100)
+        XCTAssertGreaterThanOrEqual(endpoint.minY, scroll.frame.minY)
+        XCTAssertLessThanOrEqual(endpoint.maxY, composer.minY - 12)
+    }
+
+    @MainActor
+    private func exerciseNativeV2Journey(readerReopen: Bool, motionJourney: Bool = false, farLatest: Bool = false) throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        // The four-tall selector takes precedence over the generic tall route.
+        app.launchArguments = (readerReopen ? ["--chat-performance-rich30-back-lab"]
+            : ["--chat-performance-tall-lab", "--chat-performance-four-tall-lab"])
+            + ["--chat-native-transcript-v2", "--chat-rich-native-code-text",
+               "--chat-full-inline-code", "--chat-viewport-follow-latest-open",
+               "--composer-test-fresh-draft"]
+            + (readerReopen ? ["--chat-performance-stream-rich-code"] : [])
+        app.terminate()
+        app.launch() // Configure and cold-launch before constructing any AX queries.
+        let name = farLatest ? "r39-native-far-latest" : motionJourney ? "r38-native-motion-reader" : readerReopen ? "r37-native-rich30" : "r37-native-four-tall"
+        let scroll = app.collectionViews["chat-transcript-scroll"]
+        let marker = app.descendants(matching: .any).matching(identifier: "chat-native-transcript-v2").firstMatch
+        let open = app.buttons["Open rich30 chat"].firstMatch
+        let arrow = app.buttons[scrollToLatestLabel]
+        let terminal = readerReopen ? "Rich group 30 complete. SEMREH_RICH30_END"
+            : "End of four-row mixed conversation."
+        let tail = app.staticTexts.matching(NSPredicate(format: "label == %@", terminal)).firstMatch
+        var phase = "launch"
+        var evidence: [String] = []
+        func check(_ passed: Bool, _ message: String) -> Bool {
+            guard !passed else { return true }
+            attachScreenshot(named: "\(name)-\(phase)-failure")
+            // Bounded geometry/identifier evidence, never a giant live AX dump.
+            attachPlainText(evidence.suffix(24).joined(separator: "\n") + "\nFailure: \(message)",
+                            named: "\(name)-\(phase)-failure-geometry")
+            XCTFail(message)
+            return false
+        }
+        func wait(_ element: XCUIElement, _ predicate: String, timeout: TimeInterval = 15) -> Bool {
+            XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: predicate),
+                                                         object: element)], timeout: timeout) == .completed
+        }
+        func boundary(_ label: String) throws -> (rows: [XCUIElementSnapshot], readable: CGRect) {
+            phase = label
+            let snapshot: XCUIElementSnapshot
+            do { snapshot = try scroll.snapshot() }
+            catch {
+                _ = check(false, "Transcript subtree snapshot failed: \(error)")
+                throw error
+            }
+            let back = app.buttons["Back"].frame
+            let composer = app.descendants(matching: .any).matching(identifier: "chat-composer-input").firstMatch.frame
+            let top = max(snapshot.frame.minY, back.minY - 4 + 96 + 24)
+            let bottom = min(snapshot.frame.maxY, composer.minY - 12)
+            let readable = CGRect(x: snapshot.frame.minX, y: top, width: snapshot.frame.width,
+                                  height: max(0, bottom - top))
+            var rows: [XCUIElementSnapshot] = []
+            var preview = false
+            func visit(_ node: XCUIElementSnapshot) {
+                if node.elementType == .staticText && node.identifier.hasPrefix("message-row:") { rows.append(node) }
+                if node.identifier == "view-full-code" || node.label.hasPrefix("View full code (") { preview = true }
+                node.children.forEach(visit)
+            }
+            visit(snapshot)
+            evidence.append("\(label): scroll=\(snapshot.frame) back=\(back) composer=\(composer) readable=\(readable) mounted=\(rows.count)")
+            evidence.append(contentsOf: rows.prefix(60).map { "\($0.identifier) frame=\($0.frame)" })
+            attachPlainText(evidence.suffix(min(rows.count, 60) + 1).joined(separator: "\n"), named: "\(name)-\(label)-geometry")
+            _ = check(back.height > 0 && composer.height > 0 && readable.height > 20,
+                      "The production shell must leave a readable transcript.")
+            _ = check(!rows.isEmpty && !preview, "Reused cells must retain full-inline content without source previews.")
+            return (rows, readable)
+        }
+        func first(_ state: (rows: [XCUIElementSnapshot], readable: CGRect)) -> XCUIElementSnapshot? {
+            state.rows.filter { $0.frame.intersection(state.readable).height > 20
+                && $0.frame.intersection(state.readable).width > 0 }
+                .sorted { $0.frame.minY < $1.frame.minY }.first
+        }
+        func visibleTail(_ region: CGRect) -> Bool {
+            guard tail.exists else { return false }
+            let frame = tail.frame
+            return frame.height > 0 && frame.height < 100 && region.contains(frame)
+        }
+        func dragOlder() {
+            scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.96, dy: 0.30))
+                .press(forDuration: 0.05, thenDragTo: scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.96, dy: 0.76)))
+        }
+        func motionCounters(_ label: String) -> (completed: Int, cancelled: Int, samples: Int)? {
+            let value = marker.value as? String ?? ""
+            evidence.append("\(label): \(value)")
+            let fields = value.split(separator: ";").reduce(into: [String: String]()) { result, field in
+                let pair = field.split(separator: "=", maxSplits: 1)
+                if pair.count == 2 { result[String(pair[0])] = String(pair[1]) }
+            }
+            guard check(fields["motion"] == "idle" || fields["motion"] == "animating",
+                        "Native motion probe must publish its state."),
+                  let completed = fields["motionCompleted"].flatMap(Int.init),
+                  let cancelled = fields["motionCancelled"].flatMap(Int.init),
+                  let samples = fields["motionSamples"].flatMap(Int.init) else {
+                _ = check(false, "Native motion probe must publish all latched counters.")
+                return nil
+            }
+            return (completed, cancelled, samples)
+        }
+        defer { attachPlainText(evidence.joined(separator: "\n"), named: "\(name)-readback") }
+        if readerReopen {
+            guard check(open.waitForExistence(timeout: 25) && open.isHittable, "Open rich30 entry must be reachable.") else { return }
+            open.tap()
+        }
+        guard check(scroll.waitForExistence(timeout: 25) && marker.waitForExistence(timeout: 10),
+                    "The actual native scroll and native-v2 controller marker must exist.") else { return }
+        guard check(wait(tail, "exists == true", timeout: 25), "Complete terminal paragraph must mount.") else { return }
+        let cold = try boundary("cold-tail")
+        guard check(visibleTail(cold.readable) && first(cold) != nil, "Cold tail must be semantically visible and nonempty.") else { return }
+        attachScreenshot(named: "\(name)-cold-tail")
+
+        if farLatest {
+            phase = "status-bar-to-first-group"
+            // The target's native screenshot shows the OS clock here, but iOS
+            // does not expose its status bar in this app's accessibility tree.
+            // One physical clock-region tap; actual first-group arrival below
+            // remains mandatory. No debug offset or corrective swipe ladder.
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.18, dy: 0.04)).tap()
+            let firstRequest = app.staticTexts["message-row:rich30-message-0"]
+            guard check(wait(firstRequest, "exists == true AND hittable == true", timeout: 12),
+                        "FAR coverage blocked: status-bar tap did not realize the first rich group.") else { return }
+            let top = try boundary("far-first-group")
+            guard check(top.rows.contains { $0.identifier == "message-row:rich30-message-0"
+                        && $0.label.contains("Rich group 1 request.")
+                        && $0.frame.intersection(top.readable).height > 20 },
+                        "FAR origin must contain readable original first-group text.") else { return }
+            // The unchanged first request is itself 502pt tall plus its link
+            // preview. One ordinary reader drag reveals the response below it;
+            // the two full messages cannot both fit above the composer at top.
+            scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.96, dy: 0.80))
+                .press(forDuration: 0.08, thenDragTo: scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.96, dy: 0.25)))
+            let responseOrigin = try boundary("far-first-response")
+            let firstResponse = app.staticTexts["message-row:rich30-message-1"]
+            let firstInline = firstResponse.textViews["native-inline-code-text"].firstMatch
+            let firstSource = String(repeating: "let row0 = records.filter { $0.group == 0 }.map { $0.id }\n", count: 40)
+            guard check(responseOrigin.rows.contains { $0.identifier == "message-row:rich30-message-1"
+                        && $0.label.contains("Rich group 1")
+                        && $0.frame.intersection(responseOrigin.readable).height > 20 }
+                        && firstResponse.label.contains(firstSource)
+                        && firstInline.exists && (firstInline.value as? String ?? "").contains(firstSource),
+                        "FAR origin must also realize the original rich response with readable geometry and complete repeated source."),
+                  check(arrow.exists && arrow.isHittable, "FAR origin must expose latest."),
+                  let before = motionCounters("far-before-latest") else { return }
+            attachScreenshot(named: "\(name)-far-first-group")
+            arrow.tap() // Exactly one latest action for the scored FAR landing.
+            guard check(wait(tail, "exists == true AND hittable == true", timeout: 20),
+                        "One FAR latest tap must reach the original terminal paragraph."),
+                  check(wait(marker, "value CONTAINS 'motion=idle'", timeout: 5),
+                        "FAR motion must finish before scoring its latched counters."),
+                  let after = motionCounters("far-after-latest"),
+                  check(after.completed == before.completed + 1 && after.cancelled == before.cancelled
+                        && after.samples > before.samples,
+                        "FAR latest must complete one sampled motion without cancellation.") else { return }
+            let landed = try boundary("far-terminal")
+            let original = String(repeating: "let row29 = records.filter { $0.group == 29 }.map { $0.id }\n", count: 88)
+                + "let richGroupFinalSourceLine30 = \"SEMREH_RICH30_CODE_END\""
+            let finalRow = app.staticTexts["message-row:rich30-message-59"]
+            let inline = finalRow.textViews["native-inline-code-text"].firstMatch
+            guard check(visibleTail(landed.readable) && finalRow.label.contains(original)
+                        && inline.exists && (inline.value as? String ?? "").contains(original),
+                        "FAR landing must retain every original terminal source line inline.") else { return }
+            attachScreenshot(named: "\(name)-far-terminal")
+        }
+
+        // Finger moves down to move the viewport upward into older text; use
+        // the outer trailing gutter to avoid nested code's horizontal scroller.
+        scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.96, dy: 0.30))
+            .press(forDuration: 0.05, thenDragTo: scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.96, dy: 0.76)))
+        guard check(wait(arrow, "exists == true AND hittable == true", timeout: 10), "Real reader drag must expose latest action.") else { return }
+        let parked = try boundary("reader-before-back")
+        guard let selected = first(parked), let initial = first(cold) else {
+            _ = check(false, "Real drag must leave readable content."); return
+        }
+        let offset = selected.frame.minY - parked.readable.minY
+        guard check(selected.identifier != initial.identifier
+                    || offset > initial.frame.minY - cold.readable.minY + 24,
+                    "The drag must measurably move into older content, even within a tall row.") else { return }
+        attachScreenshot(named: "\(name)-reader-before-back")
+        if readerReopen {
+            app.buttons["Back"].tap()
+            phase = "back-list"
+            guard check(open.waitForExistence(timeout: 20) && open.isHittable && !scroll.exists,
+                        "Back must return to the actual list.") else { return }
+            attachScreenshot(named: "\(name)-back-list")
+            open.tap()
+            guard check(scroll.waitForExistence(timeout: 20) && marker.exists, "Reopen must restore the native route.") else { return }
+            let reopened = try boundary("reopened-reader")
+            guard let restored = first(reopened) else { _ = check(false, "Reopen must not be blank."); return }
+            let delta = restored.frame.minY - reopened.readable.minY - offset
+            evidence.append("restore id=\(selected.identifier) restored=\(restored.identifier) beforeOffset=\(offset) delta=\(delta)")
+            guard check(restored.identifier == selected.identifier && abs(delta) <= 24,
+                        "Back/reopen must preserve first readable content and intra-row offset within 24pt.") else { return }
+            attachScreenshot(named: "\(name)-reopened-reader")
+        }
+        guard check(arrow.exists && arrow.isHittable, "Latest must remain available while parked.") else { return }
+        let beforeMotion = motionJourney ? motionCounters("before-first-latest") : nil
+        if motionJourney && beforeMotion == nil { return }
+        arrow.tap() // One latest action; no corrective gesture for this scored landing.
+        guard check(wait(tail, "exists == true AND hittable == true", timeout: 20), "One latest tap must reach the terminal paragraph.") else { return }
+        let latest = try boundary("after-one-latest")
+        guard check(visibleTail(latest.readable) && first(latest) != nil, "Latest must leave visible complete terminal content.") else { return }
+        attachScreenshot(named: "\(name)-after-one-latest")
+        if motionJourney {
+            guard let beforeMotion, let completed = motionCounters("after-first-latest"),
+                  check(completed.completed > beforeMotion.completed && completed.samples > beforeMotion.samples,
+                        "One latest tap must complete sampled native motion; counters are not FPS.") else { return }
+            dragOlder()
+            guard check(wait(arrow, "exists == true AND hittable == true", timeout: 10),
+                        "Repeat real drag must expose latest.") else { return }
+            let repeatParked = try boundary("repeat-drag")
+            guard let moved = first(repeatParked), let atLatest = first(latest),
+                  check(moved.identifier != atLatest.identifier
+                        || moved.frame.minY - repeatParked.readable.minY > atLatest.frame.minY - latest.readable.minY + 24,
+                        "Repeated drag must produce actual displacement in immutable geometry.") else { return }
+            arrow.tap()
+            // Attempt an immediate finger interruption. XCUI may quiesce until
+            // motion completes; latched cancellation is evidence, never assumed.
+            dragOlder()
+            let interrupted = try boundary("drag-after-repeat-latest")
+            guard let reading = first(interrupted),
+                  check(arrow.exists && arrow.isHittable
+                        && (reading.identifier != atLatest.identifier
+                            || reading.frame.minY - interrupted.readable.minY > atLatest.frame.minY - latest.readable.minY + 24),
+                        "The immediate post-latest drag must leave a displaced readable viewport."),
+                  let afterDrag = motionCounters("after-interruption-attempt"),
+                  check(afterDrag.completed + afterDrag.cancelled > completed.completed + completed.cancelled
+                        && afterDrag.samples > completed.samples,
+                        "Repeated latest must record sampled motion and a completed or cancelled outcome.") else { return }
+            evidence.append("interruptionObserved=\(afterDrag.cancelled > completed.cancelled); XCUI quiescence may consume motion before the drag")
+            arrow.tap()
+            guard check(wait(tail, "exists == true AND hittable == true", timeout: 20),
+                        "One latest after the interruption attempt must restore the terminal paragraph.") else { return }
+            let returned = try boundary("repeat-latest-tail")
+            guard check(visibleTail(returned.readable), "Repeated latest must restore complete terminal geometry.") else { return }
+        }
+        if !readerReopen {
+            let row = app.staticTexts["message-row:four-tall-message-3"]
+            let expected = String(repeating: "let value = Array(0..<1_000).reduce(0, +)\n", count: 320)
+                + "\nlet fourTallFinalMarker = \"SEMREH_FOUR_TALL_CODE_END\""
+            let code = row.textViews["native-inline-code-text"].firstMatch
+            let displayed = expected.components(separatedBy: "\n").map { $0.isEmpty ? " " : $0 }.joined(separator: "\n")
+            guard check(row.exists && row.label.contains(expected) && code.exists
+                        && (code.value as? String) == displayed,
+                        "The complete final code, including its end marker, must remain inline without truncation.") else { return }
+        } else {
+            let row = app.staticTexts["message-row:rich30-message-59"]
+            let expected = String(repeating: "let row29 = records.filter { $0.group == 29 }.map { $0.id }\n", count: 88)
+                + "let richGroupFinalSourceLine30 = \"SEMREH_RICH30_CODE_END\""
+            let code = row.textViews["native-inline-code-text"].firstMatch
+            guard check(row.exists && row.label.contains(expected) && code.exists
+                        && (code.value as? String ?? "").contains(expected),
+                        "Rich30's terminal cell must retain all 88 source lines and the final code marker.") else { return }
+            // Full-response Select Text is distinct from inline paragraph-range selection.
+            phase = "full-response-selection"
+            tail.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 1)
+            let select = app.buttons["Select Text"]
+            guard check(select.waitForExistence(timeout: 3), "Terminal paragraph must offer full-response Select Text.") else { return }
+            select.tap()
+            let selection = app.textViews["selectable-response-text"]
+            guard check(selection.waitForExistence(timeout: 5), "Full-response selection must open.") else { return }
+            let source = selection.value as? String ?? ""
+            guard check(source.contains(expected) && source.contains(terminal),
+                        "Full-response selection must retain every source line and terminal paragraph.") else { return }
+            XCUIDevice.shared.press(.home)
+            guard check(app.wait(for: .runningBackground, timeout: 5), "Selection journey must actually background the app.") else { return }
+            app.activate()
+            guard check(selection.waitForExistence(timeout: 5) && (selection.value as? String) == source
+                        && !app.keyboards.firstMatch.exists,
+                        "Foreground must preserve full-response source without focusing the composer.") else { return }
+            app.buttons["Done"].firstMatch.tap()
+            guard check(selection.waitForNonExistence(timeout: 5), "Done must dismiss full-response selection.") else { return }
+            let afterSelection = try boundary("selection-return")
+            guard check(marker.exists && visibleTail(afterSelection.readable), "Selection return must retain the native terminal paragraph.") else { return }
+
+            dragOlder()
+            guard check(wait(arrow, "exists == true AND hittable == true", timeout: 10), "Real drag must park before streaming.") else { return }
+            let beforeStream = try boundary("parked-before-stream")
+            guard let anchor = first(beforeStream) else { _ = check(false, "Parked stream needs readable content."); return }
+            let stream = app.buttons["rich30-stream-turn"]
+            guard check(stream.exists && stream.isHittable && stream.isEnabled, "Shared rich30 stream action must be usable.") else { return }
+            stream.tap()
+            guard check(wait(stream, "enabled == true", timeout: 20), "Shared stream must complete.") else { return }
+            let afterStream = try boundary("parked-after-stream")
+            guard let retained = afterStream.rows.first(where: { $0.identifier == anchor.identifier }),
+                  check(arrow.exists && retained.frame.intersection(afterStream.readable).height > 20
+                        && abs((retained.frame.minY - afterStream.readable.minY)
+                               - (anchor.frame.minY - beforeStream.readable.minY)) <= 24,
+                        "Parked streaming must preserve the same readable row and intra-row offset.") else { return }
+            arrow.tap()
+            let streamedTail = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "SEMREH_MULTI_CHAT_STREAM_1")).firstMatch
+            guard check(wait(streamedTail, "exists == true AND hittable == true", timeout: 20), "One latest must expose the actual completed streamed response.") else { return }
+            let streamed = try boundary("stream-completed-tail")
+            let streamedCode = "let lineOne = \"a long synthetic line that wraps across the viewport and remains readable while the fence is open\"\n"
+                + "let lineTwo = \"another long synthetic line that grows the open code block while the reader is parked away from the tail\"\n"
+                + "let finalSourceLine = \"SEMREH_STREAM_CODE_END_1\""
+            guard check(streamed.readable.contains(streamedTail.frame)
+                        && streamed.rows.contains { $0.identifier == "message-row:perf-stream-message-1-assistant"
+                            && $0.label.contains(streamedCode)
+                            && $0.label.contains("SEMREH_MULTI_CHAT_STREAM_1") },
+                        "Stream completion must retain the full final code marker and readable terminal content.") else { return }
+            // Reuse the established composer action after restoration is scored.
+            phase = "composer"
+            let composer = app.textViews["chat-composer-input"]
+            guard check(composer.exists && composer.isHittable, "Composer must remain usable.") else { return }
+            composer.tap()
+            guard check(app.keyboards.firstMatch.waitForExistence(timeout: 5), "Composer tap must open the real keyboard.") else { return }
+            composer.typeText("R37 reader draft")
+            guard check((composer.value as? String ?? "").contains("R37 reader draft"), "Composer must retain typed text.") else { return }
+            attachScreenshot(named: "\(name)-composer-keyboard")
+        }
+    }
+
+    func testRich30ReaderDragSurvivesBackAndReopen() throws {
+        continueAfterFailure = false
+        for eager in [false, true] {
+            let app = XCUIApplication()
+            app.launchArguments = ["--chat-performance-rich30-back-lab", "--composer-test-fresh-draft"]
+                + (eager ? ["--chat-windowed-eager", "--chat-windowed-rows=60"] : [])
+            app.launch()
+            let open = app.buttons["Open rich30 chat"].firstMatch
+            XCTAssertTrue(open.waitForExistence(timeout: 25))
+            open.tap()
+            let scroll = app.scrollViews["chat-transcript-scroll"]
+            XCTAssertTrue(scroll.waitForExistence(timeout: 20))
+
+            func firstReadableRow() throws -> Int? {
+                // Resolve the complete subtree once. Live element-property reads
+                // took hundreds of AX snapshots before reaching the first drag.
+                let snapshot = try scroll.snapshot()
+                let viewport = snapshot.frame
+                let prefix = "message-row:rich30-message-"
+                var first: (number: Int, y: CGFloat)?
+                func visit(_ row: XCUIElementSnapshot) {
+                    if row.elementType == .staticText,
+                       row.identifier.hasPrefix(prefix),
+                       let number = Int(row.identifier.dropFirst(prefix.count)),
+                       row.frame.maxY > viewport.minY + 1,
+                       row.frame.minY < viewport.maxY - 1,
+                       first == nil || row.frame.minY < first!.y {
+                        first = (number, row.frame.minY)
+                    }
+                    for child in row.children { visit(child) }
+                }
+                visit(snapshot)
+                return first?.number
+            }
+
+            let initialRow = try firstReadableRow()
+            XCTAssertNotNil(initialRow, "The mounted chat must expose a readable display row")
+            var changedRow: Int?
+            for _ in 0..<8 where changedRow == nil {
+                scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.96, dy: 0.82))
+                    .press(forDuration: 0.05,
+                           thenDragTo: scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.96, dy: 0.18)))
+                if let row = try firstReadableRow(), row != initialRow { changedRow = row }
+            }
+            guard let savedRow = changedRow else {
+                XCTFail("A real drag must change the reader's logical row before Back")
+                app.terminate()
+                continue
+            }
+            let before = XCTAttachment(screenshot: app.screenshot())
+            before.name = "Reader after real drag, before Back, eager=\(eager)"
+            before.lifetime = .keepAlways
+            add(before)
+
+            let back = app.buttons["Back"]
+            XCTAssertTrue(back.waitForExistence(timeout: 10))
+            let composer = app.descendants(matching: .any)
+                .matching(identifier: "chat-composer-input").firstMatch
+            XCTAssertTrue(composer.exists, "The production composer must be present during reader restoration")
+            let beforeGeometry = XCTAttachment(string: "eager=\(eager) savedAXRow=\(savedRow) window=\(app.windows.firstMatch.frame) transcript=\(scroll.frame) headerBack=\(back.frame) composer=\(composer.frame)")
+            beforeGeometry.name = "Reader production shell rectangles before Back"
+            beforeGeometry.lifetime = .keepAlways
+            add(beforeGeometry)
+            back.tap()
+            XCTAssertTrue(open.waitForExistence(timeout: 20))
+            XCTAssertFalse(scroll.exists)
+            open.tap()
+            XCTAssertTrue(scroll.waitForExistence(timeout: 20))
+            let reopenedRow = try firstReadableRow()
+            let after = XCTAttachment(screenshot: app.screenshot())
+            after.name = "Reader after retained ChatView reopen, eager=\(eager)"
+            after.lifetime = .keepAlways
+            add(after)
+            let afterGeometry = XCTAttachment(string: "eager=\(eager) restoredAXRow=\(String(describing: reopenedRow)) window=\(app.windows.firstMatch.frame) transcript=\(scroll.frame) headerBack=\(app.buttons["Back"].frame) composer=\(composer.frame)")
+            afterGeometry.name = "Reader production shell rectangles after reopen"
+            afterGeometry.lifetime = .keepAlways
+            add(afterGeometry)
+            XCTAssertEqual(reopenedRow, savedRow,
+                           "A real user drag must survive the production Back persistence and retained-model reopen path")
+            app.terminate()
+        }
+    }
+
+    @MainActor
+    private func exerciseSmoothnessRich30OpenBack(candidate: Bool) throws {
+        try smoothnessEnabled()
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = smoothnessArguments("--chat-performance-rich30-back-lab", candidate: candidate)
+        var events: [[String: Any]] = []
+        smoothnessEvent("process_launch_request", into: &events)
+        app.launch()
+        let open = app.buttons["Open rich30 chat"].firstMatch
+        XCTAssertTrue(open.waitForExistence(timeout: 25))
+        smoothnessEvent("list_readable_after_preparation", into: &events)
+        let chat = app.scrollViews["chat-transcript-scroll"]
+        for cycle in 1...6 {
+            smoothnessEvent("open_\(cycle)_tap_request", into: &events)
+            open.tap()
+            XCTAssertTrue(chat.waitForExistence(timeout: 25))
+            smoothnessEvent("open_\(cycle)_transcript_readable", into: &events)
+            let back = app.buttons["Back"]
+            XCTAssertTrue(back.waitForExistence(timeout: 10) && back.isHittable)
+            if cycle == 3 {
+                let stream = app.buttons["rich30-stream-turn"]
+                XCTAssertTrue(stream.waitForExistence(timeout: 10))
+                smoothnessEvent("stream_back_request", into: &events)
+                stream.tap()
+            }
+            smoothnessEvent("back_\(cycle)_tap_request", into: &events)
+            back.tap()
+            XCTAssertTrue(open.waitForExistence(timeout: 20))
+            XCTAssertFalse(chat.exists, "Back must dismiss the chat destination.")
+            smoothnessEvent("back_\(cycle)_list_readable", into: &events)
+        }
+        attachSmoothnessEvidence(app, scenario: "rich30_open_back", events: events)
+    }
+
+    @MainActor
+    func testOptInSmoothnessRichSwitchBaseline() throws {
+        try exerciseSmoothnessRichSwitch(candidate: false)
+    }
+
+    @MainActor
+    func testOptInSmoothnessRichSwitchCandidate() throws {
+        try exerciseSmoothnessRichSwitch(candidate: true)
+    }
+
+    @MainActor
+    private func exerciseSmoothnessRichSwitch(candidate: Bool) throws {
+        try smoothnessEnabled()
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = smoothnessArguments("--chat-performance-rich-switch-lab", candidate: candidate)
+        var events: [[String: Any]] = []
+        smoothnessEvent("process_launch_request", into: &events)
+        app.launch()
+        for (visitIndex, chatNumber) in [1, 2, 1, 2, 1].enumerated() {
+            let switchButton = app.buttons["Performance chat \(chatNumber)"]
+            if visitIndex != 0 {
+                smoothnessEvent("switch_\(chatNumber)_request", into: &events)
+                switchButton.tap()
+            }
+            let chat = app.otherElements["chat-detail:Rich 30-group lab \(chatNumber)"]
+            XCTAssertTrue(chat.waitForExistence(timeout: 20) && chat.isHittable)
+            XCTAssertTrue(switchButton.isSelected, "Performance chat \(chatNumber) must be selected on visit \(visitIndex + 1).")
+            smoothnessEvent("chat_\(chatNumber)_readable", into: &events)
+        }
+        attachScreenshot(named: "smoothness-multi-chat-return-a")
+        attachSmoothnessEvidence(app, scenario: "rich30_switch", events: events)
+    }
+
+    @MainActor
+    func testOptInSmoothnessRich30CoveragePagingBaseline() throws {
+        try exerciseSmoothnessRich30CoveragePaging(candidate: false)
+    }
+
+    @MainActor
+    func testOptInSmoothnessRich30CoveragePaging() throws {
+        try exerciseSmoothnessRich30CoveragePaging(candidate: true)
+    }
+
+    @MainActor
+    private func exerciseSmoothnessRich30CoveragePaging(candidate: Bool) throws {
+        try smoothnessEnabled()
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = smoothnessArguments("--chat-performance-rich30-lab", candidate: candidate)
+            + ["--chat-performance-rich30-paging-spread"]
+        var events: [[String: Any]] = []
+        smoothnessEvent("process_launch_request", into: &events)
+        app.launch()
+        let tail = app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", rich30Marker)).firstMatch
+        assertHittable(tail, timeout: 35, message: "Paging cold tail must be readable.")
+        smoothnessEvent("first_readable_tail", into: &events)
+        let older = app.buttons["windowed-page-older"]
+        XCTAssertTrue(older.waitForExistence(timeout: 10) && older.isHittable)
+        let firstRow = app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", "Rich group")).firstMatch
+        // This is the separate full-coverage run. The eager60 screening runs
+        // do not imply that tool-card rows leave all 30 groups mounted.
+        var coveredGroups = Set<Int>()
+        let pattern = try NSRegularExpression(pattern: #"Rich group ([0-9]+) complete"#)
+        func collectVisibleGroups() {
+            for label in app.staticTexts.allElementsBoundByIndex.map(\.label) {
+                let range = NSRange(label.startIndex..<label.endIndex, in: label)
+                for match in pattern.matches(in: label, range: range) {
+                    guard let numberRange = Range(match.range(at: 1), in: label),
+                          let number = Int(label[numberRange]) else { continue }
+                    coveredGroups.insert(number)
+                }
+            }
+        }
+        collectVisibleGroups()
+        for page in 1...3 {
+            let beforePage = firstRow.label
+            smoothnessEvent("page_\(page)_request", into: &events)
+            older.tap()
+            XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+                predicate: NSPredicate(format: "label != %@", beforePage), object: firstRow
+            )], timeout: 10), .completed, "Paging must publish a different mounted row.")
+            collectVisibleGroups()
+            smoothnessEvent("page_\(page)_readable", into: &events)
+        }
+        let scroll = app.scrollViews["chat-transcript-scroll"]
+        for _ in 0..<35 where coveredGroups.count < 30 {
+            if older.isHittable { older.tap() }
+            scroll.swipeDown()
+            collectVisibleGroups()
+        }
+        XCTAssertEqual(coveredGroups, Set(1...30), "Every rich group must be observed in the actual mounted transcript.")
+        smoothnessEvent("rich_groups_covered_\(coveredGroups.count)", into: &events)
+        attachScreenshot(named: "smoothness-rich30-older-readable")
+        let arrow = app.buttons[scrollToLatestLabel]
+        XCTAssertTrue(arrow.waitForExistence(timeout: 10) && arrow.isHittable)
+        smoothnessEvent("return_latest_request", into: &events)
+        arrow.tap()
+        assertHittable(tail, timeout: 20, message: "One tap must restore the rich30 tail.")
+        smoothnessEvent("return_latest_readable", into: &events)
+        attachScreenshot(named: "smoothness-rich30-restored-tail")
+        attachSmoothnessEvidence(app, scenario: "rich30_paging", events: events)
     }
 
     func testDebugStrictNative10kColdFarArrowGate() throws {

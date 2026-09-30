@@ -233,7 +233,8 @@ final class SessionListMutationTests: XCTestCase {
     func testListRefreshLoadsOneServerPreviewMapAcrossProfiles() async throws {
         let context = try makeContext()
         let server = try XCTUnwrap(URL(string: "https://example.test"))
-        let cachedAt = Date(timeIntervalSince1970: 1_790_000_000)
+        // load() uses the live clock; this is a fresh-preview test, not a TTL test.
+        let cachedAt = Date()
         for (profile, sessionID, text) in [
             ("default", "default-row", "Default latest answer"),
             ("maurice", "maurice-row", "Maurice latest answer")

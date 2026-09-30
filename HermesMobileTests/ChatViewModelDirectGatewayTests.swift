@@ -96,6 +96,50 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         await runtime.stop()
     }
 
+    func testCanonicalColdAndWarmLoadsDeriveReasoningOnceAndPreserveRichRows() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let richAnswer = "## Answer\n\n**Full detail** with [reference](https://example.test/reference).\n\n```swift\nlet value = 42\n```"
+        let reasoning = "Check every detail before presenting the result."
+        let response = try JSONSerialization.data(withJSONObject: [
+            "session_id": "durable-1",
+            "messages": [
+                ["id": 1, "role": "user", "content": "Explain", "timestamp": 1],
+                ["id": 2, "role": "assistant", "content": richAnswer,
+                 "reasoning": reasoning, "timestamp": 2]
+            ],
+            "pagination": ["limit": 120, "offset": 0, "order": "latest", "returned": 2]
+        ])
+        let responseText = try XCTUnwrap(String(data: response, encoding: .utf8))
+        let client = makeClient { request in
+            XCTAssertEqual(request.url?.path, "/api/sessions/durable-1/messages")
+            return apiTestJSONResponse(responseText, for: request)
+        }
+        let vm = makeViewModel(client: client, runtime: runtime, sessionID: "durable-1")
+        var originalRenderIDs: [String]?
+
+        // First attachment and repeated warm canonical reads use the same model.
+        // The old path derived reasoning twice for each of these reads.
+        for _ in 0..<3 {
+            let before = vm.reasoningDerivedStateRecomputeCountForTesting
+            await vm.loadMessages()
+            XCTAssertEqual(vm.reasoningDerivedStateRecomputeCountForTesting - before, 1)
+            XCTAssertEqual(vm.messages.compactMap(\.content), ["Explain", richAnswer])
+            XCTAssertEqual(vm.displayedTranscriptMessages.map(\.message.content), ["Explain", richAnswer])
+            let group = try XCTUnwrap(vm.displayedReasoningGroups.first)
+            XCTAssertEqual(vm.displayedReasoningGroups.count, 1)
+            XCTAssertEqual(group.text, reasoning)
+            XCTAssertEqual(group.anchorMessageID, vm.displayedTranscriptMessages.last?.anchorID)
+            XCTAssertEqual(vm.displayedReasoningGroupsForAnchor(group.anchorMessageID).map(\.id), [group.id])
+            XCTAssertTrue(vm.completedReasoningGroups.isEmpty)
+            let renderIDs = vm.displayedTranscriptMessages.map(\.renderID)
+            if let originalRenderIDs { XCTAssertEqual(renderIDs, originalRenderIDs) }
+            originalRenderIDs = renderIDs
+        }
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
     func testColdIdleLoadRequestsCurrentContextUsageSnapshot() async throws {
         let fake = ChatDirectFakeTransport()
         fake.setUsageResponse(.object([

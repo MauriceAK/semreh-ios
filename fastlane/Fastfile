@@ -46,7 +46,8 @@ platform :ios do
 
     xcargs = [
       "DEVELOPMENT_TEAM=#{team_id}",
-      "CURRENT_PROJECT_VERSION=#{build_number}"
+      "CURRENT_PROJECT_VERSION=#{build_number}",
+      "SWIFT_ACTIVE_COMPILATION_CONDITIONS='$(inherited) SEMREH_INTERNAL_CHAT_PREVIEW'"
     ].join(" ")
 
     export_xcargs = [
@@ -79,9 +80,11 @@ platform :ios do
       api_key: api_key,
       ipa: ipa,
       app_identifier: bundle_id,
-      skip_waiting_for_build_processing: true,
+      skip_waiting_for_build_processing: false,
+      wait_processing_timeout_duration: 1200,
       distribute_external: false,
-      notify_external_testers: false
+      notify_external_testers: false,
+      submit_beta_review: false
     )
   end
 

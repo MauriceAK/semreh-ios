@@ -7,6 +7,258 @@ final class StreamingTextFadeTests: XCTestCase {
     private let fade = StreamingTextFadeDefaults.fadeDuration
     private let floorOpacity = StreamingTextFadeDefaults.floorOpacity
 
+    func testBatchOpacityMatchesScalarAcrossBaselineAppendRepeatAndRollover() {
+        for duration in [0.0, -1.0, 0.16, 0.5] {
+            for floor in [0.0, 0.25, 1.0] {
+                let scalar = StreamingTextFadeStampStore<Int>()
+                let batch = StreamingTextFadeStampStore<Int>()
+                func compare(_ keys: [Int?], _ clock: TimeInterval) {
+                    scalar.register(keys.compactMap { $0 }, clock: clock)
+                    let expected = keys.map {
+                        scalar.opacity(for: $0, clock: clock, fadeDuration: duration, floorOpacity: floor)
+                    }
+                    XCTAssertEqual(batch.registerAndOpacities(keys, clock: clock,
+                        fadeDuration: duration, floorOpacity: floor), expected)
+                }
+                compare([nil, 0, 0, 1], 0)
+                // Batch reads must not finish the baseline themselves.
+                compare([0, 2, nil], 0.01)
+                scalar.finishBaseline()
+                batch.finishBaseline()
+                compare([0, 2, 3, 3, nil, 4], 1)
+                compare([0, 2, 3, 3, nil, 4], 1.08)
+                compare([0, 2, 3, 4, 5], 1.09)
+                compare([3, 4, 5], 3)
+                scalar.rolloverReset()
+                batch.rolloverReset()
+                compare([nil, 0, 0, 1], 3.01)
+                compare([], 3.02)
+                compare([0, 1], 4)
+            }
+        }
+    }
+
+    func testBatchOpacityMatchesScalarSharedChainOrderingAndCompression() {
+        let scalarChain = StreamingTextFadeStampChain()
+        let batchChain = StreamingTextFadeStampChain()
+        let scalar = (0..<2).map { _ in StreamingTextFadeStampStore<Int>(chain: scalarChain) }
+        let batch = (0..<2).map { _ in StreamingTextFadeStampStore<Int>(chain: batchChain) }
+        for store in scalar + batch { store.finishBaseline() }
+        for tick in 0..<8 {
+            let block = tick % 2
+            let keys: [Int?] = (0..<(100 + tick * 10)).map { Optional($0) } + [nil, 99]
+            let clock = 10 + Double(tick) * 0.01
+            scalar[block].register(keys.compactMap { $0 }, clock: clock)
+            XCTAssertEqual(batch[block].registerAndOpacities(keys, clock: clock),
+                           keys.map { scalar[block].opacity(for: $0, clock: clock) })
+        }
+        for block in 0..<2 {
+            let keys: [Int?] = (0..<180).map { Optional($0) }
+            scalar[block].register(keys.compactMap { $0 }, clock: 12)
+            XCTAssertEqual(batch[block].registerAndOpacities(keys, clock: 12),
+                           keys.map { scalar[block].opacity(for: $0, clock: 12) })
+        }
+    }
+
+    func testLongKeyBatchScalarExactOutputsAndWorkAttachment() throws {
+        let scalar = StreamingTextFadeStampStore<Int>()
+        let batch = StreamingTextFadeStampStore<Int>()
+        scalar.finishBaseline()
+        batch.finishBaseline()
+        let keys: [Int?] = (0..<8_000).map { $0 % 31 == 0 ? nil : $0 }
+        var scalarCalls = 0
+        var scalarLocks = 0
+        var batchCalls = 0
+        var batchLocks = 0
+        for clock in [10.0, 10.08, 10.16, 11.0] {
+            scalar.register(keys.compactMap { $0 }, clock: clock, glyphStagger: 0, maxStampLead: 0)
+            scalarLocks += 1
+            let expected = keys.map { key -> Double in
+                scalarCalls += 1
+                if key != nil { scalarLocks += 1 }
+                return scalar.opacity(for: key, clock: clock, fadeDuration: 0.16)
+            }
+            let actual = batch.registerAndOpacities(keys, clock: clock,
+                glyphStagger: 0, maxStampLead: 0, fadeDuration: 0.16)
+            batchCalls += 1
+            batchLocks += 1
+            XCTAssertEqual(actual, expected)
+            scalar.finishBaseline()
+            batch.finishBaseline()
+            scalarLocks += 1
+            batchLocks += 1
+        }
+        XCTAssertEqual(scalarCalls, 32_000)
+        XCTAssertEqual(batchCalls, 4)
+        XCTAssertEqual(batchLocks, 8)
+        XCTAssertEqual(scalarLocks, 8 + 4 * keys.compactMap { $0 }.count)
+        let attachment = XCTAttachment(string:
+            "Helper-only exact array parity; no FPS measurement. " +
+            "scalarOpacityCalls=\(scalarCalls), batchOpacityCalls=\(batchCalls), " +
+            "scalarStoreLocks=\(scalarLocks), batchStoreLocks=\(batchLocks). " +
+            "Counts follow invoked APIs; exclude diagnostics and shared-chain locks.")
+        attachment.name = "R54 bounded opacity API work comparison"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+#if DEBUG
+    @MainActor
+    func testMountedProductionFadeStoreLazyLifetimeMatchesEagerPixels() async throws {
+        let lazy = try await mountedFadeStoreFrames(eager: false)
+        let eager = try await mountedFadeStoreFrames(eager: true)
+        XCTAssertEqual(lazy.count, eager.count)
+        for (index, pair) in zip(lazy, eager).enumerated() {
+            assertFramePixelsEqual(pair.0, pair.1, "Mounted frame \(index)")
+        }
+    }
+
+    private func assertFramePixelsEqual(_ lhs: [UInt8], _ rhs: [UInt8], _ label: String,
+                                        file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertEqual(lhs.count, rhs.count, label, file: file, line: line)
+        let differences = zip(lhs, rhs).reduce(0) { $0 + ($1.0 == $1.1 ? 0 : 1) }
+        XCTAssertEqual(differences, 0, label, file: file, line: line)
+    }
+
+    @MainActor
+    private func mountedFadeStoreFrames(eager: Bool) async throws -> [[UInt8]] {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        window.frame = scene.coordinateSpace.bounds
+        window.backgroundColor = .white
+        let model = FadeStoreMountModel()
+        let probe = StreamingFadeWorkProbe()
+        let host = UIHostingController(rootView: FadeStoreMountRoot(model: model, eager: eager, probe: probe))
+        host.view.backgroundColor = .white
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        host.view.frame = window.bounds
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previousKeyWindow?.makeKey()
+        }
+        var frames: [[UInt8]] = []
+        var ink: [Int] = []
+        var retained: StreamingTextFadeStampStore<Text.Layout.CharacterIndex>?
+        var expectedCreations = 1
+        for step in 0..<8 {
+            let previousBodies = step == 0 ? 0 : model.bodyCount
+            switch step {
+            case 1: model.clock = 1
+            case 2: model.text += " appended"; model.clock = 2
+            case 3: model.clock = 2.08
+            case 4: model.clock = 2.2
+            case 5:
+                model.ordinal += 1
+                model.armOnAppear = true
+                model.text = "New block"
+                model.clock = 3
+                expectedCreations += 1
+            case 6: model.clock = 3.2
+            case 7:
+                model.identity += 1
+                model.text = "Replacement baseline"
+                model.armOnAppear = false
+                model.clock = 4
+                expectedCreations += 1
+            default: break
+            }
+            // Yield for real SwiftUI transactions, then force a visible frame.
+            try await Task.sleep(for: .milliseconds(30))
+            host.view.setNeedsLayout()
+            host.view.layoutIfNeeded()
+            let format = UIGraphicsImageRendererFormat()
+            format.scale = 1
+            let image = UIGraphicsImageRenderer(
+                bounds: CGRect(x: 0, y: 0, width: 320, height: 240), format: format
+            ).image { _ in
+                XCTAssertTrue(host.view.drawHierarchy(in: host.view.bounds, afterScreenUpdates: true))
+            }
+            XCTAssertGreaterThan(model.bodyCount, previousBodies, "Step \(step) must update the production body")
+            let store = try XCTUnwrap(model.store)
+            if step == 0 || step == 5 || step == 7 {
+                if let retained { XCTAssertFalse(retained === store) }
+                retained = store
+            } else {
+                XCTAssertTrue(retained === store, "Clock/appends must retain the original store")
+            }
+            let creations = try XCTUnwrap(probe.snapshot()["fadeStoreCreations"])
+            if eager {
+                XCTAssertGreaterThanOrEqual(creations, step + 1)
+            } else {
+                XCTAssertEqual(creations, expectedCreations)
+            }
+            let cgImage = try XCTUnwrap(image.cgImage)
+            frames.append(try rgbaPixels(cgImage))
+            ink.append(darknessSum(in: cgImage))
+        }
+        XCTAssertGreaterThan(ink[0], 0, "Baseline must draw visible text")
+        assertFramePixelsEqual(frames[0], frames[1], "Clock updates preserve baseline pixels")
+        XCTAssertLessThan(ink[2], ink[3], "Appended text must fade, not remount as baseline")
+        XCTAssertLessThan(ink[3], ink[4])
+        XCTAssertLessThan(ink[5], ink[6], "New ordinal must honor armOnAppear")
+        XCTAssertGreaterThan(ink[7], 0, "Replacement identity gets a fresh baseline")
+        let attachment = XCTAttachment(string: "eager=\(eager), bodies=\(model.bodyCount), counters=\(probe.snapshot())")
+        attachment.name = "R56 mounted production store construction"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        return frames
+    }
+
+    @MainActor
+    func testTrailingRendererScalarBatchExactPixelsForStyledUnicode() throws {
+        let markdown = "**office affine** café e\u{301} 👩🏽‍💻 — العربية שלום *italic* `code`"
+        let scalar = StreamingTextFadeStampStore<Text.Layout.CharacterIndex>()
+        let batch = StreamingTextFadeStampStore<Text.Layout.CharacterIndex>()
+        func compare(_ clock: TimeInterval) throws -> Int {
+            let left = try trailingRendererImage(markdown, store: scalar, clock: clock, scalar: true)
+            let right = try trailingRendererImage(markdown, store: batch, clock: clock, scalar: false)
+            XCTAssertEqual(left.width, right.width)
+            XCTAssertEqual(left.height, right.height)
+            XCTAssertEqual(try rgbaPixels(left), try rgbaPixels(right))
+            return darknessSum(in: left)
+        }
+        let baselineInk = try compare(0)
+        XCTAssertGreaterThan(baselineInk, 0)
+        scalar.rolloverReset()
+        batch.rolloverReset()
+        let freshInk = try compare(10)
+        let partialInk = try compare(10.08)
+        let settledInk = try compare(10.2)
+        XCTAssertLessThan(freshInk, partialInk)
+        XCTAssertLessThan(partialInk, settledInk)
+        XCTAssertEqual(settledInk, baselineInk)
+    }
+
+    @MainActor
+    private func trailingRendererImage(
+        _ markdown: String, store: StreamingTextFadeStampStore<Text.Layout.CharacterIndex>,
+        clock: TimeInterval, scalar: Bool
+    ) throws -> CGImage {
+        var fadeRenderer = StreamingTrailingContentOpacityRenderer(clock: clock, store: store)
+        fadeRenderer.usesScalarOpacity = scalar
+        let view = Markdown(markdown)
+            .textRenderer(fadeRenderer)
+            .frame(width: 320, alignment: .leading)
+            .background(SwiftUI.Color.white)
+            .environment(\.colorScheme, .light)
+        let renderer = ImageRenderer(content: view)
+        renderer.scale = 1
+        return try XCTUnwrap(renderer.cgImage)
+    }
+
+    private func rgbaPixels(_ image: CGImage) throws -> [UInt8] {
+        var pixels = [UInt8](repeating: 0, count: image.width * image.height * 4)
+        let context = try XCTUnwrap(CGContext(data: &pixels, width: image.width, height: image.height,
+            bitsPerComponent: 8, bytesPerRow: image.width * 4,
+            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        return pixels
+    }
+#endif
+
     // MARK: - StreamingTextFadeCurve
 
     func testCurveStartsAtFloorOpacity() {
@@ -448,6 +700,170 @@ final class StreamingTextFadeTests: XCTestCase {
         }
     }
 
+    // MARK: - Mounted-identity split cache
+
+#if DEBUG
+    @MainActor
+    func testSplitCacheReusesIdenticalLookupsAndEvictsPreviousKey() {
+        let cache = StreamingTextFadeSplitCache()
+        let text = "First **paragraph**.\n\nSecond 👩🏽‍💻"
+        // First body and onAppear anchor share the all-solid split. Boundary
+        // count does not depend on the ordinal used to produce that split.
+        let initial = cache.split(text, firstFadeOrdinal: Int.max)
+        XCTAssertEqual(cache.split(text, firstFadeOrdinal: Int.max), initial)
+        XCTAssertEqual(cache.splitCount, 1)
+        XCTAssertEqual(initial.boundaryCount,
+                       StreamingTextFadeTailSplitter.split(text, firstFadeOrdinal: 0).boundaryCount)
+
+        let anchored = cache.split(text, firstFadeOrdinal: initial.boundaryCount)
+        for _ in 0..<10 {
+            // Parent/theme/fade-active changes leave the split inputs intact.
+            XCTAssertEqual(cache.split(text, firstFadeOrdinal: initial.boundaryCount), anchored)
+        }
+        XCTAssertEqual(cache.splitCount, 2)
+
+        let appended = text + " appended"
+        let advance = cache.split(appended, firstFadeOrdinal: initial.boundaryCount)
+        XCTAssertEqual(cache.split(appended, firstFadeOrdinal: initial.boundaryCount), advance)
+        XCTAssertEqual(cache.splitCount, 3, "advance and body share unchanged fade ordinal")
+        _ = cache.split(text, firstFadeOrdinal: initial.boundaryCount)
+        XCTAssertEqual(cache.splitCount, 4, "only the latest key is retained")
+
+        let newIdentity = StreamingTextFadeSplitCache()
+        XCTAssertEqual(newIdentity.split(text, firstFadeOrdinal: initial.boundaryCount), anchored)
+        XCTAssertEqual(newIdentity.splitCount, 1, "new identity owns independent derived state")
+        XCTAssertEqual(cache.splitCount, 4)
+    }
+
+    @MainActor
+    func testSplitCacheParityAcrossStreamingShapesAndMotionSettings() {
+        let cache = StreamingTextFadeSplitCache()
+        let revisions = [
+            "", "paragraph **bold** [link](https://example.com) العربية 👩🏽‍💻",
+            "paragraph\n\nnext", "paragraph\n\nnext\n\n",
+            "```swift\nlet café = 1\n", "```swift\nlet café = 1\n```\ntail",
+            "~~~\ncode\n~~~\n", "- parent\n", "- parent\n  - nested child",
+            "1. first\n2. second\n3. growing", "## Heading\n---\nnext",
+            "> quote\n\n| a | b |\n|---|---|\n| 1 | 2 |",
+            "replacement", "r", "", "new response\n\nend"
+        ]
+        for text in revisions {
+            for rawOrdinal in [-1, 0, 1, 3, Int.max] {
+                for (reduceMotion, enabled) in [(false, true), (true, true), (false, false), (false, true)] {
+                    let ordinal = StreamedTextAnimationSettings.effectiveFirstFadeOrdinal(
+                        rawOrdinal, reduceMotion: reduceMotion, isEnabled: enabled
+                    )
+                    let expected = StreamingTextFadeTailSplitter.split(text, firstFadeOrdinal: ordinal)
+                    let actual = cache.split(text, firstFadeOrdinal: ordinal)
+                    XCTAssertEqual(actual, expected)
+                    XCTAssertEqual(Array((actual.head + actual.blocks.map(\.text).joined()).utf8), Array(text.utf8))
+                    let count = cache.splitCount
+                    XCTAssertEqual(cache.split(text, firstFadeOrdinal: ordinal), expected)
+                    XCTAssertEqual(cache.splitCount, count)
+                    if reduceMotion || !enabled {
+                        XCTAssertTrue(actual.blocks.isEmpty)
+                        XCTAssertEqual(Array(actual.head.utf8), Array(text.utf8))
+                    }
+                }
+            }
+        }
+    }
+
+    @MainActor
+    func testSplitCacheOrdinalChangesAvoidBoundaryScansForLongActiveTails() {
+        let paragraph = String(repeating: "Long `inline code` café 👩🏽‍💻 العربية $x^2$ ", count: 1_000)
+        let samples = [paragraph, "Intro\n\n```swift\n" + paragraph + "\n\n" + paragraph]
+        for text in samples {
+            let cache = StreamingTextFadeSplitCache()
+            let ordinals = [Int.max, 0, 1, 0, -1, Int.max, 0]
+            for ordinal in ordinals {
+                let actual = cache.split(text, firstFadeOrdinal: ordinal)
+                XCTAssertEqual(actual, StreamingTextFadeTailSplitter.split(text, firstFadeOrdinal: ordinal))
+                XCTAssertEqual(Array((actual.head + actual.blocks.map(\.text).joined()).utf8), Array(text.utf8))
+            }
+            XCTAssertEqual(cache.splitCount, ordinals.count, "assembly still runs for each ordinal change")
+            XCTAssertEqual(cache.boundaryScanCount, 1, "long unchanged tail is scanned only once")
+            XCTAssertEqual(cache.boundaryScanReuseCount, ordinals.count - 1)
+            _ = cache.split(text, firstFadeOrdinal: ordinals.last!)
+            XCTAssertEqual(cache.splitCount, ordinals.count, "identical lookups also avoid assembly")
+            XCTAssertEqual(cache.boundaryScanReuseCount, ordinals.count - 1)
+        }
+    }
+
+    @MainActor
+    func testSplitCacheEveryScalarAppendAndOrdinalMatchesReference() {
+        // Scalar boundaries include combining marks, ZWJ joins, and CR/LF
+        // arriving separately, as well as every partial list/fence line.
+        let samples = [
+            "- parent\n  - child\n\tcontinuation\n- sibling\nend",
+            "1. first\n2. second\n  nested\n3) last\n",
+            "Intro\n\n```swift\nlet s = `value`\n\n```\ntail",
+            "~~~\ncode\n~~~\n## heading\n---\n***\n",
+            "cafe\u{301} 👩🏽‍💻 🇺🇳 العربية\r\n\r\nnext",
+            "> quote\n\n| a | b |\n|---|---|\n| 1 | 2 |\n",
+            "\n \n\t\nplain **bold** and $x^2$"
+        ]
+        for sample in samples {
+            let cache = StreamingTextFadeSplitCache()
+            var text = ""
+            var revisions = [text]
+            for scalar in sample.unicodeScalars {
+                text.unicodeScalars.append(scalar)
+                revisions.append(text)
+            }
+            for revision in revisions {
+                let boundaryCount = StreamingTextFadeTailSplitter.split(revision, firstFadeOrdinal: 0).boundaryCount
+                // Walk forward and backward through every possible split,
+                // including empty trailing blocks and all-solid mode.
+                let ordinals = [Int.min] + Array(0...(boundaryCount + 1))
+                    + Array((0...(boundaryCount + 1)).reversed()) + [Int.max]
+                for ordinal in ordinals {
+                    let actual = cache.split(revision, firstFadeOrdinal: ordinal)
+                    XCTAssertEqual(actual, StreamingTextFadeTailSplitter.split(revision, firstFadeOrdinal: ordinal))
+                    XCTAssertEqual(Array((actual.head + actual.blocks.map(\.text).joined()).utf8), Array(revision.utf8))
+                }
+            }
+            XCTAssertEqual(cache.boundaryScanCount, revisions.count, "one scan per distinct source revision")
+            XCTAssertEqual(cache.splitCount, cache.boundaryScanCount + cache.boundaryScanReuseCount)
+        }
+    }
+
+    @MainActor
+    func testSplitCacheReplacementInvalidatesBoundariesEvenAtSameLength() {
+        let cache = StreamingTextFadeSplitCache()
+        let revisions = ["a\n\nb", "abcd", "- p\n", "- p\n  child", "```\nx\n", "x", "", "a\n\nb"]
+        for (index, text) in revisions.enumerated() {
+            for ordinal in [0, 1, Int.max, 0] {
+                XCTAssertEqual(cache.split(text, firstFadeOrdinal: ordinal),
+                               StreamingTextFadeTailSplitter.split(text, firstFadeOrdinal: ordinal))
+            }
+            XCTAssertEqual(cache.boundaryScanCount, index + 1)
+            XCTAssertEqual(cache.boundaryScanReuseCount, (index + 1) * 3)
+        }
+    }
+
+    @MainActor
+    func testSplitCacheDistinguishesCanonicalUnicodeAndEffectiveOrdinal() {
+        let cache = StreamingTextFadeSplitCache()
+        let composed = "caf\u{e9}\n\ntail"
+        let decomposed = "cafe\u{301}\n\ntail"
+        XCTAssertEqual(composed, decomposed, "Swift equality alone is insufficient for this cache")
+        _ = cache.split(composed, firstFadeOrdinal: 0)
+        let replaced = cache.split(decomposed, firstFadeOrdinal: 0)
+        XCTAssertEqual(cache.splitCount, 2)
+        XCTAssertEqual(cache.boundaryScanCount, 2, "canonical equivalence must invalidate stored indices")
+        XCTAssertEqual(Array(replaced.blocks.map(\.text).joined().utf8), Array(decomposed.utf8))
+        let solid = cache.split(decomposed, firstFadeOrdinal: Int.max)
+        XCTAssertEqual(cache.splitCount, 3)
+        XCTAssertTrue(solid.blocks.isEmpty)
+        XCTAssertEqual(Array(solid.head.utf8), Array(decomposed.utf8))
+        _ = cache.split(decomposed, firstFadeOrdinal: 0)
+        XCTAssertEqual(cache.splitCount, 4, "re-enabling motion must not reuse the all-solid result")
+        XCTAssertEqual(cache.boundaryScanCount, 2)
+        XCTAssertEqual(cache.boundaryScanReuseCount, 2)
+    }
+#endif
+
     // MARK: - StreamingTextFadeWindow
 
     func testWindowKeepsFreshBlocks() {
@@ -596,3 +1012,41 @@ final class StreamingTextFadeTests: XCTestCase {
         return sum
     }
 }
+
+#if DEBUG
+@MainActor
+private final class FadeStoreMountModel: ObservableObject {
+    @Published var text = "Baseline text"
+    @Published var clock: TimeInterval = 0
+    @Published var ordinal = 0
+    @Published var identity = 0
+    @Published var armOnAppear = false
+    let chain = StreamingTextFadeStampChain()
+    var bodyCount = 0
+    var store: StreamingTextFadeStampStore<Text.Layout.CharacterIndex>?
+}
+
+private struct FadeStoreMountRoot: View {
+    @ObservedObject var model: FadeStoreMountModel
+    let eager: Bool
+    let probe: StreamingFadeWorkProbe
+
+    var body: some View {
+        StreamingFadeBlockView(
+            text: model.text, colorScheme: .light, fadeEnabled: true,
+            armOnAppear: model.armOnAppear, clock: model.clock, chain: model.chain,
+            eagerConstruction: eager, probe: probe,
+            observeStore: { store in
+                model.bodyCount += 1
+                model.store = store
+            }
+        )
+        .id(model.ordinal)
+        .id(model.identity)
+        .frame(width: 320, alignment: .leading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Color.white)
+        .environment(\.colorScheme, .light)
+    }
+}
+#endif
