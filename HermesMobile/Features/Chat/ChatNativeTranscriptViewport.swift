@@ -1233,10 +1233,13 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             motionTailOffset = nil
         }
         @objc func jumpToLatest() {
-            guard isPresentationActive, !presentationSuspended, motionLink == nil,
+            guard isPresentationActive, !presentationSuspended,
                   !collection.isTracking, !collection.isDragging else { return }
+            // A visible button press is fresh intent, even during our own glide
+            // or before SwiftUI has echoed the preceding command.
+            let priorIssuedToken = latestEchoCancellationToken ?? input.cancellationToken
+            cancelMotion()
             let replacingTop = systemTopActive
-            guard replacingTop || latestEchoCancellationToken == nil else { return }
             // A tap is newer intent than the OS ascent. Cancel that owner rather
             // than discarding the visible button's action until ascent completes.
             if replacingTop {
@@ -1244,7 +1247,6 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
                 invalidatePublications()
                 pendingRestore = nil
             }
-            let priorIssuedToken = latestEchoCancellationToken ?? input.cancellationToken
             beginMotion()
             latestEchoCancellationToken = priorIssuedToken &+ 1
             input.onLatest()

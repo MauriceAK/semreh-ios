@@ -1756,6 +1756,13 @@ struct ChatTranscriptView: View, Equatable {
                                         attempt: 0
                                     )
 #endif
+                                    // This action surface is a sibling of the scroll view.
+                                    // Take over momentum before proxy positioning: otherwise
+                                    // UIKit remains an independent content-offset writer.
+                                    if let scrollView = viewportTracker.scrollView,
+                                       scrollView.isDecelerating {
+                                        scrollView.setContentOffset(scrollView.contentOffset, animated: false)
+                                    }
                                     cancelTranscriptRestore(reason: "explicit_bottom")
                                     var sameMountedWindow = false
 #if DEBUG
@@ -5321,39 +5328,22 @@ struct OutgoingBubbleInsertionModifier: ViewModifier {
 }
 
 private struct ChatScrollToBottomButton: View {
-    @Environment(\.colorScheme) private var colorScheme
-
     let bottomPadding: CGFloat
     let onTap: () -> Void
 
     var body: some View {
-        Button(action: onTap) {
+        ChatChromeActionButton(accessibilityLabel: "Scroll to latest message",
+            accessibilityIdentifier: "chat-scroll-to-bottom", action: onTap) {
             Image(systemName: "arrow.down")
                 .font(.system(size: 13, weight: .semibold))
                 .frame(width: 32, height: 32)
                 .foregroundStyle(.primary)
-                .adaptiveGlass(
-                    .regular,
-                    isInteractive: true,
-                    fallbackMaterial: .regularMaterial,
-                    in: Circle()
-                )
-                .chatMinimumHitTarget(in: Circle())
+                .adaptiveGlass(.regular, fallbackMaterial: .regularMaterial, in: Circle())
+                // The native action owns real layout space, including the hit
+                // target; negative padding cannot put that space under the scroll.
+                .frame(width: 48, height: 48)
         }
-        .buttonStyle(.chatTactile(
-            .icon,
-            shadow: ChatTactileButtonStyle.Shadow(
-                color: .black,
-                opacity: colorScheme == .dark ? 0.32 : 0.16,
-                radius: 8,
-                y: 4,
-                pressedOpacity: colorScheme == .dark ? 0.18 : 0.08,
-                pressedRadius: 3,
-                pressedY: 2
-            )
-        ))
         .padding(.bottom, bottomPadding)
-        .accessibilityLabel("Scroll to latest message")
     }
 }
 
