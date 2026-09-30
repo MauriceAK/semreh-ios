@@ -35,6 +35,22 @@ private extension EnvironmentValues {
     }
 }
 
+/// Instruments only the synchronous production presentation call. The formatter
+/// closure is nonescaping, without shared mutable state or task-local storage.
+@MainActor
+private func preparedMarkdownMathPresentation(in content: String) -> MarkdownMathPresentation {
+#if DEBUG
+    if let probe = ChatPerformanceInvalidationProbe.shared {
+        probe.record("math_presentation_request", a: content.utf8.count)
+        return MarkdownMathSegmenter.presentation(in: content) { source in
+            probe.record("math_inline_format", a: source.utf8.count)
+            return MarkdownMathFormatter.replacingInlineMath(in: source)
+        }
+    }
+#endif
+    return MarkdownMathSegmenter.presentation(in: content)
+}
+
 struct MarkdownRenderer: View {
     let content: String
     let isStreaming: Bool
@@ -104,7 +120,8 @@ struct MarkdownRenderer: View {
 
     @ViewBuilder
     private var markdownContent: some View {
-        let segments = MarkdownMathSegmenter.segments(in: content)
+        let presentation = preparedMarkdownMathPresentation(in: content)
+        let segments = presentation.segments
 
         if segments.containsMath {
             VStack(alignment: .leading, spacing: 0) {
@@ -126,7 +143,7 @@ struct MarkdownRenderer: View {
             .textSelection(.enabled)
         } else {
             ChatMarkdownView(
-                content: MarkdownMathFormatter.replacingInlineMath(in: content),
+                content: presentation.inlineMarkdown,
                 colorScheme: colorScheme,
                 isStreaming: isStreaming
             )
@@ -169,7 +186,8 @@ struct StreamingMarkdownRenderer: View {
 
     @ViewBuilder
     private var streamingMarkdownContent: some View {
-        let segments = MarkdownMathSegmenter.segments(in: displayedContent)
+        let presentation = preparedMarkdownMathPresentation(in: displayedContent)
+        let segments = presentation.segments
 
         if segments.containsMath {
             VStack(alignment: .leading, spacing: 0) {
@@ -189,7 +207,7 @@ struct StreamingMarkdownRenderer: View {
             }
         } else {
             StreamingMarkdownChunkedView(
-                content: MarkdownMathFormatter.replacingInlineMath(in: displayedContent),
+                content: presentation.inlineMarkdown,
                 colorScheme: colorScheme
             )
         }
@@ -197,9 +215,53 @@ struct StreamingMarkdownRenderer: View {
 
 }
 
-private struct StreamingMarkdownChunkedView: View {
+/// The first split belongs to the mounted view identity. StateObject's lazy
+/// initializer avoids splitting discarded View values on parent re-evaluation.
+@MainActor
+private final class StreamingMarkdownBlockState: ObservableObject {
+    private var accumulator = StreamingMarkdownBlockAccumulator()
+    let fadeSplitCache = StreamingTextFadeSplitCache()
+    @Published private(set) var segments: StreamingMarkdownBlockSegments
+#if DEBUG
+    private let onChange: ((Bool, StreamingMarkdownBlockSegments) -> Void)?
+#endif
+
+    init(
+        content: String,
+        onChange: ((Bool, StreamingMarkdownBlockSegments) -> Void)? = nil
+    ) {
+        segments = accumulator.update(content, appendOnly: false)
+#if DEBUG
+        self.onChange = onChange
+        onChange?(true, segments)
+#endif
+    }
+
+    func update(_ content: String, appendOnly: Bool) -> (old: String, new: String) {
+        let oldActive = segments.activeMarkdown
+        segments = accumulator.update(content, appendOnly: appendOnly)
+#if DEBUG
+        onChange?(false, segments)
+#endif
+        return (oldActive, segments.activeMarkdown)
+    }
+}
+
+/// Offset-based incremental state must observe byte changes even when Swift's
+/// String equality considers two Unicode spellings canonically equivalent.
+private struct StreamingMarkdownSourceRevision: Equatable {
+    let content: String
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.content.utf8.elementsEqual(rhs.content.utf8)
+    }
+}
+
+struct StreamingMarkdownChunkedView: View {
     let content: String
     let colorScheme: ColorScheme
+
+    @StateObject private var blockState: StreamingMarkdownBlockState
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage(StreamedTextAnimationSettings.isEnabledKey) private var isStreamedTextAnimationEnabled = true
@@ -218,29 +280,24 @@ private struct StreamingMarkdownChunkedView: View {
     /// blocks (paragraphs, list items) appear in reading order even when a
     /// fast stream backlogs a block's queue toward `maxStampLead`.
     @State private var chain = StreamingTextFadeStampChain()
-    @State private var blockAccumulator = StreamingMarkdownBlockAccumulator()
-    @State private var blockSegments = StreamingMarkdownBlockSegments(
-        stableChunks: [],
-        activeMarkdown: ""
-    )
-
-    init(content: String, colorScheme: ColorScheme) {
+    init(
+        content: String,
+        colorScheme: ColorScheme,
+        onBlockStateChange: ((Bool, StreamingMarkdownBlockSegments) -> Void)? = nil
+    ) {
         self.content = content
         self.colorScheme = colorScheme
-        var accumulator = StreamingMarkdownBlockAccumulator()
-        let initialSegments = accumulator.update(content, appendOnly: false)
-        _blockAccumulator = State(initialValue: accumulator)
-        _blockSegments = State(initialValue: initialSegments)
+        _blockState = StateObject(wrappedValue: StreamingMarkdownBlockState(
+            content: content,
+            onChange: onBlockStateChange
+        ))
     }
 
     var body: some View {
-        let blockSplit = StreamingTextFadeTailSplitter.split(
+        let blockSegments = blockState.segments
+        let blockSplit = blockState.fadeSplitCache.split(
             blockSegments.activeMarkdown,
-            firstFadeOrdinal: StreamedTextAnimationSettings.effectiveFirstFadeOrdinal(
-                firstFadeOrdinal,
-                reduceMotion: reduceMotion,
-                isEnabled: isStreamedTextAnimationEnabled
-            )
+            firstFadeOrdinal: effectiveFirstFadeOrdinal
         )
 
         VStack(alignment: .leading, spacing: 0) {
@@ -285,10 +342,10 @@ private struct StreamingMarkdownChunkedView: View {
         .onAppear {
             anchorFadeWindowAtCurrentBlock()
         }
-        .onChange(of: content) { oldContent, newContent in
-            let activeWindow = updateBlockSegments(
-                newContent,
-                appendOnly: newContent.hasPrefix(oldContent)
+        .onChange(of: StreamingMarkdownSourceRevision(content: content)) { old, new in
+            let activeWindow = blockState.update(
+                new.content,
+                appendOnly: new.content.utf8.starts(with: old.content.utf8)
             )
             advanceFadeWindow(from: activeWindow.old, to: activeWindow.new)
         }
@@ -302,7 +359,7 @@ private struct StreamingMarkdownChunkedView: View {
                 anchorFadeWindowAtCurrentBlock()
             }
         }
-        .task(id: content) {
+        .task(id: StreamingMarkdownSourceRevision(content: content)) {
             // Let queued reveals and the newest fade finish, then pause frame
             // updates until more content arrives (e.g. the stream stalls on
             // tool use). A new change cancels this task and restarts it.
@@ -310,6 +367,14 @@ private struct StreamingMarkdownChunkedView: View {
             guard !Task.isCancelled else { return }
             fadesActive = false
         }
+    }
+
+    private var effectiveFirstFadeOrdinal: Int {
+        StreamedTextAnimationSettings.effectiveFirstFadeOrdinal(
+            firstFadeOrdinal,
+            reduceMotion: reduceMotion,
+            isEnabled: isStreamedTextAnimationEnabled
+        )
     }
 
     /// Anchors the fade window at the current block: everything visible now
@@ -320,25 +385,21 @@ private struct StreamingMarkdownChunkedView: View {
     /// the reopened window would arm blocks the user is already reading and
     /// visibly re-fade them.
     private func anchorFadeWindowAtCurrentBlock() {
-        let split = StreamingTextFadeTailSplitter.split(blockSegments.activeMarkdown, firstFadeOrdinal: 0)
+        // Boundary count is ordinal-independent; reuse the body lookup when
+        // possible, including the initial all-solid (Int.max) frame.
+        let split = blockState.fadeSplitCache.split(
+            blockState.segments.activeMarkdown, firstFadeOrdinal: effectiveFirstFadeOrdinal
+        )
         firstFadeOrdinal = split.boundaryCount
         mountBoundaryCount = split.boundaryCount
         lastBoundaryCount = split.boundaryCount
         lastTouchedAt = [:]
     }
 
-    private func updateBlockSegments(
-        _ newContent: String,
-        appendOnly: Bool
-    ) -> (old: String, new: String) {
-        let oldActive = blockSegments.activeMarkdown
-        blockSegments = blockAccumulator.update(newContent, appendOnly: appendOnly)
-        return (oldActive, blockSegments.activeMarkdown)
-    }
-
     private func advanceFadeWindow(from oldActive: String, to newActive: String) {
         let now = Date().timeIntervalSinceReferenceDate
-        let split = StreamingTextFadeTailSplitter.split(newActive, firstFadeOrdinal: firstFadeOrdinal)
+        // Bookkeeping still needs the raw window while motion is disabled.
+        let split = blockState.fadeSplitCache.split(newActive, firstFadeOrdinal: firstFadeOrdinal)
 
         if !newActive.hasPrefix(oldActive) {
             // Replaced content or a sealed stable chunk shifted the active
@@ -376,36 +437,82 @@ private struct StreamingMarkdownChunkedView: View {
 /// renderer with its own stamp store so neighbouring blocks' character offsets
 /// never collide. Newly appended glyphs appear at their final layout positions
 /// and fade together; they are not queued behind a per-token delay.
-private struct StreamingFadeBlockView: View {
+private final class StreamingFadeStoreOwner: ObservableObject {
+    let stampStore: StreamingTextFadeStampStore<Text.Layout.CharacterIndex>
+
+    init(chain: StreamingTextFadeStampChain, armOnAppear: Bool) {
+        stampStore = StreamingTextFadeStampStore(chain: chain)
+        if armOnAppear { stampStore.rolloverReset() }
+    }
+
+#if DEBUG
+    convenience init(chain: StreamingTextFadeStampChain, armOnAppear: Bool,
+                     probe: StreamingFadeWorkProbe?) {
+        self.init(chain: chain, armOnAppear: armOnAppear)
+        probe?.recordFadeStoreCreation()
+    }
+#endif
+}
+
+struct StreamingFadeBlockView: View {
     let text: String
     let colorScheme: ColorScheme
     let fadeEnabled: Bool
     let armOnAppear: Bool
     let clock: TimeInterval
 
-    @State private var store: StreamingTextFadeStampStore<Text.Layout.CharacterIndex>
+    @StateObject private var owner: StreamingFadeStoreOwner
+#if DEBUG
+    private static let eagerControl = ProcessInfo.processInfo.arguments
+        .contains("--chat-eager-fade-store-construction")
+    private var observeStore: ((StreamingTextFadeStampStore<Text.Layout.CharacterIndex>) -> Void)?
+#endif
 
-    init(
-        text: String,
-        colorScheme: ColorScheme,
-        fadeEnabled: Bool,
-        armOnAppear: Bool,
-        clock: TimeInterval,
-        chain: StreamingTextFadeStampChain
-    ) {
+    init(text: String, colorScheme: ColorScheme, fadeEnabled: Bool,
+         armOnAppear: Bool, clock: TimeInterval, chain: StreamingTextFadeStampChain) {
+#if DEBUG
+        self.init(text: text, colorScheme: colorScheme, fadeEnabled: fadeEnabled,
+                  armOnAppear: armOnAppear, clock: clock, chain: chain,
+                  eagerConstruction: Self.eagerControl)
+#else
         self.text = text
         self.colorScheme = colorScheme
         self.fadeEnabled = fadeEnabled
         self.armOnAppear = armOnAppear
         self.clock = clock
-        let store = StreamingTextFadeStampStore<Text.Layout.CharacterIndex>(chain: chain)
-        if armOnAppear {
-            store.rolloverReset()
-        }
-        _store = State(initialValue: store)
+        // Keep construction inside StateObject's autoclosure: only the mounted
+        // identity needs an owner, not every TimelineView value update.
+        _owner = StateObject(wrappedValue: StreamingFadeStoreOwner(
+            chain: chain, armOnAppear: armOnAppear))
+#endif
     }
 
+#if DEBUG
+    // Same wrapper and renderer for both paths; only factory evaluation differs.
+    init(text: String, colorScheme: ColorScheme, fadeEnabled: Bool,
+         armOnAppear: Bool, clock: TimeInterval, chain: StreamingTextFadeStampChain,
+         eagerConstruction: Bool, probe: StreamingFadeWorkProbe? = .shared,
+         observeStore: ((StreamingTextFadeStampStore<Text.Layout.CharacterIndex>) -> Void)? = nil) {
+        self.text = text
+        self.colorScheme = colorScheme
+        self.fadeEnabled = fadeEnabled
+        self.armOnAppear = armOnAppear
+        self.clock = clock
+        self.observeStore = observeStore
+        if eagerConstruction {
+            let eagerOwner = StreamingFadeStoreOwner(chain: chain, armOnAppear: armOnAppear, probe: probe)
+            _owner = StateObject(wrappedValue: eagerOwner)
+        } else {
+            _owner = StateObject(wrappedValue: StreamingFadeStoreOwner(
+                chain: chain, armOnAppear: armOnAppear, probe: probe))
+        }
+    }
+#endif
+
     var body: some View {
+#if DEBUG
+        let _ = observeStore?(owner.stampStore)
+#endif
         Group {
             if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 if fadeEnabled {
@@ -414,7 +521,7 @@ private struct StreamingFadeBlockView: View {
                         colorScheme: colorScheme,
                         isStreaming: true
                     )
-                    .textRenderer(StreamingTrailingContentOpacityRenderer(clock: clock, store: store))
+                    .textRenderer(StreamingTrailingContentOpacityRenderer(clock: clock, store: owner.stampStore))
                 } else {
                     ChatMarkdownView(
                         content: text,
@@ -435,33 +542,40 @@ private enum StreamingTrailingContentReveal {
 /// A layout-neutral fade for just-arrived trailing glyphs. A zero-stagger,
 /// zero-lead stamp registers each renderer update immediately, so text stays
 /// in reading order and fades over 160ms without waiting behind a token queue.
-private struct StreamingTrailingContentOpacityRenderer: TextRenderer {
+struct StreamingTrailingContentOpacityRenderer: TextRenderer {
     let clock: TimeInterval
     let store: StreamingTextFadeStampStore<Text.Layout.CharacterIndex>
+#if DEBUG
+    private static let scalarControl = ProcessInfo.processInfo.arguments.contains("--chat-scalar-fade-opacity")
+    // Internal override allows same-binary pixel comparisons of the real renderer.
+    var usesScalarOpacity = Self.scalarControl
+#endif
 
     func draw(layout: Text.Layout, in context: inout GraphicsContext) {
-        var orderedKeys: [Text.Layout.CharacterIndex] = []
+#if DEBUG
+        if usesScalarOpacity {
+            drawScalar(layout: layout, in: &context)
+            return
+        }
+#endif
+        var orderedKeys: [Text.Layout.CharacterIndex?] = []
         for line in layout {
             for run in line {
                 for slice in run {
-                    if let key = slice.characterIndices.max() {
-                        orderedKeys.append(key)
-                    }
+                    orderedKeys.append(slice.characterIndices.max())
                 }
             }
         }
-
-        store.register(orderedKeys, clock: clock, glyphStagger: 0, maxStampLead: 0)
-
+        let opacities = store.registerAndOpacities(
+            orderedKeys, clock: clock, glyphStagger: 0, maxStampLead: 0,
+            fadeDuration: StreamingTrailingContentReveal.duration
+        )
+        var index = 0
         for line in layout {
             for run in line {
                 for slice in run {
-                    let opacity = store.opacity(
-                        for: slice.characterIndices.max(),
-                        clock: clock,
-                        fadeDuration: StreamingTrailingContentReveal.duration
-                    )
-
+                    let opacity = opacities[index]
+                    index += 1
                     if opacity >= 1 {
                         context.draw(slice)
                     } else if opacity > 0 {
@@ -472,8 +586,86 @@ private struct StreamingTrailingContentOpacityRenderer: TextRenderer {
                 }
             }
         }
-
         store.finishBaseline()
+#if DEBUG
+        StreamingFadeWorkProbe.shared?.recordDraw(
+            glyphSliceCount: index, scalarOpacityCalls: 0,
+            batchOpacityCalls: 1, stampStoreLockCalls: 2
+        )
+#endif
+    }
+
+#if DEBUG
+    private func drawScalar(layout: Text.Layout, in context: inout GraphicsContext) {
+        var orderedKeys: [Text.Layout.CharacterIndex] = []
+        for line in layout {
+            for run in line {
+                for slice in run {
+                    if let key = slice.characterIndices.max() { orderedKeys.append(key) }
+                }
+            }
+        }
+        store.register(orderedKeys, clock: clock, glyphStagger: 0, maxStampLead: 0)
+        var sliceCount = 0
+        var opacityLocks = 0
+        for line in layout {
+            for run in line {
+                for slice in run {
+                    let key = slice.characterIndices.max()
+                    sliceCount += 1
+                    if key != nil { opacityLocks += 1 }
+                    let opacity = store.opacity(
+                        for: key, clock: clock,
+                        fadeDuration: StreamingTrailingContentReveal.duration
+                    )
+                    if opacity >= 1 {
+                        context.draw(slice)
+                    } else if opacity > 0 {
+                        var faded = context
+                        faded.opacity = opacity
+                        faded.draw(slice)
+                    }
+                }
+            }
+        }
+        store.finishBaseline()
+        StreamingFadeWorkProbe.shared?.recordDraw(
+            glyphSliceCount: sliceCount, scalarOpacityCalls: sliceCount,
+            batchOpacityCalls: 0, stampStoreLockCalls: 2 + opacityLocks
+        )
+    }
+#endif
+}
+
+/// Memoizes only MarkdownUI's parsed document, never styled text or geometry.
+/// Each mounted leaf retains at most one document with at most 128 KiB of source.
+/// Replacement releases the previous revision; oversized input is parsed without
+/// retention. Width, font, theme and paragraph style remain live view inputs.
+@MainActor
+final class MarkdownDocumentCache {
+    static let maximumSourceBytes = 128 * 1_024
+
+    private var entry: (source: String, document: MarkdownContent)?
+#if DEBUG
+    private(set) var preparationCount = 0
+    var retainedSourceBytes: Int { entry?.source.utf8.count ?? 0 }
+#endif
+
+    func document(for source: String) -> MarkdownContent {
+        // Byte equality preserves normalization-sensitive code and copy text.
+        if let entry, source.utf8.elementsEqual(entry.source.utf8) {
+            return entry.document
+        }
+
+        entry = nil
+        let document = MarkdownContent(source)
+#if DEBUG
+        preparationCount += 1
+#endif
+        if source.utf8.count <= Self.maximumSourceBytes {
+            entry = (source, document)
+        }
+        return document
     }
 }
 
@@ -483,6 +675,7 @@ private struct ChatMarkdownView: View, Equatable {
     let isStreaming: Bool
 
     @Environment(\.markdownBodyStyle) private var markdownBodyStyle
+    @State private var documentCache = MarkdownDocumentCache()
 
     static func == (lhs: ChatMarkdownView, rhs: ChatMarkdownView) -> Bool {
         lhs.content == rhs.content
@@ -491,7 +684,7 @@ private struct ChatMarkdownView: View, Equatable {
     }
 
     var body: some View {
-        Markdown(content)
+        Markdown(documentCache.document(for: content))
             .markdownTheme(MarkdownUI.Theme.chat(colorScheme: colorScheme, isStreaming: isStreaming))
             .markdownTextStyle {
                 ForegroundColor(.primary)
@@ -602,10 +795,19 @@ private struct ChatCodeBlock: View {
     @AppStorage(ChatTranscriptDisplaySettings.wrapsCodeBlockLinesKey) private var wrapsCodeBlockLines = false
     @State private var didCopy = false
     @State private var highlightedCode: MarkdownPreparedCode?
+#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
+    @State private var highlightedForRequest: MarkdownCodeHighlightRequest?
+    @State private var synchronousHighlight = MarkdownPreparedSyncLookup()
+#endif
     @State private var showsFullCode = false
 #if DEBUG
     @Environment(\.prototypeCodeViewport) private var prototypeViewport
+#endif
+#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
+    @Environment(\.chatNativeCodeText) private var chatNativeCodeText
+    @Environment(\.internalChatRendererEnabled) private var internalChatRendererEnabled
     @Environment(\.nativePreparedHighlights) private var nativePreparedHighlights
+    @Environment(\.chatFullInlineCode) private var chatFullInlineCode
 #endif
 
     private let logger = Logger.hermesMarkdownRendering
@@ -718,11 +920,24 @@ private struct ChatCodeBlock: View {
     }
 
     @ViewBuilder private var originalCodeText: some View {
+#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
+        if (internalChatRendererEnabled || chatNativeCodeText || InternalChatRendererPolicy.debugArgument("--chat-rich-native-code-text")),
+           MarkdownNativeCodeText.isEligible(inlineCode) {
+            MarkdownNativeCodeText(source: inlineCode, prepared: displayHighlightedCode,
+                                   wraps: wrapsCodeBlockLines, colorScheme: colorScheme,
+                                   isStreaming: isStreaming)
+        } else if let highlightedCode = displayHighlightedCode {
+            HighlightedCodeBlockText(content: highlightedCode, wraps: wrapsCodeBlockLines)
+        } else {
+            PlainCodeBlockText(content: inlineCode, wraps: wrapsCodeBlockLines)
+        }
+#else
         if let highlightedCode = displayHighlightedCode {
             HighlightedCodeBlockText(content: highlightedCode, wraps: wrapsCodeBlockLines)
         } else {
             PlainCodeBlockText(content: inlineCode, wraps: wrapsCodeBlockLines)
         }
+#endif
     }
 
     private var logicalLineCount: Int {
@@ -730,7 +945,12 @@ private struct ChatCodeBlock: View {
     }
 
     private var isInlinePreview: Bool {
-        allowsInlinePreview && logicalLineCount > ChatCodeInlinePreviewPolicy.maximumVisibleLines
+#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
+        let fullInline = internalChatRendererEnabled || chatFullInlineCode || InternalChatRendererPolicy.debugArgument("--chat-full-inline-code")
+#else
+        let fullInline = false
+#endif
+        return allowsInlinePreview && !fullInline && logicalLineCount > ChatCodeInlinePreviewPolicy.maximumVisibleLines
     }
 
     private var inlineCode: String {
@@ -738,8 +958,12 @@ private struct ChatCodeBlock: View {
     }
 
     private var displayHighlightedCode: MarkdownPreparedCode? {
-#if DEBUG
+#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
         if let prepared = nativePreparedHighlights.first(where: { $0.request == highlightRequest }) { return prepared.code }
+        if let warm = synchronousPreparedCode(for: highlightRequest) { return warm }
+        if (internalChatRendererEnabled || chatNativeCodeText || InternalChatRendererPolicy.debugArgument("--chat-rich-native-code-text")),
+           MarkdownNativeCodeText.isEligible(inlineCode),
+           highlightedForRequest != highlightRequest { return nil }
 #endif
         return highlightedCode
     }
@@ -769,19 +993,33 @@ private struct ChatCodeBlock: View {
         )
     }
 
+#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
+    private func synchronousPreparedCode(for request: MarkdownCodeHighlightRequest) -> MarkdownPreparedCode? {
+        synchronousHighlight.completedCode(
+            for: request, worker: .shared,
+            nativeEnabled: internalChatRendererEnabled || chatNativeCodeText || InternalChatRendererPolicy.debugArgument("--chat-rich-native-code-text"),
+            arguments: ProcessInfo.processInfo.arguments
+        )
+    }
+#endif
+
     @MainActor
     private func updateHighlightedCode(for request: MarkdownCodeHighlightRequest) async {
+#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
+        // The first body already displayed this revision. Do not clear it or yield.
+        if synchronousPreparedCode(for: request) != nil { return }
+        if nativePreparedHighlights.contains(where: { $0.request == request }) { return }
+#endif
 #if DEBUG
-        if nativePreparedHighlights.contains(where: { $0.request == request }) {
-            Logger(subsystem: "com.maurice.semreh", category: "NativeBaseline").debug("event=highlight_prepared_hit")
-            return
-        }
         if ProcessInfo.processInfo.arguments.contains("--viewport-virtual-code") {
             Logger(subsystem: "com.maurice.semreh", category: "ViewportPrototype").debug("event=virtual_code_gate hasViewport=\(self.prototypeViewport != nil, privacy: .public)")
         }
         if ProcessInfo.processInfo.arguments.contains("--tail-geometry-no-highlight") { return }
 #endif
         highlightedCode = nil
+#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
+        highlightedForRequest = nil
+#endif
         await Task.yield()
 
         guard !Task.isCancelled else { return }
@@ -792,6 +1030,9 @@ private struct ChatCodeBlock: View {
         switch result {
         case .highlighted(let attributedString):
             highlightedCode = attributedString
+#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
+            highlightedForRequest = request
+#endif
 #if DEBUG
             if ProcessInfo.processInfo.arguments.contains("--native-refinement-trace") {
                 Logger(subsystem: "com.maurice.semreh", category: "NativeBaseline").debug("event=highlight_applied characters=\(request.code.count, privacy: .public)")
@@ -928,7 +1169,11 @@ private struct FullCodeTextView: UIViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeUIView(context: Context) -> UITextView {
+#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
+        let view = ParagraphSelectableTextView()
+#else
         let view = UITextView()
+#endif
         view.isEditable = false
         view.isSelectable = true
         view.isScrollEnabled = true
@@ -992,6 +1237,290 @@ private struct FullCodeTextView: UIViewRepresentable {
         }
     }
 }
+
+#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
+private struct ChatNativeCodeTextKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+private struct ChatFullInlineCodeKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    var chatNativeCodeText: Bool {
+        get { self[ChatNativeCodeTextKey.self] }
+        set { self[ChatNativeCodeTextKey.self] = newValue }
+    }
+
+    var chatFullInlineCode: Bool {
+        get { self[ChatFullInlineCodeKey.self] }
+        set { self[ChatFullInlineCodeKey.self] = newValue }
+    }
+}
+
+/// Keeps TextKit's legacy display intact while copying only selected source text.
+final class MarkdownNativeCodeTextView: UITextView {
+    var copySource: String?
+
+    /// Each display boundary maps to a source UTF-16 boundary. Placeholder
+    /// spaces span no source; a normalized newline spans its original separator.
+    static func selectedSourceText(_ source: String, displayRange: NSRange) -> String? {
+        let original = source as NSString
+        var boundaries = [0]
+        var index = 0
+        var lineStart = 0
+        while index < original.length {
+            let character = original.character(at: index)
+            if character == 10 || character == 13 || character == 0x2028 || character == 0x2029 {
+                if index == lineStart { boundaries.append(index) }
+                if character == 13, index + 1 < original.length,
+                   original.character(at: index + 1) == 10 {
+                    index += 1
+                }
+                boundaries.append(index + 1)
+                lineStart = index + 1
+            } else {
+                boundaries.append(index + 1)
+            }
+            index += 1
+        }
+        if lineStart == original.length { boundaries.append(original.length) }
+        let displayLength = boundaries.count - 1
+        guard displayRange.location != NSNotFound,
+              displayRange.location >= 0, displayRange.length >= 0,
+              displayRange.location <= displayLength,
+              displayRange.length <= displayLength - displayRange.location else { return nil }
+        let start = boundaries[displayRange.location]
+        let end = boundaries[displayRange.location + displayRange.length]
+        return original.substring(with: NSRange(location: start, length: end - start))
+    }
+
+    override func copy(_ sender: Any?) {
+        guard let copySource else {
+            super.copy(sender)
+            return
+        }
+        guard selectedRange.length > 0,
+              let selected = Self.selectedSourceText(copySource, displayRange: selectedRange) else { return }
+        UIPasteboard.general.string = selected
+    }
+}
+
+/// A single selectable TextKit leaf. Its paragraphs are the legacy source
+/// lines: paragraph spacing applies between them, never to soft wraps.
+struct MarkdownNativeCodeText: UIViewRepresentable {
+    let source: String
+    let prepared: MarkdownPreparedCode?
+    let wraps: Bool
+    let colorScheme: ColorScheme
+    var isStreaming = false
+    var plainCache: MarkdownNativePlainCodeCache = .shared
+
+    static func isEligible(_ source: String) -> Bool {
+        // Very long lines retain the segmented legacy renderer. The byte cap
+        // bounds TextKit work while admitting the complete rich-code fixture.
+        source.utf8.count <= 64 * 1_024 &&
+            !MarkdownHighlightPolicy.containsLineLongerThan(500, in: source)
+    }
+
+    /// The prepared revision owns this width-independent representation, so
+    /// warm remounts do not repeat bridging and paragraph/placeholder assembly.
+    /// Plain or stale input never populates the prepared revision's display.
+    static func displayText(source: String, prepared: MarkdownPreparedCode?) -> NSAttributedString {
+        if let prepared,
+           let display = prepared.nativeDisplay.value(for: source, make: {
+               let highlighted = NSAttributedString(prepared.fullText)
+               guard highlighted.string.utf8.elementsEqual(source.utf8) else { return nil }
+               return assembleDisplayText(highlighted, prepared: true)
+           }) {
+            return display
+        }
+        return assembleDisplayText(NSAttributedString(string: source))
+    }
+
+    private static func assembleDisplayText(_ attributedSource: NSAttributedString, prepared: Bool = false) -> NSAttributedString {
+#if DEBUG
+        ChatPerformanceInvalidationProbe.shared?.record("native_code_display_assembly",
+            a: attributedSource.length, b: prepared ? 1 : 0)
+#endif
+        let string = attributedSource.string as NSString
+        let result = NSMutableAttributedString(string: "")
+        let font = UIFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        var lineRanges: [NSRange] = []
+        let separator = NSAttributedString(string: "\n")
+        let emptyLine = NSAttributedString(string: " ")
+        func appendLine(from start: Int, to end: Int) {
+            if !lineRanges.isEmpty { result.append(separator) }
+            let range = NSRange(location: start, length: end - start)
+            let outputStart = result.length
+            result.append(range.length == 0 ? emptyLine : attributedSource.attributedSubstring(from: range))
+            lineRanges.append(NSRange(location: outputStart, length: result.length - outputStart))
+        }
+        var lineStart = 0
+        var index = 0
+        while index < string.length {
+            let character = string.character(at: index)
+            if character == 10 || character == 13 || character == 0x2028 || character == 0x2029 {
+                appendLine(from: lineStart, to: index)
+                if character == 13, index + 1 < string.length, string.character(at: index + 1) == 10 {
+                    index += 1
+                }
+                lineStart = index + 1
+            }
+            index += 1
+        }
+        appendLine(from: lineStart, to: string.length)
+        let range = NSRange(location: 0, length: result.length)
+        result.enumerateAttribute(.font, in: range) { value, subrange, _ in
+            if value == nil { result.addAttribute(.font, value: font, range: subrange) }
+        }
+        result.enumerateAttribute(.foregroundColor, in: range) { value, subrange, _ in
+            if value == nil { result.addAttribute(.foregroundColor, value: UIColor.label, range: subrange) }
+        }
+        for (index, lineRange) in lineRanges.enumerated() {
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.paragraphSpacing = index == lineRanges.count - 1 ? 0 : 3
+            paragraph.lineSpacing = 13 * 0.18
+            result.addAttribute(.paragraphStyle, value: paragraph, range: lineRange)
+        }
+        return NSAttributedString(attributedString: result)
+    }
+
+    @MainActor
+    final class Coordinator {
+        var source = ""
+        var prepared: MarkdownPreparedCode?
+        var colorScheme: ColorScheme?
+        var wraps: Bool?
+        var isStreaming: Bool?
+        var plainDisplay: MarkdownNativeCodeDisplay?
+        var measurements = MarkdownNativeCodeMeasurements()
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeUIView(context: Context) -> UITextView {
+        let view = MarkdownNativeCodeTextView()
+        view.isEditable = false
+        view.isSelectable = true
+        view.isScrollEnabled = false
+        view.backgroundColor = .clear
+        view.textContainerInset = .zero
+        view.textContainer.lineFragmentPadding = 0
+        view.textContainer.maximumNumberOfLines = 0
+        view.semanticContentAttribute = .forceLeftToRight
+        view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        view.isAccessibilityElement = true
+        view.accessibilityIdentifier = "native-inline-code-text"
+        return view
+    }
+
+    func updateUIView(_ view: UITextView, context: Context) {
+        update(view, state: context.coordinator)
+    }
+
+    // Diagnostic opt-out keeps the prior per-leaf sizing cache for exact-binary
+    // A/B captures; both prepared and plain revision measurement sharing are disabled.
+    private static let reusesPreparedMeasurements = !InternalChatRendererPolicy.debugArgument(
+        "--chat-native-code-size-cache-disabled")
+
+    func update(_ view: UITextView, state: Coordinator) {
+        (view as? MarkdownNativeCodeTextView)?.copySource = source
+        if !state.source.utf8.elementsEqual(source.utf8) ||
+            state.prepared?.nativeDisplay !== prepared?.nativeDisplay || state.colorScheme != colorScheme ||
+            state.isStreaming != isStreaming {
+            let selection = view.selectedRange
+            let wasSameSource = state.source.utf8.elementsEqual(source.utf8)
+            // A nonnil prepared input remains authoritative, including stale-input
+            // fallback. Never publish that fallback or a live prefix as completed.
+            let plainRevision = plainCache.revision(source: source, colorScheme: colorScheme,
+                                                     isStreaming: isStreaming, hasPrepared: prepared != nil)
+            let display: NSAttributedString
+            if let plainRevision {
+                display = plainRevision.value(for: source) {
+                    Self.displayText(source: source, prepared: nil)
+                }!
+            } else {
+                display = Self.displayText(source: source, prepared: prepared)
+            }
+            view.attributedText = display
+            state.plainDisplay = plainRevision
+            let sharedMeasurements = (prepared?.nativeDisplay ?? plainRevision)?.measurements(for: display)
+            state.measurements = Self.reusesPreparedMeasurements
+                ? (sharedMeasurements ?? MarkdownNativeCodeMeasurements())
+                : MarkdownNativeCodeMeasurements()
+#if DEBUG
+            ChatPerformanceInvalidationProbe.shared?.record("native_code_size_owner", a: source.utf8.count,
+                b: prepared == nil ? 0 : 1, c: sharedMeasurements == nil ? 0 : 1)
+#endif
+            // Keep the public property and AX query blocks on the same plain
+            // text. Setting the attributed value also updates the plain value;
+            // the blocks provide that cached text to block-based AX queries.
+            // TextKit still owns visible text, selection, and navigation.
+            let accessibleText = NSAttributedString(string: view.attributedText.string)
+            view.accessibilityAttributedValue = accessibleText
+            view.accessibilityAttributedValueBlock = { accessibleText }
+            view.accessibilityValueBlock = { accessibleText.string }
+            if wasSameSource {
+                view.selectedRange = NSRange(location: min(selection.location, view.textStorage.length),
+                                             length: min(selection.length, max(0, view.textStorage.length - selection.location)))
+            }
+            state.source = source
+            state.prepared = prepared
+            state.colorScheme = colorScheme
+            state.isStreaming = isStreaming
+        }
+        if state.wraps != wraps {
+            view.textContainer.lineBreakMode = wraps ? .byWordWrapping : .byClipping
+            state.wraps = wraps
+        }
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView view: UITextView, context: Context) -> CGSize? {
+        let width = wraps ? max(1, proposal.width ?? 340) : CGFloat(100_000)
+        return Self.measuredSize(view, width: width, wraps: wraps, colorScheme: colorScheme,
+                                 measurements: context.coordinator.measurements)
+    }
+
+    /// The lookup precedes all native measurement. Remounted leaves still own
+    /// their text storage/layout manager; only the resulting CGSize is reused.
+    static func measuredSize(_ view: UITextView, width: CGFloat, wraps: Bool,
+                             colorScheme: ColorScheme,
+                             measurements: MarkdownNativeCodeMeasurements) -> CGSize {
+        measurements.value(width: width, wraps: wraps, colorScheme: colorScheme,
+                           traits: view.traitCollection) {
+            let measured = wraps
+                ? view.sizeThatFits(CGSize(width: width, height: 1_000_000))
+                : Self.unwrappedTextKitSize(view, width: width)
+            return CGSize(width: wraps ? width : max(1, ceil(measured.width)),
+                          height: max(1, ceil(measured.height)))
+        }
+    }
+
+    /// Reuse the selectable text's TextKit layout for ordinary code. Drawing
+    /// the attributed string separately builds another typesetter per mount.
+    /// Keep the original metrics for tabs and non-ASCII glyphs, where the two
+    /// layout engines can return different widths.
+    static func unwrappedTextKitSize(_ view: UITextView, width: CGFloat) -> CGSize {
+        let text = view.attributedText!
+        guard isTextKitSizingEligible(text) else {
+            return text.boundingRect(
+                with: CGSize(width: width, height: 1_000_000),
+                options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil
+            ).size
+        }
+        let container = view.textContainer
+        container.size = CGSize(width: width, height: 1_000_000)
+        view.layoutManager.ensureLayout(for: container)
+        return view.layoutManager.usedRect(for: container).size
+    }
+
+    static func isTextKitSizingEligible(_ text: NSAttributedString) -> Bool {
+        text.string.utf8.allSatisfy { $0 == 10 || ($0 >= 32 && $0 <= 126) }
+    }
+}
+#endif
 
 private struct PlainCodeBlockText: View {
     let content: String
@@ -1231,8 +1760,9 @@ private struct HighlightedCodeBlockText: View {
 }
 
 /// One immutable display-ready revision, owned by the mounted code block.
-/// Preparation runs on the existing highlight actor, not in SwiftUI bodies.
-/// There is no process-wide cache: replacement/unmount releases this value.
+/// Highlight preparation runs on the existing actor, not in SwiftUI bodies.
+/// The DEBUG native leaf lazily materializes its shared display on MainActor.
+/// The DEBUG native experiment may retain this revision in a bounded actor cache.
 /// Wrapping and environment layout reuse the same attributes and stable IDs;
 /// content/language/theme/streaming changes restart the existing request task.
 struct MarkdownPreparedCode: Equatable, Sendable {
@@ -1249,6 +1779,16 @@ struct MarkdownPreparedCode: Equatable, Sendable {
     let lines: [Line]
     let fullText: AttributedString
 
+#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
+    let nativeDisplay = MarkdownNativeCodeDisplay()
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        // Copies of one immutable revision need no per-line comparison.
+        if lhs.nativeDisplay === rhs.nativeDisplay { return true }
+        return lhs.fullText == rhs.fullText && lhs.lines == rhs.lines
+    }
+#endif
+
     init(_ source: NSAttributedString) {
         fullText = AttributedString(source)
         lines = MarkdownAttributedCodeFormatter.lines(in: source).map { line in
@@ -1258,6 +1798,173 @@ struct MarkdownPreparedCode: Equatable, Sendable {
         }
     }
 }
+
+#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
+/// Two most-recent layout identities per prepared revision (or plain leaf).
+/// Full trait equality includes Dynamic Type, scale, direction and legibility;
+/// attributes/content are scoped by the owning immutable display revision.
+@MainActor
+final class MarkdownNativeCodeMeasurements {
+    private struct Entry {
+        let width: CGFloat
+        let wraps: Bool
+        let colorScheme: ColorScheme
+        let traits: UITraitCollection
+        let size: CGSize
+    }
+    private var entries: [Entry] = []
+    private(set) var measurementCount = 0
+    var count: Int { entries.count }
+
+    func value(width: CGFloat, wraps: Bool, colorScheme: ColorScheme,
+               traits: UITraitCollection, measure: () -> CGSize) -> CGSize {
+#if DEBUG
+        let probe = ChatPerformanceInvalidationProbe.shared
+#endif
+#if DEBUG
+        let diagnosticWidth = probe == nil ? 0 : (Int(exactly: width.rounded()) ?? -1)
+#endif
+        // Diagnostics only: reason 0=cold, 1=exact width/options found, 2=width/options differ.
+#if DEBUG
+        let layoutMatch = probe != nil && entries.contains { $0.width == width && $0.wraps == wraps && $0.colorScheme == colorScheme }
+#endif
+#if DEBUG
+        probe?.record("native_code_size_request", a: diagnosticWidth, b: entries.count,
+                      c: entries.isEmpty ? 0 : (layoutMatch ? 1 : 2))
+#endif
+        if let index = entries.firstIndex(where: {
+            $0.width == width && $0.wraps == wraps && $0.colorScheme == colorScheme &&
+                $0.traits.isEqual(traits)
+        }) {
+            let hit = entries.remove(at: index)
+            entries.append(hit)
+#if DEBUG
+            probe?.record("native_code_size_hit", a: diagnosticWidth)
+#endif
+            return hit.size
+        }
+#if DEBUG
+        probe?.record("native_code_size_measure", a: diagnosticWidth, b: entries.count,
+                      c: entries.isEmpty ? 0 : (layoutMatch ? 1 : 2))
+#endif
+        let size = measure()
+        measurementCount += 1
+        // Nonfinite proposals/results must never poison subsequent layout.
+        guard width.isFinite, size.width.isFinite, size.height.isFinite else { return size }
+        if entries.count == 2 { entries.removeFirst() }
+        entries.append(Entry(width: width, wraps: wraps, colorScheme: colorScheme,
+                             traits: traits, size: size))
+        return size
+    }
+}
+
+/// Completed plain displays only. Keys compare exact bytes, never canonical
+/// String equality. Font/paragraph construction is fixed; scheme is conservative.
+/// Cost is an estimate, not RSS: charge key/source copies, UTF-16 display and
+/// worst-case per-code-unit paragraph/run overhead, plus holder/size metadata.
+@MainActor
+final class MarkdownNativePlainCodeCache {
+    static let shared = MarkdownNativePlainCodeCache(enabled: isEnabled())
+
+    static func isEnabled(arguments: [String] = ProcessInfo.processInfo.arguments) -> Bool {
+        !arguments.contains("--chat-native-plain-code-cache-disabled")
+    }
+
+    private struct Entry {
+        let bytes: [UInt8]
+        let scheme: ColorScheme
+        let revision: MarkdownNativeCodeDisplay
+        let cost: Int
+    }
+    private let enabled: Bool
+    private let maxEntries: Int
+    private let maxCost: Int
+    private var entries: [Entry] = []
+    private(set) var cost = 0
+    var count: Int { entries.count }
+
+    init(maxEntries: Int = 16, maxCost: Int = 4 * 1_024 * 1_024, enabled: Bool = true) {
+        self.maxEntries = max(0, maxEntries)
+        self.maxCost = max(0, maxCost)
+        self.enabled = enabled
+    }
+
+    static func estimatedCost(_ source: String) -> Int {
+        1_024 + source.utf8.count * 3 + (source.utf16.count + 1) * 256
+    }
+
+    func removeAll() {
+        entries.removeAll()
+        cost = 0
+    }
+
+    func revision(source: String, colorScheme: ColorScheme, isStreaming: Bool,
+                  hasPrepared: Bool) -> MarkdownNativeCodeDisplay? {
+        guard enabled, maxEntries > 0, !isStreaming, !hasPrepared,
+              !source.isEmpty, MarkdownNativeCodeText.isEligible(source) else {
+#if DEBUG
+            ChatPerformanceInvalidationProbe.shared?.record("native_plain_cache_bypass")
+#endif
+            return nil
+        }
+        let charge = Self.estimatedCost(source)
+        guard charge <= maxCost else {
+#if DEBUG
+            ChatPerformanceInvalidationProbe.shared?.record("native_plain_cache_bypass")
+#endif
+            return nil
+        }
+        if let index = entries.firstIndex(where: {
+            $0.scheme == colorScheme && $0.bytes.elementsEqual(source.utf8)
+        }) {
+            let hit = entries.remove(at: index)
+            entries.append(hit)
+#if DEBUG
+            ChatPerformanceInvalidationProbe.shared?.record("native_plain_cache_hit")
+#endif
+            return hit.revision
+        }
+        // Allocate only on an admitted miss. No view/storage/layout owner is shared.
+        let revision = MarkdownNativeCodeDisplay()
+        while entries.count >= maxEntries || cost > maxCost - charge {
+            cost -= entries.removeFirst().cost
+        }
+        entries.append(Entry(bytes: Array(source.utf8), scheme: colorScheme,
+                             revision: revision, cost: charge))
+        cost += charge
+#if DEBUG
+        ChatPerformanceInvalidationProbe.shared?.record("native_plain_cache_admit")
+#endif
+        return revision
+    }
+}
+
+/// A lazy representation of one prepared revision, shared by its value copies.
+/// MainActor confines UIKit display construction; the highlight actor can create
+/// the empty holder. It retains no view, closure, global entry, or older revision.
+@MainActor
+final class MarkdownNativeCodeDisplay {
+    private var source: String?
+    private var text: NSAttributedString?
+    private(set) var constructionCount = 0
+    private lazy var sizes = MarkdownNativeCodeMeasurements()
+
+    func measurements(for display: NSAttributedString) -> MarkdownNativeCodeMeasurements? {
+        display === text ? sizes : nil
+    }
+
+    nonisolated init() {}
+
+    fileprivate func value(for source: String, make: () -> NSAttributedString?) -> NSAttributedString? {
+        if let previous = self.source, previous.utf8.elementsEqual(source.utf8) { return text }
+        guard let value = make() else { return nil }
+        self.source = source
+        text = value
+        constructionCount += 1
+        return value
+    }
+}
+#endif
 
 struct MarkdownPlainCodeLine: Equatable, Identifiable {
     let id: Int
@@ -1673,7 +2380,7 @@ enum MarkdownHighlightPolicy {
     }
 }
 
-#if DEBUG
+#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
 /// Per-mount, bounded representative-fixture payload. No production cache.
 struct NativePreparedHighlight: Sendable {
     let request: MarkdownCodeHighlightRequest
@@ -1695,6 +2402,29 @@ struct MarkdownCodeHighlightRequest: Equatable, @unchecked Sendable {
     let language: String?
     let colorScheme: ColorScheme
     let isStreaming: Bool
+#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
+    static func == (lhs: Self, rhs: Self) -> Bool {
+#if SEMREH_INTERNAL_CHAT_PREVIEW && !DEBUG
+        return lhs.exactlyMatches(rhs)
+#else
+        if MarkdownPreparedSyncLookup.isEnabled(
+            nativeEnabled: InternalChatRendererPolicy.debugArgument("--chat-rich-native-code-text"),
+            arguments: ProcessInfo.processInfo.arguments
+        ) { return lhs.exactlyMatches(rhs) }
+        return lhs.code == rhs.code && lhs.language == rhs.language &&
+            lhs.colorScheme == rhs.colorScheme && lhs.isStreaming == rhs.isStreaming
+#endif
+    }
+
+    func exactlyMatches(_ rhs: Self) -> Bool {
+        let lhs = self
+        return lhs.colorScheme == rhs.colorScheme && lhs.isStreaming == rhs.isStreaming &&
+        lhs.code.utf8.elementsEqual(rhs.code.utf8) &&
+        ((lhs.language == nil && rhs.language == nil) ||
+         (lhs.language != nil && rhs.language != nil &&
+          lhs.language!.utf8.elementsEqual(rhs.language!.utf8)))
+    }
+#endif
 }
 
 enum MarkdownCodeHighlightResult: @unchecked Sendable {
@@ -1739,11 +2469,174 @@ enum MarkdownCodeHighlighter {
     }
 }
 
+#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
+/// Cost units estimate all retained representations, including a future lazy
+/// native display. This is a retention budget, not a measured heap-byte limit.
+struct MarkdownPreparedRevisionCacheConfiguration: Sendable {
+    let maxEntries: Int
+    let maxCost: Int
+    static let disabled = Self(maxEntries: 0, maxCost: 0)
+    static let nativeExperiment = Self(maxEntries: 32, maxCost: 32 * 1_024 * 1_024)
+
+    static func experiment(arguments: [String]) -> Self {
+#if SEMREH_INTERNAL_CHAT_PREVIEW && !DEBUG
+        return .nativeExperiment
+#else
+        return arguments.contains("--chat-rich-native-code-text") &&
+        !arguments.contains("--chat-native-prepared-cache-disabled") ? .nativeExperiment : .disabled
+#endif
+    }
+}
+
+private struct MarkdownPreparedRevisionKey: Equatable {
+    // String equality folds canonical equivalents; source and raw language must not.
+    let source: [UInt8]
+    let language: [UInt8]?
+    let colorScheme: ColorScheme
+    let isStreaming: Bool
+
+    init(_ request: MarkdownCodeHighlightRequest) {
+        source = Array(request.code.utf8)
+        language = request.language.map { Array($0.utf8) }
+        colorScheme = request.colorScheme
+        isStreaming = request.isStreaming
+    }
+}
+
+/// One bounded store shared by actor publication and synchronous completed-only reads.
+/// Policy/key construction and all highlighting stay outside the lock.
+private final class MarkdownPreparedRevisionStore: @unchecked Sendable {
+    private struct CachedRevision {
+        let key: MarkdownPreparedRevisionKey
+        let code: MarkdownPreparedCode
+        let cost: Int
+    }
+    private let cacheConfiguration: MarkdownPreparedRevisionCacheConfiguration
+    // Oldest first; a hit moves to the end. Only this store retains cached revisions.
+    private var completedRevisions: [CachedRevision] = []
+    private var retainedCost = 0
+    private let lock = NSLock()
+    private var keyConstructionCount = 0
+    var preparedCacheKeyConstructionCount: Int { lock.withLock { keyConstructionCount } }
+
+    func cacheKey(for request: MarkdownCodeHighlightRequest) -> MarkdownPreparedRevisionKey? {
+        guard cacheConfiguration.maxEntries > 0, cacheConfiguration.maxCost >= 1_024,
+              !request.isStreaming else { return nil }
+        // Check the cheap lower-bound charge before copying either byte array.
+        // The full prepared cost still governs admission after highlighting.
+        let available = cacheConfiguration.maxCost - 1_024
+        let sourceBytes = request.code.utf8.count
+        guard sourceBytes <= available / 32,
+              (request.language?.utf8.count ?? 0) <= available - sourceBytes * 32,
+              case .highlight = MarkdownHighlightPolicy.decision(
+                for: request.code, language: request.language, isStreaming: request.isStreaming
+              ) else { return nil }
+        lock.withLock { keyConstructionCount &+= 1 }
+        return MarkdownPreparedRevisionKey(request)
+    }
+
+    init(configuration: MarkdownPreparedRevisionCacheConfiguration) { cacheConfiguration = configuration }
+    var usage: (count: Int, cost: Int) { lock.withLock { (completedRevisions.count, retainedCost) } }
+
+    func completed(for key: MarkdownPreparedRevisionKey) -> MarkdownPreparedCode? {
+        lock.withLock {
+            guard let index = completedRevisions.firstIndex(where: { $0.key == key }) else { return nil }
+            let hit = completedRevisions.remove(at: index)
+            completedRevisions.append(hit)
+            return hit.code
+        }
+    }
+
+    func publish(_ code: MarkdownPreparedCode, key: MarkdownPreparedRevisionKey, cost: Int) {
+        guard cost <= cacheConfiguration.maxCost else { return }
+        let retired: [CachedRevision] = lock.withLock {
+            var retired: [CachedRevision] = []
+            while !completedRevisions.isEmpty &&
+                (completedRevisions.count >= cacheConfiguration.maxEntries ||
+                 retainedCost > cacheConfiguration.maxCost - cost) {
+                let entry = completedRevisions.removeFirst()
+                retainedCost -= entry.cost
+                retired.append(entry)
+            }
+            completedRevisions.append(CachedRevision(key: key, code: code, cost: cost))
+            retainedCost += cost
+            return retired
+        }
+        // Release potentially large attributed revisions after unlocking, so a
+        // MainActor completed-only lookup never waits for their destruction.
+        withExtendedLifetime(retired) {}
+    }
+}
+
+/// One current request per mounted leaf, including a remembered miss. Getters do
+/// not repeatedly allocate byte keys or scan highlight policy. No history retained.
+final class MarkdownPreparedSyncLookup {
+    private var request: MarkdownCodeHighlightRequest?
+    private var code: MarkdownPreparedCode?
+
+    static func isEnabled(nativeEnabled: Bool, arguments: [String]) -> Bool {
+#if SEMREH_INTERNAL_CHAT_PREVIEW && !DEBUG
+        return nativeEnabled
+#else
+        return nativeEnabled && arguments.contains("--chat-native-prepared-sync-hit") &&
+        !arguments.contains("--chat-native-prepared-cache-disabled") &&
+        !arguments.contains("--tail-geometry-no-highlight")
+#endif
+    }
+
+    @MainActor
+    func completedCode(for request: MarkdownCodeHighlightRequest,
+                       worker: MarkdownCodeHighlightWorker, nativeEnabled: Bool,
+                       arguments: [String]) -> MarkdownPreparedCode? {
+        guard Self.isEnabled(nativeEnabled: nativeEnabled, arguments: arguments) else {
+            self.request = nil
+            code = nil
+            return nil
+        }
+        if self.request?.exactlyMatches(request) != true {
+            self.request = request
+            code = MarkdownNativeCodeText.isEligible(request.code)
+                ? worker.completedCode(for: request) : nil
+        }
+        return code
+    }
+}
+
+#endif
+
 /// Serializes the non-thread-safe JavaScript/Splash highlighters on a dedicated
 /// executor. `ChatCodeBlock` awaits this actor from MainActor, allowing scrolling,
 /// typing, and layout to continue while completed code is parsed and colored.
 actor MarkdownCodeHighlightWorker {
+#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
+    static let shared = MarkdownCodeHighlightWorker(
+        cacheConfiguration: .experiment(arguments: ProcessInfo.processInfo.arguments)
+    )
+    private nonisolated let completedStore: MarkdownPreparedRevisionStore
+    var preparedCacheKeyConstructionCount: Int { completedStore.preparedCacheKeyConstructionCount }
+
+    init(cacheConfiguration: MarkdownPreparedRevisionCacheConfiguration = .disabled) {
+        completedStore = MarkdownPreparedRevisionStore(configuration: cacheConfiguration)
+    }
+
+    var preparedCacheUsage: (count: Int, cost: Int) { completedStore.usage }
+
+    nonisolated func completedCode(for request: MarkdownCodeHighlightRequest) -> MarkdownPreparedCode? {
+        guard let key = completedStore.cacheKey(for: request) else { return nil }
+        return completedStore.completed(for: key)
+    }
+
+    static func preparedRevisionCost(_ code: MarkdownPreparedCode,
+                                     for request: MarkdownCodeHighlightRequest) -> Int {
+        // Charge source/key, attributed copies, segment/run and line overhead,
+        // and the bounded display/measurement holder. No native storage is cached.
+        1_024 + request.code.utf8.count * 32 + (request.language?.utf8.count ?? 0) +
+        code.lines.count * 128 + code.lines.reduce(0) { $0 + $1.segments.count * 256 } +
+        code.fullText.runs.count * 256
+    }
+#else
     static let shared = MarkdownCodeHighlightWorker()
+#endif
 
 #if DEBUG
     func rawHighlightedCode(for request: MarkdownCodeHighlightRequest) -> MarkdownCodeHighlightResult {
@@ -1752,9 +2645,20 @@ actor MarkdownCodeHighlightWorker {
 #endif
 
     func highlightedCode(for request: MarkdownCodeHighlightRequest) -> MarkdownPreparedCodeResult {
+#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
+        let key = completedStore.cacheKey(for: request)
+        if let key, let hit = completedStore.completed(for: key) { return .highlighted(hit) }
+#endif
         switch MarkdownCodeHighlighter.highlightedCode(for: request) {
         case .highlighted(let source):
-            return .highlighted(MarkdownPreparedCode(source))
+            let prepared = MarkdownPreparedCode(source)
+#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
+            if let key {
+                let cost = Self.preparedRevisionCost(prepared, for: request)
+                completedStore.publish(prepared, key: key, cost: cost)
+            }
+#endif
+            return .highlighted(prepared)
         case .plain(let reason, let language):
             return .plain(reason: reason, normalizedLanguage: language)
         }
@@ -1933,6 +2837,15 @@ struct TableCellWidthCap: Layout {
     let minWidth: CGFloat
     let maxWidth: CGFloat
 
+    // R13: opt-in, same-binary comparison; release retains the original path.
+    private static let skipsRedundantIdealMeasurement: Bool = {
+#if DEBUG
+        ProcessInfo.processInfo.arguments.contains("--chat-table-proposed-width-sizing")
+#else
+        false
+#endif
+    }()
+
     /// Pure clamp used by `sizeThatFits`: fill the proposed (column) width
     /// when the parent offers one, otherwise fall back to the child's ideal
     /// width, always bounded to `minWidth...maxWidth`.
@@ -1947,14 +2860,33 @@ struct TableCellWidthCap: Layout {
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         guard let subview = subviews.first else { return .zero }
-        let idealWidth = subview.sizeThatFits(.unspecified).width
-        let width = Self.resolvedWidth(
+        return Self.measuredSize(
+            proposedWidth: proposal.width, minWidth: minWidth, maxWidth: maxWidth,
+            skipsRedundantIdealMeasurement: Self.skipsRedundantIdealMeasurement
+        ) { subview.sizeThatFits($0) }
+    }
+
+    /// A supplied column width completely overrides the ideal width. Avoid
+    /// asking rich cell content to lay itself out at an unused width, but still
+    /// measure its height at the clamped width on every call (no stale cache).
+    static func measuredSize(
+        proposedWidth: CGFloat?, minWidth: CGFloat, maxWidth: CGFloat,
+        skipsRedundantIdealMeasurement: Bool,
+        measure: (ProposedViewSize) -> CGSize
+    ) -> CGSize {
+        let idealWidth: CGFloat
+        if skipsRedundantIdealMeasurement, let proposedWidth {
+            idealWidth = proposedWidth
+        } else {
+            idealWidth = measure(.unspecified).width
+        }
+        let width = resolvedWidth(
             idealWidth: idealWidth,
-            proposedWidth: proposal.width,
+            proposedWidth: proposedWidth,
             minWidth: minWidth,
             maxWidth: maxWidth
         )
-        let measured = subview.sizeThatFits(ProposedViewSize(width: width, height: nil))
+        let measured = measure(ProposedViewSize(width: width, height: nil))
         return CGSize(width: width, height: measured.height)
     }
 

@@ -4,12 +4,100 @@ import UIKit
 @testable import HermesMobile
 
 final class ChatHapticsTests: XCTestCase {
+    func testExplicitDeselectionInvalidatesOwnershipWhileAlreadyInactive() {
+        var ownership = ChatPresentationOwnership()
+        ownership.update(isActive: true, isSelected: true)
+        let beforeBackground = ownership.generation
+        ownership.update(isActive: false, isSelected: true)
+        let duringBackground = ownership.generation
+        XCTAssertTrue(ownership.isSelected, "Backgrounding preserves presentation ownership")
+        ownership.update(isActive: false, isSelected: false)
+        XCTAssertFalse(ownership.isSelected)
+        XCTAssertNotEqual(ownership.generation, duringBackground,
+                          "Deselecting an already inactive root must invalidate its work")
+        ownership.update(isActive: true, isSelected: false)
+        XCTAssertFalse(ownership.isActive, "Appearance cannot activate an unselected root")
+        ownership.update(isActive: true, isSelected: true)
+        XCTAssertFalse(ownership.owns(beforeBackground))
+        XCTAssertFalse(ownership.owns(duringBackground))
+        XCTAssertTrue(ownership.owns(ownership.generation))
+    }
+
+    func testPresentationOwnershipRejectsFocusAcrossDeactivateReactivate() {
+        var ownership = ChatPresentationOwnership()
+        XCTAssertFalse(ownership.isActive)
+        ownership.update(isActive: true)
+        let oldRequest = ownership.generation
+        XCTAssertTrue(ownership.owns(oldRequest))
+        ownership.update(isActive: false)
+        XCTAssertFalse(ownership.owns(oldRequest))
+        ownership.update(isActive: true)
+        XCTAssertFalse(ownership.owns(oldRequest), "A-B-A must not revive a suspended focus request")
+        XCTAssertTrue(ownership.owns(ownership.generation))
+    }
+
+    func testPresentationOwnershipRepeatedActivityDoesNotInvalidateCurrentRequest() {
+        var ownership = ChatPresentationOwnership()
+        ownership.update(isActive: true)
+        let request = ownership.generation
+        ownership.update(isActive: true)
+        XCTAssertTrue(ownership.owns(request))
+        ownership.update(isActive: false)
+        let inactiveGeneration = ownership.generation
+        ownership.update(isActive: false)
+        XCTAssertEqual(ownership.generation, inactiveGeneration)
+        XCTAssertFalse(ownership.owns(inactiveGeneration))
+    }
+
+    func testStreamProgressEligibilityRequiresPresentedActiveVisibleFollowingTail() {
+        XCTAssertTrue(StreamingHapticEligibility.shouldEmit(
+            isSceneActive: true,
+            isChatPresented: true,
+            isLatestTranscriptRowVisible: true,
+            isTranscriptBottomVisible: true,
+            shouldFollowLatestMessage: true
+        ))
+
+        let ineligibleStates: [(Bool, Bool, Bool, Bool, Bool)] = [
+            (false, true, true, true, true),
+            (true, false, true, true, true),
+            (true, true, false, true, true),
+            (true, true, true, false, true),
+            (true, true, true, true, false)
+        ]
+        for (scene, presented, latestRow, bottom, followsLatest) in ineligibleStates {
+            XCTAssertFalse(StreamingHapticEligibility.shouldEmit(
+                isSceneActive: scene,
+                isChatPresented: presented,
+                isLatestTranscriptRowVisible: latestRow,
+                isTranscriptBottomVisible: bottom,
+                shouldFollowLatestMessage: followsLatest
+            ))
+        }
+    }
+
+    func testStreamPulseGateFollowsVisibleUnitsWithBoundedRateAndReset() {
+        var gate = StreamingHapticPulseGate()
+        XCTAssertFalse(gate.recordVisibleUnits(0, at: 1))
+        XCTAssertFalse(gate.recordVisibleUnits(3, at: 1))
+        XCTAssertFalse(gate.recordVisibleUnits(1, at: 1.3))
+        XCTAssertTrue(gate.recordVisibleUnits(1, at: 1.66))
+        XCTAssertFalse(gate.recordVisibleUnits(100, at: 1.67), "burst must not queue catch-up pulses")
+        XCTAssertTrue(gate.recordVisibleUnits(1, at: 2.32))
+
+        gate.reset() // stopped stream, hidden transcript, or new session
+        XCTAssertFalse(gate.recordVisibleUnits(1, at: 10))
+        XCTAssertFalse(gate.recordVisibleUnits(2, at: 10.7))
+        XCTAssertTrue(gate.recordVisibleUnits(1, at: 11.4))
+    }
+
     @MainActor
     func testHapticsRespectEnabledSetting() {
         var feedback: [ChatHapticFeedback] = []
 
         ChatHaptics.messageSent(isEnabled: false) { feedback.append($0) }
         ChatHaptics.assistantResponseCompleted(isEnabled: false) { feedback.append($0) }
+        ChatHaptics.streamProgress(isEnabled: false) { feedback.append($0) }
         ChatHaptics.streamCancelled(isEnabled: false) { feedback.append($0) }
         ChatHaptics.approvalSubmitted(.deny, isEnabled: false) { feedback.append($0) }
         ChatHaptics.clarificationSubmitted(isEnabled: false) { feedback.append($0) }
@@ -25,6 +113,7 @@ final class ChatHapticsTests: XCTestCase {
 
         ChatHaptics.messageSent(isEnabled: true) { feedback.append($0) }
         ChatHaptics.assistantResponseCompleted(isEnabled: true) { feedback.append($0) }
+        ChatHaptics.streamProgress(isEnabled: true) { feedback.append($0) }
         ChatHaptics.streamCancelled(isEnabled: true) { feedback.append($0) }
         ChatHaptics.approvalSubmitted(.once, isEnabled: true) { feedback.append($0) }
         ChatHaptics.approvalSubmitted(.session, isEnabled: true) { feedback.append($0) }
@@ -38,6 +127,7 @@ final class ChatHapticsTests: XCTestCase {
         XCTAssertEqual(feedback, [
             .lightImpact,
             .success,
+            .selection,
             .mediumImpact,
             .lightImpact,
             .lightImpact,

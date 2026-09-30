@@ -192,6 +192,32 @@ final class StreamingTextFadeStampStore<Key: Hashable>: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
+        registerLocked(orderedKeys, clock: clock, glyphStagger: glyphStagger, maxStampLead: maxStampLead)
+    }
+
+    /// Registers and reads one draw's ordered slice keys under one store lock.
+    /// Baseline completion remains the caller's responsibility after drawing.
+    func registerAndOpacities(
+        _ orderedKeys: [Key?],
+        clock: TimeInterval,
+        glyphStagger: TimeInterval = StreamingTextFadeDefaults.glyphStagger,
+        maxStampLead: TimeInterval = StreamingTextFadeDefaults.maxStampLead,
+        fadeDuration: TimeInterval = StreamingTextFadeDefaults.fadeDuration,
+        floorOpacity: Double = StreamingTextFadeDefaults.floorOpacity
+    ) -> [Double] {
+        lock.lock()
+        defer { lock.unlock() }
+        registerLocked(orderedKeys.compactMap { $0 }, clock: clock,
+                       glyphStagger: glyphStagger, maxStampLead: maxStampLead)
+        return orderedKeys.map {
+            opacityLocked(for: $0, clock: clock, fadeDuration: fadeDuration, floorOpacity: floorOpacity)
+        }
+    }
+
+    private func registerLocked(
+        _ orderedKeys: [Key], clock: TimeInterval,
+        glyphStagger: TimeInterval, maxStampLead: TimeInterval
+    ) {
         let newKeys = orderedKeys.filter { stamps[$0] == nil }
         guard !newKeys.isEmpty else { return }
 
@@ -227,7 +253,13 @@ final class StreamingTextFadeStampStore<Key: Hashable>: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
-        guard let stamp = stamps[key] else { return 1 }
+        return opacityLocked(for: key, clock: clock, fadeDuration: fadeDuration, floorOpacity: floorOpacity)
+    }
+
+    private func opacityLocked(
+        for key: Key?, clock: TimeInterval, fadeDuration: TimeInterval, floorOpacity: Double
+    ) -> Double {
+        guard let key, let stamp = stamps[key] else { return 1 }
 
         return StreamingTextFadeCurve.opacity(
             age: clock - stamp,
@@ -289,6 +321,12 @@ enum StreamingTextFadeTailSplitter {
     }
 
     static func split(_ text: String, firstFadeOrdinal: Int) -> BlockSplit {
+        assemble(text, boundaries: scanBoundaries(text), firstFadeOrdinal: firstFadeOrdinal)
+    }
+
+    // Boundary discovery depends only on source bytes, not the fade window.
+    // Indices must always be used with the source retained alongside them.
+    fileprivate static func scanBoundaries(_ text: String) -> [String.Index] {
         var boundaries: [String.Index] = []
         // A completed item line's boundary is provisional: it vanishes if the
         // next line turns out to be indented (a nested child or continuation
@@ -333,6 +371,14 @@ enum StreamingTextFadeTailSplitter {
             boundaries.append(pending)
         }
 
+        return boundaries
+    }
+
+    fileprivate static func assemble(
+        _ text: String,
+        boundaries: [String.Index],
+        firstFadeOrdinal: Int
+    ) -> BlockSplit {
         // firstFadeOrdinal == boundaryCount + 1 (e.g. Int.max for Reduce
         // Motion) puts everything, including the current block, in the head.
         let firstKept = max(0, min(firstFadeOrdinal, boundaries.count + 1))
@@ -419,6 +465,63 @@ enum StreamingTextFadeTailSplitter {
     }
 }
 
+/// One derived result per mounted streaming identity. Never publishes changes:
+/// a lookup during body evaluation must not invalidate that body. Only source
+/// and the effective ordinal affect splitting; theme/clock/style stay live in
+/// the renderer. Main-actor confinement keeps this out of TextRenderer.draw.
+@MainActor
+final class StreamingTextFadeSplitCache {
+    private struct Entry {
+        let text: String
+        let boundaries: [String.Index]
+        var ordinal: Int
+        var split: StreamingTextFadeTailSplitter.BlockSplit
+    }
+
+    private var entry: Entry?
+#if DEBUG
+    /// Assemblies, including source misses; identical source+ordinal hits do none.
+    private(set) var splitCount = 0
+    private(set) var boundaryScanCount = 0
+    /// Ordinal-only assemblies that avoided a full boundary scan.
+    private(set) var boundaryScanReuseCount = 0
+#endif
+
+    func split(_ text: String, firstFadeOrdinal: Int) -> StreamingTextFadeTailSplitter.BlockSplit {
+        // String equality is canonically equivalent, not byte-exact. Retain
+        // the actual incoming normalization for code, selection and copying.
+        if var cached = entry, cached.text.utf8.elementsEqual(text.utf8) {
+            if cached.ordinal == firstFadeOrdinal {
+                return cached.split
+            }
+            let result = StreamingTextFadeTailSplitter.assemble(
+                cached.text, boundaries: cached.boundaries, firstFadeOrdinal: firstFadeOrdinal
+            )
+            cached.ordinal = firstFadeOrdinal
+            cached.split = result
+            entry = cached
+#if DEBUG
+            splitCount += 1
+            boundaryScanReuseCount += 1
+#endif
+            return result
+        }
+
+        // Appends can retract provisional list boundaries or change an open
+        // line/fence. Keep the full reference scan for every source change.
+        let boundaries = StreamingTextFadeTailSplitter.scanBoundaries(text)
+        let result = StreamingTextFadeTailSplitter.assemble(
+            text, boundaries: boundaries, firstFadeOrdinal: firstFadeOrdinal
+        )
+#if DEBUG
+        splitCount += 1
+        boundaryScanCount += 1
+#endif
+        entry = Entry(text: text, boundaries: boundaries, ordinal: firstFadeOrdinal, split: result)
+        return result
+    }
+}
+
 /// Decides when completed blocks can leave the fade window and be absorbed
 /// into the solid head. A block whose text has not been appended to for
 /// `blockAbsorbDelay` has provably finished its cascade (the reveal queue
@@ -445,3 +548,33 @@ enum StreamingTextFadeWindow {
         return start
     }
 }
+
+#if DEBUG
+/// Opt-in numeric work accounting. Counts store locks only, excluding diagnostic
+/// and shared-chain locks. No instance or counters exist when the flag is absent.
+final class StreamingFadeWorkProbe: @unchecked Sendable {
+    static let shared: StreamingFadeWorkProbe? = ProcessInfo.processInfo.arguments
+        .contains("--chat-performance-fade-work-probe") ? StreamingFadeWorkProbe() : nil
+
+    private let lock = NSLock()
+    private var counts = ["drawCount": 0, "glyphSliceCount": 0, "scalarOpacityCalls": 0,
+                          "batchOpacityCalls": 0, "stampStoreLockCalls": 0, "fadeStoreCreations": 0]
+
+    func recordDraw(glyphSliceCount: Int, scalarOpacityCalls: Int,
+                    batchOpacityCalls: Int, stampStoreLockCalls: Int) {
+        lock.withLock {
+            counts["drawCount", default: 0] += 1
+            counts["glyphSliceCount", default: 0] += glyphSliceCount
+            counts["scalarOpacityCalls", default: 0] += scalarOpacityCalls
+            counts["batchOpacityCalls", default: 0] += batchOpacityCalls
+            counts["stampStoreLockCalls", default: 0] += stampStoreLockCalls
+        }
+    }
+
+    func recordFadeStoreCreation() {
+        lock.withLock { counts["fadeStoreCreations", default: 0] += 1 }
+    }
+
+    func snapshot() -> [String: Int] { lock.withLock { counts } }
+}
+#endif

@@ -172,6 +172,7 @@
 		1A2B3C4D5E6F7000000000AE /* ServerCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F7000000000BE /* ServerCatalog.swift */; };
 		1A2B3C4D5E6F7000000000AF /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F7000000000BF /* ChatView.swift */; };
 		C05100000000000000000001 /* ChatTranscriptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C05100000000000000000011 /* ChatTranscriptView.swift */; };
+		C03700000000000000000001 /* ChatNativeTranscriptViewport.swift in Sources */ = {isa = PBXBuildFile; fileRef = C03700000000000000000011 /* ChatNativeTranscriptViewport.swift */; };
 		C05100000000000000000002 /* ChatMessageActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = C05100000000000000000012 /* ChatMessageActions.swift */; };
 		C05100000000000000000003 /* ChatGoalControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = C05100000000000000000013 /* ChatGoalControls.swift */; };
 		C05100000000000000000004 /* ChatTranscriptSupportingViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = C05100000000000000000014 /* ChatTranscriptSupportingViews.swift */; };
@@ -629,6 +630,7 @@
 		1A2B3C4D5E6F7000000000BE /* ServerCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerCatalog.swift; sourceTree = "<group>"; };
 		1A2B3C4D5E6F7000000000BF /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
 		C05100000000000000000011 /* ChatTranscriptView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatTranscriptView.swift; sourceTree = "<group>"; };
+		C03700000000000000000011 /* ChatNativeTranscriptViewport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatNativeTranscriptViewport.swift; sourceTree = "<group>"; };
 		C05100000000000000000012 /* ChatMessageActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatMessageActions.swift; sourceTree = "<group>"; };
 		C05100000000000000000013 /* ChatGoalControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatGoalControls.swift; sourceTree = "<group>"; };
 		C05100000000000000000014 /* ChatTranscriptSupportingViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatTranscriptSupportingViews.swift; sourceTree = "<group>"; };
@@ -1353,6 +1355,7 @@
 			children = (
 				1A2B3C4D5E6F7000000000BF /* ChatView.swift */,
 				C05100000000000000000011 /* ChatTranscriptView.swift */,
+				C03700000000000000000011 /* ChatNativeTranscriptViewport.swift */,
 				C05100000000000000000012 /* ChatMessageActions.swift */,
 				C05100000000000000000013 /* ChatGoalControls.swift */,
 				C05100000000000000000014 /* ChatTranscriptSupportingViews.swift */,
@@ -1988,6 +1991,7 @@
 				32E310C6E45AD8077072DC21 /* SessionListViewExtensions.swift in Sources */,
 					1A2B3C4D5E6F7000000000AF /* ChatView.swift in Sources */,
 					C05100000000000000000001 /* ChatTranscriptView.swift in Sources */,
+					C03700000000000000000001 /* ChatNativeTranscriptViewport.swift in Sources */,
 					C05100000000000000000002 /* ChatMessageActions.swift in Sources */,
 					C05100000000000000000003 /* ChatGoalControls.swift in Sources */,
 					C05100000000000000000004 /* ChatTranscriptSupportingViews.swift in Sources */,

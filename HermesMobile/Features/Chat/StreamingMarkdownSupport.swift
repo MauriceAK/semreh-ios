@@ -116,15 +116,19 @@ enum StreamingMarkdownBlockSplitter {
 /// the response on every streaming flush. This accumulator keeps the last line
 /// provisional, because a boundary at the end of the current string cannot be
 /// sealed until more content arrives, and resumes from that line on the next
-/// append. Stable chunks retain the same IDs and text as the reference splitter.
+/// append. A separate byte cursor avoids searching the unfinished line again.
+/// Stable chunks retain the same IDs and text as the reference splitter.
 struct StreamingMarkdownBlockAccumulator {
     private var stableChunks: [StreamingMarkdownChunk] = []
     private var chunkStartUTF16Offset = 0
     private var pendingLineStartUTF16Offset = 0
+    private var newlineSearchUTF8Offset = 0
     private var isInsideFenceBeforePendingLine = false
     private var lastTextUTF16Length = 0
     private var isInitialized = false
 
+    /// `appendOnly` requires a byte-exact UTF-8 extension of the previous input,
+    /// including unchanged input. Canonically equivalent replacements must reset.
     mutating func update(
         _ text: String,
         appendOnly: Bool
@@ -148,6 +152,7 @@ struct StreamingMarkdownBlockAccumulator {
         stableChunks = []
         chunkStartUTF16Offset = 0
         pendingLineStartUTF16Offset = 0
+        newlineSearchUTF8Offset = 0
         isInsideFenceBeforePendingLine = false
         lastTextUTF16Length = 0
         isInitialized = false
@@ -163,18 +168,37 @@ struct StreamingMarkdownBlockAccumulator {
             return
         }
 
-        while lineStartOffset < endOffset {
-            let lineStart = String.Index(utf16Offset: lineStartOffset, in: text)
-            let lineEnd = text[lineStart...].firstIndex(of: "\n") ?? text.endIndex
-            let nextLineStart = lineEnd < text.endIndex
-                ? text.index(after: lineEnd)
-                : text.endIndex
+        let bytes = text.utf8
+        var searchStart = bytes.index(bytes.startIndex, offsetBy: newlineSearchUTF8Offset)
+        while let lf = bytes[searchStart...].firstIndex(of: 0x0A) {
+            newlineSearchUTF8Offset += bytes.distance(from: searchStart, to: lf)
+            searchStart = bytes.index(after: lf)
+
+            // Character-based firstIndex(of: "\n") skips CRLF, which is one
+            // Character. Look behind even when CR arrived in the prior append.
+            if lf > bytes.startIndex, bytes[bytes.index(before: lf)] == 0x0D {
+                newlineSearchUTF8Offset += 1
+                continue
+            }
+
+            // A standalone LF is a complete Character regardless of adjacent
+            // combining/ZWJ scalars. Convert only here, never at an old string's
+            // end offset, which may now lie inside an extended grapheme.
+            let lineEnd = String.Index(lf, within: text)!
+            let nextLineStart = text.index(after: lineEnd)
             let nextLineOffset = nextLineStart.utf16Offset(in: text)
 
             // A boundary at the end of the current string is provisional. Keep
             // this line and its pre-line fence state for the next append.
-            guard nextLineOffset < endOffset else { break }
+            guard nextLineOffset < endOffset else {
+                // Revisit this LF once it has following content, without
+                // searching the pending line that precedes it again.
+                pendingLineStartUTF16Offset = lineStartOffset
+                isInsideFenceBeforePendingLine = isInsideFence
+                return
+            }
 
+            let lineStart = String.Index(utf16Offset: lineStartOffset, in: text)
             let line = text[lineStart..<lineEnd]
             let trimmedLine = String(line).trimmingCharacters(in: .whitespacesAndNewlines)
             var stableBoundaryOffset: Int?
@@ -204,8 +228,10 @@ struct StreamingMarkdownBlockAccumulator {
             }
 
             lineStartOffset = nextLineOffset
+            newlineSearchUTF8Offset += 1
         }
 
+        newlineSearchUTF8Offset += bytes.distance(from: searchStart, to: bytes.endIndex)
         pendingLineStartUTF16Offset = lineStartOffset
         isInsideFenceBeforePendingLine = isInsideFence
     }

@@ -170,6 +170,55 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
     }
 
     @MainActor
+    func testProgressPulseDoesNotReplayOffscreenBacklogOrAfterCancellation() async throws {
+        let streamClient = DirectPacingEventFixture()
+        let viewModel = try makeViewModel(
+            streamClient: streamClient,
+            wordCadenceNanoseconds: 20_000_000,
+            maxLagNanoseconds: 100_000_000
+        )
+        streamClient.startResponse(on: viewModel)
+        viewModel.setTranscriptPresentationActive(false)
+        let backlog = String(repeating: "old ", count: 40)
+        streamClient.emit(.token(backlog))
+        viewModel.setTranscriptPresentationActive(true)
+        _ = try await observeAssistantContent(viewModel, until: backlog)
+        XCTAssertEqual(viewModel.streamProgressHapticTrigger, 0)
+
+        // Fresh visible progress may pulse, at most once per interval.
+        streamClient.emit(.token(String(repeating: "new ", count: 40)))
+        _ = try await observeAssistantContent(viewModel, until: backlog + String(repeating: "new ", count: 40))
+        XCTAssertLessThanOrEqual(viewModel.streamProgressHapticTrigger, 1)
+
+        streamClient.emit(.cancelled)
+        let afterCancel = viewModel.streamProgressHapticTrigger
+        try await Task.sleep(nanoseconds: 750_000_000)
+        XCTAssertEqual(viewModel.streamProgressHapticTrigger, afterCancel)
+    }
+
+    @MainActor
+    func testSustainedVisibleStreamPublishesProgressPulse() async throws {
+        let streamClient = DirectPacingEventFixture()
+        let viewModel = try makeViewModel(
+            streamClient: streamClient,
+            wordCadenceNanoseconds: 20_000_000,
+            // Keep a one-word quota: 100 words span roughly two seconds.
+            // A lag bound equal to one cadence would drain the whole burst.
+            maxLagNanoseconds: 60_000_000_000
+        )
+        streamClient.startResponse(on: viewModel)
+
+        let sustainedProgress = (0..<100).map { "visible\($0) " }.joined()
+        streamClient.emit(.token(sustainedProgress))
+        _ = try await observeAssistantContent(viewModel, until: sustainedProgress)
+
+        XCTAssertGreaterThan(
+            viewModel.streamProgressHapticTrigger, 0,
+            "the model must publish stream progress; this does not prove UIKit/compositor delivery"
+        )
+    }
+
+    @MainActor
     func testStreamingMutationCostDoesNotScaleWithLoadedHistory() async throws {
         let large = try await timedStreamingHotPaths(historyMessageCount: 10_000)
         let small = try await timedStreamingHotPaths(historyMessageCount: 1_000)

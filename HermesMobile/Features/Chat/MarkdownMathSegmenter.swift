@@ -5,18 +5,70 @@ enum MarkdownMathSegment: Equatable {
     case displayMath(String)
 }
 
+/// The renderer's leaf/stack decision, with already formatted leaf content.
+/// Segment output alone cannot represent the legacy empty-display fallback.
+struct MarkdownMathPresentation {
+    let segments: [MarkdownMathSegment]
+    let inlineMarkdown: String
+}
+
 struct MarkdownMathSegmenter {
+    static func presentation(
+        in content: String,
+        formatInline: (String) -> String = MarkdownMathFormatter.replacingInlineMath
+    ) -> MarkdownMathPresentation {
+        presentation(in: content, duplicateInlinePreprocessing: duplicateInlinePreprocessing,
+                     formatInline: formatInline)
+    }
+
+    // Explicit control also lets tests compare both paths in the same binary.
+    static func presentation(
+        in content: String,
+        duplicateInlinePreprocessing: Bool,
+        formatInline: (String) -> String = MarkdownMathFormatter.replacingInlineMath
+    ) -> MarkdownMathPresentation {
+        if !duplicateInlinePreprocessing, MarkdownMathScanPolicy.fastPathsEnabled,
+           !content.contains("$$"), !content.contains(#"\["#) {
+            return MarkdownMathPresentation(
+                segments: [],
+                inlineMarkdown: formatInline(content)
+            )
+        }
+
+        // This is the old renderer algorithm. Keep the ORIGINAL source fallback:
+        // segmentation may consume empty display delimiters without emitting math.
+        let segments = segments(in: content, formatInline: formatInline)
+        return MarkdownMathPresentation(
+            segments: segments,
+            inlineMarkdown: segments.containsMath ? "" : formatInline(content)
+        )
+    }
+
+    private static let duplicateInlinePreprocessing: Bool = {
+#if DEBUG
+        ProcessInfo.processInfo.arguments.contains("--chat-duplicate-math-preprocessing")
+#else
+        false
+#endif
+    }()
+
     static func segments(in content: String) -> [MarkdownMathSegment] {
+        segments(in: content, formatInline: MarkdownMathFormatter.replacingInlineMath)
+    }
+
+    private static func segments(
+        in content: String, formatInline: (String) -> String
+    ) -> [MarkdownMathSegment] {
         // No display delimiter can open without one of these literal tokens.
         // Avoid allocating per-character code-protection masks for the common
         // prose/code-only case. Inline formatting still uses its normal rules.
         if MarkdownMathScanPolicy.fastPathsEnabled,
            !content.contains("$$"), !content.contains(#"\["#) {
-            return [.markdown(MarkdownMathFormatter.replacingInlineMath(in: content))]
+            return [.markdown(formatInline(content))]
         }
         let characters = Array(content)
         guard characters.count >= 4 else {
-            return [.markdown(MarkdownMathFormatter.replacingInlineMath(in: content))]
+            return [.markdown(formatInline(content))]
         }
 
         let protected = MarkdownMathProtection.mask(for: characters)
@@ -37,15 +89,15 @@ struct MarkdownMathSegmenter {
                 continue
             }
 
-            appendMarkdown(String(characters[cursor..<index]), to: &segments)
+            appendMarkdown(String(characters[cursor..<index]), to: &segments, formatInline: formatInline)
             let latex = String(characters[(index + delimiter.openLength)..<closeIndex])
             appendDisplayMath(latex, to: &segments)
             index = closeIndex + delimiter.closeLength
             cursor = index
         }
 
-        appendMarkdown(String(characters[cursor...]), to: &segments)
-        return segments.isEmpty ? [.markdown(MarkdownMathFormatter.replacingInlineMath(in: content))] : segments
+        appendMarkdown(String(characters[cursor...]), to: &segments, formatInline: formatInline)
+        return segments.isEmpty ? [.markdown(formatInline(content))] : segments
     }
 
     private static func closingDisplayDelimiter(
@@ -77,9 +129,10 @@ struct MarkdownMathSegmenter {
 
     private static func appendMarkdown(
         _ markdown: String,
-        to segments: inout [MarkdownMathSegment]
+        to segments: inout [MarkdownMathSegment],
+        formatInline: (String) -> String
     ) {
-        let rendered = MarkdownMathFormatter.replacingInlineMath(in: markdown)
+        let rendered = formatInline(markdown)
         guard !rendered.isEmpty else { return }
         segments.append(.markdown(rendered))
     }

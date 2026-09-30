@@ -4,6 +4,9 @@ import OSLog
 import Foundation
 import CoreFoundation
 import UserNotifications
+#if DEBUG
+import UIKit
+#endif
 
 struct SemrehSceneActions {
     let canCreateNewChat: Bool
@@ -398,6 +401,7 @@ struct HermesMobileApp: App {
         // killed app still lands before the first scene connects.
         UNUserNotificationCenter.current().delegate = ResponseCompletionNotificationDelegate.shared
 #if DEBUG
+        _ = ChatPerformanceAutoSwitchLaunch.appInit
         // This is intentionally before ContentView/ChatViewModel creation so
         // the normal persisted restore reader consumes the seeded row.
         _ = ChatP09DiagnosticRestoreBootstrap.apply(
@@ -415,12 +419,23 @@ struct HermesMobileApp: App {
             // `xcrun simctl launch <udid> com.maurice.semreh --chat-performance-lab --chat-outgoing-motion-lab`
             // `xcrun simctl launch <udid> com.maurice.semreh --chat-performance-cycle-lab --chat-performance-signposts`
             // `xcrun simctl launch <udid> com.maurice.semreh --chat-performance-app-wide-monitor`
+            // `xcrun simctl launch <udid> com.maurice.semreh --chat-performance-rich-switch-lab --chat-performance-auto-switch --chat-performance-auto-switch-run-id=<UUID>`
             // `xcrun simctl launch <udid> com.maurice.semreh --sidebar-brand-lab`
             // `xcrun simctl launch <udid> com.maurice.semreh --bird-palette-visual-lab`
             Group {
                 if ProcessInfo.processInfo.arguments.contains("--chat-performance-four-tall-lab") {
                     NavigationStack {
                         ChatPerformanceLabView(fourTallMessages: true)
+                    }
+                    .semrehAppTheme()
+                } else if ProcessInfo.processInfo.arguments.contains("--chat-performance-rich30-back-lab") {
+                    NavigationStack {
+                        ChatPerformanceLabView(richThirtyMessages: true)
+                    }
+                    .semrehAppTheme()
+                } else if ProcessInfo.processInfo.arguments.contains("--chat-performance-rich30-lab") {
+                    NavigationStack {
+                        ChatPerformanceLabView(richThirtyMessages: true)
                     }
                     .semrehAppTheme()
                 } else if ProcessInfo.processInfo.arguments.contains("--chat-performance-tall-lab") {
@@ -456,6 +471,11 @@ struct HermesMobileApp: App {
                 } else if ProcessInfo.processInfo.arguments.contains("--chat-performance-cycle-lab") {
                     ChatPerformanceCycleLabContainer()
                         .semrehAppTheme()
+                } else if ProcessInfo.processInfo.arguments.contains("--chat-performance-rich-switch-lab") {
+                    NavigationStack {
+                        ChatPerformanceMultiLabView(richThirty: true)
+                    }
+                    .semrehAppTheme()
                 } else if ProcessInfo.processInfo.arguments.contains("--chat-performance-multi-lab") {
                     NavigationStack {
                         ChatPerformanceMultiLabView()
@@ -485,9 +505,19 @@ struct HermesMobileApp: App {
                 }
             }
             #else
-            ContentView(authManager: authManager)
-                .semrehAppTheme()
-                .preferredColorScheme(AppTheme.storedValue(appThemeRawValue).colorScheme)
+            Group {
+#if SEMREH_INTERNAL_CHAT_PREVIEW && targetEnvironment(simulator)
+                if ProcessInfo.processInfo.arguments.contains("--internal-chat-preview-smoke") {
+                    InternalChatPreviewSmokeView()
+                } else {
+                    ContentView(authManager: authManager)
+                }
+#else
+                ContentView(authManager: authManager)
+#endif
+            }
+            .semrehAppTheme()
+            .preferredColorScheme(AppTheme.storedValue(appThemeRawValue).colorScheme)
             #endif
         }
         .modelContainer(for: [CachedSession.self, CachedMessage.self, CachedSessionPreviewRecord.self])
@@ -638,8 +668,15 @@ private enum ChatPerformanceInstrumentation {
     static var standard: Fixture?
     static var tall: Fixture?
     static var fourTall: Fixture?
+    static var richThirty: Fixture?
 
-    static func value(tallMessages: Bool, fourTallMessages: Bool) -> Fixture {
+    static func value(tallMessages: Bool, fourTallMessages: Bool, richThirtyMessages: Bool = false) -> Fixture {
+        if richThirtyMessages {
+            if let richThirty { return richThirty }
+            let fixture = ChatViewModel.makeRichThirtyPerformanceLabFixture()
+            richThirty = fixture
+            return fixture
+        }
         if fourTallMessages {
             if let fourTall { return fourTall }
             let fixture = ChatViewModel.makeFourTallPerformanceLabFixture()
@@ -659,6 +696,20 @@ private enum ChatPerformanceInstrumentation {
     }
 }
 
+/// DEBUG-only shared-Back seam: no XCTest idle wait and no external lifecycle.
+struct ChatNavigationTimingProbe: ViewModifier {
+    let onBack: () -> Void
+    func body(content: Content) -> some View {
+        if ProcessInfo.processInfo.arguments.contains("--chat-navigation-script") {
+            content.onReceive(NotificationCenter.default.publisher(for: Notification.Name("semreh.lab.navigationBack"))) { _ in
+                onBack()
+            }
+        } else {
+            content
+        }
+    }
+}
+
 private struct ChatPerformanceLabView: View {
     @State private var fixture: (session: SessionSummary, server: URL, viewModel: ChatViewModel)
     @Environment(\.colorScheme) private var colorScheme
@@ -669,6 +720,10 @@ private struct ChatPerformanceLabView: View {
     @State private var outgoingMotionMarker: UInt64 = 0
     @State private var premountRichReady = false
     @State private var premountRichFailed = false
+    @State private var navigationProbePresented = false
+    @State private var navigationProbeCycle = 0
+    @State private var navigationProbeBackTime = 0.0
+    @State private var navigationProbeTask: Task<Void, Never>?
 
     private var preparesOneRichBeforeMount: Bool {
         ProcessInfo.processInfo.arguments.contains("--native-direct-premount-rich-one")
@@ -686,6 +741,104 @@ private struct ChatPerformanceLabView: View {
             && fixture.session.sessionId == "representative-120"
     }
 
+    private var richThirtyStreamingFixture: Bool {
+        ProcessInfo.processInfo.arguments.contains("--chat-performance-rich30-lab")
+            && fixture.session.sessionId == "semreh-rich30-lab"
+    }
+
+    private var richThirtyBackLabFixture: Bool {
+        ProcessInfo.processInfo.arguments.contains("--chat-performance-rich30-back-lab")
+            && fixture.session.sessionId == "semreh-rich30-lab"
+    }
+
+    @ViewBuilder
+    private var windowedPageControls: some View {
+        HStack(spacing: 12) {
+            Button("Page older (debug)") {
+                NotificationCenter.default.post(name: .semrehWindowedTranscriptPageOlder, object: nil)
+            }
+            .accessibilityIdentifier("windowed-page-older")
+            Button("Page newer (debug)") {
+                NotificationCenter.default.post(name: .semrehWindowedTranscriptPageNewer, object: nil)
+            }
+            .accessibilityIdentifier("windowed-page-newer")
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func logNavigationProbe(_ event: String, detail: String = "") {
+        let now = String(format: "%.6f", ProcessInfo.processInfo.systemUptime)
+        fputs("SEMREH_NAV_PROBE event=\(event) cycle=\(navigationProbeCycle) uptime=\(now) \(detail)\n", stderr)
+    }
+
+    /// This script measures the shared action handler, NOT physical touch latency.
+    /// The early Back deadline is established before SwiftUI begins the rich mount.
+    @MainActor private func runNavigationProbe() async {
+        for cycle in 1...3 {
+            do { try await Task.sleep(for: .seconds(1)) } catch { return }
+            navigationProbeCycle = cycle
+            let began = ProcessInfo.processInfo.systemUptime
+            logNavigationProbe("open_request")
+            navigationProbePresented = true
+            let backDelay = cycle == 1 ? 0.1 : 2.0
+            do { try await Task.sleep(for: .seconds(backDelay)) } catch { return }
+            if cycle == 3 {
+                logNavigationProbe("stream_start")
+                Task { @MainActor in await fixture.viewModel.appendPerformanceLabStreamingTurn() }
+                do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
+            }
+            navigationProbeBackTime = ProcessInfo.processInfo.systemUptime
+            let deadlineLag = max(0, navigationProbeBackTime - began - backDelay - (cycle == 3 ? 0.1 : 0))
+            logNavigationProbe("back_request", detail: "scheduled_delay_s=\(backDelay) deadline_lag_ms=\(deadlineLag * 1000)")
+            NotificationCenter.default.post(name: Notification.Name("semreh.lab.navigationBack"), object: nil)
+            do { try await Task.sleep(for: .seconds(1)) } catch { return }
+            logNavigationProbe("cycle_end", detail: "still_presented=\(navigationProbePresented)")
+        }
+        logNavigationProbe("script_complete")
+    }
+
+    private var scriptedBackLab: some View {
+        NavigationStack {
+            List {
+                NavigationLink(isActive: $navigationProbePresented) {
+                    VStack(spacing: 0) {
+                        windowedPageControls
+                        HStack {
+                            Button("Stream rich test turn") {
+                                guard !nativeRichLifecycleStreaming else { return }
+                                nativeRichLifecycleStreaming = true
+                                Task { @MainActor in
+                                    await fixture.viewModel.appendPerformanceLabStreamingTurn()
+                                    nativeRichLifecycleStreaming = false
+                                }
+                            }
+                            .disabled(nativeRichLifecycleStreaming)
+                            .accessibilityIdentifier("rich30-stream-turn")
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.vertical, 4)
+                        chat.environment(\.nativePreparedHighlights, prepared)
+                    }
+                    .onAppear { logNavigationProbe("chat_appeared") }
+                    .onDisappear { logNavigationProbe("chat_disappeared") }
+                } label: {
+                    Text("Open rich30 chat")
+                        .onAppear {
+                            let elapsed = navigationProbeBackTime == 0 ? 0 : (ProcessInfo.processInfo.systemUptime - navigationProbeBackTime) * 1000
+                            logNavigationProbe("list_appeared", detail: "since_back_ms=\(elapsed)")
+                        }
+                }
+            }
+        }
+        .task {
+            // The navigation subtree can cancel its view-scoped task on push.
+            // Retain this explicitly bounded, DEBUG-only three-cycle runner.
+            guard navigationProbeTask == nil else { return }
+            navigationProbeTask = Task { @MainActor in await runNavigationProbe() }
+        }
+    }
+
     private var outgoingMotionFixture: Bool {
         ProcessInfo.processInfo.arguments.contains("--chat-outgoing-motion-lab")
             && fixture.session.sessionId?.hasPrefix("outgoing-motion-lab-") == true
@@ -696,10 +849,11 @@ private struct ChatPerformanceLabView: View {
             && fixture.session.sessionId?.hasPrefix("representative-") == true
     }
 
-    init(tallMessages: Bool = false, fourTallMessages: Bool = false) {
+    init(tallMessages: Bool = false, fourTallMessages: Bool = false, richThirtyMessages: Bool = false) {
         NativeOpeningTrace.shared.begin()
         _fixture = State(initialValue: ChatPerformanceLabFixtureCache.value(
-            tallMessages: tallMessages, fourTallMessages: fourTallMessages
+            tallMessages: tallMessages, fourTallMessages: fourTallMessages,
+            richThirtyMessages: richThirtyMessages
         ))
     }
 
@@ -765,6 +919,61 @@ private struct ChatPerformanceLabView: View {
                             Logger(subsystem: "com.maurice.semreh", category: "NativeRichLifecycle")
                                 .debug("event=fixture_reopen_after rows=\(fixture.viewModel.messages.count, privacy: .public)")
                         }
+                }
+            } else if richThirtyBackLabFixture && ProcessInfo.processInfo.arguments.contains("--chat-navigation-script") {
+                scriptedBackLab
+            } else if richThirtyBackLabFixture {
+                NavigationStack {
+                    List {
+                        NavigationLink("Open rich30 chat") {
+                            VStack(spacing: 0) {
+                                windowedPageControls
+                                HStack {
+                                    Button("Stream rich test turn") {
+                                        guard !nativeRichLifecycleStreaming else { return }
+                                        nativeRichLifecycleStreaming = true
+                                        Task { @MainActor in
+                                            await fixture.viewModel.appendPerformanceLabStreamingTurn()
+                                            nativeRichLifecycleStreaming = false
+                                        }
+                                    }
+                                    .disabled(nativeRichLifecycleStreaming)
+                                    .accessibilityIdentifier("rich30-stream-turn")
+                                    Spacer(minLength: 0)
+                                }
+                                .padding(.vertical, 4)
+                                chat.environment(\.nativePreparedHighlights, prepared)
+                            }
+                        }
+                        .simultaneousGesture(TapGesture().onEnded {
+                            ChatPerformanceCadenceMonitor.begin(.entry)
+                        })
+                    }
+                    .onAppear { ChatPerformanceCadenceMonitor.end(.back) }
+                }
+            } else if richThirtyStreamingFixture {
+                VStack(spacing: 0) {
+                    windowedPageControls
+                    HStack {
+                        Button("Stream rich test turn") {
+                            guard !nativeRichLifecycleStreaming else { return }
+                            nativeRichLifecycleStreaming = true
+                            Task { @MainActor in
+                                await fixture.viewModel.appendPerformanceLabStreamingTurn()
+                                nativeRichLifecycleStreaming = false
+                            }
+                        }
+                        .disabled(nativeRichLifecycleStreaming)
+                        .accessibilityIdentifier("rich30-stream-turn")
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.vertical, 4)
+                    chat.environment(\.nativePreparedHighlights, prepared)
+                }
+            } else if ProcessInfo.processInfo.arguments.contains("--chat-windowed-eager") {
+                VStack(spacing: 0) {
+                    windowedPageControls
+                    chat.environment(\.nativePreparedHighlights, prepared)
                 }
             } else {
                 chat.environment(\.nativePreparedHighlights, prepared)
@@ -974,7 +1183,7 @@ private struct ChatActivityHandoffLabView: View {
                 },
                 onLoadMessages: {}, onLoadOlderMessages: { _, _ in .noProgress },
                 onUpdateScrollMetrics: { _ in }, onDismissKeyboard: {},
-                onScrollToBottom: { _ in }, onScrollToLatestTranscriptMessage: { _ in },
+                onScrollToBottom: { _, _, _, _ in }, onScrollToLatestTranscriptMessage: { _ in },
                 onScrollToLatestContent: { _, _ in },
                 onPreviewAttachment: { _, _ in }, onPreviewTranscriptMedia: { _ in },
                 onToggleListening: { _ in }, onSubmitClarification: { _, _ in },
@@ -1187,6 +1396,166 @@ private struct ChatResponseMotionComponentsLabView: View {
 }
 
 
+#if DEBUG
+/// Both clocks are recorded because systemUptime is the interval clock and
+/// epoch time lets an external native trace identify the same process run.
+private struct ChatPerformanceSwitchStamp: Encodable {
+    let uptimeSeconds: TimeInterval
+    let epochMilliseconds: Int64
+
+    static func now() -> Self {
+        Self(
+            uptimeSeconds: ProcessInfo.processInfo.systemUptime,
+            epochMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000)
+        )
+    }
+}
+
+private enum ChatPerformanceAutoSwitchLaunch {
+    static let appInit = ChatPerformanceSwitchStamp.now()
+    static let flag = "--chat-performance-auto-switch"
+    static let runIDPrefix = "--chat-performance-auto-switch-run-id="
+
+    static func runID(arguments: [String]) -> UUID? {
+        guard arguments.filter({ $0 == flag }).count == 1 else { return nil }
+        let values = arguments.filter { $0.hasPrefix(runIDPrefix) }
+        guard values.count == 1 else { return nil }
+        let raw = String(values[0].dropFirst(runIDPrefix.count))
+        guard let id = UUID(uuidString: raw), id.uuidString == raw.uppercased() else { return nil }
+        return id
+    }
+}
+
+private struct ChatPerformanceAutoSwitchStep: Encodable {
+    let processID: Int32
+    let requestedChatNumber: Int
+    let generation: Int
+    let request: ChatPerformanceSwitchStamp
+    let destinationLifecycleOnAppear: ChatPerformanceSwitchStamp?
+    var destinationActivationObserved: ChatPerformanceSwitchStamp? = nil
+    let outcome: String
+}
+
+private struct ChatPerformanceAutoSwitchReport: Encodable {
+    let schema: String
+    let runID: String
+    let processID: Int32
+    let clockDomain: String
+    let readinessScope: String
+    let preparationScope: String
+    let appInit: ChatPerformanceSwitchStamp
+    let fixtureInitStart: ChatPerformanceSwitchStamp
+    let fixtureInitEnd: ChatPerformanceSwitchStamp
+    let driverStart: ChatPerformanceSwitchStamp
+    let initialDestinationLifecycleOnAppear: ChatPerformanceSwitchStamp?
+    let steps: [ChatPerformanceAutoSwitchStep]
+    let finished: ChatPerformanceSwitchStamp
+    let outcome: String
+    let appWideCallbackReport: String?
+    var retainedRootCount: Int? = nil
+    var rootMountCount: Int? = nil
+    var rootActivationCount: Int? = nil
+    var activeChatIdentity: String? = nil
+}
+#endif
+
+/// DEBUG rich-multi lab only. SwiftUI owns one representable per visited ID;
+/// each representable owns one hosting controller for its entire lifetime.
+/// Controller containment and root identity remain stable; inactive native views
+/// detach from the window while their hosting controller and state stay retained.
+private struct ChatPerformanceRetainedRootHost<Content: View>: UIViewControllerRepresentable {
+    let isActive: Bool
+    let content: Content
+    let onMount: () -> Void
+
+    /// A hosting boundary does not inherit the surrounding SwiftUI graph.
+    /// Forward all environment values (including modelContext, scenePhase,
+    /// palette, color scheme and dynamic type) on every update. Navigation
+    /// preferences cannot cross that boundary, so each retained tree owns its
+    /// own stable stack, including file/branch destinations and presentations.
+    struct Root: View {
+        var content: Content
+        var environment: EnvironmentValues
+
+        var body: some View {
+            NavigationStack {
+                content
+            }
+            .environment(\.self, environment)
+        }
+    }
+
+    /// SwiftUI owns the representable's outer view. Keep the retained hosting
+    /// view behind a separate UIKit containment boundary so inactive content is
+    /// genuinely outside the window/AX tree, not merely transparent within it.
+    final class Container: UIViewController {
+        final class Surface: UIView {
+            var acceptsInteraction = true
+            override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+                guard acceptsInteraction else { return nil }
+                return super.hitTest(point, with: event)
+            }
+        }
+
+        let host: UIHostingController<Root>
+        private var selected = false
+
+        init(root: Root) {
+            host = UIHostingController(rootView: root)
+            super.init(nibName: nil, bundle: nil)
+            host.safeAreaRegions = .container
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+        override func loadView() {
+            view = Surface()
+            view.backgroundColor = .clear
+            addChild(host)
+            host.view.backgroundColor = .clear
+            host.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            host.didMove(toParent: self)
+        }
+
+        func update(root: Root, active: Bool) {
+            loadViewIfNeeded()
+            host.rootView = root
+            selected = active
+            (view as? Surface)?.acceptsInteraction = active
+            host.view.isUserInteractionEnabled = active
+            host.view.accessibilityElementsHidden = !active
+            if active {
+                if host.view.superview == nil {
+                    host.view.frame = view.bounds
+                    view.addSubview(host.view)
+                }
+            } else {
+                // Retain the controller, root state, native view and its last
+                // geometry. Detach only the inactive view from the visible tree.
+                host.view.removeFromSuperview()
+            }
+        }
+
+        override func viewDidLayoutSubviews() {
+            super.viewDidLayoutSubviews()
+            if selected { host.view.frame = view.bounds }
+        }
+    }
+
+    func makeUIViewController(context: Context) -> Container {
+        let container = Container(root: Root(content: content, environment: context.environment))
+        container.update(root: Root(content: content, environment: context.environment), active: isActive)
+        let didMount = onMount
+        DispatchQueue.main.async { didMount() }
+        return container
+    }
+
+    func updateUIViewController(_ container: Container, context: Context) {
+        container.update(root: Root(content: content, environment: context.environment), active: isActive)
+    }
+}
+
 private struct ChatPerformanceMultiLabView: View {
     @State private var fixtures: [(
         session: SessionSummary,
@@ -1194,19 +1563,245 @@ private struct ChatPerformanceMultiLabView: View {
         viewModel: ChatViewModel
     )]
     @State private var selectedChat = 0
+    @State private var visitedRoots: Set<Int> = [0]
+    @State private var activationObservations: [Int: ChatPerformanceSwitchStamp] = [:]
+    @State private var rootMountCount = 0
+    @State private var rootActivationCount = 0
+    @State private var producerGeneration = 0
+    private var retainsRoots: Bool {
+        richThirty && ProcessInfo.processInfo.arguments.contains("--chat-performance-retained-roots")
+    }
     @State private var isStreamingFixture = false
     @State private var streamingTask: Task<Void, Never>?
+    @State private var switchGeneration = 0
+    @State private var lifecycleAppearances: [Int: ChatPerformanceSwitchStamp] = [:]
+    @State private var autoRunStarted = false
+    @State private var autoRunFinished = false
+    private let richThirty: Bool
+    private let fixtureInitStart: ChatPerformanceSwitchStamp
+    private let fixtureInitEnd: ChatPerformanceSwitchStamp
+    private let autoRunID: UUID?
 
-    init() {
-        _fixtures = State(initialValue: ChatViewModel.makePerformanceLabFixtures())
+    init(richThirty: Bool = false) {
+        self.richThirty = richThirty
+        fixtureInitStart = .now()
+        let preparedFixtures = richThirty
+            ? (1...2).map { ChatViewModel.makeRichThirtyPerformanceLabFixture(identity: $0) }
+            : ChatViewModel.makePerformanceLabFixtures()
+        fixtureInitEnd = .now()
+        _fixtures = State(initialValue: preparedFixtures)
+        autoRunID = richThirty
+            ? ChatPerformanceAutoSwitchLaunch.runID(arguments: ProcessInfo.processInfo.arguments)
+            : nil
+    }
+
+    @MainActor private func selectChat(_ index: Int) {
+        guard selectedChat != index else { return }
+        ChatPerformanceCadenceMonitor.begin(.switchChat)
+        if retainsRoots {
+            streamingTask?.cancel()
+            visitedRoots.insert(index)
+        }
+        if retainsRoots || (autoRunID != nil && !autoRunFinished) { switchGeneration += 1 }
+        selectedChat = index
+    }
+
+    /// A bounded wait for the actual destination lifecycle callback. Its
+    /// 20 ms check cadence is not used as a readiness or frame measurement.
+    @MainActor private func waitForAppearance(
+        generation: Int,
+        timeoutSeconds: TimeInterval = 6
+    ) async -> ChatPerformanceSwitchStamp? {
+        let deadline = ProcessInfo.processInfo.systemUptime + timeoutSeconds
+        ChatPerformanceInvalidationProbe.shared?.record("driver_wait_begin", a: min(generation, 1_000_000))
+        while !Task.isCancelled && ProcessInfo.processInfo.systemUptime < deadline {
+            if let appearance = (retainsRoots ? activationObservations[generation] : lifecycleAppearances[generation]) {
+                ChatPerformanceInvalidationProbe.shared?.record("driver_appearance_found", a: min(generation, 1_000_000))
+                return appearance
+            }
+            do { try await Task.sleep(for: .milliseconds(20)) }
+            catch {
+                ChatPerformanceInvalidationProbe.shared?.record("driver_wait_cancelled", a: min(generation, 1_000_000))
+                return nil
+            }
+        }
+        ChatPerformanceInvalidationProbe.shared?.record(
+            Task.isCancelled ? "driver_wait_cancelled" : "driver_wait_deadline",
+            a: min(generation, 1_000_000)
+        )
+        return retainsRoots ? activationObservations[generation] : lifecycleAppearances[generation]
+    }
+
+    @MainActor private func writeAutoReport(_ report: ChatPerformanceAutoSwitchReport) {
+        guard let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first,
+              let data = try? JSONEncoder().encode(report) else { return }
+        let url = documents.appendingPathComponent("chat-performance-auto-switch-\(report.runID).json")
+        do {
+            try data.write(to: url, options: .atomic)
+        } catch {
+            // The diagnostic is finite even if the sandbox cannot persist its report.
+            fputs("SEMREH_AUTO_SWITCH report_write_failed run_id=\(report.runID)\n", stderr)
+        }
+    }
+
+    @MainActor private func runAutoSwitch(runID: UUID) async {
+        let driverStart = ChatPerformanceSwitchStamp.now()
+        var steps: [ChatPerformanceAutoSwitchStep] = []
+        let initialAppearance = await waitForAppearance(generation: 0)
+        var outcome = initialAppearance == nil ? (Task.isCancelled ? "cancelled" : "initial_destination_timeout") : "complete"
+
+        if initialAppearance != nil {
+            // Diagnostic-only finite repetition; ordinary four-switch baseline
+            // and all production routing remain unchanged. No unbounded loop.
+            let switchCount = ProcessInfo.processInfo.arguments.contains(
+                "--chat-performance-repeat-switches") ? 24 : 4
+            for visit in 0..<switchCount {
+                let destination = visit.isMultiple(of: 2) ? 1 : 0
+                if Task.isCancelled { outcome = "cancelled"; break }
+                let request = ChatPerformanceSwitchStamp.now()
+                ChatPerformanceInvalidationProbe.shared?.record("driver_switch_request", a: destination + 1)
+                selectChat(destination)
+                let generation = switchGeneration
+                let appearance = await waitForAppearance(generation: generation)
+                ChatPerformanceInvalidationProbe.shared?.record("driver_wait_return", a: min(generation, 1_000_000), b: appearance == nil ? 0 : 1)
+                let stepOutcome = appearance != nil ? (retainsRoots ? "destination_activation_observed" : "destination_lifecycle_on_appear") : (Task.isCancelled ? "cancelled" : "timeout")
+                steps.append(ChatPerformanceAutoSwitchStep(
+                    processID: ProcessInfo.processInfo.processIdentifier,
+                    requestedChatNumber: destination + 1,
+                    generation: generation,
+                    request: request,
+                    destinationLifecycleOnAppear: retainsRoots ? lifecycleAppearances[generation] : appearance,
+                    destinationActivationObserved: retainsRoots ? appearance : nil,
+                    outcome: stepOutcome
+                ))
+                if appearance == nil { outcome = stepOutcome; break }
+                // Separate actions after an observed callback; this delay is
+                // outside the scored request-to-callback interval.
+                ChatPerformanceInvalidationProbe.shared?.record("driver_sleep_begin", a: min(generation, 1_000_000))
+                do { try await Task.sleep(for: .milliseconds(500)) }
+                catch { outcome = "cancelled"; break }
+                ChatPerformanceInvalidationProbe.shared?.record("driver_sleep_end", a: min(generation, 1_000_000))
+            }
+        }
+        if Task.isCancelled && outcome == "complete" { outcome = "cancelled" }
+
+        writeAutoReport(ChatPerformanceAutoSwitchReport(
+            schema: "semreh.chat.auto_switch.v1",
+            runID: runID.uuidString,
+            processID: ProcessInfo.processInfo.processIdentifier,
+            clockDomain: "ProcessInfo.systemUptime seconds since boot; epochMilliseconds Unix wall clock",
+            readinessScope: retainsRoots
+                ? "retained ChatView current-generation activity callback; SwiftUI onAppear recorded separately; mounts count native host creation; not rendered frame or FPS"
+                : "destination ChatView wrapper lifecycle onAppear; not first presented frame, FPS, or physical tap latency",
+            preparationScope: "appInit is HermesMobileApp.init entry; fixtureInitStart/End bracket lab fixture creation; process launch, Swift runtime and App construction before appInit are unmeasured",
+            appInit: ChatPerformanceAutoSwitchLaunch.appInit,
+            fixtureInitStart: fixtureInitStart,
+            fixtureInitEnd: fixtureInitEnd,
+            driverStart: driverStart,
+            initialDestinationLifecycleOnAppear: retainsRoots ? lifecycleAppearances[0] : initialAppearance,
+            steps: steps,
+            finished: .now(),
+            outcome: outcome,
+            appWideCallbackReport: ChatPerformanceCadenceMonitor.isAppWideOptedIn
+                ? ChatPerformanceCadenceMonitor.shared.summary().formattedReport : nil,
+            retainedRootCount: retainsRoots ? visitedRoots.count : nil,
+            rootMountCount: retainsRoots ? rootMountCount : nil,
+            rootActivationCount: retainsRoots ? rootActivationCount : nil,
+            activeChatIdentity: retainsRoots ? fixtures[selectedChat].session.id : nil
+        ))
+        autoRunFinished = true
+        if outcome == "complete",
+           ProcessInfo.processInfo.arguments.contains("--chat-performance-auto-stream"),
+           ProcessInfo.processInfo.arguments.contains("--chat-performance-paced-stream") {
+            let model = fixtures[selectedChat].viewModel
+            let producer = startStreamingTurn()
+            await withTaskCancellationHandler {
+                await producer.value
+            } onCancel: {
+                producer.cancel()
+            }
+            if var evidence = model.pacedPerformanceLabEvidence,
+               let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+                evidence["run_id"] = runID.uuidString
+                evidence["process_id"] = ProcessInfo.processInfo.processIdentifier
+                evidence["clock_domain"] = "ProcessInfo.systemUptime seconds since boot"
+                evidence["app_wide_callback_report"] = ChatPerformanceCadenceMonitor.shared.summary().formattedReport
+                if let probe = StreamingFadeWorkProbe.shared {
+                    evidence["fade_draw_work"] = probe.snapshot()
+                }
+                do {
+                    let data = try JSONSerialization.data(withJSONObject: evidence, options: [.sortedKeys])
+                    try data.write(to: documents.appendingPathComponent("chat-performance-paced-stream-\(runID.uuidString).json"), options: .atomic)
+                } catch {
+                    fputs("SEMREH_PACED_STREAM report_write_failed\n", stderr)
+                }
+            }
+        }
+        // Keep the same run UUID as the switch and paced-stream reports.
+        // Export after the awaited stream, or after switches in switch-only mode.
+        ChatPerformanceInvalidationProbe.shared?.write(runID: runID)
+    }
+
+    /// All producers share one chain: cancel and join the predecessor before
+    /// touching the next model. Generation ownership prevents stale cleanup.
+    @MainActor private func startStreamingTurn() -> Task<Void, Never> {
+        let previous = streamingTask
+        previous?.cancel()
+        producerGeneration += 1
+        let generation = producerGeneration
+        let index = selectedChat
+        let model = fixtures[index].viewModel
+        isStreamingFixture = true
+        let task = Task { @MainActor in
+            if let previous { await previous.value }
+            if !Task.isCancelled, generation == producerGeneration, selectedChat == index {
+                await model.appendPerformanceLabStreamingTurn()
+            }
+            guard generation == producerGeneration else { return }
+            isStreamingFixture = false
+            streamingTask = nil
+        }
+        streamingTask = task
+        return task
+    }
+
+    private func retainedRoot(_ index: Int) -> some View {
+        let fixture = fixtures[index]
+        let active = selectedChat == index
+        return ChatView(
+            session: fixture.session,
+            server: fixture.server,
+            onAPIError: { _ in },
+            loadsInitialMessages: false,
+            retainedViewModel: fixture.viewModel,
+            disablesExternalLifecycle: true,
+            isPresentationActive: active,
+            onPresentationActivation: {
+                guard selectedChat == index else { return }
+                // This callback follows the destination's effective activity gate.
+                activationObservations[switchGeneration] = .now()
+                rootActivationCount += 1
+                ChatPerformanceCadenceMonitor.end(.switchChat)
+            }
+        )
+        .onAppear {
+            if selectedChat == index { lifecycleAppearances[switchGeneration] = .now() }
+        }
+
     }
 
     var body: some View {
+        GeometryReader { geometry in
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 ForEach(fixtures.indices, id: \.self) { index in
-                    Button("Performance chat \(index + 1)") {
-                        selectedChat = index
+                    Button {
+                        selectChat(index)
+                    } label: {
+                        Text("Performance chat \(index + 1)")
+                            .font(.caption)
+                            .lineLimit(2)
+                            .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.bordered)
                     .tint(selectedChat == index ? .accentColor : .secondary)
@@ -1214,15 +1809,14 @@ private struct ChatPerformanceMultiLabView: View {
                     .accessibilityAddTraits(selectedChat == index ? .isSelected : [])
                 }
 
-                Button("Stream test turn") {
+                Button {
                     guard !isStreamingFixture else { return }
-                    isStreamingFixture = true
-                    let viewModel = fixtures[selectedChat].viewModel
-                    streamingTask = Task { @MainActor in
-                        await viewModel.appendPerformanceLabStreamingTurn()
-                        isStreamingFixture = false
-                        streamingTask = nil
-                    }
+                    _ = startStreamingTurn()
+                } label: {
+                    Text("Stream test turn")
+                        .font(.caption)
+                        .lineLimit(2)
+                        .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(isStreamingFixture)
@@ -1232,6 +1826,21 @@ private struct ChatPerformanceMultiLabView: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 6)
 
+            if retainsRoots {
+                ZStack {
+                    ForEach(visitedRoots.sorted(), id: \.self) { index in
+                        ChatPerformanceRetainedRootHost(
+                            isActive: selectedChat == index,
+                            content: retainedRoot(index),
+                            onMount: { rootMountCount += 1 }
+                        )
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                }
+                // The child hosts own navigation; suppress only the lab's
+                // otherwise empty outer bar. Production routing is untouched.
+                .toolbar(.hidden, for: .navigationBar)
+            } else {
             let fixture = fixtures[selectedChat]
             ChatView(
                 session: fixture.session,
@@ -1241,12 +1850,29 @@ private struct ChatPerformanceMultiLabView: View {
                 retainedViewModel: fixture.viewModel,
                 disablesExternalLifecycle: true
             )
+            .onAppear {
+                if autoRunID != nil && !autoRunFinished {
+                    lifecycleAppearances[switchGeneration] = .now()
+                }
+            }
+            // The observer must be inside the replaced destination identity.
+            // An observer outside .id remains mounted across A/B switches.
             .id(fixture.session.id)
+            }
+        }
+        // Diagnostic controls must not enlarge the viewport offered to ChatView.
+        // Keep the real device width; do not clip an already oversized transcript.
+        .frame(width: geometry.size.width, height: geometry.size.height)
+        }
+        .task {
+            guard let autoRunID, !autoRunStarted else { return }
+            autoRunStarted = true
+            await runAutoSwitch(runID: autoRunID)
         }
         .onDisappear {
             streamingTask?.cancel()
-            streamingTask = nil
-            isStreamingFixture = false
+            // Keep the cancelled task until its generation-owned cleanup joins it.
+
         }
     }
 }
@@ -1578,6 +2204,34 @@ private struct SidebarBrandLabView: View {
 
                 Spacer()
             }
+        }
+    }
+}
+#endif
+
+#if SEMREH_INTERNAL_CHAT_PREVIEW && targetEnvironment(simulator) && !DEBUG
+/// Signed Release smoke route, compiled only for the internal simulator build.
+/// Settings and each newly opened chat use their production preference policy.
+@MainActor
+private struct InternalChatPreviewSmokeView: View {
+    @State private var authManager = AuthManager()
+    @State private var fixture = ChatViewModel.makeInternalChatPreviewSmokeFixture()
+
+    var body: some View {
+        NavigationStack {
+            List {
+                NavigationLink("Chat settings") {
+                    SettingsView(authManager: authManager, server: fixture.server, destination: .chat)
+                }
+                .accessibilityIdentifier("internal-preview-settings")
+                NavigationLink("Open preview chat") {
+                    ChatView(session: fixture.session, server: fixture.server,
+                             onAPIError: { _ in }, loadsInitialMessages: false,
+                             retainedViewModel: fixture.viewModel, disablesExternalLifecycle: true)
+                }
+                .accessibilityIdentifier("internal-preview-open-chat")
+            }
+            .navigationTitle("Internal renderer smoke")
         }
     }
 }

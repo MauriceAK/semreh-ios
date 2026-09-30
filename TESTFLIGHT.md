@@ -1,5 +1,27 @@
 # External TestFlight Launch Runbook
 
+## Internal chat-renderer preview
+
+The maintainer's `internal_testflight` Fastlane lane adds
+`SEMREH_INTERNAL_CHAT_PREVIEW` to the **Release** archive. It does not define
+`DEBUG`, enable performance labs, or change external distribution. Ordinary
+Release builds do not expose the preview.
+
+The preview is device-local and **off by default**. In TestFlight, open
+**Settings → Chat → Experimental chat renderer**, enable it, then leave and
+reopen the chat. Turning it off and reopening returns to the existing renderer.
+Each chat captures its renderer choice on first presentation, so changing the setting
+cannot replace a mounted transcript mid-gesture. If a retained iPad detail stays
+open, close that detail or restart the app to apply the choice.
+
+The internal Release Simulator has an explicit `--internal-chat-preview-smoke`
+route for the production Settings toggle and chat renderer with deterministic
+local messages. That route is not compiled for physical devices. Its focused
+UI selector is
+`LongChatScrollUITests/testInternalReleaseRendererTogglePersistenceAndFallback`.
+This is an experimental preview, not a claim of Muse-level smoothness.
+
+
 > **Maintainer-only ops.** Everything in this file requires the maintainer's Apple Developer account, App Store Connect access, and signing credentials. Contributors never need this runbook to build, test, or contribute to the app.
 
 This is the step-by-step checklist for getting Semreh ready for external TestFlight testers. Work through it in order. Each numbered item is intended to be a fresh, focused Codex session or an owner-only App Store Connect task.

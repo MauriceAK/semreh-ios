@@ -74,6 +74,31 @@ enum ChatDebugTranscriptWindowPolicy {
 /// interaction prevents streaming layout growth from yanking the viewport
 /// while a manual scroll is still settling.
 enum ChatScrollPolicy {
+    #if DEBUG
+    enum EagerArrowMotionDecision: String {
+        case flagOff = "flag_off"
+        case nonEager = "non_eager"
+        case replacedWindow = "replaced_window"
+        case reduceMotion = "reduce_motion"
+        case directInteraction = "direct_interaction"
+        case animate = "animate"
+
+        var isEligible: Bool { self == .animate }
+    }
+
+    static func eagerArrowMotionDecision(
+        requested: Bool, windowedEager: Bool, sameMountedWindow: Bool,
+        reduceMotion: Bool, isDirectlyInteracting: Bool, isDecelerating: Bool
+    ) -> EagerArrowMotionDecision {
+        _ = isDecelerating // Inherited deceleration is not a new finger gesture.
+        guard requested else { return .flagOff }
+        guard windowedEager else { return .nonEager }
+        guard sameMountedWindow else { return .replacedWindow }
+        guard !reduceMotion else { return .reduceMotion }
+        guard !isDirectlyInteracting else { return .directInteraction }
+        return .animate
+    }
+    #endif
     /// Existing transcripts should enter at their latest content as part of the
     /// scroll view's first layout, before the destination becomes visible.
     static let initialTranscriptAnchor = UnitPoint.bottom
@@ -453,6 +478,19 @@ enum ChatTranscriptVisibilityPolicy {
                 return lhs.value.minY < rhs.value.minY
             }
             .map { VisibleRow(id: $0.key, frame: $0.value) }
+    }
+
+    /// A row preference can arrive before the first drag metrics and be
+    /// rejected by the parent's pending-restore guard. Replay that observation
+    /// after metrics transfer ownership to the reader, even if the row has not
+    /// changed (and therefore will not produce another row-change callback).
+    static func visibleMessageIDForReaderHandoff(
+        observedID: String?, wasDirectlyInteracting: Bool,
+        isDirectlyInteracting: Bool, isAttachedToActiveScene: Bool
+    ) -> String? {
+        guard isAttachedToActiveScene, isDirectlyInteracting,
+              !wasDirectlyInteracting else { return nil }
+        return observedID
     }
 
     /// A preference pass can transiently contain no realized rows while a lazy
@@ -966,5 +1004,44 @@ enum ChatLiveReconcilePolicy {
             return !trimmed.isEmpty
         }
         return present(loadedActiveStreamID) || present(localActiveStreamID)
+    }
+}
+
+
+/// Device-local opt-in. Capture once per ChatView identity; never read defaults
+/// from a mounted transcript or leaf renderer.
+enum InternalChatRendererPolicy {
+    static let storageKey = "semreh.experimentalChatRenderer"
+    static let toggleIdentifier = "experimental-chat-renderer-toggle"
+    static var isAvailable: Bool {
+#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
+        true
+#else
+        false
+#endif
+    }
+    static func capture(defaults: UserDefaults = .standard,
+                        arguments: [String] = ProcessInfo.processInfo.arguments) -> Bool {
+        guard isAvailable else { return false }
+#if DEBUG
+        if arguments.contains("--chat-native-transcript-v2") { return true }
+#endif
+        return defaults.bool(forKey: storageKey)
+    }
+    static func debugArgument(_ name: String) -> Bool {
+#if DEBUG
+        ProcessInfo.processInfo.arguments.contains(name)
+#else
+        false
+#endif
+    }
+}
+private struct InternalChatRendererSelectionKey: EnvironmentKey {
+    static let defaultValue = false
+}
+extension EnvironmentValues {
+    var internalChatRendererEnabled: Bool {
+        get { self[InternalChatRendererSelectionKey.self] }
+        set { self[InternalChatRendererSelectionKey.self] = newValue }
     }
 }

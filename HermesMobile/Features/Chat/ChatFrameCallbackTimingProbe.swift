@@ -4,6 +4,76 @@ import QuartzCore
 import SwiftUI
 import UIKit
 
+/// DEBUG-only event trace. The optional singleton leaves the disabled path
+/// without event storage or observable SwiftUI state.
+@MainActor
+final class ChatPerformanceInvalidationProbe {
+    static let launchArgument = "--chat-performance-invalidation-probe"
+    static let shared: ChatPerformanceInvalidationProbe? =
+        ProcessInfo.processInfo.arguments.contains(launchArgument) ? ChatPerformanceInvalidationProbe() : nil
+    static let defaultCapacity = 8_192
+
+    struct Event: Encodable, Equatable {
+        let kind: String
+        let time: TimeInterval
+        let a: Int
+        let b: Int
+        let c: Int
+    }
+
+    struct Report: Encodable {
+        let schema: String
+        let runID: String
+        let processID: Int32
+        let clockDomain: String
+        let capacity: Int
+        let droppedCount: Int
+        let events: [Event]
+    }
+
+    let capacity: Int
+    private var ring: [Event?]
+    private var next = 0
+    private(set) var count = 0
+    private(set) var droppedCount = 0
+
+    init(capacity: Int = 8_192) {
+        precondition(capacity > 0)
+        self.capacity = capacity
+        ring = Array(repeating: nil, count: capacity)
+    }
+
+    func record(_ kind: String, at time: TimeInterval = CACurrentMediaTime(),
+                a: Int = 0, b: Int = 0, c: Int = 0) {
+        guard time.isFinite else { return }
+        if count == capacity { droppedCount = droppedCount == Int.max ? Int.max : droppedCount + 1 }
+        else { count += 1 }
+        ring[next] = Event(kind: kind, time: time, a: a, b: b, c: c)
+        next = (next + 1) % capacity
+    }
+
+    func events() -> [Event] {
+        let start = count == capacity ? next : 0
+        return (0..<count).compactMap { ring[(start + $0) % capacity] }
+    }
+
+    func report(runID: UUID, processID: Int32 = ProcessInfo.processInfo.processIdentifier) -> Report {
+        Report(schema: "semreh.chat.invalidation.v1", runID: runID.uuidString,
+               processID: processID, clockDomain: "CACurrentMediaTime mach_absolute_seconds",
+               capacity: capacity, droppedCount: droppedCount, events: events())
+    }
+
+    func write(runID: UUID) {
+        guard let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
+        do {
+            let data = try JSONEncoder().encode(report(runID: runID))
+            try data.write(to: documents.appendingPathComponent("chat-performance-invalidation-\(runID.uuidString).json"), options: .atomic)
+        } catch {
+            fputs("SEMREH_INVALIDATION_PROBE report_write_failed\n", stderr)
+        }
+    }
+}
+
 /// Bounded summary of main-run-loop CADisplayLink callback timing. This does
 /// not observe whether Core Animation or the GPU presented a frame.
 struct ChatFrameCallbackTimingSummary: Equatable {
@@ -14,6 +84,8 @@ struct ChatFrameCallbackTimingSummary: Equatable {
     let maximumTargetIntervalsBetweenCallbacks: Int
     let p95TargetIntervalsBetweenCallbacks: Int?
     let p99TargetIntervalsBetweenCallbacks: Int?
+    let minimumObservedTargetIntervalMilliseconds: Double?
+    let maximumObservedTargetIntervalMilliseconds: Double?
     let maximumCallbackGapMilliseconds: Double?
     /// Monotonic callback timestamps for the exact gap represented by
     /// `maximumCallbackGapMilliseconds`. The app-wide monitor converts these
@@ -23,12 +95,16 @@ struct ChatFrameCallbackTimingSummary: Equatable {
     let maximumCallbackGapTargetIntervals: Int?
     let p95CallbackGapMillisecondBin: Int?
     let p99CallbackGapMillisecondBin: Int?
+    let p50CallbackGapMillisecondBin: Int?
+    let callbackGapsOver50Milliseconds: Int
+    let callbackGapsOver100Milliseconds: Int
     let measuredCallbackGapSeconds: TimeInterval
     let cadenceChangeRebases: Int
 
     var formattedReport: String {
         return ([
             "measurement=CADisplayLink main-run-loop callback timing only",
+            "clock_domain=mach_absolute_seconds",
             "presented_frame_hitches=not_measured",
             "fps=not_measured",
             "gpu_timing=not_measured",
@@ -43,6 +119,7 @@ struct ChatFrameCallbackTimingSummary: Equatable {
         let maximumGap = maximumCallbackGapMilliseconds.map { String(format: "%.2f", $0) } ?? "none"
         let p95Gap = Self.formattedMillisecondBucket(p95CallbackGapMillisecondBin)
         let p99Gap = Self.formattedMillisecondBucket(p99CallbackGapMillisecondBin)
+        let p50Gap = Self.formattedMillisecondBucket(p50CallbackGapMillisecondBin)
         let p95Intervals = Self.formattedIntervalBucket(p95TargetIntervalsBetweenCallbacks)
         let p99Intervals = Self.formattedIntervalBucket(p99TargetIntervalsBetweenCallbacks)
 
@@ -51,12 +128,19 @@ struct ChatFrameCallbackTimingSummary: Equatable {
             "callbacks=\(callbackCount)",
             "callback_gaps=\(callbackGapCount)",
             "measured_callback_gap_coverage_seconds=\(String(format: "%.3f", measuredCallbackGapSeconds))",
+            "effective_callback_hz_proxy=\(measuredCallbackGapSeconds > 0 ? String(format: "%.2f", Double(callbackGapCount) / measuredCallbackGapSeconds) : "none")",
+            "observed_target_interval_min_ms=\(minimumObservedTargetIntervalMilliseconds.map { String(format: "%.3f", $0) } ?? "none")",
+            "observed_target_interval_max_ms=\(maximumObservedTargetIntervalMilliseconds.map { String(format: "%.3f", $0) } ?? "none")",
             "estimated_missed_target_intervals=\(estimatedMissedTargetIntervals)",
+            "estimated_missed_target_interval_ratio=\(callbackGapCount > 0 ? String(format: "%.6f", Double(estimatedMissedTargetIntervals) / (Double(callbackGapCount) + Double(estimatedMissedTargetIntervals))) : "none")",
+            "callback_gaps_over_50_ms=\(callbackGapsOver50Milliseconds)",
+            "callback_gaps_over_100_ms=\(callbackGapsOver100Milliseconds)",
             "callback_gaps_with_estimated_misses=\(callbackGapsWithEstimatedMisses)",
             "maximum_target_intervals_between_callbacks=\(maximumTargetIntervalsBetweenCallbacks)",
             "p95_target_intervals_between_callbacks=\(p95Intervals)",
             "p99_target_intervals_between_callbacks=\(p99Intervals)",
             "maximum_callback_gap_ms=\(maximumGap)",
+            "p50_callback_gap_ms_upper_bin=\(p50Gap)",
             "p95_callback_gap_ms_upper_bin=\(p95Gap)",
             "p99_callback_gap_ms_upper_bin=\(p99Gap)",
             "cadence_change_rebases=\(cadenceChangeRebases)",
@@ -101,6 +185,10 @@ final class ChatFrameCallbackTimingAccumulator: ChatFrameCallbackTimingRecorder 
     private(set) var callbackGapsWithEstimatedMisses = 0
     private(set) var maximumTargetIntervalsBetweenCallbacks = 0
     private(set) var maximumCallbackGapMilliseconds: Double?
+    private(set) var minimumObservedTargetIntervalMilliseconds: Double?
+    private(set) var maximumObservedTargetIntervalMilliseconds: Double?
+    private(set) var callbackGapsOver50Milliseconds = 0
+    private(set) var callbackGapsOver100Milliseconds = 0
     private(set) var maximumCallbackGapStartTime: TimeInterval?
     private(set) var maximumCallbackGapEndTime: TimeInterval?
     private(set) var maximumCallbackGapTargetIntervals: Int?
@@ -120,6 +208,10 @@ final class ChatFrameCallbackTimingAccumulator: ChatFrameCallbackTimingRecorder 
         callbackGapsWithEstimatedMisses = 0
         maximumTargetIntervalsBetweenCallbacks = 0
         maximumCallbackGapMilliseconds = nil
+        minimumObservedTargetIntervalMilliseconds = nil
+        maximumObservedTargetIntervalMilliseconds = nil
+        callbackGapsOver50Milliseconds = 0
+        callbackGapsOver100Milliseconds = 0
         maximumCallbackGapStartTime = nil
         maximumCallbackGapEndTime = nil
         maximumCallbackGapTargetIntervals = nil
@@ -142,6 +234,11 @@ final class ChatFrameCallbackTimingAccumulator: ChatFrameCallbackTimingRecorder 
         }
 
         callbackCount = Self.saturatingAdd(callbackCount, 1)
+        let targetMilliseconds = targetInterval * 1_000
+        if targetMilliseconds.isFinite {
+            minimumObservedTargetIntervalMilliseconds = min(minimumObservedTargetIntervalMilliseconds ?? targetMilliseconds, targetMilliseconds)
+            maximumObservedTargetIntervalMilliseconds = max(maximumObservedTargetIntervalMilliseconds ?? targetMilliseconds, targetMilliseconds)
+        }
 
         guard let previousCallbackTime, let previousTargetInterval else {
             self.previousCallbackTime = callbackTime
@@ -182,6 +279,8 @@ final class ChatFrameCallbackTimingAccumulator: ChatFrameCallbackTimingRecorder 
         let missedCount = intervalCount - 1
 
         callbackGapCount = Self.saturatingAdd(callbackGapCount, 1)
+        if gapMilliseconds > 50 { callbackGapsOver50Milliseconds = Self.saturatingAdd(callbackGapsOver50Milliseconds, 1) }
+        if gapMilliseconds > 100 { callbackGapsOver100Milliseconds = Self.saturatingAdd(callbackGapsOver100Milliseconds, 1) }
         Self.increment(&callbackGapHistogram, at: Self.callbackGapBin(for: gapMilliseconds))
         Self.increment(&targetIntervalHistogram, at: min(intervalCount, Self.targetIntervalBinCount - 1))
         estimatedMissedTargetIntervals = Self.saturatingAdd(estimatedMissedTargetIntervals, missedCount)
@@ -218,6 +317,8 @@ final class ChatFrameCallbackTimingAccumulator: ChatFrameCallbackTimingRecorder 
                 sampleCount: callbackGapCount,
                 percentile: 0.99
             ),
+            minimumObservedTargetIntervalMilliseconds: minimumObservedTargetIntervalMilliseconds,
+            maximumObservedTargetIntervalMilliseconds: maximumObservedTargetIntervalMilliseconds,
             maximumCallbackGapMilliseconds: maximumCallbackGapMilliseconds,
             maximumCallbackGapStartTime: maximumCallbackGapStartTime,
             maximumCallbackGapEndTime: maximumCallbackGapEndTime,
@@ -232,6 +333,13 @@ final class ChatFrameCallbackTimingAccumulator: ChatFrameCallbackTimingRecorder 
                 sampleCount: callbackGapCount,
                 percentile: 0.99
             ),
+            p50CallbackGapMillisecondBin: Self.percentileBucket(
+                in: callbackGapHistogram,
+                sampleCount: callbackGapCount,
+                percentile: 0.50
+            ),
+            callbackGapsOver50Milliseconds: callbackGapsOver50Milliseconds,
+            callbackGapsOver100Milliseconds: callbackGapsOver100Milliseconds,
             measuredCallbackGapSeconds: measuredCallbackGapSeconds,
             cadenceChangeRebases: cadenceChangeRebases
         )
@@ -274,12 +382,24 @@ enum ChatPerformanceCadencePhase: String, CaseIterable, Hashable {
     case entry
     case back
     case send
+    case scroll
+    case arrow
+    case paging
+    case streamFollow
+    case streamParked
+    case switchChat
 
     fileprivate var index: Int {
         switch self {
         case .entry: return 0
         case .back: return 1
         case .send: return 2
+        case .scroll: return 3
+        case .arrow: return 4
+        case .paging: return 5
+        case .streamFollow: return 6
+        case .streamParked: return 7
+        case .switchChat: return 8
         }
     }
 }
@@ -456,16 +576,19 @@ struct ChatPerformanceCadenceMonitorSummary: Equatable {
     let scenePauseCount: Int
     let scenePauseSeconds: TimeInterval
     let sampleDurationSeconds: TimeInterval
+    let phasesOpenAtStop: Int
 
     var formattedReport: String {
         var lines = [
             "measurement=CADisplayLink main-run-loop callback timing only",
+            "clock_domain=mach_absolute_seconds",
             "presented_frame_hitches=not_measured",
             "fps=not_measured",
             "gpu_timing=not_measured",
             "scope=DEBUG opt-in app-wide cadence monitor",
             "sample_duration_seconds=\(String(format: "%.3f", sampleDurationSeconds))",
-            "phase_marker_scope=entry ends at ChatView.onAppear; back ends at return observation; send ends when sendDraftMessage returns; not first-presented-frame timing"
+            "phases_open_at_stop=\(phasesOpenAtStop)",
+            "phase_marker_scope=entry/switch end at UIKit appearance completion; back ends at return observation; scroll ends after interaction/deceleration; arrow ends at tail settlement/cancellation; paging ends at older-state publication, viewport readiness separate; stream ends at turn completion/disappearance; lifecycle proxies, not presented-frame timing"
         ]
 
         if let worstGapCorrelation {
@@ -531,11 +654,13 @@ struct ChatPerformanceCadenceMonitorSummary: Equatable {
 /// `record` on the main run loop.
 final class ChatPerformanceCadenceMonitor: ChatFrameCallbackTimingRecorder {
     static let appWideOptInArgument = "--chat-performance-app-wide-monitor"
+    private static let invalidationProbeOptedIn =
+        ProcessInfo.processInfo.arguments.contains("--chat-performance-invalidation-probe")
     static let shared = ChatPerformanceCadenceMonitor()
     /// Phase markers are sparse interaction boundaries, so a small bounded
     /// history is enough to correlate the largest callback gap without
     /// retaining an unbounded event timeline.
-    static let phaseBoundaryRecordCapacity = 32
+    static let phaseBoundaryRecordCapacity = 128
 
     private struct AbsolutePhaseBoundaryRecord {
         let phase: ChatPerformanceCadencePhase
@@ -555,7 +680,7 @@ final class ChatPerformanceCadenceMonitor: ChatFrameCallbackTimingRecorder {
         ChatPerformancePhaseTimingAccumulator()
     }
     private var phaseEventCounts = ChatPerformanceCadencePhase.allCases.map { _ in 0 }
-    private var activePhase: ChatPerformanceCadencePhase?
+    private var activePhases: Set<ChatPerformanceCadencePhase> = []
     private var isSampling = false
     private var isSceneActive = true
     private var scenePauseStartedAt: TimeInterval?
@@ -563,9 +688,12 @@ final class ChatPerformanceCadenceMonitor: ChatFrameCallbackTimingRecorder {
     private var scenePauseSeconds: TimeInterval = 0
     private var sampleStartedAt: TimeInterval?
     private var phaseBoundaryRecords: [AbsolutePhaseBoundaryRecord] = []
-    private var activePhaseStartedAt: TimeInterval?
+    private var activePhaseStartedAt: [ChatPerformanceCadencePhase: TimeInterval] = [:]
+    private var phasesOpenAtStop = 0
+    private var previousInvalidationCallbackTime: TimeInterval?
 
     func startSampling(at time: TimeInterval = CACurrentMediaTime()) {
+        previousInvalidationCallbackTime = nil
         aggregate.reset()
         for accumulator in phaseAccumulators {
             accumulator.reset()
@@ -574,7 +702,7 @@ final class ChatPerformanceCadenceMonitor: ChatFrameCallbackTimingRecorder {
             accumulator.reset()
         }
         phaseEventCounts = ChatPerformanceCadencePhase.allCases.map { _ in 0 }
-        activePhase = nil
+        activePhases.removeAll()
         isSampling = true
         isSceneActive = true
         scenePauseStartedAt = nil
@@ -582,15 +710,17 @@ final class ChatPerformanceCadenceMonitor: ChatFrameCallbackTimingRecorder {
         scenePauseSeconds = 0
         sampleStartedAt = time.isFinite ? time : nil
         phaseBoundaryRecords.removeAll(keepingCapacity: true)
-        activePhaseStartedAt = nil
+        activePhaseStartedAt.removeAll()
+        phasesOpenAtStop = 0
     }
 
     func stopSampling(at time: TimeInterval = CACurrentMediaTime()) -> ChatPerformanceCadenceMonitorSummary {
-        if let activePhase {
-            finishActivePhaseBoundary(at: time)
-            phaseTimingAccumulators[activePhase.index].end(at: time)
-            self.activePhase = nil
+        phasesOpenAtStop = activePhases.count
+        for phase in activePhases {
+            finishActivePhaseBoundary(phase, at: time)
+            phaseTimingAccumulators[phase.index].end(at: time)
         }
+        activePhases.removeAll()
         let result = summary(at: time)
         isSampling = false
         pause()
@@ -606,7 +736,7 @@ final class ChatPerformanceCadenceMonitor: ChatFrameCallbackTimingRecorder {
             accumulator.reset()
         }
         phaseEventCounts = ChatPerformanceCadencePhase.allCases.map { _ in 0 }
-        activePhase = nil
+        activePhases.removeAll()
         isSampling = false
         isSceneActive = true
         scenePauseStartedAt = nil
@@ -614,7 +744,8 @@ final class ChatPerformanceCadenceMonitor: ChatFrameCallbackTimingRecorder {
         scenePauseSeconds = 0
         sampleStartedAt = nil
         phaseBoundaryRecords.removeAll(keepingCapacity: true)
-        activePhaseStartedAt = nil
+        activePhaseStartedAt.removeAll()
+        phasesOpenAtStop = 0
     }
 
     func beginPhase(
@@ -622,13 +753,9 @@ final class ChatPerformanceCadenceMonitor: ChatFrameCallbackTimingRecorder {
         at time: TimeInterval = CACurrentMediaTime()
     ) {
         guard isSampling else { return }
-        if let activePhase {
-            finishActivePhaseBoundary(at: time)
-            phaseAccumulators[activePhase.index].pause()
-            phaseTimingAccumulators[activePhase.index].end(at: time)
-        }
-        activePhase = phase
-        activePhaseStartedAt = time.isFinite ? time : nil
+        guard !activePhases.contains(phase) else { return }
+        activePhases.insert(phase)
+        if time.isFinite { activePhaseStartedAt[phase] = time }
         phaseAccumulators[phase.index].pause()
         phaseTimingAccumulators[phase.index].begin(at: time)
         if !isSceneActive {
@@ -641,12 +768,12 @@ final class ChatPerformanceCadenceMonitor: ChatFrameCallbackTimingRecorder {
         _ phase: ChatPerformanceCadencePhase,
         at time: TimeInterval = CACurrentMediaTime()
     ) {
-        guard isSampling, activePhase == phase else { return }
-        finishActivePhaseBoundary(at: time)
+        guard isSampling, activePhases.contains(phase) else { return }
+        finishActivePhaseBoundary(phase, at: time)
         phaseAccumulators[phase.index].pause()
         phaseTimingAccumulators[phase.index].end(at: time)
-        activePhase = nil
-        activePhaseStartedAt = nil
+        activePhases.remove(phase)
+        activePhaseStartedAt.removeValue(forKey: phase)
     }
 
     /// Scene changes are lifecycle boundaries, not frame samples. Resuming
@@ -676,10 +803,26 @@ final class ChatPerformanceCadenceMonitor: ChatFrameCallbackTimingRecorder {
 
     func record(callbackTime: TimeInterval, targetInterval: TimeInterval) {
         guard isSampling, isSceneActive else { return }
+        if Self.invalidationProbeOptedIn,
+           let previous = previousInvalidationCallbackTime,
+           previous.isFinite, callbackTime.isFinite,
+           callbackTime - previous > 0.1 {
+            // Both endpoints use the same mach clock as every probe event.
+            MainActor.assumeIsolated {
+                ChatPerformanceInvalidationProbe.shared?.record(
+                    "display_link_gap_start", at: previous
+                )
+                ChatPerformanceInvalidationProbe.shared?.record(
+                    "display_link_gap_end", at: callbackTime,
+                    a: Int(min(1_000_000, (callbackTime - previous) * 1_000))
+                )
+            }
+        }
+        previousInvalidationCallbackTime = callbackTime
         aggregate.record(callbackTime: callbackTime, targetInterval: targetInterval)
-        if let activePhase {
-            phaseTimingAccumulators[activePhase.index].recordFirstCallback(at: callbackTime)
-            phaseAccumulators[activePhase.index].record(
+        for phase in activePhases {
+            phaseTimingAccumulators[phase.index].recordFirstCallback(at: callbackTime)
+            phaseAccumulators[phase.index].record(
                 callbackTime: callbackTime,
                 targetInterval: targetInterval
             )
@@ -687,6 +830,7 @@ final class ChatPerformanceCadenceMonitor: ChatFrameCallbackTimingRecorder {
     }
 
     func pause() {
+        previousInvalidationCallbackTime = nil
         aggregate.pause()
         for accumulator in phaseAccumulators {
             accumulator.pause()
@@ -727,11 +871,12 @@ final class ChatPerformanceCadenceMonitor: ChatFrameCallbackTimingRecorder {
             phaseBoundaryRecords: relativeBoundaries,
             scenePauseCount: scenePauseCount,
             scenePauseSeconds: completedPauseSeconds,
-            sampleDurationSeconds: duration
+            sampleDurationSeconds: duration,
+            phasesOpenAtStop: phasesOpenAtStop
         )
     }
 
-    /// Fixed storage across the aggregate and three phase accumulators. This
+    /// Fixed storage across the aggregate and named phase accumulators. This
     /// is exposed only for deterministic DEBUG unit coverage, not for the UI.
     var histogramStorageCount: Int {
         aggregate.histogramStorageCount
@@ -767,14 +912,13 @@ final class ChatPerformanceCadenceMonitor: ChatFrameCallbackTimingRecorder {
         shared.setSceneActive(active)
     }
 
-    private func finishActivePhaseBoundary(at time: TimeInterval) {
-        defer { activePhaseStartedAt = nil }
-        guard let activePhase, let startTime = activePhaseStartedAt,
+    private func finishActivePhaseBoundary(_ phase: ChatPerformanceCadencePhase, at time: TimeInterval) {
+        guard let startTime = activePhaseStartedAt.removeValue(forKey: phase),
               startTime.isFinite, time.isFinite else { return }
 
         appendPhaseBoundary(
             AbsolutePhaseBoundaryRecord(
-                phase: activePhase,
+                phase: phase,
                 startTime: startTime,
                 endTime: max(startTime, time)
             )
@@ -790,19 +934,14 @@ final class ChatPerformanceCadenceMonitor: ChatFrameCallbackTimingRecorder {
 
     private func absolutePhaseBoundaryRecords(at time: TimeInterval) -> [AbsolutePhaseBoundaryRecord] {
         var records = phaseBoundaryRecords
-        guard let activePhase, let startTime = activePhaseStartedAt,
-              startTime.isFinite, time.isFinite else { return records }
-
-        if records.count >= Self.phaseBoundaryRecordCapacity {
-            records.removeFirst()
+        for phase in activePhases {
+            guard let startTime = activePhaseStartedAt[phase],
+                  startTime.isFinite, time.isFinite else { continue }
+            if records.count >= Self.phaseBoundaryRecordCapacity { records.removeFirst() }
+            records.append(AbsolutePhaseBoundaryRecord(
+                phase: phase, startTime: startTime, endTime: max(startTime, time)
+            ))
         }
-        records.append(
-            AbsolutePhaseBoundaryRecord(
-                phase: activePhase,
-                startTime: startTime,
-                endTime: max(startTime, time)
-            )
-        )
         return records
     }
 

@@ -1,0 +1,1307 @@
+#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
+import SwiftUI
+import UIKit
+
+/// Independent, opt-in transcript. Only this controller owns the native viewport.
+struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
+    let ids: [String]
+    let revisionAt: (Int) -> StableViewportRowRevision
+    let revision: Int
+    let typeKey: String
+    let scope: String
+    let initialID: String?
+    let restoreRequest: ChatTranscriptRestoreRequest?
+    let cancellationToken: Int
+    let latestToken: Int
+    let explicitLatest: Bool
+    let following: Bool
+    var isStreaming: Bool = false
+    let horizontalPadding: CGFloat
+    let spacing: CGFloat
+    let bottomInset: CGFloat
+    let environment: EnvironmentValues
+    /// Opt-in only for inert geometry with no captured actions. Factories remain
+    /// authoritative; rich content uses nil and refreshes on every update.
+    enum BoundaryRevision: Equatable { case spacer(height: CGFloat) }
+    var headerRevision: BoundaryRevision? = nil
+    var footerRevision: BoundaryRevision? = nil
+    let makeRow: (Int) -> AnyView
+    let makeHeader: () -> AnyView
+    let makeFooter: () -> AnyView
+    let onLatest: () -> Void
+    let onState: (ChatScrollMetrics, String?, Bool, Bool) -> Void
+    let onRestore: (ChatTranscriptRestoreRequest, ChatTranscriptRestoreOutcome) -> Void
+    let onRefresh: @MainActor (@escaping @MainActor () -> Bool) async -> Void
+
+    func makeUIViewController(context: Context) -> Controller { Controller(input: self) }
+    func updateUIViewController(_ controller: Controller, context: Context) { controller.update(self) }
+    static func dismantleUIViewController(_ controller: Controller, coordinator: ()) { controller.stop() }
+
+    class Collection: UICollectionView {
+        var willLayout: (() -> Void)?
+        var didLayout: (() -> Void)?
+        override func layoutSubviews() { willLayout?(); super.layoutSubviews(); didLayout?() }
+    }
+
+    final class Controller: UIViewController, UICollectionViewDelegate {
+        enum Item: Hashable { case header, row(String), footer }
+        /// Scalar-only LRU. Heights are hints until this mount fits the hosted cell.
+        struct EstimateKey: Hashable {
+            let scope: String
+            let width: CGFloat
+            let type: String
+            let padding: CGFloat
+        }
+        struct EstimateStore {
+            static let scopeLimit = 16
+            static let rowLimit = 2_048
+            private(set) var values: [EstimateKey: [Item: CGFloat]] = [:]
+            private var order: [EstimateKey] = []
+            mutating func heights(for key: EstimateKey) -> [Item: CGFloat] {
+                guard let result = values[key] else { return [:] }
+                order.removeAll { $0 == key }; order.append(key)
+                return result
+            }
+            mutating func put(_ height: CGFloat, item: Item, key: EstimateKey) {
+                guard height.isFinite, height >= 0 else { return }
+                if values[key] == nil {
+                    if order.count == Self.scopeLimit { values.removeValue(forKey: order.removeFirst()) }
+                    values[key] = [:]
+                }
+                order.removeAll { $0 == key }; order.append(key)
+                if values[key]?[item] == nil, values[key]!.count >= Self.rowLimit {
+                    // A bounded dictionary; eviction ordering has no geometry semantics.
+                    if let victim = values[key]?.keys.first { values[key]?.removeValue(forKey: victim) }
+                }
+                values[key]?[item] = height
+            }
+        }
+        static var estimates = EstimateStore()
+
+        final class ColumnLayout: UICollectionViewLayout {
+            private var items: [Item] = []
+            private var ids: [String]?
+            private(set) var key: EstimateKey?
+            private var heights: [Item: CGFloat] = [:]
+            private(set) var measured: Set<Item> = []
+            private(set) var warmHits = 0
+            private var frames: [CGRect] = []
+            private var dirty = true
+            private var spacing: CGFloat = 0
+            private var bottom: CGFloat = 0
+            private var size: CGSize = .zero
+
+            func configure(input: ChatNativeTranscriptViewport, width: CGFloat) {
+                guard width.isFinite, width > 0 else { return }
+                let nextKey = EstimateKey(scope: input.scope, width: width, type: input.typeKey,
+                                          padding: input.horizontalPadding)
+                let identityChanged = ids != input.ids
+                if identityChanged {
+                    ids = input.ids
+                    items = [.header] + input.ids.map(Item.row) + [.footer]
+                    let retained = Set(items)
+                    measured.formIntersection(retained)
+                    heights = heights.filter { retained.contains($0.key) }
+                    dirty = true
+                }
+                if key != nextKey {
+                    key = nextKey
+                    heights = Controller.estimates.heights(for: nextKey)
+                    measured.removeAll()
+                    warmHits = min(EstimateStore.rowLimit, items.filter { heights[$0] != nil }.count)
+#if DEBUG
+                    ChatPerformanceInvalidationProbe.shared?.record("native_layout_estimate_hits", a: warmHits)
+#endif
+                    dirty = true
+                }
+                if spacing != input.spacing || bottom != input.bottomInset {
+                    spacing = input.spacing; bottom = input.bottomInset; dirty = true
+                }
+                if dirty { invalidateLayout() }
+            }
+            func needsFit(_ item: Item) {
+                measured.remove(item)
+                guard let index = items.firstIndex(of: item) else { return }
+                let context = UICollectionViewLayoutInvalidationContext()
+                context.invalidateItems(at: [IndexPath(item: index, section: 0)])
+                invalidateLayout(with: context)
+            }
+            override func prepare() {
+                super.prepare()
+                guard dirty, let key else { return }
+                frames.removeAll(keepingCapacity: true)
+                var y: CGFloat = 16
+                for item in items {
+                    let height = heights[item] ?? 160
+                    frames.append(CGRect(x: key.padding, y: y,
+                        width: max(1, key.width - 2 * key.padding), height: height))
+                    y += height + spacing
+                }
+                size = CGSize(width: key.width, height: max(0, y - (items.isEmpty ? 0 : spacing) + bottom))
+                dirty = false
+            }
+            override var collectionViewContentSize: CGSize { size }
+            override func layoutAttributesForItem(at path: IndexPath) -> UICollectionViewLayoutAttributes? {
+                guard path.section == 0, frames.indices.contains(path.item) else { return nil }
+                let value = UICollectionViewLayoutAttributes(forCellWith: path)
+                value.frame = frames[path.item]
+                return value
+            }
+            override func layoutAttributesForElements(in rect: CGRect) -> [UICollectionViewLayoutAttributes]? {
+                var low = 0, high = frames.count
+                while low < high {
+                    let mid = (low + high) / 2
+                    if frames[mid].maxY < rect.minY { low = mid + 1 } else { high = mid }
+                }
+                var result: [UICollectionViewLayoutAttributes] = []
+                while low < frames.count, frames[low].minY <= rect.maxY {
+                    if let value = layoutAttributesForItem(at: IndexPath(item: low, section: 0)) { result.append(value) }
+                    low += 1
+                }
+                return result
+            }
+            override func shouldInvalidateLayout(forBoundsChange newBounds: CGRect) -> Bool {
+                newBounds.width != collectionView?.bounds.width
+            }
+            override func shouldInvalidateLayout(forPreferredLayoutAttributes preferred: UICollectionViewLayoutAttributes,
+                                                  withOriginalAttributes original: UICollectionViewLayoutAttributes) -> Bool {
+                let index = preferred.indexPath.item
+                guard items.indices.contains(index), let key,
+                      preferred.size.height.isFinite, preferred.size.height >= 0,
+                      preferred.size.width == max(1, key.width - 2 * key.padding) else { return false }
+                return preferred.size.height != original.size.height
+            }
+            func didFit(_ attributes: UICollectionViewLayoutAttributes, item: Item, key fittedKey: EstimateKey?) {
+                guard let key, key == fittedKey, items.indices.contains(attributes.indexPath.item),
+                      items[attributes.indexPath.item] == item,
+                      attributes.size.width == max(1, key.width - 2 * key.padding),
+                      attributes.size.height.isFinite, attributes.size.height >= 0 else { return }
+                measured.insert(item)
+                if heights[item] != attributes.size.height { dirty = true }
+                heights[item] = attributes.size.height
+                Controller.estimates.put(attributes.size.height, item: item, key: key)
+            }
+        }
+        struct RowStamp: Equatable {
+            let id: String
+            let key: EstimateKey
+            let revision: StableViewportRowRevision
+        }
+        func rowStamp(for id: String) -> RowStamp? {
+            guard let index = indices[id] else { return nil }
+            return RowStamp(id: id, key: EstimateKey(scope: input.scope,
+                width: collection.bounds.width, type: input.typeKey, padding: input.horizontalPadding),
+                revision: input.revisionAt(index))
+        }
+        struct BoundaryStamp: Equatable {
+            let item: Item
+            let revision: BoundaryRevision
+            let scope: String
+            let type: String
+            let width: CGFloat
+            let padding: CGFloat
+            let spacing: CGFloat
+            let bottomInset: CGFloat
+            let presentation: Int
+        }
+        final class Cell: UICollectionViewCell {
+            var boundaryStamp: BoundaryStamp?
+            var rowStamp: RowStamp?
+            var layoutPolicy = 0
+            var didFit: ((UICollectionViewLayoutAttributes) -> Void)?
+            override func preferredLayoutAttributesFitting(_ layoutAttributes: UICollectionViewLayoutAttributes) -> UICollectionViewLayoutAttributes {
+#if DEBUG
+                let probe = ChatPerformanceInvalidationProbe.shared
+                let start = probe == nil ? 0 : CACurrentMediaTime()
+#endif
+                let result = super.preferredLayoutAttributesFitting(layoutAttributes)
+#if DEBUG
+                probe?.record("native_layout_fit", b: Int((CACurrentMediaTime() - start) * 1_000_000), c: layoutPolicy)
+#endif
+                // UIKit may skip the invalidation delegate when the fitted size
+                // equals its estimate; fitting itself is the measurement receipt.
+                didFit?(result)
+                return result
+            }
+            override func prepareForReuse() {
+                super.prepareForReuse()
+                boundaryStamp = nil
+                rowStamp = nil
+                didFit = nil
+            }
+        }
+        private(set) var boundaryConfigurations = 0
+        var reusesBoundaryConfigurations = !InternalChatRendererPolicy.debugArgument("--chat-native-eager-boundaries")
+
+        func boundaryStamp(for item: Item) -> BoundaryStamp? {
+            let revision: BoundaryRevision?
+            switch item {
+            case .header: revision = input.headerRevision
+            case .footer: revision = input.footerRevision
+            case .row: return nil
+            }
+            guard let revision else { return nil }
+            return BoundaryStamp(item: item, revision: revision, scope: input.scope,
+                type: input.typeKey, width: collection.bounds.width,
+                padding: input.horizontalPadding, spacing: input.spacing,
+                bottomInset: input.bottomInset, presentation: presentationEpoch)
+        }
+        struct Anchor { let id: String; let delta: CGFloat }
+        enum Ownership { case restoring(Anchor?), following, reading }
+        struct Memory { let anchor: Anchor; let following: Bool }
+        /// Compact reader points only, ordered least to most recently used.
+        struct MemoryStore {
+            private var values: [String: Memory] = [:]
+            private var order: [String] = []
+            var count: Int { values.count }
+
+            subscript(key: String) -> Memory? {
+                mutating get {
+                    guard let value = values[key] else { return nil }
+                    order.removeAll { $0 == key }
+                    order.append(key)
+                    return value
+                }
+                set {
+                    order.removeAll { $0 == key }
+                    guard let newValue else {
+                        values.removeValue(forKey: key)
+                        return
+                    }
+                    if values[key] == nil, values.count == 32 {
+                        values.removeValue(forKey: order.removeFirst())
+                    }
+                    values[key] = newValue
+                    order.append(key)
+                }
+            }
+
+            mutating func removeAll() {
+                values.removeAll()
+                order.removeAll()
+            }
+        }
+        static var memory = MemoryStore()
+        var input: ChatNativeTranscriptViewport
+        var ownership: Ownership
+        var anchor: Anchor?
+        var collection: Collection!
+        var dataSource: UICollectionViewDiffableDataSource<Int, Item>!
+        var revisions: [String: StableViewportRowRevision] = [:]
+        var indices: [String: Int] = [:]
+        var appliedIDs: [String]?
+        var identityBuilds = 0
+        var applying = false
+        var correcting = false
+        var stopped = false
+        var generation = 0
+        // Presentation epochs invalidate UI callbacks without invalidating refresh work.
+        var presentationEpoch = 0
+        var presentationVisible = false
+        var applicationActive = UIApplication.shared.applicationState == .active
+        // Initial mounted layout remains available to the first-layer restore.
+        // Once presentation is lost, only an active appearance can reopen it.
+        var presentationSuspended = false
+        var isPresentationActive: Bool { presentationVisible && applicationActive && !stopped }
+        var lifecycleObserver: LifecycleObserver?
+        var pendingRestore: (request: ChatTranscriptRestoreRequest, outcome: ChatTranscriptRestoreOutcome)?
+        @MainActor final class LifecycleObserver: NSObject {
+            weak var owner: Controller?
+            init(_ owner: Controller) {
+                self.owner = owner
+                super.init()
+                NotificationCenter.default.addObserver(self, selector: #selector(resign(_:)), name: UIApplication.willResignActiveNotification, object: nil)
+                NotificationCenter.default.addObserver(self, selector: #selector(activate(_:)), name: UIApplication.didBecomeActiveNotification, object: nil)
+            }
+            @objc func resign(_ notification: Notification) {
+                owner?.applicationActive = false
+                owner?.suspendPresentation()
+            }
+            @objc func activate(_ notification: Notification) {
+                owner?.applicationActive = true
+                owner?.resumePresentation()
+            }
+            deinit { NotificationCenter.default.removeObserver(self) }
+        }
+        var width: CGFloat = 0
+        var initialized = false
+        var completedRequest: ChatTranscriptRestoreRequest?
+        struct SettlementSample: Equatable {
+            let request: ChatTranscriptRestoreRequest
+            let width: CGFloat
+            let contentSize: CGSize
+            let targetFrame: CGRect
+            let offset: CGPoint
+        }
+        var settlementSample: SettlementSample?
+        var confirmationQueued = false
+        var confirmationPasses = 0
+        var refreshTask: Task<Void, Never>?
+        // One display-linked UIKit offset owner. The target is recomputed from the
+        // live self-sizing layout each frame; no estimated endpoint is cached.
+        @MainActor final class MotionTarget: NSObject {
+            weak var owner: Controller?
+            init(_ owner: Controller) { self.owner = owner }
+            @objc func tick(_ link: CADisplayLink) { owner?.advanceMotion(link) }
+        }
+        @MainActor final class FollowTarget: NSObject {
+            weak var owner: Controller?
+            init(_ owner: Controller) { self.owner = owner }
+            @objc func tick(_ link: CADisplayLink) { owner?.advanceFollow(link) }
+        }
+        var followLink: CADisplayLink?
+        private(set) var followTicks = 0
+        private var realizedBottomEstablished = false
+        private var followTimestamp: CFTimeInterval = 0
+        private var followContentChangedAt: CFTimeInterval = 0
+        private var viewportSize: CGSize = .zero
+        private var viewportInsets: UIEdgeInsets = .zero
+        // Late self-sizing after a viewport/keyboard resize stays immediate until
+        // new semantic content arrives, even if the tail was briefly realized.
+        private var immediateFollowRevision: Int?
+
+        var motionLink: CADisplayLink?
+        var motionStarted: CFTimeInterval = 0
+        var motionProgress: CGFloat = 0
+        var motionTailSample: CGRect?
+        var motionTailOffset: CGFloat?
+        var motionCompleted = 0
+        var motionCancelled = 0
+        var motionSamples = 0
+        // Actual native work, not delivered callbacks or presented FPS.
+        private(set) var motionTicks = 0
+        private(set) var publishComputations = 0
+        private(set) var descendantScanPasses = 0
+        private(set) var motionPublishComputations = 0
+        private(set) var motionDescendantScanPasses = 0
+        private(set) var followObservationSteps = 0
+        private(set) var followPublishComputations = 0
+        private(set) var followDescendantScanPasses = 0
+        private(set) var batchingMotionObservations = false
+        private var needsMotionDescendantScan = false
+        private var scrollObservationTicket = 0
+        private var pendingScrollObservation: Int?
+        private(set) var scrollObservationDrains = 0
+        var decelerationTakeovers = 0
+        // Persists through settlement (including Reduce Motion) until a newer
+        // gesture or cancellation takes ownership. Late UIKit end callbacks do not.
+        var explicitLatestOwnsViewport = false
+        // Only the synchronous stop of inherited rejoin momentum owns this guard.
+        // Ordinary follow must not acquire explicit jump's suspension semantics.
+        private var handingOffRejoinMomentum = false
+        var latestEchoCancellationToken: Int?
+        var systemTopActive = false
+        var systemTopReaderIntent = false
+        var systemTopRequests = 0
+        var systemTopCompleted = 0
+        // Retained across interruption until the parent acknowledges reader intent.
+        var systemTopEchoCancellationToken: Int?
+        struct Published: Equatable {
+            let metrics: ChatScrollMetrics
+            let visible: String?
+            let last: Bool
+            let bottom: Bool
+        }
+        var lastPublished: Published?
+        var publication = 0
+        let latest = UIButton(type: .system)
+        let probe = UILabel()
+
+        let reduceMotionEnabled: () -> Bool
+        let reusesIdentitySnapshot: Bool
+        let coalescesScrollObservations: Bool
+        let batchesMotionObservations: Bool
+        let makeCollection: @MainActor (UICollectionViewLayout) -> Collection
+
+        init(input: ChatNativeTranscriptViewport,
+             reduceMotionEnabled: @escaping () -> Bool = { UIAccessibility.isReduceMotionEnabled },
+             reusesIdentitySnapshot: Bool = true,
+             batchesMotionObservations: Bool = true,
+             coalescesScrollObservations: Bool = true,
+             makeCollection: @escaping @MainActor (UICollectionViewLayout) -> Collection = {
+                 Collection(frame: .zero, collectionViewLayout: $0)
+             }) {
+            self.makeCollection = makeCollection
+            self.reduceMotionEnabled = reduceMotionEnabled
+            self.reusesIdentitySnapshot = reusesIdentitySnapshot
+            self.batchesMotionObservations = batchesMotionObservations
+            self.coalescesScrollObservations = coalescesScrollObservations
+            self.input = input
+            ownership = .restoring(input.initialID.map { Anchor(id: $0, delta: 0) })
+            super.init(nibName: nil, bundle: nil)
+        }
+        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+        func makeLayout() -> UICollectionViewLayout {
+            if !InternalChatRendererPolicy.debugArgument("--chat-native-compositional-layout") {
+                return ColumnLayout()
+            }
+            let item = NSCollectionLayoutItem(layoutSize: .init(widthDimension: .fractionalWidth(1), heightDimension: .estimated(160)))
+            let group = NSCollectionLayoutGroup.vertical(layoutSize: .init(widthDimension: .fractionalWidth(1), heightDimension: .estimated(160)), subitems: [item])
+            let section = NSCollectionLayoutSection(group: group)
+            section.interGroupSpacing = input.spacing
+            section.contentInsets = .init(top: 16, leading: input.horizontalPadding, bottom: input.bottomInset, trailing: input.horizontalPadding)
+            return UICollectionViewCompositionalLayout(section: section)
+        }
+
+        override func viewDidLoad() {
+            super.viewDidLoad()
+            lifecycleObserver = LifecycleObserver(self)
+            collection = makeCollection(makeLayout())
+            collection.backgroundColor = .clear
+            collection.alwaysBounceVertical = true
+            collection.scrollsToTop = true
+            collection.keyboardDismissMode = .interactive
+            collection.contentInsetAdjustmentBehavior = .never
+            collection.accessibilityIdentifier = "chat-transcript-scroll"
+            collection.delegate = self
+            collection.register(Cell.self, forCellWithReuseIdentifier: "rich")
+            view.addSubview(collection)
+            collection.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                collection.leadingAnchor.constraint(equalTo: view.leadingAnchor), collection.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+                collection.topAnchor.constraint(equalTo: view.topAnchor), collection.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+            ])
+            dataSource = UICollectionViewDiffableDataSource<Int, Item>(collectionView: collection) { [weak self] collection, path, item in
+                guard let self else { return nil }
+                let cell = collection.dequeueReusableCell(withReuseIdentifier: "rich", for: path)
+                self.configure(cell, item: item)
+                return cell
+            }
+            collection.willLayout = { [weak self] in
+                guard let self else { return }
+                (self.collection.collectionViewLayout as? ColumnLayout)?.configure(input: self.input, width: self.collection.bounds.width)
+            }
+            collection.didLayout = { [weak self] in self?.settleLayout() }
+            let refresh = UIRefreshControl()
+            refresh.addTarget(self, action: #selector(refreshHistory), for: .valueChanged)
+            collection.refreshControl = refresh
+            latest.setImage(UIImage(systemName: "arrow.down"), for: .normal)
+            latest.backgroundColor = .secondarySystemBackground
+            latest.layer.cornerRadius = 22
+            latest.accessibilityLabel = "Scroll to latest message"
+            latest.accessibilityIdentifier = "chat-scroll-to-bottom"
+            latest.addTarget(self, action: #selector(jumpToLatest), for: .touchUpInside)
+            view.addSubview(latest)
+            latest.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([latest.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20), latest.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -16), latest.widthAnchor.constraint(equalToConstant: 44), latest.heightAnchor.constraint(equalToConstant: 44)])
+#if DEBUG
+            probe.font = .systemFont(ofSize: 1)
+            probe.textColor = .clear
+            probe.isAccessibilityElement = true
+            probe.accessibilityIdentifier = "chat-native-transcript-v2"
+            view.addSubview(probe)
+            probe.frame = CGRect(x: 0, y: 0, width: 1, height: 1)
+#endif
+            collection.accessibilityIdentifier = "chat-native-transcript-v2"
+            update(input)
+        }
+
+        override func viewDidAppear(_ animated: Bool) {
+            super.viewDidAppear(animated)
+            presentationVisible = true
+            applicationActive = UIApplication.shared.applicationState == .active
+            resumePresentation()
+        }
+        override func viewWillDisappear(_ animated: Bool) {
+            presentationVisible = false
+            suspendPresentation()
+            super.viewWillDisappear(animated)
+        }
+        func invalidatePublications() {
+            pendingScrollObservation = nil
+            presentationEpoch += 1
+            publication += 1
+            lastPublished = nil
+            confirmationQueued = false
+        }
+        func suspendPresentation() {
+            guard !stopped, !presentationSuspended else { return }
+            presentationSuspended = true
+            invalidatePublications()
+            guard isViewLoaded else { return }
+            let interruptedMotion = motionLink != nil
+            let preservesFollowing = follows && !explicitLatestOwnsViewport
+            cancelSystemTop()
+            cancelMotion()
+            if initialized { anchor = currentAnchor() ?? anchor }
+            // Never acknowledge a covered restore merely because presentation ended.
+            // An undelivered success must prove its geometry again on return.
+            if let pendingRestore, case .success = pendingRestore.outcome {
+                self.pendingRestore = nil
+                ownership = requestedOwnership(input)
+            } else if interruptedMotion, pendingRestore == nil,
+                      let request = input.restoreRequest, request != completedRequest {
+                ownership = requestedOwnership(input)
+            } else if input.restoreRequest == nil || input.restoreRequest == completedRequest {
+                // Ordinary follow intent survives background/cover suspension;
+                // explicit motion still cancels into a stable reader position.
+                ownership = preservesFollowing ? .following : .reading
+            }
+            saveMemory(scope: input.scope)
+            resetSettlement()
+        }
+        func resumePresentation() {
+            guard isPresentationActive, isViewLoaded else { return }
+            presentationSuspended = false
+            if let pending = pendingRestore {
+                pendingRestore = nil
+                finishRestore(pending.outcome)
+            }
+            collection.setNeedsLayout()
+        }
+
+        func collectionView(_ collectionView: UICollectionView, willDisplay cell: UICollectionViewCell,
+                            forItemAt indexPath: IndexPath) {
+            guard let item = dataSource.itemIdentifier(for: indexPath) else { return }
+            switch item {
+            case .row(let id):
+                // Prepared offscreen cells can survive without another dequeue.
+                // Their host and fit callback must use the current geometry/content.
+                if (cell as? Cell)?.rowStamp != rowStamp(for: id) { configure(cell, item: item) }
+            case .header, .footer:
+                // UIKit can retain a prepared offscreen cell without dequeuing it.
+                let stamp = boundaryStamp(for: item)
+                if stamp == nil || (cell as? Cell)?.boundaryStamp != stamp {
+                    configure(cell, item: item)
+                }
+            }
+        }
+
+        func configure(_ cell: UICollectionViewCell, item: Item) {
+            let column = collection.collectionViewLayout as? ColumnLayout
+            column?.needsFit(item)
+            (cell as? Cell)?.layoutPolicy = column == nil ? 0 : 1
+            let fittedKey = column?.key
+            (cell as? Cell)?.didFit = { [weak column] attributes in
+                column?.didFit(attributes, item: item, key: fittedKey)
+            }
+            let stamp = boundaryStamp(for: item)
+            (cell as? Cell)?.boundaryStamp = stamp
+            (cell as? Cell)?.rowStamp = nil
+            let content: AnyView
+            switch item {
+            case .header, .footer:
+                boundaryConfigurations += 1
+#if DEBUG
+                ChatPerformanceInvalidationProbe.shared?.record(
+                    "native_boundary_configuration", a: item == .header ? 0 : 1,
+                    b: stamp == nil ? 0 : 1)
+#endif
+                content = item == .header ? input.makeHeader() : input.makeFooter()
+            case .row(let id):
+                guard let index = indices[id] else { return }
+                content = input.makeRow(index)
+                let rowStamp = rowStamp(for: id)
+                (cell as? Cell)?.rowStamp = rowStamp
+                revisions[id] = rowStamp?.revision
+            }
+            let rowWidth = max(1, collection.bounds.width - input.horizontalPadding * 2)
+            cell.contentConfiguration = UIHostingConfiguration {
+                content.environment(\.self, input.environment)
+                    .id(item)
+                    .frame(width: rowWidth, alignment: .leading)
+            }.margins(.all, 0)
+        }
+
+        func update(_ next: ChatNativeTranscriptViewport) {
+            guard !stopped else { return }
+            let old = input
+            // Capture the old reader position before changing row/scope inputs.
+            let scopeChanged = old.scope != next.scope
+            // onLatest synchronously asks the parent to clear restoration and
+            // increment cancellation. Acknowledge exactly that echo, not a new
+            // restore command or any subsequent cancellation.
+            let latestEcho = !scopeChanged && latestEchoCancellationToken == next.cancellationToken
+                && next.following && next.restoreRequest == nil && next.latestToken == old.latestToken
+            let topEcho = !scopeChanged && systemTopEchoCancellationToken != nil
+                && next.restoreRequest == nil && !next.explicitLatest
+                && next.latestToken == old.latestToken
+                && (next.cancellationToken == systemTopEchoCancellationToken
+                    || (next.cancellationToken == old.cancellationToken && old.restoreRequest != nil))
+            let rejoinCommand = !scopeChanged && old.latestToken != next.latestToken
+                && next.restoreRequest == nil
+            let restoreChanged = old.restoreRequest != next.restoreRequest && !latestEcho && !topEcho
+            let cancelled = old.cancellationToken != next.cancellationToken && !latestEcho && !topEcho
+            if scopeChanged || restoreChanged || old.cancellationToken != next.cancellationToken {
+                systemTopEchoCancellationToken = nil
+            }
+            if scopeChanged || old.cancellationToken != next.cancellationToken {
+                latestEchoCancellationToken = nil
+            }
+            if scopeChanged || restoreChanged { systemTopReaderIntent = false }
+            if scopeChanged || restoreChanged || cancelled {
+                cancelSystemTop()
+                cancelMotion()
+                invalidatePublications()
+                pendingRestore = nil
+            }
+            if latestEcho || topEcho, old.restoreRequest != next.restoreRequest {
+                invalidatePublications()
+                pendingRestore = nil
+            }
+            if scopeChanged { saveMemory(scope: old.scope, typeKey: old.typeKey) }
+            if old.typeKey != next.typeKey || old.horizontalPadding != next.horizontalPadding
+                || old.spacing != next.spacing || old.bottomInset != next.bottomInset {
+                cancelFollow()
+            }
+            if followLink != nil && (old.revision != next.revision || old.isStreaming != next.isStreaming) {
+                followContentChangedAt = CACurrentMediaTime()
+            }
+            input = next
+            guard isViewLoaded else { return }
+            if old.scope != next.scope {
+                generation += 1
+                initialized = false
+                immediateFollowRevision = nil
+                completedRequest = nil
+                resetSettlement()
+                anchor = nil
+                revisions.removeAll()
+                lastPublished = nil
+                cancelRefresh()
+                ownership = requestedOwnership(next)
+            } else if restoreChanged, let request = next.restoreRequest, request != completedRequest {
+                resetSettlement()
+                ownership = requestedOwnership(next)
+            }
+            if cancelled {
+                ownership = .reading
+                finishRestore(.cancelled)
+            }
+            // A new explicit command supersedes system-top motion, but never a
+            // direct tracking/dragging. Inherited momentum yields to the command.
+            let explicitEdge = !old.explicitLatest && next.explicitLatest
+            if systemTopActive && explicitEdge && !scopeChanged && !restoreChanged && !cancelled
+                && isPresentationActive && !presentationSuspended
+                && !collection.isTracking && !collection.isDragging {
+                cancelSystemTop()
+            }
+            // Rejoin is distinct from stale following input. It may accompany
+            // cancellation/removal of the old restore, but never a new restore or
+            // scope, and its consumed token cannot reclaim a later gesture.
+            if rejoinCommand && isPresentationActive && !presentationSuspended
+                && !collection.isTracking && !collection.isDragging {
+                cancelSystemTop()
+                cancelMotion()
+                systemTopReaderIntent = false
+                ownership = .following
+                // Claim before stopping inherited momentum: UIKit may deliver
+                // synchronous end callbacks, which must not reclaim this command.
+                if collection.isDecelerating {
+                    handingOffRejoinMomentum = true
+                    defer { handingOffRejoinMomentum = false }
+                    decelerationTakeovers += 1
+                    collection.setContentOffset(collection.contentOffset, animated: false)
+                }
+            }
+            // Consume command edges once; a retained true flag cannot reclaim a drag.
+            // A same-tap echo only acknowledges input, even after motion cancellation.
+            if isPresentationActive && !presentationSuspended && !collection.isTracking && !collection.isDragging && !scopeChanged && !restoreChanged && !cancelled && !latestEcho && !topEcho {
+                if explicitEdge && initialized {
+                    beginMotion()
+                } else if !interacting && !systemTopReaderIntent && motionLink == nil && (!old.following && next.following) {
+                    ownership = .following
+                }
+            }
+            if old.horizontalPadding != next.horizontalPadding || old.spacing != next.spacing || old.bottomInset != next.bottomInset {
+                if !(collection.collectionViewLayout is ColumnLayout) {
+                    collection.setCollectionViewLayout(makeLayout(), animated: false)
+                }
+            }
+            (collection.collectionViewLayout as? ColumnLayout)?.configure(input: next, width: collection.bounds.width)
+            // Scroll/follow echoes and streamed content usually retain row identity.
+            // Avoid rebuilding the history index and copying the diffable snapshot
+            // on those updates; mounted row revisions are still checked below.
+            if !reusesIdentitySnapshot || appliedIDs != next.ids {
+                identityBuilds += 1
+                indices = Dictionary(uniqueKeysWithValues: next.ids.enumerated().map { ($0.element, $0.offset) })
+                let items: [Item] = [.header] + next.ids.map(Item.row) + [.footer]
+                let previous = dataSource.snapshot().itemIdentifiers
+                if previous != items {
+                    var snapshot = NSDiffableDataSourceSnapshot<Int, Item>()
+                    snapshot.appendSections([0]); snapshot.appendItems(items)
+                    applying = true
+                    dataSource.apply(snapshot, animatingDifferences: false)
+                    applying = false
+                    revisions = revisions.filter { indices[$0.key] != nil }
+                }
+                appliedIDs = next.ids
+            }
+            // Only mounted changed rows are reconfigured. Offscreen rows read fresh
+            // inputs when dequeued; no eager hosts or all-row measurement pass.
+            for path in collection.indexPathsForVisibleItems {
+                guard let item = dataSource.itemIdentifier(for: path), let cell = collection.cellForItem(at: path) else { continue }
+                switch item {
+                case .row(let id):
+                    if let index = indices[id], revisions[id] != next.revisionAt(index) || old.typeKey != next.typeKey
+                        || old.horizontalPadding != next.horizontalPadding {
+                        configure(cell, item: item)
+                    }
+                default:
+                    if !reusesBoundaryConfigurations || boundaryStamp(for: item) == nil
+                        || (cell as? Cell)?.boundaryStamp != boundaryStamp(for: item) {
+                        configure(cell, item: item)
+                    }
+                }
+            }
+            collection.setNeedsLayout()
+        }
+
+        /// Explicit navigation owns the target. Cached intra-row deltas refine only
+        /// the same requested row; they can never override a latest/different-row request.
+        func requestedOwnership(_ value: ChatNativeTranscriptViewport) -> Ownership {
+            let key = "\(value.scope)|\(Int(collection.bounds.width.rounded()))|\(value.typeKey)"
+            let saved = Self.memory[key]
+            func row(_ id: String) -> Ownership {
+                .restoring(saved?.anchor.id == id ? saved?.anchor : Anchor(id: id, delta: 0))
+            }
+            if let request = value.restoreRequest {
+                switch request.target {
+                case .latest: return .following
+                case .message(let id): return row(id)
+                }
+            }
+            if value.explicitLatest { return .following }
+            if let id = value.initialID { return row(id) }
+            if let saved { return saved.following ? .following : .restoring(saved.anchor) }
+            return .following
+        }
+        func resetSettlement() {
+            settlementSample = nil
+            confirmationPasses = 0
+        }
+        /// A measured native cell must agree on a subsequent layout, including
+        /// after a width/configuration change. Existence alone is not settlement.
+        /// At most four extra layout requests are issued; failure stays explicit.
+        func confirmsSettlement(frame: CGRect, positioned: Bool) -> Bool {
+            guard let request = input.restoreRequest, request != completedRequest else { return positioned }
+            let sample = SettlementSample(request: request, width: width,
+                contentSize: collection.contentSize, targetFrame: frame, offset: collection.contentOffset)
+            if positioned, settlementSample == sample { return true }
+            settlementSample = sample
+            guard !confirmationQueued else { return false }
+            guard confirmationPasses < 4 else {
+                finishRestore(.exhausted)
+                return false
+            }
+            confirmationQueued = true
+            confirmationPasses += 1
+            let epoch = generation, presentation = presentationEpoch
+            DispatchQueue.main.async { [weak self] in
+                guard let self, !self.stopped, !self.presentationSuspended,
+                      self.generation == epoch, self.presentationEpoch == presentation else { return }
+                self.confirmationQueued = false
+                guard self.input.restoreRequest == request, self.completedRequest != request else { return }
+                self.collection.setNeedsLayout()
+            }
+            return false
+        }
+        var memoryKey: String { "\(input.scope)|\(Int(collection.bounds.width.rounded()))|\(input.typeKey)" }
+        var bottomOffset: CGFloat { max(-collection.adjustedContentInset.top, collection.contentSize.height - collection.bounds.height + collection.adjustedContentInset.bottom) }
+        var interacting: Bool {
+            ChatScrollPolicy.isEffectiveUserInteraction(
+                isUserInteracting: systemTopActive || collection.isTracking || collection.isDragging || collection.isDecelerating,
+                isDirectlyInteracting: systemTopActive || collection.isTracking || collection.isDragging,
+                isDecelerating: collection.isDecelerating,
+                isExplicitBottomScrollContext: explicitLatestOwnsViewport || handingOffRejoinMomentum)
+        }
+        var follows: Bool { if case .following = ownership { return true }; return false }
+        func currentAnchor() -> Anchor? {
+            let top = collection.contentOffset.y + collection.adjustedContentInset.top
+            return collection.indexPathsForVisibleItems.sorted().compactMap { path -> Anchor? in
+                guard case .row(let id) = dataSource.itemIdentifier(for: path),
+                      let frame = collection.layoutAttributesForItem(at: path)?.frame, frame.maxY > top else { return nil }
+                return Anchor(id: id, delta: top - frame.minY)
+            }.first
+        }
+        func align(_ target: Anchor) -> Bool {
+            guard let path = dataSource.indexPath(for: .row(target.id)),
+                  let frame = collection.layoutAttributesForItem(at: path)?.frame else { return false }
+            let y = min(bottomOffset, max(-collection.adjustedContentInset.top, frame.minY + target.delta - collection.adjustedContentInset.top))
+            if abs(collection.contentOffset.y - y) > 0.5 { collection.setContentOffset(CGPoint(x: 0, y: y), animated: false) }
+            return collection.cellForItem(at: path) != nil
+                && ((collection.collectionViewLayout as? ColumnLayout)?.measured.contains(.row(target.id)) ?? true)
+        }
+        func disableNestedScrollToTop(in view: UIView) {
+            guard !batchingMotionObservations else { needsMotionDescendantScan = true; return }
+            descendantScanPasses += 1
+            func visit(_ view: UIView) {
+                for child in view.subviews {
+                    if let scroll = child as? UIScrollView { scroll.scrollsToTop = false }
+                    visit(child)
+                }
+            }
+            visit(view)
+        }
+        func settleLayout() {
+            guard !stopped, !presentationSuspended, !applying, !correcting, collection.bounds.width > 0, collection.bounds.height > 0 else { return }
+            correcting = true
+            defer { correcting = false }
+            if !initialized {
+                initialized = true
+                ownership = requestedOwnership(input)
+            }
+            // Only descendants owned by this transcript are ineligible. Hosted
+            // selectable text and horizontal code scroll views must not compete.
+            disableNestedScrollToTop(in: collection)
+            if viewportSize != collection.bounds.size || viewportInsets != collection.adjustedContentInset {
+                if viewportSize != .zero { immediateFollowRevision = input.revision }
+                cancelFollow()
+                viewportSize = collection.bounds.size
+                viewportInsets = collection.adjustedContentInset
+            }
+            let widthChanged = width != collection.bounds.width
+            if widthChanged {
+                resetSettlement()
+                width = collection.bounds.width
+                for path in collection.indexPathsForVisibleItems {
+                    if let item = dataSource.itemIdentifier(for: path), let cell = collection.cellForItem(at: path) {
+                        configure(cell, item: item)
+                    }
+                }
+            }
+            if !interacting && motionLink == nil {
+                switch ownership {
+                case .restoring(let target):
+                    if let target {
+                        if align(target), let path = dataSource.indexPath(for: .row(target.id)),
+                           let cell = collection.cellForItem(at: path) {
+                            let desired = min(bottomOffset, max(-collection.adjustedContentInset.top,
+                                cell.frame.minY + target.delta - collection.adjustedContentInset.top))
+                            if confirmsSettlement(frame: cell.frame,
+                                positioned: !widthChanged && abs(collection.contentOffset.y - desired) <= 1) {
+                                anchor = target
+                                ownership = .reading
+                                finishRestore(.success)
+                            }
+                        } else if indices[target.id] == nil {
+                            ownership = .reading
+                            finishRestore(.unavailable)
+                        }
+                    } else {
+                        ownership = .following
+                        collection.setContentOffset(CGPoint(x: 0, y: bottomOffset), animated: false)
+                        // Completion requires a realized tail, not estimated geometry.
+                        if let tail = collection.cellForItem(at: IndexPath(item: input.ids.count + 1, section: 0)),
+                           confirmsSettlement(frame: tail.frame, positioned: !widthChanged && realizedTailArrival) {
+                            finishRestore(.success)
+                        }
+                    }
+                case .following:
+                    if canGlideFollow && (bottomOffset - collection.contentOffset.y > 0.5
+                        || (followLink != nil && !realizedTailArrival)) {
+                        beginFollow()
+                    } else {
+                        cancelFollow(resetEligibility: false)
+                        if abs(collection.contentOffset.y - bottomOffset) > 0.5 {
+                            collection.setContentOffset(CGPoint(x: 0, y: bottomOffset), animated: false)
+                        }
+                    }
+                    if let tail = collection.cellForItem(at: IndexPath(item: input.ids.count + 1, section: 0)),
+                           confirmsSettlement(frame: tail.frame, positioned: !widthChanged && realizedTailArrival) {
+                            finishRestore(.success)
+                        }
+                case .reading:
+                    if let anchor { _ = align(anchor) }
+                }
+            }
+            if follows && realizedTailArrival { realizedBottomEstablished = true }
+            publish()
+        }
+        func finishRestore(_ outcome: ChatTranscriptRestoreOutcome) {
+            guard let request = input.restoreRequest, request != completedRequest,
+                  pendingRestore == nil else { return }
+            pendingRestore = (request, outcome)
+            guard !presentationSuspended else { return }
+            let epoch = generation, presentation = presentationEpoch
+            DispatchQueue.main.async { [weak self] in
+                guard let self, !self.stopped, !self.presentationSuspended,
+                      self.generation == epoch, self.presentationEpoch == presentation,
+                      self.input.restoreRequest == request,
+                      self.pendingRestore?.request == request else { return }
+                self.pendingRestore = nil
+                self.completedRequest = request
+                self.input.onRestore(request, outcome)
+            }
+        }
+        // Scroll tickets are independent of onState tickets: an eager identical
+        // publication must still allow its already queued onState delivery.
+        private func enqueueScrollObservation() {
+            guard !batchingMotionObservations else { return }
+            guard coalescesScrollObservations else { publish(); return }
+            guard pendingScrollObservation == nil else { return }
+            scrollObservationTicket &+= 1
+            let ticket = scrollObservationTicket
+            let epoch = generation, presentation = presentationEpoch
+            pendingScrollObservation = ticket
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.pendingScrollObservation == ticket else { return }
+                self.pendingScrollObservation = nil
+                guard !self.stopped, !self.presentationSuspended,
+                      !self.correcting, !self.applying, !self.batchingMotionObservations,
+                      self.generation == epoch, self.presentationEpoch == presentation else { return }
+                self.scrollObservationDrains += 1
+                self.publish()
+            }
+        }
+
+        func publish() {
+            pendingScrollObservation = nil
+            guard !stopped, !presentationSuspended, !batchingMotionObservations else { return }
+            publishComputations += 1
+            let distance = max(0, bottomOffset - collection.contentOffset.y)
+            let visible = currentAnchor()?.id
+            let lastVisible = input.ids.last.map { id in collection.indexPathsForVisibleItems.contains { dataSource.itemIdentifier(for: $0) == .row(id) } } ?? false
+            let metrics = ChatScrollMetrics(distanceFromBottom: distance, isUserInteracting: interacting, isDirectlyInteracting: systemTopActive || collection.isTracking || collection.isDragging, isDecelerating: collection.isDecelerating)
+            let arrived = realizedTailArrival
+            latest.isHidden = (arrived && motionLink == nil) || (followLink != nil && canGlideFollow)
+#if DEBUG
+            probe.accessibilityLabel = "Native transcript v2"
+            probe.accessibilityValue = "mounted=\(collection.visibleCells.count);logical=\(input.ids.count);state=\(follows ? "following" : "reading");motion=\(motionLink == nil ? "idle" : "animating");motionCompleted=\(motionCompleted);motionCancelled=\(motionCancelled);motionSamples=\(motionSamples);decelerationTakeovers=\(decelerationTakeovers);topRequests=\(systemTopRequests);topCompleted=\(systemTopCompleted);topActive=\(systemTopActive)"
+#endif
+            let sample = Published(metrics: metrics, visible: visible, last: lastVisible, bottom: arrived)
+            guard sample != lastPublished else { return }
+            lastPublished = sample
+            publication += 1
+            let ticket = publication, epoch = generation, presentation = presentationEpoch
+            DispatchQueue.main.async { [weak self] in
+                guard let self, !self.stopped, !self.presentationSuspended, self.presentationEpoch == presentation, self.generation == epoch, self.publication == ticket else { return }
+                // A newer scroll can arrive before this older delivery. Observe
+                // it first; equal geometry preserves this delivery, changed geometry
+                // issues a new ticket instead of sending stale state to the parent.
+                if self.pendingScrollObservation != nil {
+                    self.scrollObservationDrains += 1
+                    self.publish()
+                    guard self.publication == ticket else { return }
+                }
+                self.input.onState(metrics, visible, lastVisible, arrived)
+            }
+        }
+        func scrollViewShouldScrollToTop(_ scrollView: UIScrollView) -> Bool {
+            guard scrollView === collection, isPresentationActive, !presentationSuspended else { return false }
+            systemTopRequests += 1
+            invalidatePublications()
+            pendingRestore = nil
+            resetSettlement()
+            cancelMotion()
+            systemTopActive = true
+            systemTopReaderIntent = true
+            systemTopEchoCancellationToken = input.cancellationToken &+ 1
+            ownership = .reading
+            anchor = currentAnchor()
+            finishRestore(.cancelled)
+            publish()
+            return true
+        }
+        func scrollViewDidScrollToTop(_ scrollView: UIScrollView) {
+            guard scrollView === collection, systemTopActive, !stopped, !presentationSuspended else { return }
+            systemTopActive = false
+            systemTopCompleted += 1
+            anchor = currentAnchor()
+            ownership = .reading
+            saveMemory(scope: input.scope)
+            publish()
+        }
+        func cancelSystemTop() {
+            guard systemTopActive else { return }
+            systemTopActive = false
+            // Stop UIKit's animation at the currently displayed reader position.
+            let offset = collection.contentOffset
+            collection.setContentOffset(offset, animated: false)
+            anchor = currentAnchor()
+            ownership = .reading
+        }
+        func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+            guard !stopped, !presentationSuspended else { return }
+            invalidatePublications()
+            pendingRestore = nil
+            cancelSystemTop()
+            cancelMotion()
+            ownership = .reading
+            anchor = currentAnchor()
+            finishRestore(.cancelled)
+            publish()
+        }
+        func scrollViewDidScroll(_ scrollView: UIScrollView) {
+            // Native callback count is telemetry, never a frame-rate estimate.
+            if motionLink != nil { motionSamples += 1 }
+            guard !stopped, !presentationSuspended, !correcting, !applying else { return }
+            if interacting { anchor = currentAnchor() }
+            enqueueScrollObservation()
+        }
+        func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) { if !decelerate { endInteraction() } else { publish() } }
+        func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) { endInteraction() }
+        func endInteraction() {
+            // A real drag moves ownership to reading before its end callback.
+            // An obsolete momentum-end callback cannot revoke newer follow intent.
+            guard !stopped, !presentationSuspended, !interacting, !follows,
+                  !explicitLatestOwnsViewport, !handingOffRejoinMomentum else { return }
+            anchor = currentAnchor()
+            ownership = realizedTailArrival ? .following : .reading
+            saveMemory(scope: input.scope)
+            publish()
+        }
+        var realizedTailArrival: Bool {
+            guard (collection.collectionViewLayout as? ColumnLayout)?.measured.contains(.footer) ?? true,
+                  let path = dataSource.indexPath(for: .footer),
+                  let tail = collection.cellForItem(at: path),
+                  let frame = collection.layoutAttributesForItem(at: path)?.frame,
+                  abs(tail.frame.maxY - frame.maxY) <= 1 else { return false }
+            let visibleBottom = collection.contentOffset.y + collection.bounds.height - collection.adjustedContentInset.bottom
+            return abs(collection.contentOffset.y - bottomOffset) <= 1 && tail.frame.maxY <= visibleBottom + 1
+        }
+        var canGlideFollow: Bool {
+            isPresentationActive && !presentationSuspended && (input.isStreaming || followLink != nil)
+                && follows && realizedBottomEstablished && immediateFollowRevision != input.revision
+                && !interacting && motionLink == nil
+                && !input.environment.accessibilityReduceMotion && !reduceMotionEnabled()
+                && (input.restoreRequest == nil || input.restoreRequest == completedRequest)
+        }
+        func cancelFollow(resetEligibility: Bool = true) {
+            followLink?.invalidate()
+            followLink = nil
+            if resetEligibility { realizedBottomEstablished = false }
+        }
+        private func beginFollow() {
+            guard followLink == nil else { return }
+            followTimestamp = CACurrentMediaTime()
+            followContentChangedAt = followTimestamp
+            let link = CADisplayLink(target: FollowTarget(self), selector: #selector(FollowTarget.tick(_:)))
+            followLink = link
+            link.add(to: .main, forMode: .common)
+        }
+        // Shared by both display-link owners. Suppression lives only on this
+        // synchronous stack and is released before observing the final geometry.
+        private func beginObservationBatch() -> () -> Void {
+            let epoch = generation, presentation = presentationEpoch, scope = input.scope
+            batchingMotionObservations = batchesMotionObservations
+            needsMotionDescendantScan = false
+            return { [self] in
+                let needsScan = needsMotionDescendantScan
+                batchingMotionObservations = false
+                needsMotionDescendantScan = false
+                guard batchesMotionObservations, !stopped, !presentationSuspended,
+                      generation == epoch, presentationEpoch == presentation, input.scope == scope else { return }
+                if needsScan { disableNestedScrollToTop(in: collection) }
+                publish()
+            }
+        }
+        func advanceFollow(_ link: CADisplayLink) {
+            guard followLink === link else { return }
+            guard canGlideFollow else {
+                cancelFollow()
+                collection.setNeedsLayout()
+                return
+            }
+            let publicationsBefore = publishComputations, scansBefore = descendantScanPasses
+            followObservationSteps += 1
+            let finishObservations = beginObservationBatch()
+            defer {
+                finishObservations()
+                followPublishComputations += publishComputations - publicationsBefore
+                followDescendantScanPasses += descendantScanPasses - scansBefore
+            }
+            collection.layoutIfNeeded()
+            guard followLink === link, canGlideFollow else { return }
+            followTicks += 1
+            let now = link.timestamp
+            let elapsed = max(0, now - followTimestamp)
+            followTimestamp = now
+            let target = bottomOffset
+            let current = collection.contentOffset.y
+            let remaining = target - current
+            // Self-sizing can move estimates without any new content. It must not
+            // renew this deadline and keep the realized tail perpetually out of reach.
+            let settle = remaining <= 0.5 || now - followContentChangedAt >= 0.5
+            let y = settle ? target : current + remaining * CGFloat(1 - exp(-elapsed / 0.07))
+            // Suppress recursive layout/scroll publication until this offset is applied.
+            correcting = true
+            collection.setContentOffset(CGPoint(x: collection.contentOffset.x,
+                y: min(target, max(-collection.adjustedContentInset.top, y))), animated: false)
+            collection.layoutIfNeeded()
+            correcting = false
+            guard followLink === link, canGlideFollow else { return }
+            if settle && realizedTailArrival { cancelFollow(resetEligibility: false) }
+            collection.setNeedsLayout()
+            publish()
+        }
+        func beginMotion() {
+            cancelFollow()
+            guard isPresentationActive, !presentationSuspended, motionLink == nil,
+                  !systemTopActive, !collection.isTracking, !collection.isDragging else { return }
+            explicitLatestOwnsViewport = true
+            ownership = .following
+            // Claim ownership before stopping UIKit: it can synchronously deliver
+            // scroll/end callbacks. Count only the state actually observed here.
+            if collection.isDecelerating {
+                decelerationTakeovers += 1
+                let visibleOffset = collection.contentOffset
+                let wasCorrecting = correcting
+                correcting = true
+                collection.setContentOffset(visibleOffset, animated: false)
+                correcting = wasCorrecting
+            }
+            systemTopReaderIntent = false
+            systemTopEchoCancellationToken = nil
+            guard !input.environment.accessibilityReduceMotion, !reduceMotionEnabled() else {
+                collection.setNeedsLayout()
+                return
+            }
+            guard !realizedTailArrival else { return }
+            motionStarted = CACurrentMediaTime()
+            motionProgress = 0
+            motionTailSample = nil
+            motionTailOffset = nil
+            let link = CADisplayLink(target: MotionTarget(self), selector: #selector(MotionTarget.tick(_:)))
+            motionLink = link
+            link.add(to: .main, forMode: .common)
+            publish()
+        }
+        func advanceMotion(_ link: CADisplayLink) {
+            guard motionLink === link, isPresentationActive, !presentationSuspended else { return }
+            // Only this synchronous invocation owns suppression. Clear before the
+            // final observation, including cancellation and Reduce Motion exits.
+            let epoch = generation, presentation = presentationEpoch, scope = input.scope
+            let publicationsBefore = publishComputations, scansBefore = descendantScanPasses
+            motionTicks += 1
+            let finishObservations = beginObservationBatch()
+            defer {
+                finishObservations()
+                motionPublishComputations += publishComputations - publicationsBefore
+                motionDescendantScanPasses += descendantScanPasses - scansBefore
+            }
+            guard !interacting else { cancelMotion(); publish(); return }
+            if input.environment.accessibilityReduceMotion || reduceMotionEnabled() {
+                cancelMotion()
+                explicitLatestOwnsViewport = true
+                ownership = .following
+                collection.setNeedsLayout()
+                return
+            }
+            collection.layoutIfNeeded()
+            guard motionLink === link, !stopped, !presentationSuspended,
+                  generation == epoch, presentationEpoch == presentation, input.scope == scope else { return }
+            let elapsed = max(0, link.timestamp - motionStarted)
+            let t = min(1, CGFloat(elapsed / 0.55))
+            let eased = 1 - pow(1 - t, 3)
+            let fraction = motionProgress < 1 ? min(1, (eased - motionProgress) / (1 - motionProgress)) : 1
+            motionProgress = eased
+            let current = collection.contentOffset.y
+            let y = current + (bottomOffset - current) * fraction
+            collection.setContentOffset(CGPoint(x: collection.contentOffset.x, y: y), animated: false)
+            collection.layoutIfNeeded()
+            guard motionLink === link, !stopped, !presentationSuspended,
+                  generation == epoch, presentationEpoch == presentation, input.scope == scope else { return }
+            let tail = dataSource.indexPath(for: .footer).flatMap { collection.cellForItem(at: $0) }
+            // A second realized, unchanged sample proves arrival after self-sizing.
+            if t == 1, realizedTailArrival, let tail,
+               motionTailSample == tail.frame, motionTailOffset == collection.contentOffset.y {
+                motionLink?.invalidate()
+                motionLink = nil
+                motionCompleted += 1
+                anchor = currentAnchor()
+                ownership = .following
+                finishRestore(.success)
+                saveMemory(scope: input.scope)
+                publish()
+                return
+            }
+            motionTailSample = realizedTailArrival ? tail?.frame : nil
+            motionTailOffset = realizedTailArrival ? collection.contentOffset.y : nil
+            // One bounded phase, including self-sizing settlement. Do not silently
+            // fall into instant follow or a retry ladder when the tail cannot settle.
+            if elapsed >= 0.9 {
+                cancelMotion()
+                finishRestore(.exhausted)
+                saveMemory(scope: input.scope)
+            }
+            publish()
+        }
+        func cancelMotion() {
+            cancelFollow()
+            explicitLatestOwnsViewport = false
+            // Retain the token until its parent echo is consumed. Cancellation
+            // must not turn that queued same-tap echo into a fresh follow command.
+            guard let link = motionLink else { return }
+            link.invalidate()
+            motionLink = nil
+            motionCancelled += 1
+            anchor = currentAnchor()
+            ownership = .reading
+            motionTailSample = nil
+            motionTailOffset = nil
+        }
+        @objc func jumpToLatest() {
+            guard isPresentationActive, !presentationSuspended, motionLink == nil,
+                  !collection.isTracking, !collection.isDragging else { return }
+            let replacingTop = systemTopActive
+            guard replacingTop || latestEchoCancellationToken == nil else { return }
+            // A tap is newer intent than the OS ascent. Cancel that owner rather
+            // than discarding the visible button's action until ascent completes.
+            if replacingTop {
+                cancelSystemTop()
+                invalidatePublications()
+                pendingRestore = nil
+            }
+            let priorIssuedToken = latestEchoCancellationToken ?? input.cancellationToken
+            beginMotion()
+            latestEchoCancellationToken = priorIssuedToken &+ 1
+            input.onLatest()
+            collection.setNeedsLayout()
+        }
+        @objc func refreshHistory() {
+            guard isPresentationActive, !presentationSuspended, refreshTask == nil else { return }
+            invalidatePublications()
+            pendingRestore = nil
+            cancelSystemTop()
+            cancelMotion()
+            anchor = currentAnchor()
+            ownership = .reading
+            finishRestore(.cancelled)
+            let epoch = generation
+            // Bind work to the initiating chat, not whichever input exists when
+            // the queued task runs. Cancellation can precede its first turn.
+            let refresh = input.onRefresh
+            refreshTask = Task { [weak self] in
+                guard self?.stopped == false, self?.generation == epoch,
+                      !Task.isCancelled else { return }
+                // Do not retain the viewport while backend work is suspended.
+                await refresh { [weak self] in
+                    guard let self else { return false }
+                    return !self.stopped && self.generation == epoch && !Task.isCancelled
+                }
+                // An old completion must not clear a newer chat's refresh owner.
+                guard let self, !self.stopped, self.generation == epoch else { return }
+                self.collection.refreshControl?.endRefreshing()
+                self.refreshTask = nil
+            }
+        }
+        func cancelRefresh() {
+            refreshTask?.cancel()
+            refreshTask = nil
+            if isViewLoaded { collection.refreshControl?.endRefreshing() }
+        }
+        func saveMemory(scope: String, typeKey: String? = nil) {
+            if case .restoring = ownership { return }
+            guard initialized, let anchor = currentAnchor() else { return }
+            let key = "\(scope)|\(Int(width.rounded()))|\(typeKey ?? input.typeKey)"
+            Self.memory[key] = Memory(anchor: anchor, following: follows)
+        }
+        func stop() {
+            guard !stopped else { return }
+            invalidatePublications()
+            pendingRestore = nil
+            lifecycleObserver = nil
+            cancelSystemTop()
+            cancelMotion()
+            if isViewLoaded { saveMemory(scope: input.scope) }
+            stopped = true
+            generation += 1
+            cancelRefresh()
+            collection?.willLayout = nil
+            collection?.didLayout = nil
+        }
+    }
+}
+#endif

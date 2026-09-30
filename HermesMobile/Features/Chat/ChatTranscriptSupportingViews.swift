@@ -3139,6 +3139,17 @@ struct ChatScrollObserver: UIViewRepresentable {
                   scrollView.contentSize != lastReportedContentSize
             else { return }
 
+#if DEBUG
+            let previousHeight = lastReportedContentSize?.height ?? scrollView.contentSize.height
+            let height = scrollView.contentSize.height.isFinite ? scrollView.contentSize.height : 0
+            let delta = (scrollView.contentSize.height - previousHeight).isFinite
+                ? scrollView.contentSize.height - previousHeight : 0
+            ChatPerformanceInvalidationProbe.shared?.record(
+                "native_content_size_changed",
+                a: Int(min(1_000_000, max(0, height.rounded()))),
+                b: Int(min(1_000_000, max(-1_000_000, delta.rounded())))
+            )
+#endif
             lastReportedContentSize = scrollView.contentSize
             onContentSizeChange(scrollView.contentSize)
         }

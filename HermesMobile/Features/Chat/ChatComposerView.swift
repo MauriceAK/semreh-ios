@@ -95,6 +95,11 @@ struct MessageComposerView: View {
     let isWaitingForStream: Bool
     let isCancellingStream: Bool
     let isOfflineReadOnly: Bool
+    var isPresentationActive: Bool = true
+    var isPresentationSelected: Bool = true
+    var isParentPresentationOpen: Bool = false
+    @State private var presentationOwnership = ChatPresentationOwnership()
+    @State private var voicePresentationTask: Task<Void, Never>?
     let isChromeCompact: Bool
     let errorMessage: String?
     let configurationErrorMessage: String?
@@ -398,7 +403,8 @@ struct MessageComposerView: View {
                                 isFocused: $isFocused,
                                 inputHeight: $textInputHeight,
                                 measuredHeight: $textFieldHeight,
-                                isDisabled: isOfflineReadOnly,
+                                isDisabled: isOfflineReadOnly || !isPresentationActive,
+                                isAccessibilityHidden: !isPresentationSelected,
                                 isKeyboardSendEnabled: !showsStopButton && !isActionButtonDisabled,
                                 verticalPadding: textFieldVerticalPadding,
                                 onKeyboardSend: actionButtonTapped,
@@ -610,12 +616,30 @@ struct MessageComposerView: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
+            guard presentationOwnership.isActive else { return }
             keyboardIsVisible = true
         }
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
             keyboardIsVisible = false
         }
+        .onChange(of: isPresentationActive, initial: true) { _, active in
+            presentationOwnership.update(isActive: active, isSelected: isPresentationSelected)
+            if !active { deactivatePresentation() }
+            else {
+                restoreFocusAfterPresentationIfNeeded()
+                autoStartVoiceInputIfNeeded()
+            }
+        }
+        .onChange(of: isPresentationSelected, initial: true) { _, selected in
+            presentationOwnership.update(isActive: isPresentationActive, isSelected: selected)
+            if !selected { deactivatePresentation() }
+        }
+        .onChange(of: canFocusTextView) { _, canFocus in
+            if canFocus { restoreFocusAfterPresentationDismissalSettles() }
+        }
         .onDisappear {
+            presentationOwnership.update(isActive: false, isSelected: isPresentationSelected)
+            deactivatePresentation()
             voiceInput.stopBeforeSubmittingDraft()
             cancelVoiceNote()
         }
@@ -820,7 +844,9 @@ struct MessageComposerView: View {
                         title: String(localized: "Attach File"),
                         image: UIImage(systemName: "paperclip")
                     ) { _ in
+                        let generation = presentationOwnership.generation
                         Task { @MainActor in
+                            guard presentationOwnership.owns(generation) else { return }
                             prepareForComposerPresentation()
                             showFileImporter = true
                         }
@@ -829,7 +855,9 @@ struct MessageComposerView: View {
                         title: String(localized: "Photos"),
                         image: UIImage(systemName: "photo.on.rectangle")
                     ) { _ in
+                        let generation = presentationOwnership.generation
                         Task { @MainActor in
+                            guard presentationOwnership.owns(generation) else { return }
                             prepareForComposerPresentation()
                             showPhotoPicker = true
                         }
@@ -839,7 +867,9 @@ struct MessageComposerView: View {
                         image: UIImage(systemName: "camera"),
                         attributes: UIImagePickerController.isSourceTypeAvailable(.camera) ? [] : .disabled
                     ) { _ in
+                        let generation = presentationOwnership.generation
                         Task { @MainActor in
+                            guard presentationOwnership.owns(generation) else { return }
                             prepareForComposerPresentation()
                             showCameraPicker = true
                         }
@@ -1329,7 +1359,7 @@ struct MessageComposerView: View {
     @MainActor
     private func autoStartVoiceInputIfNeeded() {
         guard autoStartsVoiceInput, !didAutoStartVoiceInput else { return }
-        guard scenePhase == .active else { return }
+        guard scenePhase == .active, presentationOwnership.isActive else { return }
         didAutoStartVoiceInput = true
         guard !voiceInput.isListening, !isVoiceInputDisabled else { return }
         toggleVoiceInput()
@@ -1337,15 +1367,21 @@ struct MessageComposerView: View {
 
     @MainActor
     private func toggleVoiceInput() {
+        guard presentationOwnership.isActive, voicePresentationTask == nil else { return }
         voiceInput.apiClient = apiClient
         voiceInput.profileName = voiceInputProfileName
         voiceInput.currentProfile = currentVoiceInputProfile
         voiceInput.providerPreference = ComposerSTTProviderPreference.storedValue(sttProviderPreferenceRawValue)
         voiceInput.locale = .current
-        Task {
+        let generation = presentationOwnership.generation
+        voicePresentationTask = Task {
+            defer { voicePresentationTask = nil }
+            guard !Task.isCancelled, presentationOwnership.owns(generation) else { return }
             await voiceInput.toggle(currentDraft: draftMessage) { newDraft in
+                guard presentationOwnership.owns(generation) else { return }
                 draftMessage = newDraft
             }
+            if !presentationOwnership.owns(generation) { voiceInput.stopBeforeSubmittingDraft() }
         }
     }
 
@@ -1353,13 +1389,19 @@ struct MessageComposerView: View {
     /// disabled conditions; stops dictation first if it's running.
     @MainActor
     private func startVoiceNoteRecording() {
-        guard !isVoiceNoteRecordingDisabled, !voiceNoteRecorder.isRecording else { return }
+        guard presentationOwnership.isActive, voicePresentationTask == nil, !isVoiceNoteRecordingDisabled, !voiceNoteRecorder.isRecording else { return }
 
         if voiceInput.isListening {
             voiceInput.stopKeepingTranscript()
         }
         voiceNoteCancelArmed = false
-        Task { await voiceNoteRecorder.begin() }
+        let generation = presentationOwnership.generation
+        voicePresentationTask = Task {
+            defer { voicePresentationTask = nil }
+            guard !Task.isCancelled, presentationOwnership.owns(generation) else { return }
+            await voiceNoteRecorder.begin()
+            if !presentationOwnership.owns(generation) { voiceNoteRecorder.cancel() }
+        }
     }
 
     /// Finger lifted (or max duration hit). Cancels if slid up past the threshold,
@@ -1384,11 +1426,40 @@ struct MessageComposerView: View {
         voiceNoteRecorder.cancel()
     }
 
+    private func deactivatePresentation() {
+        voicePresentationTask?.cancel()
+        isFocused = false
+        if !isPresentationSelected {
+            shouldRestoreFocusAfterPresentation = false
+            deferredUploadFocusPhase = .none
+            showPhotoPicker = false
+            showFileImporter = false
+            showCameraPicker = false
+            showsAllModelsSheet = false
+            showsWorkspaceSheet = false
+            showsGitBranchSheet = false
+            showsConfigurationModelPicker = false
+            showsModelConfirmation = false
+            pendingConfigurationProfile = nil
+            startsNewChatAfterControlsDismiss = false
+        }
+        keyboardIsVisible = false
+        voiceInput.stopBeforeSubmittingDraft()
+        cancelVoiceNote()
+    }
+
     private var canFocusTextView: Bool {
-        !isOfflineReadOnly && !isUploadingAttachment && uploadAttachmentErrorMessage == nil
+        isPresentationSelected && isPresentationActive && presentationOwnership.isActive
+            && !isParentPresentationOpen && controlsPresentation?.wrappedValue != true
+            && !showPhotoPicker && !showFileImporter && !showCameraPicker
+            && !showsAllModelsSheet && !showsWorkspaceSheet && !showsGitBranchSheet
+            && !showsConfigurationModelPicker && !showsModelConfirmation && noticeMessage == nil
+            && deferredUploadFocusPhase == .none
+            && !isOfflineReadOnly && !isUploadingAttachment && uploadAttachmentErrorMessage == nil
     }
 
     private func prepareForComposerPresentation() {
+        guard presentationOwnership.isActive else { return }
         shouldRestoreFocusAfterPresentation = isFocused
         if isFocused {
             isFocused = false
@@ -1397,16 +1468,16 @@ struct MessageComposerView: View {
 
     private func restoreFocusAfterPresentationIfNeeded() {
         guard shouldRestoreFocusAfterPresentation else { return }
-        shouldRestoreFocusAfterPresentation = false
         requestTextViewFocusIfPossible()
     }
 
     private func restoreFocusAfterPresentationDismissalSettles() {
         guard shouldRestoreFocusAfterPresentation else { return }
 
+        let generation = presentationOwnership.generation
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 80_000_000)
-            guard shouldRestoreFocusAfterPresentation else { return }
+            guard !Task.isCancelled, presentationOwnership.owns(generation), shouldRestoreFocusAfterPresentation else { return }
             restoreFocusAfterPresentationIfNeeded()
         }
     }
@@ -1439,15 +1510,20 @@ struct MessageComposerView: View {
     private func restoreFocusAfterDeferredUploadIfNeeded() {
         guard deferredUploadFocusPhase != .none else { return }
         deferredUploadFocusPhase = .none
-        requestTextViewFocusIfPossible()
+        // Keep completed upload intent while inactive or while a picker is dismissing.
+        shouldRestoreFocusAfterPresentation = isPresentationSelected
+        restoreFocusAfterPresentationIfNeeded()
     }
 
     private func requestTextViewFocusIfPossible() {
         guard canFocusTextView else { return }
 
+        let generation = presentationOwnership.generation
         Task { @MainActor in
             await Task.yield()
-            guard canFocusTextView else { return }
+            guard !Task.isCancelled, presentationOwnership.owns(generation), canFocusTextView else { return }
+            guard shouldRestoreFocusAfterPresentation else { return }
+            shouldRestoreFocusAfterPresentation = false
             isFocused = true
         }
     }
