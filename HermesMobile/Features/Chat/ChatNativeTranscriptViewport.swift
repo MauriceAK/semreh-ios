@@ -286,6 +286,7 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
         var ownership: Ownership
         var anchor: Anchor?
         var collection: Collection!
+        private let edgeMask = CAGradientLayer()
         var dataSource: UICollectionViewDiffableDataSource<Int, Item>!
         var revisions: [String: StableViewportRowRevision] = [:]
         var indices: [String: Int] = [:]
@@ -449,6 +450,9 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             lifecycleObserver = LifecycleObserver(self)
             collection = makeCollection(makeLayout())
             collection.backgroundColor = .clear
+            edgeMask.colors = [UIColor.clear.cgColor, UIColor.black.cgColor,
+                               UIColor.black.cgColor, UIColor.clear.cgColor, UIColor.clear.cgColor]
+            collection.layer.mask = edgeMask
             collection.alwaysBounceVertical = true
             collection.scrollsToTop = true
             collection.keyboardDismissMode = .interactive
@@ -472,7 +476,10 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
                 guard let self else { return }
                 (self.collection.collectionViewLayout as? ColumnLayout)?.configure(input: self.input, width: self.collection.bounds.width)
             }
-            collection.didLayout = { [weak self] in self?.settleLayout() }
+            collection.didLayout = { [weak self] in
+                self?.updateEdgeMask()
+                self?.settleLayout()
+            }
             let refresh = UIRefreshControl()
             refresh.addTarget(self, action: #selector(refreshHistory), for: .valueChanged)
             collection.refreshControl = refresh
@@ -1126,6 +1133,22 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             collection.setNeedsLayout()
             publish()
         }
+        private func updateEdgeMask() {
+            let height = max(1, collection.bounds.height)
+            let bottom = max(0, height - max(0, input.bottomInset - 32))
+            let topEnd = min(28, bottom / 2)
+            let bottomStart = max(topEnd, bottom - 24)
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            // A scroll layer's bounds origin moves with contentOffset. The mask
+            // must move with that origin to remain fixed at the viewport edges.
+            edgeMask.frame = collection.bounds
+            edgeMask.locations = [0, NSNumber(value: Double(topEnd / height)),
+                NSNumber(value: Double(bottomStart / height)),
+                NSNumber(value: Double(bottom / height)), 1]
+            CATransaction.commit()
+        }
+
         func beginMotion() {
             cancelFollow()
             guard isPresentationActive, !presentationSuspended, motionLink == nil,

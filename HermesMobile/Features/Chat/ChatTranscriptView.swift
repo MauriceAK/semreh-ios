@@ -1664,9 +1664,9 @@ struct ChatTranscriptView: View, Equatable {
                         }
                     }
                     .scrollDismissesKeyboard(.interactively)
-                    // UIKit may draw into the safe area outside SwiftUI's viewport.
-                    // Keep rows inside the declared transcript viewport.
-                    .clipped()
+                    // Fade before the header and composer boundaries rather
+                    // than exposing a hard rectangular clip of message bubbles.
+                    .mask(ChatTranscriptEdgeMask(bottomInset: transcriptBottomInsetHeight))
                     .coordinateSpace(name: Self.transcriptCoordinateSpaceName)
                     .accessibilityIdentifier("chat-transcript-scroll")
 #if DEBUG
@@ -1721,7 +1721,6 @@ struct ChatTranscriptView: View, Equatable {
                             .frame(height: transcriptBottomInsetHeight)
                             .accessibilityHidden(true)
                     }
-                    .adaptiveSoftScrollEdges()
                     .simultaneousGesture(
                         TapGesture().onEnded {
                             guard clarificationPrompt == nil else { return }

@@ -3524,3 +3524,27 @@ struct PinnedLocalNoticeStack: View {
         .accessibilityLabel(notices.joined(separator: "\n"))
     }
 }
+
+/// Fade the scrolling surface itself, never the sibling navigation/composer
+/// controls. Absolute edge widths keep the treatment visible on tall viewports.
+struct ChatTranscriptEdgeMask: View {
+    let bottomInset: CGFloat
+
+    var body: some View {
+        GeometryReader { geometry in
+            let height = max(1, geometry.size.height)
+            let bottom = max(0, height - max(0, bottomInset - 32))
+            let topEnd = min(28, bottom / 2)
+            let bottomStart = max(topEnd, bottom - 24)
+            LinearGradient(stops: [
+                .init(color: .clear, location: 0),
+                .init(color: .black, location: topEnd / height),
+                .init(color: .black, location: bottomStart / height),
+                .init(color: .clear, location: bottom / height),
+                .init(color: .clear, location: 1)
+            ], startPoint: .top, endPoint: .bottom)
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
