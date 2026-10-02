@@ -1013,8 +1013,7 @@ final class DirectSkillUITests: XCTestCase {
         try assertAccessibleTranscriptRows(
             visibleTail, in: detail, context: "long-scroll initial tail"
         )
-        let transcripts = detail.descendants(matching: .scrollView)
-            .matching(identifier: "chat-transcript-scroll")
+        let transcripts = canonicalTranscriptContainers(in: detail)
         let transcript = transcripts.firstMatch
         XCTAssertTrue(transcript.waitForExistence(timeout: 10) && transcript.isHittable)
         XCTAssertEqual(transcripts.count, 1, "The selected chat detail must contain one transcript.")
@@ -1129,8 +1128,7 @@ final class DirectSkillUITests: XCTestCase {
         // Keep context-menu coverage in this separate bounded interaction test;
         // the automatic-restore test above remains entirely no-intervention
         // through its three relaunch assertions.
-        let contextTranscript = detail.descendants(matching: .scrollView)
-            .matching(identifier: "chat-transcript-scroll").firstMatch
+        let contextTranscript = canonicalTranscriptContainers(in: detail).firstMatch
         let contextRow = contextTranscript.descendants(matching: .any)
             .matching(identifier: try XCTUnwrap(accessibleTranscriptRow(completedTail.last!)).identifier)
             .firstMatch
@@ -1144,11 +1142,14 @@ final class DirectSkillUITests: XCTestCase {
         // Completed assistant rows can expose a persistent Copy button behind
         // the context-menu presentation. Select the visible menu action rather
         // than letting XCTest bind to that obscured, non-hittable sibling.
-        let copyAction = app.buttons.matching(
-            NSPredicate(format: "label == %@ AND hittable == true", "Copy")
-        ).firstMatch
-        XCTAssertTrue(copyAction.waitForExistence(timeout: 5),
-                      "The canonical row container must retain its message context menu.")
+        let copyButtons = app.buttons.matching(NSPredicate(format: "label == %@", "Copy"))
+        let copyIsVisible = NSPredicate { _, _ in
+            copyButtons.allElementsBoundByIndex.contains { $0.isHittable }
+        }
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: copyIsVisible, object: nil
+        )], timeout: 5), .completed,
+            "The canonical row container must retain its message context menu.")
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.95)).tap()
 
         let timingAttachment = XCTAttachment(string: timings.joined(separator: "\n"))
@@ -1222,8 +1223,7 @@ final class DirectSkillUITests: XCTestCase {
         try assertAccessibleTranscriptRows(
             visibleTail, in: detail, context: "explicit bottom jump initial tail"
         )
-        let transcript = detail.descendants(matching: .scrollView)
-            .matching(identifier: "chat-transcript-scroll").firstMatch
+        let transcript = canonicalTranscriptContainers(in: detail).firstMatch
         XCTAssertTrue(transcript.waitForExistence(timeout: 10) && transcript.isHittable)
         let arrow = app.buttons["Scroll to latest message"]
         let tail = transcript.descendants(matching: .any)
@@ -1522,8 +1522,7 @@ final class DirectSkillUITests: XCTestCase {
         try assertAccessibleTranscriptRows(
             visibleTail, in: detail, context: "reduce motion initial tail"
         )
-        let transcript = detail.descendants(matching: .scrollView)
-            .matching(identifier: "chat-transcript-scroll").firstMatch
+        let transcript = canonicalTranscriptContainers(in: detail).firstMatch
         XCTAssertTrue(transcript.waitForExistence(timeout: 10) && transcript.isHittable)
         let arrow = app.buttons["Scroll to latest message"]
         let tail = transcript.descendants(matching: .any)
@@ -1705,8 +1704,7 @@ final class DirectSkillUITests: XCTestCase {
         let detail = details.firstMatch
         XCTAssertTrue(detail.waitForExistence(timeout: 30))
         XCTAssertEqual(details.count, 1, "The deep link must mount exactly one chat detail.")
-        let transcripts = detail.descendants(matching: .scrollView)
-            .matching(identifier: "chat-transcript-scroll")
+        let transcripts = canonicalTranscriptContainers(in: detail)
         XCTAssertTrue(transcripts.firstMatch.waitForExistence(timeout: 10))
         XCTAssertEqual(transcripts.count, 1, "The selected chat detail must contain one transcript.")
 
@@ -1774,6 +1772,120 @@ final class DirectSkillUITests: XCTestCase {
         timing.name = "Long active-background timing and evidence limits"
         timing.lifetime = .keepAlways
         add(timing)
+    }
+
+    @MainActor
+    func testOptInProductionLongActiveBackReopenRegression() async throws {
+        continueAfterFailure = false
+        guard ProcessInfo.processInfo.environment["SEMREH_LONG_ACTIVE_NAVIGATION_UI"] == "1" else {
+            throw XCTSkip("Long active-navigation verification is opt-in.")
+        }
+        try requirePreviewShellFixture()
+        let observer = try await LifecycleCanonicalObserver(
+            origin: try XCTUnwrap(URL(string: origin)), credentials: try readCredentials()
+        )
+        defer { observer.invalidate() }
+        guard let fixture = try await observer.discoverLongStoredSession(
+            minimumRows: 100, candidateLimit: 100
+        ), fixture.rows.count >= 140 else {
+            throw XCTSkip("The approved fixture needs an existing 140-row transcript; this test never seeds one.")
+        }
+        let baseline = fixture.rows
+        let app = XCUIApplication()
+        app.launch()
+        defer { app.terminate(); UIPasteboard.general.items = [] }
+        var link = URLComponents()
+        link.scheme = "semreh"
+        link.host = "session"
+        link.queryItems = [URLQueryItem(name: "id", value: fixture.storedID)]
+        app.open(try XCTUnwrap(link.url)) // Entry prerequisite only; scored reopen uses its real row.
+        let details = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "chat-detail:")
+        )
+        let detail = details.firstMatch
+        XCTAssertTrue(detail.waitForExistence(timeout: 30))
+        XCTAssertEqual(details.count, 1)
+        let detailID = detail.identifier
+        try assertAccessibleTranscriptRows(
+            Array(baseline.suffix(2)), in: detail, context: "long active-navigation initial canonical tail"
+        )
+        let composer = app.descendants(matching: .any)
+            .matching(identifier: "chat-composer-input").firstMatch
+        XCTAssertTrue(composer.waitForExistence(timeout: 5) && composer.isHittable)
+        let marker = "SEMREH_INTERRUPT_FIXTURE SEMREH_LONG_ACTIVE_BACK_\(UUID().uuidString)"
+        let sendStart = Date()
+        send(marker, through: composer, app: app)
+        XCTAssertTrue(app.buttons["Stop response"].waitForExistence(timeout: 10))
+        let back = chatBackButton(app: app)
+        XCTAssertTrue(back.isHittable)
+        back.tap() // Scored Back: exactly one delivered tap, with no retry or route normalization.
+        guard detail.waitForNonExistence(timeout: 5) else {
+            retainPreviewScreenshot("FAIL long active-navigation single Back", app: app)
+            XCTFail("One Back tap must leave the active chat.\n\(app.debugDescription)")
+            throw NSError(domain: "SemrehLongActiveNavigation", code: 1)
+        }
+        let sendToBackSeconds = Date().timeIntervalSince(sendStart)
+        XCTAssertLessThan(sendToBackSeconds, 15)
+        _ = try await observer.waitForLongTranscript(
+            storedID: fixture.storedID,
+            beforeRead: { XCTAssertFalse(details.firstMatch.exists) }
+        ) { rows in
+            self.hasStableBaseline(rows, baseline: baseline)
+                && rows.count == baseline.count + 1
+                && rows.last?["role"] as? String == "user"
+                && rows.last.flatMap({ self.canonicalText($0) }) == marker
+        }
+        let completedRows = try await observer.waitForLongTranscript(
+            storedID: fixture.storedID,
+            beforeRead: { XCTAssertFalse(details.firstMatch.exists) }
+        ) { rows in
+            self.hasStableBaseline(rows, baseline: baseline)
+                && rows.count == baseline.count + 2
+                && rows[rows.count - 2]["role"] as? String == "user"
+                && self.canonicalText(rows[rows.count - 2]) == marker
+                && rows.last?["role"] as? String == "assistant"
+                && self.canonicalText(rows.last!) == "SEMREH_SLICE1_ACK"
+        }
+        let row = app.buttons["session-row:\(fixture.storedID)"]
+        guard row.waitForExistence(timeout: 15), row.isHittable else {
+            retainPreviewScreenshot("FAIL long active-navigation exact session row", app: app)
+            XCTFail("The same canonical session must remain reachable through its real row.\n\(app.debugDescription)")
+            throw NSError(domain: "SemrehLongActiveNavigation", code: 2)
+        }
+        row.tap() // Scored reopen: no deep link, second tap, or corrective Latest.
+        let reopenedDetail = app.descendants(matching: .any).matching(identifier: detailID).firstMatch
+        guard reopenedDetail.waitForExistence(timeout: 10), composer.waitForExistence(timeout: 5),
+              composer.isHittable else {
+            retainPreviewScreenshot("FAIL long active-navigation exact reentry", app: app)
+            XCTFail("One real session-row tap must reopen the original detail and usable composer.")
+            throw NSError(domain: "SemrehLongActiveNavigation", code: 3)
+        }
+        XCTAssertEqual(details.count, 1)
+        try assertAccessibleTranscriptRows(
+            Array(completedRows.suffix(2)), in: reopenedDetail,
+            context: "long active-navigation completed tail after real row reopen without correction"
+        )
+        let next = try sendUniqueCompleted("SEMREH_LONG_AFTER_ACTIVE_BACK", composer: composer, app: app)
+        _ = try await observer.waitForLongTranscript(storedID: fixture.storedID) { rows in
+            self.hasStableBaseline(rows, baseline: baseline)
+                && rows.count == baseline.count + 4
+                && Array(rows.suffix(4)).compactMap { $0["role"] as? String }
+                    == ["user", "assistant", "user", "assistant"]
+                && Array(rows.suffix(4)).compactMap(self.canonicalText)
+                    == [marker, "SEMREH_SLICE1_ACK", next, "SEMREH_SLICE1_ACK"]
+        }
+        retainPreviewScreenshot("PASS long active Back real-row reopen completion and next-send", app: app)
+        let evidence = XCTAttachment(string: [
+            "baseline_rows=\(baseline.count)",
+            "fixture_provider_delay_seconds=15",
+            "send_to_verified_back_seconds=\(sendToBackSeconds)",
+            "accepted incomplete suffix observed after Back; exact completion observed while detail absent",
+            "one Back tap; one exact canonical session-row tap; no reopen deep link or corrective scroll",
+            "XCTest quiescence applies; this does not establish compositor pacing or active-momentum taps",
+        ].joined(separator: "\n"))
+        evidence.name = "Long active-navigation canonical and evidence limits"
+        evidence.lifetime = .keepAlways
+        add(evidence)
     }
 
     @MainActor
@@ -2291,8 +2403,7 @@ final class DirectSkillUITests: XCTestCase {
         guard detail.waitForExistence(timeout: 20) else {
             return XCTFail("The seeded production deep link must mount the exact transcript.")
         }
-        let transcript = detail.descendants(matching: .scrollView)
-            .matching(identifier: "chat-transcript-scroll").firstMatch
+        let transcript = canonicalTranscriptContainers(in: detail).firstMatch
         guard transcript.waitForExistence(timeout: 10) else {
             return XCTFail("The production transcript scroll container must exist.")
         }
@@ -2880,8 +2991,7 @@ final class DirectSkillUITests: XCTestCase {
             NSPredicate(format: "identifier BEGINSWITH %@", "chat-detail:")
         ).firstMatch
         XCTAssertTrue(detail.waitForExistence(timeout: 20))
-        let transcript = detail.descendants(matching: .scrollView)
-            .matching(identifier: "chat-transcript-scroll").firstMatch
+        let transcript = canonicalTranscriptContainers(in: detail).firstMatch
         XCTAssertTrue(transcript.waitForExistence(timeout: 10) && transcript.isHittable)
         let composer = app.descendants(matching: .any)
             .matching(identifier: "chat-composer-input").firstMatch
@@ -3075,8 +3185,7 @@ final class DirectSkillUITests: XCTestCase {
             NSPredicate(format: "identifier BEGINSWITH %@", "chat-detail:")
         ).firstMatch
         XCTAssertTrue(detail.waitForExistence(timeout: 20))
-        let transcript = detail.descendants(matching: .scrollView)
-            .matching(identifier: "chat-transcript-scroll").firstMatch
+        let transcript = canonicalTranscriptContainers(in: detail).firstMatch
         let composer = app.descendants(matching: .any)
             .matching(identifier: "chat-composer-input").firstMatch
         XCTAssertTrue(transcript.waitForExistence(timeout: 10) && composer.waitForExistence(timeout: 10))
@@ -4705,8 +4814,7 @@ final class DirectSkillUITests: XCTestCase {
             throw NSError(domain: "DirectSkillUITests", code: 38)
         }
 
-        let transcript = detail.descendants(matching: .scrollView)
-            .matching(identifier: "chat-transcript-scroll").firstMatch
+        let transcript = canonicalTranscriptContainers(in: detail).firstMatch
         XCTAssertTrue(transcript.waitForExistence(timeout: 10) && transcript.isHittable)
         XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5),
                       "Paging baseline must begin with the keyboard hidden.")
@@ -4892,8 +5000,7 @@ final class DirectSkillUITests: XCTestCase {
             throw NSError(domain: "DirectSkillUITests", code: 47)
         }
 
-        let transcripts = detail.descendants(matching: .scrollView)
-            .matching(identifier: "chat-transcript-scroll")
+        let transcripts = canonicalTranscriptContainers(in: detail)
         let transcript = transcripts.firstMatch
         guard transcript.waitForExistence(timeout: max(0, deadline.timeIntervalSinceNow)),
               transcripts.count == 1 else {
@@ -4965,6 +5072,11 @@ final class DirectSkillUITests: XCTestCase {
     }
 
     @MainActor
+    private func canonicalTranscriptContainers(in root: XCUIElement) -> XCUIElementQuery {
+        root.descendants(matching: .any).matching(identifier: "chat-transcript-scroll")
+    }
+
+    @MainActor
     private func assertAccessibleTranscriptRows(
         _ rows: [[String: Any]],
         in detail: XCUIElement,
@@ -4976,11 +5088,10 @@ final class DirectSkillUITests: XCTestCase {
             throw NSError(domain: "DirectSkillUITests", code: 17)
         }
 
-        let transcript = detail.descendants(matching: .scrollView)
-            .matching(identifier: "chat-transcript-scroll")
-            .firstMatch
-        guard transcript.waitForExistence(timeout: 10) else {
-            XCTFail("\(context) must expose the canonical transcript scroll container.")
+        let containers = canonicalTranscriptContainers(in: detail)
+        let transcript = containers.firstMatch
+        guard transcript.waitForExistence(timeout: 10), containers.count == 1 else {
+            XCTFail("\(context) must expose exactly one canonical transcript scroll container.")
             throw NSError(domain: "DirectSkillUITests", code: 18)
         }
 
