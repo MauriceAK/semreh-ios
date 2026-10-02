@@ -1560,15 +1560,31 @@ final class ChatTranscriptViewRestoreTests: XCTestCase {
                        "A saved-message restore must not request the latest content")
     }
 
-    private func firstVisibleTranscriptMessageNumber(in image: UIImage) throws -> Int {
+    func testFirstVisibleTranscriptRowReadsLeadingIndexInClippedHeading() throws {
+        let bounds = CGRect(x: 0, y: 0, width: 180, height: 48)
+        for index in [2, 20] {
+            let image = UIGraphicsImageRenderer(bounds: bounds).image { context in
+                context.cgContext.setFillColor(UIColor.white.cgColor)
+                context.cgContext.fill(bounds)
+                ("Restored \(index) transcript message" as NSString).draw(at: CGPoint(x: 8, y: 12),
+                    withAttributes: [.font: UIFont.systemFont(ofSize: 17), .foregroundColor: UIColor.black])
+            }
+            XCTAssertEqual(try firstVisibleTranscriptMessageNumber(in: image, prefix: "Restored"), index)
+        }
+    }
+
+    private func firstVisibleTranscriptMessageNumber(
+        in image: UIImage, prefix: String = "Restored transcript message"
+    ) throws -> Int {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = false
         let cgImage = try XCTUnwrap(image.cgImage)
         try VNImageRequestHandler(cgImage: cgImage, options: [:]).perform([request])
+        let pattern = NSRegularExpression.escapedPattern(for: prefix) + #"\s+(\d+)"#
         let visibleRows = (request.results ?? []).compactMap { observation -> (Int, CGFloat)? in
             guard let text = observation.topCandidates(1).first?.string,
-                  let range = text.range(of: #"Restored transcript message\s+(\d+)"#, options: .regularExpression),
+                  let range = text.range(of: pattern, options: .regularExpression),
                   let number = Int(text[range].split(separator: " ").last ?? "")
             else { return nil }
             return (number, observation.boundingBox.maxY)
@@ -2000,8 +2016,10 @@ final class ChatTranscriptViewRestoreTests: XCTestCase {
             let model = ChatViewModel(session: session, server: server, userDefaults: defaults,
                                       gatewayRuntimeProvider: { _ in throw URLError(.cannotConnectToHost) })
             model.seedTranscriptForTesting((0..<60).map { index in
+                // Keep the index near the leading edge during the native push.
+                // A clipped trailing 20 must not be misread as row 2 by OCR.
                 ChatMessage(role: index.isMultiple(of: 2) ? "user" : "assistant",
-                            content: "Restored transcript message \(index)\n\nReader fixture body \(index). The same display row is the durable reading unit.",
+                            content: "Restored \(index) transcript message\n\nReader fixture body \(index). The same display row is the durable reading unit.",
                             timestamp: Double(index), messageId: "shell-message-\(index)")
             })
             let displayRows = model.displayedTranscriptMessages
@@ -2031,6 +2049,15 @@ final class ChatTranscriptViewRestoreTests: XCTestCase {
                 window.isHidden = true
                 window.rootViewController = nil
                 previousKeyWindow?.makeKey()
+            }
+
+            // Complete neutral setup before the single scored navigation request.
+            // This must not wait for or pre-render the chat destination.
+            guard try await MountedReadinessWait.poll(condition: {
+                capture.neutralRootAppearanceCompleted && window.isKeyWindow && !window.isHidden
+            }) else {
+                XCTFail("Timed out waiting for neutral reader-shell appearance: completed=\(capture.neutralRootAppearanceCompleted), key=\(window.isKeyWindow), hidden=\(window.isHidden)")
+                return
             }
 
             var firstImages: [UIImage] = []
@@ -2090,7 +2117,7 @@ final class ChatTranscriptViewRestoreTests: XCTestCase {
             add(timeline)
             for (visit, firstImage) in firstImages.enumerated() {
                 do {
-                    XCTAssertEqual(try firstVisibleTranscriptMessageNumber(in: firstImage), savedRow,
+                    XCTAssertEqual(try firstVisibleTranscriptMessageNumber(in: firstImage, prefix: "Restored"), savedRow,
                                    "The first presented frame at the first attached production tick on visit \(visit + 1) must show the saved reader row first")
                 } catch {
                     XCTFail("Production shell first tick on visit \(visit + 1) could not be read: \(error)")
@@ -4698,6 +4725,9 @@ private struct ReaderShellRoot: View {
     var body: some View {
         NavigationStack {
             Color.clear
+                .background(NavigationAppearanceCompletionObserver {
+                    capture.neutralRootAppearanceCompleted = true
+                })
                 .navigationDestination(isPresented: $route.chatPresented) {
                     ChatView(session: session, server: server, onAPIError: { _ in },
                              loadsInitialMessages: false, retainedViewModel: model,
@@ -4732,6 +4762,7 @@ private struct ReaderShellSample {
 
 @MainActor
 private final class ReaderShellCapture {
+    var neutralRootAppearanceCompleted = false
     let probe = ChatTranscriptRestoreProbe()
     private(set) var samples: [ReaderShellSample] = []
     private var completed: XCTestExpectation?
