@@ -5283,10 +5283,13 @@ private final class MountedSteerFixture {
         window.makeKeyAndVisible()
         window.layoutIfNeeded()
         route.presented = true
-        try await wait { self.find("chat-composer-input", in: self.window) is UITextView }
+        try await wait({ self.find("chat-composer-input", in: self.window) is UITextView },
+                       phase: "startup: composer mounted")
         try await keyboardSend()
-        try await wait { self.model.activeStreamID != nil && !self.model.isStartingChat }
-        try await wait { (try? self.composer().text) == "" }
+        try await wait({ self.model.activeStreamID != nil && !self.model.isStartingChat },
+                       phase: "startup: initial prompt running")
+        try await wait({ (try? self.composer().text) == "" },
+                       phase: "startup: initial draft cleared")
         let calls = await transport.calls()
         XCTAssertEqual(calls.filter { $0.method == "prompt.submit" }.count, 1)
     }
@@ -5305,12 +5308,12 @@ private final class MountedSteerFixture {
     }
 
     func keyboardSend() async throws {
-        try await wait {
+        try await wait({
             guard let input = try? self.composer(),
                   let command = input.keyCommands?.first(where: { $0.action == NSSelectorFromString("sendMessageFromKeyboard") }),
                   let action = command.action else { return false }
             return input.canPerformAction(action, withSender: command)
-        }
+        }, phase: "keyboard Send enabled")
         let input = try composer()
         let command = try XCTUnwrap(input.keyCommands?.first(where: { $0.action == NSSelectorFromString("sendMessageFromKeyboard") }))
         XCTAssertTrue(input.becomeFirstResponder())
@@ -5383,13 +5386,17 @@ private final class MountedSteerFixture {
         }
     }
 
-    private func wait(_ condition: () -> Bool) async throws {
+    private func wait(_ condition: () -> Bool, phase: String = "mounted composer") async throws {
         let deadline = Date().addingTimeInterval(3)
         while Date() < deadline {
             if condition() { return }
             try await Task.sleep(for: .milliseconds(10))
         }
-        XCTFail("Mounted composer condition did not settle")
+        XCTFail("Mounted composer condition did not settle (\(phase)); "
+            + "keyWindow=\(window.isKeyWindow), scene=\(String(describing: window.windowScene?.activationState)), "
+            + "composerMounted=\(find("chat-composer-input", in: window) is UITextView), "
+            + "starting=\(model.isStartingChat), activeRun=\(model.activeStreamID != nil), "
+            + "sendError=\(model.sendErrorMessage ?? "nil")")
         throw DirectSessionError.invalidResponse
     }
 

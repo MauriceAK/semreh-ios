@@ -923,6 +923,12 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         XCTAssertTrue(sent)
         XCTAssertTrue(vm.directConversationHasPromptDeliveryUncertainty)
         XCTAssertTrue(vm.directPromptDeliveryHasConfirmedAcceptance)
+        // prompt.submit schedules start/delta in a separate fake-transport task.
+        // Consume those frames before enqueuing completion, or a late start can
+        // reopen the run after completion and correctly block idle recovery.
+        await waitUntil { vm.hasStreamingAssistantMessageContent }
+        XCTAssertTrue(vm.hasStreamingAssistantMessageContent)
+        XCTAssertNotNil(vm.activeStreamID)
         fake.emit(ChatDirectEventFactory.event(
             sessionID: "runtime-1",
             type: "message.complete",
