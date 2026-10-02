@@ -14,6 +14,43 @@ final class ChatTranscriptViewRestoreTests: XCTestCase {
             "The neutral root must also be gated by actual XCTest host configuration")
     }
 
+    func testMountedReadinessChecksPredicateOnDelayedFinalResumption() async throws {
+        var instant = ContinuousClock().now
+        var ready = false
+        var suspensions = 0
+        let satisfied = try await MountedReadinessWait.poll(
+            condition: { ready }, now: { instant }, suspend: {
+                suspensions += 1
+                instant = instant.advanced(by: .seconds(4))
+                ready = true
+            })
+        XCTAssertTrue(satisfied, "Read readiness before rejecting a delayed final resumption")
+        XCTAssertEqual(suspensions, 1, "Do not add a post-deadline sleep or retry")
+    }
+
+    func testMountedReadinessStopsUnreadyAtOriginalBudget() async throws {
+        var instant = ContinuousClock().now
+        var suspensions = 0
+        let satisfied = try await MountedReadinessWait.poll(
+            condition: { false }, now: { instant }, suspend: {
+                suspensions += 1
+                instant = instant.advanced(by: .seconds(3))
+            })
+        XCTAssertFalse(satisfied)
+        XCTAssertEqual(suspensions, 1, "Preserve the three-second setup budget")
+    }
+
+    func testMountedReadinessPropagatesCancellation() async throws {
+        do {
+            _ = try await MountedReadinessWait.poll(condition: { false }, suspend: {
+                throw CancellationError()
+            })
+            XCTFail("Cancellation must escape the readiness helper")
+        } catch is CancellationError {
+            // Cancellation must not be rewritten as a setup timeout.
+        }
+    }
+
     // Controlled gateway mock, mounted production ChatView and native keyboard Send.
     // These are composer ownership regressions, not live Hermes/network evidence.
     func testMountedSteerRejectionAndTransportFailureRetainDraft() async throws {
@@ -4708,6 +4745,10 @@ private final class ReaderShellCapture {
 
     func record(window: UIWindow?, tick: Int) {
         guard completed != nil else { return }
+        let captureBegan = CACurrentMediaTime()
+        let preCaptureWindow = window.map {
+            "window.bounds=\($0.bounds) keyWindow=\($0.isKeyWindow) hidden=\($0.isHidden)"
+        } ?? "window=nil"
         let image = window.map { window in
             UIGraphicsImageRenderer(bounds: window.bounds).image { context in
                 // Supplementary raw layer-tree capture, not the judged frame:
@@ -4723,16 +4764,26 @@ private final class ReaderShellCapture {
         // commit (diagnostic only). The forced commit may advance later ticks'
         // raw frames; that tradeoff is evidence-only and cannot change tick one,
         // which is captured before these run.
+        var presentedSucceeded: Bool?
         let presentedImage = window.map { window in
             UIGraphicsImageRenderer(bounds: window.bounds).image { context in
-                window.drawHierarchy(in: window.bounds, afterScreenUpdates: false)
+                presentedSucceeded = window.drawHierarchy(in: window.bounds, afterScreenUpdates: false)
             }
         }
+        let presentedFinished = CACurrentMediaTime()
+        var forcedSucceeded: Bool?
         let forcedDiagnostic = window.map { window in
             UIGraphicsImageRenderer(bounds: window.bounds).image { context in
-                window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+                forcedSucceeded = window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
             }
         }
+        let forcedFinished = CACurrentMediaTime()
+        let captureStatus = "preCapture: \(preCaptureWindow)"
+            + "\npresentedSucceeded=\(String(describing: presentedSucceeded))"
+            + " forcedSucceeded=\(String(describing: forcedSucceeded))"
+            + " rawAndPresentedMs=\((presentedFinished - captureBegan) * 1000)"
+            + " forcedMs=\((forcedFinished - presentedFinished) * 1000)"
+            + " callbackBegan=\(captureBegan)"
         // Geometry is observed after the capture; it cannot force a later
         // hierarchy repaint into the image or replace tick one with tick four.
         // Split into locals: one concatenation chain here exceeds the type
@@ -4743,9 +4794,9 @@ private final class ReaderShellCapture {
             let scrollLine = attachedScrollDescription(in: window)
             let layerLine = attachedLayerDescription(in: window)
             let censusLine = diagnosticScrollLayerSummary(in: window)
-            geometry = boundsLine + "\n" + scrollLine + "\n" + layerLine + "\n" + censusLine
+            geometry = captureStatus + "\n" + boundsLine + "\n" + scrollLine + "\n" + layerLine + "\n" + censusLine
         } else {
-            geometry = "window=nil"
+            geometry = captureStatus
         }
         samples.append(ReaderShellSample(tick: tick, image: image, geometry: geometry,
                                          presentedImage: presentedImage,
@@ -5103,6 +5154,24 @@ private final class MetricPublicationTestScrollView: UIScrollView {
 
 // Every RPC response below is a controlled mock. The barrier suspends exactly
 // session.steer; no real socket, provider, credentials or server is involved.
+@MainActor
+private enum MountedReadinessWait {
+    // The final resumed predicate is authoritative for fixture readiness, not a
+    // startup-latency measurement. Never schedule another sleep after the budget.
+    static func poll(
+        condition: () -> Bool,
+        now: () -> ContinuousClock.Instant = { ContinuousClock().now },
+        suspend: () async throws -> Void = { try await Task.sleep(for: .milliseconds(10)) }
+    ) async throws -> Bool {
+        let deadline = now().advanced(by: .seconds(3))
+        while true {
+            if condition() { return true }
+            if now() >= deadline { return false }
+            try await suspend()
+        }
+    }
+}
+
 private enum MountedSteerResponse: Sendable {
     case accepted, rejected, transportFailure
 }
@@ -5387,11 +5456,7 @@ private final class MountedSteerFixture {
     }
 
     private func wait(_ condition: () -> Bool, phase: String = "mounted composer") async throws {
-        let deadline = Date().addingTimeInterval(3)
-        while Date() < deadline {
-            if condition() { return }
-            try await Task.sleep(for: .milliseconds(10))
-        }
+        if try await MountedReadinessWait.poll(condition: condition) { return }
         XCTFail("Mounted composer condition did not settle (\(phase)); "
             + "keyWindow=\(window.isKeyWindow), scene=\(String(describing: window.windowScene?.activationState)), "
             + "composerMounted=\(find("chat-composer-input", in: window) is UITextView), "
