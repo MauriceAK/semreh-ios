@@ -190,6 +190,7 @@ struct SessionInteractiveRow: View {
         }
         .buttonStyle(.plain)
         .id(session.id)
+        .accessibilityIdentifier("session-row:\(session.id)")
         .background(
             session.sessionId == selectedSessionID
                 ? Color.accentColor.opacity(0.12)

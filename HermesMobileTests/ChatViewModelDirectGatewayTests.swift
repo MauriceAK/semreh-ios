@@ -923,6 +923,12 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         XCTAssertTrue(sent)
         XCTAssertTrue(vm.directConversationHasPromptDeliveryUncertainty)
         XCTAssertTrue(vm.directPromptDeliveryHasConfirmedAcceptance)
+        // prompt.submit schedules start/delta in a separate fake-transport task.
+        // Consume those frames before enqueuing completion, or a late start can
+        // reopen the run after completion and correctly block idle recovery.
+        await waitUntil { vm.hasStreamingAssistantMessageContent }
+        XCTAssertTrue(vm.hasStreamingAssistantMessageContent)
+        XCTAssertNotNil(vm.activeStreamID)
         fake.emit(ChatDirectEventFactory.event(
             sessionID: "runtime-1",
             type: "message.complete",
@@ -1817,6 +1823,26 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         let draft = try XCTUnwrap(outcome?.session)
         XCTAssertNil(draft.sessionId)
         XCTAssertEqual(draft.profile, "other")
+        XCTAssertNotNil(draft.localDraftID)
+        let secondOutcome = await vm.switchProfile(profile, startNewSession: true)
+        let second = try XCTUnwrap(secondOutcome?.session)
+        XCTAssertNotNil(second.localDraftID)
+        XCTAssertNotEqual(draft.localDraftID, second.localDraftID)
+        // Exercise the same registration/navigation payload seam as ChatView.
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "ProfileDraftRoute.\(UUID().uuidString)"))
+        let drafts = ComposerDraftStore(defaults: defaults)
+        defer { drafts.resetForTesting() }
+        let origin = URL(string: "https://profile-draft.example")!
+        drafts.registerLocalDraft(draft, server: origin)
+        let writer = drafts.claimWriter(server: origin, sessionID: draft.id, owner: UUID())
+        XCTAssertTrue(drafts.save("profile draft", configuration: draft,
+            server: origin, sessionID: draft.id, writer: writer))
+        let reconstructed = ComposerDraftStore(defaults: defaults)
+        let route = try XCTUnwrap(reconstructed.reachableLocalDrafts(server: origin, profile: "other").first)
+        XCTAssertEqual(route.localDraftID, draft.localDraftID)
+        XCTAssertEqual(route.profile, "other")
+        XCTAssertEqual(reconstructed.load(server: origin, sessionID: route.id), "profile draft")
+        XCTAssertTrue(reconstructed.reachableLocalDrafts(server: origin, profile: "work").isEmpty)
         XCTAssertTrue(vm.hasServerBackedSession)
         XCTAssertEqual(vm.selectedProfileTitle, "work")
         XCTAssertTrue(fake.calls().isEmpty)

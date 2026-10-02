@@ -887,6 +887,8 @@ final class ChatViewModel {
     /// Shared configuration mutation generation. Model and reasoning writes are
     /// optimistic, so a late response must never roll back a newer visible choice.
     private var composerConfigurationMutationToken = 0
+    /// Synchronous intent revision, including optimistic changes later rolled back.
+    var composerConfigurationMutationRevision: Int { composerConfigurationMutationToken }
     @ObservationIgnored private var composerConfigurationLoadGeneration = 0
     var showsReasoningEffortControl: Bool {
         ReasoningEffortOption.showsEffortControl(
@@ -2981,6 +2983,10 @@ final class ChatViewModel {
         Self.nonEmpty(sessionID)
     }
 
+    /// Wire identity only. Draft owners use it after successful consumption,
+    /// never merely because first-send runtime creation finished.
+    var composerDraftCanonicalSessionID: String? { canonicalSessionID }
+
     func loadComposerConfiguration() async {
         await loadDirectComposerConfiguration()
     }
@@ -3155,6 +3161,7 @@ final class ChatViewModel {
         }
         return ProfileSwitchOutcome(
             session: SessionSummary(
+                localDraftID: "local-draft-\(UUID().uuidString)",
                 title: "New Chat",
                 createdAt: Date().timeIntervalSince1970,
                 profile: name

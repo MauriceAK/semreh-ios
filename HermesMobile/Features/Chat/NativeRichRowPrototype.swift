@@ -899,7 +899,6 @@ struct NativeDirectPreparedRow {
     struct ToolAction {
         let id: String
         let title: String
-        let symbol: String
         let accessibilityStatus: String
         let headerFrame: CGRect
         let isExpanded: Bool
@@ -1005,7 +1004,7 @@ final class NativeDirectTranscriptRowView: UIView, UIContextMenuInteractionDeleg
                             thinkingDetail, thinkingDetailFrame, toolActions, linkPreview, copyFrame):
             var headerY: CGFloat = 0
             if let thinkingTitle {
-                let button = disclosureButton(title: thinkingTitle, symbol: "ellipsis.bubble", y: headerY,
+                let button = disclosureButton(title: thinkingTitle, y: headerY,
                                               expanded: thinkingDetail != nil)
                 addSubview(button)
                 ordered.append(button)
@@ -1020,7 +1019,7 @@ final class NativeDirectTranscriptRowView: UIView, UIContextMenuInteractionDeleg
                 }
             }
             for action in toolActions {
-                let button = disclosureButton(title: action.title, symbol: action.symbol,
+                let button = disclosureButton(title: action.title,
                     frame: action.headerFrame, expanded: action.isExpanded,
                     onTap: { [weak self] in self?.onToggleTool?(action.id) })
                 button.accessibilityIdentifier = "native-tool-action-\(action.id)"
@@ -1111,19 +1110,17 @@ final class NativeDirectTranscriptRowView: UIView, UIContextMenuInteractionDeleg
         accessibilityElements = ordered
     }
 
-    private func disclosureButton(title: String, symbol: String, y: CGFloat,
+    private func disclosureButton(title: String, y: CGFloat,
                                   expanded: Bool = false, onTap: (() -> Void)? = nil) -> UIButton {
-        disclosureButton(title: title, symbol: symbol,
+        disclosureButton(title: title,
                          frame: CGRect(x: 0, y: y, width: bounds.width, height: 44),
                          expanded: expanded, onTap: onTap)
     }
 
-    private func disclosureButton(title: String, symbol: String, frame: CGRect,
+    private func disclosureButton(title: String, frame: CGRect,
                                   expanded: Bool = false, onTap: (() -> Void)? = nil) -> UIButton {
         let button = UIButton(type: .system)
-        button.setImage(UIImage(systemName: symbol, withConfiguration:
-            UIImage.SymbolConfiguration(pointSize: 16, weight: .medium)), for: .normal)
-        button.setTitle("  \(title)", for: .normal)
+        button.setTitle(title, for: .normal)
         button.contentHorizontalAlignment = .leading
         button.contentEdgeInsets = UIEdgeInsets(top: 0, left: 0, bottom: 0, right: 26)
         button.titleLabel?.font = UIFont.preferredFont(forTextStyle: .subheadline)

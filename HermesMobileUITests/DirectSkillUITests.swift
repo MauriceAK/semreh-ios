@@ -44,6 +44,164 @@ private enum P09CalibrationGeometry {
 }
 
 final class DirectSkillUITests: XCTestCase {
+    /// Actual disposable-server UI flow; no lab injection, fake send or direct navigation.
+    @MainActor
+    func testDailyDriverDraftReopenRestartAndCanonicalSend() async throws {
+        continueAfterFailure = false
+        try requirePreviewShellFixture()
+        guard ProcessInfo.processInfo.environment["SEMREH_DAILY_DRIVER_UI"] == "1" else {
+            throw XCTSkip("Daily-driver draft journey requires the explicit contained opt-in.")
+        }
+        let observer = try await LifecycleCanonicalObserver(
+            origin: try XCTUnwrap(URL(string: origin)), credentials: readCredentials()
+        )
+        defer { observer.invalidate() }
+        let activeBefore = try await observer.activeProfile()
+        let defaultBefore = try await observer.defaultProfile()
+        let app = XCUIApplication()
+        defer { app.terminate(); UIPasteboard.general.items = [] }
+
+        for (theme, style) in [("semrehLight", "Light"), ("semrehDark", "Dark")] {
+            app.launchArguments = ["-appTheme", theme, "-AppleInterfaceStyle", style]
+            app.launch()
+            let composer = try openContainedNewChat(app: app)
+            XCTAssertTrue(app.otherElements["chat-detail:New Chat"].exists,
+                          "New chat must reach its composer, not remain in the bot picker.")
+            let marker = "SEMREH_DAILY_DRAFT_\(style)_\(UUID().uuidString)"
+            composer.tap()
+            composer.typeText(marker)
+            XCTAssertEqual(composer.value as? String, marker)
+
+            let back = chatBackButton(app: app)
+            XCTAssertTrue(back.isHittable)
+            back.tap() // Scored leave: exactly one delivered Back tap.
+            XCTAssertTrue(app.staticTexts["Drafts"].waitForExistence(timeout: 10))
+            let draftRow = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", marker)).firstMatch
+            XCTAssertTrue(draftRow.waitForExistence(timeout: 5) && draftRow.isHittable)
+            draftRow.tap()
+            XCTAssertTrue(composer.waitForExistence(timeout: 10))
+            XCTAssertEqual(composer.value as? String, marker, "Reopen must restore the exact text.")
+            retainPreviewScreenshot("\(style) reachable draft reopened", app: app)
+
+            let reopenBack = chatBackButton(app: app)
+            XCTAssertTrue(reopenBack.isHittable)
+            reopenBack.tap()
+            XCTAssertTrue(draftRow.waitForExistence(timeout: 10))
+            app.terminate()
+            app.launch()
+            // A cold launch can legitimately restore an older canonical chat.
+            // Composer existence identifies a chat surface, NOT this draft.
+            // Normalize that prerequisite, then reopen the unique exact-text
+            // draft through its real row. Never accept another chat's composer.
+            if composer.waitForExistence(timeout: 3) {
+                let restoredBack = chatBackButton(app: app)
+                guard restoredBack.waitForExistence(timeout: 5), restoredBack.isHittable else {
+                    retainPreviewScreenshot("FAIL \(style) restored surface cannot leave", app: app)
+                    XCTFail("Cold-launch prerequisite must allow leaving the restored chat.\n\(app.debugDescription)")
+                    throw NSError(domain: "SemrehDailyDriverJourney", code: 5)
+                }
+                restoredBack.tap() // Prerequisite only; scored Back remains above.
+            }
+            guard draftRow.waitForExistence(timeout: 15), draftRow.isHittable,
+                  app.buttons.matching(NSPredicate(format: "label CONTAINS %@", marker)).count == 1 else {
+                retainPreviewScreenshot("FAIL \(style) exact draft row unavailable after restart", app: app)
+                XCTFail("The original unique unsent draft must remain reachable after restart.\n\(app.debugDescription)")
+                throw NSError(domain: "SemrehDailyDriverJourney", code: 6)
+            }
+            draftRow.tap()
+            guard composer.waitForExistence(timeout: 10), composer.value as? String == marker else {
+                retainPreviewScreenshot("FAIL \(style) exact draft composer mismatch after restart", app: app)
+                XCTFail("Process reconstruction must retain the reachable draft's exact text.\n\(app.debugDescription)")
+                throw NSError(domain: "SemrehDailyDriverJourney", code: 7)
+            }
+            retainPreviewScreenshot("\(style) exact draft reconstructed through its row", app: app)
+
+            let sendButton = app.buttons["Send"]
+            XCTAssertTrue(sendButton.isEnabled && sendButton.isHittable)
+            sendButton.tap() // Exactly one send; canonical observer rejects duplicates.
+            let storedID = try await observer.discoverStoredID(uniquePrompt: marker)
+            _ = try await waitForCanonical(observer: observer, storedID: storedID) {
+                self.exactCanonicalPairs($0, users: [marker])
+            }
+            waitForIdle(app: app)
+            XCTAssertTrue(containing(marker, app: app).exists)
+            let postSendDraft = "SEMREH_DAILY_CANONICAL_DRAFT_\(style)_\(UUID().uuidString)"
+            composer.tap()
+            composer.typeText(postSendDraft)
+            XCTAssertEqual(composer.value as? String, postSendDraft)
+            XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+            let transcript = app.descendants(matching: .any)
+                .matching(identifier: "chat-transcript-scroll").firstMatch
+            XCTAssertTrue(transcript.waitForExistence(timeout: 5) && !transcript.frame.isEmpty)
+            // Scored ordinary transcript tap, outside hosted row controls. No
+            // swipes or second tap may conceal lost tap-to-dismiss behavior.
+            transcript.coordinate(withNormalizedOffset: CGVector(dx: 0.98, dy: 0.1)).tap()
+            let keyboardDismissed = NSPredicate { _, _ in !app.keyboards.firstMatch.exists }
+            guard XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: keyboardDismissed,
+                    object: nil)], timeout: 5) == .completed else {
+                retainPreviewScreenshot("FAIL \(style) transcript tap did not dismiss keyboard", app: app)
+                XCTFail("One transcript tap must dismiss the keyboard without losing the draft.")
+                throw NSError(domain: "SemrehDailyDriverJourney", code: 9)
+            }
+            XCTAssertEqual(composer.value as? String, postSendDraft)
+            composer.tap()
+            XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+            XCTAssertEqual(composer.value as? String, postSendDraft)
+            retainPreviewScreenshot("\(style) transcript tap dismisses keyboard and retains draft", app: app)
+            // Draft persistence is debounced 300 ms; the global scene flush runs
+            // synchronously when the app backgrounds. Simulate the real
+            // force-quit flow (home, then kill) instead of SIGKILLing a
+            // foreground app mid-debounce.
+            XCUIDevice.shared.press(.home)
+            try await Task.sleep(for: .milliseconds(800))
+            app.terminate()
+            app.launch()
+            // Always resolve the cold-launch prerequisite back to the list and
+            // tap the exact wire identity. Another restored chat can expose an
+            // equally valid composer; existence alone is never identity proof.
+            if composer.waitForExistence(timeout: 3) {
+                let restoredBack = chatBackButton(app: app)
+                guard restoredBack.waitForExistence(timeout: 5), restoredBack.isHittable else {
+                    retainPreviewScreenshot("FAIL \(style) canonical restart cannot leave restored surface", app: app)
+                    XCTFail("Cold-launch prerequisite must allow leaving the restored chat.\n\(app.debugDescription)")
+                    throw NSError(domain: "SemrehDailyDriverJourney", code: 8)
+                }
+                restoredBack.tap()
+            }
+            let canonicalRow = app.buttons["session-row:\(storedID)"]
+            guard canonicalRow.waitForExistence(timeout: 15), canonicalRow.isHittable else {
+                retainPreviewScreenshot("FAIL \(style) canonical row unavailable after restart", app: app)
+                XCTFail("Canonical conversation must remain reachable after process reconstruction.\n\(app.debugDescription)")
+                throw NSError(domain: "SemrehDailyDriverJourney", code: 1)
+            }
+            canonicalRow.tap()
+            guard composer.waitForExistence(timeout: 10), composer.isHittable else {
+                retainPreviewScreenshot("FAIL \(style) canonical composer unavailable", app: app)
+                XCTFail("Reopening the exact canonical conversation must present its composer.\n\(app.debugDescription)")
+                throw NSError(domain: "SemrehDailyDriverJourney", code: 2)
+            }
+            guard composer.value as? String == postSendDraft,
+                  containing(marker, app: app).waitForExistence(timeout: 10) else {
+                retainPreviewScreenshot("FAIL \(style) canonical draft or transcript mismatch", app: app)
+                XCTFail("Exact canonical transcript and text typed after the first send must reconstruct together.")
+                throw NSError(domain: "SemrehDailyDriverJourney", code: 3)
+            }
+            let rows = try await observer.transcript(storedID: storedID)
+            guard exactCanonicalPairs(rows, users: [marker]) else {
+                XCTFail("Reconstruction must not resend or change the canonical conversation.")
+                throw NSError(domain: "SemrehDailyDriverJourney", code: 4)
+            }
+            retainPreviewScreenshot("\(style) canonical conversation and later draft reconstructed", app: app)
+            // Consume only our unsent test draft; keep canonical server evidence.
+            try clearDailyDriverDraft(composer, expectedText: postSendDraft, style: style, app: app)
+            app.terminate()
+        }
+        let activeAfter = try await observer.activeProfile()
+        let defaultAfter = try await observer.defaultProfile()
+        XCTAssertEqual(activeAfter, activeBefore)
+        XCTAssertEqual(defaultAfter, defaultBefore)
+    }
+
     @MainActor
     func testChatConfigurationDraftModelAndProfileConfirmation() throws {
         continueAfterFailure = false
@@ -5281,6 +5439,45 @@ final class DirectSkillUITests: XCTestCase {
             XCTAssertTrue(selectAll.waitForExistence(timeout: 3)); selectAll.tap()
         }
         field.typeText(value)
+    }
+
+    @MainActor
+    private func clearDailyDriverDraft(
+        _ field: XCUIElement, expectedText: String, style: String, app: XCUIApplication
+    ) throws {
+        guard field.value as? String == expectedText else {
+            XCTFail("Refusing to clear text other than this journey's owned draft.")
+            throw NSError(domain: "SemrehDailyDriverJourney", code: 9)
+        }
+        field.tap()
+        field.press(forDuration: 1.1)
+        // Use the actual iOS editing action; Cmd-A synthesis did not select
+        // this Simulator's native text view and deleted only one character.
+        let selectAll = app.menuItems["Select All"]
+        guard selectAll.waitForExistence(timeout: 5), selectAll.isHittable else {
+            retainPreviewScreenshot("FAIL \(style) draft cleanup selection unavailable", app: app)
+            XCTFail("Owned draft cleanup requires the real Select All editing action.\n\(app.debugDescription)")
+            throw NSError(domain: "SemrehDailyDriverJourney", code: 10)
+        }
+        selectAll.tap()
+        let cut = app.menuItems["Cut"]
+        guard cut.waitForExistence(timeout: 3), cut.isHittable else {
+            retainPreviewScreenshot("FAIL \(style) draft cleanup Cut unavailable", app: app)
+            XCTFail("Owned draft cleanup requires the real Cut editing action.\n\(app.debugDescription)")
+            throw NSError(domain: "SemrehDailyDriverJourney", code: 12)
+        }
+        cut.tap()
+        let emptied = NSPredicate { _, _ in
+            let value = (field.value as? String) ?? ""
+            return value.isEmpty || value == field.placeholderValue
+        }
+        let clearResult = XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: emptied, object: nil)], timeout: 3)
+        let cleared = (field.value as? String) ?? ""
+        guard clearResult == .completed, cleared.isEmpty || cleared == field.placeholderValue else {
+            retainPreviewScreenshot("FAIL \(style) draft cleanup incomplete", app: app)
+            XCTFail("The owned disposable draft must be empty before the next theme.\n\(app.debugDescription)")
+            throw NSError(domain: "SemrehDailyDriverJourney", code: 11)
+        }
     }
 
     private func clearTextInput(_ field: XCUIElement, app: XCUIApplication) {

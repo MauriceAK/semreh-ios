@@ -423,7 +423,13 @@ struct HermesMobileApp: App {
             // `xcrun simctl launch <udid> com.maurice.semreh --sidebar-brand-lab`
             // `xcrun simctl launch <udid> com.maurice.semreh --bird-palette-visual-lab`
             Group {
-                if ProcessInfo.processInfo.arguments.contains("--chat-performance-four-tall-lab") {
+                // Hosted unit tests must not consume real App Intent routing,
+                // saved chats, credentials or voice requests while tests await.
+                // Mounted tests create their own windows with production children.
+                if ProcessInfo.processInfo.arguments.contains("--semreh-unit-test-host")
+                    && ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil {
+                    Color.clear.accessibilityIdentifier("semreh-unit-test-host")
+                } else if ProcessInfo.processInfo.arguments.contains("--chat-performance-four-tall-lab") {
                     NavigationStack {
                         ChatPerformanceLabView(fourTallMessages: true)
                     }

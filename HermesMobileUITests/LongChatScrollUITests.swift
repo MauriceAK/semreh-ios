@@ -3318,7 +3318,10 @@ final class LongChatScrollUITests: XCTestCase {
         // A persisted deep link can legitimately restore an authenticated chat
         // detail instead of the shell root. Return through that known chat's
         // navigation control before asserting the shell tabs.
-        waitForPostLoginDestination(app: app)
+        let attachmentJourney = environment["SEMREH_SLICE3_ATTACHMENT_UI"] == "1"
+            || environment["SEMREH_SLICE3_FILE_PICKER_UI"] == "1"
+        let sessionsButtonLabel = attachmentJourney ? "Chats" : "Sessions"
+        waitForPostLoginDestination(app: app, sessionsButtonLabel: sessionsButtonLabel)
 
         if environment["SEMREH_SLICE4_KANBAN_UI"] == "1" {
             guard stockBackend else {
@@ -3441,7 +3444,7 @@ final class LongChatScrollUITests: XCTestCase {
             return
         }
 
-        let sessionsTab = app.buttons["Sessions"]
+        let sessionsTab = app.buttons[sessionsButtonLabel]
         XCTAssertTrue(sessionsTab.waitForExistence(timeout: 10), "Successful login must reach the production shell.")
         sessionsTab.tap()
         let newSession = app.buttons["New chat"]
@@ -4335,12 +4338,14 @@ final class LongChatScrollUITests: XCTestCase {
 
     @MainActor
     private func exerciseOptInDirectAttachmentFlow(app: XCUIApplication) {
-        let composers = app.textViews.matching(
-            NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
-        )
+        let composers = app.textViews.matching(identifier: "chat-composer-input")
         let composer = composers.firstMatch
         XCTAssertTrue(composer.waitForExistence(timeout: 10), "The production chat must expose its composer for attachment staging.")
-        let chatDetailIdentifier = composer.identifier
+        let chat = app.otherElements.matching(
+            NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
+        ).firstMatch
+        XCTAssertTrue(chat.waitForExistence(timeout: 10), "The attachment flow must expose its production chat.")
+        let chatDetailIdentifier = chat.identifier
         XCTAssertTrue(
             chatDetailIdentifier.hasPrefix("chat-detail:"),
             "The attachment flow must remain scoped to the actual production chat identifier."
@@ -4457,9 +4462,7 @@ final class LongChatScrollUITests: XCTestCase {
 
     @MainActor
     private func exerciseOptInFilePickerFlow(app: XCUIApplication) {
-        let composers = app.textViews.matching(
-            NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
-        )
+        let composers = app.textViews.matching(identifier: "chat-composer-input")
         let composer = composers.firstMatch
         XCTAssertTrue(composer.waitForExistence(timeout: 10), "The production chat must expose its composer for Files picker attachment staging.")
         let textPrompt = "SEMREH_SLICE3_FILE_PICKER_TEXT_\(UUID().uuidString)"
@@ -5010,8 +5013,8 @@ final class LongChatScrollUITests: XCTestCase {
                       "An idle chat must restore the production Send action.")
     }
 
-    private func waitForPostLoginDestination(app: XCUIApplication) {
-        let sessions = app.buttons["Sessions"]
+    private func waitForPostLoginDestination(app: XCUIApplication, sessionsButtonLabel: String = "Sessions") {
+        let sessions = app.buttons[sessionsButtonLabel]
         let chat = app.otherElements.matching(
             NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
         ).firstMatch
@@ -5025,11 +5028,11 @@ final class LongChatScrollUITests: XCTestCase {
         // evaluating navigation hittability.
         dismissKnownPasswordSavePrompt(app: app)
         guard sessions.exists || chat.exists else {
-            XCTFail("Successful login must expose Sessions or a known restored chat detail.")
+            XCTFail("Successful login must expose \(sessionsButtonLabel) or a known restored chat detail.")
             return
         }
         guard chat.exists else {
-            XCTAssertTrue(sessions.isHittable, "The Sessions destination must be hittable after login.")
+            XCTAssertTrue(sessions.isHittable, "The \(sessionsButtonLabel) destination must be hittable after login.")
             return
         }
 
@@ -6314,6 +6317,64 @@ final class LongChatScrollUITests: XCTestCase {
     }
 
     @MainActor
+    func testBackOneTapAfterFlingAndLatestAcrossWarmReopens() throws {
+        continueAfterFailure = false
+        for native in [false, true] {
+            let app = XCUIApplication()
+            app.launchArguments = ["--chat-performance-rich30-back-lab", "--composer-test-fresh-draft"]
+                + (native ? ["--chat-native-transcript-v2"] : [])
+            app.terminate()
+            app.launch()
+            let open = app.buttons["Open rich30 chat"].firstMatch
+            XCTAssertTrue(open.waitForExistence(timeout: 25))
+            for cycle in 0..<4 {
+                open.tap()
+                let scroll = native ? app.collectionViews["chat-native-transcript-v2"]
+                    : app.collectionViews["chat-transcript-scroll"]
+                XCTAssertTrue(scroll.waitForExistence(timeout: 25))
+                let back = app.buttons["chat-back"]
+                XCTAssertTrue(back.waitForExistence(timeout: 10) && back.isHittable)
+                let frame = back.frame
+                // AX expresses global coordinates as floating-point subtraction.
+                // Allow only two ULPs of representation noise, not a sub-point
+                // reduction of the actual 44-point hit-target requirement.
+                XCTAssertGreaterThanOrEqual(frame.width.nextUp.nextUp, 44)
+                XCTAssertGreaterThanOrEqual(frame.height.nextUp.nextUp, 44)
+                let backTap = app.coordinate(withNormalizedOffset: .zero)
+                    .withOffset(CGVector(dx: frame.midX, dy: frame.midY))
+                let dragStart = scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.25))
+                let dragEnd = scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.80))
+                if cycle == 2 {
+                    let stream = app.buttons["rich30-stream-turn"]
+                    XCTAssertTrue(stream.waitForExistence(timeout: 10))
+                    stream.tap()
+                }
+                dragStart.press(forDuration: 0.01, thenDragTo: dragEnd,
+                    withVelocity: .fast, thenHoldForDuration: 0)
+                if cycle == 1 {
+                    let latest = app.buttons[scrollToLatestLabel]
+                    XCTAssertTrue(latest.waitForExistence(timeout: 10) && latest.isHittable)
+                    latest.tap()
+                }
+                if cycle == 3 {
+                    let composer = app.descendants(matching: .any).matching(identifier: "chat-composer-input").firstMatch
+                    XCTAssertTrue(composer.waitForExistence(timeout: 10))
+                    composer.tap()
+                    composer.typeText("Back preserves the composer draft")
+                    XCTAssertTrue(app.keyboards.firstMatch.exists)
+                }
+                // Exactly one delivered coordinate tap, without a retry. XCUI
+                // may wait for idle; this does not prove physical momentum timing.
+                backTap.tap()
+                XCTAssertTrue(open.waitForExistence(timeout: 20))
+                XCTAssertFalse(scroll.exists, "One Back tap must remove the actual transcript destination")
+                attachScreenshot(named: "pass2-back-native-\(native)-cycle-\(cycle)")
+            }
+            app.terminate()
+        }
+    }
+
+    @MainActor
     func testOptInNativeV2LatestAfterFastFling() throws {
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -6325,8 +6386,8 @@ final class LongChatScrollUITests: XCTestCase {
         let open = app.buttons["Open rich30 chat"].firstMatch
         XCTAssertTrue(open.waitForExistence(timeout: 25))
         open.tap()
-        let scroll = app.collectionViews["chat-transcript-scroll"]
-        let marker = app.descendants(matching: .any).matching(identifier: "chat-native-transcript-v2").firstMatch
+        let scroll = app.collectionViews["chat-native-transcript-v2"]
+        let marker = app.staticTexts["chat-native-transcript-v2"].firstMatch
         let tail = app.staticTexts.matching(NSPredicate(format: "label == %@",
             "Rich group 30 complete. SEMREH_RICH30_END")).firstMatch
         let arrow = app.buttons[scrollToLatestLabel]
@@ -6392,8 +6453,10 @@ final class LongChatScrollUITests: XCTestCase {
         app.terminate()
         app.launch() // Configure and cold-launch before constructing any AX queries.
         let name = farLatest ? "r39-native-far-latest" : motionJourney ? "r38-native-motion-reader" : readerReopen ? "r37-native-rich30" : "r37-native-four-tall"
-        let scroll = app.collectionViews["chat-transcript-scroll"]
-        let marker = app.descendants(matching: .any).matching(identifier: "chat-native-transcript-v2").firstMatch
+        // The internal renderer identifies its collection separately from the
+        // DEBUG status text; resolve each by type, never an untyped firstMatch.
+        let scroll = app.collectionViews["chat-native-transcript-v2"]
+        let marker = app.staticTexts["chat-native-transcript-v2"].firstMatch
         let open = app.buttons["Open rich30 chat"].firstMatch
         let arrow = app.buttons[scrollToLatestLabel]
         let terminal = readerReopen ? "Rich group 30 complete. SEMREH_RICH30_END"

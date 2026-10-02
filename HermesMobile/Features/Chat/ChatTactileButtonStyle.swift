@@ -127,6 +127,71 @@ extension ButtonStyle where Self == ChatTactileButtonStyle {
     }
 }
 
+/// A UIKit action surface above the decorative SwiftUI label. Critical chat
+/// controls must not participate in SwiftUI's transcript tap/press arbitration.
+/// Keep the button outside the scroll view, with one touch-up action and native
+/// accessibility activation (no competing tap gesture or retry dispatch).
+struct ChatChromeActionButton<Label: View>: View {
+    let accessibilityLabel: String
+    var accessibilityIdentifier: String = ""
+    let action: () -> Void
+    @ViewBuilder let label: () -> Label
+
+    var body: some View {
+        label()
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+            .overlay {
+                ChatChromeActionSurface(label: accessibilityLabel,
+                    identifier: accessibilityIdentifier, action: action)
+            }
+    }
+}
+
+private struct ChatChromeActionSurface: UIViewRepresentable {
+    @Environment(\.isEnabled) private var isEnabled
+    let label: String
+    let identifier: String
+    let action: () -> Void
+
+    func makeUIView(context: Context) -> ChatChromeButton {
+        ChatChromeButton(frame: .zero)
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: ChatChromeButton, context: Context) -> CGSize? {
+        guard let width = proposal.width, let height = proposal.height else { return nil }
+        return CGSize(width: width, height: height)
+    }
+
+    func updateUIView(_ button: ChatChromeButton, context: Context) {
+        button.isEnabled = isEnabled
+        button.accessibilityLabel = label
+        button.accessibilityIdentifier = identifier
+        button.onActivate = action
+    }
+}
+
+/// One standard touch-up/VoiceOver activation path; updates never reinstall a
+/// target while a press is in flight. No touch-down navigation or retries.
+final class ChatChromeButton: UIButton {
+    var onActivate: (() -> Void)?
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        isAccessibilityElement = true
+        accessibilityTraits = .button
+        addTarget(self, action: #selector(activate), for: .touchUpInside)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    @objc private func activate() {
+        guard isEnabled else { return }
+        onActivate?()
+    }
+}
+
 struct ChatUIKitMenuButton<Label: View>: View {
     @Environment(\.isEnabled) private var isEnabled
 

@@ -24,9 +24,10 @@ enum ChatMotion {
         reduceMotion ? nil : .smooth(duration: 0.26, extraBounce: 0.03)
     }
 
-    static let scrollToLatestDuration: TimeInterval = 0.20
+    // Explicit user navigation has a longer glide than streaming follow.
+    static let scrollToLatestDuration: TimeInterval = 0.65
     static func scrollToLatest(reduceMotion: Bool) -> Animation? {
-        reduceMotion ? nil : .easeOut(duration: scrollToLatestDuration)
+        reduceMotion ? nil : .easeInOut(duration: scrollToLatestDuration)
     }
 
     /// The window during which an issued explicit bottom-jump animation is

@@ -38,7 +38,7 @@ struct ToolCallCardView: View {
 
                     if isExpanded {
                         expandedContent(statusDisplay: statusDisplay)
-                            .padding(.leading, 28)
+                            .padding(.leading, 0)
                             .transition(disclosureTransition)
                     }
                 }
@@ -91,7 +91,6 @@ struct ToolCallCardView: View {
 
     private func header(statusDisplay: ToolCallStatusDisplay) -> some View {
         TranscriptActivityDisclosureLabel(
-            symbol: statusIcon,
             title: actionTitle,
             status: toolCall.isError == true ? statusDisplay.collapsedText : nil,
             isExpanded: isExpanded,
@@ -107,14 +106,6 @@ struct ToolCallCardView: View {
 
     private var actionTitle: String {
         ToolCallPresentationLabel.title(for: toolCall)
-    }
-
-    private var statusIcon: String {
-        if toolCall.isError == true {
-            return "exclamationmark.triangle.fill"
-        }
-
-        return ToolCallPresentationLabel.icon(for: toolCall.name)
     }
 
     private var statusColor: Color {

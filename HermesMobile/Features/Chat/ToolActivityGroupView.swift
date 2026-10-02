@@ -41,7 +41,7 @@ struct ToolActivityGroupView: View {
                         }
                     }
                 }
-                .padding(.leading, 28)
+                .padding(.leading, 0)
                 .transition(disclosureTransition)
             }
         }
@@ -56,7 +56,6 @@ struct ToolActivityGroupView: View {
 
     private var header: some View {
         TranscriptActivityDisclosureLabel(
-            symbol: activityIcon,
             title: actionSummary,
             status: group.hasFailedTool ? collapsedStateText : nil,
             isExpanded: isExpanded,
@@ -68,14 +67,6 @@ struct ToolActivityGroupView: View {
 
     private var actionSummary: String {
         ToolActivityGroupPresentation.title(for: group)
-    }
-
-    private var activityIcon: String {
-        if group.hasFailedTool {
-            return "exclamationmark.triangle.fill"
-        }
-
-        return ToolActivityGroupPresentation.icon(for: group)
     }
 
     private var collapsedStateText: String? {

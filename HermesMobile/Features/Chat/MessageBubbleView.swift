@@ -10,7 +10,7 @@ struct MessageBubbleView: View {
     }
 
     private var userBubbleForeground: Color {
-        SemrehVisualTheme.promptBubbleForeground(for: palette, accent: accent)
+        SemrehVisualTheme.promptBubbleForeground(for: palette, colorScheme: colorScheme, accent: accent)
     }
 
     private var userBubbleBorder: Color {
@@ -123,7 +123,7 @@ struct MessageBubbleView: View {
             linkPreview
         }
         .padding(12)
-        .background(Color(.secondarySystemBackground).opacity(0.8), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .background(SemrehVisualTheme.panel(for: colorScheme, palette: palette), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .padding(.trailing, dynamicTypeSize.isAccessibilitySize ? 0 : 24)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, 2)
@@ -198,39 +198,21 @@ struct MessageBubbleView: View {
         return ResponseSpeedFormatter.accessibilityText(isStreaming ? liveTokensPerSecond : message.turnTps)
     }
 
-    private var localNoticeRow: some View {
-        localStatusRow(
-            iconName: "checkmark.circle.fill",
-            iconColor: SemrehVisualTheme.statusPositive(for: palette)
-        )
-    }
+    private var localNoticeRow: some View { localStatusRow }
 
-    private var localAssistantRow: some View {
-        localStatusRow(
-            iconName: "command.circle.fill",
-            iconColor: SemrehVisualTheme.statusInfo(for: colorScheme, palette: palette)
-        )
-    }
+    private var localAssistantRow: some View { localStatusRow }
 
-    private func localStatusRow(iconName: String, iconColor: Color) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: iconName)
-                .font(.system(size: 17, weight: .semibold))
-                .foregroundStyle(iconColor)
-                .frame(width: 28, height: 28)
-                .background(iconColor.opacity(colorScheme == .dark ? 0.18 : 0.12), in: Circle())
-
-            MarkdownRenderer(content: messageText, isStreaming: isStreaming)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 12)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(Color(.separator).opacity(colorScheme == .dark ? 0.42 : 0.28), lineWidth: 0.5)
-        )
-        .padding(.vertical, 4)
+    private var localStatusRow: some View {
+        MarkdownRenderer(content: messageText, isStreaming: isStreaming)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(12)
+            .background(SemrehVisualTheme.panel(for: colorScheme, palette: palette),
+                        in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(SemrehVisualTheme.subtleStroke(for: colorScheme, palette: palette), lineWidth: 0.5)
+            )
+            .padding(.vertical, 4)
     }
 
     private var userBubble: some View {

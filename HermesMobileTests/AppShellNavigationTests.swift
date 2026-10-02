@@ -406,3 +406,17 @@ final class AppShellNavigationTests: XCTestCase {
     }
 
 }
+
+@MainActor
+final class DefaultNewChatRouteTests: XCTestCase {
+    func testGenericEntryPinsBuiltInDefaultButVoiceAndBotRequestsKeepScope() {
+        let generic = NewChatRequest.defaultChat()
+        XCTAssertEqual(generic.profileName, "default")
+        XCTAssertFalse(generic.autoStartsVoiceInput)
+        let voice = NewChatRequest(autoStartsVoiceInput: true)
+        XCTAssertNil(voice.profileName, "Voice preserves the existing active-profile contract")
+        XCTAssertTrue(voice.autoStartsVoiceInput)
+        XCTAssertEqual(NewChatRequest(profileName: "work").profileName, "work")
+        XCTAssertNotEqual(generic.id, NewChatRequest.defaultChat().id)
+    }
+}

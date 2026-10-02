@@ -1,4 +1,5 @@
 import XCTest
+import SwiftUI
 import AVFoundation
 import ImageIO
 import SwiftData
@@ -760,29 +761,28 @@ final class TranscriptMessageTests: XCTestCase {
     }
 
     func testTranscriptUsesLazyRowConstructionForLongConversations() throws {
-        let sourceURL = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .appendingPathComponent("HermesMobile/Features/Chat/ChatTranscriptView.swift")
-        let source = try String(contentsOf: sourceURL, encoding: .utf8)
-        let contentStart = try XCTUnwrap(source.range(of: "private func transcriptScrollContent("))
-        let contentEnd = try XCTUnwrap(
-            source.range(of: "private func compressionReferenceCardView", range: contentStart.upperBound..<source.endIndex)
-        )
-        let scrollContent = source[contentStart.lowerBound..<contentEnd.lowerBound]
-        XCTAssertTrue(scrollContent.contains("return transcriptRowsStack {"))
-        let stackStart = try XCTUnwrap(source.range(of: "private func transcriptRowsStack<"))
-        let stackEnd = try XCTUnwrap(source.range(of: "\n    }", range: stackStart.upperBound..<source.endIndex))
-        let stack = String(source[stackStart.lowerBound..<stackEnd.lowerBound])
-        XCTAssertTrue(stack.contains("#if DEBUG\n        if windowedEagerTranscriptEnabled"),
-                      "Eager construction is only an explicit DEBUG experiment")
-        let releaseStart = try XCTUnwrap(stack.range(of: "#else"))
-        let releaseStack = stack[releaseStart.upperBound...]
-        XCTAssertTrue(releaseStack.contains("LazyVStack(spacing: transcriptMessageSpacing, content: content)"),
-                      "The production legacy transcript must instantiate rows lazily")
-        XCTAssertFalse(releaseStack.split(separator: "\n").contains {
-            $0.trimmingCharacters(in: .whitespaces).hasPrefix("VStack(")
-        })
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        let source = try String(contentsOf: root.appendingPathComponent(
+            "HermesMobile/Features/Chat/ChatTranscriptView.swift"), encoding: .utf8)
+        let viewport = try String(contentsOf: root.appendingPathComponent(
+            "HermesMobile/Features/Chat/ChatNativeTranscriptViewport.swift"), encoding: .utf8)
+        // Behavioral intent is bounded rich construction, independent of history
+        // length. UICollectionView now replaces LazyVStack target resolution.
+        let start = try XCTUnwrap(source.range(of: "private var measuredTranscriptViewport:"))
+        let end = try XCTUnwrap(source.range(of: "private var nativeBaselineTranscript", range: start.upperBound..<source.endIndex))
+        let production = source[start.lowerBound..<end.lowerBound]
+        XCTAssertTrue(production.contains("let rows = allRenderedTranscriptMessages"),
+                      "The complete canonical ID sequence must remain reachable")
+        XCTAssertTrue(production.contains("makeRow: { index in"))
+        XCTAssertTrue(production.contains("transcriptMessageRow("),
+                      "The original rich SwiftUI row renderer must remain authoritative")
+        XCTAssertFalse(production.contains("ForEach("), "Do not eagerly host all source rows")
+        XCTAssertFalse(viewport.hasPrefix("#if DEBUG"), "Bounded realization must also exist in Release")
+        XCTAssertTrue(viewport.contains("collection.isPrefetchingEnabled = false"))
+        XCTAssertTrue(viewport.contains("cell.contentConfiguration = nil"))
+        XCTAssertTrue(viewport.contains("while heights.count > EstimateStore.rowLimit"))
+        XCTAssertTrue(source.contains("private var nativeTranscriptV2Enabled: Bool { internalChatRendererEnabled }"),
+                      "Changing viewport ownership must not change renderer selection")
     }
 }
 
@@ -1655,3 +1655,146 @@ final class ChatNativeTranscriptMetadataCacheTests: XCTestCase {
     }
 }
 #endif
+
+/// Inspect the real labels' emitted view trees, rather than a disconnected
+/// "text only" flag. This deliberately checks image/progress construction;
+/// typography, actual hit routing and VoiceOver still need hosted UI acceptance.
+@MainActor
+final class TextOnlyTranscriptActivityViewTests: XCTestCase {
+    private func count<T>(_ type: T.Type, in value: Any, depth: Int = 0) -> Int {
+        if value is T { return 1 }
+        guard depth < 32 else { return 0 }
+        return Mirror(reflecting: value).children.reduce(0) {
+            $0 + count(type, in: $1.value, depth: depth + 1)
+        }
+    }
+
+    func testThinkingAndFailedToolLabelsEmitOnlyFunctionalDisclosureImage() {
+        for expanded in [false, true] {
+            for failed in [false, true] {
+                let label = TranscriptActivityDisclosureLabel(title: failed ? "Read file" : "Thinking",
+                    status: failed ? "Failed" : "1.2s", isExpanded: expanded,
+                    isFailure: failed, isActive: !failed, isCompact: true)
+                let tree = label.body
+                XCTAssertEqual(count(Image.self, in: tree), 1, "Only the functional disclosure chevron may remain")
+                XCTAssertEqual(count(Text.self, in: tree), 2, "Title and status/duration must survive symbol removal")
+                XCTAssertEqual(count(ProgressView<EmptyView, EmptyView>.self, in: tree), 0)
+            }
+        }
+    }
+
+    // ModifiedContent stores accessibility labels in its modifier subtree.
+    // Inspect the content branch separately; the all-tree decorative checks
+    // still include every modifier. Source assertions below keep the actual
+    // title/status and accessibility wiring explicit rather than raising a cap.
+    private func contentTextCount(in value: Any, depth: Int = 0) -> Int {
+        if value is Text { return 1 }
+        guard depth < 32 else { return 0 }
+        return Mirror(reflecting: value).children.reduce(0) { result, child in
+            result + (child.label == "modifier" ? 0 : contentTextCount(in: child.value, depth: depth + 1))
+        }
+    }
+
+    func testCurrentActivityRetainsTextWithoutImageOrSpinner() throws {
+        let label = TranscriptActivityInlineStatusLabel(title: "Preparing response",
+            accessibilityLabel: "Semreh is preparing a response")
+        XCTAssertEqual(count(Image.self, in: label.body), 0)
+        XCTAssertEqual(contentTextCount(in: label.body), 1, "Exactly one visible title")
+        XCTAssertEqual(count(Text.self, in: label.body) - contentTextCount(in: label.body), 1,
+                       "The separate accessibility label must remain in modifier storage")
+        XCTAssertEqual(count(ProgressView<EmptyView, EmptyView>.self, in: label.body), 0)
+        XCTAssertEqual(label.title, "Preparing response")
+        XCTAssertEqual(label.accessibilityLabel, "Semreh is preparing a response")
+        let recovery = StreamRecoveryStatusView(state: .reconnecting)
+        XCTAssertEqual(count(Image.self, in: recovery.body), 0)
+        XCTAssertEqual(count(ProgressView<EmptyView, EmptyView>.self, in: recovery.body), 0)
+        XCTAssertEqual(contentTextCount(in: recovery.body), 1, "Exactly one visible recovery status")
+        XCTAssertEqual(count(Text.self, in: recovery.body) - contentTextCount(in: recovery.body), 1,
+                       "The separate accessibility label must remain in modifier storage")
+        let run = ChatActiveRunStatusView(presentation: .init(kind: .reconnecting))
+        XCTAssertEqual(count(ProgressView<EmptyView, EmptyView>.self, in: run.body), 0)
+        XCTAssertEqual(count(Circle.self, in: run.body), 0)
+        XCTAssertEqual(count(Image.self, in: run.body), 0)
+        XCTAssertEqual(contentTextCount(in: run.body), 1, "Exactly one visible run status")
+        XCTAssertEqual(count(Text.self, in: run.body) - contentTextCount(in: run.body), 1,
+                       "The separate accessibility label must remain in modifier storage")
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        let reasoning = try String(contentsOf: root.appendingPathComponent(
+            "HermesMobile/Features/Chat/ReasoningBlockView.swift"), encoding: .utf8)
+        let inlineStart = try XCTUnwrap(reasoning.range(of: "struct TranscriptActivityInlineStatusLabel: View"))
+        let inlineEnd = try XCTUnwrap(reasoning.range(of: "struct ReasoningTextShineModifier", range: inlineStart.upperBound..<reasoning.endIndex))
+        let inline = String(reasoning[inlineStart.lowerBound..<inlineEnd.lowerBound])
+        XCTAssertTrue(inline.contains("Text(title)"))
+        XCTAssertTrue(inline.contains(".accessibilityLabel(accessibilityLabel)"))
+        let support = try String(contentsOf: root.appendingPathComponent(
+            "HermesMobile/Features/Chat/ChatTranscriptSupportingViews.swift"), encoding: .utf8)
+        let recoveryStart = try XCTUnwrap(support.range(of: "struct StreamRecoveryStatusView: View"))
+        let recoveryEnd = try XCTUnwrap(support.range(of: "struct ChatTranscriptLoadingSkeletonView", range: recoveryStart.upperBound..<support.endIndex))
+        let recoverySource = String(support[recoveryStart.lowerBound..<recoveryEnd.lowerBound])
+        XCTAssertTrue(recoverySource.contains("Text(label)"))
+        XCTAssertTrue(recoverySource.contains(".accessibilityLabel(label)"))
+        XCTAssertTrue(recoverySource.contains("Reconnecting stream"))
+        let runSource = try String(contentsOf: root.appendingPathComponent(
+            "HermesMobile/Features/Chat/ChatActiveRunStatusView.swift"), encoding: .utf8)
+        XCTAssertTrue(runSource.contains("Text(presentation.label)"))
+        XCTAssertTrue(runSource.contains(".accessibilityLabel(presentation.accessibilityLabel)"))
+    }
+
+    func testLegacyLatestReplacementTracksProductionCancellationIntent() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        let transcript = try String(contentsOf: root.appendingPathComponent(
+            "HermesMobile/Features/Chat/ChatTranscriptView.swift"), encoding: .utf8)
+        let observerStart = try XCTUnwrap(transcript.range(of: "ChatScrollObserver("))
+        let observerEnd = try XCTUnwrap(transcript.range(of: "onDirectInteraction:", range: observerStart.upperBound..<transcript.endIndex))
+        let observer = String(transcript[observerStart.lowerBound..<observerEnd.lowerBound])
+        XCTAssertTrue(observer.contains("cancellationToken: transcriptRestoreCancellationToken"))
+        let contextStart = try XCTUnwrap(transcript.range(of: "private func legacyScrollMetricContext"))
+        let contextEnd = try XCTUnwrap(transcript.range(of: "@ViewBuilder", range: contextStart.upperBound..<transcript.endIndex))
+        XCTAssertTrue(transcript[contextStart.lowerBound..<contextEnd.lowerBound]
+            .contains("cancellationToken: transcriptRestoreCancellationToken"))
+        let changeStart = try XCTUnwrap(transcript.range(of: ".onChange(of: transcriptRestoreCancellationToken)"))
+        let changeEnd = try XCTUnwrap(transcript.range(of: ".onChange(of: hasExplicitBottomScrollRequest)", range: changeStart.upperBound..<transcript.endIndex))
+        let change = String(transcript[changeStart.lowerBound..<changeEnd.lowerBound])
+        XCTAssertTrue(change.contains("scrollMetricPublication.invalidate()"))
+        XCTAssertTrue(change.contains("cancelTranscriptRestore(reason: \"cancellation_token\")"))
+        let shell = try String(contentsOf: root.appendingPathComponent(
+            "HermesMobile/Features/Chat/ChatView.swift"), encoding: .utf8)
+        XCTAssertTrue(shell.contains("transcriptRestoreCancellationToken: transcriptRestoreCancellationToken"))
+        let sendStart = try XCTUnwrap(shell.range(of: "private func prepareTranscriptForExplicitSend()"))
+        let sendEnd = try XCTUnwrap(shell.range(of: "followRejoinScrollToken &+= 1", range: sendStart.upperBound..<shell.endIndex))
+        XCTAssertTrue(shell[sendStart.lowerBound..<sendEnd.lowerBound].contains("transcriptRestoreCancellationToken &+= 1"))
+        let olderStart = try XCTUnwrap(shell.range(of: "if intent.acceptsUserIntent {"))
+        let olderEnd = try XCTUnwrap(shell.range(of: "return await loadOlderMessages(intent: intent)", range: olderStart.upperBound..<shell.endIndex))
+        XCTAssertTrue(shell[olderStart.lowerBound..<olderEnd.lowerBound].contains("transcriptRestoreCancellationToken &+= 1"))
+    }
+
+    func testOfflineNoticeKeepsTextWithoutLeadingImage() {
+        let banner = ChatOfflineCacheBanner()
+        XCTAssertEqual(count(Image.self, in: banner.body), 0)
+        XCTAssertEqual(count(Text.self, in: banner.body), 1)
+    }
+}
+
+final class ChatTranscriptSourceMutationTests: XCTestCase {
+    func testNonFixtureSourceIdentityDistinguishesAppendPrependReconcileAndReplacement() {
+        let ids = ["server/profile/session:one", "server/profile/session:two", "server/profile/session:three"]
+        XCTAssertEqual(ChatTranscriptSourceMutation.classify(previous: ids, next: ids), .unchanged)
+        XCTAssertEqual(ChatTranscriptSourceMutation.classify(previous: ids, next: ids + ["four"]), .append)
+        XCTAssertEqual(ChatTranscriptSourceMutation.classify(previous: ids, next: ["zero"] + ids), .prepend)
+        XCTAssertEqual(ChatTranscriptSourceMutation.classify(previous: ids, next: [ids[2], ids[0]]), .reconcile)
+        XCTAssertEqual(ChatTranscriptSourceMutation.classify(previous: ids, next: ["other-profile:one"]), .replacement)
+        XCTAssertEqual(ChatTranscriptSourceMutation.classify(previous: ids, next: []), .replacement)
+        XCTAssertEqual(ChatTranscriptSourceMutation.classify(previous: [], next: ids), .replacement)
+    }
+
+    func testCountThresholdNeverBecomesIdentityPolicy() {
+        for size in [59, 60, 61, 62, 120, 2048, 2049, 4096] {
+            let ids = (0..<size).map { "durable-row-\($0)" }
+            XCTAssertEqual(ChatTranscriptSourceMutation.classify(previous: ids, next: ids + ["new-tail"]), .append)
+            XCTAssertEqual(ChatTranscriptSourceMutation.classify(previous: ids, next: ["new-head"] + ids), .prepend)
+            var replaced = ids
+            replaced[size / 2] = "canonical-replacement"
+            XCTAssertEqual(ChatTranscriptSourceMutation.classify(previous: ids, next: replaced), .reconcile)
+        }
+    }
+}

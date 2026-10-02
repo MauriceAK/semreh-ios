@@ -3,13 +3,10 @@ import SwiftUI
 struct ChatActiveRunStatusView: View {
     let presentation: ChatActiveRunStatusPresentation
 
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
         HStack(spacing: 8) {
-            progressIndicator
-
             Text(presentation.label)
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
@@ -26,20 +23,6 @@ struct ChatActiveRunStatusView: View {
         .fixedSize(horizontal: false, vertical: true)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(presentation.accessibilityLabel)
-    }
-
-    @ViewBuilder
-    private var progressIndicator: some View {
-        if reduceMotion {
-            Circle()
-                .fill(.secondary)
-                .frame(width: 7, height: 7)
-                .accessibilityHidden(true)
-        } else {
-            ProgressView()
-                .controlSize(.mini)
-                .accessibilityHidden(true)
-        }
     }
 }
 

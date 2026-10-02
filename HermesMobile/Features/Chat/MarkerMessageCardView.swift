@@ -67,26 +67,8 @@ struct MarkerMessageCardView: View {
         dynamicTypeSize.isAccessibilitySize
     }
 
-    private var iconName: String {
-        switch kind {
-        case .contextCompaction:
-            return "arrow.down.right.and.arrow.up.left"
-        case .preservedTaskList:
-            return "checklist"
-        case .compressionReference:
-            return "star"
-        case .processWakeup:
-            return "terminal"
-        }
-    }
-
     private func header(summary: String?) -> some View {
         HStack(alignment: usesStackedHeader ? .top : .center, spacing: 6) {
-            Image(systemName: iconName)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .frame(width: 18, height: 18)
-
             if usesStackedHeader {
                 VStack(alignment: .leading, spacing: 2) {
                     titleText

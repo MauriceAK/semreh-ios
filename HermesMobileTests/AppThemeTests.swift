@@ -116,8 +116,8 @@ final class AppThemeTests: XCTestCase {
         XCTAssertEqual(SemrehVisualTheme.deepNavyHex, SemrehVisualTheme.logoNavyHex)
         XCTAssertEqual(SemrehVisualTheme.brandAction, SemrehVisualTheme.logoTeal)
         XCTAssertEqual(SemrehVisualTheme.energy, SemrehVisualTheme.logoTeal)
-        XCTAssertEqual(SemrehVisualTheme.promptBubbleBackgroundHex(for: .dark), "#D4B992")
-        XCTAssertEqual(SemrehVisualTheme.promptBubbleForegroundHex(), "#30251D")
+        XCTAssertEqual(SemrehVisualTheme.promptBubbleBackgroundHex(for: .dark), "#24252A")
+        XCTAssertEqual(SemrehVisualTheme.promptBubbleForegroundHex(), "#242421")
     }
 
     func testGokuPaletteRetainsLegacyVisualTokens() {
@@ -133,7 +133,7 @@ final class AppThemeTests: XCTestCase {
             for scheme in [ColorScheme.light, .dark] {
                 XCTAssertGreaterThanOrEqual(
                     SemrehVisualTheme.contrastRatio(
-                        foregroundHex: SemrehVisualTheme.promptBubbleForegroundHex(for: palette),
+                        foregroundHex: SemrehVisualTheme.promptBubbleForegroundHex(for: palette, colorScheme: scheme),
                         backgroundHex: SemrehVisualTheme.promptBubbleBackgroundHex(for: scheme, palette: palette)
                     ),
                     4.5,
@@ -144,12 +144,12 @@ final class AppThemeTests: XCTestCase {
     }
 
     func testSemrehDarkCanvasStaysSeparateFromLogoNavy() {
-        XCTAssertEqual(SemrehVisualTheme.canvasHex(for: .dark), "#211E1A")
+        XCTAssertEqual(SemrehVisualTheme.canvasHex(for: .dark), "#0E0F11")
         XCTAssertNotEqual(SemrehVisualTheme.canvasHex(for: .dark), SemrehVisualTheme.logoNavyHex)
     }
     func testSemrehVisualThemeActionAdaptsForDarkModeContrast() {
-        XCTAssertEqual(SemrehVisualTheme.actionHex(for: .light), "#795334")
-        XCTAssertEqual(SemrehVisualTheme.actionHex(for: .dark), "#D9B98C")
+        XCTAssertEqual(SemrehVisualTheme.actionHex(for: .light), "#242421")
+        XCTAssertEqual(SemrehVisualTheme.actionHex(for: .dark), "#E7E4DC")
 
         for scheme in [ColorScheme.light, .dark] {
             XCTAssertGreaterThanOrEqual(
@@ -163,8 +163,8 @@ final class AppThemeTests: XCTestCase {
     }
 
     func testSemrehVisualThemeUsesReadableAccentForegrounds() {
-        XCTAssertEqual(SemrehVisualTheme.accentForegroundHex(for: .light), "#FFF9EF")
-        XCTAssertEqual(SemrehVisualTheme.accentForegroundHex(for: .dark), "#30251D")
+        XCTAssertEqual(SemrehVisualTheme.accentForegroundHex(for: .light), "#FBFAF6")
+        XCTAssertEqual(SemrehVisualTheme.accentForegroundHex(for: .dark), "#141517")
 
         for scheme in [ColorScheme.light, .dark] {
             XCTAssertGreaterThanOrEqual(
@@ -211,10 +211,10 @@ final class AppThemeTests: XCTestCase {
     }
 
     func testSemrehVisualThemeCanvasAdaptsToColorScheme() {
-        XCTAssertEqual(SemrehVisualTheme.canvasHex(for: .light), "#F3E8D5")
-        XCTAssertEqual(SemrehVisualTheme.canvasHex(for: .dark), "#211E1A")
-        XCTAssertEqual(SemrehVisualTheme.panelHex(for: .light), "#FBF2E3")
-        XCTAssertEqual(SemrehVisualTheme.panelHex(for: .dark), "#2C2721")
+        XCTAssertEqual(SemrehVisualTheme.canvasHex(for: .light), "#FBFAF6")
+        XCTAssertEqual(SemrehVisualTheme.canvasHex(for: .dark), "#0E0F11")
+        XCTAssertEqual(SemrehVisualTheme.panelHex(for: .light), "#FFFFFF")
+        XCTAssertEqual(SemrehVisualTheme.panelHex(for: .dark), "#17181B")
     }
 
     func testAdaptiveBrandAccentMeetsTextContrastInBothAppearances() {
@@ -317,12 +317,12 @@ final class AppAccentTests: XCTestCase {
         XCTAssertEqual(AppAccent.storedValue(""), .warm)
     }
 
-    func testWarmAccentPreservesTheExistingSemrehAppearance() {
-        XCTAssertEqual(SemrehVisualTheme.actionHex(for: .light, accent: .warm), "#795334")
-        XCTAssertEqual(SemrehVisualTheme.actionHex(for: .dark, accent: .warm), "#D9B98C")
-        XCTAssertEqual(SemrehVisualTheme.promptBubbleBackgroundHex(for: .light, accent: .warm), "#E7D3B3")
-        XCTAssertEqual(SemrehVisualTheme.promptBubbleBackgroundHex(for: .dark, accent: .warm), "#D4B992")
-        XCTAssertEqual(SemrehVisualTheme.promptBubbleForegroundHex(for: .semreh, accent: .warm), "#30251D")
+    func testWarmAccentUsesApprovedPearlAndInkAppearance() {
+        XCTAssertEqual(SemrehVisualTheme.actionHex(for: .light, accent: .warm), "#242421")
+        XCTAssertEqual(SemrehVisualTheme.actionHex(for: .dark, accent: .warm), "#E7E4DC")
+        XCTAssertEqual(SemrehVisualTheme.promptBubbleBackgroundHex(for: .light, accent: .warm), "#F0EEE7")
+        XCTAssertEqual(SemrehVisualTheme.promptBubbleBackgroundHex(for: .dark, accent: .warm), "#24252A")
+        XCTAssertEqual(SemrehVisualTheme.promptBubbleForegroundHex(for: .semreh, accent: .warm), "#242421")
     }
 
     func testNamedAccentsProduceDistinctSemrehActionsAndBubbles() {
@@ -378,8 +378,8 @@ final class AppAccentTests: XCTestCase {
 
     func testEachSemrehAccentHasReadableUserBubblePairs() {
         for accent in AppAccent.allCases {
-            let foreground = SemrehVisualTheme.promptBubbleForegroundHex(for: .semreh, accent: accent)
             for scheme in [ColorScheme.light, .dark] {
+                let foreground = SemrehVisualTheme.promptBubbleForegroundHex(for: .semreh, colorScheme: scheme, accent: accent)
                 XCTAssertGreaterThanOrEqual(
                     SemrehVisualTheme.contrastRatio(
                         foregroundHex: foreground,
@@ -738,5 +738,34 @@ private final class SpyResponseCompletionNotificationScheduler: ResponseCompleti
 
     func schedule(_ request: ResponseCompletionNotificationRequest) async {
         scheduledRequests.append(request)
+    }
+}
+
+final class ApprovedSemrehPaletteTests: XCTestCase {
+    func testEveryApprovedRoleHasExactLightAndDarkToken() {
+        let expectations: [(ColorScheme, [String])] = [
+            (.light, ["#FBFAF6", "#FFFFFF", "#F3F1EB", "#F0EEE7", "#242421", "#686861", "#E5E2DA", "#7D705B", "#242421", "#FBFAF6"]),
+            (.dark, ["#0E0F11", "#17181B", "#202126", "#24252A", "#F3F2EE", "#B1B0AA", "#2C2D31", "#D8D3C8", "#E7E4DC", "#141517"])
+        ]
+        for (scheme, expected) in expectations {
+            let actual = [
+                SemrehVisualTheme.canvasHex(for: scheme),
+                SemrehVisualTheme.panelHex(for: scheme),
+                SemrehVisualTheme.tokens(for: .semreh).raisedHex(for: scheme),
+                SemrehVisualTheme.promptBubbleBackgroundHex(for: scheme),
+                SemrehVisualTheme.primaryTextHex(for: scheme),
+                SemrehVisualTheme.mutedTextHex(for: scheme),
+                SemrehVisualTheme.lineHex(for: scheme),
+                SemrehVisualTheme.brandAccentHex(for: scheme),
+                SemrehVisualTheme.actionHex(for: scheme),
+                SemrehVisualTheme.accentForegroundHex(for: scheme)
+            ]
+            XCTAssertEqual(actual, expected)
+            XCTAssertEqual(SemrehVisualTheme.promptBubbleForegroundHex(colorScheme: scheme), expected[4])
+            for background in [expected[0], expected[1], expected[2], expected[3]] {
+                XCTAssertGreaterThanOrEqual(SemrehVisualTheme.contrastRatio(foregroundHex: expected[4], backgroundHex: background), 4.5)
+                XCTAssertGreaterThanOrEqual(SemrehVisualTheme.contrastRatio(foregroundHex: expected[5], backgroundHex: background), 4.5)
+            }
+        }
     }
 }

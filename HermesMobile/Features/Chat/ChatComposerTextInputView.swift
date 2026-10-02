@@ -177,7 +177,11 @@ struct ComposerTextView: UIViewRepresentable {
         textView.textAlignment = isRTL ? .right : .natural
         textView.isEditable = !isDisabled
         textView.isSelectable = !isDisabled
-        textView.textColor = isDisabled ? .secondaryLabel : .label
+        let scheme = context.environment.colorScheme
+        let palette = context.environment.appColorPalette
+        textView.textColor = UIColor(isDisabled
+            ? SemrehVisualTheme.mutedText(for: scheme, palette: palette)
+            : SemrehVisualTheme.primaryText(for: scheme, palette: palette))
         textView.isKeyboardSendEnabled = isKeyboardSendEnabled
         textView.onKeyboardSend = onKeyboardSend
         textView.onPasteFileProviders = onPasteFileProviders

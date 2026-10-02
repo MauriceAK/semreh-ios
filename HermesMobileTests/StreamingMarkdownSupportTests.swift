@@ -207,8 +207,8 @@ final class ToolActivityGroupPresentationTests: XCTestCase {
 final class TranscriptActivityDisclosureLayoutTests: XCTestCase {
     func testThinkingAndToolRowsShareCompactGeometry() {
         for size in [DynamicTypeSize.large, .accessibility1] {
-            let thinking = rowHeight(status: nil, symbol: "ellipsis.bubble", title: "Thinking", dynamicTypeSize: size)
-            let readFile = rowHeight(status: nil, symbol: "book", title: "Read file", dynamicTypeSize: size)
+            let thinking = rowHeight(status: nil, title: "Thinking", dynamicTypeSize: size)
+            let readFile = rowHeight(status: nil, title: "Read file", dynamicTypeSize: size)
             let running = rowHeight(status: "Running", dynamicTypeSize: size)
 
             XCTAssertEqual(thinking, readFile, accuracy: 0.5)
@@ -238,11 +238,10 @@ final class TranscriptActivityDisclosureLayoutTests: XCTestCase {
     }
 
     private func rowHeight(
-        status: String?, symbol: String = "book", title: String = "Read transcript",
+        status: String?, title: String = "Read transcript",
         dynamicTypeSize: DynamicTypeSize
     ) -> CGFloat {
         let row = TranscriptActivityDisclosureLabel(
-            symbol: symbol,
             title: title,
             status: status,
             isExpanded: false,

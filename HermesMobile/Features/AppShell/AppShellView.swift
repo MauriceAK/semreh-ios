@@ -130,7 +130,6 @@ struct AppShellView: View {
     @Binding var pendingNewChatRequest: NewChatRequest?
     @State private var isSessionConversationPresented = false
     @State private var showsSettings = false
-    @State private var showsBotPicker = false
     @State private var pendingSessionFilterRequest: SessionFilterRequest? = nil
     @State private var sessionSurfaceVisitID = 0
     @Environment(\.colorScheme) private var colorScheme
@@ -179,7 +178,13 @@ struct AppShellView: View {
                 usesShellChrome: true,
                 shellSurfaceVisitID: sessionSurfaceVisitID,
                 onConversationVisibilityChanged: { isSessionConversationPresented = $0 },
-                onNewChat: { showsBotPicker = true },
+                onNewChat: {
+                    if pendingNewChatRequest == nil, pendingSharedImport == nil,
+                       pendingDeepLinkedSessionID == nil {
+                        pendingNewChatRequest = .defaultChat()
+                    }
+                    selectedSurface = .sessions
+                },
                 onAccount: { showsSettings = true }
             )
             .modifier(ShellTabReveal(isSelected: selectedSurface == .sessions))
@@ -199,21 +204,6 @@ struct AppShellView: View {
             if AppShellSessionReturnPolicy.resetsOnDeparture(from: oldValue, to: newValue) {
                 sessionSurfaceVisitID += 1
                 isSessionConversationPresented = false
-            }
-        }
-        .sheet(isPresented: $showsBotPicker) {
-            NavigationStack {
-                AppShellBotsView(server: server, onAPIError: authManager.handleAPIError) { name in
-                    showsBotPicker = false
-                    pendingNewChatRequest = NewChatRequest(profileName: name)
-                    selectedSurface = .sessions
-                }
-                .navigationTitle("New chat")
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("Cancel") { showsBotPicker = false }
-                    }
-                }
             }
         }
         .sheet(isPresented: $showsSettings) {

@@ -1,8 +1,9 @@
-#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
 import SwiftUI
 import UIKit
 
-/// Independent, opt-in transcript. Only this controller owns the native viewport.
+/// Measured realization owner shared by the existing SwiftUI row renderers.
+/// IDs/index geometry scale with canonical history; hosted rich content scales
+/// with the viewport. No SwiftUI scroll target resolver also writes its offset.
 struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
     let ids: [String]
     let revisionAt: (Int) -> StableViewportRowRevision
@@ -31,6 +32,9 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
     let onLatest: () -> Void
     let onState: (ChatScrollMetrics, String?, Bool, Bool) -> Void
     let onRestore: (ChatTranscriptRestoreRequest, ChatTranscriptRestoreOutcome) -> Void
+    var metricPublication: ChatScrollMetricPublication? = nil
+    var allowsAutomaticPaging = false
+    var onOlder: @MainActor (ChatTranscriptOlderLoadIntent, @escaping @MainActor () -> Bool) async -> Bool = { _, _ in false }
     let onRefresh: @MainActor (@escaping @MainActor () -> Bool) async -> Void
 
     func makeUIViewController(context: Context) -> Controller { Controller(input: self) }
@@ -83,10 +87,15 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             private var ids: [String]?
             private(set) var key: EstimateKey?
             private var heights: [Item: CGFloat] = [:]
+            private var measurementOrder: [Item] = []
             private(set) var measured: Set<Item> = []
+            var retainedMeasurementCount: Int { heights.count }
             private(set) var warmHits = 0
             private var frames: [CGRect] = []
             private var dirty = true
+            private var preparedCount = -1
+            private var snapshotTransition = false
+            var snapshotItems: (() -> [Item])?
             private var spacing: CGFloat = 0
             private var bottom: CGFloat = 0
             private var size: CGSize = .zero
@@ -98,17 +107,17 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
                 let identityChanged = ids != input.ids
                 if identityChanged {
                     ids = input.ids
-                    items = [.header] + input.ids.map(Item.row) + [.footer]
-                    let retained = Set(items)
-                    measured.formIntersection(retained)
-                    heights = heights.filter { retained.contains($0.key) }
+                    // Input is staged before diffable application. It cannot
+                    // replace the identities owned by the committed collection.
                     dirty = true
                 }
                 if key != nextKey {
                     key = nextKey
                     heights = Controller.estimates.heights(for: nextKey)
+                    measurementOrder = Array(heights.keys)
                     measured.removeAll()
-                    warmHits = min(EstimateStore.rowLimit, items.filter { heights[$0] != nil }.count)
+                    let warmItems = [.header] + input.ids.map(Item.row) + [.footer]
+                    warmHits = min(EstimateStore.rowLimit, warmItems.filter { heights[$0] != nil }.count)
 #if DEBUG
                     ChatPerformanceInvalidationProbe.shared?.record("native_layout_estimate_hits", a: warmHits)
 #endif
@@ -119,43 +128,90 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
                 }
                 if dirty { invalidateLayout() }
             }
+            func beginSnapshotTransition() {
+                snapshotTransition = true
+                invalidateLayout()
+            }
+            func commitSnapshot(_ committed: [Item]) {
+                snapshotTransition = false
+                setItems(committed)
+                // An apply can prepare against the old count, including a
+                // same-count replacement. Rebuild even when identities match.
+                dirty = true
+                invalidateLayout()
+            }
+            private func setItems(_ committed: [Item]) {
+                guard items != committed else { return }
+                items = committed
+                let retained = Set(items)
+                measured.formIntersection(retained)
+                heights = heights.filter { retained.contains($0.key) }
+                measurementOrder.removeAll { !retained.contains($0) }
+                dirty = true
+            }
+            func retire(_ item: Item) { measured.remove(item) }
+
             func needsFit(_ item: Item) {
+                rebuildFramesIfNeeded()
                 measured.remove(item)
-                guard let index = items.firstIndex(of: item) else { return }
+                guard let index = items.firstIndex(of: item), index < committedCount else { return }
                 let context = UICollectionViewLayoutInvalidationContext()
                 context.invalidateItems(at: [IndexPath(item: index, section: 0)])
                 invalidateLayout(with: context)
             }
-            override func prepare() {
-                super.prepare()
-                guard dirty, let key else { return }
+            private var committedCount: Int {
+                guard let collectionView, collectionView.numberOfSections > 0 else { return 0 }
+                return collectionView.numberOfItems(inSection: 0)
+            }
+            private func rebuildFramesIfNeeded() {
+                // During apply, diffable identity and UIKit's count can advance
+                // at different times. Resolve identity from the data source and
+                // bound geometry by the count UIKit has actually committed.
+                if snapshotTransition, let snapshotItems { setItems(snapshotItems()) }
+                let count = committedCount
+                guard dirty || preparedCount != count, let key else { return }
                 frames.removeAll(keepingCapacity: true)
                 var y: CGFloat = 16
-                for item in items {
+                for item in items.prefix(count) {
                     let height = heights[item] ?? 160
                     frames.append(CGRect(x: key.padding, y: y,
                         width: max(1, key.width - 2 * key.padding), height: height))
                     y += height + spacing
                 }
-                size = CGSize(width: key.width, height: max(0, y - (items.isEmpty ? 0 : spacing) + bottom))
+                size = CGSize(width: key.width, height: max(0, y - (frames.isEmpty ? 0 : spacing) + bottom))
+                preparedCount = count
                 dirty = false
             }
-            override var collectionViewContentSize: CGSize { size }
+            override func prepare() {
+                super.prepare()
+                rebuildFramesIfNeeded()
+            }
+            override var collectionViewContentSize: CGSize {
+                rebuildFramesIfNeeded()
+                return size
+            }
             override func layoutAttributesForItem(at path: IndexPath) -> UICollectionViewLayoutAttributes? {
-                guard path.section == 0, frames.indices.contains(path.item) else { return nil }
+                rebuildFramesIfNeeded()
+                guard path.section == 0, path.item < committedCount,
+                      frames.indices.contains(path.item) else { return nil }
+                return attributes(at: path)
+            }
+            private func attributes(at path: IndexPath) -> UICollectionViewLayoutAttributes {
                 let value = UICollectionViewLayoutAttributes(forCellWith: path)
                 value.frame = frames[path.item]
                 return value
             }
             override func layoutAttributesForElements(in rect: CGRect) -> [UICollectionViewLayoutAttributes]? {
+                rebuildFramesIfNeeded()
                 var low = 0, high = frames.count
                 while low < high {
                     let mid = (low + high) / 2
                     if frames[mid].maxY < rect.minY { low = mid + 1 } else { high = mid }
                 }
                 var result: [UICollectionViewLayoutAttributes] = []
-                while low < frames.count, frames[low].minY <= rect.maxY {
-                    if let value = layoutAttributesForItem(at: IndexPath(item: low, section: 0)) { result.append(value) }
+                let limit = min(frames.count, committedCount)
+                while low < limit, frames[low].minY <= rect.maxY {
+                    result.append(attributes(at: IndexPath(item: low, section: 0)))
                     low += 1
                 }
                 return result
@@ -165,21 +221,50 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             }
             override func shouldInvalidateLayout(forPreferredLayoutAttributes preferred: UICollectionViewLayoutAttributes,
                                                   withOriginalAttributes original: UICollectionViewLayoutAttributes) -> Bool {
+                rebuildFramesIfNeeded()
                 let index = preferred.indexPath.item
-                guard items.indices.contains(index), let key,
+                guard preferred.indexPath.section == 0, index < committedCount,
+                      items.indices.contains(index), let key,
                       preferred.size.height.isFinite, preferred.size.height >= 0,
                       preferred.size.width == max(1, key.width - 2 * key.padding) else { return false }
                 return preferred.size.height != original.size.height
             }
             func didFit(_ attributes: UICollectionViewLayoutAttributes, item: Item, key fittedKey: EstimateKey?) {
-                guard let key, key == fittedKey, items.indices.contains(attributes.indexPath.item),
+                rebuildFramesIfNeeded()
+                guard attributes.indexPath.section == 0, attributes.indexPath.item < committedCount,
+                      let key, key == fittedKey, items.indices.contains(attributes.indexPath.item),
                       items[attributes.indexPath.item] == item,
                       attributes.size.width == max(1, key.width - 2 * key.padding),
                       attributes.size.height.isFinite, attributes.size.height >= 0 else { return }
                 measured.insert(item)
-                if heights[item] != attributes.size.height { dirty = true }
+                let oldHeight = heights[item] ?? 160
+                var leadingAdjustment: CGFloat = 0
+                let top = (collectionView?.contentOffset.y ?? 0) + (collectionView?.adjustedContentInset.top ?? 0)
+                if frames.indices.contains(attributes.indexPath.item), frames[attributes.indexPath.item].maxY <= top {
+                    leadingAdjustment += attributes.size.height - oldHeight
+                }
+                if oldHeight != attributes.size.height { dirty = true }
                 heights[item] = attributes.size.height
+                measurementOrder.removeAll { $0 == item }
+                measurementOrder.append(item)
+                while heights.count > EstimateStore.rowLimit, let victim = measurementOrder.first {
+                    measurementOrder.removeFirst()
+                    if let old = heights.removeValue(forKey: victim), let index = items.firstIndex(of: victim),
+                       frames.indices.contains(index), frames[index].maxY <= top {
+                        leadingAdjustment += 160 - old
+                    }
+                    measured.remove(victim)
+                    dirty = true
+                }
                 Controller.estimates.put(attributes.size.height, item: item, key: key)
+                if dirty {
+                    // Maintain the same viewport Y while an earlier estimate is
+                    // refined/evicted, even during UIKit momentum. This is layout
+                    // geometry, not a delayed restore or another motion owner.
+                    let context = UICollectionViewLayoutInvalidationContext()
+                    context.contentOffsetAdjustment = CGPoint(x: 0, y: leadingAdjustment)
+                    invalidateLayout(with: context)
+                }
             }
         }
         struct RowStamp: Equatable {
@@ -205,6 +290,7 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             let presentation: Int
         }
         final class Cell: UICollectionViewCell {
+            var representedItem: Item?
             var boundaryStamp: BoundaryStamp?
             var rowStamp: RowStamp?
             var layoutPolicy = 0
@@ -225,6 +311,8 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             }
             override func prepareForReuse() {
                 super.prepareForReuse()
+                representedItem = nil
+                contentConfiguration = nil
                 boundaryStamp = nil
                 rowStamp = nil
                 didFit = nil
@@ -247,6 +335,20 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
                 bottomInset: input.bottomInset, presentation: presentationEpoch)
         }
         struct Anchor { let id: String; let delta: CGFloat }
+        struct ReaderHandoff {
+            let anchor: Anchor
+            let scope: String
+            let width: CGFloat
+            let revision: Int
+            let cancellation: Int
+            let generation: Int
+            let presentation: Int
+        }
+        private(set) var lastSourceMutation = ChatTranscriptSourceMutation.unchanged
+        private var olderBoundary: String?
+        private var olderTask: Task<Void, Never>?
+        private var olderGeneration = 0
+        private var olderEchoCancellationToken: Int?
         enum Ownership { case restoring(Anchor?), following, reading }
         struct Memory { let anchor: Anchor; let following: Bool }
         /// Compact reader points only, ordered least to most recently used.
@@ -286,6 +388,7 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
         var ownership: Ownership
         var anchor: Anchor?
         var collection: Collection!
+        private let edgeMask = CAGradientLayer()
         var dataSource: UICollectionViewDiffableDataSource<Int, Item>!
         var revisions: [String: StableViewportRowRevision] = [:]
         var indices: [String: Int] = [:]
@@ -310,12 +413,17 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             init(_ owner: Controller) {
                 self.owner = owner
                 super.init()
+                NotificationCenter.default.addObserver(self, selector: #selector(older(_:)), name: .semrehTranscriptLoadOlder, object: nil)
                 NotificationCenter.default.addObserver(self, selector: #selector(resign(_:)), name: UIApplication.willResignActiveNotification, object: nil)
                 NotificationCenter.default.addObserver(self, selector: #selector(activate(_:)), name: UIApplication.didBecomeActiveNotification, object: nil)
             }
             @objc func resign(_ notification: Notification) {
                 owner?.applicationActive = false
                 owner?.suspendPresentation()
+            }
+            @objc func older(_ notification: Notification) {
+                guard let owner, notification.object as? String == owner.input.scope else { return }
+                owner.loadOlder(intent: .explicitUserRequest)
             }
             @objc func activate(_ notification: Notification) {
                 owner?.applicationActive = true
@@ -405,6 +513,7 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
         var lastPublished: Published?
         var publication = 0
         let latest = UIButton(type: .system)
+        private var latestBottomConstraint: NSLayoutConstraint?
         let probe = UILabel()
 
         let reduceMotionEnabled: () -> Bool
@@ -449,6 +558,12 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             lifecycleObserver = LifecycleObserver(self)
             collection = makeCollection(makeLayout())
             collection.backgroundColor = .clear
+            edgeMask.colors = [UIColor.clear.cgColor, UIColor.black.cgColor,
+                               UIColor.black.cgColor, UIColor.clear.cgColor, UIColor.clear.cgColor]
+            collection.layer.mask = edgeMask
+            // UIKit must not accumulate prepared rich hosts outside the current
+            // realization region while fast motion visits many source IDs.
+            collection.isPrefetchingEnabled = false
             collection.alwaysBounceVertical = true
             collection.scrollsToTop = true
             collection.keyboardDismissMode = .interactive
@@ -468,11 +583,18 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
                 self.configure(cell, item: item)
                 return cell
             }
+            (collection.collectionViewLayout as? ColumnLayout)?.snapshotItems = { [weak self] in
+                self?.dataSource.snapshot().itemIdentifiers ?? []
+            }
             collection.willLayout = { [weak self] in
                 guard let self else { return }
                 (self.collection.collectionViewLayout as? ColumnLayout)?.configure(input: self.input, width: self.collection.bounds.width)
+                self.primeInitialViewport()
             }
-            collection.didLayout = { [weak self] in self?.settleLayout() }
+            collection.didLayout = { [weak self] in
+                self?.updateEdgeMask()
+                self?.settleLayout()
+            }
             let refresh = UIRefreshControl()
             refresh.addTarget(self, action: #selector(refreshHistory), for: .valueChanged)
             collection.refreshControl = refresh
@@ -484,7 +606,10 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             latest.addTarget(self, action: #selector(jumpToLatest), for: .touchUpInside)
             view.addSubview(latest)
             latest.translatesAutoresizingMaskIntoConstraints = false
-            NSLayoutConstraint.activate([latest.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20), latest.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -16), latest.widthAnchor.constraint(equalToConstant: 44), latest.heightAnchor.constraint(equalToConstant: 44)])
+            let bottomConstraint = latest.bottomAnchor.constraint(equalTo: view.bottomAnchor,
+                constant: -max(16, input.bottomInset - 32))
+            latestBottomConstraint = bottomConstraint
+            NSLayoutConstraint.activate([latest.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20), bottomConstraint, latest.widthAnchor.constraint(equalToConstant: 44), latest.heightAnchor.constraint(equalToConstant: 44)])
 #if DEBUG
             probe.font = .systemFont(ofSize: 1)
             probe.textColor = .clear
@@ -493,7 +618,8 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             view.addSubview(probe)
             probe.frame = CGRect(x: 0, y: 0, width: 1, height: 1)
 #endif
-            collection.accessibilityIdentifier = "chat-native-transcript-v2"
+            collection.accessibilityIdentifier = input.environment.internalChatRendererEnabled
+                ? "chat-native-transcript-v2" : "chat-transcript-scroll"
             update(input)
         }
 
@@ -518,6 +644,7 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
         func suspendPresentation() {
             guard !stopped, !presentationSuspended else { return }
             presentationSuspended = true
+            cancelOlder()
             invalidatePublications()
             guard isViewLoaded else { return }
             let interruptedMotion = motionLink != nil
@@ -543,12 +670,40 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
         }
         func resumePresentation() {
             guard isPresentationActive, isViewLoaded else { return }
+            let wasSuspended = presentationSuspended
             presentationSuspended = false
+            if wasSuspended {
+                // Hidden updates can be fitted by UIKit while publication is
+                // deliberately suspended. Reacquire only realized hosts so their
+                // fitting receipts use the current presentation; cached geometry
+                // alone must not masquerade as a measured tail on foreground.
+                for path in collection.indexPathsForVisibleItems {
+                    guard let item = dataSource.itemIdentifier(for: path),
+                          let cell = collection.cellForItem(at: path) else { continue }
+                    configure(cell, item: item)
+                }
+            }
             if let pending = pendingRestore {
                 pendingRestore = nil
                 finishRestore(pending.outcome)
             }
             collection.setNeedsLayout()
+        }
+
+        func collectionView(_ collectionView: UICollectionView, didEndDisplaying cell: UICollectionViewCell,
+                            forItemAt indexPath: IndexPath) {
+            // Reuse-pool cells retain no rich host, actions or revision payload.
+            // Canonical content remains in input and is reconstructed by ID.
+            guard !collectionView.visibleCells.contains(where: { $0 === cell }) else { return }
+            if let item = (cell as? Cell)?.representedItem {
+                if case .row(let id) = item { revisions.removeValue(forKey: id) }
+                (collection.collectionViewLayout as? ColumnLayout)?.retire(item)
+            }
+            (cell as? Cell)?.representedItem = nil
+            cell.contentConfiguration = nil
+            (cell as? Cell)?.rowStamp = nil
+            (cell as? Cell)?.boundaryStamp = nil
+            (cell as? Cell)?.didFit = nil
         }
 
         func collectionView(_ collectionView: UICollectionView, willDisplay cell: UICollectionViewCell,
@@ -573,10 +728,27 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             column?.needsFit(item)
             (cell as? Cell)?.layoutPolicy = column == nil ? 0 : 1
             let fittedKey = column?.key
-            (cell as? Cell)?.didFit = { [weak column] attributes in
+            let fittedScope = input.scope
+            let fittedPresentation = presentationEpoch
+            let fittedStamp: RowStamp?
+            if case .row(let id) = item { fittedStamp = rowStamp(for: id) }
+            else { fittedStamp = nil }
+            let stamp = boundaryStamp(for: item)
+            let fittedRevision = input.revision
+            (cell as? Cell)?.representedItem = item
+            (cell as? Cell)?.didFit = { [weak self, weak column] attributes in
+                guard let self, !self.stopped, !self.presentationSuspended,
+                      self.input.scope == fittedScope else { return }
+                if case .row(let id) = item {
+                    guard self.rowStamp(for: id) == fittedStamp else { return }
+                } else if let stamp {
+                    guard self.boundaryStamp(for: item) == stamp else { return }
+                } else {
+                    guard self.input.revision == fittedRevision,
+                          self.presentationEpoch == fittedPresentation else { return }
+                }
                 column?.didFit(attributes, item: item, key: fittedKey)
             }
-            let stamp = boundaryStamp(for: item)
             (cell as? Cell)?.boundaryStamp = stamp
             (cell as? Cell)?.rowStamp = nil
             let content: AnyView
@@ -607,6 +779,12 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
         func update(_ next: ChatNativeTranscriptViewport) {
             guard !stopped else { return }
             let old = input
+            if old.metricPublication !== next.metricPublication {
+                old.metricPublication?.detachMeasuredViewport(source: ObjectIdentifier(self))
+            }
+            next.metricPublication?.bindMeasuredViewport(source: ObjectIdentifier(self),
+                flush: { [weak self] in self?.flushForNavigation() },
+                suspend: { [weak self] in self?.suspendPresentation() })
             // Capture the old reader position before changing row/scope inputs.
             let scopeChanged = old.scope != next.scope
             // onLatest synchronously asks the parent to clear restoration and
@@ -621,8 +799,14 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
                     || (next.cancellationToken == old.cancellationToken && old.restoreRequest != nil))
             let rejoinCommand = !scopeChanged && old.latestToken != next.latestToken
                 && next.restoreRequest == nil
-            let restoreChanged = old.restoreRequest != next.restoreRequest && !latestEcho && !topEcho
-            let cancelled = old.cancellationToken != next.cancellationToken && !latestEcho && !topEcho
+            let olderEcho = !scopeChanged && olderTask != nil
+                && olderEchoCancellationToken == next.cancellationToken
+                && next.restoreRequest == nil && next.latestToken == old.latestToken
+            let restoreChanged = old.restoreRequest != next.restoreRequest && !latestEcho && !topEcho && !olderEcho
+            let cancelled = old.cancellationToken != next.cancellationToken && !latestEcho && !topEcho && !olderEcho
+            if scopeChanged || old.cancellationToken != next.cancellationToken {
+                olderEchoCancellationToken = nil
+            }
             if scopeChanged || restoreChanged || old.cancellationToken != next.cancellationToken {
                 systemTopEchoCancellationToken = nil
             }
@@ -631,6 +815,7 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             }
             if scopeChanged || restoreChanged { systemTopReaderIntent = false }
             if scopeChanged || restoreChanged || cancelled {
+                cancelOlder()
                 cancelSystemTop()
                 cancelMotion()
                 invalidatePublications()
@@ -648,8 +833,38 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             if followLink != nil && (old.revision != next.revision || old.isStreaming != next.isStreaming) {
                 followContentChangedAt = CACurrentMediaTime()
             }
+            lastSourceMutation = ChatTranscriptSourceMutation.classify(previous: old.ids, next: next.ids)
+            if old.typeKey != next.typeKey || lastSourceMutation != .unchanged {
+                invalidatePublications()
+                pendingRestore = nil
+                resetSettlement()
+                if motionLink == nil, let request = next.restoreRequest, request != completedRequest {
+                    ownership = requestedOwnership(next)
+                }
+            }
+            if old.typeKey != next.typeKey {
+                cancelMotion()
+                if case .reading = ownership { anchor = currentAnchor() ?? anchor }
+            }
+            if let anchor, !next.ids.contains(anchor.id) { self.anchor = nil }
+            let handoff: ReaderHandoff?
+            if !scopeChanged, !restoreChanged, !cancelled, initialized,
+               lastSourceMutation != .unchanged, case .reading = ownership,
+               motionLink == nil, !collection.isTracking, !collection.isDragging,
+               let current = currentAnchor(), next.ids.contains(current.id) {
+                handoff = ReaderHandoff(anchor: current, scope: next.scope,
+                    width: collection.bounds.width, revision: next.revision,
+                    cancellation: next.cancellationToken, generation: generation,
+                    presentation: presentationEpoch)
+            } else { handoff = nil }
             input = next
             guard isViewLoaded else { return }
+            // Use the same composer clearance as the legacy sibling control.
+            latestBottomConstraint?.constant = -max(16, next.bottomInset - 32)
+            latest.backgroundColor = UIColor(SemrehVisualTheme.raisedPanel(for: next.environment.colorScheme,
+                palette: next.environment.appColorPalette))
+            latest.tintColor = UIColor(SemrehVisualTheme.primaryText(for: next.environment.colorScheme,
+                palette: next.environment.appColorPalette))
             if old.scope != next.scope {
                 generation += 1
                 initialized = false
@@ -722,7 +937,10 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
                     var snapshot = NSDiffableDataSourceSnapshot<Int, Item>()
                     snapshot.appendSections([0]); snapshot.appendItems(items)
                     applying = true
+                    let column = collection.collectionViewLayout as? ColumnLayout
+                    column?.beginSnapshotTransition()
                     dataSource.apply(snapshot, animatingDifferences: false)
+                    column?.commitSnapshot(dataSource.snapshot().itemIdentifiers)
                     applying = false
                     revisions = revisions.filter { indices[$0.key] != nil }
                 }
@@ -746,6 +964,47 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
                 }
             }
             collection.setNeedsLayout()
+            if let handoff { commitReaderHandoff(handoff) }
+        }
+
+        // The handoff is synchronous, within one UIKit update. No queued proxy
+        // alignment can outlive a touch, Back, Send or source/scope replacement.
+        func commitReaderHandoff(_ sample: ReaderHandoff) {
+            func isCurrent() -> Bool {
+                !stopped && !presentationSuspended && input.scope == sample.scope
+                    && input.revision == sample.revision && input.cancellationToken == sample.cancellation
+                    && generation == sample.generation && presentationEpoch == sample.presentation
+                    && collection.bounds.width == sample.width
+                    && !collection.isTracking && !collection.isDragging
+            }
+            guard isCurrent() else { return }
+            let wasCorrecting = correcting
+            correcting = true
+            defer { correcting = wasCorrecting }
+            collection.layoutIfNeeded()
+            guard isCurrent(), indices[sample.anchor.id] != nil else { return }
+            anchor = sample.anchor
+            _ = align(sample.anchor)
+            collection.layoutIfNeeded()
+        }
+
+        // Choose the durable row before UIKit realizes its first cell set. Warm
+        // estimates refine geometry, but never replace the requested source ID.
+        func primeInitialViewport() {
+            guard !initialized, !stopped, !presentationSuspended,
+                  collection.bounds.width > 0, collection.bounds.height > 0,
+                  let layout = collection.collectionViewLayout as? ColumnLayout else { return }
+            layout.prepare()
+            initialized = true
+            ownership = requestedOwnership(input)
+            switch ownership {
+            case .restoring(let target):
+                if let target { _ = align(target) }
+                else { collection.setContentOffset(CGPoint(x: 0, y: bottomOffset), animated: false) }
+            case .following:
+                collection.setContentOffset(CGPoint(x: 0, y: bottomOffset), animated: false)
+            case .reading: break
+            }
         }
 
         /// Explicit navigation owns the target. Cached intra-row deltas refine only
@@ -764,6 +1023,7 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             }
             if value.explicitLatest { return .following }
             if let id = value.initialID { return row(id) }
+            if value.following { return .following }
             if let saved { return saved.following ? .following : .restoring(saved.anchor) }
             return .following
         }
@@ -951,7 +1211,11 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             guard !stopped, !presentationSuspended, !batchingMotionObservations else { return }
             publishComputations += 1
             let distance = max(0, bottomOffset - collection.contentOffset.y)
-            let visible = currentAnchor()?.id
+            let observedVisible = currentAnchor()?.id
+            let visible: String?
+            if case .restoring(let target) = ownership, let target,
+               observedVisible != target.id { visible = nil }
+            else { visible = observedVisible }
             let lastVisible = input.ids.last.map { id in collection.indexPathsForVisibleItems.contains { dataSource.itemIdentifier(for: $0) == .row(id) } } ?? false
             let metrics = ChatScrollMetrics(distanceFromBottom: distance, isUserInteracting: interacting, isDirectlyInteracting: systemTopActive || collection.isTracking || collection.isDragging, isDecelerating: collection.isDecelerating)
             let arrived = realizedTailArrival
@@ -1014,6 +1278,7 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
         }
         func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
             guard !stopped, !presentationSuspended else { return }
+            cancelOlder()
             invalidatePublications()
             pendingRestore = nil
             cancelSystemTop()
@@ -1041,6 +1306,7 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             ownership = realizedTailArrival ? .following : .reading
             saveMemory(scope: input.scope)
             publish()
+            loadOlderIfNeeded()
         }
         var realizedTailArrival: Bool {
             guard (collection.collectionViewLayout as? ColumnLayout)?.measured.contains(.footer) ?? true,
@@ -1126,6 +1392,20 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             collection.setNeedsLayout()
             publish()
         }
+        private func updateEdgeMask() {
+            let edge = ChatTranscriptEdgeGeometry(height: collection.bounds.height, bottomInset: input.bottomInset)
+            let edgeColor = input.environment.accessibilityReduceTransparency ? UIColor.black.cgColor : UIColor.clear.cgColor
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            // A scroll layer's bounds origin moves with contentOffset. The mask
+            // must move with that origin to remain fixed at the viewport edges.
+            edgeMask.frame = collection.bounds
+            edgeMask.colors = [edgeColor, UIColor.black.cgColor, UIColor.black.cgColor, edgeColor, edgeColor]
+            edgeMask.locations = [0, NSNumber(value: Double(edge.topEnd)),
+                NSNumber(value: Double(edge.bottomStart)), NSNumber(value: Double(edge.bottomEnd)), 1]
+            CATransaction.commit()
+        }
+
         func beginMotion() {
             cancelFollow()
             guard isPresentationActive, !presentationSuspended, motionLink == nil,
@@ -1183,8 +1463,9 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             guard motionLink === link, !stopped, !presentationSuspended,
                   generation == epoch, presentationEpoch == presentation, input.scope == scope else { return }
             let elapsed = max(0, link.timestamp - motionStarted)
-            let t = min(1, CGFloat(elapsed / 0.55))
-            let eased = 1 - pow(1 - t, 3)
+            let t = min(1, CGFloat(elapsed / ChatMotion.scrollToLatestDuration))
+            // Zero velocity at both ends avoids the abrupt cubic ease-out launch.
+            let eased = t * t * (3 - 2 * t)
             let fraction = motionProgress < 1 ? min(1, (eased - motionProgress) / (1 - motionProgress)) : 1
             motionProgress = eased
             let current = collection.contentOffset.y
@@ -1233,23 +1514,91 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             motionTailOffset = nil
         }
         @objc func jumpToLatest() {
-            guard isPresentationActive, !presentationSuspended, motionLink == nil,
+            guard isPresentationActive, !presentationSuspended,
                   !collection.isTracking, !collection.isDragging else { return }
+            // A visible button press is fresh intent, even during our own glide
+            // or before SwiftUI has echoed the preceding command.
+            let priorIssuedToken = latestEchoCancellationToken ?? input.cancellationToken
+            cancelOlder()
+            cancelMotion()
+            // Drop old reader callbacks immediately; waiting for the SwiftUI
+            // echo can publish restoration after this newer navigation intent.
+            invalidatePublications()
+            pendingRestore = nil
+            resetSettlement()
             let replacingTop = systemTopActive
-            guard replacingTop || latestEchoCancellationToken == nil else { return }
             // A tap is newer intent than the OS ascent. Cancel that owner rather
             // than discarding the visible button's action until ascent completes.
             if replacingTop {
                 cancelSystemTop()
-                invalidatePublications()
-                pendingRestore = nil
             }
-            let priorIssuedToken = latestEchoCancellationToken ?? input.cancellationToken
             beginMotion()
             latestEchoCancellationToken = priorIssuedToken &+ 1
             input.onLatest()
             collection.setNeedsLayout()
         }
+        func flushForNavigation() {
+            guard !stopped, !presentationSuspended, isViewLoaded else { return }
+            invalidatePublications()
+            let current = currentAnchor()?.id
+            let metrics = ChatScrollMetrics(distanceFromBottom: max(0, bottomOffset - collection.contentOffset.y),
+                isUserInteracting: interacting,
+                isDirectlyInteracting: systemTopActive || collection.isTracking || collection.isDragging,
+                isDecelerating: collection.isDecelerating)
+            let latestVisible = input.ids.last.map { id in
+                collection.indexPathsForVisibleItems.contains { dataSource.itemIdentifier(for: $0) == .row(id) }
+            } ?? false
+            input.onState(metrics, current, latestVisible, realizedTailArrival)
+        }
+
+        func loadOlderIfNeeded() {
+            guard input.allowsAutomaticPaging, !follows, !interacting, motionLink == nil,
+                  input.restoreRequest == nil || input.restoreRequest == completedRequest,
+                  let current = currentAnchor(), let index = indices[current.id], index < 8,
+                  olderBoundary != input.ids.first else { return }
+            loadOlder(intent: .automaticPrefetch)
+        }
+        func loadOlder(intent: ChatTranscriptOlderLoadIntent) {
+            guard isPresentationActive, !presentationSuspended, olderTask == nil,
+                  !collection.isTracking, !collection.isDragging else { return }
+            if intent == .automaticPrefetch, !input.allowsAutomaticPaging { return }
+            if intent.acceptsUserIntent {
+                olderEchoCancellationToken = input.cancellationToken &+ 1
+                cancelMotion()
+                invalidatePublications()
+                pendingRestore = nil
+                anchor = currentAnchor()
+                ownership = .reading
+                finishRestore(.cancelled)
+            }
+            let scope = input.scope, epoch = generation
+            let cancellation = input.cancellationToken, operation = olderGeneration
+            let boundary = input.ids.first, load = input.onOlder
+            olderBoundary = boundary
+            olderTask = Task { [weak self] in
+                let current: @MainActor () -> Bool = { [weak self] in
+                    guard let self else { return false }
+                    return !self.stopped && !self.presentationSuspended && !Task.isCancelled
+                        && self.input.scope == scope && self.generation == epoch
+                        && self.olderGeneration == operation
+                        && (self.input.cancellationToken == cancellation
+                            || (intent.acceptsUserIntent && self.input.cancellationToken == cancellation &+ 1))
+                }
+                guard current() else { return }
+                let progressed = await load(intent, current)
+                guard let self, current() else { return }
+                self.olderTask = nil
+                if !progressed { self.olderBoundary = boundary }
+            }
+        }
+        func cancelOlder() {
+            olderGeneration &+= 1
+            if olderTask != nil { olderBoundary = nil }
+            olderTask?.cancel()
+            olderTask = nil
+            olderEchoCancellationToken = nil
+        }
+
         @objc func refreshHistory() {
             guard isPresentationActive, !presentationSuspended, refreshTask == nil else { return }
             invalidatePublications()
@@ -1290,6 +1639,8 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
         }
         func stop() {
             guard !stopped else { return }
+            input.metricPublication?.detachMeasuredViewport(source: ObjectIdentifier(self))
+            cancelOlder()
             invalidatePublications()
             pendingRestore = nil
             lifecycleObserver = nil
@@ -1304,4 +1655,7 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
         }
     }
 }
-#endif
+
+extension Notification.Name {
+    static let semrehTranscriptLoadOlder = Notification.Name("semreh.transcript.loadOlder")
+}

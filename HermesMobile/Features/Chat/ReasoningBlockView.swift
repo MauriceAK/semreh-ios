@@ -424,7 +424,6 @@ struct ReasoningBlockView: View {
 
     private var header: some View {
         TranscriptActivityDisclosureLabel(
-            symbol: "ellipsis.bubble",
             title: title,
             status: nil,
             isExpanded: isExpanded,
@@ -452,7 +451,6 @@ struct ReasoningBlockView: View {
 /// Shared inline language for live and retained intermediate work. Details are
 /// revealed deliberately; status changes never stream raw payload into the row.
 struct TranscriptActivityDisclosureLabel: View {
-    let symbol: String
     let title: String
     let status: String?
     let isExpanded: Bool
@@ -485,17 +483,6 @@ struct TranscriptActivityDisclosureLabel: View {
 
     private var identity: some View {
         HStack(alignment: .center, spacing: 8) {
-            if isFailure {
-                Image(systemName: symbol)
-                    .font(.system(size: 16, weight: .regular))
-                    .foregroundStyle(.red)
-                    .frame(width: 20)
-            } else {
-                Image(systemName: symbol)
-                    .font(.system(size: 16, weight: .regular))
-                    .frame(width: 20)
-            }
-
             if dynamicTypeSize.isAccessibilitySize {
                 VStack(alignment: .leading, spacing: 2) {
                     titleText
@@ -505,8 +492,8 @@ struct TranscriptActivityDisclosureLabel: View {
                 titleText
             }
         }
-        // One sweep crosses the icon and title as a single wave, without
-        // changing either view's size or moving the disclosure chevron.
+        // One sweep crosses the title as a single wave, without
+        // changing the title's size or moving the disclosure chevron.
         .modifier(ReasoningTextShineModifier(isActive: isActive && !isFailure))
     }
 
@@ -526,10 +513,9 @@ struct TranscriptActivityDisclosureLabel: View {
     }
 }
 
-/// A live status uses the same compact icon/title rhythm as disclosures, but
+/// A live status uses the same compact text rhythm as disclosures, but
 /// has no chevron or tap affordance because there are no details to expand.
 struct TranscriptActivityInlineStatusLabel: View {
-    let symbol: String
     let title: String
     let accessibilityLabel: String
 
@@ -537,10 +523,6 @@ struct TranscriptActivityInlineStatusLabel: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: 8) {
-            Image(systemName: symbol)
-                .font(.system(size: 16, weight: .regular))
-                .frame(width: 20)
-                .accessibilityHidden(true)
             Text(title)
                 .font(AppFont.subheadline())
                 .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)

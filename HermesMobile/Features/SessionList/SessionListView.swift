@@ -465,6 +465,7 @@ struct SessionListView: View {
             if usesShellChrome {
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     Button("New chat", systemImage: "square.and.pencil", action: onNewChat)
+                        .disabled(viewModel.isViewingCachedData || viewModel.isCreatingSession || navigationState.isCreatingNewChat)
                     Button(AppShellSettingsAction.accessibilityLabel, systemImage: AppShellSettingsAction.systemImage, action: onAccount)
                 }
             }
@@ -663,6 +664,32 @@ struct SessionListView: View {
                 )
             }
 
+            if !visibleLocalDrafts.isEmpty {
+                Section {
+                    ForEach(visibleLocalDrafts) { session in
+                        Button {
+                            selectSession(session)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(SessionRowView.displayTitle(for: session))
+                                    .foregroundStyle(.primary)
+                                Text(viewModel.localDraftText(for: session))
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityHint("Reopens this unsent draft.")
+                        .sessionsScreenListRow()
+                    }
+                } header: {
+                    Text("Drafts")
+                }
+            }
+
             SessionListRowsSection(
                 viewModel: viewModel,
                 server: server,
@@ -677,9 +704,9 @@ struct SessionListView: View {
                     ? navigationState.selectedSessionID
                     : nil,
                 actions: sessionRowActions,
-                suppressEmptyState: usesShellChrome
+                suppressEmptyState: !visibleLocalDrafts.isEmpty || (usesShellChrome
                     ? !pinnedSessions.isEmpty
-                    : !sessionGroups.scheduled.isEmpty,
+                    : !sessionGroups.scheduled.isEmpty),
                 useMessagesStyle: usesShellChrome,
                 showsSectionHeader: !usesShellChrome
             )
@@ -980,6 +1007,11 @@ struct SessionListView: View {
         )
     }
 
+    private var visibleLocalDrafts: [SessionSummary] {
+        let drafts = viewModel.visibleLocalDrafts(searchText: searchText, selectedProjectID: selectedProjectID)
+        return usesShellChrome ? drafts.filter(matchesShellFilters) : drafts
+    }
+
     private var scheduledSessionGroups: ScheduledSessionGroups {
         let groups = viewModel.scheduledSessionGroups(
             searchText: searchText,
@@ -1272,6 +1304,9 @@ struct SessionListView: View {
     // solid header-color fill there so the button stays themed and readable;
     // the liquid-glass surface keeps tinting via `newSessionButtonGlassTint`.
     private var newSessionButtonSolidThemeFill: Color? {
+        if palette == .semreh, accent == .warm {
+            return SemrehVisualTheme.action(for: colorScheme, palette: palette, accent: accent)
+        }
         guard newSessionButtonUsesThemeColor, newSessionButtonSurface != .liquidGlass else {
             return nil
         }
@@ -1280,6 +1315,9 @@ struct SessionListView: View {
     }
 
     private var newSessionButtonGlassTint: Color {
+        if palette == .semreh, accent == .warm {
+            return SemrehVisualTheme.action(for: colorScheme, palette: palette, accent: accent)
+        }
         if newSessionButtonUsesThemeColor {
             return selectedHeaderLogoColor
         }
@@ -1288,6 +1326,9 @@ struct SessionListView: View {
     }
 
     private var newSessionButtonForegroundColor: Color {
+        if palette == .semreh, accent == .warm {
+            return SemrehVisualTheme.accentForeground(for: colorScheme, palette: palette, accent: accent)
+        }
         if newSessionButtonUsesThemeColor {
             return SemrehVisualTheme.energyForeground(for: palette, accent: accent)
         }
@@ -1685,7 +1726,12 @@ struct SessionListView: View {
     }
 
     private func openNewChat() {
-        startNewChat(PendingNewChatRoute())
+        guard pendingSharedImport == nil, requestedNewChat == nil,
+              pendingDeepLinkedSessionID == nil else {
+            drainPendingExternalNewChatRequestsIfIdle()
+            return
+        }
+        startNewChat(PendingNewChatRoute(profileName: ProfileSummary.canonicalDefaultName))
     }
 
     @discardableResult
@@ -1757,7 +1803,14 @@ struct SessionListView: View {
 #if DEBUG
         ChatPerformanceCadenceMonitor.begin(.entry)
 #endif
-        navigationState.select(session)
+        if session.localDraftID != nil {
+            guard let destination = viewModel.localDraftDestination(for: session),
+                  case .newChat(let saved, let route) = destination,
+                  navigationState.beginNewChatCreation(route) else { return }
+            _ = navigationState.completeNewChatCreation(saved, for: route)
+        } else {
+            navigationState.select(session)
+        }
         persistLastSelectedSession()
     }
 
@@ -2170,6 +2223,10 @@ struct SemrehHeaderLogo: View {
 /// A fresh `id` each time so a repeat invocation re-triggers navigation even if the previous
 /// value lingers.
 struct NewChatRequest: Equatable {
+    static func defaultChat() -> Self {
+        Self(profileName: ProfileSummary.canonicalDefaultName)
+    }
+
     let id: UUID
     let autoStartsVoiceInput: Bool
     /// When set, the new session is created pinned to this profile; nil uses the server's
