@@ -990,13 +990,6 @@ struct ChatView: View {
             .padding(.horizontal, 12)
         }
         .frame(minHeight: 96)
-        .background {
-            ChatHeaderReadabilityBackdrop()
-                .padding(.bottom, -24)
-                .ignoresSafeArea(.container, edges: .top)
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
-        }
     }
 
     /// The Sessions shell owns the selected destination, while this view owns
@@ -4083,27 +4076,6 @@ struct ChatView: View {
         }
 
         return max(0, transcriptMessages.count - 1 - index)
-    }
-}
-
-/// A scroll-edge fade, not a separate header panel. It protects the status bar
-/// and floating identity without changing transcript layout or intercepting taps.
-private struct ChatHeaderReadabilityBackdrop: View {
-    @Environment(\.colorScheme) private var colorScheme
-    @Environment(\.appColorPalette) private var palette
-
-    var body: some View {
-        let canvas = SemrehVisualTheme.canvas(for: colorScheme, palette: palette)
-        LinearGradient(
-            stops: [
-                .init(color: canvas.opacity(0.98), location: 0),
-                .init(color: canvas.opacity(0.94), location: 0.45),
-                .init(color: canvas.opacity(0.70), location: 0.75),
-                .init(color: canvas.opacity(0), location: 1)
-            ],
-            startPoint: .top,
-            endPoint: .bottom
-        )
     }
 }
 
