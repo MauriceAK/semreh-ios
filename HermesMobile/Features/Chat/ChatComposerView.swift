@@ -450,6 +450,7 @@ struct MessageComposerView: View {
                     .adaptiveGlass(
                         .regular,
                         isInteractive: true,
+                        tint: SemrehVisualTheme.panel(for: colorScheme, palette: palette),
                         fallbackMaterial: .ultraThinMaterial,
                         in: RoundedRectangle(cornerRadius: composerCornerRadius, style: .continuous)
                     )
@@ -1201,7 +1202,7 @@ struct MessageComposerView: View {
     }
 
     private var metaControlColor: Color {
-        Color(.secondaryLabel)
+        SemrehVisualTheme.mutedText(for: colorScheme, palette: palette)
     }
 
     private var workspaceTitle: String {
@@ -1273,6 +1274,9 @@ struct MessageComposerView: View {
     }
 
     private var actionButtonBackground: Color {
+        if palette == .semreh, accent == .warm, !isActionButtonDisabled {
+            return SemrehVisualTheme.action(for: colorScheme, palette: palette, accent: accent)
+        }
         if PrimaryActionTintSettings.usesThemeColor(
             isEnabled: tintsPrimaryActions,
             controlIsEnabled: !isActionButtonDisabled
@@ -1288,6 +1292,9 @@ struct MessageComposerView: View {
     }
 
     private var actionButtonForeground: Color {
+        if palette == .semreh, accent == .warm, !isActionButtonDisabled {
+            return SemrehVisualTheme.accentForeground(for: colorScheme, palette: palette, accent: accent)
+        }
         if PrimaryActionTintSettings.usesThemeColor(
             isEnabled: tintsPrimaryActions,
             controlIsEnabled: !isActionButtonDisabled

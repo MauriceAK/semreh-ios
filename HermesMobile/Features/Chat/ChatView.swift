@@ -480,10 +480,15 @@ struct ChatView: View {
     let autoStartsVoiceInput: Bool
 
     @State private var draftMessage = ""
+    @State private var preservesInitialComposerDraft = false
+    @State private var composerWriterOwner = UUID()
+    @State private var composerWriterLease: ComposerDraftStore.WriterLease?
     @State private var followRejoinScrollToken = 0
     @State private var restoreScrollToken = 0
     @State private var transcriptRestoreCancellationToken = 0
-    @State private var didPersistTranscriptBeforeBack = false
+    @State private var scrollMetricPublication = ChatScrollMetricPublication()
+    @State private var isLeavingViaBack = false
+    @State private var backRestoreSnapshot: ChatTranscriptRestoreSnapshot?
     @State private var didRequestTranscriptRestore = false
     @State private var didInteractBeforeTranscriptRestore = false
     @State private var isTranscriptRestorePending = false
@@ -613,6 +618,8 @@ struct ChatView: View {
 #else
         let usesFreshSyntheticComposer = false
 #endif
+        _preservesInitialComposerDraft = State(initialValue: usesFreshSyntheticComposer
+            || !initialDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         _draftMessage = State(initialValue: ComposerDraftStore.resolvedDraft(
             initialDraft: initialDraft,
             storedDraft: usesFreshSyntheticComposer ? "" : ComposerDraftStore.shared.load(
@@ -647,7 +654,7 @@ struct ChatView: View {
     // "unable to type-check in reasonable time" limit).
     private var messageComposer: some View {
         MessageComposerView(
-            draftMessage: $draftMessage,
+            draftMessage: composerDraftBinding,
             isFocused: $composerIsFocused,
             isSending: viewModel.isStartingChat || viewModel.isSendingVoiceNote,
             isCompressingSession: viewModel.isCompressingSession,
@@ -823,11 +830,12 @@ struct ChatView: View {
             },
             controlsPresentation: $showsChatControls,
             onStartNewChat: {
-                forkedSession = SessionSummary(
+                openNewComposerDraft(SessionSummary(
+                    localDraftID: "local-draft-\(UUID().uuidString)",
                     title: "New Chat",
                     createdAt: Date().timeIntervalSince1970,
-                    profile: viewModel.selectedProfileName ?? session.profile
-                )
+                    profile: viewModel.selectedProfileName ?? session.profile ?? "default"
+                ))
             },
             workspacePickerRequest: workspacePickerRequest,
             gitBranchPickerRequest: gitBranchPickerRequest
@@ -841,6 +849,24 @@ struct ChatView: View {
             try? await Task.sleep(nanoseconds: 300_000_000)
             guard !Task.isCancelled else { return }
             persistComposerDraft()
+        }
+        .onChange(of: localDraftConfiguration) {
+            if let writer = composerWriterLease {
+                ComposerDraftStore.shared.noteWriterConfigurationEdit(
+                    writer: writer, server: server, sessionID: composerDraftSessionID)
+            }
+            guard session.localDraftID != nil || ComposerDraftStore.shared.savedConfiguration(
+                server: server, sessionID: composerDraftSessionID) != nil else { return }
+            // Configuration-only edits keep the current text and exact local
+            // identity. Observe committed VM values, not picker pending intent.
+            persistComposerDraft()
+        }
+        .onChange(of: ComposerDraftStore.shared.failureRestorationRevision(
+            server: server, sessionID: composerDraftSessionID)) {
+            guard let writer = composerWriterLease, draftMessage.isEmpty,
+                  let restored = ComposerDraftStore.shared.failureRestorationDraft(
+                    server: server, sessionID: composerDraftSessionID, writer: writer) else { return }
+            draftMessage = restored
         }
         .background(
             NavigationAppearanceCompletionObserver(action: handleInitialAppearanceCompletion)
@@ -872,24 +898,29 @@ struct ChatView: View {
     }
 
     private var chatBotHeader: some View {
-        Button {
-            showsChatControls = true
-        } label: {
-            VStack(spacing: -3) {
-                if let identity = BirdAvatarIdentity(server: server, profile: viewModel.selectedProfileName ?? session.profile) {
-                    BirdAvatarView(identity: identity)
-                        .frame(width: 52, height: 52)
-                        .offset(y: 2)
-                }
-
-                Text(viewModel.selectedProfileTitle)
-                    .font(.system(.body, design: .rounded).weight(.medium))
-                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
-                    .truncationMode(.middle)
-                    .minimumScaleFactor(0.75)
-                    .padding(.horizontal, 12)
-                    .frame(minHeight: 32)
-                    .adaptiveGlass(.regular, isInteractive: true, fallbackMaterial: .thinMaterial, in: Capsule())
+        Group {
+            if session.sessionId == nil, viewModel.messages.isEmpty,
+               viewModel.activeStreamID == nil, !viewModel.isStartingChat,
+               !viewModel.isSingleProfileMode, !viewModel.profileOptions.isEmpty {
+                Menu {
+                    ForEach(viewModel.profileOptions, id: \.self) { profile in
+                        Button {
+                            handleProfileSelection(profile)
+                        } label: {
+                            if viewModel.isSelectedProfile(profile) {
+                                Label(profile.displayName, systemImage: "checkmark")
+                            } else {
+                                Text(profile.displayName)
+                            }
+                        }
+                    }
+                    Divider()
+                    Button("Chat controls", systemImage: "slider.horizontal.3") {
+                        showsChatControls = true
+                    }
+                } label: { chatBotHeaderLabel }
+            } else {
+                Button { showsChatControls = true } label: { chatBotHeaderLabel }
             }
         }
         .buttonStyle(.plain)
@@ -897,6 +928,25 @@ struct ChatView: View {
         .accessibilityValue(headerSubtitle ?? viewModel.selectedProfileTitle)
         .accessibilityHint("Choose a profile and configure this chat.")
         .accessibilityIdentifier("chatProfileConfiguration")
+    }
+
+    private var chatBotHeaderLabel: some View {
+        VStack(spacing: -3) {
+            if let identity = BirdAvatarIdentity(server: server, profile: viewModel.selectedProfileName ?? session.profile) {
+                BirdAvatarView(identity: identity)
+                    .frame(width: 52, height: 52)
+                    .offset(y: 2)
+            }
+
+            Text(viewModel.selectedProfileTitle)
+                .font(.system(.body, design: .rounded).weight(.medium))
+                .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
+                .truncationMode(.middle)
+                .minimumScaleFactor(0.75)
+                .padding(.horizontal, 12)
+                .frame(minHeight: 32)
+                .adaptiveGlass(.regular, isInteractive: true, fallbackMaterial: .thinMaterial, in: Capsule())
+        }
     }
 
     private var chatNavigationBar: some View {
@@ -957,11 +1007,18 @@ struct ChatView: View {
     /// required for the custom header button because it is outside the system
     /// navigation bar and therefore has no implicit pop action of its own.
     private func handleBackNavigation() {
+        guard !isLeavingViaBack else { return }
 #if DEBUG
         ChatPerformanceCadenceMonitor.begin(.back)
 #endif
-        persistTranscriptRestore()
-        didPersistTranscriptBeforeBack = true
+        // Freeze only cheap values here. Durable UserDefaults persistence and
+        // lifecycle teardown belong to disappearance, after navigation responds.
+        // Consume at most a touch edge and the current UIKit metrics outside
+        // layout, so the immutable exit snapshot includes the last observation.
+        scrollMetricPublication.flush()
+        scrollMetricPublication.suspend()
+        backRestoreSnapshot = transcriptRestoreSnapshot
+        isLeavingViaBack = true
         viewModel.warmTranscriptReaderMemory?.suspendCapture()
         onParentBack?()
         dismiss()
@@ -1114,6 +1171,9 @@ struct ChatView: View {
         .background {
             SemrehBackdrop().ignoresSafeArea()
                 .onChange(of: draftMessage) {
+                    guard let writer = composerWriterLease,
+                          ComposerDraftStore.shared.ownsWriter(writer, server: server, sessionID: composerDraftSessionID) else { return }
+                    ComposerDraftStore.shared.noteWriterEdit(draftMessage, writer: writer, server: server, sessionID: composerDraftSessionID)
                     viewModel.setDirectComposerEditing(!draftMessage.isEmpty)
                 }
                 .onChange(of: viewModel.clarificationPrompt?.gatewayIdentity) { oldIdentity, newIdentity in
@@ -1196,6 +1256,8 @@ struct ChatView: View {
                 viewModel.setShowsLiveActivityResponseExcerpts(showsLiveActivityResponseExcerpts)
             }
             .onDisappear {
+                scrollMetricPublication.flush()
+                scrollMetricPublication.suspend()
                 isChatPresented = false
                 updatePresentationActivity()
 #if DEBUG
@@ -1211,6 +1273,7 @@ struct ChatView: View {
                 composerResizeTask?.cancel()
                 composerResizeTask = nil
                 persistComposerDraft()
+                releaseComposerWriter()
                 persistTranscriptRestore()
                 foregroundRefreshTask?.cancel()
                 foregroundRefreshTask = nil
@@ -1222,12 +1285,15 @@ struct ChatView: View {
                 viewModel.stopListening()
             }
             .onAppear {
+                claimComposerWriter()
                 // NavigationLink may construct a destination before Settings changes.
                 // Capture at first presentation, then retain through covers/backgrounding.
                 if internalChatRendererSelection == nil {
                     internalChatRendererSelection = InternalChatRendererPolicy.capture()
                 }
-                didPersistTranscriptBeforeBack = false
+                scrollMetricPublication.resume()
+                isLeavingViaBack = false
+                backRestoreSnapshot = nil
                 viewModel.warmTranscriptReaderMemory?.resumeCapture()
                 isChatPresented = true
                 updatePresentationActivity()
@@ -1352,7 +1418,12 @@ struct ChatView: View {
         chatBaseView
             // Keep the additional ownership observers outside the large base
             // expression so Swift can type-check each modifier chain separately.
-            .onChange(of: isPresentationActive) { _, _ in
+            .onChange(of: isPresentationActive) { _, active in
+                if active, isChatPresented { claimComposerWriter() }
+                if !active {
+                    persistComposerDraft()
+                    releaseComposerWriter()
+                }
                 updatePresentationActivity()
             }
             .onChange(of: canFocusComposer) { _, canFocus in
@@ -1727,6 +1798,7 @@ struct ChatView: View {
                 }
                 return await loadOlderMessages(intent: intent) ? .progress : .noProgress
             },
+            scrollMetricPublication: scrollMetricPublication,
             onUpdateScrollMetrics: updateScrollMetrics,
             onDismissKeyboard: dismissKeyboard,
             onScrollToBottom: { proxy, sameMountedWindow, directlyInteracting, decelerating in
@@ -1744,7 +1816,7 @@ struct ChatView: View {
                 scrollToTranscriptMessage(proxy, messageID: messageID, animated: animated)
             },
             onVisibleTranscriptRowIDChange: { rowID in
-                guard !didPersistTranscriptBeforeBack else { return }
+                guard !isLeavingViaBack else { return }
                 if isTranscriptRestorePending {
                     guard let rowID, rowID == pendingTranscriptRestoreMessageID else {
                         return
@@ -2225,8 +2297,27 @@ struct ChatView: View {
 
         if submittedDraft.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("/") {
             let parsedCommand = SlashCommandExecutor.parse(submittedDraft)?.command
+            let steeringSubmission: ComposerDraftStore.StreamingSubmission?
+            if parsedCommand?.handler == .serverSide(.steer) {
+                guard let writer = composerWriterLease,
+                      let submission = ComposerDraftStore.shared.beginStreamingSubmission(
+                        submittedDraft, configuration: composerDraftConfiguration,
+                        server: server, sessionID: composerDraftSessionID, writer: writer,
+                        configurationMutation: viewModel.composerConfigurationMutationRevision) else { return }
+                steeringSubmission = submission
+            } else {
+                steeringSubmission = nil
+            }
             let result = await SlashCommandExecutor.execute(text: submittedDraft, viewModel: viewModel)
-            handleSlashExecutionResult(result, parsedCommand: parsedCommand)
+            if let steeringSubmission,
+               ComposerDraftStore.shared.settleStreamingSubmission(steeringSubmission,
+                accepted: result.isSuccessfulSubmission, currentText: draftMessage,
+                configuration: composerDraftConfiguration, server: server, sessionID: composerDraftSessionID,
+                configurationMutation: viewModel.composerConfigurationMutationRevision) {
+                draftMessage = ""
+            }
+            handleSlashExecutionResult(result, parsedCommand: parsedCommand,
+                                       clearsComposer: steeringSubmission == nil)
 
             if result != .sendAsMessage {
                 if let lastError = viewModel.lastError {
@@ -2238,12 +2329,25 @@ struct ChatView: View {
 
         let didStart: Bool
         if viewModel.activeStreamID != nil {
+            guard draftMessage == submittedDraft, let writer = composerWriterLease,
+                  let submission = ComposerDraftStore.shared.beginStreamingSubmission(
+                    submittedDraft, configuration: composerDraftConfiguration,
+                    server: server, sessionID: composerDraftSessionID, writer: writer,
+                    configurationMutation: viewModel.composerConfigurationMutationRevision) else { return }
             prepareTranscriptForExplicitSend()
             let result = await viewModel.submitStreamingMessage(
                 submittedDraft,
                 behavior: StreamingSendBehavior.storedValue(streamingSendBehaviorRawValue)
             )
-            handleSlashExecutionResult(result, parsedCommand: SlashCommandCatalog.command(named: streamingSendBehaviorCommandName))
+            if ComposerDraftStore.shared.settleStreamingSubmission(submission,
+                accepted: result.isSuccessfulSubmission, currentText: draftMessage,
+                configuration: composerDraftConfiguration, server: server, sessionID: composerDraftSessionID,
+                configurationMutation: viewModel.composerConfigurationMutationRevision) {
+                draftMessage = ""
+            }
+            handleSlashExecutionResult(result,
+                parsedCommand: SlashCommandCatalog.command(named: streamingSendBehaviorCommandName),
+                clearsComposer: false)
             didStart = result.isSuccessfulSubmission
         } else {
             didStart = await sendStandardMessage(submittedDraft)
@@ -2268,6 +2372,8 @@ struct ChatView: View {
         defer { ChatPerformanceCadenceMonitor.end(.send) }
 #endif
         prepareTranscriptForExplicitSend()
+        persistComposerDraft()
+        let writer = composerWriterLease
 
         let didSend = await viewModel.sendVoiceNote(
             audioData: audioData,
@@ -2276,6 +2382,10 @@ struct ChatView: View {
         )
 
         if didSend {
+            retireSuccessfullySentLocalDraft()
+            if let writer, ComposerDraftStore.shared.ownsWriter(writer, server: server, sessionID: composerDraftSessionID) {
+                persistComposerDraft()
+            }
             ChatHaptics.messageSent(isEnabled: isHapticsEnabled && presentationOwnership.isActive)
         }
 
@@ -2289,6 +2399,8 @@ struct ChatView: View {
             return false
         }
 
+        guard let writer = composerWriterLease,
+              ComposerDraftStore.shared.ownsWriter(writer, server: server, sessionID: composerDraftSessionID) else { return false }
         prepareTranscriptForExplicitSend()
 
         draftMessage = ""
@@ -2299,18 +2411,28 @@ struct ChatView: View {
             persistComposerDraft()
         }
 
+        let checkpoint = ComposerDraftStore.shared.submissionCheckpoint(
+            server: server, sessionID: composerDraftSessionID, writer: writer)
         let didStart = await viewModel.sendMessage(submittedDraft, modelContext: modelContext)
-        if !didStart, draftMessage.isEmpty {
-            draftMessage = submittedDraft
+        if didStart { retireSuccessfullySentLocalDraft() }
+        let stillOwnsWriter = ComposerDraftStore.shared.ownsWriter(writer, server: server, sessionID: composerDraftSessionID)
+        if !didStart, let checkpoint {
+            // Flush this owner's pending edits before attempting conditional restoration.
+            if stillOwnsWriter, !draftMessage.isEmpty { persistComposerDraft() }
+            if ComposerDraftStore.shared.restoreFailedSubmission(submittedDraft, checkpoint: checkpoint,
+                server: server, sessionID: composerDraftSessionID), stillOwnsWriter, draftMessage.isEmpty {
+                draftMessage = submittedDraft
+            }
         }
-        persistComposerDraft()
+        if stillOwnsWriter { persistComposerDraft() }
 
         return didStart
     }
 
     private func handleSlashExecutionResult(
         _ result: SlashCommandExecutionResult,
-        parsedCommand: SlashCommand?
+        parsedCommand: SlashCommand?,
+        clearsComposer: Bool = true
     ) {
         switch result {
         case .executed(let message):
@@ -2325,10 +2447,10 @@ struct ChatView: View {
                     viewModel.appendLocalAssistantMessage(message)
                 }
             }
-            draftMessage = ""
+            if clearsComposer { draftMessage = "" }
         case .openedSession(let session):
             forkedSession = session
-            draftMessage = ""
+            if clearsComposer { draftMessage = "" }
         case .openedDirectBranch(let handoff):
             guard OpenChatSessionStore.shared.adoptBranch(handoff) != nil else {
                 OpenChatSessionStore.shared.releaseUnadoptedBranch(handoff)
@@ -2337,10 +2459,10 @@ struct ChatView: View {
             }
             directBranchHandoff = handoff
             isShowingDirectBranch = true
-            draftMessage = ""
+            if clearsComposer { draftMessage = "" }
         case .unsupported(let friendlyMessage):
             viewModel.setSendErrorMessage(friendlyMessage)
-            draftMessage = ""
+            if clearsComposer { draftMessage = "" }
         case .needsSubArg:
             viewModel.setSendErrorMessage(String(localized: "Choose a slash command or continue typing."))
         case .sendAsMessage:
@@ -2414,7 +2536,7 @@ struct ChatView: View {
         }
 
         if let session = outcome?.session {
-            forkedSession = session
+            openNewComposerDraft(session)
         }
     }
 
@@ -2900,6 +3022,8 @@ struct ChatView: View {
         directlyInteracting: Bool, decelerating: Bool
     ) {
         guard !usesStableViewport else { return }
+        // The tap retired pre-decision metrics before any window-change yield.
+        // Do not discard a gesture that arrived during that suspension.
         transcriptRestoreOutcomeState.acceptUserIntent()
         didInteractBeforeTranscriptRestore = true
         isTranscriptRestorePending = false
@@ -3284,7 +3408,7 @@ struct ChatView: View {
 #if DEBUG
             let taskWasCancelled = Task.isCancelled
             let generationChanged = generation != followScrollGeneration
-            guard !taskWasCancelled, !generationChanged else {
+            guard !taskWasCancelled, presentationOwnership.isActive, !generationChanged else {
                 if pendingTranscriptProxyGenerationDiagnostic?.generation == generation {
                     logTranscriptProxyGenerationBoundary(
                         event: "transcript_proxy_generation",
@@ -3519,11 +3643,71 @@ struct ChatView: View {
         }
     }
 
+    private func retireSuccessfullySentLocalDraft() {
+        guard let localID = session.localDraftID else { return }
+        ComposerDraftStore.shared.retireLocalDraft(
+            server: server, sessionID: localID,
+            canonicalSessionID: viewModel.composerDraftCanonicalSessionID
+        )
+    }
+
+    private var localDraftConfiguration: [String?] {
+        [viewModel.selectedProfileName, viewModel.selectedModelID,
+         viewModel.selectedModelProviderID, viewModel.selectedWorkspacePath,
+         viewModel.sessionReasoningEffort]
+    }
+
+    private var composerDraftSessionID: String { session.sessionId ?? session.id }
+
+    private var composerDraftBinding: Binding<String> {
+        Binding(get: { draftMessage }, set: { text in
+            // Record every input mutation before SwiftUI can coalesce renders;
+            // clear-and-retype of identical bytes still invalidates a send.
+            if let writer = composerWriterLease {
+                ComposerDraftStore.shared.noteWriterEdit(text, writer: writer,
+                    server: server, sessionID: composerDraftSessionID)
+            }
+            draftMessage = text
+        })
+    }
+
+    private func openNewComposerDraft(_ draft: SessionSummary) {
+        persistComposerDraft()
+        ComposerDraftStore.shared.registerLocalDraft(draft, server: server)
+        forkedSession = draft
+    }
+
+    private func claimComposerWriter() {
+        guard isPresentationActive else { return }
+        composerWriterLease = ComposerDraftStore.shared.claimWriter(
+            server: server, sessionID: composerDraftSessionID, owner: composerWriterOwner)
+        if !preservesInitialComposerDraft {
+            draftMessage = ComposerDraftStore.shared.load(server: server, sessionID: composerDraftSessionID)
+        }
+        preservesInitialComposerDraft = false
+    }
+
+    private func releaseComposerWriter() {
+        guard let writer = composerWriterLease else { return }
+        ComposerDraftStore.shared.releaseWriter(writer, server: server, sessionID: composerDraftSessionID)
+        composerWriterLease = nil
+    }
+
     private func persistComposerDraft() {
-        ComposerDraftStore.shared.save(
-            draftMessage,
-            server: server,
-            sessionID: session.sessionId ?? session.id
+        guard let writer = composerWriterLease else { return }
+        ComposerDraftStore.shared.save(draftMessage, configuration: composerDraftConfiguration,
+            server: server, sessionID: composerDraftSessionID, writer: writer)
+    }
+
+    private var composerDraftConfiguration: SessionSummary {
+        SessionSummary(
+            sessionId: session.sessionId, localDraftID: session.localDraftID, title: session.title,
+            workspace: viewModel.selectedWorkspacePath,
+            model: viewModel.selectedModelID,
+            modelProvider: viewModel.selectedModelProviderID,
+            reasoningEffort: viewModel.sessionReasoningEffort,
+            createdAt: session.createdAt, updatedAt: session.updatedAt,
+            profile: viewModel.selectedProfileName ?? session.profile ?? "default"
         )
     }
 
@@ -3573,21 +3757,23 @@ struct ChatView: View {
         }
     }
 
-    private func persistTranscriptRestore() {
-        guard !didPersistTranscriptBeforeBack else { return }
-        guard !transcriptRestoreOutcomeState.preservesDurableTarget else { return }
-        guard didRequestTranscriptRestore || didInteractBeforeTranscriptRestore else {
-            // The durable point remains authoritative until appearance
-            // restoration has initialized local state or the user makes a
-            // real gesture.
-            return
-        }
-        viewModel.rememberTranscriptRestorePoint(
+    private var transcriptRestoreSnapshot: ChatTranscriptRestoreSnapshot? {
+        ChatTranscriptRestoreSnapshot.capture(
+            preservesDurableTarget: transcriptRestoreOutcomeState.preservesDurableTarget,
+            didRequestRestore: didRequestTranscriptRestore,
+            didInteract: didInteractBeforeTranscriptRestore,
             followingLatest: shouldFollowLatestMessage,
-            // Persist only the row identity, not the high-frequency scroll offset.
-            // Reopening a reader's position then uses the same stable render ID
-            // without adding a scroll-position binding to ChatView.
             visibleMessageID: visibleTranscriptRowID
+        )
+    }
+
+    private func persistTranscriptRestore() {
+        // A Back activation's snapshot is authoritative even if teardown emits
+        // later metrics. A nil snapshot deliberately preserves the durable target.
+        guard let snapshot = isLeavingViaBack ? backRestoreSnapshot : transcriptRestoreSnapshot else { return }
+        viewModel.rememberTranscriptRestorePoint(
+            followingLatest: snapshot.followingLatest,
+            visibleMessageID: snapshot.visibleMessageID
         )
     }
 
@@ -3633,6 +3819,7 @@ struct ChatView: View {
     }
 
     private func updateScrollMetrics(_ metrics: ChatScrollMetrics) {
+        guard !isLeavingViaBack else { return }
 #if DEBUG
         let previousFollowLatest = shouldFollowLatestMessage
         let wasUserScrolling = isUserInteractingWithScroll
@@ -3780,7 +3967,8 @@ struct ChatView: View {
     }
 
     private var isAutoFollowScrollPaused: Bool {
-        isExplicitBottomScrollActive || ChatScrollPolicy.isAutoScrollPaused(
+        scrollMetricPublication.hasPendingDirectInteraction
+            || isExplicitBottomScrollActive || ChatScrollPolicy.isAutoScrollPaused(
             isUserInteracting: isUserInteractingWithScroll,
             cooldownUntil: userScrollCooldownUntil
         )

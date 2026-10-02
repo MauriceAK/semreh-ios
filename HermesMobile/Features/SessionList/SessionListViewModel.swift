@@ -155,6 +155,7 @@ final class SessionListViewModel {
     private let client: APIClient
     private let sessionMutator: SessionMutator
     private let organizerStore: LocalOrganizerStore
+    private let composerDraftStore: ComposerDraftStore
     private let server: URL
     private var loadGeneration = 0
     /// Monotonic generation of the newest successful canonical `/api/sessions`
@@ -197,13 +198,15 @@ final class SessionListViewModel {
         server: URL,
         client: APIClient? = nil,
         gatewayRuntimeProvider: GatewayRuntimeProvider? = nil,
-        organizerStore: LocalOrganizerStore? = nil
+        organizerStore: LocalOrganizerStore? = nil,
+        composerDraftStore: ComposerDraftStore? = nil
     ) {
         self.server = server
         let resolvedClient = client ?? APIClient(baseURL: server)
         self.client = resolvedClient
         self.sessionMutator = SessionMutator(client: resolvedClient)
         self.organizerStore = organizerStore ?? LocalOrganizerStore()
+        self.composerDraftStore = composerDraftStore ?? .shared
         self.gatewayRuntimeProvider = gatewayRuntimeProvider ?? { client in
             try await OpenChatSessionStore.shared.runtime(for: server, client: client)
         }
@@ -361,6 +364,34 @@ final class SessionListViewModel {
         // content matches: the search route determines membership, while the
         // same recency sort used for local matches determines presentation.
         return sortedLocalMatches + Self.sortedSessions(remoteMatches)
+    }
+
+    /// Kept separate from canonical/cache rows so local IDs never reach server
+    /// metadata, transcript, export, or deletion actions.
+    func visibleLocalDrafts(searchText: String, selectedProjectID: String?) -> [SessionSummary] {
+        guard selectedProjectID == nil else { return [] }
+        let query = Self.normalizedSearchQuery(searchText)
+        let profile = Self.nonEmpty(activeProfileName) ?? "default"
+        return Self.sortedSessions(composerDraftStore.reachableLocalDrafts(server: server, profile: profile)
+            .filter { session in
+                query.isEmpty || Self.searchableText(for: session).contains(query)
+                    || localDraftText(for: session).lowercased().contains(query)
+            })
+    }
+
+    func localDraftText(for session: SessionSummary) -> String {
+        composerDraftStore.load(server: server, sessionID: session.id)
+    }
+
+    func localDraftDestination(for session: SessionSummary) -> SessionNavigationDestination? {
+        guard session.sessionId == nil,
+              let saved = visibleLocalDrafts(searchText: "", selectedProjectID: nil)
+                .first(where: { $0.id == session.id && $0.profile == session.profile })
+        else { return nil }
+        composerDraftStore.registerLocalDraft(saved, server: server)
+        // The composer loads the durable text by exact ID. Do not inject it as
+        // an import override or allocate a second conversation on reopen.
+        return .newChat(session: saved, route: PendingNewChatRoute(profileName: saved.profile))
     }
 
     /// True when a search result was resolved from Hermes but is not part of
@@ -1704,17 +1735,20 @@ final class SessionListViewModel {
         lastError = nil
         defer { isCreatingSession = false }
 
-        _ = modelContext // Local drafts are deliberately neither cached nor persisted.
+        _ = modelContext // Local drafts never enter the server-session cache.
         localDraftSequence &+= 1
         let timestamp = Date().timeIntervalSince1970
             + (Double(localDraftSequence) * 0.000001)
-        return SessionSummary(
+        let session = SessionSummary(
             sessionId: nil,
+            localDraftID: "local-draft-\(UUID().uuidString)",
             title: "New Chat",
             createdAt: timestamp,
             updatedAt: timestamp,
             profile: Self.nonEmpty(profile) ?? Self.nonEmpty(activeProfileName) ?? "default"
         )
+        composerDraftStore.registerLocalDraft(session, server: server)
+        return session
     }
 
     func clearActionError() {

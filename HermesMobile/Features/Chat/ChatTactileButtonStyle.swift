@@ -154,21 +154,41 @@ private struct ChatChromeActionSurface: UIViewRepresentable {
     let identifier: String
     let action: () -> Void
 
-    func makeUIView(context: Context) -> UIButton {
-        let button = UIButton(type: .custom)
-        button.backgroundColor = .clear
-        return button
+    func makeUIView(context: Context) -> ChatChromeButton {
+        ChatChromeButton(frame: .zero)
     }
 
-    func updateUIView(_ button: UIButton, context: Context) {
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: ChatChromeButton, context: Context) -> CGSize? {
+        guard let width = proposal.width, let height = proposal.height else { return nil }
+        return CGSize(width: width, height: height)
+    }
+
+    func updateUIView(_ button: ChatChromeButton, context: Context) {
         button.isEnabled = isEnabled
         button.accessibilityLabel = label
         button.accessibilityIdentifier = identifier
-        button.removeTarget(nil, action: nil, for: .touchUpInside)
-        button.removeAction(identifiedBy: UIAction.Identifier("chat-chrome-action"), for: .touchUpInside)
-        button.addAction(UIAction(identifier: UIAction.Identifier("chat-chrome-action")) { _ in
-            action()
-        }, for: .touchUpInside)
+        button.onActivate = action
+    }
+}
+
+/// One standard touch-up/VoiceOver activation path; updates never reinstall a
+/// target while a press is in flight. No touch-down navigation or retries.
+final class ChatChromeButton: UIButton {
+    var onActivate: (() -> Void)?
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        isAccessibilityElement = true
+        accessibilityTraits = .button
+        addTarget(self, action: #selector(activate), for: .touchUpInside)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    @objc private func activate() {
+        guard isEnabled else { return }
+        onActivate?()
     }
 }
 

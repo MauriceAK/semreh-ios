@@ -238,7 +238,7 @@ enum SemrehVisualTheme {
         case .goku:
             return colorScheme == .dark ? "#2FE099" : "#39E89A"
         case .semreh:
-            return colorScheme == .dark ? "#D4B992" : "#E7D3B3"
+            return accentTokens(for: .warm).promptBubbleBackgroundHex(for: colorScheme)
         case .chatgpt:
             return colorScheme == .dark ? "#2DD4A0" : "#43D39E"
         case .midnight:
@@ -252,9 +252,11 @@ enum SemrehVisualTheme {
 
     static func promptBubbleForegroundHex(
         for palette: AppColorPalette = .semreh,
+        colorScheme: ColorScheme = .light,
         accent: AppAccent = .warm
     ) -> String {
         if palette == .semreh {
+            if accent == .warm { return primaryTextHex(for: colorScheme) }
             return accentTokens(for: accent).promptBubbleForegroundHex
         }
 
@@ -262,7 +264,7 @@ enum SemrehVisualTheme {
         case .goku:
             return gokuDeepNavyHex
         case .semreh:
-            return "#30251D"
+            return primaryTextHex(for: colorScheme)
         case .chatgpt:
             return "#06281F"
         case .midnight:
@@ -287,7 +289,7 @@ enum SemrehVisualTheme {
         case .goku:
             return colorScheme == .dark ? gokuBlueDarkHex : "#5F8FE8"
         case .semreh:
-            return colorScheme == .dark ? "#AC8C63" : "#C6AB83"
+            return lineHex(for: colorScheme)
         case .chatgpt:
             return colorScheme == .dark ? "#62D9B4" : "#19C37D"
         case .midnight:
@@ -309,9 +311,10 @@ enum SemrehVisualTheme {
 
     static func promptBubbleForeground(
         for palette: AppColorPalette = .semreh,
+        colorScheme: ColorScheme = .light,
         accent: AppAccent = .warm
     ) -> Color {
-        Color(hexRGB: promptBubbleForegroundHex(for: palette, accent: accent))!
+        Color(hexRGB: promptBubbleForegroundHex(for: palette, colorScheme: colorScheme, accent: accent))!
     }
 
     static func promptBubbleBorder(
@@ -320,6 +323,26 @@ enum SemrehVisualTheme {
         accent: AppAccent = .warm
     ) -> Color {
         Color(hexRGB: promptBubbleBorderHex(for: colorScheme, palette: palette, accent: accent))!
+    }
+
+    static func primaryTextHex(for scheme: ColorScheme) -> String {
+        scheme == .dark ? "#F3F2EE" : "#242421"
+    }
+
+    static func mutedTextHex(for scheme: ColorScheme) -> String {
+        scheme == .dark ? "#B1B0AA" : "#686861"
+    }
+
+    static func lineHex(for scheme: ColorScheme) -> String {
+        scheme == .dark ? "#2C2D31" : "#E5E2DA"
+    }
+
+    static func primaryText(for scheme: ColorScheme, palette: AppColorPalette = .semreh) -> Color {
+        palette == .semreh ? Color(hexRGB: primaryTextHex(for: scheme))! : Color.primary
+    }
+
+    static func mutedText(for scheme: ColorScheme, palette: AppColorPalette = .semreh) -> Color {
+        palette == .semreh ? Color(hexRGB: mutedTextHex(for: scheme))! : Color.secondary
     }
 
     static func statusPositive(for palette: AppColorPalette = .semreh) -> Color {
@@ -400,7 +423,10 @@ enum SemrehVisualTheme {
         increasedContrast: Bool = false,
         palette: AppColorPalette = .semreh
     ) -> Color {
-        (palette == .semreh ? Color.primary : action(for: colorScheme, palette: palette)).opacity(panelStrokeOpacity(
+        if palette == .semreh {
+            return Color(hexRGB: increasedContrast ? primaryTextHex(for: colorScheme) : lineHex(for: colorScheme))!
+        }
+        return action(for: colorScheme, palette: palette).opacity(panelStrokeOpacity(
             for: colorScheme,
             increasedContrast: increasedContrast
         ))
@@ -453,20 +479,20 @@ enum SemrehVisualTheme {
         switch accent {
         case .warm:
             SemrehAccentTokens(
-                brandActionHex: "#D4B992",
-                energyHex: "#D4B992",
-                energyForegroundHex: "#30251D",
-                actionLightHex: "#795334",
-                actionDarkHex: "#D9B98C",
-                brandAccentLightHex: "#795334",
-                brandAccentDarkHex: "#D9B98C",
-                accentForegroundLightHex: "#FFF9EF",
-                accentForegroundDarkHex: "#30251D",
-                promptBubbleBackgroundLightHex: "#E7D3B3",
-                promptBubbleBackgroundDarkHex: "#D4B992",
-                promptBubbleForegroundHex: "#30251D",
-                promptBubbleBorderLightHex: "#C6AB83",
-                promptBubbleBorderDarkHex: "#AC8C63"
+                brandActionHex: "#D8D3C8",
+                energyHex: "#D8D3C8",
+                energyForegroundHex: "#242421",
+                actionLightHex: "#242421",
+                actionDarkHex: "#E7E4DC",
+                brandAccentLightHex: "#7D705B",
+                brandAccentDarkHex: "#D8D3C8",
+                accentForegroundLightHex: "#FBFAF6",
+                accentForegroundDarkHex: "#141517",
+                promptBubbleBackgroundLightHex: "#F0EEE7",
+                promptBubbleBackgroundDarkHex: "#24252A",
+                promptBubbleForegroundHex: "#242421",
+                promptBubbleBorderLightHex: "#E5E2DA",
+                promptBubbleBorderDarkHex: "#2C2D31"
             )
         case .violet:
             SemrehAccentTokens(
@@ -564,24 +590,24 @@ enum SemrehVisualTheme {
             )
         case .semreh:
             VisualThemeTokens(
-                brandActionHex: "#D4B992",
-                energyHex: "#D4B992",
-                energyForegroundHex: "#30251D",
-                actionLightHex: "#795334",
-                actionDarkHex: "#D9B98C",
-                canvasLightHex: "#F3E8D5",
-                canvasDarkHex: "#211E1A",
-                panelLightHex: "#FBF2E3",
-                panelDarkHex: "#2C2721",
-                raisedLightHex: "#EADCC5",
-                raisedDarkHex: "#393127",
-                brandAccentLightHex: "#795334",
-                brandAccentDarkHex: "#D9B98C",
-                accentForegroundLightHex: "#FFF9EF",
-                accentForegroundDarkHex: "#30251D",
-                backdropMidLightHex: "#F3E8D5",
-                backdropMidDarkHex: "#211E1A",
-                gradientMidHex: "#B68E60",
+                brandActionHex: "#D8D3C8",
+                energyHex: "#D8D3C8",
+                energyForegroundHex: "#242421",
+                actionLightHex: "#242421",
+                actionDarkHex: "#E7E4DC",
+                canvasLightHex: "#FBFAF6",
+                canvasDarkHex: "#0E0F11",
+                panelLightHex: "#FFFFFF",
+                panelDarkHex: "#17181B",
+                raisedLightHex: "#F3F1EB",
+                raisedDarkHex: "#202126",
+                brandAccentLightHex: "#7D705B",
+                brandAccentDarkHex: "#D8D3C8",
+                accentForegroundLightHex: "#FBFAF6",
+                accentForegroundDarkHex: "#141517",
+                backdropMidLightHex: "#FBFAF6",
+                backdropMidDarkHex: "#0E0F11",
+                gradientMidHex: "#7D705B",
             )
         case .chatgpt:
             VisualThemeTokens(
@@ -846,6 +872,10 @@ private struct SemrehAppThemeModifier: ViewModifier {
         content
             .environment(\.appColorPalette, palette)
             .environment(\.appAccent, accent)
+            .foregroundStyle(
+                SemrehVisualTheme.primaryText(for: colorScheme, palette: palette),
+                SemrehVisualTheme.mutedText(for: colorScheme, palette: palette)
+            )
             .tint(SemrehVisualTheme.action(for: colorScheme, palette: palette, accent: accent))
             .background { SemrehBackdrop().ignoresSafeArea() }
             .toolbarBackground(

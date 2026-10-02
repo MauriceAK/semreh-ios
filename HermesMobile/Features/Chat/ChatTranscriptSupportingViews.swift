@@ -1701,7 +1701,6 @@ struct ChatStableViewportPrototype: UIViewControllerRepresentable {
             if grouped, let group = revision.toolCallGroups.first {
                 actions.append(.init(id: "__native_group__",
                     title: ToolActivityGroupPresentation.title(for: group),
-                    symbol: ToolActivityGroupPresentation.icon(for: group),
                     accessibilityStatus: ToolActivityGroupPresentation.status(for: group) ?? "",
                     headerFrame: CGRect(x: 0, y: headerHeight, width: key.width, height: 44),
                     isExpanded: expandedToolGroup, detail: nil, detailFrame: nil))
@@ -1718,8 +1717,6 @@ struct ChatStableViewportPrototype: UIViewControllerRepresentable {
                 }
                 actions.append(.init(id: call.id,
                     title: ToolCallPresentationLabel.title(for: call),
-                    symbol: call.isError == true ? "exclamationmark.triangle.fill"
-                        : ToolCallPresentationLabel.icon(for: call.name),
                     accessibilityStatus: ToolCallStatusDisplay(toolCall: call).detailText,
                     headerFrame: headerFrame, isExpanded: expandedDetail != nil,
                     detail: expandedDetail,
@@ -2894,19 +2891,293 @@ struct ChatScrollMetrics: Equatable {
     let isDecelerating: Bool
 }
 
+/// Non-observable legacy publication lease. Layout/KVO may record intent, but
+/// only a main-queue drain (or an explicit navigation action) publishes state.
+/// Keep one queued drain and at most one sticky touch edge plus fresh geometry.
+@MainActor
+final class ChatScrollMetricPublication {
+    // The collection realization owner drains through the same explicit Back
+    // boundary as the diagnostic observer. Weak callbacks retain no viewport.
+    private var measuredSource: ObjectIdentifier?
+    private var measuredFlush: (() -> Void)?
+    private var measuredSuspend: (() -> Void)?
+
+    func bindMeasuredViewport(source: ObjectIdentifier, flush: @escaping () -> Void,
+                              suspend: @escaping () -> Void) {
+        measuredSource = source
+        measuredFlush = flush
+        measuredSuspend = suspend
+    }
+
+    func detachMeasuredViewport(source: ObjectIdentifier) {
+        guard measuredSource == source else { return }
+        measuredSource = nil
+        measuredFlush = nil
+        measuredSuspend = nil
+    }
+
+    private var generation = 0
+    private var decisionGeneration = 0
+    private var isSuspended = false
+    private var source: ObjectIdentifier?
+    private var scheduledGeneration: Int?
+    private var pending: ChatScrollMetrics?
+    private var sawDirectInteraction = false
+    private var deliveringDirectInteraction = false
+    private var deliveringLatestReadiness = false
+    private var readCurrent: (() -> ChatScrollMetrics?)?
+    private var readAttachedScrollView: (() -> UIScrollView?)?
+    private var publish: ((ChatScrollMetrics) -> Void)?
+    private var boundContext: ChatScrollObserver.MetricContext?
+    private struct LatestReplacement {
+        let ticket: Int
+        let origin: ObjectIdentifier
+        let originWindow: Int
+        let context: ChatScrollObserver.MetricContext
+        var replacement: ObjectIdentifier?
+        let action: () -> Void
+        var originDetached = false
+    }
+    private var latestReplacement: LatestReplacement?
+
+    @discardableResult
+    func bind(source: ObjectIdentifier? = nil, context: ChatScrollObserver.MetricContext? = nil,
+              readAttachedScrollView: (() -> UIScrollView?)? = nil, readCurrent: @escaping () -> ChatScrollMetrics?,
+              publish: @escaping (ChatScrollMetrics) -> Void) -> Int {
+        // A handoff is authorized by this intent's exact logical context and
+        // target window, never merely by a new observer having appeared.
+        let authorizedReplacement: Bool
+        if let replacement = latestReplacement, let context, let source {
+            authorizedReplacement = replacement.ticket == decisionGeneration
+                && source != replacement.origin
+                && (replacement.replacement == nil || replacement.replacement == source)
+                && replacement.context.matchesPresentation(context)
+        } else { authorizedReplacement = false }
+        let contextChanged = boundContext.map { old in
+            context.map { !old.matchesPresentation($0) } ?? true
+        } ?? false
+        invalidate(retireDecision: !authorizedReplacement && (self.source != source || contextChanged))
+        self.source = source
+        boundContext = context
+        if authorizedReplacement {
+            latestReplacement?.replacement = source
+        }
+        self.readCurrent = readCurrent
+        self.readAttachedScrollView = readAttachedScrollView
+        self.publish = publish
+        return generation
+    }
+
+    func invalidate(ifOwnedBy owner: Int? = nil, retireDecision: Bool = true) {
+        if let owner, owner != generation { return }
+        generation &+= 1
+        if retireDecision {
+            decisionGeneration &+= 1
+            latestReplacement = nil
+        }
+        scheduledGeneration = nil
+        pending = nil
+        sawDirectInteraction = false
+        readCurrent = nil
+        readAttachedScrollView = nil
+        publish = nil
+    }
+
+    var lifecycleGeneration: Int { generation }
+
+    /// Read-only UIKit attachment for row preferences that precede the queued
+    /// ready callback. This never publishes attachment or correction state.
+    var attachedScrollView: UIScrollView? {
+        guard !isSuspended, let scroll = readAttachedScrollView?(), scroll.window != nil else { return nil }
+        return scroll
+    }
+
+    var hasPendingDirectInteraction: Bool { sawDirectInteraction || deliveringDirectInteraction }
+
+    /// Called at the tap, before any bounded-window suspension.
+    func beginLatestDecision() -> Int {
+        invalidate()
+        return decisionGeneration
+    }
+
+    func acceptsLatestDecision(_ ticket: Int) -> Bool {
+        !isSuspended && ticket == decisionGeneration
+    }
+
+    func recordDirectInteraction() {
+        decisionGeneration &+= 1
+        latestReplacement = nil
+    }
+
+    /// Register before changing the ScrollView's .id. Readiness, rather than a
+    /// scheduling delay, delivers the command after the new attachment callbacks.
+    @discardableResult
+    func expectLatestReplacement(_ ticket: Int, context: ChatScrollObserver.MetricContext,
+                                 action: @escaping () -> Void) -> Bool {
+        guard acceptsLatestDecision(ticket), let source, let boundContext,
+              boundContext.hasSameLogicalPresentation(context),
+              boundContext.windowGeneration != context.windowGeneration else { return false }
+        latestReplacement = LatestReplacement(ticket: ticket, origin: source,
+            originWindow: boundContext.windowGeneration, context: context, action: action)
+        return true
+    }
+
+    func performLatestAfterWindowChange(_ ticket: Int, action: () -> Void) async {
+        await Task.yield()
+        guard !Task.isCancelled, acceptsLatestDecision(ticket), latestReplacement == nil else { return }
+        decisionGeneration &+= 1 // Consume before invoking reentrant parent code.
+        action()
+    }
+
+    func contextDidChange(source: ObjectIdentifier, context: ChatScrollObserver.MetricContext) {
+        guard isBoundSource(source) else { return }
+        if let replacement = latestReplacement, source == replacement.origin,
+           replacement.originDetached { return }
+        if let replacement = latestReplacement, source == replacement.origin,
+           replacement.context.hasSameLogicalPresentation(context),
+           context.windowGeneration == replacement.originWindow
+                || context.windowGeneration == replacement.context.windowGeneration { return }
+        invalidate()
+    }
+
+    func detach(source: ObjectIdentifier) {
+        guard isBoundSource(source) else { return }
+        if latestReplacement?.origin == source {
+            latestReplacement?.originDetached = true
+            invalidate(retireDecision: false)
+        } else {
+            // beginLatestDecision may already have retired the metric lease;
+            // detachment still retires its intent unless it owns this handoff.
+            invalidate()
+        }
+    }
+
+    func isAwaitingReplacement(from source: ObjectIdentifier) -> Bool {
+        !isSuspended && latestReplacement?.origin == source
+    }
+
+    func acceptsOriginInteraction(from source: ObjectIdentifier) -> Bool {
+        isAwaitingReplacement(from: source) && isBoundSource(source)
+            && latestReplacement?.originDetached == false
+    }
+
+    func replacementReady(owner: Int) {
+        guard deliveringLatestReadiness, owns(owner), latestReplacement?.replacement == source else { return }
+        guard let replacement = latestReplacement, replacement.ticket == decisionGeneration,
+              let metrics = readCurrent?() else { return }
+        // Readiness callbacks can expose a touch after the drain's first read.
+        // That newer intent retires the action even when the next sample is idle.
+        if metrics.isDirectlyInteracting || hasPendingDirectInteraction {
+            recordDirectInteraction()
+            if metrics.isDirectlyInteracting { submit(metrics, owner: owner) }
+            return
+        }
+        latestReplacement = nil
+        decisionGeneration &+= 1
+        replacement.action()
+    }
+
+    func resume() { isSuspended = false }
+
+    func suspend() {
+        measuredSuspend?()
+        invalidate()
+        isSuspended = true
+    }
+
+    func isBoundSource(_ source: ObjectIdentifier) -> Bool {
+        self.source == source
+    }
+
+    func canRenew(source: ObjectIdentifier) -> Bool {
+        !isSuspended && isBoundSource(source) && !isAwaitingReplacement(from: source)
+    }
+
+    func owns(_ owner: Int?) -> Bool {
+        !isSuspended && owner == generation && readCurrent != nil
+    }
+
+    func submit(_ metrics: ChatScrollMetrics, owner: Int) {
+        guard !isSuspended, owner == generation, readCurrent != nil else { return }
+        pending = metrics
+        sawDirectInteraction = sawDirectInteraction || metrics.isDirectlyInteracting
+        guard scheduledGeneration == nil else { return }
+        scheduledGeneration = generation
+        let ticket = generation
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.generation == ticket,
+                  self.scheduledGeneration == ticket else { return }
+            self.flush(allowLatest: true)
+        }
+    }
+
+    /// Back/disappear consumes the final observation before capturing restore
+    /// intent. This explicit flush never applies a waiting Latest command.
+    /// No persistence, row traversal, Tasks or queued view retention.
+    func flush() {
+        if !isSuspended { measuredFlush?() }
+        flush(allowLatest: false)
+    }
+
+    private func flush(allowLatest: Bool) {
+        guard !isSuspended, pending != nil else { return }
+        let previousLatestDelivery = deliveringLatestReadiness
+        deliveringLatestReadiness = allowLatest
+        defer { deliveringLatestReadiness = previousLatestDelivery }
+        let direct = sawDirectInteraction
+        let previousDelivery = deliveringDirectInteraction
+        deliveringDirectInteraction = previousDelivery || direct
+        defer { deliveringDirectInteraction = previousDelivery }
+        let ticket = generation
+        let current = readCurrent?()
+        let delivery = publish
+        pending = nil
+        sawDirectInteraction = false
+        scheduledGeneration = nil
+        guard let current, let delivery else { return }
+        deliveringDirectInteraction = previousDelivery || direct || current.isDirectlyInteracting
+        // UIKit may begin tracking without a producer callback between submit
+        // and drain. Retire Latest on this fresh edge before reentrant delivery.
+        if direct || current.isDirectlyInteracting { recordDirectInteraction() }
+        // A brief touch ending within one turn still cancels restore/Latest.
+        // Use fresh distance rather than the old edge's layout geometry.
+        if direct && !current.isDirectlyInteracting {
+            delivery(ChatScrollMetrics(distanceFromBottom: current.distanceFromBottom,
+                isUserInteracting: true, isDirectlyInteracting: true,
+                isDecelerating: current.isDecelerating))
+            guard generation == ticket else { return }
+        }
+        delivery(current)
+    }
+}
+
 struct ChatScrollObserver: UIViewRepresentable {
     let isStreaming: Bool
+    var publication = ChatScrollMetricPublication()
+    var scope: UUID? = nil
+    var restoreToken: Int = 0
+    var cancellationToken: Int = 0
+    var latestToken: ChatExplicitBottomGeometryToken? = nil
+    var readerScope: ChatWarmReaderMemory.Scope? = nil
+    var transcriptIdentity: String = ""
+    var windowGeneration: Int = 0
+    var onDirectInteraction: @MainActor () -> Void = {}
     let onMetrics: @MainActor (ChatScrollMetrics) -> Void
     var onContentSizeChange: @MainActor (CGSize) -> Void = { _ in }
     var onScrollViewReady: @MainActor (UIScrollView?) -> Void = { _ in }
 
     private var metricContext: MetricContext {
-        MetricContext(isStreaming: isStreaming)
+        MetricContext(isStreaming: isStreaming, scope: scope, restoreToken: restoreToken,
+            latestToken: latestToken, cancellationToken: cancellationToken,
+            readerScope: readerScope, transcriptIdentity: transcriptIdentity,
+            windowGeneration: windowGeneration)
     }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
             metricContext: metricContext,
+            publication: publication,
+            onDirectInteraction: onDirectInteraction,
             onMetrics: onMetrics,
             onContentSizeChange: onContentSizeChange,
             onScrollViewReady: onScrollViewReady
@@ -2918,6 +3189,7 @@ struct ChatScrollObserver: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: ObserverView, context: Context) {
+        context.coordinator.onDirectInteraction = onDirectInteraction
         context.coordinator.onMetrics = onMetrics
         context.coordinator.onContentSizeChange = onContentSizeChange
         context.coordinator.onScrollViewReady = onScrollViewReady
@@ -2934,6 +3206,38 @@ struct ChatScrollObserver: UIViewRepresentable {
 
     struct MetricContext: Equatable {
         let isStreaming: Bool
+        let scope: UUID?
+        let restoreToken: Int
+        let latestToken: ChatExplicitBottomGeometryToken?
+        let cancellationToken: Int
+        var readerScope: ChatWarmReaderMemory.Scope? = nil
+        var transcriptIdentity: String = ""
+        var windowGeneration: Int = 0
+
+        init(isStreaming: Bool, scope: UUID?, restoreToken: Int,
+             latestToken: ChatExplicitBottomGeometryToken?, cancellationToken: Int = 0,
+             readerScope: ChatWarmReaderMemory.Scope? = nil,
+             transcriptIdentity: String = "", windowGeneration: Int = 0) {
+            self.isStreaming = isStreaming
+            self.scope = scope
+            self.restoreToken = restoreToken
+            self.latestToken = latestToken
+            self.cancellationToken = cancellationToken
+            self.readerScope = readerScope
+            self.transcriptIdentity = transcriptIdentity
+            self.windowGeneration = windowGeneration
+        }
+
+        func hasSameLogicalPresentation(_ other: Self) -> Bool {
+            scope == other.scope && restoreToken == other.restoreToken
+                && cancellationToken == other.cancellationToken
+                && latestToken == other.latestToken && readerScope == other.readerScope
+                && transcriptIdentity == other.transcriptIdentity
+        }
+
+        func matchesPresentation(_ other: Self) -> Bool {
+            hasSameLogicalPresentation(other) && windowGeneration == other.windowGeneration
+        }
     }
 
     @MainActor
@@ -2971,7 +3275,6 @@ struct ChatScrollObserver: UIViewRepresentable {
     @MainActor
     final class Coordinator: NSObject {
         enum MetricDelivery {
-            case immediate
             case deferred
         }
 
@@ -2984,16 +3287,24 @@ struct ChatScrollObserver: UIViewRepresentable {
         private var metricContext: MetricContext
         private var lastMetrics: ChatScrollMetrics?
         private var lastReportedContentSize: CGSize?
-        private var pendingMetrics: ChatScrollMetrics?
-        private var hasScheduledMetricDelivery = false
+        private var attachmentContentSize: CGSize?
+        private weak var deliveredScrollView: UIScrollView?
+        private let publication: ChatScrollMetricPublication
+        private var publicationOwner: Int?
+        private var hasBoundPublication = false
+        var onDirectInteraction: @MainActor () -> Void
 
         init(
             metricContext: MetricContext,
+            publication: ChatScrollMetricPublication,
+            onDirectInteraction: @escaping @MainActor () -> Void,
             onMetrics: @escaping @MainActor (ChatScrollMetrics) -> Void,
             onContentSizeChange: @escaping @MainActor (CGSize) -> Void,
             onScrollViewReady: @escaping @MainActor (UIScrollView?) -> Void
         ) {
             self.metricContext = metricContext
+            self.publication = publication
+            self.onDirectInteraction = onDirectInteraction
             self.onMetrics = onMetrics
             self.onContentSizeChange = onContentSizeChange
             self.onScrollViewReady = onScrollViewReady
@@ -3002,34 +3313,52 @@ struct ChatScrollObserver: UIViewRepresentable {
         func updateMetricContext(_ newContext: MetricContext) {
             guard metricContext != newContext else { return }
 
+            let ownershipChanged = metricContext.scope != newContext.scope
+                || metricContext.restoreToken != newContext.restoreToken
+                || metricContext.cancellationToken != newContext.cancellationToken
+                || metricContext.latestToken != newContext.latestToken
+                || metricContext.readerScope != newContext.readerScope
+                || metricContext.transcriptIdentity != newContext.transcriptIdentity
+                || metricContext.windowGeneration != newContext.windowGeneration
             metricContext = newContext
             lastMetrics = nil
+            if ownershipChanged, scrollView != nil {
+                publication.contextDidChange(source: ObjectIdentifier(self), context: newContext)
+                if publication.canRenew(source: ObjectIdentifier(self)) { bindPublication() }
+            }
         }
 
         func attachIfNeeded(from view: UIView, delivery: MetricDelivery) {
-            guard let scrollView = enclosingScrollView(for: view) else { return }
+            guard view.window != nil, let scrollView = enclosingScrollView(for: view) else {
+                if self.scrollView != nil { detach() }
+                return
+            }
 
             guard scrollView !== self.scrollView else {
-                onScrollViewReady(scrollView)
+                if !publication.owns(publicationOwner),
+                   publication.canRenew(source: ObjectIdentifier(self)) { bindPublication() }
                 reportMetrics(delivery: delivery)
                 return
             }
 
+            if hasBoundPublication, publication.isAwaitingReplacement(from: ObjectIdentifier(self)) {
+                // A retiring observer moved to another host is not the expected
+                // new coordinator. Withdraw it without reclaiming the handoff.
+                detach()
+                return
+            }
             observations.removeAll()
             lastMetrics = nil
-            lastReportedContentSize = scrollView.contentSize
+            lastReportedContentSize = nil
+            attachmentContentSize = scrollView.contentSize
             self.scrollView = scrollView
-            onScrollViewReady(scrollView)
-            // Establish the app-facing baseline before observing later growth;
-            // this snapshot is not itself a follow request.
-            onContentSizeChange(scrollView.contentSize)
+            bindPublication()
 
             observations = [
                 scrollView.observe(\.contentOffset, options: [.new]) { [weak self] _, _ in
                     Self.reportObservedMetrics(for: self)
                 },
                 scrollView.observe(\.contentSize, options: [.new]) { [weak self] _, _ in
-                    Self.reportObservedContentSize(for: self)
                     Self.reportObservedMetrics(for: self)
                 }
             ]
@@ -3040,19 +3369,70 @@ struct ChatScrollObserver: UIViewRepresentable {
         func detach() {
             observations.removeAll()
             lastMetrics = nil
-            pendingMetrics = nil
-            hasScheduledMetricDelivery = false
+            publication.detach(source: ObjectIdentifier(self))
+            publicationOwner = nil
             lastReportedContentSize = nil
+            attachmentContentSize = nil
             scrollView = nil
-            onScrollViewReady(nil)
+            let retirement = publication.lifecycleGeneration
+            // Teardown must not re-enter SwiftUI layout or clear a replacement.
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.scrollView == nil,
+                      retirement == self.publication.lifecycleGeneration,
+                      self.publication.canRenew(source: ObjectIdentifier(self)) else { return }
+                self.deliveredScrollView = nil
+                self.onScrollViewReady(nil)
+            }
         }
 
-        func reportMetrics(delivery: MetricDelivery) {
-            guard let scrollView else { return }
+        private func bindPublication() {
+            // A previously attached coordinator cannot reclaim a replacement,
+            // even if UIKit later gives that stale view a different scroll host.
+            guard !hasBoundPublication || (publication.isBoundSource(ObjectIdentifier(self))
+                && !publication.isAwaitingReplacement(from: ObjectIdentifier(self))) else { return }
+            hasBoundPublication = true
+            publicationOwner = publication.bind(
+                source: ObjectIdentifier(self), context: metricContext,
+                readAttachedScrollView: { [weak self] in self?.scrollView },
+                readCurrent: { [weak self] in self?.currentMetrics() },
+                publish: { [weak self] metrics in
+                    guard let self, self.scrollView?.window != nil else { return }
+                    let ticket = self.publicationOwner
+                    guard self.publication.owns(ticket) else { return }
+                    if self.deliveredScrollView !== self.scrollView {
+                        self.deliveredScrollView = self.scrollView
+                        self.onScrollViewReady(self.scrollView)
+                    }
+                    guard self.publication.owns(ticket) else { return }
+                    if let baseline = self.attachmentContentSize {
+                        self.attachmentContentSize = nil
+                        self.lastReportedContentSize = baseline
+                        self.onContentSizeChange(baseline)
+                    }
+                    guard self.publication.owns(ticket) else { return }
+                    self.deliverContentSizeIfChanged()
+                    guard self.publication.owns(ticket), let fresh = self.currentMetrics() else { return }
+                    // Attachment may have aligned the viewport; re-read geometry
+                    // while retaining the drain's sticky direct-interaction edge.
+                    let delivery = ChatScrollMetrics(distanceFromBottom: fresh.distanceFromBottom,
+                        isUserInteracting: metrics.isUserInteracting || fresh.isUserInteracting,
+                        isDirectlyInteracting: metrics.isDirectlyInteracting || fresh.isDirectlyInteracting,
+                        isDecelerating: fresh.isDecelerating)
+                    self.lastMetrics = delivery
+                    self.onMetrics(delivery)
+                    guard let ticket, self.publication.owns(ticket) else { return }
+                    self.publication.replacementReady(owner: ticket)
+                })
+        }
 
+        private func currentMetrics() -> ChatScrollMetrics? {
+            guard let scrollView, scrollView.window != nil else { return nil }
             let inset = scrollView.adjustedContentInset
             let visibleHeight = scrollView.bounds.height - inset.top - inset.bottom
-            guard visibleHeight > 0 else { return }
+            guard visibleHeight.isFinite, visibleHeight > 0,
+                  scrollView.contentSize.height.isFinite,
+                  scrollView.contentOffset.y.isFinite,
+                  inset.top.isFinite else { return nil }
 
             let currentOffset = scrollView.contentOffset.y + inset.top
             let maximumOffset = scrollView.contentSize.height - visibleHeight
@@ -3062,46 +3442,34 @@ struct ChatScrollObserver: UIViewRepresentable {
             // into this observer repeatedly.
             let distanceFromBottom = max(0, maximumOffset - currentOffset)
             let isDirectlyInteracting = scrollView.isDragging || scrollView.isTracking
-            let metrics = ChatScrollMetrics(
+            return ChatScrollMetrics(
                 distanceFromBottom: distanceFromBottom,
                 isUserInteracting: isDirectlyInteracting || scrollView.isDecelerating,
                 isDirectlyInteracting: isDirectlyInteracting,
                 isDecelerating: scrollView.isDecelerating
             )
-            guard metrics != lastMetrics else { return }
+        }
 
-            lastMetrics = metrics
-
-            switch delivery {
-            case .immediate:
-                pendingMetrics = nil
-                hasScheduledMetricDelivery = false
-                onMetrics(metrics)
-            case .deferred:
-                if metrics.isDirectlyInteracting {
-                    // A drag must invalidate restore before a later main-queue
-                    // geometry callback can reissue the saved scroll target.
-                    pendingMetrics = nil
-                    hasScheduledMetricDelivery = false
-                    onMetrics(metrics)
-                    return
-                }
-
-                pendingMetrics = metrics
-                guard !hasScheduledMetricDelivery else { return }
-
-                hasScheduledMetricDelivery = true
-                DispatchQueue.main.async { [weak self] in
-                    MainActor.assumeIsolated {
-                        guard let self else { return }
-                        let metrics = self.pendingMetrics
-                        self.pendingMetrics = nil
-                        self.hasScheduledMetricDelivery = false
-                        guard let metrics, self.lastMetrics == metrics else { return }
-                        self.onMetrics(metrics)
-                    }
-                }
+        func reportMetrics(delivery: MetricDelivery) {
+            guard let metrics = currentMetrics() else { return }
+            let cancelsOriginIntent = metrics.isDirectlyInteracting
+                && publication.acceptsOriginInteraction(from: ObjectIdentifier(self))
+            if cancelsOriginIntent {
+                publication.recordDirectInteraction()
+                onDirectInteraction()
             }
+            if !publication.owns(publicationOwner),
+               publication.canRenew(source: ObjectIdentifier(self)) { bindPublication() }
+            guard let publicationOwner, publication.owns(publicationOwner) else { return }
+            // Cancellation of non-observable leases is safe inside layout. All
+            // SwiftUI state, including drag intent, goes through the drain.
+            if metrics.isDirectlyInteracting && !cancelsOriginIntent {
+                publication.recordDirectInteraction()
+                onDirectInteraction()
+            }
+            guard metrics != lastMetrics || deliveredScrollView !== scrollView
+                || scrollView?.contentSize != lastReportedContentSize else { return }
+            publication.submit(metrics, owner: publicationOwner)
         }
 
         nonisolated private static func reportObservedMetrics(for coordinator: Coordinator?) {
@@ -3119,22 +3487,7 @@ struct ChatScrollObserver: UIViewRepresentable {
             }
         }
 
-        nonisolated private static func reportObservedContentSize(for coordinator: Coordinator?) {
-            guard Thread.isMainThread else {
-                DispatchQueue.main.async { [weak coordinator] in
-                    MainActor.assumeIsolated {
-                        coordinator?.reportContentSizeIfChanged()
-                    }
-                }
-                return
-            }
-
-            MainActor.assumeIsolated {
-                coordinator?.reportContentSizeIfChanged()
-            }
-        }
-
-        private func reportContentSizeIfChanged() {
+        private func deliverContentSizeIfChanged() {
             guard let scrollView,
                   scrollView.contentSize != lastReportedContentSize
             else { return }
@@ -3419,10 +3772,6 @@ struct StreamRecoveryStatusView: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            ProgressView()
-                .controlSize(.mini)
-                .accessibilityHidden(true)
-
             Text(label)
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
@@ -3455,10 +3804,6 @@ struct StreamRecoveryStatusView: View {
 struct ChatTranscriptLoadingSkeletonView: View {
     var body: some View {
         VStack(spacing: 10) {
-            ProgressView()
-                .controlSize(.regular)
-                .tint(.secondary)
-
             Text("Loading conversation…")
                 .font(AppFont.body())
                 .foregroundStyle(.secondary)
@@ -3474,9 +3819,6 @@ struct ChatOfflineCacheBanner: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: "wifi.slash")
-                .imageScale(.small)
-
             Text("Offline — viewing cached version")
                 .font(.subheadline)
                 .fontWeight(.semibold)
@@ -3499,10 +3841,6 @@ struct PinnedLocalNoticeStack: View {
         VStack(spacing: 8) {
             ForEach(Array(notices.enumerated()), id: \.offset) { _, notice in
                 HStack(alignment: .top, spacing: 10) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(SemrehVisualTheme.statusPositive(for: palette))
-
                     Text(notice)
                         .font(.footnote)
                         .foregroundStyle(.primary)
@@ -3529,22 +3867,38 @@ struct PinnedLocalNoticeStack: View {
 /// controls. Absolute edge widths keep the treatment visible on tall viewports.
 struct ChatTranscriptEdgeMask: View {
     let bottomInset: CGFloat
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var body: some View {
         GeometryReader { geometry in
-            let height = max(1, geometry.size.height)
-            let bottom = max(0, height - max(0, bottomInset - 32))
-            let topEnd = min(28, bottom / 2)
-            let bottomStart = max(topEnd, bottom - 24)
+            let edge = ChatTranscriptEdgeGeometry(height: geometry.size.height, bottomInset: bottomInset)
             LinearGradient(stops: [
-                .init(color: .clear, location: 0),
-                .init(color: .black, location: topEnd / height),
-                .init(color: .black, location: bottomStart / height),
-                .init(color: .clear, location: bottom / height),
-                .init(color: .clear, location: 1)
+                .init(color: reduceTransparency ? .black : .clear, location: 0),
+                .init(color: .black, location: edge.topEnd),
+                .init(color: .black, location: edge.bottomStart),
+                .init(color: reduceTransparency ? .black : .clear, location: edge.bottomEnd),
+                .init(color: reduceTransparency ? .black : .clear, location: 1)
             ], startPoint: .top, endPoint: .bottom)
         }
         .allowsHitTesting(false)
         .accessibilityHidden(true)
+    }
+}
+
+/// Normalized mask stops. Bottom alpha falls only inside reserved transcript
+/// padding, after the complete last line's resting edge, never over chrome.
+struct ChatTranscriptEdgeGeometry {
+    let topEnd: CGFloat
+    let bottomStart: CGFloat
+    let bottomEnd: CGFloat
+
+    init(height rawHeight: CGFloat, bottomInset rawInset: CGFloat) {
+        let height = rawHeight.isFinite ? max(1, rawHeight) : 1
+        let inset = rawInset.isFinite ? max(0, rawInset) : 0
+        let readableBottom = max(0, height - inset)
+        let top = min(28, readableBottom / 2)
+        topEnd = top / height
+        bottomStart = max(top, min(height, readableBottom + 16)) / height
+        bottomEnd = max(top, min(height, readableBottom + 32)) / height
     }
 }

@@ -72,7 +72,7 @@ struct ClarificationRequestCard: View {
     private var question: some View {
         Text(prompt.question)
             .font(.subheadline)
-            .foregroundStyle(SemrehVisualTheme.promptBubbleForeground(for: palette))
+            .foregroundStyle(SemrehVisualTheme.promptBubbleForeground(for: palette, colorScheme: colorScheme))
             .fixedSize(horizontal: false, vertical: true)
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)

@@ -119,7 +119,7 @@ struct ApprovalRequestOverlay: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     Text(command)
                         .font(.system(.footnote, design: .monospaced))
-                        .foregroundStyle(SemrehVisualTheme.promptBubbleForeground(for: palette))
+                        .foregroundStyle(SemrehVisualTheme.promptBubbleForeground(for: palette, colorScheme: colorScheme))
                         .textSelection(.enabled)
                         .padding(10)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -140,7 +140,7 @@ struct ApprovalRequestOverlay: View {
                         ForEach(prompt.patternKeys, id: \.self) { key in
                             Text(key)
                                 .font(.caption2.monospaced())
-                                .foregroundStyle(SemrehVisualTheme.promptBubbleForeground(for: palette))
+                                .foregroundStyle(SemrehVisualTheme.promptBubbleForeground(for: palette, colorScheme: colorScheme))
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 5)
                                 .background(

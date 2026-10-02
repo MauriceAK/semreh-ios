@@ -463,6 +463,9 @@ enum ProfileNameRules {
 }
 
 struct ProfileSummary: Decodable, Equatable, Hashable, Identifiable, Sendable {
+    /// Reserved built-in identity used by the direct profile/session contracts.
+    /// Distinct from the running profile and the user's sticky startup default.
+    static let canonicalDefaultName = "default"
     var id: String { name ?? path ?? UUID().uuidString }
 
     let name: String?

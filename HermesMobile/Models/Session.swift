@@ -114,12 +114,16 @@ struct SessionSummary: Decodable, Equatable, Hashable, Identifiable {
             return sessionId
         }
 
+        if let localDraftID { return localDraftID }
+
         let titlePart = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "untitled"
         let timestamp = createdAt ?? updatedAt ?? lastMessageAt ?? 0
         return "session-\(titlePart)-\(timestamp)"
     }
 
     let sessionId: String?
+    /// Device-local identity only; never sent to Hermes as a session ID.
+    let localDraftID: String?
     private(set) var title: String?
     let workspace: String?
     let model: String?
@@ -155,6 +159,7 @@ struct SessionSummary: Decodable, Equatable, Hashable, Identifiable {
 
     init(
         sessionId: String? = nil,
+        localDraftID: String? = nil,
         title: String? = nil,
         workspace: String? = nil,
         model: String? = nil,
@@ -189,6 +194,7 @@ struct SessionSummary: Decodable, Equatable, Hashable, Identifiable {
         matchType: String? = nil
     ) {
         self.sessionId = sessionId
+        self.localDraftID = localDraftID
         self.title = title
         self.workspace = workspace
         self.model = model
@@ -225,6 +231,7 @@ struct SessionSummary: Decodable, Equatable, Hashable, Identifiable {
 
     init(from detail: SessionDetail) {
         sessionId = detail.sessionId
+        localDraftID = nil
         title = detail.title
         workspace = detail.workspace
         model = detail.model

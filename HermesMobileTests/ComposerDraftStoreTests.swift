@@ -101,6 +101,671 @@ final class ComposerDraftStoreTests: XCTestCase {
             "cached"
         )
     }
+
+    func testLocalDraftRegistrationIsInvisibleUntilNonemptySaveAndSurvivesReconstruction() throws {
+        let session = SessionSummary(localDraftID: "local-draft-a", title: "New Chat", createdAt: 1, profile: "default")
+        store.registerLocalDraft(session, server: server)
+        XCTAssertTrue(store.reachableLocalDrafts(server: server, profile: "default").isEmpty)
+        store.save("  preserved 👩🏽‍💻\n", server: server, sessionID: session.id)
+
+        let reconstructed = ComposerDraftStore(defaults: defaults)
+        let restored = try XCTUnwrap(reconstructed.reachableLocalDrafts(server: server, profile: "default").first)
+        XCTAssertEqual(restored.id, session.id)
+        XCTAssertNil(restored.sessionId)
+        XCTAssertEqual(restored.createdAt, session.createdAt)
+        XCTAssertEqual(restored.profile, session.profile)
+        XCTAssertEqual(reconstructed.load(server: server, sessionID: restored.id), "  preserved 👩🏽‍💻\n")
+    }
+
+    func testLocalConfigurationAndTextReconstructFromOnePayloadWithExactValues() throws {
+        let session = SessionSummary(localDraftID: "local-draft-config", workspace: "/work/Project 👩🏽‍💻",
+            model: "Vendor/Model:Preview", modelProvider: "Provider-A", reasoningEffort: "xhigh",
+            createdAt: 1, profile: "work")
+        store.registerLocalDraft(session, server: server)
+        store.save("  unfinished\n", server: server, sessionID: session.id)
+        // The indexed payload must restore both text and configuration without
+        // relying on the legacy per-session text copy.
+        defaults.removeObject(forKey: ComposerDraftStore.visibilityKeyPrefix + server.absoluteString + "|" + session.id)
+        let restarted = ComposerDraftStore(defaults: defaults)
+        let restored = try XCTUnwrap(restarted.reachableLocalDrafts(server: server, profile: "work").first)
+        XCTAssertEqual(restored.id, session.id)
+        XCTAssertNil(restored.sessionId)
+        XCTAssertEqual(restored.model, session.model)
+        XCTAssertEqual(restored.modelProvider, session.modelProvider)
+        XCTAssertEqual(restored.workspace, session.workspace)
+        XCTAssertEqual(restored.reasoningEffort, session.reasoningEffort)
+        XCTAssertEqual(restored.createdAt, session.createdAt)
+        XCTAssertEqual(restarted.load(server: server, sessionID: restored.id), "  unfinished\n")
+        XCTAssertTrue(restarted.reachableLocalDrafts(server: server, profile: "default").isEmpty)
+        XCTAssertTrue(restarted.reachableLocalDrafts(server: server, profile: "Work").isEmpty)
+    }
+
+    func testConfigurationOnlySaveReplacesChoicesAndExplicitNilWithoutClearingText() throws {
+        let original = SessionSummary(localDraftID: "local-draft-config", workspace: "/old",
+            model: "old-model", modelProvider: "old-provider", reasoningEffort: "high", profile: "default")
+        store.registerLocalDraft(original, server: server)
+        store.save("unchanged text", server: server, sessionID: original.id)
+        let changed = SessionSummary(localDraftID: original.id, workspace: "/new",
+            model: "new-model", modelProvider: "new-provider", reasoningEffort: "low", profile: "default")
+        store.registerLocalDraft(changed, server: server)
+        store.save("unchanged text", server: server, sessionID: original.id)
+        let restarted = ComposerDraftStore(defaults: defaults)
+        let updated = try XCTUnwrap(restarted.reachableLocalDrafts(server: server, profile: "default").first)
+        XCTAssertEqual(updated.model, "new-model")
+        XCTAssertEqual(updated.modelProvider, "new-provider")
+        XCTAssertEqual(updated.workspace, "/new")
+        XCTAssertEqual(updated.reasoningEffort, "low")
+        XCTAssertEqual(restarted.load(server: server, sessionID: original.id), "unchanged text")
+
+        // Explicit nil must replace old metadata, including the raw reasoning
+        // override. It must never be serialized as the effective profile effort.
+        restarted.registerLocalDraft(SessionSummary(localDraftID: original.id,
+            model: "new-model", profile: "default"), server: server)
+        restarted.save("unchanged text", server: server, sessionID: original.id)
+        let afterInherit = ComposerDraftStore(defaults: defaults)
+        let inherited = try XCTUnwrap(afterInherit.reachableLocalDrafts(server: server, profile: "default").first)
+        XCTAssertEqual(inherited.id, original.id)
+        XCTAssertEqual(inherited.model, "new-model")
+        XCTAssertNil(inherited.modelProvider)
+        XCTAssertNil(inherited.workspace)
+        XCTAssertNil(inherited.reasoningEffort)
+        XCTAssertEqual(afterInherit.load(server: server, sessionID: inherited.id), "unchanged text")
+    }
+
+    func testConfiguredDraftsKeepExactServerAndProfileScopes() throws {
+        let otherServer = URL(string: "https://semreh.example:8443")!
+        let scopes: [(String, URL, String, String, String?)] = [
+            ("local-draft-same-id", server, "default", "default-model", "high"),
+            ("local-draft-work", server, "work", "work-model", nil),
+            ("local-draft-same-id", otherServer, "default", "other-model", "low")
+        ]
+        for (id, origin, profile, model, effort) in scopes {
+            store.registerLocalDraft(SessionSummary(localDraftID: id, workspace: "/" + model,
+                model: model, modelProvider: model + "-provider", reasoningEffort: effort,
+                profile: profile), server: origin)
+            store.save(model + " text", server: origin, sessionID: id)
+        }
+        let restarted = ComposerDraftStore(defaults: defaults)
+        for (id, origin, profile, model, effort) in scopes {
+            let rows = restarted.reachableLocalDrafts(server: origin, profile: profile)
+            XCTAssertEqual(rows.count, 1)
+            let restored = try XCTUnwrap(rows.first)
+            XCTAssertEqual(restored.id, id)
+            XCTAssertEqual(restored.profile, profile)
+            XCTAssertEqual(restored.model, model)
+            XCTAssertEqual(restored.modelProvider, model + "-provider")
+            XCTAssertEqual(restored.workspace, "/" + model)
+            XCTAssertEqual(restored.reasoningEffort, effort)
+            XCTAssertEqual(restarted.load(server: origin, sessionID: id), model + " text")
+        }
+        XCTAssertTrue(restarted.reachableLocalDrafts(server: server, profile: "Work").isEmpty)
+    }
+
+    func testLegacyLocalPayloadWithMissingConfigurationAndUnknownFieldsRemainsReachable() throws {
+        let data = Data(#"[{"id":"local-draft-legacy","profile":"default","text":"legacy text","createdAt":1,"future_field":{"enabled":true}}]"#.utf8)
+        defaults.set(data, forKey: "semreh.localComposerDrafts." + server.absoluteString)
+        let restarted = ComposerDraftStore(defaults: defaults)
+        let legacy = try XCTUnwrap(restarted.reachableLocalDrafts(server: server, profile: "default").first)
+        XCTAssertEqual(legacy.id, "local-draft-legacy")
+        XCTAssertNil(legacy.model)
+        XCTAssertNil(legacy.modelProvider)
+        XCTAssertNil(legacy.workspace)
+        XCTAssertNil(legacy.reasoningEffort)
+        XCTAssertEqual(restarted.load(server: server, sessionID: legacy.id), "legacy text")
+        restarted.registerLocalDraft(legacy, server: server)
+        restarted.save("edited legacy text", server: server, sessionID: legacy.id)
+        let afterEdit = ComposerDraftStore(defaults: defaults)
+        XCTAssertNil(afterEdit.reachableLocalDrafts(server: server, profile: "default").first?.reasoningEffort)
+        XCTAssertEqual(afterEdit.load(server: server, sessionID: legacy.id), "edited legacy text")
+    }
+
+    func testConfiguredDraftRetainsChoicesAfterPreAwaitClearAndDefiniteFailure() throws {
+        let session = SessionSummary(localDraftID: "local-draft-failed", workspace: "/workspace",
+            model: "model", modelProvider: "provider", reasoningEffort: "high", profile: "default")
+        store.registerLocalDraft(session, server: server)
+        store.save("submitted", server: server, sessionID: session.id)
+        let reopenedStore = ComposerDraftStore(defaults: defaults)
+        let reopened = try XCTUnwrap(reopenedStore.reachableLocalDrafts(server: server, profile: "default").first)
+        reopenedStore.registerLocalDraft(reopened, server: server)
+        reopenedStore.clear(server: server, sessionID: reopened.id)
+        XCTAssertTrue(reopenedStore.reachableLocalDrafts(server: server, profile: "default").isEmpty)
+        reopenedStore.save("submitted", server: server, sessionID: reopened.id)
+        let restarted = ComposerDraftStore(defaults: defaults)
+        let restored = try XCTUnwrap(restarted.reachableLocalDrafts(server: server, profile: "default").first)
+        XCTAssertEqual(restored.model, session.model)
+        XCTAssertEqual(restored.modelProvider, session.modelProvider)
+        XCTAssertEqual(restored.workspace, session.workspace)
+        XCTAssertEqual(restored.reasoningEffort, session.reasoningEffort)
+        XCTAssertEqual(restarted.load(server: server, sessionID: restored.id), "submitted")
+    }
+
+    func testConfigurationSaveAfterRetirementCannotResurrectLocalRowOrChangeCanonicalRouting() {
+        let local = SessionSummary(localDraftID: "local-draft-consumed-config", workspace: "/workspace",
+            model: "model", modelProvider: "provider", reasoningEffort: "high", profile: "default")
+        store.registerLocalDraft(local, server: server)
+        store.save("submitted", server: server, sessionID: local.id)
+        store.clear(server: server, sessionID: local.id)
+        store.retireLocalDraft(server: server, sessionID: local.id, canonicalSessionID: "Canonical:Exact-ID")
+        store.registerLocalDraft(SessionSummary(localDraftID: local.id, workspace: "/changed",
+            model: "changed", profile: "work"), server: server)
+        store.save("next composer text", server: server, sessionID: local.id)
+        let restarted = ComposerDraftStore(defaults: defaults)
+        XCTAssertTrue(restarted.reachableLocalDrafts(server: server, profile: "default").isEmpty)
+        XCTAssertTrue(restarted.reachableLocalDrafts(server: server, profile: "work").isEmpty)
+        XCTAssertEqual(restarted.load(server: server, sessionID: local.id), "")
+        XCTAssertEqual(restarted.load(server: server, sessionID: "Canonical:Exact-ID"), "next composer text")
+    }
+
+    func testReachableDraftsUseExactOriginAndProfileWithoutIncludingServerComposers() {
+        let other = URL(string: "https://other.example:8443")!
+        let sameHostOtherPort = URL(string: "https://semreh.example:8443")!
+        for (id, origin, profile) in [
+            ("local-draft-a", server, "default"),
+            ("local-draft-work", server, "work"),
+            ("local-draft-other", other, "default"),
+            ("local-draft-port", sameHostOtherPort, "default")
+        ] {
+            let session = SessionSummary(localDraftID: id, title: "New Chat", profile: profile)
+            store.registerLocalDraft(session, server: origin)
+            store.save(id, server: origin, sessionID: id)
+        }
+        store.save("existing server composer", server: server, sessionID: "durable-1")
+        let reconstructed = ComposerDraftStore(defaults: defaults)
+        XCTAssertEqual(reconstructed.reachableLocalDrafts(server: server, profile: "default").map(\.id), ["local-draft-a"])
+        XCTAssertEqual(reconstructed.reachableLocalDrafts(server: server, profile: "work").map(\.id), ["local-draft-work"])
+        XCTAssertEqual(reconstructed.reachableLocalDrafts(server: other, profile: "default").map(\.id), ["local-draft-other"])
+        XCTAssertEqual(reconstructed.reachableLocalDrafts(server: sameHostOtherPort, profile: "default").map(\.id), ["local-draft-port"])
+        XCTAssertTrue(reconstructed.reachableLocalDrafts(server: server, profile: "Work").isEmpty)
+        XCTAssertEqual(reconstructed.load(server: server, sessionID: "durable-1"), "existing server composer")
+    }
+
+    func testLocalClearSendAndWhitespaceRemoveReachabilityWithoutLosingOtherDrafts() {
+        for id in ["local-draft-clear", "local-draft-send", "local-draft-empty", "local-draft-keep"] {
+            store.registerLocalDraft(SessionSummary(localDraftID: id, profile: "default"), server: server)
+            store.save(id, server: server, sessionID: id)
+        }
+        store.clear(server: server, sessionID: "local-draft-clear")
+        // ChatView's direct-send path saves an empty composer before awaiting.
+        store.save("", server: server, sessionID: "local-draft-send")
+        store.save(" \n\t", server: server, sessionID: "local-draft-empty")
+        let reconstructed = ComposerDraftStore(defaults: defaults)
+        XCTAssertEqual(reconstructed.reachableLocalDrafts(server: server, profile: "default").map(\.id), ["local-draft-keep"])
+        for id in ["local-draft-clear", "local-draft-send", "local-draft-empty"] {
+            XCTAssertEqual(reconstructed.load(server: server, sessionID: id), "")
+        }
+        XCTAssertEqual(reconstructed.load(server: server, sessionID: "local-draft-keep"), "local-draft-keep")
+    }
+
+    func testReopenedLocalDraftCanRestoreAfterDefiniteSendFailure() throws {
+        let session = SessionSummary(localDraftID: "local-draft-a", profile: "default")
+        store.registerLocalDraft(session, server: server)
+        store.save("submitted", server: server, sessionID: session.id)
+        let reconstructed = ComposerDraftStore(defaults: defaults)
+        let reopened = try XCTUnwrap(reconstructed.reachableLocalDrafts(server: server, profile: "default").first)
+        reconstructed.registerLocalDraft(reopened, server: server)
+        reconstructed.save("", server: server, sessionID: reopened.id)
+        XCTAssertTrue(reconstructed.reachableLocalDrafts(server: server, profile: "default").isEmpty)
+        reconstructed.save("submitted", server: server, sessionID: reopened.id)
+        let afterFailure = ComposerDraftStore(defaults: defaults)
+        XCTAssertEqual(afterFailure.reachableLocalDrafts(server: server, profile: "default").map(\.id), [session.id])
+        XCTAssertEqual(afterFailure.load(server: server, sessionID: session.id), "submitted")
+    }
+
+    func testSuccessfulFirstSendRekeysLaterComposerTextToCanonicalIdentityAcrossReconstruction() {
+        let local = SessionSummary(localDraftID: "local-draft-consumed", profile: "default")
+        let otherServer = URL(string: "https://other.example")!
+        store.registerLocalDraft(local, server: server)
+        store.registerLocalDraft(local, server: otherServer)
+        store.save("submitted", server: server, sessionID: local.id)
+        store.save("other origin text", server: otherServer, sessionID: local.id)
+        store.save("", server: server, sessionID: local.id)
+        store.save("typed while awaiting acceptance", server: server, sessionID: local.id)
+        store.retireLocalDraft(server: server, sessionID: local.id, canonicalSessionID: "canonical-accepted")
+        XCTAssertEqual(store.load(server: server, sessionID: "canonical-accepted"), "typed while awaiting acceptance")
+        store.registerLocalDraft(local, server: server)
+        store.save("next unsent message", server: server, sessionID: local.id)
+
+        let restarted = ComposerDraftStore(defaults: defaults)
+        XCTAssertEqual(restarted.load(server: server, sessionID: "canonical-accepted"), "next unsent message")
+        XCTAssertEqual(restarted.load(server: server, sessionID: local.id), "")
+        XCTAssertTrue(restarted.reachableLocalDrafts(server: server, profile: "default").isEmpty)
+        XCTAssertEqual(restarted.load(server: otherServer, sessionID: local.id), "other origin text")
+        XCTAssertEqual(restarted.reachableLocalDrafts(server: otherServer, profile: "default").map(\.id), [local.id])
+    }
+
+    func testProfileChoiceSaveMovesReachableScopeWithoutChangingLocalIdentity() {
+        let original = SessionSummary(localDraftID: "local-draft-profile-choice", profile: "default")
+        store.registerLocalDraft(original, server: server)
+        store.save("unfinished", server: server, sessionID: original.id)
+        store.registerLocalDraft(SessionSummary(localDraftID: original.id, profile: "work"), server: server)
+        store.save("unfinished", server: server, sessionID: original.id)
+        let restarted = ComposerDraftStore(defaults: defaults)
+        XCTAssertTrue(restarted.reachableLocalDrafts(server: server, profile: "default").isEmpty)
+        XCTAssertEqual(restarted.reachableLocalDrafts(server: server, profile: "work").map(\.id), [original.id])
+        XCTAssertEqual(restarted.load(server: server, sessionID: original.id), "unfinished")
+    }
+
+    func testFailureNotificationDoesNotResurrectAnotherChatsPendingClear() throws {
+        let a = SessionSummary(localDraftID: "local-draft-failure-a", profile: "work")
+        let b = SessionSummary(localDraftID: "local-draft-clear-b", profile: "work")
+        let wa = store.claimWriter(server: server, sessionID: a.id, owner: UUID())
+        store.save("", configuration: a, server: server, sessionID: a.id, writer: wa)
+        let checkpoint = try XCTUnwrap(store.submissionCheckpoint(server: server, sessionID: a.id, writer: wa))
+        let wb = store.claimWriter(server: server, sessionID: b.id, owner: UUID())
+        store.save("B draft before clear", configuration: b, server: server, sessionID: b.id, writer: wb)
+        let before = store.failureRestorationRevision(server: server, sessionID: b.id)
+        store.noteWriterEdit("", writer: wb, server: server, sessionID: b.id)
+        XCTAssertTrue(store.restoreFailedSubmission("rejected A", checkpoint: checkpoint, server: server, sessionID: a.id))
+        XCTAssertEqual(store.failureRestorationRevision(server: server, sessionID: b.id), before)
+        XCTAssertNil(store.failureRestorationDraft(server: server, sessionID: b.id, writer: wb))
+        XCTAssertEqual(store.load(server: server, sessionID: b.id), "B draft before clear", "The deliberate clear is still pending, reproducing the observer's exact unsafe window.")
+        XCTAssertEqual(store.failureRestorationDraft(server: server, sessionID: a.id, writer: wa), "rejected A")
+    }
+
+    func testFailureNotificationCannotUndoLaterSameChatPendingClear() throws {
+        let a = SessionSummary(localDraftID: "local-draft-later-clear", profile: "work")
+        let writer = store.claimWriter(server: server, sessionID: a.id, owner: UUID())
+        store.save("", configuration: a, server: server, sessionID: a.id, writer: writer)
+        let checkpoint = try XCTUnwrap(store.submissionCheckpoint(server: server, sessionID: a.id, writer: writer))
+        XCTAssertTrue(store.restoreFailedSubmission("rejected A", checkpoint: checkpoint, server: server, sessionID: a.id))
+        store.noteWriterEdit("", writer: writer, server: server, sessionID: a.id)
+        XCTAssertNil(store.failureRestorationDraft(server: server, sessionID: a.id, writer: writer))
+        XCTAssertEqual(store.load(server: server, sessionID: a.id), "rejected A")
+    }
+
+    func testFailureNotificationIsIsolatedFromSameIDOnAnotherOrigin() throws {
+        let id = "local-draft-origin"
+        let other = URL(string: "https://other-origin.example")!
+        let config = SessionSummary(localDraftID: id, profile: "work")
+        let writer = store.claimWriter(server: server, sessionID: id, owner: UUID())
+        store.save("", configuration: config, server: server, sessionID: id, writer: writer)
+        let checkpoint = try XCTUnwrap(store.submissionCheckpoint(server: server, sessionID: id, writer: writer))
+        let otherWriter = store.claimWriter(server: other, sessionID: id, owner: UUID())
+        store.save("other origin text", configuration: config, server: other, sessionID: id, writer: otherWriter)
+        XCTAssertTrue(store.restoreFailedSubmission("rejected A", checkpoint: checkpoint, server: server, sessionID: id))
+        XCTAssertEqual(store.failureRestorationRevision(server: other, sessionID: id), 0)
+        XCTAssertNil(store.failureRestorationDraft(server: other, sessionID: id, writer: otherWriter))
+        XCTAssertEqual(store.load(server: other, sessionID: id), "other origin text")
+    }
+
+    func testDefiniteFailureRestoresUntouchedTextAcrossConfigurationOnlyRefresh() throws {
+        let local = SessionSummary(localDraftID: "local-draft-loading-settings", profile: "work")
+        let writer = store.claimWriter(server: server, sessionID: local.id, owner: UUID())
+        store.save("", configuration: local, server: server, sessionID: local.id, writer: writer)
+        let checkpoint = try XCTUnwrap(store.submissionCheckpoint(server: server, sessionID: local.id, writer: writer))
+        let loaded = SessionSummary(localDraftID: local.id, workspace: "/latest workspace",
+            model: "InheritedDefault", modelProvider: "inherited-provider", reasoningEffort: nil, profile: "work")
+        XCTAssertTrue(store.save("", configuration: loaded, server: server, sessionID: local.id, writer: writer))
+        let submitted = "  definitely rejected text 👩🏽‍💻\n"
+        XCTAssertTrue(store.restoreFailedSubmission(submitted, checkpoint: checkpoint, server: server, sessionID: local.id))
+        let restarted = ComposerDraftStore(defaults: defaults)
+        let route = try XCTUnwrap(restarted.reachableLocalDrafts(server: server, profile: "work").first)
+        XCTAssertEqual(restarted.load(server: server, sessionID: route.id), submitted)
+        XCTAssertEqual(route.model, loaded.model)
+        XCTAssertEqual(route.modelProvider, loaded.modelProvider)
+        XCTAssertEqual(route.workspace, loaded.workspace)
+        XCTAssertNil(route.reasoningEffort)
+    }
+
+    func testNewWriterPayloadAndLeaseSurviveOldFirstSendCompletionAndReconstruction() throws {
+        let local = SessionSummary(localDraftID: "local-draft-pending", workspace: "/old",
+            model: "old", modelProvider: "old-provider", reasoningEffort: "high", profile: "work")
+        let old = store.claimWriter(server: server, sessionID: local.id, owner: UUID())
+        store.save("submitted", configuration: local, server: server, sessionID: local.id, writer: old)
+        store.save("", configuration: local, server: server, sessionID: local.id, writer: old)
+        let checkpoint = try XCTUnwrap(store.submissionCheckpoint(server: server, sessionID: local.id, writer: old))
+        store.releaseWriter(old, server: server, sessionID: local.id)
+        let current = store.claimWriter(server: server, sessionID: local.id, owner: UUID())
+        let changed = SessionSummary(localDraftID: local.id, workspace: "/new 👩🏽‍💻",
+            model: "Vendor/Model:Exact", modelProvider: "Provider:Exact", reasoningEffort: nil, profile: "work")
+        let pending = "  next message 👩🏽‍💻\n"
+        XCTAssertTrue(store.save(pending, configuration: changed, server: server, sessionID: local.id, writer: current))
+
+        // The accepted old send migrates the CURRENT owner, not its captured lease.
+        store.retireLocalDraft(server: server, sessionID: local.id, canonicalSessionID: "Canonical:Exact-ID")
+        XCTAssertFalse(store.save("stale text", configuration: local, server: server, sessionID: local.id, writer: old))
+        store.releaseWriter(old, server: server, sessionID: local.id)
+        XCTAssertTrue(store.ownsWriter(current, server: server, sessionID: local.id))
+        XCTAssertTrue(store.ownsWriter(current, server: server, sessionID: "Canonical:Exact-ID"))
+        XCTAssertFalse(store.restoreFailedSubmission("submitted", checkpoint: checkpoint, server: server, sessionID: local.id))
+        // Repeated retirement and even a conflicting late callback cannot retarget identity.
+        store.retireLocalDraft(server: server, sessionID: local.id, canonicalSessionID: "Wrong-ID")
+        let restarted = ComposerDraftStore(defaults: defaults)
+        XCTAssertTrue(restarted.reachableLocalDrafts(server: server, profile: "work").isEmpty)
+        XCTAssertEqual(restarted.load(server: server, sessionID: "Canonical:Exact-ID"), pending)
+        XCTAssertEqual(restarted.load(server: server, sessionID: "Wrong-ID"), "")
+        defaults.removeObject(forKey: ComposerDraftStore.visibilityKeyPrefix + server.absoluteString + "|Canonical:Exact-ID")
+        XCTAssertEqual(restarted.load(server: server, sessionID: "Canonical:Exact-ID"), pending,
+            "Canonical text and configuration must reconstruct from one payload")
+        let restored = try XCTUnwrap(restarted.savedConfiguration(server: server, sessionID: "Canonical:Exact-ID"))
+        XCTAssertEqual(restored.sessionId, "Canonical:Exact-ID")
+        XCTAssertEqual(restored.profile, "work")
+        XCTAssertEqual(restored.model, changed.model)
+        XCTAssertEqual(restored.modelProvider, changed.modelProvider)
+        XCTAssertEqual(restored.workspace, changed.workspace)
+        XCTAssertNil(restored.reasoningEffort, "Raw inherit must survive, independent of effective profile effort")
+        // Pending debounce on the replacement view writes through the alias.
+        XCTAssertTrue(store.save("later", configuration: changed, server: server, sessionID: local.id, writer: current))
+        XCTAssertEqual(restarted.load(server: server, sessionID: "Canonical:Exact-ID"), "later")
+    }
+
+    func testOldDisappearanceCannotReleaseNewClaimBeforeOrAfterRetirement() {
+        for retire in [false, true] {
+            let id = retire ? "local-draft-retired-owner" : "local-draft-owner"
+            let owner = UUID()
+            let old = store.claimWriter(server: server, sessionID: id, owner: owner)
+            let current = store.claimWriter(server: server, sessionID: id, owner: UUID())
+            if retire { store.retireLocalDraft(server: server, sessionID: id, canonicalSessionID: "canonical-owner") }
+            store.releaseWriter(old, server: server, sessionID: id)
+            XCTAssertTrue(store.ownsWriter(current, server: server, sessionID: id))
+            XCTAssertFalse(store.ownsWriter(old, server: server, sessionID: id))
+            store.releaseWriter(current, server: server, sessionID: id)
+            let reappeared = store.claimWriter(server: server, sessionID: id, owner: owner)
+            XCTAssertNotEqual(reappeared, old, "The same view's new presentation must invalidate its old await")
+        }
+    }
+
+    func testFailureRestoresUntouchedComposerAfterBackWithoutReclaimingWriter() throws {
+        let local = SessionSummary(localDraftID: "local-draft-failure-owner", workspace: "/exact",
+            model: "Exact", reasoningEffort: nil, profile: "work")
+        let old = store.claimWriter(server: server, sessionID: local.id, owner: UUID())
+        store.save("submitted", configuration: local, server: server, sessionID: local.id, writer: old)
+        store.save("", configuration: local, server: server, sessionID: local.id, writer: old)
+        let checkpoint = try XCTUnwrap(store.submissionCheckpoint(server: server, sessionID: local.id, writer: old))
+        // A redundant debounce/disappearance flush must not invalidate restoration.
+        store.noteWriterEdit("", writer: old, server: server, sessionID: local.id)
+        store.save("", configuration: local, server: server, sessionID: local.id, writer: old)
+        store.releaseWriter(old, server: server, sessionID: local.id)
+        XCTAssertTrue(store.restoreFailedSubmission("submitted", checkpoint: checkpoint, server: server, sessionID: local.id))
+        XCTAssertFalse(store.ownsWriter(old, server: server, sessionID: local.id))
+        let restarted = ComposerDraftStore(defaults: defaults)
+        let restored = try XCTUnwrap(restarted.reachableLocalDrafts(server: server, profile: "work").first)
+        XCTAssertEqual(restored.id, local.id)
+        XCTAssertEqual(restored.workspace, local.workspace)
+        XCTAssertNil(restored.reasoningEffort)
+        XCTAssertEqual(restarted.load(server: server, sessionID: local.id), "submitted")
+    }
+
+    func testFailureDoesNotEraseReplacementEditsEvenBeforeDebounceOrAfterUserClear() throws {
+        for clearAfterTyping in [false, true] {
+            let id = clearAfterTyping ? "local-draft-user-clear" : "local-draft-debounce"
+            let local = SessionSummary(localDraftID: id, profile: "default")
+            let old = store.claimWriter(server: server, sessionID: id, owner: UUID())
+            store.save("", configuration: local, server: server, sessionID: id, writer: old)
+            let checkpoint = try XCTUnwrap(store.submissionCheckpoint(server: server, sessionID: id, writer: old))
+            let current = store.claimWriter(server: server, sessionID: id, owner: UUID())
+            store.noteWriterEdit("new edit", writer: current, server: server, sessionID: id)
+            if clearAfterTyping { store.noteWriterEdit("", writer: current, server: server, sessionID: id) }
+            XCTAssertFalse(store.restoreFailedSubmission("submitted", checkpoint: checkpoint, server: server, sessionID: id))
+            XCTAssertFalse(store.save("submitted", configuration: local, server: server, sessionID: id, writer: old))
+            let latest = clearAfterTyping ? "" : "new edit"
+            XCTAssertTrue(store.save(latest, configuration: local, server: server, sessionID: id, writer: current))
+            XCTAssertEqual(ComposerDraftStore(defaults: defaults).load(server: server, sessionID: id), latest)
+        }
+    }
+
+    func testCanonicalWriterClaimBeforeOldAcceptanceKeepsItsPayloadAndLease() throws {
+        let local = SessionSummary(localDraftID: "local-draft-before-canonical", profile: "work")
+        let old = store.claimWriter(server: server, sessionID: local.id, owner: UUID())
+        store.save("old pending", configuration: local, server: server, sessionID: local.id, writer: old)
+        let canonical = SessionSummary(sessionId: "Canonical:Existing", workspace: "/new", model: "New",
+            modelProvider: "New-provider", reasoningEffort: nil, profile: "work")
+        let current = store.claimWriter(server: server, sessionID: canonical.id, owner: UUID())
+        store.save("canonical pending", configuration: canonical, server: server, sessionID: canonical.id, writer: current)
+        store.retireLocalDraft(server: server, sessionID: local.id, canonicalSessionID: canonical.id)
+        store.releaseWriter(old, server: server, sessionID: local.id)
+        XCTAssertTrue(store.ownsWriter(current, server: server, sessionID: canonical.id))
+        XCTAssertFalse(store.save("old", configuration: local, server: server, sessionID: local.id, writer: old))
+        let restarted = ComposerDraftStore(defaults: defaults)
+        XCTAssertEqual(restarted.load(server: server, sessionID: canonical.id), "canonical pending")
+        XCTAssertEqual(restarted.savedConfiguration(server: server, sessionID: canonical.id)?.model, "New")
+        XCTAssertNil(restarted.savedConfiguration(server: server, sessionID: canonical.id)?.reasoningEffort)
+    }
+
+    func testRetirementWithoutCanonicalIDCanLaterMigrateExactConfiguration() {
+        let local = SessionSummary(localDraftID: "local-draft-late-identity", workspace: "/exact",
+            model: "Exact", reasoningEffort: nil, profile: "work")
+        let current = store.claimWriter(server: server, sessionID: local.id, owner: UUID())
+        store.save("pending", configuration: local, server: server, sessionID: local.id, writer: current)
+        store.retireLocalDraft(server: server, sessionID: local.id)
+        store.retireLocalDraft(server: server, sessionID: local.id, canonicalSessionID: "Canonical:Late")
+        let restarted = ComposerDraftStore(defaults: defaults)
+        XCTAssertEqual(restarted.load(server: server, sessionID: "Canonical:Late"), "pending")
+        XCTAssertEqual(restarted.savedConfiguration(server: server, sessionID: "Canonical:Late")?.workspace, "/exact")
+        XCTAssertNil(restarted.savedConfiguration(server: server, sessionID: "Canonical:Late")?.reasoningEffort)
+        XCTAssertTrue(store.ownsWriter(current, server: server, sessionID: "Canonical:Late"))
+    }
+
+    func testWriterOwnershipIsOriginAndConversationScoped() {
+        let other = URL(string: "https://semreh.example:8443")!
+        let first = store.claimWriter(server: server, sessionID: "local-draft-same", owner: UUID())
+        let second = store.claimWriter(server: other, sessionID: "local-draft-same", owner: UUID())
+        let third = store.claimWriter(server: server, sessionID: "local-draft-work", owner: UUID())
+        XCTAssertTrue(store.ownsWriter(first, server: server, sessionID: "local-draft-same"))
+        XCTAssertTrue(store.ownsWriter(second, server: other, sessionID: "local-draft-same"))
+        XCTAssertTrue(store.ownsWriter(third, server: server, sessionID: "local-draft-work"))
+        XCTAssertFalse(store.ownsWriter(first, server: other, sessionID: "local-draft-same"))
+    }
+
+    // These exercise the begin/settle seam called by ChatView's streaming path.
+    // The interval between them models the suspended submission, without a backend.
+    func testStreamingAcceptedUntouchedDraftClearsDurableText() throws {
+        let session = SessionSummary(sessionId: "stream-accepted", model: "Exact", profile: "work")
+        let writer = store.claimWriter(server: server, sessionID: session.id, owner: UUID())
+        let text = "  submitted 👩🏽‍💻\n"
+        let submission = try XCTUnwrap(store.beginStreamingSubmission(text, configuration: session,
+            server: server, sessionID: session.id, writer: writer))
+        XCTAssertEqual(ComposerDraftStore(defaults: defaults).load(server: server, sessionID: session.id), text,
+            "The submitted composer must remain durable during the await")
+
+        XCTAssertTrue(store.settleStreamingSubmission(submission, accepted: true, currentText: text,
+            configuration: session, server: server, sessionID: session.id))
+        XCTAssertEqual(store.load(server: server, sessionID: session.id), "")
+        XCTAssertEqual(ComposerDraftStore(defaults: defaults).load(server: server, sessionID: session.id), "")
+        XCTAssertEqual(store.savedConfiguration(server: server, sessionID: session.id)?.model, "Exact")
+    }
+
+    func testStreamingAcceptancePreservesDraftAfterUnobservedConfigurationRollback() throws {
+        let session = SessionSummary(sessionId: "stream-config-rollback", profile: "default")
+        let writer = store.claimWriter(server: server, sessionID: session.id, owner: UUID())
+        let submission = try XCTUnwrap(store.beginStreamingSubmission("submitted", configuration: session,
+            server: server, sessionID: session.id, writer: writer, configurationMutation: 7))
+        // Optimistic edits can roll back to the same values before onChange.
+        // The model-owned synchronous mutation token must still prevent clearing.
+        XCTAssertFalse(store.settleStreamingSubmission(submission, accepted: true, currentText: "submitted",
+            configuration: session, server: server, sessionID: session.id, configurationMutation: 8))
+        XCTAssertEqual(ComposerDraftStore(defaults: defaults).load(server: server, sessionID: session.id), "submitted")
+    }
+
+    func testStreamingRejectionOrErrorPreservesSubmittedTextAcrossReconstruction() throws {
+        // Rejection and caught transport errors both map to accepted == false.
+        let session = SessionSummary(sessionId: "stream-rejected", profile: "default")
+        let writer = store.claimWriter(server: server, sessionID: session.id, owner: UUID())
+        let text = "unaccepted text"
+        let submission = try XCTUnwrap(store.beginStreamingSubmission(text, configuration: session,
+            server: server, sessionID: session.id, writer: writer))
+        XCTAssertFalse(store.settleStreamingSubmission(submission, accepted: false, currentText: text,
+            configuration: session, server: server, sessionID: session.id))
+        XCTAssertEqual(ComposerDraftStore(defaults: defaults).load(server: server, sessionID: session.id), text)
+    }
+
+    func testStreamingDelayedAcceptanceOrRejectionPersistsPendingEditBeforeDebounce() throws {
+        for accepted in [true, false] {
+            let session = SessionSummary(sessionId: "stream-edit-\(accepted)", profile: "default")
+            let writer = store.claimWriter(server: server, sessionID: session.id, owner: UUID())
+            let submission = try XCTUnwrap(store.beginStreamingSubmission("submitted", configuration: session,
+                server: server, sessionID: session.id, writer: writer))
+            // Input has changed, but its 300 ms persistence task has not fired.
+            store.noteWriterEdit("newer composer", writer: writer, server: server, sessionID: session.id)
+            XCTAssertEqual(store.load(server: server, sessionID: session.id), "submitted")
+            XCTAssertFalse(store.settleStreamingSubmission(submission, accepted: accepted,
+                currentText: "newer composer", configuration: session, server: server, sessionID: session.id))
+            XCTAssertEqual(ComposerDraftStore(defaults: defaults).load(server: server, sessionID: session.id),
+                "newer composer")
+        }
+    }
+
+    func testStreamingAcceptanceDetectsEditBeforeObservationCallback() throws {
+        let session = SessionSummary(sessionId: "stream-unobserved-edit", profile: "default")
+        let writer = store.claimWriter(server: server, sessionID: session.id, owner: UUID())
+        let submission = try XCTUnwrap(store.beginStreamingSubmission("submitted", configuration: session,
+            server: server, sessionID: session.id, writer: writer))
+        XCTAssertFalse(store.settleStreamingSubmission(submission, accepted: true,
+            currentText: "edited before observation", configuration: session, server: server, sessionID: session.id))
+        XCTAssertEqual(store.load(server: server, sessionID: session.id), "edited before observation")
+    }
+
+    func testStreamingAcceptedClearAndRetypeOfIdenticalTextSurvives() throws {
+        let session = SessionSummary(sessionId: "stream-retyped", profile: "default")
+        let writer = store.claimWriter(server: server, sessionID: session.id, owner: UUID())
+        let text = "same bytes"
+        let submission = try XCTUnwrap(store.beginStreamingSubmission(text, configuration: session,
+            server: server, sessionID: session.id, writer: writer))
+        // Matches the synchronous composer binding, even within one render.
+        store.noteWriterEdit("", writer: writer, server: server, sessionID: session.id)
+        store.noteWriterEdit(text, writer: writer, server: server, sessionID: session.id)
+        XCTAssertFalse(store.settleStreamingSubmission(submission, accepted: true, currentText: text,
+            configuration: session, server: server, sessionID: session.id))
+        XCTAssertEqual(ComposerDraftStore(defaults: defaults).load(server: server, sessionID: session.id), text)
+    }
+
+    func testStreamingOldWriterCannotSettleAfterBackAndReopen() throws {
+        for accepted in [true, false] {
+            for sameOwner in [true, false] {
+                let session = SessionSummary(sessionId: "stream-reopen-\(accepted)-\(sameOwner)", profile: "default")
+                let owner = UUID()
+                let old = store.claimWriter(server: server, sessionID: session.id, owner: owner)
+                let submission = try XCTUnwrap(store.beginStreamingSubmission("submitted", configuration: session,
+                    server: server, sessionID: session.id, writer: old))
+                store.releaseWriter(old, server: server, sessionID: session.id)
+                let current = store.claimWriter(server: server, sessionID: session.id,
+                    owner: sameOwner ? owner : UUID())
+                // The unchanged text and revision still belong to a new lease.
+                XCTAssertFalse(store.settleStreamingSubmission(submission, accepted: accepted,
+                    currentText: "submitted", configuration: session, server: server, sessionID: session.id))
+                XCTAssertTrue(store.ownsWriter(current, server: server, sessionID: session.id))
+                store.save("replacement draft", configuration: session, server: server,
+                    sessionID: session.id, writer: current)
+                XCTAssertFalse(store.settleStreamingSubmission(submission, accepted: accepted,
+                    currentText: "stale old view", configuration: session, server: server, sessionID: session.id))
+                XCTAssertEqual(ComposerDraftStore(defaults: defaults).load(server: server, sessionID: session.id),
+                    "replacement draft")
+            }
+        }
+    }
+
+    func testStreamingDispatchRequiresCurrentWriter() {
+        let session = SessionSummary(sessionId: "stream-stale-dispatch", profile: "default")
+        let old = store.claimWriter(server: server, sessionID: session.id, owner: UUID())
+        let current = store.claimWriter(server: server, sessionID: session.id, owner: UUID())
+        store.save("current", configuration: session, server: server, sessionID: session.id, writer: current)
+        XCTAssertNil(store.beginStreamingSubmission("stale", configuration: session,
+            server: server, sessionID: session.id, writer: old))
+        XCTAssertEqual(store.load(server: server, sessionID: session.id), "current")
+    }
+
+    func testStreamingStaleCompletionCannotOverwriteReplacementPendingEdit() throws {
+        for accepted in [true, false] {
+            let session = SessionSummary(sessionId: "stream-pending-replacement-\(accepted)", profile: "default")
+            let old = store.claimWriter(server: server, sessionID: session.id, owner: UUID())
+            let submission = try XCTUnwrap(store.beginStreamingSubmission("submitted", configuration: session,
+                server: server, sessionID: session.id, writer: old))
+            store.releaseWriter(old, server: server, sessionID: session.id)
+            let current = store.claimWriter(server: server, sessionID: session.id, owner: UUID())
+            store.noteWriterEdit("replacement pending edit", writer: current, server: server, sessionID: session.id)
+            XCTAssertFalse(store.settleStreamingSubmission(submission, accepted: accepted,
+                currentText: "stale view text", configuration: session, server: server, sessionID: session.id))
+            XCTAssertEqual(store.load(server: server, sessionID: session.id), "submitted",
+                "An old completion must not flush its stale text while the new owner is awaiting debounce")
+            XCTAssertTrue(store.save("replacement pending edit", configuration: session,
+                server: server, sessionID: session.id, writer: current))
+            XCTAssertEqual(ComposerDraftStore(defaults: defaults).load(server: server, sessionID: session.id),
+                "replacement pending edit")
+        }
+    }
+
+    func testStreamingAcceptedLocalDraftCannotResurrectFromIndexedPayload() throws {
+        let session = SessionSummary(localDraftID: "local-draft-stream-accepted", model: "Exact", profile: "work")
+        let writer = store.claimWriter(server: server, sessionID: session.id, owner: UUID())
+        let submission = try XCTUnwrap(store.beginStreamingSubmission("submitted", configuration: session,
+            server: server, sessionID: session.id, writer: writer))
+        XCTAssertEqual(ComposerDraftStore(defaults: defaults).reachableLocalDrafts(server: server, profile: "work").count, 1)
+        XCTAssertTrue(store.settleStreamingSubmission(submission, accepted: true, currentText: "submitted",
+            configuration: session, server: server, sessionID: session.id))
+        let restarted = ComposerDraftStore(defaults: defaults)
+        XCTAssertEqual(restarted.load(server: server, sessionID: session.id), "")
+        XCTAssertTrue(restarted.reachableLocalDrafts(server: server, profile: "work").isEmpty)
+    }
+
+    func testStreamingSettlementCannotCrossServerOrSession() throws {
+        let session = SessionSummary(sessionId: "stream-scope", profile: "default")
+        let otherSession = SessionSummary(sessionId: "stream-other", profile: "default")
+        let otherServer = URL(string: "https://other.example")!
+        let writer = store.claimWriter(server: server, sessionID: session.id, owner: UUID())
+        let submission = try XCTUnwrap(store.beginStreamingSubmission("submitted", configuration: session,
+            server: server, sessionID: session.id, writer: writer))
+        let otherWriter = store.claimWriter(server: otherServer, sessionID: session.id, owner: UUID())
+        let otherSessionWriter = store.claimWriter(server: server, sessionID: otherSession.id, owner: UUID())
+        store.save("other server", configuration: session, server: otherServer, sessionID: session.id, writer: otherWriter)
+        store.save("other session", configuration: otherSession, server: server,
+            sessionID: otherSession.id, writer: otherSessionWriter)
+        for accepted in [true, false] {
+            XCTAssertFalse(store.settleStreamingSubmission(submission, accepted: accepted, currentText: "submitted",
+                configuration: session, server: otherServer, sessionID: session.id))
+            XCTAssertFalse(store.settleStreamingSubmission(submission, accepted: accepted, currentText: "submitted",
+                configuration: otherSession, server: server, sessionID: otherSession.id))
+        }
+        XCTAssertTrue(store.settleStreamingSubmission(submission, accepted: true, currentText: "submitted",
+            configuration: session, server: server, sessionID: session.id))
+        let restarted = ComposerDraftStore(defaults: defaults)
+        XCTAssertEqual(restarted.load(server: server, sessionID: session.id), "")
+        XCTAssertEqual(restarted.load(server: otherServer, sessionID: session.id), "other server")
+        XCTAssertEqual(restarted.load(server: server, sessionID: otherSession.id), "other session")
+    }
+
+    func testStreamingAcceptancePreservesChangedConfigurationAndSameText() throws {
+        let original = SessionSummary(localDraftID: "local-draft-stream-config", workspace: "/old",
+            model: "old", reasoningEffort: "high", profile: "default")
+        let writer = store.claimWriter(server: server, sessionID: original.id, owner: UUID())
+        let submission = try XCTUnwrap(store.beginStreamingSubmission("same text", configuration: original,
+            server: server, sessionID: original.id, writer: writer))
+        let changed = SessionSummary(localDraftID: original.id, workspace: "/new",
+            model: "new", reasoningEffort: nil, profile: "work")
+        store.noteWriterConfigurationEdit(writer: writer, server: server, sessionID: original.id)
+        store.save("same text", configuration: changed, server: server, sessionID: original.id, writer: writer)
+        XCTAssertFalse(store.settleStreamingSubmission(submission, accepted: true, currentText: "same text",
+            configuration: changed, server: server, sessionID: original.id))
+        let restarted = ComposerDraftStore(defaults: defaults)
+        XCTAssertEqual(restarted.load(server: server, sessionID: original.id), "same text")
+        let restored = try XCTUnwrap(restarted.savedConfiguration(server: server, sessionID: original.id))
+        XCTAssertEqual(restored.workspace, "/new")
+        XCTAssertEqual(restored.model, "new")
+        XCTAssertEqual(restored.profile, "work")
+        XCTAssertNil(restored.reasoningEffort)
+        // Returning to the original options also must not make this await current.
+        store.noteWriterConfigurationEdit(writer: writer, server: server, sessionID: original.id)
+        store.save("same text", configuration: original, server: server, sessionID: original.id, writer: writer)
+        XCTAssertFalse(store.settleStreamingSubmission(submission, accepted: true, currentText: "same text",
+            configuration: original, server: server, sessionID: original.id))
+    }
+
+    func testRetiredSentLocalIdentityCannotReappearWhenComposerReceivesMoreText() {
+        let session = SessionSummary(localDraftID: "local-draft-sent", profile: "default")
+        let unrelated = SessionSummary(localDraftID: "local-draft-keep", profile: "default")
+        for draft in [session, unrelated] {
+            store.registerLocalDraft(draft, server: server)
+            store.save("first message", server: server, sessionID: draft.id)
+        }
+        store.save("", server: server, sessionID: session.id)
+        // Required integration seam: consume local identity on didStart == true,
+        // not on the pre-await empty write (a definite failure must restore it).
+        store.retireLocalDraft(server: server, sessionID: session.id)
+        store.save("next composer text", server: server, sessionID: session.id)
+        let reconstructed = ComposerDraftStore(defaults: defaults)
+        XCTAssertEqual(reconstructed.reachableLocalDrafts(server: server, profile: "default").map(\.id), [unrelated.id])
+        XCTAssertEqual(reconstructed.load(server: server, sessionID: session.id), "next composer text")
+        XCTAssertEqual(reconstructed.load(server: server, sessionID: unrelated.id), "first message")
+    }
 }
 
 @MainActor

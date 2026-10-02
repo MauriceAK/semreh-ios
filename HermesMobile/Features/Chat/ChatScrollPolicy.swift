@@ -1045,3 +1045,19 @@ extension EnvironmentValues {
         set { self[InternalChatRendererSelectionKey.self] = newValue }
     }
 }
+
+/// Source identity is independent of row count and loaded indices. A prepend
+/// must never be interpreted as the append that a count-only window would see.
+enum ChatTranscriptSourceMutation: Equatable {
+    case unchanged, append, prepend, reconcile, replacement
+
+    static func classify(previous: [String], next: [String]) -> Self {
+        if previous == next { return .unchanged }
+        guard !previous.isEmpty, !next.isEmpty else { return .replacement }
+        if next.count > previous.count {
+            if next.starts(with: previous) { return .append }
+            if next.suffix(previous.count).elementsEqual(previous) { return .prepend }
+        }
+        return Set(previous).isDisjoint(with: next) ? .replacement : .reconcile
+    }
+}

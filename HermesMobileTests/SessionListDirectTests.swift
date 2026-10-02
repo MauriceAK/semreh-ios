@@ -3,6 +3,239 @@ import XCTest
 
 final class SessionListDirectTests: APIClientTestCase {
     @MainActor
+    func testConfiguredDraftRouteUsesLatestSavedChoicesAfterReconstructionAndFreshChatInherits() async throws {
+        let suite = "ConfiguredDraftRouting.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let server = URL(staticString: "https://configured-draft.example")
+        let client = makeClient { request in
+            XCTFail("Configuration routing must not request \(request.url?.path ?? "nil")")
+            throw URLError(.badURL)
+        }
+        let store = ComposerDraftStore(defaults: defaults)
+        let original = SessionListViewModel(server: server, client: client, composerDraftStore: store)
+        let created = await original.createSession(profile: "default")
+        let local = try XCTUnwrap(created)
+        store.registerLocalDraft(SessionSummary(localDraftID: local.id, workspace: "/old",
+            model: "old", modelProvider: "old-provider", reasoningEffort: "high", profile: "default"), server: server)
+        store.save("unchanged", server: server, sessionID: local.id)
+        let staleRow = try XCTUnwrap(original.visibleLocalDrafts(searchText: "", selectedProjectID: nil).first)
+        store.registerLocalDraft(SessionSummary(localDraftID: local.id, workspace: "/work/Exact Path",
+            model: "Vendor/Model:Preview", modelProvider: "Provider-B", reasoningEffort: nil,
+            createdAt: local.createdAt, profile: "default"), server: server)
+        store.save("unchanged", server: server, sessionID: local.id)
+
+        let restartedStore = ComposerDraftStore(defaults: defaults)
+        let restarted = SessionListViewModel(server: server, client: client, composerDraftStore: restartedStore)
+        let destination = try XCTUnwrap(restarted.localDraftDestination(for: staleRow))
+        guard case .newChat(let reopened, let route) = destination else {
+            return XCTFail("Configured local identity must reopen through New Chat")
+        }
+        XCTAssertEqual(reopened.id, local.id)
+        XCTAssertNil(reopened.sessionId)
+        XCTAssertEqual(reopened.model, "Vendor/Model:Preview")
+        XCTAssertEqual(reopened.modelProvider, "Provider-B")
+        XCTAssertEqual(reopened.workspace, "/work/Exact Path")
+        XCTAssertNil(reopened.reasoningEffort, "Raw inherit must not revert to stale high effort")
+        XCTAssertEqual(route.profileName, "default")
+        XCTAssertTrue(route.initialDraft.isEmpty)
+        XCTAssertFalse(destination.loadsInitialMessages)
+        XCTAssertEqual(restarted.localDraftText(for: reopened), "unchanged")
+        let next = await restarted.createSession(profile: "default")
+        let fresh = try XCTUnwrap(next)
+        XCTAssertNotEqual(fresh.id, local.id)
+        XCTAssertNil(fresh.model)
+        XCTAssertNil(fresh.modelProvider)
+        XCTAssertNil(fresh.workspace)
+        XCTAssertNil(fresh.reasoningEffort)
+        XCTAssertEqual(restarted.localDraftText(for: fresh), "")
+        XCTAssertTrue(restarted.sessions.isEmpty)
+
+        restartedStore.retireLocalDraft(server: server, sessionID: reopened.id,
+            canonicalSessionID: "canonical-configured")
+        restartedStore.registerLocalDraft(reopened, server: server)
+        restartedStore.save("canonical follow-up", server: server, sessionID: reopened.id)
+        XCTAssertNil(restarted.localDraftDestination(for: staleRow))
+        let afterConsumption = SessionListViewModel(server: server, client: client,
+            composerDraftStore: ComposerDraftStore(defaults: defaults))
+        XCTAssertNil(afterConsumption.localDraftDestination(for: reopened))
+        XCTAssertTrue(afterConsumption.visibleLocalDrafts(searchText: "", selectedProjectID: nil).isEmpty)
+        XCTAssertEqual(restartedStore.load(server: server, sessionID: "canonical-configured"), "canonical follow-up")
+    }
+
+    @MainActor
+    func testImportedDraftConfigurationRemainsDistinctOnReconstructedRoutesAndImportTextWins() async throws {
+        let suite = "ConfiguredImportedDraftRouting.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let server = URL(staticString: "https://configured-import.example")
+        let client = makeClient { request in
+            XCTFail("Imported local draft routing must not request \(request.url?.path ?? "nil")")
+            throw URLError(.badURL)
+        }
+        let store = ComposerDraftStore(defaults: defaults)
+        let original = SessionListViewModel(server: server, client: client, composerDraftStore: store)
+        let ordinaryCreated = await original.createSession(profile: "default")
+        let importedCreated = await original.createSession(profile: "default")
+        let ordinary = try XCTUnwrap(ordinaryCreated)
+        let imported = try XCTUnwrap(importedCreated)
+        store.registerLocalDraft(SessionSummary(localDraftID: ordinary.id, workspace: "/ordinary",
+            model: "same-model", modelProvider: "provider-A", reasoningEffort: "high", profile: "default"), server: server)
+        store.save("ordinary text", server: server, sessionID: ordinary.id)
+        store.registerLocalDraft(SessionSummary(localDraftID: imported.id, workspace: "/imported",
+            model: "same-model", modelProvider: "provider-B", reasoningEffort: nil, profile: "default"), server: server)
+        store.save("older stored text", server: server, sessionID: imported.id)
+        let importRoute = PendingNewChatRoute(initialDraft: "  shared/intent text\n", profileName: "default")
+        store.save(ComposerDraftStore.resolvedDraft(initialDraft: importRoute.initialDraft,
+            storedDraft: store.load(server: server, sessionID: imported.id)), server: server, sessionID: imported.id)
+
+        let restartedStore = ComposerDraftStore(defaults: defaults)
+        let restarted = SessionListViewModel(server: server, client: client, composerDraftStore: restartedStore)
+        XCTAssertNotEqual(ordinary.id, imported.id)
+        XCTAssertEqual(Set(restarted.visibleLocalDrafts(searchText: "", selectedProjectID: nil).map(\.id)),
+            Set([ordinary.id, imported.id]))
+        for (draft, provider, workspace, effort, text) in [
+            (ordinary, "provider-A", "/ordinary", Optional("high"), "ordinary text"),
+            (imported, "provider-B", "/imported", nil, "  shared/intent text\n")
+        ] {
+            let destination = try XCTUnwrap(restarted.localDraftDestination(for: draft))
+            guard case .newChat(let reopened, let route) = destination else {
+                return XCTFail("Each draft must retain its own local destination")
+            }
+            XCTAssertEqual(reopened.id, draft.id)
+            XCTAssertEqual(reopened.model, "same-model")
+            XCTAssertEqual(reopened.modelProvider, provider)
+            XCTAssertEqual(reopened.workspace, workspace)
+            XCTAssertEqual(reopened.reasoningEffort, effort)
+            XCTAssertTrue(route.initialDraft.isEmpty)
+            XCTAssertEqual(restarted.localDraftText(for: reopened), text)
+        }
+        XCTAssertTrue(restartedStore.reachableLocalDrafts(server: server, profile: "work").isEmpty)
+        XCTAssertTrue(restarted.sessions.isEmpty)
+    }
+
+    @MainActor
+    func testDepartedNewChatIsReachableAndReopensExactLocalIdentityAndComposer() async throws {
+        let suite = "ReachableDraftRouting.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = ComposerDraftStore(defaults: defaults)
+        let server = URL(staticString: "https://draft-routing.example")
+        let client = makeClient { request in
+            XCTFail("Local draft routing must not request \(request.url?.path ?? "nil")")
+            throw URLError(.badURL)
+        }
+        let model = SessionListViewModel(server: server, client: client, composerDraftStore: store)
+        let created = await model.createSession(profile: "default")
+        let session = try XCTUnwrap(created)
+        var navigation = SessionNavigationState()
+        let newRoute = PendingNewChatRoute(profileName: "default")
+        XCTAssertTrue(navigation.beginNewChatCreation(newRoute))
+        XCTAssertTrue(navigation.completeNewChatCreation(session, for: newRoute))
+        // ChatView persists on debounce and disappearance using this exact key.
+        store.save("unfinished message\nsecond line", server: server, sessionID: session.sessionId ?? session.id)
+        navigation.clearDestination()
+
+        let reachable = try XCTUnwrap(model.visibleLocalDrafts(searchText: "", selectedProjectID: nil).first)
+        XCTAssertEqual(reachable.id, session.id)
+        let destination = try XCTUnwrap(model.localDraftDestination(for: reachable))
+        guard case .newChat(let reopened, let route) = destination else {
+            return XCTFail("A saved local draft must use the existing New Chat destination")
+        }
+        XCTAssertFalse(destination.loadsInitialMessages, "Reopen must not fetch a transcript for a local ID")
+        XCTAssertTrue(route.initialDraft.isEmpty, "Restore uses the store rather than an imported-text override")
+        XCTAssertFalse(route.autoStartsVoiceInput)
+        XCTAssertTrue(navigation.beginNewChatCreation(route))
+        XCTAssertTrue(navigation.completeNewChatCreation(reopened, for: route))
+        XCTAssertEqual(reopened.id, session.id)
+        XCTAssertNil(reopened.sessionId)
+        XCTAssertEqual(ComposerDraftStore.resolvedDraft(initialDraft: route.initialDraft,
+            storedDraft: store.load(server: server, sessionID: reopened.sessionId ?? reopened.id)), "unfinished message\nsecond line")
+        XCTAssertTrue(model.sessions.isEmpty, "Local drafts never enter canonical or cached server rows")
+        XCTAssertEqual(model.visibleLocalDrafts(searchText: "SECOND", selectedProjectID: nil).map(\.id), [session.id])
+        XCTAssertTrue(model.visibleLocalDrafts(searchText: "", selectedProjectID: "group").isEmpty)
+    }
+
+    @MainActor
+    func testReachableDraftRoutingSurvivesModelReconstructionAndNewChatRemainsFresh() async throws {
+        let suite = "ReachableDraftRestart.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let server = URL(staticString: "https://draft-restart.example")
+        let client = makeClient { request in
+            XCTFail("Reconstruction must not request \(request.url?.path ?? "nil")")
+            throw URLError(.badURL)
+        }
+        let store = ComposerDraftStore(defaults: defaults)
+        var original: SessionListViewModel? = SessionListViewModel(server: server, client: client, composerDraftStore: store)
+        let created = await original?.createSession(profile: "default")
+        let first = try XCTUnwrap(created)
+        store.save("saved before restart", server: server, sessionID: first.id)
+        original = nil
+        let restoredStore = ComposerDraftStore(defaults: defaults)
+        let restoredModel = SessionListViewModel(server: server, client: client, composerDraftStore: restoredStore)
+        let row = try XCTUnwrap(restoredModel.visibleLocalDrafts(searchText: "", selectedProjectID: nil).first)
+        XCTAssertEqual(row.id, first.id)
+        XCTAssertNotNil(restoredModel.localDraftDestination(for: row))
+        XCTAssertEqual(restoredModel.localDraftText(for: row), "saved before restart")
+        let next = await restoredModel.createSession(profile: "default")
+        let fresh = try XCTUnwrap(next)
+        XCTAssertNotEqual(fresh.id, first.id)
+        XCTAssertEqual(restoredStore.load(server: server, sessionID: fresh.id), "")
+        XCTAssertEqual(restoredModel.visibleLocalDrafts(searchText: "", selectedProjectID: nil).map(\.id), [first.id])
+        restoredStore.save("", server: server, sessionID: first.id)
+        XCTAssertTrue(restoredModel.visibleLocalDrafts(searchText: "", selectedProjectID: nil).isEmpty)
+        XCTAssertNil(restoredModel.localDraftDestination(for: row), "A stale row must not reopen a cleared/sent draft")
+    }
+
+    @MainActor
+    func testImportedAndOrdinaryDraftsRemainDistinctAndProfileSwitchScopesRouting() async throws {
+        let suite = "ReachableDraftScopes.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = ComposerDraftStore(defaults: defaults)
+        let server = URL(staticString: "https://draft-scopes.example")
+        let client = makeClient { request in
+            if request.url?.path == "/api/profiles" {
+                return apiTestJSONResponse(#"{"profiles":[{"name":"default","is_default":true},{"name":"work"}],"active":"default","single_profile_mode":false}"#, for: request)
+            }
+            XCTFail("Draft routing/profile selection must not create or resume a server session")
+            throw URLError(.badURL)
+        }
+        let model = SessionListViewModel(server: server, client: client, composerDraftStore: store)
+        let createdOrdinary = await model.createSession(profile: NewChatRequest.defaultChat().profileName)
+        let ordinary = try XCTUnwrap(createdOrdinary)
+        store.save("ordinary text", server: server, sessionID: ordinary.id)
+        let importRoute = PendingNewChatRoute(initialDraft: "shared text", profileName: "default")
+        let createdImport = await model.createSession(profile: importRoute.profileName)
+        let imported = try XCTUnwrap(createdImport)
+        store.save(ComposerDraftStore.resolvedDraft(initialDraft: importRoute.initialDraft,
+            storedDraft: store.load(server: server, sessionID: imported.id)), server: server, sessionID: imported.id)
+        XCTAssertNotEqual(ordinary.id, imported.id)
+        XCTAssertEqual(Set(model.visibleLocalDrafts(searchText: "", selectedProjectID: nil).map(\.id)), Set([ordinary.id, imported.id]))
+        XCTAssertEqual(model.localDraftText(for: ordinary), "ordinary text")
+        XCTAssertEqual(model.localDraftText(for: imported), "shared text")
+        let createdWork = await model.createSession(profile: "work")
+        let workDraft = try XCTUnwrap(createdWork)
+        store.save("work text", server: server, sessionID: workDraft.id)
+        let otherModel = SessionListViewModel(server: URL(staticString: "https://other-draft-scopes.example"),
+            client: client, composerDraftStore: store)
+        XCTAssertTrue(otherModel.visibleLocalDrafts(searchText: "", selectedProjectID: nil).isEmpty)
+        XCTAssertNil(otherModel.localDraftDestination(for: ordinary))
+        await model.loadActiveProfile()
+        let workProfile = try XCTUnwrap(model.profileOptions.first { $0.name == "work" })
+        let switched = await model.switchActiveProfile(workProfile)
+        XCTAssertTrue(switched)
+        XCTAssertEqual(model.visibleLocalDrafts(searchText: "", selectedProjectID: nil).map(\.id), [workDraft.id])
+        XCTAssertNil(model.localDraftDestination(for: ordinary))
+        XCTAssertNotNil(model.localDraftDestination(for: workDraft))
+        store.clear(server: server, sessionID: workDraft.id)
+        XCTAssertTrue(model.visibleLocalDrafts(searchText: "", selectedProjectID: nil).isEmpty)
+        XCTAssertEqual(store.load(server: server, sessionID: ordinary.id), "ordinary text")
+        XCTAssertEqual(store.load(server: server, sessionID: imported.id), "shared text")
+    }
+
+    @MainActor
     func testSidebarLoadWaitsForNonDefaultActiveProfileBeforeFirstSessionRequest() async throws {
         var requestedPaths: [String] = []
         var requestedSessionProfiles: [String] = []
@@ -154,6 +387,26 @@ final class SessionListDirectTests: APIClientTestCase {
         XCTAssertTrue(viewModel.sessions.isEmpty)
         XCTAssertNil(viewModel.lastError)
         XCTAssertNil(viewModel.actionErrorMessage)
+    }
+
+    @MainActor
+    func testGenericDefaultDraftDoesNotUseNonDefaultRunningProfileOrCreateRuntime() async throws {
+        let client = makeClient { request in
+            if request.url?.path == "/api/profiles" {
+                return apiTestJSONResponse(#"{"profiles":[{"name":"default","is_default":true},{"name":"work"}],"active":"work","single_profile_mode":false}"#, for: request)
+            }
+            XCTFail("Local Default draft must not create a runtime or query another endpoint")
+            throw URLError(.badURL)
+        }
+        let viewModel = SessionListViewModel(server: URL(staticString: "https://example.test"), client: client)
+        await viewModel.loadActiveProfile()
+        XCTAssertEqual(viewModel.activeProfileName, "work")
+        let request = NewChatRequest.defaultChat()
+        let created = await viewModel.createSession(profile: request.profileName)
+        let draft = try XCTUnwrap(created)
+        XCTAssertNil(draft.sessionId)
+        XCTAssertEqual(draft.profile, "default")
+        XCTAssertEqual(viewModel.activeProfileName, "work", "Opening a Default draft must not switch the running sidebar scope")
     }
 
     @MainActor

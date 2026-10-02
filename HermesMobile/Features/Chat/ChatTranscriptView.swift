@@ -84,6 +84,7 @@ final class ChatWarmReaderSettlement {
     private var deliveredRequests: [ChatTranscriptRestoreRequest] = []
     private var completion: ((ChatTranscriptRestoreOutcome) -> Void)?
     private var expiryTask: Task<Void, Never>?
+    private var completionGeneration = 0
     var corrections = 0
     var attachmentSample: ChatInitialMeasuredTarget?
 
@@ -112,6 +113,7 @@ final class ChatWarmReaderSettlement {
     func bind(_ request: ChatTranscriptRestoreRequest,
               completion: @escaping (ChatTranscriptRestoreOutcome) -> Void) {
         guard !hasDelivered(request) else { return }
+        completionGeneration &+= 1
         self.request = request
         self.completion = completion
         publishIfNeeded()
@@ -151,6 +153,32 @@ final class ChatWarmReaderSettlement {
         outcome = outcome ?? .cancelled
         publishIfNeeded()
         completion = nil
+    }
+
+    /// Producer-side withdrawal cannot call the SwiftUI completion. The owner
+    /// retains this inactive settlement until a drain or safe lifecycle cancel.
+    func cancelFromProducer() {
+        guard isActive else { return }
+        isActive = false
+        expiryTask?.cancel()
+        expiryTask = nil
+        outcome = outcome ?? .cancelled
+        let ticket = completionGeneration
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.completionGeneration == ticket else { return }
+            self.publishIfNeeded()
+        }
+    }
+
+    /// Shared production completion boundary: stale requests/scopes must not
+    /// clear a new restore's SwiftUI or parent ownership.
+    func bindRestoreCompletion(_ request: ChatTranscriptRestoreRequest,
+                               isCurrent: @escaping () -> Bool,
+                               complete: @escaping (ChatTranscriptRestoreOutcome) -> Void) {
+        bind(request) { outcome in
+            guard isCurrent() else { return }
+            complete(outcome)
+        }
     }
 
     func hasDelivered(_ request: ChatTranscriptRestoreRequest) -> Bool {
@@ -476,7 +504,6 @@ enum ChatTranscriptReasoningMergePolicy {
     }
 }
 
-#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
 /// One preparation bundle for the exact filtered snapshot. Never stores row
 /// content or rendering callbacks; unscoped callers have no revision contract.
 final class ChatNativeTranscriptMetadataCache {
@@ -521,12 +548,11 @@ final class ChatNativeTranscriptMetadataCache {
         return metadata
     }
 }
-#endif
 
 /// Preference and UIKit metrics arrive at frame/layout frequency. Keep their
 /// small amount of bookkeeping in a stable reference so recording an anchor
 /// does not invalidate the entire transcript body on every sample.
-private final class ChatTranscriptViewportTracker {
+final class ChatTranscriptViewportTracker {
     struct RenderKey: Equatable {
         let scope: UUID?
         let revision: Int
@@ -547,10 +573,8 @@ private final class ChatTranscriptViewportTracker {
     var viewportHeight: CGFloat = 0
     var activationRecoveryState = ChatTranscriptActivationRecoveryState()
     var latestFrames: [String: CGRect] = [:]
-#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
     var renderedGeneration = 0
     let nativeMetadataCache = ChatNativeTranscriptMetadataCache()
-#endif
 #if DEBUG
     var diagnosticRowHeights: [String: CGFloat] = [:]
     var lastViewportDiagnosticAt: TimeInterval = 0
@@ -572,6 +596,27 @@ private final class ChatTranscriptViewportTracker {
     var hasPendingMeasuredLayoutGrowth = false
     var measuredLayoutFollowTask: Task<Void, Never>?
     var measuredLayoutFollowGeneration = 0
+    /// Only non-observable ownership is changed at a producer callback.
+    /// Keep growth/baseline/rate limiting for the next permitted follow.
+    @MainActor
+    func cancelCorrectionsFromProducer(restoreTask: Task<Void, Never>?) {
+        restoreTask?.cancel()
+        withdrawMeasuredLayoutFollow()
+        warmReaderSettlement?.cancelFromProducer()
+    }
+
+    func withdrawMeasuredLayoutFollow() {
+        measuredLayoutFollowGeneration &+= 1
+        measuredLayoutFollowTask?.cancel()
+        measuredLayoutFollowTask = nil
+    }
+
+    func finishMeasuredLayoutFollow(generation: Int) -> Bool {
+        guard generation == measuredLayoutFollowGeneration else { return false }
+        measuredLayoutFollowTask = nil
+        return true
+    }
+
     var measuredLayoutFollowNextAllowedAt: Date?
     var pendingOlderMessagesReconciliation = ChatTranscriptPagingReconciliationState()
     var olderMessagesSettlementExpiryTask: Task<Void, Never>?
@@ -586,7 +631,7 @@ private final class ChatTranscriptViewportTracker {
     var pendingAnchorCorrectionReapplicationCount = 0
 #if DEBUG
     var pagingEvidenceSequence = 0
-    var pendingPagingEvidence: ChatTranscriptPagingDebugEvidence?
+    fileprivate var pendingPagingEvidence: ChatTranscriptPagingDebugEvidence?
     /// Boundary diagnostics are reset for each paging sequence and capped by
     /// the view's small reason set. They never participate in row layout.
     var pendingAnchorDiagnosticKeys = Set<String>()
@@ -843,6 +888,70 @@ extension Notification.Name {
 }
 #endif
 
+/// Bridges token-only callers to the measured owner. This lease is deliberately
+/// non-observable: native layout queues its outcome before any legacy callback.
+@MainActor
+private final class ChatMeasuredLegacyRestoreAdapter {
+    private struct Token: Equatable {
+        let scope: String
+        let generation: Int
+    }
+    private var token: Token?
+    private var target: ChatTranscriptRestoreTarget?
+    private var typedToken: Token?
+    private var request: ChatTranscriptRestoreRequest?
+    private var cancellationToken = 0
+    private var retired = false
+    private var completed = false
+    private var isActive = false
+    var isMounted = false
+    var isPending: Bool { request != nil && !retired && !completed }
+
+    func prepare(scope: String, generation: Int, target: ChatTranscriptRestoreTarget,
+                 typedRequest: ChatTranscriptRestoreRequest?, cancellationToken: Int,
+                 isActive: Bool, isInteracting: Bool, explicitLatest: Bool) -> ChatTranscriptRestoreRequest? {
+        let next = Token(scope: scope, generation: generation)
+        if token != next {
+            token = next
+            self.target = target
+            request = nil
+            retired = false
+            completed = false
+        } else if self.cancellationToken != cancellationToken || self.target != target {
+            // A new target needs a new token, just as in the legacy onChange
+            // producer. Withdraw the old target without replaying this token.
+            retired = true
+        }
+        self.cancellationToken = cancellationToken
+        self.isActive = isActive
+        if !isActive || isInteracting || explicitLatest { retired = true }
+        if let typedRequest {
+            typedToken = next
+            request = nil
+            return typedRequest
+        }
+        // Clearing a completed typed request is its parent's acknowledgement,
+        // not permission to replay the same token through the legacy contract.
+        guard generation > 0, typedToken != next, !retired else { return nil }
+        if request == nil {
+            request = .init(scope: UUID(), generation: generation, target: target)
+        }
+        return request
+    }
+
+    func cancel() { retired = true }
+
+    func fallback(for delivered: ChatTranscriptRestoreRequest,
+                  outcome: ChatTranscriptRestoreOutcome) -> String? {
+        guard isMounted, isActive, !retired, !completed, delivered == request else { return nil }
+        completed = true
+        // Unavailable stays unavailable. Only the legacy caller gets its one
+        // bounded, nonanimated attempt; a loaded row never uses the proxy.
+        guard outcome == .unavailable, case .message(let id) = delivered.target else { return nil }
+        return id
+    }
+}
+
 struct ChatTranscriptView: View, Equatable {
 #if DEBUG
     @Environment(\.chatTranscriptRestoreProbe) private var restoreProbe
@@ -909,6 +1018,7 @@ struct ChatTranscriptView: View, Equatable {
     let shouldRenderMessageRow: (ChatMessage) -> Bool
     let onLoadMessages: () async -> Void
     let onLoadOlderMessages: (ChatTranscriptOlderLoadIntent, @MainActor () -> Bool) async -> ChatTranscriptOlderLoadResult
+    var scrollMetricPublication = ChatScrollMetricPublication()
     let onUpdateScrollMetrics: (ChatScrollMetrics) -> Void
     let onDismissKeyboard: () -> Void
     let onScrollToBottom: (ScrollViewProxy, Bool, Bool, Bool) -> Void
@@ -956,6 +1066,8 @@ struct ChatTranscriptView: View, Equatable {
     @State private var insertionLedger = OutgoingInsertionLedger()
 
     @State private var viewportTracker = ChatTranscriptViewportTracker()
+    @State private var unscopedViewportIdentity = UUID()
+    @State private var measuredLegacyRestore = ChatMeasuredLegacyRestoreAdapter()
     @State private var restoreSettlementTask: Task<Void, Never>?
     @State private var restoreSettlementState = ChatTranscriptRestoreState()
     @State private var hasCompletedInitialRestore = false
@@ -1006,9 +1118,7 @@ struct ChatTranscriptView: View, Equatable {
         // Scroll and window state can reevaluate this view without changing
         // transcript data. Keep the filtered rows in the non-observable tracker;
         // the model's render revision covers message and accessory mutations.
-#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
         viewportTracker.renderedGeneration &+= 1
-#endif
         viewportTracker.renderedMessages = rows
         viewportTracker.renderedKey = key
         return rows
@@ -1196,8 +1306,9 @@ struct ChatTranscriptView: View, Equatable {
             isSceneActive: scenePhase == .active,
             isRestoreCancelled: restoreSettlementState.isCancelled,
             isDirectlyInteracting: isUserInteractingWithScroll
-                || viewportTracker.scrollView?.isDragging == true
-                || viewportTracker.scrollView?.isTracking == true
+                || scrollMetricPublication.hasPendingDirectInteraction
+                || (scrollMetricPublication.attachedScrollView ?? viewportTracker.scrollView)?.isDragging == true
+                || (scrollMetricPublication.attachedScrollView ?? viewportTracker.scrollView)?.isTracking == true
         ) else {
             return false
         }
@@ -1258,14 +1369,19 @@ struct ChatTranscriptView: View, Equatable {
                 nonNativeTranscript
             }
 #else
-            transcriptScrollView
+            measuredTranscriptViewport
 #endif
         }
         }
-        .onAppear { insertionLedger.mount(scope: outgoingInsertionScope, through: outgoingInsertionEvent?.sequence ?? 0) }
+        .onAppear {
+            scrollMetricPublication.resume()
+            insertionLedger.mount(scope: outgoingInsertionScope, through: outgoingInsertionEvent?.sequence ?? 0)
+        }
         .onDisappear {
+            scrollMetricPublication.flush()
+            scrollMetricPublication.suspend()
             insertionLedger.unmount()
-            guard !nativeTranscriptV2Enabled else { return }
+            guard !usesMeasuredTranscriptViewport else { return }
             cancelWarmReader(clearPoint: false)
             clearPendingOlderMessagesAnchor(reason: "disappear")
             invalidateMeasuredLayoutFollow()
@@ -1274,12 +1390,14 @@ struct ChatTranscriptView: View, Equatable {
 #endif
         }
         .onChange(of: warmReaderMemory?.scope) { _, _ in
-            guard !nativeTranscriptV2Enabled else { return }
+            guard !usesMeasuredTranscriptViewport else { return }
+            scrollMetricPublication.invalidate()
             cancelWarmReader(clearPoint: true)
         }
         .onChange(of: outgoingInsertionScope) { _, scope in
             insertionLedger.mount(scope: scope, through: outgoingInsertionEvent?.sequence ?? 0)
-            guard !nativeTranscriptV2Enabled else { return }
+            guard !usesMeasuredTranscriptViewport else { return }
+            scrollMetricPublication.invalidate()
             viewportTracker.initialMeasuredTarget = nil
             viewportTracker.initialMeasuredAlignmentToken = nil
             invalidateMeasuredLayoutFollow()
@@ -1287,7 +1405,8 @@ struct ChatTranscriptView: View, Equatable {
         }
         .onChange(of: restoreScrollToken) { _, _ in
             insertionLedger.discardPending(through: outgoingInsertionEvent?.sequence ?? 0)
-            guard !nativeTranscriptV2Enabled else { return }
+            guard !usesMeasuredTranscriptViewport else { return }
+            scrollMetricPublication.invalidate()
             viewportTracker.initialMeasuredTarget = nil
             viewportTracker.initialMeasuredAlignmentToken = nil
             invalidateMeasuredLayoutFollow()
@@ -1299,7 +1418,7 @@ struct ChatTranscriptView: View, Equatable {
         }
         .onChange(of: shouldFollowLatestMessage) { _, follows in
             if !follows { insertionLedger.discardPending(through: outgoingInsertionEvent?.sequence ?? 0) }
-            guard !nativeTranscriptV2Enabled else { return }
+            guard !usesMeasuredTranscriptViewport else { return }
             if follows {
                 cancelWarmReader(clearPoint: true)
                 // Latest-follow ownership supersedes an unresolved older-page
@@ -1314,7 +1433,7 @@ struct ChatTranscriptView: View, Equatable {
             }
         }
         .onChange(of: isUserInteractingWithScroll) { _, isInteracting in
-            guard !nativeTranscriptV2Enabled else { return }
+            guard !usesMeasuredTranscriptViewport else { return }
             if isInteracting {
                 cancelWarmReader(clearPoint: false)
                 invalidateMeasuredLayoutFollow()
@@ -1325,13 +1444,13 @@ struct ChatTranscriptView: View, Equatable {
             }
         }
         .onChange(of: isLoadingOlderMessages) { _, isLoading in
-            guard !nativeTranscriptV2Enabled else { return }
+            guard !usesMeasuredTranscriptViewport else { return }
             if isLoading {
                 invalidateMeasuredLayoutFollow()
             }
         }
         .onChange(of: outgoingInsertionEvent) { _, event in
-            let restoring = nativeTranscriptV2Enabled ? initialRestoreRequest != nil
+            let restoring = usesMeasuredTranscriptViewport ? initialRestoreRequest != nil
                 : (restoreSettlementTask != nil || isInitialRestoreInProgress)
             if !shouldFollowLatestMessage || restoring {
                 insertionLedger.discardPending(through: event?.sequence ?? 0)
@@ -1351,11 +1470,30 @@ struct ChatTranscriptView: View, Equatable {
                 && (ProcessInfo.processInfo.arguments.contains("--chat-performance-tall-lab")
                     || ProcessInfo.processInfo.arguments.contains("--chat-performance-lab"))) {
             prototypeTranscript
-        } else {
+        } else if boundedWindowEnabled {
+            // Preserve the explicitly requested diagnostic layout experiment.
             transcriptScrollView
+        } else {
+            measuredTranscriptViewport
         }
 #else
-        transcriptScrollView
+        measuredTranscriptViewport
+#endif
+    }
+
+    /// Row rendering remains selected by internalChatRendererEnabled. This
+    /// policy selects only realization/geometry, consistently for every source
+    /// size, so crossing a row count never replaces the viewport or its IDs.
+    private var usesMeasuredTranscriptViewport: Bool {
+#if DEBUG
+        if nativeTranscriptV2Enabled { return true }
+        let arguments = ProcessInfo.processInfo.arguments
+        let lab = arguments.contains("--chat-performance-lab") || arguments.contains("--chat-performance-tall-lab")
+        return !boundedWindowEnabled && !(arguments.contains("--native-baseline") && lab)
+            && !arguments.contains("--chat-stable-viewport")
+            && !(arguments.contains("--chat-viewport-prototype") && lab)
+#else
+        return true
 #endif
     }
 
@@ -1369,17 +1507,45 @@ struct ChatTranscriptView: View, Equatable {
 #endif
     }
 
-#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
     private var nativeTranscriptScope: String {
         if let scope = warmReaderMemory?.scope {
             return "\(scope.server.absoluteString)|\(scope.profile)|\(scope.sessionID)"
         }
-        return "\(transcriptMediaCacheNamespace)|\(outgoingInsertionScope?.uuidString ?? "unscoped")"
+        return "\(transcriptMediaCacheNamespace)|\(outgoingInsertionScope?.uuidString ?? unscopedViewportIdentity.uuidString)"
     }
 
-    private var nativeTranscriptV2: some View {
+    private var nativeTranscriptV2: some View { measuredTranscriptViewport }
+
+    // UICollectionView realizes a viewport-sized set of the exact production
+    // SwiftUI rows, not a native-rich substitute or an eager full-history host.
+    private var measuredTranscriptViewport: some View {
+        ScrollViewReader { proxy in
+            measuredTranscriptViewport(proxy: proxy)
+        }
+        .onAppear { measuredLegacyRestore.isMounted = true }
+        .onDisappear {
+            measuredLegacyRestore.isMounted = false
+            measuredLegacyRestore.cancel()
+        }
+        .simultaneousGesture(
+            TapGesture().onEnded {
+                guard clarificationPrompt == nil else { return }
+                onDismissKeyboard()
+            }
+        )
+    }
+
+    private func measuredTranscriptViewport(proxy: ScrollViewProxy) -> some View {
         let rows = allRenderedTranscriptMessages
         let scope = nativeTranscriptScope
+        let restoreRequest = measuredLegacyRestore.prepare(
+            scope: scope, generation: restoreScrollToken, target: restoreTarget,
+            typedRequest: initialRestoreRequest, cancellationToken: transcriptRestoreCancellationToken,
+            isActive: scenePhase == .active,
+            isInteracting: isUserInteractingWithScroll || scrollMetricPublication.hasPendingDirectInteraction,
+            explicitLatest: hasExplicitBottomScrollRequest
+        )
+        let isRestoring = initialRestoreRequest != nil || measuredLegacyRestore.isPending
         let metadata = viewportTracker.nativeMetadataCache.metadata(
             for: .init(
                 renderedGeneration: viewportTracker.renderedGeneration,
@@ -1407,7 +1573,7 @@ struct ChatTranscriptView: View, Equatable {
                     outgoingInsertionEvent: outgoingInsertionEvent?.messageID == row.message.id ? outgoingInsertionEvent : nil,
                     allowsOutgoingMotion: ChatTranscriptRestorePolicy.shouldAllowOutgoingInsertionMotion(
                         shouldFollowLatestMessage: shouldFollowLatestMessage,
-                        isRestoreInProgress: initialRestoreRequest != nil
+                        isRestoreInProgress: isRestoring
                     ),
                     reasoningGroups: reasoningGroupsForAnchor(row.anchorID),
                     toolCallGroups: completedToolCallGroupsForAnchor(row.anchorID),
@@ -1428,10 +1594,10 @@ struct ChatTranscriptView: View, Equatable {
                 )
             },
             revision: transcriptRenderRevision,
-            typeKey: "\(dynamicTypeSize)|\(colorScheme)|wrap:\(wrapsCodeBlockLines)",
+            typeKey: "renderer:\(internalChatRendererEnabled)|\(dynamicTypeSize)|\(colorScheme)|wrap:\(wrapsCodeBlockLines)",
             scope: scope,
             initialID: initialRestoreMessageID,
-            restoreRequest: initialRestoreRequest,
+            restoreRequest: restoreRequest,
             cancellationToken: transcriptRestoreCancellationToken,
             latestToken: followRejoinScrollToken,
             explicitLatest: hasExplicitBottomScrollRequest,
@@ -1460,8 +1626,9 @@ struct ChatTranscriptView: View, Equatable {
             makeHeader: {
                 AnyView(VStack(alignment: .leading, spacing: transcriptBlockSpacing) {
                     if hasOlderMessages {
-                        Text(isLoadingOlderMessages ? "Loading earlier messages…" : "Pull down to load earlier messages")
-                            .font(.caption).foregroundStyle(.secondary)
+                        LoadOlderMessagesButton(isLoading: isLoadingOlderMessages) {
+                            NotificationCenter.default.post(name: .semrehTranscriptLoadOlder, object: nativeTranscriptScope)
+                        }
                     }
                     if let compressionReferenceCard, compressionReferenceCard.afterRenderID == nil {
                         compressionReferenceCardView(compressionReferenceCard)
@@ -1478,13 +1645,30 @@ struct ChatTranscriptView: View, Equatable {
                     inlineCommitButton
                 })
             },
-            onLatest: onStableViewportJumpToLatest,
+            onLatest: {
+                measuredLegacyRestore.cancel()
+                onStableViewportJumpToLatest()
+            },
             onState: { metrics, visibleID, latestVisible, bottomVisible in
+                if metrics.isDirectlyInteracting { measuredLegacyRestore.cancel() }
                 onUpdateScrollMetrics(metrics)
                 onVisibleTranscriptRowIDChange(visibleID)
                 onTranscriptTailVisibilityChange(latestVisible, bottomVisible)
             },
-            onRestore: onInitialRestoreOutcome,
+            onRestore: { request, outcome in
+                if initialRestoreRequest == request {
+                    onInitialRestoreOutcome(request, outcome)
+                } else if let id = measuredLegacyRestore.fallback(for: request, outcome: outcome) {
+                    onScrollToTranscriptMessage(proxy, id, false)
+                }
+            },
+            metricPublication: scrollMetricPublication,
+            allowsAutomaticPaging: isPagingStartupReady && hasOlderMessages
+                && !isLoadingOlderMessages && initialRestoreRequest == nil,
+            onOlder: { intent, isCurrent in
+                guard hasOlderMessages, !isLoadingOlderMessages else { return false }
+                return await onLoadOlderMessages(intent, isCurrent) == .progress
+            },
             onRefresh: { isCurrent in
                 if hasOlderMessages {
                     _ = await onLoadOlderMessages(.explicitUserRequest, isCurrent)
@@ -1494,7 +1678,6 @@ struct ChatTranscriptView: View, Equatable {
             }
         )
     }
-#endif
 
 #if DEBUG
     private var nativeBaselineTranscript: some View {
@@ -1575,7 +1758,7 @@ struct ChatTranscriptView: View, Equatable {
             },
             nativeRichDark: colorScheme == .dark, nativeRichWrapsCodeLines: wrapsCodeBlockLines,
             nativePromptFillHex: SemrehVisualTheme.promptBubbleBackgroundHex(for: colorScheme, palette: nativeViewportPalette, accent: nativeViewportAccent),
-            nativePromptForegroundHex: SemrehVisualTheme.promptBubbleForegroundHex(for: nativeViewportPalette, accent: nativeViewportAccent),
+            nativePromptForegroundHex: SemrehVisualTheme.promptBubbleForegroundHex(for: nativeViewportPalette, colorScheme: colorScheme, accent: nativeViewportAccent),
             nativePromptBorderHex: SemrehVisualTheme.promptBubbleBorderHex(for: colorScheme, palette: nativeViewportPalette, accent: nativeViewportAccent),
             onDirectSelectText: { index in
                 let row = rows[index]
@@ -1762,6 +1945,7 @@ struct ChatTranscriptView: View, Equatable {
                                        scrollView.isDecelerating {
                                         scrollView.setContentOffset(scrollView.contentOffset, animated: false)
                                     }
+                                    let latestDecision = scrollMetricPublication.beginLatestDecision()
                                     cancelTranscriptRestore(reason: "explicit_bottom")
                                     var sameMountedWindow = false
 #if DEBUG
@@ -1778,15 +1962,18 @@ struct ChatTranscriptView: View, Equatable {
                                         }
                                         debugWindowParkedOlder = false
                                         if current != tail {
+                                            let nextWindow = debugWindowGeneration &+ 1
+                                            scrollMetricPublication.expectLatestReplacement(
+                                                latestDecision,
+                                                context: legacyScrollMetricContext(windowGeneration: nextWindow)
+                                            ) {
+                                                onScrollToBottom(proxy, false, false, false)
+                                            }
                                             debugWindowRange = tail
-                                            debugWindowGeneration &+= 1
+                                            debugWindowGeneration = nextWindow
                                             Self.activationRecoveryLogger.debug(
                                                 "event=debug_window_tail decision=explicit_arrow total=\(count, privacy: .public) start=\(tail.lowerBound, privacy: .public)"
                                             )
-                                            Task { @MainActor in
-                                                await Task.yield()
-                                                onScrollToBottom(proxy, false, false, false)
-                                            }
                                             return
                                         }
                                     }
@@ -1835,6 +2022,7 @@ struct ChatTranscriptView: View, Equatable {
                 }
                 .onChange(of: scenePhase) { _, phase in
                     guard phase == .active else {
+                        scrollMetricPublication.invalidate()
                         restoreSettlementState.invalidateVisibilityEvidence()
                         if ownedInitialRestoreRequest != nil || restoreSettlementTask != nil {
                             cancelTranscriptRestore(reason: "scene_inactive")
@@ -1958,6 +2146,7 @@ struct ChatTranscriptView: View, Equatable {
                     applyTranscriptRestore(proxy, viewportHeight: viewport.size.height)
                 }
                 .onChange(of: transcriptRestoreCancellationToken) {
+                    scrollMetricPublication.invalidate()
                     cancelTranscriptRestore(reason: "cancellation_token")
                 }
                 .onChange(of: hasExplicitBottomScrollRequest) { _, active in
@@ -2154,7 +2343,11 @@ struct ChatTranscriptView: View, Equatable {
                         frames: frames.filter { $0.key != bottomAnchorID },
                         viewportHeight: viewport.size.height
                     )
-                    let isScrollViewAttached = viewportTracker.scrollView?.window != nil
+                    // The observer may already be attached while its queued
+                    // ready callback has not published the viewport reference.
+                    // Judge this fresh preference against the real attachment.
+                    let observedScrollView = scrollMetricPublication.attachedScrollView ?? viewportTracker.scrollView
+                    let isScrollViewAttached = observedScrollView?.window != nil
 #if DEBUG
                     restoreProbe?.record("rows.preference first=\(visibleRow?.id ?? "nil") targetFrame=\(String(describing: initialRestoreMessageID.flatMap { frames[$0] })) attached=\(isScrollViewAttached) activeScene=\(scenePhase == .active) offset=\(String(describing: viewportTracker.scrollView?.contentOffset)) size=\(String(describing: viewportTracker.scrollView?.contentSize)) completed=\(hasCompletedInitialRestore) observed=\(hasObservedInitialTargetGeometry)")
 #endif
@@ -2171,7 +2364,7 @@ struct ChatTranscriptView: View, Equatable {
                     )
 #endif
                     restoreSettlementState.recordVisibleMessageSample(
-                        visibleRow?.id, isAttachedToActiveScene: isAttachedToActiveScene
+                        visibleRow?.id, isAttachedToActiveScene: scenePhase == .active && isScrollViewAttached
                     )
                     confirmInitialRestoreTargetIfVisible(
                         visibleMessageID: visibleRow?.id,
@@ -2983,6 +3176,7 @@ struct ChatTranscriptView: View, Equatable {
 
     private var isMeasuredLayoutFollowAllowed: Bool {
         scenePhase == .active
+            && !scrollMetricPublication.hasPendingDirectInteraction
             && shouldFollowLatestMessage
             && !isUserInteractingWithScroll
             && !(viewportTracker.latestScrollMetrics?.isDirectlyInteracting ?? false)
@@ -3065,7 +3259,7 @@ struct ChatTranscriptView: View, Equatable {
                   generation == viewportTracker.measuredLayoutFollowGeneration
             else { return }
 
-            viewportTracker.measuredLayoutFollowTask = nil
+            guard viewportTracker.finishMeasuredLayoutFollow(generation: generation) else { return }
             guard viewportTracker.hasPendingMeasuredLayoutGrowth else { return }
 
             guard isMeasuredLayoutFollowAllowed else {
@@ -3103,9 +3297,7 @@ struct ChatTranscriptView: View, Equatable {
     }
 
     private func invalidateMeasuredLayoutFollow() {
-        viewportTracker.measuredLayoutFollowGeneration &+= 1
-        viewportTracker.measuredLayoutFollowTask?.cancel()
-        viewportTracker.measuredLayoutFollowTask = nil
+        viewportTracker.withdrawMeasuredLayoutFollow()
         viewportTracker.hasPendingMeasuredLayoutGrowth = false
         viewportTracker.layoutFollowState.reset()
         viewportTracker.measuredLayoutFollowNextAllowedAt = nil
@@ -3182,6 +3374,19 @@ struct ChatTranscriptView: View, Equatable {
             ZStack {
                 ChatScrollObserver(
                     isStreaming: activeStreamID != nil,
+                    publication: scrollMetricPublication,
+                    scope: outgoingInsertionScope,
+                    restoreToken: restoreScrollToken,
+                    cancellationToken: transcriptRestoreCancellationToken,
+                    latestToken: explicitBottomGeometryToken,
+                    readerScope: warmReaderMemory?.scope,
+                    transcriptIdentity: transcriptMediaCacheNamespace,
+                    windowGeneration: legacyScrollWindowGeneration,
+                    onDirectInteraction: {
+                        // Withdraw corrections now; terminal SwiftUI publication
+                        // belongs to the deferred settlement/lifecycle boundary.
+                        viewportTracker.cancelCorrectionsFromProducer(restoreTask: restoreSettlementTask)
+                    },
                     onMetrics: { metrics in
                         handleScrollMetrics(metrics)
                     },
@@ -3209,6 +3414,22 @@ struct ChatTranscriptView: View, Equatable {
         }
     }
 
+
+    private var legacyScrollWindowGeneration: Int {
+#if DEBUG
+        boundedWindowEnabled ? debugWindowGeneration : 0
+#else
+        0
+#endif
+    }
+
+    private func legacyScrollMetricContext(windowGeneration: Int) -> ChatScrollObserver.MetricContext {
+        .init(isStreaming: activeStreamID != nil, scope: outgoingInsertionScope,
+              restoreToken: restoreScrollToken, latestToken: explicitBottomGeometryToken,
+              cancellationToken: transcriptRestoreCancellationToken,
+              readerScope: warmReaderMemory?.scope, transcriptIdentity: transcriptMediaCacheNamespace,
+              windowGeneration: windowGeneration)
+    }
 
     @ViewBuilder
     private func transcriptMessageRow(_ transcriptMessage: TranscriptMessage, latestCompletedAssistantRenderID: String?, isTrailingCurrentActivity: Bool, observesGeometry: Bool = true) -> some View {
@@ -3385,7 +3606,8 @@ struct ChatTranscriptView: View, Equatable {
                 topInset: scroll.adjustedContentInset.top, bottomInset: scroll.adjustedContentInset.bottom,
                 isAttached: scroll.window != nil && scenePhase == .active,
                 restoreActive: !shouldFollowLatestMessage && !hasExplicitBottomScrollRequest,
-                isCancelled: restoreSettlementState.isCancelled,
+                isCancelled: restoreSettlementState.isCancelled
+                    || scrollMetricPublication.hasPendingDirectInteraction,
                 isDirectlyInteracting: isUserInteractingWithScroll || scroll.isTracking
                     || scroll.isDragging || scroll.isDecelerating,
                 targetMinY: settlement.point.minY)
@@ -3467,7 +3689,8 @@ struct ChatTranscriptView: View, Equatable {
     /// was left at the provisional top on first attachment.
     @discardableResult
     private func alignInitialMeasuredTarget(viewportWidth: CGFloat) -> Bool {
-        guard viewportTracker.warmReaderSettlement?.isActive != true,
+        guard !scrollMetricPublication.hasPendingDirectInteraction,
+              viewportTracker.warmReaderSettlement?.isActive != true,
               viewportTracker.initialMeasuredAlignmentToken != restoreScrollToken,
               let scrollView = viewportTracker.scrollView,
               let offset = ChatInitialMeasuredTarget.initialOffset(
@@ -3505,6 +3728,7 @@ struct ChatTranscriptView: View, Equatable {
         isViewportRecovery: Bool = false,
         viewportHeight: CGFloat
     ) {
+        guard !scrollMetricPublication.hasPendingDirectInteraction else { return }
         invalidateMeasuredLayoutFollow()
         if isViewportRecovery { cancelWarmReader(clearPoint: false) }
         if isViewportRecovery || ownedInitialRestoreRequest != initialRestoreRequest {
@@ -3534,12 +3758,17 @@ struct ChatTranscriptView: View, Equatable {
                     if settlement.hasDelivered(request) {
                         ownedInitialRestoreRequest = nil
                     } else {
-                        settlement.bind(request) { outcome in
-                            guard ownedInitialRestoreRequest == request else { return }
+                        settlement.bindRestoreCompletion(request, isCurrent: { [weak settlement] in
+                            guard let settlement else { return false }
+                            return viewportTracker.warmReaderSettlement === settlement
+                                && settlement.scope == warmReaderMemory?.scope
+                                && ownedInitialRestoreRequest == request
+                                && initialRestoreRequest == request
+                        }, complete: { outcome in
                             hasCompletedInitialRestore = true
                             pendingInitialRestoreToken = nil
                             completeInitialRestore(outcome, request: request)
-                        }
+                        })
                     }
                 }
                 return
@@ -4780,7 +5009,7 @@ struct ChatTranscriptView: View, Equatable {
                     }
             ) {
                 TranscriptActivityInlineStatusLabel(
-                    symbol: "sparkles", title: String(localized: "Preparing response"),
+                    title: String(localized: "Preparing response"),
                     accessibilityLabel: "Semreh is preparing a response"
                 )
                 .accessibilityHidden(hidesRunStatusAccessibility)
@@ -5353,11 +5582,7 @@ private struct LoadOlderMessagesButton: View {
     var body: some View {
         Button(action: onTap) {
             HStack(spacing: 8) {
-                if isLoading {
-                    ProgressView()
-                        .controlSize(.mini)
-                        .accessibilityHidden(true)
-                } else {
+                if !isLoading {
                     Image(systemName: "arrow.up")
                         .font(.caption.weight(.semibold))
                         .accessibilityHidden(true)
@@ -5381,5 +5606,19 @@ private struct LoadOlderMessagesButton: View {
         .disabled(isLoading)
         .frame(maxWidth: .infinity)
         .accessibilityLabel(isLoading ? String(localized: "Loading older messages") : String(localized: "Load older messages"))
+    }
+}
+
+/// Immutable Back-time restore intent. No geometry traversal or durable I/O.
+struct ChatTranscriptRestoreSnapshot: Equatable {
+    let followingLatest: Bool
+    let visibleMessageID: String?
+
+    static func capture(preservesDurableTarget: Bool, didRequestRestore: Bool,
+                        didInteract: Bool, followingLatest: Bool,
+                        visibleMessageID: String?) -> Self? {
+        guard !preservesDurableTarget, didRequestRestore || didInteract else { return nil }
+        return Self(followingLatest: followingLatest,
+                    visibleMessageID: followingLatest ? nil : visibleMessageID)
     }
 }
