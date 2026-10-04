@@ -3982,7 +3982,8 @@ final class DirectSkillUITests: XCTestCase {
                 NSPredicate(format: "identifier BEGINSWITH %@", "chat-detail:")
             ).firstMatch
             XCTAssertTrue(linkedDetail.waitForExistence(timeout: 10))
-            try assertAccessibleTranscriptRows(baseline, in: linkedDetail, context: "cold deep-link target")
+            try assertAccessibleTranscriptRows(baseline, in: linkedDetail, context: "cold deep-link target",
+                                               museSurface: verifiesMuseSurface)
             let linkedDetailID = linkedDetail.identifier
             let linkedBack = chatBackButton(app: app)
             XCTAssertTrue(linkedBack.waitForExistence(timeout: 5) && linkedBack.isEnabled && linkedBack.isHittable)
@@ -4005,7 +4006,8 @@ final class DirectSkillUITests: XCTestCase {
             try assertAccessibleTranscriptRows(
                 baseline,
                 in: selectedDetail,
-                context: "selected existing chat before termination"
+                context: "selected existing chat before termination",
+                museSurface: verifiesMuseSurface
             )
             let selectedDetailID = selectedDetail.identifier
             // This gate isolates existing-chat viewport restoration. Completion
@@ -4026,7 +4028,8 @@ final class DirectSkillUITests: XCTestCase {
                 try assertAccessibleTranscriptRows(
                     baseline,
                     in: restoredDetail,
-                    context: "automatic restore \(launchNumber) before interaction"
+                    context: "automatic restore \(launchNumber) before interaction",
+                    museSurface: verifiesMuseSurface
                 )
                 let screenshot = XCTAttachment(screenshot: app.screenshot())
                 screenshot.name = "Automatic restore \(launchNumber) before interaction"
@@ -5275,7 +5278,8 @@ final class DirectSkillUITests: XCTestCase {
     private func assertAccessibleTranscriptRows(
         _ rows: [[String: Any]],
         in detail: XCUIElement,
-        context: String
+        context: String,
+        museSurface: Bool = false
     ) throws {
         let expected = rows.compactMap(accessibleTranscriptRow)
         guard expected.count == rows.count else {
@@ -5283,7 +5287,9 @@ final class DirectSkillUITests: XCTestCase {
             throw NSError(domain: "DirectSkillUITests", code: 17)
         }
 
-        let containers = canonicalTranscriptContainers(in: detail)
+        let containers = museSurface
+            ? detail.descendants(matching: .collectionView).matching(identifier: "chat-native-transcript-v2")
+            : canonicalTranscriptContainers(in: detail)
         let transcript = containers.firstMatch
         guard transcript.waitForExistence(timeout: 10), containers.count == 1 else {
             XCTFail("\(context) must expose exactly one canonical transcript scroll container.")
