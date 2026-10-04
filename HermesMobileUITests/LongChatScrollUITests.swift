@@ -5,7 +5,82 @@ import Foundation
 import CoreFoundation
 import QuartzCore
 
+extension XCTestCase {
+    /// SwiftUI preserves ChatView's established chat-detail container identifier.
+    /// Prove the selected surface through the unique children it actually owns.
+    @MainActor
+    func requireSelectedChatSurface(in app: XCUIApplication, muse: Bool, needsTranscript: Bool = true) {
+        let composers = app.textViews.matching(identifier: "chat-composer-input")
+        let native = app.collectionViews.matching(identifier: "chat-native-transcript-v2")
+        let legacy = app.collectionViews.matching(identifier: "chat-transcript-scroll")
+        let headers = app.otherElements.matching(identifier: "muse-chat-header")
+        let docks = app.otherElements.matching(identifier: "muse-chat-dock")
+        var failures: [String] = []
+        if !composers.firstMatch.waitForExistence(timeout: 20) { failures.append("composer did not appear") }
+        if needsTranscript, !(muse ? native : legacy).firstMatch.waitForExistence(timeout: 20) {
+            failures.append("selected collection did not appear")
+        }
+        func requireCount(_ query: XCUIElementQuery, _ expected: Int, _ name: String) {
+            let actual = query.count
+            if actual != expected { failures.append("\(name): expected \(expected), observed \(actual)") }
+        }
+        requireCount(composers, 1, "editable composers")
+        requireCount(native, muse && needsTranscript ? 1 : 0, "native collections")
+        requireCount(legacy, !muse && needsTranscript ? 1 : 0, "legacy collections")
+        requireCount(headers, muse ? 1 : 0, "Muse headers")
+        requireCount(docks, muse ? 1 : 0, "Muse docks")
+        if muse {
+            let roots = app.otherElements.matching(NSPredicate(format: "identifier BEGINSWITH %@", "chat-detail:"))
+            let root = roots.firstMatch
+            requireCount(roots, 1, "selected chat-detail containers")
+            requireCount(root.descendants(matching: .other).matching(identifier: "muse-chat-header"), 1, "owned header")
+            requireCount(root.descendants(matching: .other).matching(identifier: "muse-chat-dock"), 1, "owned dock")
+            requireCount(root.descendants(matching: .collectionView).matching(identifier: "chat-native-transcript-v2"),
+                         needsTranscript ? 1 : 0, "owned collection")
+            requireCount(root.descendants(matching: .textView).matching(identifier: "chat-composer-input"), 1, "owned composer")
+            if roots.count == 1 && headers.count == 1 && docks.count == 1 && composers.count == 1
+                && (!needsTranscript || native.count == 1) {
+                var frames = [root.frame, headers.firstMatch.frame, docks.firstMatch.frame, composers.firstMatch.frame]
+                if needsTranscript { frames.append(native.firstMatch.frame) }
+                let valid = frames.allSatisfy {
+                    !$0.isNull && !$0.isInfinite && $0.minX.isFinite && $0.minY.isFinite
+                        && $0.width.isFinite && $0.height.isFinite && $0.width > 0 && $0.height > 0
+                }
+                if !valid || !root.frame.contains(headers.firstMatch.frame)
+                    || !root.frame.contains(docks.firstMatch.frame)
+                    || headers.firstMatch.frame.maxY >= docks.firstMatch.frame.minY {
+                    failures.append("selected header and dock must coexist inside a valid chat-detail frame")
+                }
+            }
+        }
+        if !failures.isEmpty {
+            var structure = failures + ["Identifiers only; maximum 100 nodes; no labels or values"]
+            do {
+                let snapshot = try app.snapshot()
+                var recorded = 0
+                func visit(_ node: XCUIElementSnapshot) {
+                    guard recorded < 100 else { return }
+                    if !node.identifier.isEmpty {
+                        structure.append("type=\(node.elementType.rawValue) frame=\(node.frame) identifier=\(node.identifier)")
+                        recorded += 1
+                    }
+                    for child in node.children where recorded < 100 { visit(child) }
+                }
+                visit(snapshot)
+            } catch {
+                structure.append("snapshot_error_type=\(String(reflecting: type(of: error)))")
+            }
+            let attachment = XCTAttachment(string: structure.joined(separator: "\n"))
+            attachment.name = "chat-surface-identity-failure-structure"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+        XCTAssertTrue(failures.isEmpty, failures.joined(separator: "; "))
+    }
+}
+
 final class LongChatScrollUITests: XCTestCase {
+    @MainActor
     func testInternalReleaseRendererTogglePersistenceAndFallback() throws {
 #if !SEMREH_INTERNAL_CHAT_PREVIEW || DEBUG
         throw XCTSkip("Requires the internal-preview Release Simulator build")
@@ -38,6 +113,7 @@ final class LongChatScrollUITests: XCTestCase {
             let viewport = app.collectionViews["chat-native-transcript-v2"]
             if native {
                 XCTAssertTrue(viewport.waitForExistence(timeout: 8))
+                requireSelectedChatSurface(in: app, muse: true)
                 let code = app.textViews["native-inline-code-text"].firstMatch
                 XCTAssertTrue(code.waitForExistence(timeout: 8))
                 let source = code.value as? String ?? ""
@@ -47,7 +123,8 @@ final class LongChatScrollUITests: XCTestCase {
                 XCTAssertTrue(composer.exists)
             } else {
                 XCTAssertFalse(viewport.exists)
-                XCTAssertTrue(app.scrollViews["chat-transcript-scroll"].exists)
+                XCTAssertTrue(app.collectionViews["chat-transcript-scroll"].waitForExistence(timeout: 8))
+                requireSelectedChatSurface(in: app, muse: false)
             }
             attachScreenshot(named: native ? "internal-release-native" : "internal-release-stable")
         }
@@ -67,7 +144,9 @@ final class LongChatScrollUITests: XCTestCase {
     func testNativeParagraphSelectionCopiesOnlySelectedPassage() {
         continueAfterFailure = false
         let app = XCUIApplication()
-        app.launchArguments = ["--chat-performance-tall-lab", "--chat-performance-four-tall-lab",
+        // Enable the existing fresh-draft predicate; the four-tall route wins
+        // over the generic lab route. A prior keyboard journey may leave a draft.
+        app.launchArguments = ["--chat-performance-lab", "--chat-performance-tall-lab", "--chat-performance-four-tall-lab",
                                "--chat-native-transcript-v2", "--chat-rich-native-code-text",
                                "--chat-full-inline-code", "--chat-viewport-follow-latest-open",
                                "--composer-test-fresh-draft"]
@@ -109,12 +188,8 @@ final class LongChatScrollUITests: XCTestCase {
         let composer = app.textViews["chat-composer-input"]
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         composer.tap()
-        if let draft = composer.value as? String, !draft.isEmpty, draft != composer.placeholderValue {
-            composer.typeKey("a", modifierFlags: .command)
-            composer.typeText(XCUIKeyboardKey.delete.rawValue)
-        }
         XCTAssertTrue((composer.value as? String ?? "").isEmpty || composer.value as? String == composer.placeholderValue,
-                      "Clear the fixture draft before exact paste comparison")
+                      "The isolated fixture must start with an empty draft before exact paste comparison")
         composer.press(forDuration: 1)
         let pasteItem = app.menuItems["Paste"]
         let pasteButton = app.buttons["Paste"].firstMatch
@@ -3255,7 +3330,8 @@ final class LongChatScrollUITests: XCTestCase {
         let credentials = try readCredentials(at: credentialsPath)
         let app = XCUIApplication()
         app.terminate()
-        app.launchArguments = []
+        let verifiesMuseSurface = environment["SEMREH_LIVE_MUSE_SURFACE"] == "1"
+        app.launchArguments = verifiesMuseSurface ? ["--chat-native-transcript-v2"] : []
         app.launch()
         defer { clearPasteboard() }
 
@@ -3318,9 +3394,8 @@ final class LongChatScrollUITests: XCTestCase {
         // A persisted deep link can legitimately restore an authenticated chat
         // detail instead of the shell root. Return through that known chat's
         // navigation control before asserting the shell tabs.
-        let attachmentJourney = environment["SEMREH_SLICE3_ATTACHMENT_UI"] == "1"
-            || environment["SEMREH_SLICE3_FILE_PICKER_UI"] == "1"
-        let sessionsButtonLabel = attachmentJourney ? "Chats" : "Sessions"
+        // AppShellView exposes the production conversation destination as Chats.
+        let sessionsButtonLabel = "Chats"
         waitForPostLoginDestination(app: app, sessionsButtonLabel: sessionsButtonLabel)
 
         if environment["SEMREH_SLICE4_KANBAN_UI"] == "1" {
@@ -3468,6 +3543,7 @@ final class LongChatScrollUITests: XCTestCase {
         let composer = composers.firstMatch
         XCTAssertTrue(composer.waitForExistence(timeout: 10))
         XCTAssertEqual(composers.count, 1, "The open conversation must expose one composer.")
+        if verifiesMuseSurface { requireMuseSurface(in: app, needsTranscript: false) }
         composer.tap()
         composer.typeText("SEMREH_SLICE1_PROMPT")
         let send = app.buttons["Send"]
@@ -3475,7 +3551,9 @@ final class LongChatScrollUITests: XCTestCase {
         send.tap()
 
         let acknowledgement = app.staticTexts.matching(
-            NSPredicate(format: "label CONTAINS[c] %@", "SEMREH_SLICE1_ACK")
+            // Match the visible text leaf, not the combined row's accessibility
+            // summary, which may be replaced during canonical reconciliation.
+            NSPredicate(format: "label == %@", "SEMREH_SLICE1_ACK")
         ).firstMatch
         let appeared = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "exists == true AND hittable == true"),
@@ -3483,6 +3561,14 @@ final class LongChatScrollUITests: XCTestCase {
         )
         await fulfillment(of: [appeared], timeout: 90)
         XCTAssertTrue(acknowledgement.exists && acknowledgement.isHittable)
+        if verifiesMuseSurface {
+            requireMuseSurface(in: app)
+            let transcript = app.collectionViews["chat-native-transcript-v2"]
+            XCTAssertTrue(transcript.waitForExistence(timeout: 10),
+                          "The real production send must render through the selected Muse collection.")
+            try assertMuseReadableTranscript(app: app, transcript: transcript,
+                                             phase: "live-production-reply")
+        }
         attachScreenshot(named: "live-production-chat-success")
 
         if environment["SEMREH_SLICE4_BTW_UI"] == "1" {
@@ -6440,22 +6526,41 @@ final class LongChatScrollUITests: XCTestCase {
     }
 
     @MainActor
-    private func exerciseNativeV2Journey(readerReopen: Bool, motionJourney: Bool = false, farLatest: Bool = false) throws {
+    private func exerciseNativeV2Journey(readerReopen: Bool, motionJourney: Bool = false, farLatest: Bool = false,
+                                         requiresMuseSurface: Bool = false, museSurface: Bool? = nil) throws {
         continueAfterFailure = false
         let app = XCUIApplication()
+        let enablesMuseSurface = museSurface ?? true
+        let checksMuseGeometry = requiresMuseSurface || museSurface == true
         // The four-tall selector takes precedence over the generic tall route.
         app.launchArguments = (readerReopen ? ["--chat-performance-rich30-back-lab"]
             : ["--chat-performance-tall-lab", "--chat-performance-four-tall-lab"])
-            + ["--chat-native-transcript-v2", "--chat-rich-native-code-text",
+            + ["--chat-rich-native-code-text",
                "--chat-full-inline-code", "--chat-viewport-follow-latest-open",
                "--composer-test-fresh-draft"]
             + (readerReopen ? ["--chat-performance-stream-rich-code"] : [])
+            + (enablesMuseSurface ? ["--chat-native-transcript-v2"] : [])
+        if museSurface != nil {
+            // Argument-domain defaults make the off/on pair independent of a
+            // persisted preview preference, without changing that preference.
+            // The explicit opt-in flag above is the pair's only differing input.
+            app.launchArguments += ["-semreh.experimentalChatRenderer", "NO",
+                                    "--chat-performance-app-wide-monitor",
+                                    "--chat-performance-signposts"]
+        }
+        let name = museSurface.map { "muse-rich30-\($0 ? "candidate" : "baseline")" }
+            ?? (requiresMuseSurface ? "muse-rich30" : farLatest ? "r39-native-far-latest" : motionJourney ? "r38-native-motion-reader" : readerReopen ? "r37-native-rich30" : "r37-native-four-tall")
+        var events: [[String: Any]] = []
+        func record(_ event: String) {
+            guard museSurface != nil else { return }
+            smoothnessEvent(event, into: &events)
+        }
+        record("process_launch_request")
         app.terminate()
         app.launch() // Configure and cold-launch before constructing any AX queries.
-        let name = farLatest ? "r39-native-far-latest" : motionJourney ? "r38-native-motion-reader" : readerReopen ? "r37-native-rich30" : "r37-native-four-tall"
         // The internal renderer identifies its collection separately from the
         // DEBUG status text; resolve each by type, never an untyped firstMatch.
-        let scroll = app.collectionViews["chat-native-transcript-v2"]
+        let scroll = app.collectionViews[enablesMuseSurface ? "chat-native-transcript-v2" : "chat-transcript-scroll"]
         let marker = app.staticTexts["chat-native-transcript-v2"].firstMatch
         let open = app.buttons["Open rich30 chat"].firstMatch
         let arrow = app.buttons[scrollToLatestLabel]
@@ -6479,6 +6584,7 @@ final class LongChatScrollUITests: XCTestCase {
         }
         func boundary(_ label: String) throws -> (rows: [XCUIElementSnapshot], readable: CGRect) {
             phase = label
+            record(label)
             let snapshot: XCUIElementSnapshot
             do { snapshot = try scroll.snapshot() }
             catch {
@@ -6487,10 +6593,15 @@ final class LongChatScrollUITests: XCTestCase {
             }
             let back = app.buttons["Back"].frame
             let composer = app.descendants(matching: .any).matching(identifier: "chat-composer-input").firstMatch.frame
-            let top = max(snapshot.frame.minY, back.minY - 4 + 96 + 24)
-            let bottom = min(snapshot.frame.maxY, composer.minY - 12)
-            let readable = CGRect(x: snapshot.frame.minX, y: top, width: snapshot.frame.width,
+            let readable: CGRect
+            if checksMuseGeometry {
+                readable = try museReadableRegion(app: app, transcriptFrame: snapshot.frame)
+            } else {
+                let top = max(snapshot.frame.minY, back.minY - 4 + 96 + 24)
+                let bottom = min(snapshot.frame.maxY, composer.minY - 12)
+                readable = CGRect(x: snapshot.frame.minX, y: top, width: snapshot.frame.width,
                                   height: max(0, bottom - top))
+            }
             var rows: [XCUIElementSnapshot] = []
             var preview = false
             func visit(_ node: XCUIElementSnapshot) {
@@ -6539,12 +6650,20 @@ final class LongChatScrollUITests: XCTestCase {
             return (completed, cancelled, samples)
         }
         defer { attachPlainText(evidence.joined(separator: "\n"), named: "\(name)-readback") }
+        if museSurface != nil {
+            attachPlainText(app.launchArguments.joined(separator: "\n"), named: "\(name)-launch-arguments")
+        }
         if readerReopen {
             guard check(open.waitForExistence(timeout: 25) && open.isHittable, "Open rich30 entry must be reachable.") else { return }
+            record("open_chat_request")
             open.tap()
         }
+        if checksMuseGeometry { requireMuseSurface(in: app) }
         guard check(scroll.waitForExistence(timeout: 25) && marker.waitForExistence(timeout: 10),
                     "The actual native scroll and native-v2 controller marker must exist.") else { return }
+        if museSurface == false {
+            requireSelectedChatSurface(in: app, muse: false)
+        }
         guard check(wait(tail, "exists == true", timeout: 25), "Complete terminal paragraph must mount.") else { return }
         let cold = try boundary("cold-tail")
         guard check(visibleTail(cold.readable) && first(cold) != nil, "Cold tail must be semantically visible and nonempty.") else { return }
@@ -6618,13 +6737,19 @@ final class LongChatScrollUITests: XCTestCase {
                     "The drag must measurably move into older content, even within a tall row.") else { return }
         attachScreenshot(named: "\(name)-reader-before-back")
         if readerReopen {
+            record("back_request")
             app.buttons["Back"].tap()
             phase = "back-list"
             guard check(open.waitForExistence(timeout: 20) && open.isHittable && !scroll.exists,
                         "Back must return to the actual list.") else { return }
             attachScreenshot(named: "\(name)-back-list")
+            record("reopen_request")
             open.tap()
             guard check(scroll.waitForExistence(timeout: 20) && marker.exists, "Reopen must restore the native route.") else { return }
+            if checksMuseGeometry { requireMuseSurface(in: app) }
+            if museSurface == false {
+                requireSelectedChatSurface(in: app, muse: false)
+            }
             let reopened = try boundary("reopened-reader")
             guard let restored = first(reopened) else { _ = check(false, "Reopen must not be blank."); return }
             let delta = restored.frame.minY - reopened.readable.minY - offset
@@ -6636,6 +6761,7 @@ final class LongChatScrollUITests: XCTestCase {
         guard check(arrow.exists && arrow.isHittable, "Latest must remain available while parked.") else { return }
         let beforeMotion = motionJourney ? motionCounters("before-first-latest") : nil
         if motionJourney && beforeMotion == nil { return }
+        record("latest_tap_request")
         arrow.tap() // One latest action; no corrective gesture for this scored landing.
         guard check(wait(tail, "exists == true AND hittable == true", timeout: 20), "One latest tap must reach the terminal paragraph.") else { return }
         let latest = try boundary("after-one-latest")
@@ -6719,6 +6845,7 @@ final class LongChatScrollUITests: XCTestCase {
             guard let anchor = first(beforeStream) else { _ = check(false, "Parked stream needs readable content."); return }
             let stream = app.buttons["rich30-stream-turn"]
             guard check(stream.exists && stream.isHittable && stream.isEnabled, "Shared rich30 stream action must be usable.") else { return }
+            record("parked_stream_request")
             stream.tap()
             guard check(wait(stream, "enabled == true", timeout: 20), "Shared stream must complete.") else { return }
             let afterStream = try boundary("parked-after-stream")
@@ -6727,6 +6854,7 @@ final class LongChatScrollUITests: XCTestCase {
                         && abs((retained.frame.minY - afterStream.readable.minY)
                                - (anchor.frame.minY - beforeStream.readable.minY)) <= 24,
                         "Parked streaming must preserve the same readable row and intra-row offset.") else { return }
+            record("stream_latest_tap_request")
             arrow.tap()
             let streamedTail = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "SEMREH_MULTI_CHAT_STREAM_1")).firstMatch
             guard check(wait(streamedTail, "exists == true AND hittable == true", timeout: 20), "One latest must expose the actual completed streamed response.") else { return }
@@ -6748,6 +6876,10 @@ final class LongChatScrollUITests: XCTestCase {
             composer.typeText("R37 reader draft")
             guard check((composer.value as? String ?? "").contains("R37 reader draft"), "Composer must retain typed text.") else { return }
             attachScreenshot(named: "\(name)-composer-keyboard")
+        }
+        if museSurface != nil {
+            record("journey_complete")
+            attachSmoothnessEvidence(app, scenario: name, events: events)
         }
     }
 
@@ -7009,4 +7141,251 @@ final class LongChatScrollUITests: XCTestCase {
         attachScreenshot(named: "strict-native-10k-tail")
     }
 
+}
+
+// These acceptance selectors exercise the real ChatView with deterministic
+// server-free rich history. They prove sampled presentation/interaction states;
+// a separate native-timestamp recording is required to inspect intervening frames.
+extension LongChatScrollUITests {
+    @MainActor
+    func testOptInMuseSurfaceRich30Baseline() throws {
+        try smoothnessEnabled()
+        try exerciseNativeV2Journey(readerReopen: true, motionJourney: true, museSurface: false)
+    }
+
+    @MainActor
+    func testOptInMuseSurfaceRich30Candidate() throws {
+        try smoothnessEnabled()
+        try exerciseNativeV2Journey(readerReopen: true, motionJourney: true, museSurface: true)
+    }
+
+    @MainActor
+    func testMuseSurfaceComposerKeyboardAndDraftGeometry() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--chat-performance-lab", "--chat-performance-tall-lab", "--chat-performance-four-tall-lab",
+                               "--chat-native-transcript-v2", "--chat-rich-native-code-text",
+                               "--chat-full-inline-code", "--chat-viewport-follow-latest-open",
+                               "--composer-test-fresh-draft"]
+        app.launch()
+        requireMuseSurface(in: app)
+        let transcript = app.collectionViews["chat-native-transcript-v2"]
+        XCTAssertTrue(transcript.waitForExistence(timeout: 25))
+        let tail = app.staticTexts.matching(NSPredicate(
+            format: "label == %@", "End of four-row mixed conversation."
+        )).firstMatch
+        XCTAssertTrue(tail.waitForExistence(timeout: 15) && tail.isHittable)
+        try assertMuseReadableTranscript(app: app, transcript: transcript, phase: "composer-unfocused")
+
+        let inputs = app.textViews.matching(identifier: "chat-composer-input")
+        let composer = inputs.firstMatch
+        XCTAssertTrue(composer.waitForExistence(timeout: 10))
+        XCTAssertEqual(inputs.count, 1, "The selected surface must expose exactly one editable composer.")
+        let initialDraft = composer.value as? String ?? ""
+        XCTAssertTrue(initialDraft.isEmpty || initialDraft == composer.placeholderValue)
+        let options = app.buttons["Composer options"]
+        let voice = app.buttons["Voice input"]
+        XCTAssertTrue(options.isHittable && voice.isHittable)
+        XCTAssertLessThanOrEqual(abs(options.frame.midY - voice.frame.midY), 3,
+                                 "Collapsed plus and microphone must share one control baseline.")
+        composer.tap()
+        let keyboard = app.keyboards.firstMatch
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5))
+        composer.typeText("Muse draft")
+        XCTAssertEqual(composer.value as? String, "Muse draft")
+        let singleLineHeight = composer.frame.height
+        try assertMuseComposerAboveKeyboard(app: app, composer: composer, keyboard: keyboard)
+        try assertMuseReadableTranscript(app: app, transcript: transcript, phase: "composer-single-line")
+
+        let multilineDraft = "Muse draft\nSecond line\nThird line\nFourth line"
+        composer.typeText("\nSecond line\nThird line\nFourth line")
+        XCTAssertEqual(composer.value as? String, multilineDraft,
+                       "Expanding the composer must preserve focus and every typed line.")
+        XCTAssertTrue(keyboard.exists)
+        XCTAssertGreaterThanOrEqual(composer.frame.height, singleLineHeight + 24,
+                                    "Four lines must expand the text field instead of clipping the draft.")
+        try assertMuseComposerAboveKeyboard(app: app, composer: composer, keyboard: keyboard)
+        let send = app.buttons["Send"]
+        XCTAssertTrue(send.isHittable && voice.isHittable)
+        XCTAssertLessThanOrEqual(abs(send.frame.midY - voice.frame.midY), 3,
+                                 "Send and microphone must retain their shared baseline as the draft grows.")
+        XCTAssertTrue(options.isHittable)
+        XCTAssertLessThanOrEqual(abs(options.frame.midY - voice.frame.midY), 3,
+                                 "Multiline plus and microphone must share one control baseline.")
+        XCTAssertLessThanOrEqual(abs(options.frame.midY - send.frame.midY), 3,
+                                 "Multiline plus and Send must share one control baseline.")
+        XCTAssertLessThanOrEqual(composer.frame.maxY, min(options.frame.minY, send.frame.minY) + 2,
+                                 "Expanded draft text must sit above the controls, using the capsule width.")
+        XCTAssertGreaterThan(composer.frame.width, 300,
+                             "Expanded text must reclaim the collapsed control columns.")
+        try assertMuseReadableTranscript(app: app, transcript: transcript, phase: "composer-four-lines")
+
+        // Tap the real software Delete key. This Simulator collapsed a repeated
+        // hardware-delete payload to one event and ignored hardware Command-A.
+        let deleteKey = keyboard.keys["delete"]
+        XCTAssertTrue(deleteKey.waitForExistence(timeout: 3))
+        for _ in multilineDraft { deleteKey.tap() }
+        let cleared = composer.value as? String ?? ""
+        XCTAssertTrue(cleared.isEmpty || cleared == composer.placeholderValue,
+                      "Deleting the complete known draft must leave the composer empty.")
+        XCTAssertTrue(keyboard.exists, "Clearing a multiline draft must retain keyboard focus.")
+        XCTAssertLessThanOrEqual(composer.frame.height, singleLineHeight + 4,
+                                 "Clearing must collapse the same composer back to one-line height.")
+        XCTAssertEqual(inputs.count, 1)
+        XCTAssertTrue(options.isHittable && voice.isHittable)
+        XCTAssertLessThanOrEqual(abs(options.frame.midY - voice.frame.midY), 3,
+                                 "Clearing must restore the collapsed plus/microphone baseline.")
+        try assertMuseComposerAboveKeyboard(app: app, composer: composer, keyboard: keyboard)
+        let focusedRegion = try museReadableRegion(app: app, transcriptFrame: transcript.frame)
+        try assertMuseReadableTranscript(app: app, transcript: transcript, phase: "composer-cleared")
+
+        // Tap the transcript's trailing gutter through the production dismiss
+        // gesture; avoid code links, selectable text and the overlaid dock.
+        transcript.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: focusedRegion.maxX - 6 - transcript.frame.minX,
+                                 dy: focusedRegion.midY - transcript.frame.minY)).tap()
+        XCTAssertTrue(keyboard.waitForNonExistence(timeout: 5),
+                      "A transcript tap must dismiss the real keyboard.")
+        try assertMuseReadableTranscript(app: app, transcript: transcript, phase: "composer-keyboard-dismissed")
+        let dismissedRegion = try museReadableRegion(app: app, transcriptFrame: transcript.frame)
+        XCTAssertGreaterThan(dismissedRegion.height, focusedRegion.height + 100,
+                             "Dismissing the keyboard must restore the transcript's usable height.")
+        composer.tap()
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5))
+        composer.typeText("Focus restored")
+        XCTAssertEqual(composer.value as? String, "Focus restored")
+        try assertMuseComposerAboveKeyboard(app: app, composer: composer, keyboard: keyboard)
+        try assertMuseReadableTranscript(app: app, transcript: transcript, phase: "composer-refocused")
+        let wrappedSuffix = " while typing a longer paragraph that wraps naturally across several lines without inserting a newline."
+        composer.typeText(wrappedSuffix)
+        XCTAssertEqual(composer.value as? String, "Focus restored" + wrappedSuffix)
+        XCTAssertGreaterThan(composer.frame.width, 300)
+        XCTAssertLessThanOrEqual(composer.frame.maxY, options.frame.minY + 2,
+                                 "Soft wrapping must use the expanded layout without losing the editor.")
+        XCTAssertTrue(keyboard.exists)
+        try assertMuseComposerAboveKeyboard(app: app, composer: composer, keyboard: keyboard)
+        try assertMuseReadableTranscript(app: app, transcript: transcript, phase: "composer-soft-wrapped")
+        // No send: this rich local fixture has no gateway or credentials.
+    }
+
+    @MainActor
+    func testMuseSurfaceRich30ReaderLatestBackAndReopen() throws {
+        // Reuse the complete existing history, selection, stream-while-reading,
+        // one-tap Latest, real drag, Back and warm-reader restoration assertions.
+        try exerciseNativeV2Journey(readerReopen: true, motionJourney: true,
+                                    requiresMuseSurface: true)
+    }
+
+    @MainActor
+    private func requireMuseSurface(in app: XCUIApplication, needsTranscript: Bool = true) {
+        requireSelectedChatSurface(in: app, muse: true, needsTranscript: needsTranscript)
+    }
+
+    @MainActor
+    private func museReadableRegion(app: XCUIApplication, transcriptFrame: CGRect) throws -> CGRect {
+        let header = app.descendants(matching: .any).matching(identifier: "muse-chat-header").firstMatch
+        let dock = app.descendants(matching: .any).matching(identifier: "muse-chat-dock").firstMatch
+        let window = app.windows.firstMatch.frame
+        let headerFrame = header.frame
+        let dockFrame = dock.frame
+        let viewport = transcriptFrame.intersection(window)
+        let probe = app.staticTexts["chat-native-transcript-v2"].firstMatch
+        let probeFields = (probe.value as? String ?? "").split(separator: ";")
+            .reduce(into: [String: String]()) { fields, entry in
+                let pair = entry.split(separator: "=", maxSplits: 1)
+                if pair.count == 2 { fields[String(pair[0])] = String(pair[1]) }
+            }
+        guard let surfaceTop = probeFields["surfaceTop"].flatMap(Double.init),
+              let surfaceBottom = probeFields["surfaceBottom"].flatMap(Double.init),
+              surfaceTop.isFinite && surfaceBottom.isFinite && surfaceTop > 0 && surfaceBottom > 0 else {
+            attachPlainText("surfaceTop=\(probeFields["surfaceTop"] ?? "missing") surfaceBottom=\(probeFields["surfaceBottom"] ?? "missing")",
+                            named: "muse-invalid-native-clearance")
+            XCTFail("The native viewport must publish finite positive measured header and dock clearance.")
+            throw NSError(domain: "MuseSurfaceUI", code: 2)
+        }
+        let frames = [headerFrame, dockFrame, viewport]
+        let valid = header.exists && dock.exists && frames.allSatisfy {
+            !$0.isNull && $0.origin.x.isFinite && $0.origin.y.isFinite
+                && $0.width.isFinite && $0.height.isFinite && $0.width > 0 && $0.height > 0
+        }
+        let top = max(viewport.minY + CGFloat(surfaceTop), headerFrame.maxY)
+        let bottom = min(viewport.maxY - CGFloat(surfaceBottom), dockFrame.minY)
+        let region = CGRect(x: viewport.minX, y: top, width: viewport.width, height: max(0, bottom - top))
+        attachPlainText("surfaceTop=\(surfaceTop) surfaceBottom=\(surfaceBottom) viewport=\(viewport) readable=\(region)",
+                        named: "muse-native-clearance")
+        guard valid && region.height > 20 else {
+            attachScreenshot(named: "muse-invalid-readable-geometry")
+            attachPlainText("transcript=\(transcriptFrame) header=\(headerFrame) dock=\(dockFrame) window=\(window)",
+                            named: "muse-invalid-readable-geometry")
+            XCTFail("The measured header and dock must leave a real, nonempty collection viewport.")
+            throw NSError(domain: "MuseSurfaceUI", code: 1)
+        }
+        return region
+    }
+
+    @MainActor
+    private func assertMuseComposerAboveKeyboard(app: XCUIApplication, composer: XCUIElement,
+                                                 keyboard: XCUIElement) throws {
+        let dock = app.descendants(matching: .any).matching(identifier: "muse-chat-dock").firstMatch
+        let probe = app.staticTexts["chat-native-transcript-v2"].firstMatch
+        let fields = (probe.value as? String ?? "").split(separator: ";")
+            .reduce(into: [String: String]()) { fields, entry in
+                let pair = entry.split(separator: "=", maxSplits: 1)
+                if pair.count == 2 { fields[String(pair[0])] = String(pair[1]) }
+            }
+        let keyboardExists = keyboard.exists
+        let keyboardFrame = keyboardExists ? keyboard.frame : .null
+        let windowFrame = app.windows.firstMatch.frame
+        let dockFrame = dock.exists ? dock.frame : .null
+        let inputFrame = composer.exists ? composer.frame : .null
+        attachPlainText("keyboardTop=\(fields["keyboardTop"] ?? "missing") keyboardHeight=\(fields["keyboardHeight"] ?? "missing")\nAXkeyboardExists=\(keyboardExists) AXkeyboard=\(keyboardFrame)\ndock=\(dockFrame) input=\(inputFrame) window=\(windowFrame)",
+                        named: "muse-keyboard-observed-geometry")
+        attachScreenshot(named: "muse-keyboard-observed-geometry")
+        guard let keyboardTop = fields["keyboardTop"].flatMap(Double.init),
+              let keyboardHeight = fields["keyboardHeight"].flatMap(Double.init),
+              keyboardTop.isFinite && keyboardHeight.isFinite && keyboardTop > 0 && keyboardHeight > 100 else {
+            XCTFail("The observed native keyboard frame must report a finite positive top and an occupied height above 100pt.")
+            throw NSError(domain: "MuseSurfaceUI", code: 3)
+        }
+        let observedTop = CGFloat(keyboardTop)
+        let observedBottom = observedTop + CGFloat(keyboardHeight)
+        XCTAssertTrue(composer.isHittable && keyboardExists && dock.exists)
+        XCTAssertTrue(!windowFrame.isNull && !windowFrame.isInfinite && windowFrame.height > 0)
+        XCTAssertGreaterThanOrEqual(observedTop, windowFrame.minY)
+        XCTAssertLessThanOrEqual(observedBottom, windowFrame.maxY + 1,
+                                 "The full occupied keyboard frame must stay inside the application window.")
+        XCTAssertLessThanOrEqual(observedTop, keyboardFrame.minY,
+                                 "The observed keyboard frame includes the prediction row omitted from keyboard AX bounds.")
+        XCTAssertGreaterThan(inputFrame.height, 0)
+        XCTAssertLessThanOrEqual(inputFrame.maxY, observedTop + 1,
+                                 "The native keyboard must not cover the draft.")
+        let dockGap = observedTop - dockFrame.maxY
+        XCTAssertGreaterThanOrEqual(dockGap, -1, "The composer dock must not overlap the keyboard.")
+        XCTAssertLessThanOrEqual(dockGap, 12,
+                                 "The dock must sit beside the keyboard without duplicate bottom clearance.")
+        XCTAssertTrue(dockFrame.insetBy(dx: -1, dy: -1).contains(inputFrame),
+                      "The editable composer must remain inside its measured dock.")
+    }
+
+    @MainActor
+    private func assertMuseReadableTranscript(app: XCUIApplication, transcript: XCUIElement,
+                                               phase: String) throws {
+        let snapshot = try transcript.snapshot()
+        let region = try museReadableRegion(app: app, transcriptFrame: snapshot.frame)
+        var visible: [XCUIElementSnapshot] = []
+        func visit(_ node: XCUIElementSnapshot) {
+            if node.identifier.hasPrefix("message-row:"), !node.label.isEmpty,
+               node.frame.intersection(region).height > 20,
+               node.frame.intersection(region).width > 0 {
+                visible.append(node)
+            }
+            node.children.forEach(visit)
+        }
+        visit(snapshot)
+        attachPlainText("scope=sampled settled boundary; not an intervening-frame or FPS measurement\nphase=\(phase)\nreadable=\(region)\n"
+            + visible.prefix(12).map { "\($0.identifier) frame=\($0.frame)" }.joined(separator: "\n"),
+                        named: "muse-\(phase)-geometry")
+        attachScreenshot(named: "muse-\(phase)")
+        XCTAssertFalse(visible.isEmpty, "The actual collection must contain readable transcript content at \(phase).")
+    }
 }

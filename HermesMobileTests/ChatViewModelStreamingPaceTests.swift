@@ -3,12 +3,282 @@ import XCTest
 import CryptoKit
 @testable import HermesMobile
 
-/// Display-pacing tests for issue #212: buffered streamed tokens are revealed
-/// word-by-word at an adaptive cadence, while completion paths flush instantly.
+/// Exercises lossless frame batches, injectable pacing, deadline catch-up and
+/// cancellation ownership without contacting a gateway.
 final class ChatViewModelStreamingPaceTests: XCTestCase {
     override func tearDown() {
         MockURLProtocol.requestHandler = nil
         super.tearDown()
+    }
+
+    @MainActor
+    func testResponsivePreviewCoalescesBurstIntoOneFrameAndRearms() async throws {
+        let stream = DirectPacingEventFixture()
+        let viewModel = try makeViewModel(
+            streamClient: stream,
+            wordCadenceNanoseconds: 48_000_000,
+            maxLagNanoseconds: 1_000_000_000
+        )
+        viewModel.setResponsiveStreamingPresentation(true)
+        var now: UInt64 = 0
+        viewModel.streamingClockForTesting = { now }
+        let gate = StreamingTaskSuspensionGate()
+        viewModel.streamingTaskWaitForTesting = { owner, delay in
+            await gate.suspend(owner: owner, delay: delay)
+        }
+        defer {
+            viewModel.setTranscriptPresentationActive(false)
+            gate.finish()
+        }
+        stream.startResponse(on: viewModel)
+        let burst = (0..<300).map { "word\($0) " }.joined()
+        stream.emit(.token(burst))
+        let frame = try XCTUnwrap(viewModel.scheduledStreamingContentFlushForTesting)
+        await fulfillment(of: [gate.arrival(for: frame.owner)], timeout: 2)
+        XCTAssertEqual(gate.delays[frame.owner], 16_000_000)
+        XCTAssertEqual(assistantContent(of: viewModel), "")
+
+        now = 8_000_000
+        stream.emit(.token("cafe"))
+        stream.emit(.token("\u{301}\n"))
+        XCTAssertEqual(viewModel.scheduledStreamingContentFlushForTesting?.owner, frame.owner)
+        now = 16_000_000
+        try gate.release(frame.owner)
+        await frame.task.value
+        let expected = burst + "cafe\u{301}\n"
+        XCTAssertEqual(Array((assistantContent(of: viewModel) ?? "").utf8), Array(expected.utf8))
+        XCTAssertNil(viewModel.scheduledStreamingContentFlushForTesting, "No artificial word backlog")
+
+        now = 30_000_000
+        stream.emit(.token("next burst"))
+        let next = try XCTUnwrap(viewModel.scheduledStreamingContentFlushForTesting)
+        await fulfillment(of: [gate.arrival(for: next.owner)], timeout: 2)
+        XCTAssertEqual(gate.delays[next.owner], 16_000_000, "An emptied buffer begins a new frame window")
+        // An unavailable main actor cannot meet a wall-clock deadline. Its first
+        // resumed tick must catch up completely instead of adding further lag.
+        now = 200_000_000
+        try gate.release(next.owner)
+        await next.task.value
+        XCTAssertEqual(assistantContent(of: viewModel), expected + "next burst")
+        XCTAssertNil(viewModel.scheduledStreamingContentFlushForTesting)
+    }
+
+    @MainActor
+    func testPacedDeadlineSurvivesPartialDrainAndNewArrivals() async throws {
+        let stream = DirectPacingEventFixture()
+        let viewModel = try makeViewModel(
+            streamClient: stream,
+            wordCadenceNanoseconds: 100_000_000,
+            maxLagNanoseconds: 300_000_000
+        )
+        var now: UInt64 = 0
+        viewModel.streamingClockForTesting = { now }
+        let gate = StreamingTaskSuspensionGate()
+        viewModel.streamingTaskWaitForTesting = { owner, delay in
+            await gate.suspend(owner: owner, delay: delay)
+        }
+        defer {
+            viewModel.setTranscriptPresentationActive(false)
+            gate.finish()
+        }
+        stream.startResponse(on: viewModel)
+        let initial = String(repeating: "old ", count: 60)
+        stream.emit(.token(initial))
+        let first = try XCTUnwrap(viewModel.scheduledStreamingContentFlushForTesting)
+        await fulfillment(of: [gate.arrival(for: first.owner)], timeout: 2)
+        now = 1_000_000
+        try gate.release(first.owner)
+        await first.task.value
+        XCTAssertFalse((assistantContent(of: viewModel) ?? "").isEmpty)
+        XCTAssertNotEqual(assistantContent(of: viewModel), initial)
+
+        let continuation = try XCTUnwrap(viewModel.scheduledStreamingContentFlushForTesting)
+        await fulfillment(of: [gate.arrival(for: continuation.owner)], timeout: 2)
+        now = 250_000_000
+        let fresh = String(repeating: "new ", count: 60)
+        stream.emit(.token(fresh))
+        try gate.release(continuation.owner)
+        await continuation.task.value
+        XCTAssertEqual(assistantContent(of: viewModel), initial + fresh,
+                       "Fresh arrivals must not restart the older pending text's 300 ms budget")
+        XCTAssertNil(viewModel.scheduledStreamingContentFlushForTesting)
+    }
+
+    func testPresentationSleepStopsAtOldestPendingDeadline() {
+        XCTAssertEqual(StreamingWordDrain.nextDelay(
+            requestedNanoseconds: 100_000_000,
+            oldestPendingAgeNanoseconds: 290_000_000,
+            maxLagNanoseconds: 300_000_000
+        ), 10_000_000)
+        XCTAssertEqual(StreamingWordDrain.nextDelay(
+            requestedNanoseconds: 100_000_000,
+            oldestPendingAgeNanoseconds: 310_000_000,
+            maxLagNanoseconds: 300_000_000
+        ), 0)
+        XCTAssertEqual(StreamingWordDrain.drainQuota(
+            backlogUnitCount: 1_000,
+            cadenceNanoseconds: 16_000_000,
+            maxLagNanoseconds: 300_000_000,
+            oldestPendingAgeNanoseconds: 300_000_000
+        ), 1_000)
+    }
+
+    @MainActor
+    func testCancelledContentSleeperCannotClearReplacementOrForkCadenceChain() async throws {
+        let stream = DirectPacingEventFixture()
+        let viewModel = try makeStalledDrainViewModel(streamClient: stream)
+        let gate = StreamingTaskSuspensionGate()
+        viewModel.streamingTaskWaitForTesting = { owner, delay in
+            await gate.suspend(owner: owner, delay: delay)
+        }
+        defer {
+            viewModel.setTranscriptPresentationActive(false)
+            gate.finish()
+        }
+        stream.startResponse(on: viewModel)
+        stream.emit(.token("prefix\r\n"))
+        let stale = try XCTUnwrap(viewModel.scheduledStreamingContentFlushForTesting)
+        await fulfillment(of: [gate.arrival(for: stale.owner)], timeout: 2)
+
+        // Drain the boundary synchronously and install B before cancelled A
+        // resumes. The gate deliberately does not resume on cancellation.
+        viewModel.flushPendingStreamingContent()
+        XCTAssertTrue(stale.task.isCancelled)
+        XCTAssertEqual(assistantContent(of: viewModel), "prefix\r\n")
+        let chunks = ["cafe", "\u{301}  beta\n", "👩‍", "👩‍👧‍👦 end"]
+        stream.emit(.token(chunks[0]))
+        let replacement = try XCTUnwrap(viewModel.scheduledStreamingContentFlushForTesting)
+        XCTAssertNotEqual(stale.owner, replacement.owner)
+        await fulfillment(of: [gate.arrival(for: replacement.owner)], timeout: 2)
+        for chunk in chunks.dropFirst() { stream.emit(.token(chunk)) }
+        stream.emit(.reasoning("thought\t"))
+        try gate.release(stale.owner)
+        await stale.task.value
+
+        // Resuming cancelled A must not erase the live replacement B.
+        XCTAssertEqual(viewModel.scheduledStreamingContentFlushForTesting?.owner, replacement.owner)
+        XCTAssertEqual(assistantContent(of: viewModel), "prefix\r\n")
+        XCTAssertEqual(viewModel.liveReasoningText, "")
+        XCTAssertEqual(viewModel.streamProgressHapticTrigger, 0)
+        stream.emit(.token("  tail"))
+        XCTAssertEqual(viewModel.scheduledStreamingContentFlushForTesting?.owner, replacement.owner)
+        XCTAssertEqual(gate.suspendedOwners, Set([replacement.owner]), "No orphaned B plus a new C")
+
+        try gate.release(replacement.owner)
+        await replacement.task.value
+        XCTAssertEqual(assistantContent(of: viewModel), "prefix\r\ncafe\u{301}  ")
+        XCTAssertEqual(viewModel.liveReasoningText, "thought\t")
+        let successor = try XCTUnwrap(viewModel.scheduledStreamingContentFlushForTesting)
+        XCTAssertNotEqual(successor.owner, replacement.owner)
+        await fulfillment(of: [gate.arrival(for: successor.owner)], timeout: 2)
+        XCTAssertEqual(gate.suspendedOwners, Set([successor.owner]))
+        XCTAssertEqual(gate.delays[replacement.owner], 1_000_000)
+        XCTAssertEqual(gate.delays[successor.owner], 60_000_000_000)
+        stream.emit(.token("\tfinal"))
+        XCTAssertEqual(viewModel.scheduledStreamingContentFlushForTesting?.owner, successor.owner)
+
+        // A real terminal without replacement text must drain every byte now.
+        stream.emit(.done)
+        let expected = "prefix\r\n" + chunks.joined() + "  tail\tfinal"
+        XCTAssertEqual(Array((assistantContent(of: viewModel) ?? "").utf8), Array(expected.utf8))
+        XCTAssertNil(viewModel.scheduledStreamingContentFlushForTesting)
+        XCTAssertTrue(successor.task.isCancelled)
+        XCTAssertEqual(viewModel.responseCompletionHapticTrigger, 1)
+        let progressAtTerminal = viewModel.streamProgressHapticTrigger
+        try gate.release(successor.owner)
+        await successor.task.value
+        XCTAssertEqual(assistantContent(of: viewModel), expected)
+        XCTAssertEqual(viewModel.streamProgressHapticTrigger, progressAtTerminal)
+        XCTAssertNil(viewModel.scheduledStreamingContentFlushForTesting)
+        XCTAssertTrue(gate.suspendedOwners.isEmpty)
+    }
+
+    @MainActor
+    func testCancelledContentSleeperRetainsOffscreenBacklogAndSuppressesReplayHaptics() async throws {
+        let stream = DirectPacingEventFixture()
+        let viewModel = try makeStalledDrainViewModel(streamClient: stream)
+        let gate = StreamingTaskSuspensionGate()
+        viewModel.streamingTaskWaitForTesting = { owner, delay in
+            await gate.suspend(owner: owner, delay: delay)
+        }
+        defer {
+            viewModel.setTranscriptPresentationActive(false)
+            gate.finish()
+        }
+        stream.startResponse(on: viewModel)
+        stream.emit(.token("  alpha beta\n"))
+        let stale = try XCTUnwrap(viewModel.scheduledStreamingContentFlushForTesting)
+        await fulfillment(of: [gate.arrival(for: stale.owner)], timeout: 2)
+        viewModel.setTranscriptPresentationActive(false)
+        stream.emit(.token("gamma\tdelta"))
+        stream.emit(.reasoning("offscreen thought"))
+        try gate.release(stale.owner)
+        await stale.task.value
+        XCTAssertEqual(assistantContent(of: viewModel), "")
+        XCTAssertEqual(viewModel.liveReasoningText, "")
+        XCTAssertNil(viewModel.scheduledStreamingContentFlushForTesting)
+        XCTAssertTrue(gate.suspendedOwners.isEmpty)
+
+        viewModel.setTranscriptPresentationActive(true)
+        let reentry = try XCTUnwrap(viewModel.scheduledStreamingContentFlushForTesting)
+        await fulfillment(of: [gate.arrival(for: reentry.owner)], timeout: 2)
+        XCTAssertEqual(gate.delays[reentry.owner], 0)
+        try gate.release(reentry.owner)
+        await reentry.task.value
+        XCTAssertEqual(assistantContent(of: viewModel), "  alpha beta\ngamma\tdelta")
+        XCTAssertEqual(viewModel.liveReasoningText, "offscreen thought")
+
+        let expected = "  alpha beta\ngamma\tdelta"
+        XCTAssertEqual(Array((assistantContent(of: viewModel) ?? "").utf8), Array(expected.utf8))
+        XCTAssertEqual(viewModel.streamProgressHapticTrigger, 0, "Do not replay backlog progress pulses")
+        XCTAssertNil(viewModel.scheduledStreamingContentFlushForTesting)
+        XCTAssertTrue(gate.suspendedOwners.isEmpty)
+    }
+
+    @MainActor
+    func testCancelledScrollSleeperCannotClearReplacementOrPublishOffscreen() async throws {
+        let stream = DirectPacingEventFixture()
+        let viewModel = try makeStalledDrainViewModel(streamClient: stream)
+        let gate = StreamingTaskSuspensionGate()
+        viewModel.streamingTaskWaitForTesting = { owner, delay in
+            await gate.suspend(owner: owner, delay: delay)
+        }
+        defer {
+            viewModel.setTranscriptPresentationActive(false)
+            gate.finish()
+        }
+        let originalTrigger = viewModel.streamingScrollTrigger
+        viewModel.scheduleStreamingScrollTriggerForTesting()
+        let stale = try XCTUnwrap(viewModel.scheduledStreamingScrollTriggerForTesting)
+        await fulfillment(of: [gate.arrival(for: stale.owner)], timeout: 2)
+        viewModel.setTranscriptPresentationActive(false)
+        viewModel.setTranscriptPresentationActive(true)
+        viewModel.scheduleStreamingScrollTriggerForTesting()
+        let replacement = try XCTUnwrap(viewModel.scheduledStreamingScrollTriggerForTesting)
+        await fulfillment(of: [gate.arrival(for: replacement.owner)], timeout: 2)
+        XCTAssertTrue(stale.task.isCancelled)
+        try gate.release(stale.owner)
+        await stale.task.value
+        XCTAssertEqual(viewModel.scheduledStreamingScrollTriggerForTesting?.owner, replacement.owner)
+        XCTAssertEqual(viewModel.streamingScrollTrigger, originalTrigger)
+        viewModel.scheduleStreamingScrollTriggerForTesting()
+        XCTAssertEqual(viewModel.scheduledStreamingScrollTriggerForTesting?.owner, replacement.owner)
+        XCTAssertEqual(gate.suspendedOwners, Set([replacement.owner]))
+        try gate.release(replacement.owner)
+        await replacement.task.value
+        XCTAssertNil(viewModel.scheduledStreamingScrollTriggerForTesting)
+        XCTAssertEqual(viewModel.streamingScrollTrigger, originalTrigger + 1)
+
+        viewModel.scheduleStreamingScrollTriggerForTesting()
+        let offscreen = try XCTUnwrap(viewModel.scheduledStreamingScrollTriggerForTesting)
+        await fulfillment(of: [gate.arrival(for: offscreen.owner)], timeout: 2)
+        viewModel.setTranscriptPresentationActive(false)
+        viewModel.scheduleStreamingScrollTriggerForTesting()
+        try gate.release(offscreen.owner)
+        await offscreen.task.value
+        XCTAssertEqual(viewModel.streamingScrollTrigger, originalTrigger + 1)
+        XCTAssertNil(viewModel.scheduledStreamingScrollTriggerForTesting)
+        XCTAssertTrue(gate.suspendedOwners.isEmpty)
     }
 
     @MainActor
@@ -50,9 +320,8 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
     @MainActor
     func testLargeBacklogCatchesUpWithinLagBound() async throws {
         let streamClient = DirectPacingEventFixture()
-        // 60 words × 100ms cadence = 6s of backlog; the 300ms lag bound forces a
-        // ~20-word quota per tick, so convergence inside the 4s observation window
-        // proves catch-up scaling (steady one-word cadence would time out).
+        // Real-executor convergence smoke test. The deterministic clock test
+        // above verifies the 300 ms policy deadline independently of scheduling.
         let viewModel = try makeViewModel(
             streamClient: streamClient,
             wordCadenceNanoseconds: 100_000_000,
@@ -70,10 +339,8 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
         let observed = try await observeAssistantContent(viewModel, until: target)
 
         XCTAssertEqual(observed.last, target)
-        XCTAssertGreaterThanOrEqual(
-            observed.count, 2,
-            "catch-up should drain in scaled chunks, not one dump; observed counts: \(observed.map(\.count))"
-        )
+        // A late main-actor tick may correctly reveal everything at once.
+        // Progressive batching is checked with a controlled clock above.
     }
 
     @MainActor
@@ -563,6 +830,7 @@ final class ChatStreamingMotionTests: XCTestCase {
 private final class DirectPacingEventFixture {
     enum Event {
         case token(String)
+        case reasoning(String)
         case interimAssistant(text: String, alreadyStreamed: Bool)
         case done
         case cancelled
@@ -583,6 +851,8 @@ private final class DirectPacingEventFixture {
         switch event {
         case .token(let text):
             emit(type: "message.delta", payload: ["text": .string(text)])
+        case .reasoning(let text):
+            emit(type: "reasoning.delta", payload: ["text": .string(text)])
         case .interimAssistant(let text, let alreadyStreamed):
             emit(type: "message.interim", payload: [
                 "text": .string(text),
@@ -606,5 +876,50 @@ private final class DirectPacingEventFixture {
             params: nil,
             connectionGeneration: 1
         ))
+    }
+}
+
+/// Cancellation-insensitive suspension lets the test choose when cancelled A
+/// resumes, including after replacement B has entered the real scheduler.
+@MainActor
+private final class StreamingTaskSuspensionGate {
+    private var continuations: [UUID: CheckedContinuation<Void, Never>] = [:]
+    private var arrivals: [UUID: XCTestExpectation] = [:]
+    private var enteredOwners: Set<UUID> = []
+    private var isFinished = false
+    private(set) var delays: [UUID: UInt64] = [:]
+
+    var suspendedOwners: Set<UUID> { Set(continuations.keys) }
+
+    func suspend(owner: UUID, delay: UInt64) async {
+        guard !isFinished else { return }
+        await withCheckedContinuation { continuation in
+            continuations[owner] = continuation
+            delays[owner] = delay
+            enteredOwners.insert(owner)
+            arrivals.removeValue(forKey: owner)?.fulfill()
+        }
+    }
+
+    func arrival(for owner: UUID) -> XCTestExpectation {
+        let expectation = XCTestExpectation(description: "Streaming task \(owner) suspended")
+        if enteredOwners.contains(owner) {
+            expectation.fulfill()
+        } else {
+            arrivals[owner] = expectation
+        }
+        return expectation
+    }
+
+    func release(_ owner: UUID) throws {
+        let continuation = try XCTUnwrap(continuations.removeValue(forKey: owner))
+        continuation.resume()
+    }
+
+    func finish() {
+        isFinished = true
+        let waiting = Array(continuations.values)
+        continuations.removeAll()
+        for continuation in waiting { continuation.resume() }
     }
 }

@@ -1,6 +1,6 @@
 # External TestFlight Launch Runbook
 
-## Internal chat-renderer preview
+## Internal chat-surface preview
 
 The maintainer's `internal_testflight` Fastlane lane adds
 `SEMREH_INTERNAL_CHAT_PREVIEW` to the **Release** archive. It does not define
@@ -9,13 +9,15 @@ Release builds do not expose the preview.
 
 The preview is device-local and **off by default**. In TestFlight, open
 **Settings → Chat → Experimental chat renderer**, enable it, then leave and
-reopen the chat. Turning it off and reopening returns to the existing renderer.
-Each chat captures its renderer choice on first presentation, so changing the setting
+reopen the chat. The preview includes a measured transcript viewport, floating
+header, unified composer, immediate local pending-send presentation, and batched
+streaming updates. Turning it off and reopening returns to the existing surface.
+Each chat captures its surface choice on first presentation, so changing the setting
 cannot replace a mounted transcript mid-gesture. If a retained iPad detail stays
 open, close that detail or restart the app to apply the choice.
 
 The internal Release Simulator has an explicit `--internal-chat-preview-smoke`
-route for the production Settings toggle and chat renderer with deterministic
+route for the production Settings toggle and chat surface with deterministic
 local messages. That route is not compiled for physical devices. Its focused
 UI selector is
 `LongChatScrollUITests/testInternalReleaseRendererTogglePersistenceAndFallback`.

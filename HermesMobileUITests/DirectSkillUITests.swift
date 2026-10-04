@@ -3930,12 +3930,21 @@ final class DirectSkillUITests: XCTestCase {
         defer { observer.invalidate() }
         let app = XCUIApplication()
         app.terminate()
+        let verifiesMuseSurface = environment["SEMREH_LIVE_MUSE_SURFACE"] == "1"
+        if verifiesMuseSurface { app.launchArguments = [] }
         app.launch()
         defer { UIPasteboard.general.items = [] }
-        let composer = try openContainedNewChat(app: app)
+        defer {
+            if verifiesMuseSurface, app.state == .runningForeground {
+                try? setContainedChatPreview(app: app, enabled: false)
+            }
+        }
+        let composer = try openContainedNewChat(app: app, museSurface: verifiesMuseSurface ? true : nil)
+        if verifiesMuseSurface { assertContainedSurfaceSelection(app: app, muse: true, needsTranscript: false) }
         let warmup = "SEMREH_LIFECYCLE_WARMUP_\(UUID().uuidString)"
         send(warmup, through: composer, app: app)
         waitForIdle(app: app)
+        if verifiesMuseSurface { assertContainedSurfaceSelection(app: app, muse: true) }
         let storedID: String
         do {
             storedID = try await observer.discoverStoredID(uniquePrompt: warmup)
@@ -3952,24 +3961,53 @@ final class DirectSkillUITests: XCTestCase {
             self.exactCanonicalPairs($0, users: [warmup])
         }
         if phase == "automatic-restore" {
-            // Select the durable existing conversation before termination. A new
-            // draft's navigation identity is separate from first-send adoption.
+            // A first-send draft has not selected its durable ID in the list.
+            // Test the cold deep link before row selection can persist that target
+            // and let ordinary restoration mask a dropped link.
+            let back = chatBackButton(app: app)
+            XCTAssertTrue(back.waitForExistence(timeout: 5) && back.isEnabled && back.isHittable)
+            back.tap()
+            let storedRow = app.buttons["session-row:\(storedID)"]
+            XCTAssertTrue(storedRow.waitForExistence(timeout: 20) && storedRow.isEnabled && storedRow.isHittable,
+                          "Back must expose the exact durable conversation for production selection.")
             var link = URLComponents()
             link.scheme = "semreh"
             link.host = "session"
             link.queryItems = [URLQueryItem(name: "id", value: storedID)]
             app.open(try XCTUnwrap(link.url))
+            XCTAssertTrue(app.textViews["chat-composer-input"].waitForExistence(timeout: 30),
+                          "Cold deep-link launch must open the requested durable conversation.")
+            if verifiesMuseSurface { assertContainedSurfaceSelection(app: app, muse: true) }
+            let linkedDetail = app.otherElements.matching(
+                NSPredicate(format: "identifier BEGINSWITH %@", "chat-detail:")
+            ).firstMatch
+            XCTAssertTrue(linkedDetail.waitForExistence(timeout: 10))
+            try assertAccessibleTranscriptRows(baseline, in: linkedDetail, context: "cold deep-link target",
+                                               museSurface: verifiesMuseSurface)
+            let linkedDetailID = linkedDetail.identifier
+            let linkedBack = chatBackButton(app: app)
+            XCTAssertTrue(linkedBack.waitForExistence(timeout: 5) && linkedBack.isEnabled && linkedBack.isHittable)
+            linkedBack.tap()
+            XCTAssertTrue(linkedDetail.waitForNonExistence(timeout: 10))
+            XCTAssertTrue(storedRow.waitForExistence(timeout: 20) && storedRow.isEnabled && storedRow.isHittable)
+            // Separately select the same durable row through normal navigation
+            // before exercising three plain process restarts below.
+            storedRow.tap()
             let selectedComposer = app.descendants(matching: .any)
                 .matching(identifier: "chat-composer-input").firstMatch
             XCTAssertTrue(selectedComposer.waitForExistence(timeout: 30))
+            if verifiesMuseSurface { assertContainedSurfaceSelection(app: app, muse: true) }
             let selectedDetail = app.descendants(matching: .any).matching(
                 NSPredicate(format: "identifier BEGINSWITH %@", "chat-detail:")
             ).firstMatch
             XCTAssertTrue(selectedDetail.waitForExistence(timeout: 10))
+            XCTAssertEqual(selectedDetail.identifier, linkedDetailID,
+                           "Cold deep-link and exact row selection must expose the same chat detail identity.")
             try assertAccessibleTranscriptRows(
                 baseline,
                 in: selectedDetail,
-                context: "selected existing chat before termination"
+                context: "selected existing chat before termination",
+                museSurface: verifiesMuseSurface
             )
             let selectedDetailID = selectedDetail.identifier
             // This gate isolates existing-chat viewport restoration. Completion
@@ -3982,6 +4020,7 @@ final class DirectSkillUITests: XCTestCase {
                     .matching(identifier: "chat-composer-input").firstMatch
                 XCTAssertTrue(restoredComposer.waitForExistence(timeout: 30),
                               "Plain launch \(launchNumber) must restore the selected existing conversation.")
+                if verifiesMuseSurface { assertContainedSurfaceSelection(app: app, muse: true) }
                 XCTAssertTrue(app.descendants(matching: .any).matching(identifier: selectedDetailID)
                     .firstMatch.waitForExistence(timeout: 10),
                     "Plain launch \(launchNumber) must preserve the pre-termination chat detail identity.")
@@ -3989,7 +4028,8 @@ final class DirectSkillUITests: XCTestCase {
                 try assertAccessibleTranscriptRows(
                     baseline,
                     in: restoredDetail,
-                    context: "automatic restore \(launchNumber) before interaction"
+                    context: "automatic restore \(launchNumber) before interaction",
+                    museSurface: verifiesMuseSurface
                 )
                 let screenshot = XCTAttachment(screenshot: app.screenshot())
                 screenshot.name = "Automatic restore \(launchNumber) before interaction"
@@ -4064,6 +4104,7 @@ final class DirectSkillUITests: XCTestCase {
             let foregroundComposer = app.descendants(matching: .any)
                 .matching(identifier: "chat-composer-input").firstMatch
             XCTAssertTrue(foregroundComposer.waitForExistence(timeout: 20))
+            if verifiesMuseSurface { assertContainedSurfaceSelection(app: app, muse: true) }
             let next = try sendUniqueCompleted("SEMREH_LIFECYCLE_AFTER_BACKGROUND",
                                                composer: foregroundComposer, app: app)
             _ = try await waitForCanonical(observer: observer, storedID: storedID) {
@@ -4105,6 +4146,7 @@ final class DirectSkillUITests: XCTestCase {
             let reopenedComposer = app.descendants(matching: .any)
                 .matching(identifier: "chat-composer-input").firstMatch
             XCTAssertTrue(reopenedComposer.waitForExistence(timeout: 30))
+            if verifiesMuseSurface { assertContainedSurfaceSelection(app: app, muse: true) }
             XCTAssertTrue(containing(marker, app: app).waitForExistence(timeout: 20))
             XCTAssertEqual(exactCount(marker, app: app), 1)
             waitForVisibleACKCount(2, app: app)
@@ -4116,6 +4158,109 @@ final class DirectSkillUITests: XCTestCase {
         default:
             XCTFail("Unreachable lifecycle phase")
         }
+    }
+
+    @MainActor
+    func testOptInContainedApprovalBackAndReopenAcrossSurfaces() async throws {
+        continueAfterFailure = false
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("Contained approval navigation is simulator-only.")
+        #endif
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SEMREH_BLOCKING_BACK_UI"] == "1" else {
+            throw XCTSkip("Contained approval Back/reopen verification is opt-in.")
+        }
+        guard environment["SEMREH_SLICE2_UI_LIVE"] == "1",
+              environment["SEMREH_SLICE1_HTTPS"] == "1",
+              environment["SEMREH_SLICE3_BLOCKING_UI"] == "1",
+              environment["SEMREH_SLICE2_UI_BACKEND_MODE"] == "stock",
+              environment["SEMREH_SLICE2_UI_BACKEND_SHA"] == backendSHA,
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == credentialsPath,
+              environment["SEMREH_SLICE2_TOOL_CWD"] == "/Users/maurice/workspace/semreh-slice1-runtime/tools" else {
+            return XCTFail("Approval navigation requires the exact contained stock blocking-plugin fixture.")
+        }
+        let observer = try await LifecycleCanonicalObserver(
+            origin: try XCTUnwrap(URL(string: origin)), credentials: try readCredentials()
+        )
+        defer { observer.invalidate(); UIPasteboard.general.items = [] }
+
+        // Two presentations of the same bounded stock callback. The fixture
+        // tool only asks for approval; Deny grants no execution permission.
+        for muse in [false, true] {
+            let variant = muse ? "muse" : "stable"
+            let app = XCUIApplication()
+            app.terminate()
+            app.launchArguments = []
+            app.launch()
+            defer {
+                if muse, app.state == .runningForeground {
+                    try? setContainedChatPreview(app: app, enabled: false)
+                }
+            }
+            let composer = try openContainedNewChat(app: app, museSurface: muse)
+            assertContainedSurfaceSelection(app: app, muse: muse, needsTranscript: false)
+            let warmup = "SEMREH_APPROVAL_BACK_\(UUID().uuidString)"
+            send(warmup, through: composer, app: app)
+            waitForIdle(app: app)
+            assertContainedSurfaceSelection(app: app, muse: muse)
+            let storedID = try await observer.discoverStoredID(uniquePrompt: warmup)
+            let baseline = try await waitForCanonical(observer: observer, storedID: storedID) {
+                self.exactCanonicalPairs($0, users: [warmup])
+            }
+
+            let marker = "SEMREH_BLOCKING_APPROVAL"
+            let denialAcknowledgement = "SEMREH_SLICE3_BLOCKING_ACK_APPROVAL_DENY"
+            send(marker, through: composer, app: app)
+            let heading = app.staticTexts["Approval required"]
+            let deny = app.buttons["approval-request-choice-deny"]
+            XCTAssertTrue(heading.waitForExistence(timeout: 30))
+            XCTAssertTrue(deny.waitForExistence(timeout: 10) && deny.isHittable)
+            XCTAssertTrue(containing("synthetic approval cancellation fixture", app: app).exists,
+                          "Only the exact no-op fixture approval may satisfy this test.")
+            XCTAssertFalse(app.buttons["approval-request-skip-all"].exists)
+            let before = XCTAttachment(screenshot: app.screenshot())
+            before.name = "Contained approval \(variant) before one Back tap"
+            before.lifetime = .keepAlways
+            add(before)
+
+            let back = chatBackButton(app: app)
+            XCTAssertTrue(back.waitForExistence(timeout: 5) && back.isHittable,
+                          "A pending approval must leave the production Back control usable.")
+            back.tap() // One real tap; no fallback gesture or deep-link escape.
+            let row = app.buttons["session-row:\(storedID)"]
+            XCTAssertTrue(row.waitForExistence(timeout: 20) && row.isHittable,
+                          "Back must expose this exact conversation in the real session list.")
+            XCTAssertFalse(heading.exists, "A hidden conversation must not cover the session list with its prompt.")
+            let parked = try await observer.transcript(storedID: storedID)
+            XCTAssertTrue(hasStableBaseline(parked, baseline: baseline))
+            XCTAssertEqual(canonicalTexts(parked, role: "user"), [warmup, marker])
+            XCTAssertEqual(canonicalOccurrences(parked, role: "assistant", text: denialAcknowledgement), 0,
+                           "Back must neither answer nor resolve the pending approval.")
+
+            row.tap()
+            assertContainedSurfaceSelection(app: app, muse: muse)
+            XCTAssertTrue(heading.waitForExistence(timeout: 20))
+            XCTAssertTrue(deny.waitForExistence(timeout: 10) && deny.isHittable,
+                          "Reopening the exact conversation must retain its pending approval.")
+            XCTAssertTrue(containing("synthetic approval cancellation fixture", app: app).exists)
+            let reopened = XCTAttachment(screenshot: app.screenshot())
+            reopened.name = "Contained approval \(variant) retained after session-row reopen"
+            reopened.lifetime = .keepAlways
+            add(reopened)
+            deny.tap()
+            XCTAssertTrue(heading.waitForNonExistence(timeout: 15))
+            waitForIdle(app: app)
+            _ = try await waitForCanonical(observer: observer, storedID: storedID) { rows in
+                self.hasStableBaseline(rows, baseline: baseline)
+                    && self.canonicalTexts(rows, role: "user") == [warmup, marker]
+                    && self.canonicalOccurrences(rows, role: "assistant", text: denialAcknowledgement) == 1
+            }
+        }
+    }
+
+    @MainActor
+    private func assertContainedSurfaceSelection(app: XCUIApplication, muse: Bool, needsTranscript: Bool = true) {
+        requireSelectedChatSurface(in: app, muse: muse, needsTranscript: needsTranscript)
     }
 
     @MainActor
@@ -4521,7 +4666,7 @@ final class DirectSkillUITests: XCTestCase {
     }
 
     @MainActor
-    private func openContainedNewChat(app: XCUIApplication) throws -> XCUIElement {
+    private func openContainedNewChat(app: XCUIApplication, museSurface: Bool? = nil) throws -> XCUIElement {
         let credentials = try readCredentials()
         dismissKnownPasswordSavePrompt(app, timeout: 1)
         try prepareContainedSignIn(app: app)
@@ -4579,6 +4724,7 @@ final class DirectSkillUITests: XCTestCase {
         }
         XCTAssertTrue(sessions.waitForExistence(timeout: 30) && sessions.isHittable)
         sessions.tap()
+        if let museSurface { try setContainedChatPreview(app: app, enabled: museSurface) }
         let newSession = app.buttons["New chat"]
         XCTAssertTrue(newSession.waitForExistence(timeout: 15) && newSession.isHittable)
         newSession.tap()
@@ -4591,6 +4737,58 @@ final class DirectSkillUITests: XCTestCase {
             .matching(identifier: "chat-composer-input").firstMatch
         XCTAssertTrue(composer.waitForExistence(timeout: 20) && composer.isHittable)
         return composer
+    }
+
+    @MainActor
+    private func setContainedChatPreview(app: XCUIApplication, enabled: Bool) throws {
+        func requireUsable(_ element: XCUIElement, _ description: String) throws {
+            guard element.waitForExistence(timeout: 10), element.isEnabled, element.isHittable else {
+                XCTFail("Contained preview settings require a usable \(description).")
+                throw NSError(domain: "DirectSkillUITests", code: 31)
+            }
+        }
+        let chat = app.otherElements.matching(
+            NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
+        ).firstMatch
+        if chat.exists {
+            let back = chatBackButton(app: app)
+            try requireUsable(back, "chat Back control")
+            back.tap()
+        }
+        let sessions = app.buttons["Chats"]
+        try requireUsable(sessions, "Chats tab")
+        sessions.tap()
+        let settings = app.buttons["Settings"]
+        try requireUsable(settings, "Settings control")
+        settings.tap()
+        guard app.staticTexts["semreh-slice1-test.tailda8427.ts.net"].waitForExistence(timeout: 15) else {
+            XCTFail("Refusing to change preview settings outside the contained fixture.")
+            throw NSError(domain: "DirectSkillUITests", code: 32)
+        }
+        let chatSettings = app.staticTexts["Chat"]
+        try requireUsable(chatSettings, "Chat settings section")
+        chatSettings.tap()
+        let toggle = app.switches["experimental-chat-renderer-toggle"]
+        try requireUsable(toggle, "experimental renderer toggle")
+        let desired = enabled ? "1" : "0"
+        guard let current = toggle.value as? String, ["0", "1"].contains(current) else {
+            XCTFail("The experimental renderer switch must expose a definite on/off value.")
+            throw NSError(domain: "DirectSkillUITests", code: 33)
+        }
+        if current != desired { toggle.tap() }
+        guard toggle.value as? String == desired else {
+            XCTFail("The persisted preview switch must read back its requested value.")
+            throw NSError(domain: "DirectSkillUITests", code: 34)
+        }
+        let receipt = XCTAttachment(string: "Production Settings > Chat preview toggle readback=\(desired); no renderer launch override")
+        receipt.name = "Contained persisted chat preview selection"
+        receipt.lifetime = .keepAlways
+        add(receipt)
+        let done = app.buttons["Done"]
+        try requireUsable(done, "Settings Done control")
+        done.tap()
+        XCTAssertTrue(toggle.waitForNonExistence(timeout: 5))
+        try requireUsable(sessions, "Chats tab after closing Settings")
     }
 
     @MainActor
@@ -5080,7 +5278,8 @@ final class DirectSkillUITests: XCTestCase {
     private func assertAccessibleTranscriptRows(
         _ rows: [[String: Any]],
         in detail: XCUIElement,
-        context: String
+        context: String,
+        museSurface: Bool = false
     ) throws {
         let expected = rows.compactMap(accessibleTranscriptRow)
         guard expected.count == rows.count else {
@@ -5088,7 +5287,9 @@ final class DirectSkillUITests: XCTestCase {
             throw NSError(domain: "DirectSkillUITests", code: 17)
         }
 
-        let containers = canonicalTranscriptContainers(in: detail)
+        let containers = museSurface
+            ? detail.descendants(matching: .collectionView).matching(identifier: "chat-native-transcript-v2")
+            : canonicalTranscriptContainers(in: detail)
         let transcript = containers.firstMatch
         guard transcript.waitForExistence(timeout: 10), containers.count == 1 else {
             XCTFail("\(context) must expose exactly one canonical transcript scroll container.")
@@ -5182,28 +5383,43 @@ final class DirectSkillUITests: XCTestCase {
     }
 
     private func send(_ text: String, through composer: XCUIElement, app: XCUIApplication) {
+        XCTAssertTrue(composer.exists && composer.isEnabled && composer.isHittable)
         composer.tap()
         composer.typeText(text)
         let send = app.buttons["Send"]
-        XCTAssertTrue(send.waitForExistence(timeout: 5))
+        let ready = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == true AND enabled == true AND hittable == true"),
+            object: send
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 5), .completed,
+                       "The real Send action must be enabled and reachable before submission.")
         send.tap()
     }
 
     @MainActor
     private func waitForIdle(app: XCUIApplication) {
-        let deadline = Date().addingTimeInterval(45)
-        while Date() < deadline {
+        func hasUsableIdleComposer() -> Bool {
             let composer = app.descendants(matching: .any)
                 .matching(identifier: "chat-composer-input").firstMatch
-            if !app.buttons["Stop response"].exists && composer.isHittable
-                && (app.buttons["Send"].exists || app.buttons["Voice input"].exists) { return }
+            let send = app.buttons["Send"]
+            let voice = app.buttons["Voice input"]
+            // An immediate local bubble precedes session setup: during that
+            // interval Send remains present as a disabled spinner and Stop is
+            // absent. Voice existence alone must not declare that state idle.
+            let disabledSend = send.exists && !send.isEnabled
+            let usableSend = send.exists && send.isEnabled && send.isHittable
+            let usableVoice = voice.exists && voice.isEnabled && voice.isHittable
+            return !app.buttons["Stop response"].exists && !disabledSend
+                && composer.exists && composer.isEnabled && composer.isHittable
+                && (usableSend || usableVoice)
+        }
+        let deadline = Date().addingTimeInterval(45)
+        while Date() < deadline {
+            if hasUsableIdleComposer() { return }
             RunLoop.main.run(until: Date().addingTimeInterval(0.1))
         }
-        XCTAssertFalse(app.buttons["Stop response"].exists)
-        let composer = app.descendants(matching: .any)
-            .matching(identifier: "chat-composer-input").firstMatch
-        XCTAssertTrue(composer.isHittable)
-        XCTAssertTrue(app.buttons["Send"].exists || app.buttons["Voice input"].exists)
+        XCTAssertTrue(hasUsableIdleComposer(),
+                      "Idle requires a usable composer action, no Stop, and no disabled Send spinner.")
     }
 
     /// P02 phase-protocol geometry sample: raw AX numbers, printed as a

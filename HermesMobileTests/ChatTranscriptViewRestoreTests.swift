@@ -1606,6 +1606,8 @@ final class ChatTranscriptViewRestoreTests: XCTestCase {
         let previous = scene.windows.first(where: \.isKeyWindow)
         let window = UIWindow(windowScene: scene)
         window.frame = scene.coordinateSpace.bounds
+        // This raw-capture control's white backdrop requires fixed text contrast.
+        window.overrideUserInterfaceStyle = .light
         window.backgroundColor = .white
         window.rootViewController = controller
         window.makeKeyAndVisible()

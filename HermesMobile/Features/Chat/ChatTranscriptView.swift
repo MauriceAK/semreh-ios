@@ -962,11 +962,13 @@ struct ChatTranscriptView: View, Equatable {
     @Environment(\.openURL) private var openURL
     @Environment(\.appColorPalette) private var nativeViewportPalette
     @Environment(\.appAccent) private var nativeViewportAccent
+    @Environment(\.museSurfaceUsesDefaultAccent) private var museSurfaceUsesDefaultAccent
     @AppStorage(ChatTranscriptDisplaySettings.wrapsCodeBlockLinesKey) private var wrapsCodeBlockLines = false
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.self) private var prototypeEnvironment
 
     var internalChatRendererEnabled = InternalChatRendererPolicy.debugArgument("--chat-native-transcript-v2")
+    var usesMuseChatSurface = false
 
     let isLoading: Bool
     let errorMessage: String?
@@ -999,7 +1001,9 @@ struct ChatTranscriptView: View, Equatable {
     let bottomAnchorID: String
     let transcriptMessageSpacing: CGFloat
     let transcriptBlockSpacing: CGFloat
+    var transcriptTopInsetHeight: CGFloat = 0
     let transcriptBottomInsetHeight: CGFloat
+    var latestButtonBottomInset: CGFloat? = nil
     let scrollToBottomButtonBottomPadding: CGFloat
     let localAttachmentPreviews: [String: [String: Data]]
     let listeningMessageID: String?
@@ -1338,10 +1342,14 @@ struct ChatTranscriptView: View, Equatable {
 
     var body: some View {
         ZStack {
-        if isLoading && messages.isEmpty && clarificationPrompt == nil {
+        // A pending local send belongs to presentation, before server history
+        // exists. Loading/error/empty placeholders must not cover its bubble.
+        let hasPresentedMessages = !messages.isEmpty
+            || (usesMuseChatSurface && !displayedTranscriptMessages.isEmpty)
+        if isLoading && !hasPresentedMessages && clarificationPrompt == nil {
             ChatTranscriptLoadingSkeletonView()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if let errorMessage, messages.isEmpty, clarificationPrompt == nil {
+        } else if let errorMessage, !hasPresentedMessages, clarificationPrompt == nil {
             ContentUnavailableView {
                 Label("Could Not Load Messages", systemImage: "exclamationmark.triangle")
             } description: {
@@ -1351,7 +1359,7 @@ struct ChatTranscriptView: View, Equatable {
                     Task { await onLoadMessages() }
                 }
             }
-        } else if messages.isEmpty && clarificationPrompt == nil {
+        } else if !hasPresentedMessages && clarificationPrompt == nil {
             ContentUnavailableView {
                 Image(systemName: "bubble.left.and.bubble.right")
             } description: {
@@ -1363,7 +1371,9 @@ struct ChatTranscriptView: View, Equatable {
             }
         } else {
 #if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
-            if nativeTranscriptV2Enabled {
+            if usesMuseChatSurface {
+                museMeasuredTranscript
+            } else if nativeTranscriptV2Enabled {
                 nativeTranscriptV2
             } else {
                 nonNativeTranscript
@@ -1485,6 +1495,7 @@ struct ChatTranscriptView: View, Equatable {
     /// policy selects only realization/geometry, consistently for every source
     /// size, so crossing a row count never replaces the viewport or its IDs.
     private var usesMeasuredTranscriptViewport: Bool {
+        if usesMuseChatSurface { return true }
 #if DEBUG
         if nativeTranscriptV2Enabled { return true }
         let arguments = ProcessInfo.processInfo.arguments
@@ -1516,6 +1527,23 @@ struct ChatTranscriptView: View, Equatable {
 
     private var nativeTranscriptV2: some View { measuredTranscriptViewport }
 
+    private var museMeasuredTranscript: some View {
+        ChatMeasuredTranscriptView(
+            viewport: makeMeasuredViewport(
+                restoreRequest: initialRestoreRequest,
+                isRestoring: initialRestoreRequest != nil,
+                onLatest: onStableViewportJumpToLatest,
+                onState: publishMeasuredViewportState,
+                onRestore: { request, outcome in
+                    guard initialRestoreRequest == request else { return }
+                    onInitialRestoreOutcome(request, outcome)
+                }
+            ),
+            dismissesKeyboardOnTap: clarificationPrompt == nil,
+            onDismissKeyboard: onDismissKeyboard
+        )
+    }
+
     // UICollectionView realizes a viewport-sized set of the exact production
     // SwiftUI rows, not a native-rich substitute or an eager full-history host.
     private var measuredTranscriptViewport: some View {
@@ -1536,7 +1564,6 @@ struct ChatTranscriptView: View, Equatable {
     }
 
     private func measuredTranscriptViewport(proxy: ScrollViewProxy) -> some View {
-        let rows = allRenderedTranscriptMessages
         let scope = nativeTranscriptScope
         let restoreRequest = measuredLegacyRestore.prepare(
             scope: scope, generation: restoreScrollToken, target: restoreTarget,
@@ -1545,7 +1572,46 @@ struct ChatTranscriptView: View, Equatable {
             isInteracting: isUserInteractingWithScroll || scrollMetricPublication.hasPendingDirectInteraction,
             explicitLatest: hasExplicitBottomScrollRequest
         )
-        let isRestoring = initialRestoreRequest != nil || measuredLegacyRestore.isPending
+        return makeMeasuredViewport(
+            restoreRequest: restoreRequest,
+            isRestoring: initialRestoreRequest != nil || measuredLegacyRestore.isPending,
+            onLatest: {
+                measuredLegacyRestore.cancel()
+                onStableViewportJumpToLatest()
+            },
+            onState: { metrics, visibleID, latestVisible, bottomVisible in
+                if metrics.isDirectlyInteracting { measuredLegacyRestore.cancel() }
+                publishMeasuredViewportState(metrics, visibleID, latestVisible, bottomVisible)
+            },
+            onRestore: { request, outcome in
+                if initialRestoreRequest == request {
+                    onInitialRestoreOutcome(request, outcome)
+                } else if let id = measuredLegacyRestore.fallback(for: request, outcome: outcome) {
+                    onScrollToTranscriptMessage(proxy, id, false)
+                }
+            }
+        )
+    }
+
+    private func publishMeasuredViewportState(
+        _ metrics: ChatScrollMetrics, _ visibleID: String?, _ latestVisible: Bool, _ bottomVisible: Bool
+    ) {
+        onUpdateScrollMetrics(metrics)
+        onVisibleTranscriptRowIDChange(visibleID)
+        onTranscriptTailVisibilityChange(latestVisible, bottomVisible)
+    }
+
+    /// Shared row construction; navigation ownership is supplied by the selected
+    /// surface, so the Muse adapter never enters legacy proxy restoration.
+    private func makeMeasuredViewport(
+        restoreRequest: ChatTranscriptRestoreRequest?,
+        isRestoring: Bool,
+        onLatest: @escaping () -> Void,
+        onState: @escaping (ChatScrollMetrics, String?, Bool, Bool) -> Void,
+        onRestore: @escaping (ChatTranscriptRestoreRequest, ChatTranscriptRestoreOutcome) -> Void
+    ) -> ChatNativeTranscriptViewport {
+        let rows = allRenderedTranscriptMessages
+        let scope = nativeTranscriptScope
         let metadata = viewportTracker.nativeMetadataCache.metadata(
             for: .init(
                 renderedGeneration: viewportTracker.renderedGeneration,
@@ -1594,7 +1660,7 @@ struct ChatTranscriptView: View, Equatable {
                 )
             },
             revision: transcriptRenderRevision,
-            typeKey: "renderer:\(internalChatRendererEnabled)|\(dynamicTypeSize)|\(colorScheme)|wrap:\(wrapsCodeBlockLines)",
+            typeKey: "renderer:\(internalChatRendererEnabled)|\(dynamicTypeSize)|\(colorScheme)|wrap:\(wrapsCodeBlockLines)|muse:\(usesMuseChatSurface)|defaultAccent:\(museSurfaceUsesDefaultAccent)|palette:\(nativeViewportPalette.rawValue)|accent:\(nativeViewportAccent.rawValue)|\(ChatMeasuredTranscriptView.environmentSignature(prototypeEnvironment))",
             scope: scope,
             initialID: initialRestoreMessageID,
             restoreRequest: restoreRequest,
@@ -1606,6 +1672,8 @@ struct ChatTranscriptView: View, Equatable {
             horizontalPadding: transcriptHorizontalPadding,
             spacing: transcriptMessageSpacing,
             bottomInset: transcriptBottomInsetHeight,
+            topInset: transcriptTopInsetHeight,
+            latestBottomInset: latestButtonBottomInset,
             environment: prototypeEnvironment,
             // Only empty boundaries are canonical inert spacers. Every rich branch
             // stays eager, including its callbacks, preferences and environment.
@@ -1645,23 +1713,9 @@ struct ChatTranscriptView: View, Equatable {
                     inlineCommitButton
                 })
             },
-            onLatest: {
-                measuredLegacyRestore.cancel()
-                onStableViewportJumpToLatest()
-            },
-            onState: { metrics, visibleID, latestVisible, bottomVisible in
-                if metrics.isDirectlyInteracting { measuredLegacyRestore.cancel() }
-                onUpdateScrollMetrics(metrics)
-                onVisibleTranscriptRowIDChange(visibleID)
-                onTranscriptTailVisibilityChange(latestVisible, bottomVisible)
-            },
-            onRestore: { request, outcome in
-                if initialRestoreRequest == request {
-                    onInitialRestoreOutcome(request, outcome)
-                } else if let id = measuredLegacyRestore.fallback(for: request, outcome: outcome) {
-                    onScrollToTranscriptMessage(proxy, id, false)
-                }
-            },
+            onLatest: onLatest,
+            onState: onState,
+            onRestore: onRestore,
             metricPublication: scrollMetricPublication,
             allowsAutomaticPaging: isPagingStartupReady && hasOlderMessages
                 && !isLoadingOlderMessages && initialRestoreRequest == nil,
@@ -5090,6 +5144,7 @@ extension ChatTranscriptView {
     /// transcript row.
     static func == (lhs: ChatTranscriptView, rhs: ChatTranscriptView) -> Bool {
         lhs.internalChatRendererEnabled == rhs.internalChatRendererEnabled &&
+        lhs.usesMuseChatSurface == rhs.usesMuseChatSurface &&
         lhs.outgoingInsertionEvent == rhs.outgoingInsertionEvent &&
             lhs.debugArrowMotionStatus == rhs.debugArrowMotionStatus &&
             lhs.explicitBottomGeometryToken == rhs.explicitBottomGeometryToken &&
@@ -5120,7 +5175,9 @@ extension ChatTranscriptView {
             lhs.bottomAnchorID == rhs.bottomAnchorID &&
             lhs.transcriptMessageSpacing == rhs.transcriptMessageSpacing &&
             lhs.transcriptBlockSpacing == rhs.transcriptBlockSpacing &&
+            lhs.transcriptTopInsetHeight == rhs.transcriptTopInsetHeight &&
             lhs.transcriptBottomInsetHeight == rhs.transcriptBottomInsetHeight &&
+            lhs.latestButtonBottomInset == rhs.latestButtonBottomInset &&
             lhs.scrollToBottomButtonBottomPadding == rhs.scrollToBottomButtonBottomPadding &&
             lhs.localAttachmentPreviews == rhs.localAttachmentPreviews &&
             lhs.listeningMessageID == rhs.listeningMessageID &&

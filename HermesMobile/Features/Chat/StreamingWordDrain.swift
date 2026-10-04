@@ -1,15 +1,20 @@
 import Foundation
 
-/// Pure helpers for pacing streamed assistant text at a word cadence (issue #212).
+/// Lossless buffering and bounded presentation scheduling for streamed text.
 ///
-/// The streaming flush pipeline reveals buffered tokens word-by-word instead of
-/// dumping whole burst batches into the transcript at once. A drainable "unit" is
+/// The preview flushes frame-sized batches; injected pacing can still reveal
+/// whole words without changing the received bytes. A drainable "unit" is
 /// one word plus its trailing whitespace; leading whitespace attaches to the first
 /// unit, and a trailing in-progress word counts as a unit so buffers without
 /// whitespace still drain. Splitting walks `Character`s (grapheme clusters), so
 /// emoji/ZWJ sequences and combining marks are never split, and `head + tail`
 /// always reproduces the input exactly — pacing can never alter final content.
 enum StreamingWordDrain {
+    /// Batch network arrivals around one 60 Hz frame. This is a scheduling
+    /// budget, not a claim about display refresh rate or main-thread availability.
+    static let frameIntervalNanoseconds: UInt64 = 16_000_000
+    static let maximumBufferAgeNanoseconds: UInt64 = 16_000_000
+
     /// Keeps the backlog count current as chunks arrive. A paced tick then
     /// scans only the prefix it will reveal, instead of recounting the entire
     /// pending suffix on every tick. The text remains one String so a grapheme
@@ -149,20 +154,35 @@ enum StreamingWordDrain {
         return (text, "")
     }
 
-    /// Units to drain on one cadence tick. Normally one word per tick; when the
-    /// backlog would take longer than `maxLagNanoseconds` to drain at
-    /// `cadenceNanoseconds` per word, the quota scales up proportionally so the
-    /// display catches up to the live stream within the lag bound.
+    /// Longer injected cadences can reveal progressively, but the remaining
+    /// budget belongs to the original oldest pending text. New arrivals and
+    /// partial drains never move that deadline. At/after it, drain everything
+    /// on the next main-actor opportunity instead of creating another backlog.
     static func drainQuota(
         backlogUnitCount: Int,
         cadenceNanoseconds: UInt64,
-        maxLagNanoseconds: UInt64
+        maxLagNanoseconds: UInt64,
+        oldestPendingAgeNanoseconds: UInt64 = 0
     ) -> Int {
         guard backlogUnitCount > 1 else { return 1 }
-        guard cadenceNanoseconds > 0, maxLagNanoseconds > 0 else { return backlogUnitCount }
+        guard cadenceNanoseconds > 0,
+              oldestPendingAgeNanoseconds < maxLagNanoseconds else { return backlogUnitCount }
 
+        let remainingNanoseconds = maxLagNanoseconds - oldestPendingAgeNanoseconds
+        guard cadenceNanoseconds < remainingNanoseconds else { return backlogUnitCount }
         let drainNanoseconds = Double(backlogUnitCount) * Double(cadenceNanoseconds)
-        let quota = Int((drainNanoseconds / Double(maxLagNanoseconds)).rounded(.up))
+        let quota = Int((drainNanoseconds / Double(remainingNanoseconds)).rounded(.up))
         return min(backlogUnitCount, max(1, quota))
+    }
+
+    /// Never intentionally sleep beyond the oldest pending text's deadline.
+    /// A blocked executor may still resume late; its first tick drains all text.
+    static func nextDelay(
+        requestedNanoseconds: UInt64,
+        oldestPendingAgeNanoseconds: UInt64,
+        maxLagNanoseconds: UInt64
+    ) -> UInt64 {
+        guard oldestPendingAgeNanoseconds < maxLagNanoseconds else { return 0 }
+        return min(requestedNanoseconds, maxLagNanoseconds - oldestPendingAgeNanoseconds)
     }
 }

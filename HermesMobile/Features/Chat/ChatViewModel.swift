@@ -511,6 +511,30 @@ final class ChatViewModel {
 #endif
     @ObservationIgnored private(set) var displayedTranscriptMessages: [TranscriptMessage] = []
     @ObservationIgnored private var displayedTranscriptRowIndexByLoadedIndex: [Int: Int] = [:]
+    @ObservationIgnored private var localSendPresentationEnabled = false
+    /// A send being prepared belongs to presentation, not canonical history:
+    /// resume can replace that history before the prompt is submitted.
+    @ObservationIgnored private var pendingLocalSendMessage: ChatMessage?
+    private struct LocalSendEchoCandidate {
+        let localMessageID: String
+        let text: String
+        let previousIDs: Set<String>
+        let predecessorID: String?
+        let controllerID: ObjectIdentifier
+        let profile: String
+        var sessionID: String?
+        var runtimeID: String?
+        var connectionGeneration: Int
+    }
+    @ObservationIgnored private var localSendEchoCandidate: LocalSendEchoCandidate?
+    /// Canonical IDs remain authoritative for actions and persistence. Only
+    /// already-proven echoes inherit the mounted row's presentation identity.
+    @ObservationIgnored private var localSendRenderAliases: [String: String] = [:]
+    @ObservationIgnored private var localSendAliasScope: String?
+
+    func setLocalSendPresentationEnabled(_ isEnabled: Bool) {
+        localSendPresentationEnabled = isEnabled
+    }
     #if DEBUG
     @ObservationIgnored private(set) var transcriptFullRecomputeCountForTesting = 0
     #endif
@@ -583,7 +607,7 @@ final class ChatViewModel {
     var transcriptRestoreTarget: ChatTranscriptRestoreTarget {
         ChatTranscriptRestorePolicy.target(
             wasFollowingLatest: savedFollowingLatest,
-            lastVisibleMessageID: savedVisibleMessageID
+            lastVisibleMessageID: presentationRestoreID(for: savedVisibleMessageID)
         )
     }
 
@@ -616,11 +640,20 @@ final class ChatViewModel {
     private var messagesBeforeCacheFirstPlaceholder: [ChatMessage] = []
     private var messagesOffsetBeforeCacheFirstPlaceholder = 0
     @ObservationIgnored private var pendingStreamingScrollTriggerTask: Task<Void, Never>?
+    @ObservationIgnored private var pendingStreamingScrollTriggerTaskOwner: UUID?
     @ObservationIgnored private var pendingAssistantTextBuffer = StreamingWordDrain.Buffer()
+    @ObservationIgnored private var pendingAssistantBufferStartedAt: UInt64?
+    @ObservationIgnored private var streamingReentryNeedsCatchup = false
+    @ObservationIgnored private var usesResponsiveStreamingPresentation = false
     @ObservationIgnored private var streamingHapticPulseGate = StreamingHapticPulseGate()
     @ObservationIgnored private var suppressedProgressUnitsRemaining = 0
     @ObservationIgnored private var pendingReasoningTextBuffer: String = ""
     @ObservationIgnored private var pendingStreamingContentFlushTask: Task<Void, Never>?
+    @ObservationIgnored private var pendingStreamingContentFlushTaskOwner: UUID?
+    #if DEBUG
+    @ObservationIgnored var streamingTaskWaitForTesting: (@MainActor (UUID, UInt64) async -> Void)?
+    @ObservationIgnored var streamingClockForTesting: (@MainActor () -> UInt64)?
+    #endif
     @ObservationIgnored private var isTranscriptPresentationActive = true
     @ObservationIgnored private let directFallbackRenderIdentityLedger = DirectFallbackRenderIdentityLedger()
     @ObservationIgnored private var isApplyingOlderDirectHistoryPage = false
@@ -707,8 +740,9 @@ final class ChatViewModel {
         let offset = max(0, messagesOffset)
         let transcriptMessage = TranscriptMessage(
             loadedIndex: loadedIndex,
-            renderID: Self.transcriptRenderID(for: message, absoluteIndex: offset + loadedIndex,
-                                               preferDurableID: usesDirectGateway),
+            renderID: message.messageId.flatMap { localSendRenderAliases[$0] }
+                ?? Self.transcriptRenderID(for: message, absoluteIndex: offset + loadedIndex,
+                                          preferDurableID: usesDirectGateway),
             anchorID: TranscriptTurnClassifier.anchorID(
                 for: message,
                 at: loadedIndex,
@@ -729,8 +763,9 @@ final class ChatViewModel {
         }
 
         if loadedIndex == messages.index(before: messages.endIndex) {
-            displayedTranscriptRowIndexByLoadedIndex[loadedIndex] = displayedTranscriptMessages.endIndex
-            displayedTranscriptMessages.append(transcriptMessage)
+            let rowIndex = displayedTranscriptMessages.endIndex - (pendingLocalSendMessage == nil ? 0 : 1)
+            displayedTranscriptRowIndexByLoadedIndex[loadedIndex] = rowIndex
+            displayedTranscriptMessages.insert(transcriptMessage, at: rowIndex)
             // An append cannot shift any existing transcript/reasoning anchor or
             // compression-card placement, so the stable prefix stays untouched.
             return
@@ -751,15 +786,170 @@ final class ChatViewModel {
             preferDurableIDs: usesDirectGateway,
             fallbackLedger: usesDirectGateway ? directFallbackRenderIdentityLedger : nil,
             fallbackScope: directTranscriptFallbackScope,
-            isOlderPagePrepend: isApplyingOlderDirectHistoryPage
+            isOlderPagePrepend: isApplyingOlderDirectHistoryPage,
+            renderAliases: localSendRenderAliases
         )
         displayedTranscriptRowIndexByLoadedIndex = Dictionary(
             uniqueKeysWithValues: displayedTranscriptMessages.enumerated().map { rowIndex, message in
                 (message.loadedIndex, rowIndex)
             }
         )
+        if let pendingLocalSendMessage {
+            displayedTranscriptMessages.append(localSendTranscriptMessage(pendingLocalSendMessage))
+        }
         recomputeCompressionReferenceCard()
         recomputeDisplayedReasoningGroups()
+    }
+
+    private func localSendTranscriptMessage(_ message: ChatMessage) -> TranscriptMessage {
+        TranscriptMessage(
+            loadedIndex: -1,
+            renderID: Self.transcriptRenderID(for: message, absoluteIndex: 0, preferDurableID: true),
+            anchorID: TranscriptTurnClassifier.anchorID(for: message, at: -1),
+            message: message
+        )
+    }
+
+    private func presentLocalSend(_ message: ChatMessage) {
+        pendingLocalSendMessage = message
+        recordOutgoingInsertion(messageID: message.id)
+        withAnimation(ChatMotion.outgoingBubble(reduceMotion: UIAccessibility.isReduceMotionEnabled)) {
+            displayedTranscriptMessages.append(localSendTranscriptMessage(message))
+            transcriptRenderRevision &+= 1
+        }
+    }
+
+    private func clearUnpromotedLocalSend(id: String) {
+        guard pendingLocalSendMessage?.messageId == id else { return }
+        pendingLocalSendMessage = nil
+        displayedTranscriptMessages.removeAll { $0.loadedIndex == -1 && $0.message.messageId == id }
+        transcriptRenderRevision &+= 1
+    }
+
+    private func recordOutgoingInsertion(messageID: String) {
+        outgoingInsertionSequence += 1
+        outgoingInsertionEvent = OutgoingInsertionEvent(
+            scope: outgoingInsertionScope, messageID: messageID,
+            sequence: outgoingInsertionSequence
+        )
+    }
+
+    private func localSendScope(sessionID: String, profile: String) -> String {
+        "\(server.absoluteString)|\(profile.utf8.count):\(profile)|\(sessionID)"
+    }
+
+    private func prepareLocalSendEcho(_ message: ChatMessage, controller: GatewayConversationController,
+                                      hasAttachments: Bool) -> LocalSendEchoCandidate? {
+        guard localSendPresentationEnabled, !hasAttachments,
+              canonicalSessionID == nil || directHistoryID == canonicalSessionID,
+              messages.allSatisfy({ row in
+                  guard let id = row.messageId, !id.isEmpty else { return false }
+                  return !id.hasPrefix("local-") && !id.hasPrefix("stream-") && row.role != "local_notice"
+              }) else { return nil }
+        let ids = messages.compactMap(\.messageId)
+        guard Set(ids).count == ids.count,
+              !ids.isEmpty || canonicalSessionID == nil
+                || (directHistoryID == canonicalSessionID && directOlderOffset == 0 && !hasOlderMessages)
+        else { return nil }
+        return LocalSendEchoCandidate(
+            localMessageID: message.id, text: message.content ?? "", previousIDs: Set(ids),
+            predecessorID: ids.last, controllerID: ObjectIdentifier(controller), profile: controller.profile,
+            sessionID: controller.storedID, runtimeID: controller.binding?.runtimeID,
+            connectionGeneration: controller.sharedRuntime.connectionGeneration
+        )
+    }
+
+    private func acceptLocalSendEcho(_ prepared: LocalSendEchoCandidate?, controller: GatewayConversationController) {
+        guard var candidate = prepared, let id = controller.storedID,
+              messages.contains(where: { $0.messageId == candidate.localMessageID }),
+              candidate.sessionID == nil || candidate.sessionID == id,
+              candidate.runtimeID == nil || (candidate.runtimeID == controller.binding?.runtimeID
+                && candidate.connectionGeneration == controller.sharedRuntime.connectionGeneration)
+        else { return }
+        candidate.sessionID = id
+        candidate.runtimeID = controller.binding?.runtimeID
+        candidate.connectionGeneration = controller.sharedRuntime.connectionGeneration
+        localSendEchoCandidate = candidate
+    }
+
+    private func reconcileLocalSendEcho(_ page: DirectHermesTranscriptPage, profile: String) {
+        let scope = localSendScope(sessionID: page.sessionID, profile: profile)
+        if localSendAliasScope != scope {
+            localSendRenderAliases.removeAll()
+            localSendAliasScope = scope
+        }
+        guard let candidate = localSendEchoCandidate else { return }
+        // One authoritative tail consumes this opportunity. A later unrelated
+        // turn must never be matched using an earlier send's text.
+        localSendEchoCandidate = nil
+        guard directResponseComplete, let controller = directConversation,
+              candidate.controllerID == ObjectIdentifier(controller),
+              candidate.sessionID == page.sessionID, candidate.profile == profile,
+              candidate.runtimeID == controller.binding?.runtimeID,
+              candidate.connectionGeneration == controller.sharedRuntime.connectionGeneration,
+              !controller.hasAmbiguousPromptDelivery,
+              let localIndex = messages.firstIndex(where: { $0.messageId == candidate.localMessageID })
+        else { return }
+        let ids = page.messages.compactMap(\.messageId)
+        guard ids.count == page.messages.count, Set(ids).count == ids.count,
+              !ids.contains(candidate.localMessageID) else { return }
+        let newRows: ArraySlice<ChatMessage>
+        if let predecessor = candidate.predecessorID {
+            guard let index = page.messages.firstIndex(where: { $0.messageId == predecessor }) else { return }
+            newRows = page.messages.suffix(from: index + 1)
+        } else {
+            guard candidate.previousIDs.isEmpty else { return }
+            newRows = page.messages[...]
+        }
+        guard let user = newRows.first, user.role == "user", user.content == candidate.text,
+              user.contentParts == nil, user.attachments?.isEmpty != false,
+              let userID = user.messageId, !candidate.previousIDs.contains(userID),
+              newRows.filter({ $0.role == "user" }).count == 1,
+              newRows.allSatisfy({ row in
+                  guard let id = row.messageId else { return false }
+                  return !candidate.previousIDs.contains(id)
+              }) else { return }
+        localSendRenderAliases[userID] = TranscriptRenderIdentity.directID(for: candidate.localMessageID)
+
+        // Only the unambiguous single final text response inherits the live
+        // assistant row. Tool/interim/structured turns keep canonical identity.
+        let localTail = messages.suffix(from: localIndex + 1)
+        let canonicalTail = newRows.dropFirst()
+        if localTail.count == 1, canonicalTail.count == 1,
+           let live = localTail.first, let saved = canonicalTail.first,
+           live.role == "assistant", saved.role == "assistant",
+           let liveID = live.messageId, liveID.hasPrefix("stream-"),
+           !ids.contains(liveID),
+           let savedID = saved.messageId, live.content?.isEmpty == false, live.content == saved.content,
+           live.contentParts == nil, saved.contentParts == nil,
+           live.toolCalls?.isEmpty != false, saved.toolCalls?.isEmpty != false,
+           live.attachments?.isEmpty != false, saved.attachments?.isEmpty != false,
+           live.reasoning?.isEmpty != false, saved.reasoning?.isEmpty != false,
+           liveReasoningText.isEmpty, liveToolCalls.isEmpty {
+            localSendRenderAliases[savedID] = TranscriptRenderIdentity.directID(for: liveID)
+        }
+        // Back/background can persist a live row before its canonical echo.
+        // Rewrite that saved bookmark now, including when this VM is offscreen.
+        let canonicalRestoreID = canonicalRestoreID(for: savedVisibleMessageID)
+        if canonicalRestoreID != savedVisibleMessageID {
+            savedVisibleMessageID = canonicalRestoreID
+            persistTranscriptRestorePoint()
+        }
+    }
+
+    private func canonicalRestoreID(for renderID: String?) -> String? {
+        guard let renderID,
+              let canonicalID = localSendRenderAliases.first(where: { $0.value == renderID })?.key
+        else { return renderID }
+        return TranscriptRenderIdentity.directID(for: canonicalID)
+    }
+
+    private func presentationRestoreID(for canonicalRenderID: String?) -> String? {
+        guard let canonicalRenderID, canonicalRenderID.hasPrefix(TranscriptRenderIdentity.directPrefix) else {
+            return canonicalRenderID
+        }
+        let id = String(canonicalRenderID.dropFirst(TranscriptRenderIdentity.directPrefix.count))
+        return localSendRenderAliases[id] ?? canonicalRenderID
     }
 
     private var directTranscriptFallbackScope: String? {
@@ -1143,11 +1333,9 @@ final class ChatViewModel {
     // scroll trigger / first content flush. Injectable so tests can drive
     // coalescing deterministically; production keeps the 16ms default.
     private let streamingScrollCoalescingDelayNanoseconds: UInt64
-    // Display pacing for streamed assistant text (issue #212): after the first
-    // coalesced flush, buffered tokens are revealed word-by-word at this cadence,
-    // with the per-tick quota scaling up so the display never trails the live
-    // stream by more than the max lag. Pacing affects display timing only — the
-    // buffer and final content are untouched. Injectable for tests.
+    // The internal preview drains arrivals in one frame-sized batch. Existing
+    // and injected cadences remain available, with an oldest-pending deadline
+    // that cannot be extended by partial drains or fresh network arrivals.
     private let streamingWordRevealCadenceNanoseconds: UInt64
     private let streamingMaxRevealLagNanoseconds: UInt64
     private var speechSynthesizer: (any ChatSpeechSynthesizing)?
@@ -1817,6 +2005,9 @@ final class ChatViewModel {
         btwLocalRowScopes.removeAll()
         backgroundLocalRowScopes.removeAll()
         directInvalidated = true
+        localSendEchoCandidate = nil
+        localSendRenderAliases.removeAll()
+        localSendAliasScope = nil
         sendTranscriptSessionID = nil
         directReasoningRefreshTask?.cancel()
         cancelContextUsageSnapshotTask()
@@ -2140,6 +2331,7 @@ final class ChatViewModel {
         adoptDirectID(page.sessionID)
         directHistoryID = page.sessionID
         let profile = directConversation?.profile ?? (Self.nonEmpty(currentProfile) ?? "default")
+        reconcileLocalSendEcho(page, profile: profile)
         let retainedLocalRows: [ChatMessage]
         if older {
             retainedLocalRows = []
@@ -2161,6 +2353,7 @@ final class ChatViewModel {
             let canonicalMessages = older && !canonicalChanged
                 ? Self.prependingOlderMessages(page.messages, to: messages) : retainedPrefix + page.messages
             let canonicalIDs = Set(canonicalMessages.compactMap(\.messageId))
+            localSendRenderAliases = localSendRenderAliases.filter { canonicalIDs.contains($0.key) }
             messages = canonicalMessages + retainedLocalRows.filter { row in
                 guard let id = row.messageId else { return false }
                 return !canonicalIDs.contains(id)
@@ -2225,6 +2418,7 @@ final class ChatViewModel {
         }
         directModelContext = modelContext ?? directModelContext
         isStartingChat = true
+        localSendEchoCandidate = nil
         // Capture before `open()`: resume may adopt a different canonical
         // session before its transcript callback arrives.  Only an empty
         // result for this original session can be the transient read race.
@@ -2232,16 +2426,24 @@ final class ChatViewModel {
         cancelContextUsageSnapshotTask()
         sendErrorMessage = nil
         lastError = nil
+        let localID = "local-\(UUID().uuidString)"
+        let localMessage = ChatMessage(
+            role: "user", content: text,
+            timestamp: Date().timeIntervalSince1970, messageId: localID
+        )
         defer {
+            clearUnpromotedLocalSend(id: localID)
             sendTranscriptSessionID = nil
             isStartingChat = false
             OpenChatSessionStore.shared.noteStreamingStateChanged()
         }
-        let localID = "local-\(UUID().uuidString)"
         let wasDraft = canonicalSessionID == nil
         let hasExplicitAttachmentSelection = selectedAttachmentIDs != nil
         let attachmentIDs = selectedAttachmentIDs ?? Set(directPendingAttachments.map(\.id))
         let selectionGeneration = directAttachmentSelectionGeneration
+        if localSendPresentationEnabled {
+            presentLocalSend(localMessage)
+        }
         do {
             let controller = try await ensureDirectConversation()
             guard requiredController == nil || directConversation === requiredController,
@@ -2253,8 +2455,8 @@ final class ChatViewModel {
                     || controller.sharedRuntime.connectionGeneration == requiredConnectionGeneration else {
                 throw DirectSessionError.staleOperation
             }
-            // Resume first so its canonical transcript cannot erase this new
-            // optimistic row. Draft open remains completely local.
+            // Resume before canonical insertion. The preview's pending row is
+            // separate presentation state and survives these history callbacks.
             try await controller.open()
             guard !directInvalidated, controller.runState == .idle,
                   requiredController == nil || controller === requiredController,
@@ -2305,20 +2507,20 @@ final class ChatViewModel {
             reasoningAnchorMessageID = nil
             toolCallAnchorMessageID = nil
             directResponseComplete = false
-            outgoingInsertionSequence += 1
-            outgoingInsertionEvent = OutgoingInsertionEvent(
-                scope: outgoingInsertionScope, messageID: localID,
-                sequence: outgoingInsertionSequence
-            )
-            withAnimation(ChatMotion.outgoingBubble(
-                reduceMotion: UIAccessibility.isReduceMotionEnabled
-            )) {
-                messages.append(ChatMessage(
-                    role: "user",
-                    content: text,
-                    timestamp: Date().timeIntervalSince1970,
-                    messageId: localID
-                ))
+            let preparedEcho = prepareLocalSendEcho(localMessage, controller: controller,
+                                                    hasAttachments: !attachmentIDs.isEmpty)
+            if pendingLocalSendMessage?.messageId == localID {
+                // Same identity and timestamp, one insertion event. No await
+                // can expose a frame between removal and canonical promotion.
+                pendingLocalSendMessage = nil
+                messages.append(localMessage)
+            } else {
+                recordOutgoingInsertion(messageID: localID)
+                withAnimation(ChatMotion.outgoingBubble(
+                    reduceMotion: UIAccessibility.isReduceMotionEnabled
+                )) {
+                    messages.append(localMessage)
+                }
             }
             // The protected interval ends at the optimistic insertion.  Any
             // later empty refresh is no longer the pre-submit race and must
@@ -2327,6 +2529,7 @@ final class ChatViewModel {
             let stagedAttachments = directPendingAttachments.filter { attachmentIDs.contains($0.id) }
             guard stagedAttachments.count == attachmentIDs.count else { throw DirectSessionError.staleOperation }
             try await controller.submit(text, stagedAttachments: stagedAttachments, create: creation)
+            acceptLocalSendEcho(preparedEcho, controller: controller)
             removeDirectPendingAttachments(ids: attachmentIDs)
             if wasDraft {
                 // Discover per-session support after acceptance, without holding
@@ -2743,7 +2946,11 @@ final class ChatViewModel {
         if followingLatest || memory?.point?.messageID != visibleMessageID {
             memory?.point = nil
         }
-        savedVisibleMessageID = followingLatest ? nil : visibleMessageID
+        savedVisibleMessageID = followingLatest ? nil : canonicalRestoreID(for: visibleMessageID)
+        persistTranscriptRestorePoint()
+    }
+
+    private func persistTranscriptRestorePoint() {
         restoreStore.save(
             TranscriptRestorePoint(
                 followingLatest: savedFollowingLatest,
@@ -2843,58 +3050,150 @@ final class ChatViewModel {
         return message.content?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
     }
 
+    #if DEBUG
+    var scheduledStreamingContentFlushForTesting: (owner: UUID, task: Task<Void, Never>)? {
+        guard let owner = pendingStreamingContentFlushTaskOwner,
+              let task = pendingStreamingContentFlushTask else { return nil }
+        return (owner, task)
+    }
+
+    var scheduledStreamingScrollTriggerForTesting: (owner: UUID, task: Task<Void, Never>)? {
+        guard let owner = pendingStreamingScrollTriggerTaskOwner,
+              let task = pendingStreamingScrollTriggerTask else { return nil }
+        return (owner, task)
+    }
+
+    func scheduleStreamingScrollTriggerForTesting() {
+        scheduleStreamingScrollTrigger()
+    }
+    #endif
+
     private func scheduleStreamingScrollTrigger() {
         guard isTranscriptPresentationActive else { return }
         guard pendingStreamingScrollTriggerTask == nil else { return }
 
+        let owner = UUID()
+        pendingStreamingScrollTriggerTaskOwner = owner
         let expectedSessionID = sessionID
         let delay = streamingScrollCoalescingDelayNanoseconds
+        #if DEBUG
+        let waitForTesting = streamingTaskWaitForTesting
+        #endif
         pendingStreamingScrollTriggerTask = Task { @MainActor [weak self] in
+            #if DEBUG
+            if let waitForTesting {
+                await waitForTesting(owner, delay)
+            } else {
+                try? await Task.sleep(nanoseconds: delay)
+            }
+            #else
             try? await Task.sleep(nanoseconds: delay)
-            guard let self else { return }
+            #endif
+            guard let self, !Task.isCancelled,
+                  self.pendingStreamingScrollTriggerTaskOwner == owner else { return }
 
             self.pendingStreamingScrollTriggerTask = nil
-            guard !Task.isCancelled, self.sessionID == expectedSessionID else { return }
+            self.pendingStreamingScrollTriggerTaskOwner = nil
+            guard self.sessionID == expectedSessionID,
+                  self.isTranscriptPresentationActive else { return }
 
             self.streamingScrollTrigger += 1
         }
     }
 
     private func cancelPendingStreamingScrollTrigger() {
+        pendingStreamingScrollTriggerTaskOwner = nil
         pendingStreamingScrollTriggerTask?.cancel()
         pendingStreamingScrollTriggerTask = nil
+    }
+
+    /// Captured by the chat shell's internal-preview selection. Transport,
+    /// received bytes and terminal handling are identical under either policy.
+    func setResponsiveStreamingPresentation(_ isEnabled: Bool) {
+        guard usesResponsiveStreamingPresentation != isEnabled else { return }
+        usesResponsiveStreamingPresentation = isEnabled
+        cancelPendingStreamingContentFlush()
+        if !pendingAssistantTextBuffer.isEmpty || !pendingReasoningTextBuffer.isEmpty {
+            scheduleStreamingContentFlush()
+        }
+    }
+
+    private var streamingPresentationTime: UInt64 {
+        #if DEBUG
+        if let streamingClockForTesting { return streamingClockForTesting() }
+        #endif
+        return DispatchTime.now().uptimeNanoseconds
+    }
+
+    private var pendingAssistantBufferAge: UInt64 {
+        guard let startedAt = pendingAssistantBufferStartedAt else { return 0 }
+        let now = streamingPresentationTime
+        return now >= startedAt ? now - startedAt : 0
+    }
+
+    private var streamingPresentationCadence: UInt64 {
+        usesResponsiveStreamingPresentation
+            ? StreamingWordDrain.frameIntervalNanoseconds : streamingWordRevealCadenceNanoseconds
+    }
+
+    private var streamingPresentationMaximumAge: UInt64 {
+        usesResponsiveStreamingPresentation
+            ? StreamingWordDrain.maximumBufferAgeNanoseconds : streamingMaxRevealLagNanoseconds
     }
 
     private func scheduleStreamingContentFlush(afterNanoseconds delay: UInt64? = nil) {
         guard isTranscriptPresentationActive else { return }
         guard pendingStreamingContentFlushTask == nil else { return }
 
+        let owner = UUID()
+        pendingStreamingContentFlushTaskOwner = owner
         let expectedSessionID = sessionID
-        let resolvedDelay = delay ?? streamingScrollCoalescingDelayNanoseconds
+        let requestedDelay = delay ?? (usesResponsiveStreamingPresentation
+            ? StreamingWordDrain.frameIntervalNanoseconds : streamingScrollCoalescingDelayNanoseconds)
+        let resolvedDelay = pendingAssistantTextBuffer.isEmpty ? requestedDelay : StreamingWordDrain.nextDelay(
+            requestedNanoseconds: requestedDelay,
+            oldestPendingAgeNanoseconds: pendingAssistantBufferAge,
+            maxLagNanoseconds: streamingPresentationMaximumAge
+        )
+        #if DEBUG
+        let waitForTesting = streamingTaskWaitForTesting
+        #endif
         pendingStreamingContentFlushTask = Task { @MainActor [weak self] in
+            #if DEBUG
+            if let waitForTesting {
+                await waitForTesting(owner, resolvedDelay)
+            } else {
+                try? await Task.sleep(nanoseconds: resolvedDelay)
+            }
+            #else
             try? await Task.sleep(nanoseconds: resolvedDelay)
-            guard let self else { return }
+            #endif
+            // A cancelled sleeper can resume after a replacement was installed.
+            // Only the current owner may clear the slot and drain its backlog.
+            guard let self, !Task.isCancelled,
+                  self.pendingStreamingContentFlushTaskOwner == owner else { return }
 
             self.pendingStreamingContentFlushTask = nil
-            guard !Task.isCancelled, self.sessionID == expectedSessionID else { return }
-
+            self.pendingStreamingContentFlushTaskOwner = nil
+            guard self.sessionID == expectedSessionID,
+                  self.isTranscriptPresentationActive else { return }
             self.drainStreamingContentTick()
         }
     }
 
-    /// One paced flush tick: drains a word-cadence quota of buffered assistant
-    /// text (reasoning still flushes whole — pacing applies to assistant content
-    /// only) and reschedules itself at the word cadence while a backlog remains.
-    /// Completion paths (done/cancel/error/interim/snapshot) bypass pacing via
-    /// `flushPendingStreamingContent()`, which cancels any scheduled tick.
+    /// One presentation batch. The preview catches up in one frame; longer
+    /// injected cadences use the original backlog deadline. Completion and
+    /// offscreen reentry consume the complete tail without replaying old pulses.
     private func drainStreamingContentTick() {
         guard isTranscriptPresentationActive else { return }
         var didMutate = false
-        let quota = StreamingWordDrain.drainQuota(
+        let quota = streamingReentryNeedsCatchup ? pendingAssistantTextBuffer.unitCount : StreamingWordDrain.drainQuota(
             backlogUnitCount: pendingAssistantTextBuffer.unitCount,
-            cadenceNanoseconds: streamingWordRevealCadenceNanoseconds,
-            maxLagNanoseconds: streamingMaxRevealLagNanoseconds
+            cadenceNanoseconds: streamingPresentationCadence,
+            maxLagNanoseconds: streamingPresentationMaximumAge,
+            oldestPendingAgeNanoseconds: pendingAssistantBufferAge
         )
+        streamingReentryNeedsCatchup = false
         if flushAssistantTokens(maxWordUnits: quota) {
             didMutate = true
             if suppressedProgressUnitsRemaining > 0 {
@@ -2914,11 +3213,12 @@ final class ChatViewModel {
         }
 
         if !pendingAssistantTextBuffer.isEmpty {
-            scheduleStreamingContentFlush(afterNanoseconds: streamingWordRevealCadenceNanoseconds)
+            scheduleStreamingContentFlush(afterNanoseconds: streamingPresentationCadence)
         }
     }
 
     private func cancelPendingStreamingContentFlush() {
+        pendingStreamingContentFlushTaskOwner = nil
         pendingStreamingContentFlushTask?.cancel()
         pendingStreamingContentFlushTask = nil
     }
@@ -2936,6 +3236,7 @@ final class ChatViewModel {
                 // background/foreground chunk boundary. Fresh visible progress
                 // can pulse even when a live stream never fully empties its queue.
                 suppressedProgressUnitsRemaining = pendingAssistantTextBuffer.unitCount + 1
+                streamingReentryNeedsCatchup = true
                 scheduleStreamingContentFlush(afterNanoseconds: 0)
             }
         } else {
@@ -2949,6 +3250,8 @@ final class ChatViewModel {
     private func resetPendingStreamingContentBuffers() {
         cancelPendingStreamingContentFlush()
         pendingAssistantTextBuffer.clear()
+        pendingAssistantBufferStartedAt = nil
+        streamingReentryNeedsCatchup = false
         streamingHapticPulseGate.reset()
         suppressedProgressUnitsRemaining = 0
         pendingReasoningTextBuffer = ""
@@ -2956,6 +3259,7 @@ final class ChatViewModel {
 
     func flushPendingStreamingContent() {
         cancelPendingStreamingContentFlush()
+        streamingReentryNeedsCatchup = false
 
         var didMutate = false
         if flushAssistantTokens() {
@@ -4208,6 +4512,9 @@ final class ChatViewModel {
     func clearTranscript() {
         // An explicit clear always wins over a pending resume reconciliation.
         sendTranscriptSessionID = nil
+        localSendEchoCandidate = nil
+        localSendRenderAliases.removeAll()
+        localSendAliasScope = nil
         cancelPendingStreamingScrollTrigger()
         resetPendingStreamingContentBuffers()
         clearCompressionAnchorMetadata()
@@ -5762,6 +6069,9 @@ final class ChatViewModel {
 
         // A nonempty received chunk is a synchronous progress signal for the
         // watchdog while transcript mutation stays behind the coalesced flush.
+        if pendingAssistantTextBuffer.isEmpty {
+            pendingAssistantBufferStartedAt = streamingPresentationTime
+        }
         _ = ensureStreamingAssistantMessage()
         pendingAssistantTextBuffer.append(token)
         scheduleStreamingContentFlush()
@@ -5780,6 +6090,9 @@ final class ChatViewModel {
             guard !appendedContent.isEmpty else { return false }
         } else {
             appendedContent = pendingAssistantTextBuffer.drainAll()
+        }
+        if pendingAssistantTextBuffer.isEmpty {
+            pendingAssistantBufferStartedAt = nil
         }
 
         let messageID = ensureStreamingAssistantMessage()
@@ -6618,7 +6931,8 @@ extension ChatViewModel {
         preferDurableIDs: Bool = false,
         fallbackLedger: DirectFallbackRenderIdentityLedger? = nil,
         fallbackScope: String? = nil,
-        isOlderPagePrepend: Bool = false
+        isOlderPagePrepend: Bool = false,
+        renderAliases: [String: String] = [:]
     ) -> [TranscriptMessage] {
         let offset = max(0, messageOffset ?? 0)
         var transcriptMessages: [TranscriptMessage] = []
@@ -6654,7 +6968,9 @@ extension ChatViewModel {
             )
             let absoluteIndex = offset + loadedIndex
             let renderID: String
-            if preferDurableIDs, TranscriptRenderIdentity.directID(for: message.messageId) == nil {
+            if preferDurableIDs, let id = message.messageId, let alias = renderAliases[id] {
+                renderID = alias
+            } else if preferDurableIDs, TranscriptRenderIdentity.directID(for: message.messageId) == nil {
                 let fallbackKey = TranscriptRenderIdentity.directFallbackID(for: message, occurrence: 0)
                 let occurrence = directFallbackOccurrences[fallbackKey, default: 0]
                 directFallbackOccurrences[fallbackKey] = occurrence + 1
@@ -6735,7 +7051,10 @@ extension ChatViewModel {
         case .afterLoadedMessageIndex(let loadedIndex):
             // The anchor message itself may be filtered out of the transcript
             // (e.g. tool-result-only); attach to the closest preceding row.
-            let afterRenderID = transcriptMessages.last { $0.loadedIndex <= loadedIndex }?.renderID
+            // Presentation-only pending sends have no canonical position.
+            let afterRenderID = transcriptMessages.last {
+                $0.loadedIndex >= 0 && $0.loadedIndex <= loadedIndex
+            }?.renderID
             return CompressionReferenceCard(referenceText: resolution.referenceText, afterRenderID: afterRenderID)
         }
     }
