@@ -75,12 +75,60 @@ enum ChatComposerAttachPolicy {
     }
 }
 
+/// Repositions one persistent editor; changing between the capsule and expanded
+/// arrangement never replaces its UITextView or its first-responder ownership.
+private struct MuseComposerEntryLayout: Layout {
+    let isExpanded: Bool
+    let controlSlotSize: CGFloat
+    let layoutDirection: LayoutDirection
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard subviews.count >= 3 else { return .zero }
+        let controlsWidth = CGFloat(subviews.count - 1) * controlSlotSize
+        let width = max(0, proposal.width ?? (subviews[1].sizeThatFits(.unspecified).width + controlsWidth))
+        let editorWidth = isExpanded ? width : max(0, width - controlsWidth)
+        let editorHeight = subviews[1].sizeThatFits(ProposedViewSize(width: editorWidth, height: nil)).height
+        return CGSize(width: width, height: isExpanded
+            ? editorHeight + controlSlotSize
+            : max(editorHeight, controlSlotSize))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        guard subviews.count >= 3 else { return }
+        let controlsWidth = CGFloat(subviews.count - 1) * controlSlotSize
+        let editorWidth = isExpanded ? bounds.width : max(0, bounds.width - controlsWidth)
+        let editorProposal = ProposedViewSize(width: editorWidth, height: nil)
+        let editorHeight = subviews[1].sizeThatFits(editorProposal).height
+        let controlsY = bounds.maxY - controlSlotSize
+        let editorY = isExpanded ? bounds.minY : bounds.midY - editorHeight / 2
+
+        func position(leading: CGFloat, width: CGFloat, y: CGFloat) -> CGPoint {
+            CGPoint(x: layoutDirection == .rightToLeft
+                ? bounds.maxX - leading - width : bounds.minX + leading, y: y)
+        }
+
+        subviews[1].place(at: position(leading: isExpanded ? 0 : controlSlotSize,
+                                      width: editorWidth, y: editorY),
+                          anchor: .topLeading, proposal: editorProposal)
+        let controlProposal = ProposedViewSize(width: controlSlotSize, height: controlSlotSize)
+        subviews[0].place(at: position(leading: 0, width: controlSlotSize, y: controlsY),
+                          anchor: .topLeading, proposal: controlProposal)
+        for index in 2..<subviews.count {
+            let leading = bounds.width - CGFloat(subviews.count - index) * controlSlotSize
+            subviews[index].place(at: position(leading: leading, width: controlSlotSize, y: controlsY),
+                                 anchor: .topLeading, proposal: controlProposal)
+        }
+    }
+}
+
 struct MessageComposerView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.appColorPalette) private var palette
     @Environment(\.appAccent) private var accent
+    @Environment(\.museSurfaceUsesDefaultAccent) private var museSurfaceUsesDefaultAccent
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.layoutDirection) private var layoutDirection
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage(PrimaryActionTintSettings.isEnabledKey) private var tintsPrimaryActions = false
     @ScaledMetric(relativeTo: .footnote) private var actionIconSize: CGFloat = 13
@@ -88,6 +136,7 @@ struct MessageComposerView: View {
     @ScaledMetric(relativeTo: .title3) private var plusIconSize: CGFloat = 24
     @ScaledMetric(relativeTo: .title3) private var plusButtonSize: CGFloat = 44
 
+    var usesMuseChatSurface: Bool = false
     @Binding var draftMessage: String
     @Binding var isFocused: Bool
     let isSending: Bool
@@ -190,6 +239,7 @@ struct MessageComposerView: View {
     var gitBranchPickerRequest = 0
 
     @State private var textFieldHeight: CGFloat = 0
+    @State private var museComposerAvailableWidth: CGFloat = 0
     @State private var textInputHeight: CGFloat = 22
     @State private var noticeMessage: String?
     @State private var showsAllModelsSheet = false
@@ -363,104 +413,7 @@ struct MessageComposerView: View {
                 }
                 .animation(ChatMotion.quickState(reduceMotion: reduceMotion), value: showsSlashAutocomplete)
 
-                HStack(alignment: isComposerExpanded ? .bottom : .center, spacing: 8) {
-                    composerPlusMenu
-                        .adaptiveGlass(.regular, isInteractive: true,
-                                       fallbackMaterial: .ultraThinMaterial, in: Circle())
-
-                    VStack(spacing: 0) {
-                        ComposerAttachmentStripView(
-                            attachments: attachmentDisplayItems,
-                            onRemove: onRemoveAttachment,
-                            onPreview: { item in
-                                if let onPreviewDisplayAttachment {
-                                    onPreviewDisplayAttachment(item)
-                                } else if let pending = item.legacyPendingAttachment() {
-                                    onPreviewAttachment(pending)
-                                }
-                            }
-                        )
-
-                        if attachmentDisplayItems.contains(where: \.isGenericFileReference) {
-                            Text("Will be sent as a file reference. Ask Hermes to inspect it.")
-                                .font(.footnote)
-                                .foregroundStyle(Color(.secondaryLabel))
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.horizontal, 16)
-                                .padding(.bottom, 4)
-                        }
-
-                        if voiceInput.isListening {
-                            ComposerVoiceLiveStatusView(input: voiceInput)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.horizontal, 14)
-                                .padding(.top, 8)
-                        }
-
-                        HStack(alignment: isComposerExpanded ? .bottom : .center, spacing: 2) {
-                            ComposerTextInputView(
-                                text: $draftMessage,
-                                isFocused: $isFocused,
-                                inputHeight: $textInputHeight,
-                                measuredHeight: $textFieldHeight,
-                                isDisabled: isOfflineReadOnly || !isPresentationActive,
-                                isAccessibilityHidden: !isPresentationSelected,
-                                isKeyboardSendEnabled: !showsStopButton && !isActionButtonDisabled,
-                                verticalPadding: textFieldVerticalPadding,
-                                onKeyboardSend: actionButtonTapped,
-                                onPasteFileProviders: onPasteFileProviders,
-                                onPasteFileURLs: onPasteFileURLs,
-                                onPasteImageProviders: onPasteImageProviders,
-                                onPasteImages: onPasteImages
-                            )
-
-                            ComposerVoiceControlButton(
-                                isListening: voiceInput.isListening,
-                                isDisabled: isVoiceInputDisabled,
-                                color: metaControlColor,
-                                isRecordingVoiceNote: voiceNoteRecorder.isRecording,
-                                onTap: toggleVoiceInput,
-                                onRecordingStart: startVoiceNoteRecording,
-                                onRecordingDragChanged: { height in
-                                    voiceNoteCancelArmed = ComposerVoiceNoteGesture.isCancelArmed(dragTranslationHeight: height)
-                                },
-                                onRecordingEnd: { height in
-                                    finishVoiceNote(translationHeight: height)
-                                }
-                            )
-
-                            if showsStopButton || !trimmedDraftMessage.isEmpty || !attachmentDisplayItems.isEmpty || isSending {
-                                Button(action: actionButtonTapped) {
-                                    actionButtonLabel
-                                        .frame(width: actionButtonSize, height: actionButtonSize)
-                                        .background(actionButtonBackground)
-                                        .foregroundStyle(actionButtonForeground)
-                                        .clipShape(Circle())
-                                        .chatMinimumHitTarget(in: Circle())
-                                }
-                                .buttonStyle(.chatTactile(.icon))
-                                .disabled(isActionButtonDisabled)
-                                .accessibilityLabel(showsStopButton ? "Stop response" : "Send")
-                            }
-                        }
-                        .padding(.trailing, 8)
-                        .padding(.top, 2)
-                        .padding(.bottom, isComposerExpanded ? 8 : 2)
-                    }
-                    .adaptiveGlass(
-                        .regular,
-                        isInteractive: true,
-                        tint: SemrehVisualTheme.panel(for: colorScheme, palette: palette),
-                        fallbackMaterial: .ultraThinMaterial,
-                        in: RoundedRectangle(cornerRadius: composerCornerRadius, style: .continuous)
-                    )
-                    .overlay {
-                        RoundedRectangle(cornerRadius: composerCornerRadius, style: .continuous)
-                            .stroke(SemrehVisualTheme.subtleStroke(for: colorScheme, palette: palette), lineWidth: 0.8)
-                            .allowsHitTesting(false)
-                    }
-                    .clipShape(RoundedRectangle(cornerRadius: composerCornerRadius, style: .continuous))
-                }
+                composerEntrySurface
                 .padding(.horizontal, 12)
                 .padding(.bottom, 4)
                 }
@@ -759,6 +712,163 @@ struct MessageComposerView: View {
     }
 
     @ViewBuilder
+    private var composerEntrySurface: some View {
+        if usesMuseChatSurface {
+            VStack(spacing: 0) {
+                composerAttachments
+                MuseComposerEntryLayout(isExpanded: isComposerExpanded,
+                                        controlSlotSize: museControlSlotSize,
+                                        layoutDirection: layoutDirection) {
+                    composerPlusMenu
+                        .frame(width: museControlSlotSize, height: museControlSlotSize)
+                    composerTextInput
+                    composerVoiceButton
+                        .frame(width: museControlSlotSize, height: museControlSlotSize)
+                    if showsComposerSendButton {
+                        composerSendButton
+                            .frame(width: museControlSlotSize, height: museControlSlotSize)
+                    }
+                }
+                .onGeometryChange(for: CGFloat.self) { $0.size.width } action: {
+                    museComposerAvailableWidth = $0
+                }
+                .padding(.trailing, 4)
+                .padding(.vertical, 2)
+            }
+            .background(
+                ChatSurfaceAppearance.panel(for: colorScheme, palette: palette, accent: accent,
+                                            useDefaultAccent: museSurfaceUsesDefaultAccent),
+                in: RoundedRectangle(cornerRadius: composerCornerRadius, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: composerCornerRadius, style: .continuous)
+                    .stroke(ChatSurfaceAppearance.subtleStroke(
+                        for: colorScheme, palette: palette, accent: accent,
+                        useDefaultAccent: museSurfaceUsesDefaultAccent), lineWidth: 0.8)
+                    .allowsHitTesting(false)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: composerCornerRadius, style: .continuous))
+        } else {
+            HStack(alignment: isComposerExpanded ? .bottom : .center, spacing: 8) {
+                composerPlusMenu
+                    .adaptiveGlass(.regular, isInteractive: true,
+                                   fallbackMaterial: .ultraThinMaterial, in: Circle())
+                VStack(spacing: 0) {
+                    composerAttachments
+                    HStack(alignment: isComposerExpanded ? .bottom : .center, spacing: 2) {
+                        composerTextInput
+                        composerVoiceButton
+                        composerSendButton
+                    }
+                    .padding(.trailing, 8)
+                    .padding(.top, 2)
+                    .padding(.bottom, isComposerExpanded ? 8 : 2)
+                }
+                .adaptiveGlass(
+                    .regular, isInteractive: true,
+                    tint: SemrehVisualTheme.panel(for: colorScheme, palette: palette),
+                    fallbackMaterial: .ultraThinMaterial,
+                    in: RoundedRectangle(cornerRadius: composerCornerRadius, style: .continuous)
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: composerCornerRadius, style: .continuous)
+                        .stroke(SemrehVisualTheme.subtleStroke(for: colorScheme, palette: palette), lineWidth: 0.8)
+                        .allowsHitTesting(false)
+                }
+                .clipShape(RoundedRectangle(cornerRadius: composerCornerRadius, style: .continuous))
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var composerAttachments: some View {
+        ComposerAttachmentStripView(
+            attachments: attachmentDisplayItems,
+            onRemove: onRemoveAttachment,
+            onPreview: { item in
+                if let onPreviewDisplayAttachment {
+                    onPreviewDisplayAttachment(item)
+                } else if let pending = item.legacyPendingAttachment() {
+                    onPreviewAttachment(pending)
+                }
+            }
+        )
+        if attachmentDisplayItems.contains(where: \.isGenericFileReference) {
+            Text("Will be sent as a file reference. Ask Hermes to inspect it.")
+                .font(.footnote)
+                .foregroundStyle(Color(.secondaryLabel))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 16)
+                .padding(.bottom, 4)
+        }
+        if voiceInput.isListening {
+            ComposerVoiceLiveStatusView(input: voiceInput)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 14)
+                .padding(.top, 8)
+        }
+    }
+
+    private var composerTextInput: some View {
+        ComposerTextInputView(
+            text: $draftMessage,
+            isFocused: $isFocused,
+            inputHeight: $textInputHeight,
+            measuredHeight: $textFieldHeight,
+            isDisabled: isOfflineReadOnly || !isPresentationActive,
+            isAccessibilityHidden: !isPresentationSelected,
+            isKeyboardSendEnabled: !showsStopButton && !isActionButtonDisabled,
+            verticalPadding: textFieldVerticalPadding,
+            horizontalPadding: usesMuseChatSurface ? (isComposerExpanded ? 14 : 0) : 16,
+            onKeyboardSend: actionButtonTapped,
+            onPasteFileProviders: onPasteFileProviders,
+            onPasteFileURLs: onPasteFileURLs,
+            onPasteImageProviders: onPasteImageProviders,
+            onPasteImages: onPasteImages
+        )
+    }
+
+    private var composerVoiceButton: some View {
+        ComposerVoiceControlButton(
+            isListening: voiceInput.isListening,
+            isDisabled: isVoiceInputDisabled,
+            color: metaControlColor,
+            isRecordingVoiceNote: voiceNoteRecorder.isRecording,
+            onTap: toggleVoiceInput,
+            onRecordingStart: startVoiceNoteRecording,
+            onRecordingDragChanged: { height in
+                voiceNoteCancelArmed = ComposerVoiceNoteGesture.isCancelArmed(dragTranslationHeight: height)
+            },
+            onRecordingEnd: { height in finishVoiceNote(translationHeight: height) }
+        )
+    }
+
+    private var museControlSlotSize: CGFloat {
+        max(44, max(plusButtonSize, actionButtonSize))
+    }
+
+    private var showsComposerSendButton: Bool {
+        showsStopButton || !trimmedDraftMessage.isEmpty || !attachmentDisplayItems.isEmpty || isSending
+    }
+
+    @ViewBuilder
+    private var composerSendButton: some View {
+        if showsComposerSendButton {
+            Button(action: actionButtonTapped) {
+                actionButtonLabel
+                    .frame(width: actionButtonSize, height: actionButtonSize)
+                    .background(actionButtonBackground)
+                    .foregroundStyle(actionButtonForeground)
+                    .clipShape(Circle())
+                    .chatMinimumHitTarget(in: Circle())
+            }
+            .buttonStyle(.chatTactile(.icon))
+            .disabled(isActionButtonDisabled)
+            .accessibilityLabel(showsStopButton ? "Stop response" : "Send")
+        }
+    }
+
+    @ViewBuilder
     private var actionButtonLabel: some View {
         if isSending || isCancellingStream || isCompressingSession {
             ProgressView()
@@ -801,7 +911,8 @@ struct MessageComposerView: View {
         // Match the UIKit menu backer's hit region to the SwiftUI expansion.
         ChatUIKitMenuButton(horizontalPadding: 8, verticalPadding: 8) {
             Image(systemName: "plus")
-                .font(.system(size: plusIconSize, weight: .regular))
+                .font(.system(size: usesMuseChatSurface ? plusIconSize * 0.75 : plusIconSize,
+                              weight: .regular))
                 .foregroundStyle(metaControlColor)
                 .frame(width: plusButtonSize, height: plusButtonSize)
                 .chatMinimumHitTarget(in: Circle())
@@ -1274,6 +1385,13 @@ struct MessageComposerView: View {
     }
 
     private var actionButtonBackground: Color {
+        if usesMuseChatSurface, !isActionButtonDisabled,
+           ChatSurfaceAppearance.usesReferenceStyle(
+               palette: palette, accent: accent, useDefaultAccent: museSurfaceUsesDefaultAccent) {
+            return ChatSurfaceAppearance.actionBackground(
+                for: colorScheme, palette: palette, accent: accent,
+                useDefaultAccent: museSurfaceUsesDefaultAccent)
+        }
         if palette == .semreh, accent == .warm, !isActionButtonDisabled {
             return SemrehVisualTheme.action(for: colorScheme, palette: palette, accent: accent)
         }
@@ -1292,6 +1410,13 @@ struct MessageComposerView: View {
     }
 
     private var actionButtonForeground: Color {
+        if usesMuseChatSurface, !isActionButtonDisabled,
+           ChatSurfaceAppearance.usesReferenceStyle(
+               palette: palette, accent: accent, useDefaultAccent: museSurfaceUsesDefaultAccent) {
+            return ChatSurfaceAppearance.actionForeground(
+                for: colorScheme, palette: palette, accent: accent,
+                useDefaultAccent: museSurfaceUsesDefaultAccent)
+        }
         if palette == .semreh, accent == .warm, !isActionButtonDisabled {
             return SemrehVisualTheme.accentForeground(for: colorScheme, palette: palette, accent: accent)
         }
@@ -1310,9 +1435,21 @@ struct MessageComposerView: View {
     }
 
     private var isComposerExpanded: Bool {
-        // A wrapped second line needs the same bottom-anchored controls as an
-        // explicit newline. Waiting for three lines made the mic/send jump.
-        draftMessage.contains("\n") || textFieldHeight > 26
+        if usesMuseChatSurface {
+            // Decide against the collapsed editor width, never its current
+            // rendered height. Widening a wrapped draft must not make it collapse
+            // and wrap again. Use the same body font and zero text-container inset
+            // as ComposerTextView. Bound shaping work for very large pasted drafts.
+            let measuredDraft = draftMessage.prefix(1_025)
+            if measuredDraft.count > 1_024 || measuredDraft.contains(where: \.isNewline) { return true }
+            guard museComposerAvailableWidth > 0 else { return false }
+            let controlCount = showsComposerSendButton ? 3 : 2
+            let collapsedWidth = max(1, museComposerAvailableWidth - CGFloat(controlCount) * museControlSlotSize)
+            let font = UIFont.preferredFont(forTextStyle: .body)
+            return (String(measuredDraft) as NSString).size(withAttributes: [.font: font]).width > collapsedWidth
+        }
+        // Preserve the existing composer behavior outside the preview.
+        return draftMessage.contains("\n") || textFieldHeight > 26
     }
 
     private var composerCornerRadius: CGFloat {

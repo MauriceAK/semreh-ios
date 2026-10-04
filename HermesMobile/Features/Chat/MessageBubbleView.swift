@@ -4,17 +4,39 @@ struct MessageBubbleView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.appColorPalette) private var palette
     @Environment(\.appAccent) private var accent
+    @Environment(\.usesMuseChatSurface) private var usesMuseChatSurface
+    @Environment(\.museSurfaceUsesDefaultAccent) private var museSurfaceUsesDefaultAccent
 
     private var userBubbleBackground: Color {
-        SemrehVisualTheme.promptBubbleBackground(for: colorScheme, palette: palette, accent: accent)
+        if usesMuseChatSurface {
+            return ChatSurfaceAppearance.promptBackground(for: colorScheme, palette: palette, accent: accent,
+                useDefaultAccent: museSurfaceUsesDefaultAccent)
+        }
+        return SemrehVisualTheme.promptBubbleBackground(for: colorScheme, palette: palette, accent: accent)
     }
 
     private var userBubbleForeground: Color {
-        SemrehVisualTheme.promptBubbleForeground(for: palette, colorScheme: colorScheme, accent: accent)
+        if usesMuseChatSurface {
+            return ChatSurfaceAppearance.promptForeground(for: colorScheme, palette: palette, accent: accent,
+                useDefaultAccent: museSurfaceUsesDefaultAccent)
+        }
+        return SemrehVisualTheme.promptBubbleForeground(for: palette, colorScheme: colorScheme, accent: accent)
     }
 
     private var userBubbleBorder: Color {
-        SemrehVisualTheme.promptBubbleBorder(for: colorScheme, palette: palette, accent: accent).opacity(0.82)
+        if usesMuseChatSurface {
+            return ChatSurfaceAppearance.promptBorder(for: colorScheme, palette: palette, accent: accent,
+                useDefaultAccent: museSurfaceUsesDefaultAccent).opacity(0.82)
+        }
+        return SemrehVisualTheme.promptBubbleBorder(for: colorScheme, palette: palette, accent: accent).opacity(0.82)
+    }
+
+    private var assistantSurface: Color {
+        if usesMuseChatSurface {
+            return ChatSurfaceAppearance.panel(for: colorScheme, palette: palette, accent: accent,
+                useDefaultAccent: museSurfaceUsesDefaultAccent)
+        }
+        return SemrehVisualTheme.panel(for: colorScheme, palette: palette)
     }
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @AppStorage(ChatTranscriptDisplaySettings.hidesAttachmentPathsKey) private var hidesAttachmentPaths = true
@@ -123,7 +145,7 @@ struct MessageBubbleView: View {
             linkPreview
         }
         .padding(12)
-        .background(SemrehVisualTheme.panel(for: colorScheme, palette: palette), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .background(assistantSurface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .padding(.trailing, dynamicTypeSize.isAccessibilitySize ? 0 : 24)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, 2)
@@ -206,7 +228,7 @@ struct MessageBubbleView: View {
         MarkdownRenderer(content: messageText, isStreaming: isStreaming)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(12)
-            .background(SemrehVisualTheme.panel(for: colorScheme, palette: palette),
+            .background(assistantSurface,
                         in: RoundedRectangle(cornerRadius: 16, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 16, style: .continuous)

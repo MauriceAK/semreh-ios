@@ -20,6 +20,11 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
     let horizontalPadding: CGFloat
     let spacing: CGFloat
     let bottomInset: CGFloat
+    /// Extra chrome above the viewport, independent of its keyboard-sized bounds.
+    /// Content inset keeps native anchor/restore geometry below that chrome.
+    var topInset: CGFloat = 0
+    /// Explicit button clearance for measured chrome. Nil retains the old surface.
+    var latestBottomInset: CGFloat? = nil
     let environment: EnvironmentValues
     /// Opt-in only for inert geometry with no captured actions. Factories remain
     /// authoritative; rich content uses nil and refreshes on every update.
@@ -93,6 +98,8 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             private(set) var warmHits = 0
             private var frames: [CGRect] = []
             private var dirty = true
+            private var dirtyFrom = 0
+            private(set) var lastRebuiltFrameCount = 0
             private var preparedCount = -1
             private var snapshotTransition = false
             var snapshotItems: (() -> [Item])?
@@ -109,7 +116,7 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
                     ids = input.ids
                     // Input is staged before diffable application. It cannot
                     // replace the identities owned by the committed collection.
-                    dirty = true
+                    invalidateFrames(from: 0)
                 }
                 if key != nextKey {
                     key = nextKey
@@ -121,12 +128,22 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
 #if DEBUG
                     ChatPerformanceInvalidationProbe.shared?.record("native_layout_estimate_hits", a: warmHits)
 #endif
-                    dirty = true
+                    invalidateFrames(from: 0)
                 }
-                if spacing != input.spacing || bottom != input.bottomInset {
-                    spacing = input.spacing; bottom = input.bottomInset; dirty = true
+                if spacing != input.spacing {
+                    spacing = input.spacing
+                    invalidateFrames(from: 0)
+                }
+                if bottom != input.bottomInset {
+                    bottom = input.bottomInset
+                    // Composer growth changes content size, not any row frame.
+                    invalidateFrames(from: items.count)
                 }
                 if dirty { invalidateLayout() }
+            }
+            private func invalidateFrames(from index: Int) {
+                dirtyFrom = dirty ? min(dirtyFrom, index) : index
+                dirty = true
             }
             func beginSnapshotTransition() {
                 snapshotTransition = true
@@ -137,7 +154,7 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
                 setItems(committed)
                 // An apply can prepare against the old count, including a
                 // same-count replacement. Rebuild even when identities match.
-                dirty = true
+                invalidateFrames(from: 0)
                 invalidateLayout()
             }
             private func setItems(_ committed: [Item]) {
@@ -147,7 +164,7 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
                 measured.formIntersection(retained)
                 heights = heights.filter { retained.contains($0.key) }
                 measurementOrder.removeAll { !retained.contains($0) }
-                dirty = true
+                invalidateFrames(from: 0)
             }
             func retire(_ item: Item) { measured.remove(item) }
 
@@ -170,9 +187,12 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
                 if snapshotTransition, let snapshotItems { setItems(snapshotItems()) }
                 let count = committedCount
                 guard dirty || preparedCount != count, let key else { return }
-                frames.removeAll(keepingCapacity: true)
-                var y: CGFloat = 16
-                for item in items.prefix(count) {
+                let end = min(count, items.count)
+                let start = min(dirty ? dirtyFrom : frames.count, min(frames.count, end))
+                if start < frames.count { frames.removeSubrange(start...) }
+                var y: CGFloat = frames.last.map { $0.maxY + spacing } ?? 16
+                lastRebuiltFrameCount = end - start
+                for item in items[start..<end] {
                     let height = heights[item] ?? 160
                     frames.append(CGRect(x: key.padding, y: y,
                         width: max(1, key.width - 2 * key.padding), height: height))
@@ -181,6 +201,7 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
                 size = CGSize(width: key.width, height: max(0, y - (frames.isEmpty ? 0 : spacing) + bottom))
                 preparedCount = count
                 dirty = false
+                dirtyFrom = end
             }
             override func prepare() {
                 super.prepare()
@@ -243,18 +264,21 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
                 if frames.indices.contains(attributes.indexPath.item), frames[attributes.indexPath.item].maxY <= top {
                     leadingAdjustment += attributes.size.height - oldHeight
                 }
-                if oldHeight != attributes.size.height { dirty = true }
+                if oldHeight != attributes.size.height {
+                    invalidateFrames(from: attributes.indexPath.item)
+                }
                 heights[item] = attributes.size.height
                 measurementOrder.removeAll { $0 == item }
                 measurementOrder.append(item)
                 while heights.count > EstimateStore.rowLimit, let victim = measurementOrder.first {
                     measurementOrder.removeFirst()
-                    if let old = heights.removeValue(forKey: victim), let index = items.firstIndex(of: victim),
-                       frames.indices.contains(index), frames[index].maxY <= top {
-                        leadingAdjustment += 160 - old
+                    if let old = heights.removeValue(forKey: victim), let index = items.firstIndex(of: victim) {
+                        if frames.indices.contains(index), frames[index].maxY <= top {
+                            leadingAdjustment += 160 - old
+                        }
+                        invalidateFrames(from: index)
                     }
                     measured.remove(victim)
-                    dirty = true
                 }
                 Controller.estimates.put(attributes.size.height, item: item, key: key)
                 if dirty {
@@ -407,6 +431,9 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
         var presentationSuspended = false
         var isPresentationActive: Bool { presentationVisible && applicationActive && !stopped }
         var lifecycleObserver: LifecycleObserver?
+#if DEBUG
+        private var observedKeyboardFrame: CGRect = .zero
+#endif
         var pendingRestore: (request: ChatTranscriptRestoreRequest, outcome: ChatTranscriptRestoreOutcome)?
         @MainActor final class LifecycleObserver: NSObject {
             weak var owner: Controller?
@@ -416,6 +443,9 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
                 NotificationCenter.default.addObserver(self, selector: #selector(older(_:)), name: .semrehTranscriptLoadOlder, object: nil)
                 NotificationCenter.default.addObserver(self, selector: #selector(resign(_:)), name: UIApplication.willResignActiveNotification, object: nil)
                 NotificationCenter.default.addObserver(self, selector: #selector(activate(_:)), name: UIApplication.didBecomeActiveNotification, object: nil)
+#if DEBUG
+                NotificationCenter.default.addObserver(self, selector: #selector(keyboardChanged(_:)), name: UIResponder.keyboardDidChangeFrameNotification, object: nil)
+#endif
             }
             @objc func resign(_ notification: Notification) {
                 owner?.applicationActive = false
@@ -429,6 +459,16 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
                 owner?.applicationActive = true
                 owner?.resumePresentation()
             }
+#if DEBUG
+            @objc func keyboardChanged(_ notification: Notification) {
+                guard let owner, owner.isPresentationActive, let window = owner.collection.window,
+                      let value = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue else { return }
+                let frame = value.cgRectValue
+                let occupied = frame.intersection(window.convert(window.bounds, to: window.screen.coordinateSpace))
+                owner.observedKeyboardFrame = occupied.isNull ? .zero : occupied
+                owner.updateDebugProbe()
+            }
+#endif
             deinit { NotificationCenter.default.removeObserver(self) }
         }
         var width: CGFloat = 0
@@ -607,7 +647,7 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             view.addSubview(latest)
             latest.translatesAutoresizingMaskIntoConstraints = false
             let bottomConstraint = latest.bottomAnchor.constraint(equalTo: view.bottomAnchor,
-                constant: -max(16, input.bottomInset - 32))
+                constant: -resolvedLatestBottomInset(input))
             latestBottomConstraint = bottomConstraint
             NSLayoutConstraint.activate([latest.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20), bottomConstraint, latest.widthAnchor.constraint(equalToConstant: 44), latest.heightAnchor.constraint(equalToConstant: 44)])
 #if DEBUG
@@ -776,6 +816,10 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             }.margins(.all, 0)
         }
 
+        private func resolvedLatestBottomInset(_ value: ChatNativeTranscriptViewport) -> CGFloat {
+            value.latestBottomInset.map { max(0, $0) } ?? max(16, value.bottomInset - 32)
+        }
+
         func update(_ next: ChatNativeTranscriptViewport) {
             guard !stopped else { return }
             let old = input
@@ -827,7 +871,8 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             }
             if scopeChanged { saveMemory(scope: old.scope, typeKey: old.typeKey) }
             if old.typeKey != next.typeKey || old.horizontalPadding != next.horizontalPadding
-                || old.spacing != next.spacing || old.bottomInset != next.bottomInset {
+                || old.spacing != next.spacing || old.bottomInset != next.bottomInset
+                || old.topInset != next.topInset {
                 cancelFollow()
             }
             if followLink != nil && (old.revision != next.revision || old.isStreaming != next.isStreaming) {
@@ -860,7 +905,10 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             input = next
             guard isViewLoaded else { return }
             // Use the same composer clearance as the legacy sibling control.
-            latestBottomConstraint?.constant = -max(16, next.bottomInset - 32)
+            latestBottomConstraint?.constant = -resolvedLatestBottomInset(next)
+            if collection.contentInset.top != next.topInset {
+                collection.contentInset.top = next.topInset
+            }
             latest.backgroundColor = UIColor(SemrehVisualTheme.raisedPanel(for: next.environment.colorScheme,
                 palette: next.environment.appColorPalette))
             latest.tintColor = UIColor(SemrehVisualTheme.primaryText(for: next.environment.colorScheme,
@@ -1206,6 +1254,15 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             }
         }
 
+#if DEBUG
+        // Read UIKit's completed keyboard transition, including the prediction
+        // strip omitted by XCTest's Keyboard AX element. No layout is driven here.
+        private func updateDebugProbe() {
+            probe.accessibilityLabel = "Native transcript v2"
+            probe.accessibilityValue = "mounted=\(collection.visibleCells.count);logical=\(input.ids.count);state=\(follows ? "following" : "reading");motion=\(motionLink == nil ? "idle" : "animating");motionCompleted=\(motionCompleted);motionCancelled=\(motionCancelled);motionSamples=\(motionSamples);decelerationTakeovers=\(decelerationTakeovers);topRequests=\(systemTopRequests);topCompleted=\(systemTopCompleted);topActive=\(systemTopActive);surfaceTop=\(input.topInset);surfaceBottom=\(input.bottomInset);keyboardTop=\(observedKeyboardFrame.minY);keyboardHeight=\(observedKeyboardFrame.height)"
+        }
+#endif
+
         func publish() {
             pendingScrollObservation = nil
             guard !stopped, !presentationSuspended, !batchingMotionObservations else { return }
@@ -1221,8 +1278,7 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             let arrived = realizedTailArrival
             latest.isHidden = (arrived && motionLink == nil) || (followLink != nil && canGlideFollow)
 #if DEBUG
-            probe.accessibilityLabel = "Native transcript v2"
-            probe.accessibilityValue = "mounted=\(collection.visibleCells.count);logical=\(input.ids.count);state=\(follows ? "following" : "reading");motion=\(motionLink == nil ? "idle" : "animating");motionCompleted=\(motionCompleted);motionCancelled=\(motionCancelled);motionSamples=\(motionSamples);decelerationTakeovers=\(decelerationTakeovers);topRequests=\(systemTopRequests);topCompleted=\(systemTopCompleted);topActive=\(systemTopActive)"
+            updateDebugProbe()
 #endif
             let sample = Published(metrics: metrics, visible: visible, last: lastVisible, bottom: arrived)
             guard sample != lastPublished else { return }

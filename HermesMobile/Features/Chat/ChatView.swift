@@ -431,6 +431,11 @@ private struct ListenPlaybackBar: View {
 
 struct ChatView: View {
     @State private var internalChatRendererSelection: Bool?
+    @State private var museSurfaceDefaultAccentSelection: Bool?
+    private var museSurfaceUsesDefaultAccent: Bool {
+        museSurfaceDefaultAccentSelection
+            ?? (UserDefaults.standard.object(forKey: AppAccent.storageKey) == nil)
+    }
     private var internalChatRendererEnabled: Bool {
         internalChatRendererSelection ?? InternalChatRendererPolicy.capture()
     }
@@ -455,6 +460,9 @@ struct ChatView: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.appColorPalette) private var palette
+    @Environment(\.appAccent) private var accent
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
     @Environment(\.scenePhase) private var scenePhase
@@ -566,6 +574,8 @@ struct ChatView: View {
     @State private var gitToastState = GitActionToastState()
     @State private var gitAlert: GitChatAlert?
     @State private var composerHeight: CGFloat = 52
+    @State private var surfaceHeaderHeight: CGFloat = 96
+    @State private var surfaceBottomHeight: CGFloat = 52
     @State private var showsChatControls = false
     @State private var showsChatFiles = false
     @State private var workspacePickerRequest = 0
@@ -654,6 +664,7 @@ struct ChatView: View {
     // "unable to type-check in reasonable time" limit).
     private var messageComposer: some View {
         MessageComposerView(
+            usesMuseChatSurface: internalChatRendererEnabled,
             draftMessage: composerDraftBinding,
             isFocused: $composerIsFocused,
             isSending: viewModel.isStartingChat || viewModel.isSendingVoiceNote,
@@ -1019,6 +1030,11 @@ struct ChatView: View {
 
     private var chatOverflowMenu: some View {
         Menu {
+            if internalChatRendererEnabled {
+                Button("Chat controls", systemImage: "slider.horizontal.3") {
+                    showsChatControls = true
+                }
+            }
             if showsFilesButton {
                 Button("Files", systemImage: "folder") { showsChatFiles = true }
                     .disabled(viewModel.isViewingCachedData)
@@ -1049,7 +1065,7 @@ struct ChatView: View {
         .accessibilityLabel("Chat options")
     }
 
-    private var chatBaseView: some View {
+    private var legacyChatSurface: some View {
         ZStack(alignment: .bottom) {
             VStack(spacing: 0) {
                 if viewModel.isViewingCachedData {
@@ -1068,39 +1084,113 @@ struct ChatView: View {
 
             composerAccessoryStack
 
-            if viewModel.attachmentRecoveryNeedsReset || viewModel.directConversationHasPromptDeliveryUncertainty {
-                VStack(spacing: 8) {
-                    if viewModel.attachmentRecoveryNeedsReset {
-                        DirectAttachmentRecoveryBanner(
-                            isBusy: viewModel.attachmentRecoveryIsBusy,
-                            isActionAvailable: viewModel.directAttachmentRecoveryTarget != nil,
-                            onDiscard: {
-                                attachmentRecoveryConfirmationTarget = viewModel.directAttachmentRecoveryTarget
-                            }
-                        )
-                    }
-                    if viewModel.directConversationHasPromptDeliveryUncertainty {
-                        DirectPromptDeliveryRecoveryBanner(
-                            isBusy: viewModel.promptDeliveryRecoveryIsBusy,
-                            isActionAvailable: viewModel.directPromptDeliveryRecoveryTarget != nil,
-                            isSafetyRecordUnavailable: viewModel.directPromptDeliverySafetyRecordUnavailable,
-                            hasConfirmedAcceptance: viewModel.directPromptDeliveryHasConfirmedAcceptance,
-                            onAllow: {
-                                promptDeliveryRecoveryConfirmationTarget = viewModel.directPromptDeliveryRecoveryTarget
-                            }
-                        )
-                    }
-                }
-                .padding(.horizontal)
+            deliveryRecoveryBanners
                 .padding(.bottom, composerHeight + 8)
                 .zIndex(12)
-            }
 
             messageComposer
 #if DEBUG
                 .modifier(NativeRefinementProbe(name: "composer"))
 #endif
 
+        }
+    }
+
+    private var museChatNavigationBar: some View {
+        ZStack(alignment: .top) {
+            chatBotHeader
+                .padding(.horizontal, 64)
+                .frame(maxWidth: .infinity)
+                .frame(minHeight: 96, alignment: .center)
+
+            HStack(alignment: .top) {
+                ChatChromeActionButton(accessibilityLabel: "Back",
+                    accessibilityIdentifier: "chat-back", action: handleBackNavigation) {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 20, weight: .medium))
+                        .frame(width: 44, height: 44)
+                        .adaptiveGlass(.regular, isInteractive: true,
+                                       fallbackMaterial: .thinMaterial, in: Circle())
+                }
+                .frame(width: 44, height: 44)
+                Spacer()
+                chatOverflowMenu
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 12)
+            .padding(.top, 4)
+        }
+        .frame(minHeight: 96)
+    }
+
+    @ViewBuilder
+    private var deliveryRecoveryBanners: some View {
+        if viewModel.attachmentRecoveryNeedsReset || viewModel.directConversationHasPromptDeliveryUncertainty {
+            VStack(spacing: 8) {
+                if viewModel.attachmentRecoveryNeedsReset {
+                    DirectAttachmentRecoveryBanner(
+                        isBusy: viewModel.attachmentRecoveryIsBusy,
+                        isActionAvailable: viewModel.directAttachmentRecoveryTarget != nil,
+                        onDiscard: {
+                            attachmentRecoveryConfirmationTarget = viewModel.directAttachmentRecoveryTarget
+                        }
+                    )
+                }
+                if viewModel.directConversationHasPromptDeliveryUncertainty {
+                    DirectPromptDeliveryRecoveryBanner(
+                        isBusy: viewModel.promptDeliveryRecoveryIsBusy,
+                        isActionAvailable: viewModel.directPromptDeliveryRecoveryTarget != nil,
+                        isSafetyRecordUnavailable: viewModel.directPromptDeliverySafetyRecordUnavailable,
+                        hasConfirmedAcceptance: viewModel.directPromptDeliveryHasConfirmedAcceptance,
+                        onAllow: {
+                            promptDeliveryRecoveryConfirmationTarget = viewModel.directPromptDeliveryRecoveryTarget
+                        }
+                    )
+                }
+            }
+            .padding(.horizontal)
+        }
+    }
+
+    private var museChatSurface: some View {
+        ChatSurfaceLayout(
+            onHeaderHeightChange: { surfaceHeaderHeight = $0 },
+            onBottomHeightChange: { surfaceBottomHeight = $0 }
+        ) {
+            messageContent
+                .environment(\.layoutDirection, chatLayoutDirection)
+        } header: {
+            VStack(spacing: 0) {
+                museChatNavigationBar
+                if viewModel.isViewingCachedData { ChatOfflineCacheBanner() }
+                listenPlaybackBar
+            }
+        } bottom: {
+            VStack(spacing: composerAccessoryVerticalSpacing) {
+                composerAccessoryContent
+                    .padding(.horizontal)
+                    .allowsHitTesting(false)
+                deliveryRecoveryBanners
+                messageComposer
+#if DEBUG
+                    .modifier(NativeRefinementProbe(name: "composer"))
+#endif
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var chatBackdrop: some View {
+        if internalChatRendererEnabled {
+            ChatSurfaceAppearance.canvas(for: colorScheme, palette: palette, accent: accent,
+                                         useDefaultAccent: museSurfaceUsesDefaultAccent)
+        } else {
+            SemrehBackdrop()
+        }
+    }
+
+    private var blockingInteractionOverlays: some View {
+        ZStack {
             if let directApprovalPrompt = viewModel.pendingApprovalPrompt {
                 ApprovalRequestOverlay(
                     prompt: directApprovalPrompt,
@@ -1157,12 +1247,47 @@ struct ChatView: View {
             }
 
         }
-        .safeAreaInset(edge: .top, spacing: 0) { chatNavigationBar }
+    }
+
+    @ViewBuilder
+    private var presentedBlockingInteractionOverlays: some View {
+        if viewModel.pendingApprovalPrompt != nil
+            || viewModel.pendingSecretPrompt != nil
+            || viewModel.pendingSudoPrompt != nil {
+            if internalChatRendererEnabled {
+                blockingInteractionOverlays
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    // Dialog scrims ignore safe areas internally. Bound both drawing
+                    // and hit testing before the outer padding reserves the header,
+                    // so Back remains available while Hermes waits for a decision.
+                    .contentShape(Rectangle())
+                    .clipped()
+                    .padding(.top, surfaceHeaderHeight)
+            } else {
+                blockingInteractionOverlays
+            }
+        }
+    }
+
+    private var chatBaseView: some View {
+        ZStack(alignment: .bottom) {
+            if internalChatRendererEnabled {
+                museChatSurface
+            } else {
+                legacyChatSurface
+            }
+
+            presentedBlockingInteractionOverlays
+
+        }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if !internalChatRendererEnabled { chatNavigationBar }
+        }
 #if DEBUG
         .modifier(ChatNavigationTimingProbe(onBack: handleBackNavigation))
 #endif
         .background {
-            SemrehBackdrop().ignoresSafeArea()
+            chatBackdrop.ignoresSafeArea()
                 .onChange(of: draftMessage) {
                     guard let writer = composerWriterLease,
                           ComposerDraftStore.shared.ownsWriter(writer, server: server, sessionID: composerDraftSessionID) else { return }
@@ -1213,13 +1338,17 @@ struct ChatView: View {
         .navigationBarTitleDisplayMode(.inline)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("chat-detail:\(viewModel.displayTitle)")
-        .task(id: didCompleteInitialAppearance) {
-            await handleInitialAppearanceTask()
-        }
-        .onChange(of: effectivePresentationActive) { _, _ in
-            updatePresentationActivity()
-        }
-        .onChange(of: scenePhase) {
+    }
+
+    private var chatLifecycleView: some View {
+        chatBaseView
+            .task(id: didCompleteInitialAppearance) {
+                await handleInitialAppearanceTask()
+            }
+            .onChange(of: effectivePresentationActive) { _, _ in
+                updatePresentationActivity()
+            }
+            .onChange(of: scenePhase) {
                 handleScenePhaseChange(scenePhase)
             }
             .onChange(of: viewModel.activeStreamID) {
@@ -1248,77 +1377,8 @@ struct ChatView: View {
             .onChange(of: showsLiveActivityResponseExcerpts) {
                 viewModel.setShowsLiveActivityResponseExcerpts(showsLiveActivityResponseExcerpts)
             }
-            .onDisappear {
-                scrollMetricPublication.flush()
-                scrollMetricPublication.suspend()
-                isChatPresented = false
-                updatePresentationActivity()
-#if DEBUG
-                // The destination left before any in-flight motion could settle.
-                for phase in [ChatPerformanceCadencePhase.entry, .scroll, .arrow, .paging,
-                              .streamFollow, .streamParked] {
-                    ChatPerformanceCadenceMonitor.end(phase)
-                }
-#endif
-                cancelExplicitBottomScroll()
-                OpenChatSessionStore.shared.cancelSelectedHistoryRefresh(for: viewModel)
-                viewModel.setTranscriptPresentationActive(false)
-                composerResizeTask?.cancel()
-                composerResizeTask = nil
-                persistComposerDraft()
-                releaseComposerWriter()
-                persistTranscriptRestore()
-                foregroundRefreshTask?.cancel()
-                foregroundRefreshTask = nil
-                guard !disablesExternalLifecycle else { return }
-                // Stop the per-session event stream when the chat is not on
-                // screen. Background sync for every retained conversation caused
-                // main-thread disk I/O and transcript reloads (build 19 lag).
-                viewModel.stopSessionEventSync()
-                viewModel.stopListening()
-            }
-            .onAppear {
-                claimComposerWriter()
-                // NavigationLink may construct a destination before Settings changes.
-                // Capture at first presentation, then retain through covers/backgrounding.
-                if internalChatRendererSelection == nil {
-                    internalChatRendererSelection = InternalChatRendererPolicy.capture()
-                }
-                scrollMetricPublication.resume()
-                isLeavingViaBack = false
-                backRestoreSnapshot = nil
-                viewModel.warmTranscriptReaderMemory?.resumeCapture()
-                isChatPresented = true
-                updatePresentationActivity()
-                guard !disablesExternalLifecycle else { return }
-                foregroundRefreshTask?.cancel()
-                foregroundRefreshTask = Task { @MainActor in
-                    guard !Task.isCancelled, scenePhase == .active else { return }
-                    if didCompleteInitialAppearance,
-                       pagingStartupReadyScope == viewModel.outgoingInsertionScope,
-                       loadsInitialMessages {
-                        await OpenChatSessionStore.shared.refreshStaleHistoryIfNeeded(
-                            for: viewModel, session: session, server: server,
-                            modelContext: modelContext
-                        )
-                    }
-                    guard !Task.isCancelled, scenePhase == .active else { return }
-                    await viewModel.reconnectStreamIfNeeded(modelContext: modelContext)
-                    guard !Task.isCancelled, scenePhase == .active else { return }
-
-                    if viewModel.activeStreamID != nil {
-                        handleActiveStreamChange()
-                    }
-
-                    if let lastError = viewModel.lastError {
-                        onAPIError(lastError)
-                    }
-                }
-
-                // Event sync runs only while the chat is visible; leaving the
-                // conversation stops it (see onDisappear).
-                viewModel.startSessionEventSync()
-            }
+            .onDisappear(perform: handleChatDisappearance)
+            .onAppear(perform: handleChatAppearance)
             .onChange(of: viewModel.responseCompletionHapticTrigger) {
                 guard viewModel.responseCompletionHapticTrigger > 0 else { return }
                 handleResponseCompletionSideEffects()
@@ -1335,6 +1395,10 @@ struct ChatView: View {
                 else { return }
                 ChatHaptics.streamProgress(isEnabled: isHapticsEnabled && presentationOwnership.isActive)
             }
+    }
+
+    private var chatPresentedView: some View {
+        chatLifecycleView
             .navigationDestination(item: $forkedSession) { session in
                 ChatView(
                     session: session,
@@ -1405,10 +1469,12 @@ struct ChatView: View {
                     }
                 )
             }
-        }
+    }
 
-    var body: some View {
-        chatBaseView
+    private var chatOwnedPresentationView: some View {
+        chatPresentedView
+            .environment(\.usesMuseChatSurface, internalChatRendererEnabled)
+            .environment(\.museSurfaceUsesDefaultAccent, museSurfaceUsesDefaultAccent)
             // Keep the additional ownership observers outside the large base
             // expression so Swift can type-check each modifier chain separately.
             .onChange(of: isPresentationActive) { _, active in
@@ -1422,6 +1488,10 @@ struct ChatView: View {
             .onChange(of: canFocusComposer) { _, canFocus in
                 if canFocus { restoreComposerFocusAfterPreviewIfNeeded() }
             }
+    }
+
+    var body: some View {
+        chatOwnedPresentationView
             .alert(
                 "Discard Later Messages?",
                 isPresented: $showEditDiscardConfirmation
@@ -1493,6 +1563,87 @@ struct ChatView: View {
                 target: $promptDeliveryRecoveryConfirmationTarget,
                 viewModel: viewModel
             ))
+    }
+
+    private func handleChatDisappearance() {
+        scrollMetricPublication.flush()
+        scrollMetricPublication.suspend()
+        isChatPresented = false
+        updatePresentationActivity()
+#if DEBUG
+        // The destination left before any in-flight motion could settle.
+        for phase in [ChatPerformanceCadencePhase.entry, .scroll, .arrow, .paging,
+                      .streamFollow, .streamParked] {
+            ChatPerformanceCadenceMonitor.end(phase)
+        }
+#endif
+        cancelExplicitBottomScroll()
+        OpenChatSessionStore.shared.cancelSelectedHistoryRefresh(for: viewModel)
+        viewModel.setTranscriptPresentationActive(false)
+        composerResizeTask?.cancel()
+        composerResizeTask = nil
+        persistComposerDraft()
+        releaseComposerWriter()
+        persistTranscriptRestore()
+        foregroundRefreshTask?.cancel()
+        foregroundRefreshTask = nil
+        guard !disablesExternalLifecycle else { return }
+        // Stop the per-session event stream when the chat is not on
+        // screen. Background sync for every retained conversation caused
+        // main-thread disk I/O and transcript reloads (build 19 lag).
+        viewModel.stopSessionEventSync()
+        viewModel.stopListening()
+    }
+
+    private func handleChatAppearance() {
+        claimComposerWriter()
+        // NavigationLink may construct a destination before Settings changes.
+        // Capture at first presentation, then retain through covers/backgrounding.
+        if internalChatRendererSelection == nil {
+            internalChatRendererSelection = InternalChatRendererPolicy.capture()
+            museSurfaceDefaultAccentSelection = UserDefaults.standard.object(forKey: AppAccent.storageKey) == nil
+        }
+        viewModel.setResponsiveStreamingPresentation(internalChatRendererEnabled)
+        viewModel.setLocalSendPresentationEnabled(internalChatRendererEnabled)
+        scrollMetricPublication.resume()
+        isLeavingViaBack = false
+        backRestoreSnapshot = nil
+        viewModel.warmTranscriptReaderMemory?.resumeCapture()
+        isChatPresented = true
+        updatePresentationActivity()
+        guard !disablesExternalLifecycle else { return }
+        foregroundRefreshTask?.cancel()
+        foregroundRefreshTask = Task<Void, Never> { @MainActor in
+            await refreshPresentedConversation()
+        }
+
+        // Event sync runs only while the chat is visible; leaving the
+        // conversation stops it (see onDisappear).
+        viewModel.startSessionEventSync()
+    }
+
+    @MainActor
+    private func refreshPresentedConversation() async {
+        guard !Task.isCancelled, scenePhase == .active else { return }
+        if didCompleteInitialAppearance,
+           pagingStartupReadyScope == viewModel.outgoingInsertionScope,
+           loadsInitialMessages {
+            await OpenChatSessionStore.shared.refreshStaleHistoryIfNeeded(
+                for: viewModel, session: session, server: server,
+                modelContext: modelContext
+            )
+        }
+        guard !Task.isCancelled, scenePhase == .active else { return }
+        await viewModel.reconnectStreamIfNeeded(modelContext: modelContext)
+        guard !Task.isCancelled, scenePhase == .active else { return }
+
+        if viewModel.activeStreamID != nil {
+            handleActiveStreamChange()
+        }
+
+        if let lastError = viewModel.lastError {
+            onAPIError(lastError)
+        }
     }
 
     @ViewBuilder
@@ -1664,20 +1815,23 @@ struct ChatView: View {
     }
 
     @ViewBuilder
-    private var composerAccessoryStack: some View {
+    private var composerAccessoryContent: some View {
         if composerAccessoryVisibleItemCount > 0 {
             VStack(spacing: composerAccessoryVerticalSpacing) {
                 if !viewModel.pinnedLocalNotices.isEmpty {
                     PinnedLocalNoticeStack(notices: viewModel.pinnedLocalNotices)
                         .transition(ChatMotion.bottomOverlayTransition(reduceMotion: reduceMotion))
                 }
-
                 if let activeRunStatusPresentation {
                     ChatActiveRunStatusView(presentation: activeRunStatusPresentation)
                         .transition(ChatMotion.bottomOverlayTransition(reduceMotion: reduceMotion))
                 }
-
             }
+        }
+    }
+
+    private var composerAccessoryStack: some View {
+        composerAccessoryContent
             .padding(.horizontal)
             .padding(.bottom, composerHeight + 8)
             .allowsHitTesting(false)
@@ -1685,13 +1839,13 @@ struct ChatView: View {
             .animation(ChatMotion.quickState(reduceMotion: reduceMotion), value: composerAccessoryVisibleItemCount)
             .animation(ChatMotion.quickState(reduceMotion: reduceMotion), value: activeRunStatusPresentation)
             .animation(ChatMotion.quickState(reduceMotion: reduceMotion), value: viewModel.pinnedLocalNotices)
-        }
     }
 
     @ViewBuilder
     private var messageContent: some View {
         ChatTranscriptView(
             internalChatRendererEnabled: internalChatRendererEnabled,
+            usesMuseChatSurface: internalChatRendererEnabled,
             isLoading: viewModel.isLoading,
             errorMessage: viewModel.errorMessage,
             messages: viewModel.messages,
@@ -1727,7 +1881,9 @@ struct ChatView: View {
             bottomAnchorID: bottomAnchorID,
             transcriptMessageSpacing: transcriptMessageSpacing,
             transcriptBlockSpacing: transcriptBlockSpacing,
+            transcriptTopInsetHeight: internalChatRendererEnabled ? surfaceHeaderHeight : 0,
             transcriptBottomInsetHeight: transcriptBottomInsetHeight,
+            latestButtonBottomInset: internalChatRendererEnabled ? surfaceBottomHeight + 12 : nil,
             scrollToBottomButtonBottomPadding: scrollToBottomButtonBottomPadding,
             localAttachmentPreviews: viewModel.localAttachmentPreviews,
             listeningMessageID: viewModel.listeningMessageID,
@@ -1975,7 +2131,9 @@ struct ChatView: View {
     }
 
     private var transcriptBottomInsetHeight: CGFloat {
-        max(96, composerHeight + 44 + composerAccessorySpacerHeight)
+        internalChatRendererEnabled
+            ? surfaceBottomHeight + 8
+            : max(96, composerHeight + 44 + composerAccessorySpacerHeight)
     }
 
     private var scrollToBottomButtonBottomPadding: CGFloat {
@@ -3003,10 +3161,11 @@ struct ChatView: View {
     }
 
     private var usesStableViewport: Bool {
+        if internalChatRendererEnabled { return true }
 #if DEBUG
-        ProcessInfo.processInfo.arguments.contains("--chat-stable-viewport")
+        return ProcessInfo.processInfo.arguments.contains("--chat-stable-viewport")
 #else
-        false
+        return false
 #endif
     }
 
@@ -3707,6 +3866,17 @@ struct ChatView: View {
     private func handleComposerHeightChange(_ height: CGFloat) {
         guard presentationOwnership.isActive else { return }
         guard abs(composerHeight - height) > 0.5 else { return }
+        if internalChatRendererEnabled {
+            // The measured surface updates native content clearance in the same
+            // layout cycle. UIKit alone preserves the reader or follows the tail.
+            composerHeight = height
+            composerResizeTask?.cancel()
+            composerResizeTask = nil
+            isComposerResizing = false
+            composerResizeFollowIntent = false
+            shouldAnimateNextFollowAfterComposerResize = false
+            return
+        }
 
 #if DEBUG
         let previousComposerHeight = composerHeight

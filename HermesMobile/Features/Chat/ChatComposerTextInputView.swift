@@ -31,6 +31,7 @@ struct ComposerTextInputView: View {
     var isAccessibilityHidden: Bool = false
     let isKeyboardSendEnabled: Bool
     let verticalPadding: CGFloat
+    var horizontalPadding: CGFloat = 16
     let onKeyboardSend: () -> Void
     let onPasteFileProviders: ([NSItemProvider]) -> Void
     let onPasteFileURLs: ([URL]) -> Void
@@ -54,13 +55,13 @@ struct ComposerTextInputView: View {
             )
             .frame(height: inputHeight)
             .padding(.vertical, verticalPadding)
-            .padding(.horizontal, 16)
+            .padding(.horizontal, horizontalPadding)
 
             if text.isEmpty {
                 Text("Message")
                     .lineLimit(1)
                     .foregroundStyle(Color(.placeholderText))
-                    .padding(.horizontal, 16)
+                    .padding(.horizontal, horizontalPadding)
                     .padding(.vertical, verticalPadding)
                     .allowsHitTesting(false)
             }
