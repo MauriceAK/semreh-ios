@@ -158,6 +158,9 @@ final class SessionListViewModel {
     private let composerDraftStore: ComposerDraftStore
     private let server: URL
     private var loadGeneration = 0
+    /// Deep-link navigation survives ordinary sidebar reloads, but never an
+    /// owning surface invalidation or a change of normalized profile scope.
+    private var deepLinkScopeGeneration = 0
     /// Monotonic generation of the newest successful canonical `/api/sessions`
     /// response. Optimistic rollbacks never overwrite a newer server result.
     private var successfulLoadGeneration = 0
@@ -263,6 +266,7 @@ final class SessionListViewModel {
         gatewayObservationGeneration &+= 1
         gatewayObservationEnabled = false
         loadGeneration &+= 1
+        deepLinkScopeGeneration &+= 1
         isLoading = false
         gatewayObservationTask?.cancel()
         gatewayObservationTask = nil
@@ -1089,12 +1093,12 @@ final class SessionListViewModel {
         else { return nil }
 
         let requestedProfile = Self.nonEmpty(activeProfileName) ?? "default"
-        let generation = loadGeneration
+        let generation = deepLinkScopeGeneration
         let requestedServer = server
         let isCurrentRequest: () -> Bool = { [weak self] in
             guard let self else { return false }
             return !Task.isCancelled
-                && self.loadGeneration == generation
+                && self.deepLinkScopeGeneration == generation
                 && self.server == requestedServer
                 && (Self.nonEmpty(self.activeProfileName) ?? "default") == requestedProfile
         }
@@ -1134,6 +1138,15 @@ final class SessionListViewModel {
                   !confirmedSessionDeletionIDs.contains(sessionID),
                   pendingSessionDeletions[sessionID] == nil
             else { return nil }
+
+            // A concurrent sidebar refresh may have already published this row.
+            // Keep its current metadata and cache instead of the held detail snapshot.
+            if let loadedSession = sessions.first(where: {
+                $0.sessionId == sessionID
+                    && (Self.nonEmpty($0.profile) ?? "default") == requestedProfile
+            }) {
+                return loadedSession
+            }
 
             if session.archived != true,
                session.shouldAppearInSessionList,
@@ -2014,6 +2027,9 @@ final class SessionListViewModel {
         let profileName = response.effectiveDefaultProfileName
         let profile = response.profile(matching: profileName) ?? fallbackProfile
 
+        if (Self.nonEmpty(activeProfileName) ?? "default") != (Self.nonEmpty(profileName) ?? "default") {
+            deepLinkScopeGeneration &+= 1
+        }
         if activeProfileName != profileName {
             activeProfileEpoch &+= 1
             archivedCountRequestGeneration &+= 1

@@ -1,4 +1,5 @@
 import XCTest
+import SwiftData
 @testable import HermesMobile
 
 final class SessionListDirectTests: APIClientTestCase {
@@ -315,6 +316,139 @@ final class SessionListDirectTests: APIClientTestCase {
         XCTAssertEqual(session?.archived, true)
         XCTAssertEqual(detailRequests, 1)
         XCTAssertTrue(viewModel.sessions.isEmpty, "Archived deep links open but do not enter the visible sidebar")
+    }
+
+    @MainActor
+    func testColdDeepLinkSurvivesConcurrentInitialProfileAndSidebarLoad() async throws {
+        let detailStarted = expectation(description: "cold deep-link detail started")
+        let (viewModel, gate, session) = makeGatedDeepLinkFixture(detailStarted: detailStarted)
+        let configuration = ModelConfiguration(isStoredInMemoryOnly: true)
+        let container = try ModelContainer(
+            for: CachedSession.self, CachedMessage.self, CachedSessionPreviewRecord.self,
+            configurations: configuration
+        )
+        let context = ModelContext(container)
+        defer {
+            gate.release()
+            session.invalidateAndCancel()
+            GatedDeepLinkURLProtocol.reset()
+        }
+        var navigation = SessionNavigationState()
+        var pendingSessionID: String? = "durable-1"
+        XCTAssertNil(viewModel.activeProfileName)
+
+        await SessionListInitialLoad.run(
+            resolvePendingDeepLink: {
+                guard let sessionID = navigation.beginDeepLinkedSessionLoad(id: pendingSessionID) else {
+                    return XCTFail("Expected the cold deep link to be consumed")
+                }
+                pendingSessionID = nil
+                if let linkedSession = await viewModel.loadSessionForDeepLink(id: sessionID, modelContext: context) {
+                    navigation.select(linkedSession)
+                }
+                navigation.finishDeepLinkedSessionLoad(id: sessionID)
+            },
+            refreshSessionsAndActiveProfile: {
+                await self.fulfillment(of: [detailStarted], timeout: 2)
+                await SidebarLoadOrdering.run(
+                    resolveActiveProfile: { await viewModel.loadActiveProfile() },
+                    loadSessions: {
+                        let loaded = await viewModel.load(modelContext: context)
+                        XCTAssertTrue(loaded)
+                    }
+                )
+                XCTAssertEqual(viewModel.activeProfileName, "default")
+                XCTAssertEqual(viewModel.sessions.compactMap(\.sessionId), ["durable-1"])
+                XCTAssertNil(navigation.selectedSessionID, "Detail must still be held after the list finishes")
+                gate.release()
+            },
+            restoreLastSelectedSession: { clearsMissingSelection in
+                navigation.restoreIfNeeded(
+                    from: viewModel.sessions,
+                    clearsMissingSelection: clearsMissingSelection,
+                    pendingDeepLinkedSessionID: pendingSessionID
+                )
+            }
+        )
+
+        XCTAssertNil(pendingSessionID)
+        XCTAssertEqual(navigation.selectedSessionID, "durable-1", "A sidebar refresh must not lose the consumed link")
+        if case .session(let selected)? = navigation.destination {
+            XCTAssertEqual(selected.title, "Current sidebar title", "Navigation must keep the newer list metadata")
+        } else {
+            XCTFail("Expected the deep-linked conversation destination")
+        }
+        XCTAssertEqual(viewModel.sessions.compactMap(\.sessionId), ["durable-1"], "Detail must not duplicate the sidebar row")
+        let cached = try CacheStore.cachedSessions(serverURL: URL(staticString: "https://example.test"), in: context)
+        XCTAssertEqual(cached.map(\.title), ["Current sidebar title"], "Held detail must not overwrite the newer cache")
+        XCTAssertNil(viewModel.lastError)
+        XCTAssertNil(viewModel.actionErrorMessage)
+    }
+
+    @MainActor
+    func testDeepLinkDetailResponseIsDiscardedAfterOwnerInvalidation() async throws {
+        let detailStarted = expectation(description: "owner-scoped detail started")
+        let (viewModel, gate, session) = makeGatedDeepLinkFixture(detailStarted: detailStarted)
+        defer {
+            gate.release()
+            session.invalidateAndCancel()
+            GatedDeepLinkURLProtocol.reset()
+        }
+        let loadTask = Task { @MainActor in
+            await viewModel.loadSessionForDeepLink(id: "durable-1")
+        }
+        await fulfillment(of: [detailStarted], timeout: 2)
+        viewModel.invalidateGatewayObservation()
+        gate.release()
+
+        let result = await loadTask.value
+        XCTAssertNil(result)
+        XCTAssertTrue(viewModel.sessions.isEmpty)
+        XCTAssertNil(viewModel.lastError)
+        XCTAssertNil(viewModel.actionErrorMessage)
+    }
+
+    @MainActor
+    func testDeepLinkDetailResponseIsDiscardedAfterProfileSwitchAwayAndBack() async throws {
+        let detailStarted = expectation(description: "profile-scoped detail started")
+        let (viewModel, gate, session) = makeGatedDeepLinkFixture(detailStarted: detailStarted)
+        defer {
+            gate.release()
+            session.invalidateAndCancel()
+            GatedDeepLinkURLProtocol.reset()
+        }
+        await viewModel.loadActiveProfile()
+        let work = try XCTUnwrap(viewModel.profileOptions.first(where: { $0.name == "work" }))
+        let defaultProfile = try XCTUnwrap(viewModel.profileOptions.first(where: { $0.name == "default" }))
+        let loadTask = Task { @MainActor in
+            await viewModel.loadSessionForDeepLink(id: "durable-1")
+        }
+        await fulfillment(of: [detailStarted], timeout: 2)
+        let switchedAway = await viewModel.switchActiveProfile(work)
+        let switchedBack = await viewModel.switchActiveProfile(defaultProfile)
+        XCTAssertTrue(switchedAway)
+        XCTAssertTrue(switchedBack)
+        gate.release()
+
+        let result = await loadTask.value
+        XCTAssertNil(result)
+        XCTAssertTrue(viewModel.sessions.isEmpty)
+        XCTAssertNil(viewModel.lastError)
+        XCTAssertNil(viewModel.actionErrorMessage)
+    }
+
+    @MainActor
+    private func makeGatedDeepLinkFixture(
+        detailStarted: XCTestExpectation
+    ) -> (SessionListViewModel, DeepLinkDetailGate, URLSession) {
+        let gate = DeepLinkDetailGate(started: detailStarted)
+        GatedDeepLinkURLProtocol.configure(gate: gate)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [GatedDeepLinkURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        let server = URL(staticString: "https://example.test")
+        let viewModel = SessionListViewModel(server: server, client: APIClient(baseURL: server, session: session))
+        return (viewModel, gate, session)
     }
 
     @MainActor
@@ -870,6 +1004,88 @@ final class SessionListDirectTests: APIClientTestCase {
             "A replaced search must not receive the stale mutation failure or row"
         )
     }
+}
+
+/// Holds only detail delivery, allowing the initial profile/list requests to
+/// complete on the same URLSession without sleeps or a blocked protocol queue.
+private final class DeepLinkDetailGate: @unchecked Sendable {
+    let started: XCTestExpectation
+    private let lock = NSLock()
+    private var released = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(started: XCTestExpectation) {
+        self.started = started
+    }
+
+    func waitForRelease() async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if released {
+                lock.unlock()
+                continuation.resume()
+            } else {
+                waiters.append(continuation)
+                lock.unlock()
+            }
+        }
+    }
+
+    func release() {
+        lock.lock()
+        released = true
+        let pending = waiters
+        waiters.removeAll()
+        lock.unlock()
+        pending.forEach { $0.resume() }
+    }
+}
+
+private final class GatedDeepLinkURLProtocol: URLProtocol {
+    private static var gate: DeepLinkDetailGate?
+
+    static func configure(gate: DeepLinkDetailGate) { self.gate = gate }
+    static func reset() { gate = nil }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let json: String
+        switch request.url?.path {
+        case "/api/profiles":
+            json = #"{"profiles":[{"name":"default","is_default":true},{"name":"work"}],"active":"default","single_profile_mode":false}"#
+        case "/api/profiles/sessions":
+            json = #"{"sessions":[{"id":"durable-1","title":"Current sidebar title","profile":"default","archived":false}]}"#
+        case "/api/sessions":
+            json = #"{"sessions":[],"total":0,"limit":0,"offset":0}"#
+        case "/api/sessions/durable-1":
+            guard let gate = Self.gate else {
+                client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+                return
+            }
+            gate.started.fulfill()
+            Task {
+                await gate.waitForRelease()
+                send(#"{"id":"durable-1","title":"Older detail title","profile":"default","archived":false}"#)
+            }
+            return
+        default:
+            XCTFail("Unexpected gated deep-link request: \(request.url?.path ?? "nil")")
+            client?.urlProtocol(self, didFailWithError: URLError(.badURL))
+            return
+        }
+        send(json)
+    }
+
+    private func send(_ json: String) {
+        let (response, data) = apiTestJSONResponse(json, for: request)
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: data)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
 }
 
 private final class SearchOnlyRenameFailureGate: @unchecked Sendable {
