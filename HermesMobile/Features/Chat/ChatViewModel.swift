@@ -642,9 +642,15 @@ final class ChatViewModel {
     @ObservationIgnored private var pendingStreamingScrollTriggerTask: Task<Void, Never>?
     @ObservationIgnored private var pendingStreamingScrollTriggerTaskOwner: UUID?
     @ObservationIgnored private var pendingAssistantTextBuffer = StreamingWordDrain.Buffer()
-    @ObservationIgnored private var pendingAssistantBufferStartedAt: UInt64?
+    @ObservationIgnored private var pendingStreamingBufferStartedAt: UInt64?
     @ObservationIgnored private var streamingReentryNeedsCatchup = false
     @ObservationIgnored private var usesResponsiveStreamingPresentation = false
+    @ObservationIgnored private var streamingReceivedByteCount = 0
+    @ObservationIgnored private var streamingReaderInteractionPriority = false
+    @ObservationIgnored private var streamingComposerInteractionPriority = false
+    /// Ephemeral gateway activity, separate from provider reasoning and visible
+    /// assistant commentary. Repeated spinner labels never become transcript.
+    private(set) var streamingActivityStatus: String?
     @ObservationIgnored private var streamingHapticPulseGate = StreamingHapticPulseGate()
     @ObservationIgnored private var suppressedProgressUnitsRemaining = 0
     @ObservationIgnored private var pendingReasoningTextBuffer: String = ""
@@ -1304,6 +1310,9 @@ final class ChatViewModel {
     private var sendTranscriptSessionID: String?
 #if DEBUG
     private var performanceLabStreamingTurnInFlight = false
+    var longReplyPerformanceLabPhase = "idle"
+    private var longReplyPerformanceLabFinishRequested = false
+    private var longReplyPerformanceLabCancelRequested = false
 #endif
     private var directResponseComplete = false
     private var directModelContext: ModelContext?
@@ -2693,40 +2702,54 @@ final class ChatViewModel {
         switch GatewayConversationController.presentationEvent(for: event) {
         case .textDelta(let text):
             guard !suppressUnwatermarkedContent else { break }
+            setStreamingActivityStatus(nil)
             _ = appendAssistantToken(text)
             if showsLiveActivityResponseExcerpts { liveActivityManager.update(.token(text)) }
         case .interim(let text, let alreadyStreamed):
             guard !suppressUnwatermarkedContent else { break }
             _ = appendInterimAssistant(InterimAssistantStreamEvent(text: text, alreadyStreamed: alreadyStreamed))
+            setStreamingActivityStatus(String(localized: "Thinking"))
             if showsLiveActivityResponseExcerpts { liveActivityManager.update(.interimAssistant(text)) }
-        case .thinkingDelta(let text), .reasoningDelta(let text):
+        case .thinkingDelta(let text):
             guard !suppressUnwatermarkedContent else { break }
+            setStreamingActivityStatus(text)
+        case .reasoningDelta(let text):
+            guard !suppressUnwatermarkedContent else { break }
+            setStreamingActivityStatus(String(localized: "Thinking"))
             _ = appendReasoning(text)
             liveActivityManager.update(.reasoning(text))
         case .toolStart(let tool):
+            setStreamingActivityStatus(nil)
             _ = appendToolCall(directToolEvent(tool, completed: false))
             liveActivityManager.update(.toolStarted(name: tool.name))
         case .toolComplete(let tool):
+            setStreamingActivityStatus(nil)
             _ = completeToolCall(directToolEvent(tool, completed: true))
             liveActivityManager.update(.toolCompleted)
         case .toolProgress: break // Progress is not a second tool call.
         case .usage(let usage): contextWindowSnapshot = usage
         case .terminal(let terminal):
+            setStreamingActivityStatus(nil)
             flushPendingStreamingContent()
-            if !suppressUnwatermarkedContent, let text = terminal.text, !text.isEmpty {
-                prepareStreamingAssistantForTerminal(text)
-            }
-            if !suppressUnwatermarkedContent, let text = terminal.text, !text.isEmpty,
-               let messageID = streamingAssistantMessageID,
-               let index = streamingAssistantMessagePosition(for: messageID),
-               messages[index].role == "assistant" {
-                let current = messages[index]
-                messages[index] = ChatMessage(role: current.role, content: text,
-                    timestamp: current.timestamp, messageId: current.messageId,
-                    name: current.name, toolCallId: current.toolCallId, toolUseId: current.toolUseId,
-                    toolCalls: current.toolCalls, contentParts: current.contentParts,
-                    reasoning: terminal.reasoning ?? current.reasoning, attachments: current.attachments,
-                    turnTps: terminal.usage?.tokensPerSecond ?? current.turnTps)
+            withBatchedTranscriptDerivedState {
+                if !suppressUnwatermarkedContent, let text = terminal.text, !text.isEmpty {
+                    prepareStreamingAssistantForTerminal(text)
+                }
+                if !suppressUnwatermarkedContent, let text = terminal.text, !text.isEmpty,
+                   let messageID = streamingAssistantMessageID,
+                   let index = streamingAssistantMessagePosition(for: messageID),
+                   messages[index].role == "assistant" {
+                    let current = messages[index]
+                    messages[index] = ChatMessage(role: current.role, content: text,
+                        timestamp: current.timestamp, messageId: current.messageId,
+                        name: current.name, toolCallId: current.toolCallId, toolUseId: current.toolUseId,
+                        toolCalls: current.toolCalls, contentParts: current.contentParts,
+                        reasoning: current.reasoning, attachments: current.attachments,
+                        turnTps: terminal.usage?.tokensPerSecond ?? current.turnTps)
+                }
+                if !suppressUnwatermarkedContent {
+                    retainDirectTerminalReasoning(terminal.reasoning)
+                }
             }
             if let usage = terminal.usage { contextWindowSnapshot = usage }
             directResponseComplete = true
@@ -2748,6 +2771,8 @@ final class ChatViewModel {
         case .control(let raw):
             if raw.type == "message.start" {
                 archiveDirectLiveTurnBeforeNewStart()
+                streamingReceivedByteCount = 0
+                setStreamingActivityStatus(String(localized: "Thinking"))
                 isReasoningChangeDeferred = false
                 directResponseComplete = false
                 // Item 4: the elapsed readout starts when the gateway starts the
@@ -2764,6 +2789,7 @@ final class ChatViewModel {
             } else if raw.type == "session.info" {
                 applyDirectSessionInfo(raw.payload)
             } else if raw.type == "error" {
+                setStreamingActivityStatus(nil)
                 sendErrorMessage = raw.payload?.gatewayFields["message"]?.gatewayString ?? "Hermes reported an error."
             } else if ["approval.request", "sudo.request", "secret.request"].contains(raw.type) {
                 // The live controller owns the typed prompt projection. The
@@ -2772,6 +2798,53 @@ final class ChatViewModel {
             }
         case .unknown: break
         }
+    }
+
+    private func setStreamingActivityStatus(_ status: String?) {
+        let bounded = status.map { String($0.prefix(160)).trimmingCharacters(in: .whitespacesAndNewlines) }
+        let next = bounded?.isEmpty == false ? bounded : nil
+        guard next != streamingActivityStatus else { return }
+        streamingActivityStatus = next
+    }
+
+    /// Terminal frames can omit reasoning (including interruption/error frames).
+    /// Keep the provider text already received on its owned row before the live
+    /// disclosure becomes inactive. The next canonical transcript still owns
+    /// replacement; this is only the same local message/cache representation.
+    private func retainDirectTerminalReasoning(_ terminalReasoning: String?) {
+        let explicitReasoning = terminalReasoning.flatMap {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0
+        }
+        let receivedReasoning = liveReasoningText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? nil : liveReasoningText
+        guard let reasoning = explicitReasoning ?? receivedReasoning else { return }
+
+        let candidateAnchors = explicitReasoning == nil
+            ? [reasoningAnchorMessageID, streamingAssistantMessageID]
+            : [streamingAssistantMessageID, reasoningAnchorMessageID]
+        var index = candidateAnchors.compactMap { $0 }.lazy.compactMap { anchor -> Int? in
+            guard self.directLiveAnchorBelongsToCurrentTurn(anchor) else { return nil }
+            return self.messages.lastIndex { $0.role == "assistant" && $0.messageId == anchor }
+        }.first
+        if index == nil, explicitReasoning != nil, !directResponseComplete {
+            // A provider can finish a reasoning-only response without any text
+            // deltas. Do not attach it to an unrelated previous assistant row.
+            streamingAssistantMessageID = nil
+            streamingAssistantMessageIndex = nil
+            index = streamingAssistantMessagePosition(for: ensureStreamingAssistantMessage())
+        }
+        guard let index else { return }
+
+        let current = messages[index]
+        if current.reasoning?.utf8.elementsEqual(reasoning.utf8) != true {
+            messages[index] = ChatMessage(role: current.role, content: current.content,
+                timestamp: current.timestamp, messageId: current.messageId,
+                name: current.name, toolCallId: current.toolCallId, toolUseId: current.toolUseId,
+                toolCalls: current.toolCalls, contentParts: current.contentParts,
+                reasoning: reasoning, attachments: current.attachments, turnTps: current.turnTps)
+        }
+        liveReasoningText = ""
+        reasoningAnchorMessageID = nil
     }
 
     private func endDirectLiveActivity(status: AgentRunActivityStatus, activity: String, errorSummary: String? = nil) {
@@ -3118,6 +3191,34 @@ final class ChatViewModel {
         }
     }
 
+    /// Native gestures and focused composition have distinct owners. Ending
+    /// one interaction must not remove the other owner's scheduling priority.
+    func setStreamingInteractionPriority(_ isInteracting: Bool) {
+        let previous = streamingInteractionPriority
+        streamingReaderInteractionPriority = isInteracting
+        rescheduleForStreamingPriorityChange(previous: previous)
+    }
+
+    func setComposerInteractionActive(_ isActive: Bool) {
+        let previous = streamingInteractionPriority
+        streamingComposerInteractionPriority = isActive
+        rescheduleForStreamingPriorityChange(previous: previous)
+    }
+
+    private var streamingInteractionPriority: Bool {
+        streamingReaderInteractionPriority || streamingComposerInteractionPriority
+    }
+
+    private func rescheduleForStreamingPriorityChange(previous: Bool) {
+        guard usesResponsiveStreamingPresentation, previous != streamingInteractionPriority else { return }
+        cancelPendingStreamingContentFlush()
+        if !pendingAssistantTextBuffer.isEmpty || !pendingReasoningTextBuffer.isEmpty {
+            // The oldest arrival retains its original deadline through every
+            // drag/focus transition; input cannot postpone content indefinitely.
+            scheduleStreamingContentFlush()
+        }
+    }
+
     private var streamingPresentationTime: UInt64 {
         #if DEBUG
         if let streamingClockForTesting { return streamingClockForTesting() }
@@ -3125,15 +3226,17 @@ final class ChatViewModel {
         return DispatchTime.now().uptimeNanoseconds
     }
 
-    private var pendingAssistantBufferAge: UInt64 {
-        guard let startedAt = pendingAssistantBufferStartedAt else { return 0 }
+    private var pendingStreamingBufferAge: UInt64 {
+        guard let startedAt = pendingStreamingBufferStartedAt else { return 0 }
         let now = streamingPresentationTime
         return now >= startedAt ? now - startedAt : 0
     }
 
     private var streamingPresentationCadence: UInt64 {
         usesResponsiveStreamingPresentation
-            ? StreamingWordDrain.frameIntervalNanoseconds : streamingWordRevealCadenceNanoseconds
+            ? StreamingWordDrain.presentationCadence(receivedByteCount: streamingReceivedByteCount,
+                                                     prioritizingInteraction: streamingInteractionPriority)
+            : streamingWordRevealCadenceNanoseconds
     }
 
     private var streamingPresentationMaximumAge: UInt64 {
@@ -3149,10 +3252,10 @@ final class ChatViewModel {
         pendingStreamingContentFlushTaskOwner = owner
         let expectedSessionID = sessionID
         let requestedDelay = delay ?? (usesResponsiveStreamingPresentation
-            ? StreamingWordDrain.frameIntervalNanoseconds : streamingScrollCoalescingDelayNanoseconds)
-        let resolvedDelay = pendingAssistantTextBuffer.isEmpty ? requestedDelay : StreamingWordDrain.nextDelay(
+            ? streamingPresentationCadence : streamingScrollCoalescingDelayNanoseconds)
+        let resolvedDelay = pendingStreamingBufferStartedAt == nil ? requestedDelay : StreamingWordDrain.nextDelay(
             requestedNanoseconds: requestedDelay,
-            oldestPendingAgeNanoseconds: pendingAssistantBufferAge,
+            oldestPendingAgeNanoseconds: pendingStreamingBufferAge,
             maxLagNanoseconds: streamingPresentationMaximumAge
         )
         #if DEBUG
@@ -3181,17 +3284,18 @@ final class ChatViewModel {
         }
     }
 
-    /// One presentation batch. The preview catches up in one frame; longer
-    /// injected cadences use the original backlog deadline. Completion and
+    /// One presentation batch. Responsive presentation catches up to all bytes
+    /// already received; only injected legacy pacing uses word quotas. Completion and
     /// offscreen reentry consume the complete tail without replaying old pulses.
     private func drainStreamingContentTick() {
         guard isTranscriptPresentationActive else { return }
         var didMutate = false
-        let quota = streamingReentryNeedsCatchup ? pendingAssistantTextBuffer.unitCount : StreamingWordDrain.drainQuota(
+        let quota = streamingReentryNeedsCatchup || usesResponsiveStreamingPresentation
+            ? pendingAssistantTextBuffer.unitCount : StreamingWordDrain.drainQuota(
             backlogUnitCount: pendingAssistantTextBuffer.unitCount,
             cadenceNanoseconds: streamingPresentationCadence,
             maxLagNanoseconds: streamingPresentationMaximumAge,
-            oldestPendingAgeNanoseconds: pendingAssistantBufferAge
+            oldestPendingAgeNanoseconds: pendingStreamingBufferAge
         )
         streamingReentryNeedsCatchup = false
         if flushAssistantTokens(maxWordUnits: quota) {
@@ -3212,7 +3316,7 @@ final class ChatViewModel {
             scheduleStreamingScrollTrigger()
         }
 
-        if !pendingAssistantTextBuffer.isEmpty {
+        if !pendingAssistantTextBuffer.isEmpty || !pendingReasoningTextBuffer.isEmpty {
             scheduleStreamingContentFlush(afterNanoseconds: streamingPresentationCadence)
         }
     }
@@ -3250,7 +3354,9 @@ final class ChatViewModel {
     private func resetPendingStreamingContentBuffers() {
         cancelPendingStreamingContentFlush()
         pendingAssistantTextBuffer.clear()
-        pendingAssistantBufferStartedAt = nil
+        pendingStreamingBufferStartedAt = nil
+        streamingReceivedByteCount = 0
+        setStreamingActivityStatus(nil)
         streamingReentryNeedsCatchup = false
         streamingHapticPulseGate.reset()
         suppressedProgressUnitsRemaining = 0
@@ -5720,8 +5826,8 @@ final class ChatViewModel {
 
     @discardableResult
     private func appendInterimAssistant(_ payload: InterimAssistantStreamEvent) -> Bool {
-        let text = payload.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !text.isEmpty else { return false }
+        let text = payload.text ?? ""
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
 
         flushPendingStreamingContent()
 
@@ -5729,7 +5835,28 @@ final class ChatViewModel {
         if payload.alreadyStreamed != true {
             didAppend = appendInterimTextIfNeeded(text)
             flushPendingStreamingContent()
-        } else if streamingAssistantMessageID == nil {
+        } else if let messageID = streamingAssistantMessageID,
+                  let index = streamingAssistantMessagePosition(for: messageID) {
+            let existing = messages[index]
+            let currentContent = existing.content ?? ""
+            // Reasoning may have created this row before any body arrived.
+            // The pinned gateway can also mark a complete seal already streamed
+            // after emitting only its prefix. Recover the exact authoritative
+            // body in those cases, without replaying or merging divergent text.
+            if !currentContent.utf8.elementsEqual(text.utf8),
+               currentContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || text.utf8.starts(with: currentContent.utf8) {
+                replaceStreamingMessage(at: index, with: ChatMessage(
+                    role: existing.role, content: text,
+                    timestamp: existing.timestamp, messageId: existing.messageId,
+                    name: existing.name, toolCallId: existing.toolCallId, toolUseId: existing.toolUseId,
+                    toolCalls: existing.toolCalls, contentParts: existing.contentParts,
+                    reasoning: existing.reasoning, attachments: existing.attachments,
+                    turnTps: existing.turnTps
+                ))
+                didAppend = true
+            }
+        } else {
             // A reconnect can deliver the seal without replaying its deltas.
             // The interim payload is still the authoritative visible segment.
             didAppend = appendAssistantToken(text)
@@ -5744,6 +5871,7 @@ final class ChatViewModel {
         sealedInterimAssistantMessageIDs.insert(messageID)
         streamingAssistantMessageID = nil
         streamingAssistantMessageIndex = nil
+        streamingReceivedByteCount = 0
         return true
     }
 
@@ -5984,6 +6112,7 @@ final class ChatViewModel {
         // Match appendAssistantToken's progress contract: return true for a
         // nonempty received chunk while deferring mutation to the coalesced flush.
         _ = ensureStreamingAssistantMessage()
+        noteReceivedStreamingChunk(text)
         pendingReasoningTextBuffer.append(text)
         scheduleStreamingContentFlush()
         return true
@@ -5996,6 +6125,7 @@ final class ChatViewModel {
         // Reasoning chunks flush in their received order as one concatenation.
         let appendedText = pendingReasoningTextBuffer
         pendingReasoningTextBuffer = ""
+        if pendingAssistantTextBuffer.isEmpty { pendingStreamingBufferStartedAt = nil }
 
         let messageID = ensureStreamingAssistantMessage()
         if reasoningAnchorMessageID == nil {
@@ -6069,13 +6199,20 @@ final class ChatViewModel {
 
         // A nonempty received chunk is a synchronous progress signal for the
         // watchdog while transcript mutation stays behind the coalesced flush.
-        if pendingAssistantTextBuffer.isEmpty {
-            pendingAssistantBufferStartedAt = streamingPresentationTime
-        }
         _ = ensureStreamingAssistantMessage()
+        noteReceivedStreamingChunk(token)
         pendingAssistantTextBuffer.append(token)
         scheduleStreamingContentFlush()
         return true
+    }
+
+    private func noteReceivedStreamingChunk(_ chunk: String) {
+        if pendingStreamingBufferStartedAt == nil {
+            pendingStreamingBufferStartedAt = streamingPresentationTime
+        }
+        // Only threshold selection needs this count. Saturation avoids an
+        // unbounded counter without scanning the already-received transcript.
+        streamingReceivedByteCount = min(262_144, streamingReceivedByteCount + min(chunk.utf8.count, 262_144))
     }
 
     @discardableResult
@@ -6091,8 +6228,8 @@ final class ChatViewModel {
         } else {
             appendedContent = pendingAssistantTextBuffer.drainAll()
         }
-        if pendingAssistantTextBuffer.isEmpty {
-            pendingAssistantBufferStartedAt = nil
+        if pendingAssistantTextBuffer.isEmpty && pendingReasoningTextBuffer.isEmpty {
+            pendingStreamingBufferStartedAt = nil
         }
 
         let messageID = ensureStreamingAssistantMessage()
@@ -7441,6 +7578,8 @@ private final class SpeechSynthesizerDelegate: NSObject, AVSpeechSynthesizerDele
 }
 
 #if DEBUG
+import CryptoKit
+
 extension ChatViewModel {
     /// The real ChatView chrome with a local, unanchored historical reasoning
     /// card and a new active turn. No direct controller or network is started.
@@ -7999,9 +8138,146 @@ extension ChatViewModel {
     }
 #endif
 
+    /// The lab's two terminal buttons inject only synthetic gateway terminal
+    /// events. They do not exercise Stop's transport request or contact a server.
+    func requestLongReplyPerformanceLabFinish(cancelled: Bool = false) {
+        guard (ProcessInfo.processInfo.arguments.contains("--chat-performance-long-reply")
+                || ProcessInfo.processInfo.arguments.contains("--chat-performance-rich-long-reply")),
+              performanceLabStreamingTurnInFlight else { return }
+        longReplyPerformanceLabFinishRequested = !cancelled
+        longReplyPerformanceLabCancelRequested = cancelled
+    }
+
+    /// Compact AX receipt: never attach the entire growing answer every tick.
+    var longReplyPerformanceLabStatus: String {
+        // Both messages and the evidence dictionary intentionally bypass
+        // Observation. Follow the real transcript's publication revision so
+        // this DEBUG-only AX receipt advances after each rendered-source flush.
+        let publicationRevision = transcriptRenderRevision
+        var summary = pacedPerformanceLabEvidence ?? [:]
+        summary["publication_revision"] = publicationRevision
+        summary.removeValue(forKey: "observations")
+        summary["phase"] = longReplyPerformanceLabPhase
+        if let interimID = summary["interim_id"] as? String {
+            summary["interim_retained_count"] = messages.filter {
+                $0.messageId == interimID && $0.content == "Got it — I will work through this carefully. SEMREH_LONG_INTERIM"
+            }.count
+        }
+        if let bodyID = summary["body_id"] as? String,
+           let body = messages.first(where: { $0.messageId == bodyID }) {
+            summary["published_utf8_bytes"] = body.content?.utf8.count ?? 0
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: summary, options: [.sortedKeys]),
+              let text = String(data: data, encoding: .utf8) else { return "{}" }
+        return text
+    }
+
+    @MainActor
+    private func appendLongReplyPerformanceLabTurn() async {
+        guard !performanceLabStreamingTurnInFlight else { return }
+        performanceLabStreamingTurnInFlight = true
+        longReplyPerformanceLabFinishRequested = false
+        longReplyPerformanceLabCancelRequested = false
+        longReplyPerformanceLabPhase = "waiting"
+        debugActivityLabActiveStreamID = "long-reply-lab-\(UUID().uuidString)"
+        defer {
+            performanceLabStreamingTurnInFlight = false
+            debugActivityLabActiveStreamID = nil
+        }
+        let start = ProcessInfo.processInfo.systemUptime
+        let interim = "Got it — I will work through this carefully. SEMREH_LONG_INTERIM"
+        let richFinal = ProcessInfo.processInfo.arguments.contains("--chat-performance-rich-long-reply")
+        // One uninterrupted paragraph, followed by one growing fenced block.
+        // This deliberately exceeds the old 567-byte stream by two orders of magnitude.
+        let paragraph = String(repeating:
+            "A patient reader should keep the same words under their eyes while this single answer grows. Unicode remains exact: café 👩🏽‍💻 العربية. ", count: richFinal ? 128 : 192)
+        let code = (0..<(richFinal ? 224 : 360)).map { index in
+            "let longReplyLine\(index) = \"A deliberately wrapping synthetic code line \(index) keeps every received character intact while a reader scrolls inside this same growing answer. café 👩🏽‍💻\"\n"
+        }.joined()
+        let response = "## One growing answer\n\nSEMREH_LONG_PARAGRAPH_START \(paragraph)\n\n```swift\n\(code)let finalMarker = \"SEMREH_LONG_CODE_END\"\n```\n\nSEMREH_LONG_REPLY_END"
+        let characters = Array(response)
+        var sequence = 0
+        func emit(_ type: String, _ payload: [String: JSONValue] = [:]) {
+            sequence += 1
+            handleDirectEventForTesting(HermesGatewayEvent(
+                method: "event", type: type, sessionID: sessionID, sequence: sequence,
+                payload: .object(payload), params: nil, connectionGeneration: 1
+            ))
+        }
+        pacedPerformanceLabEvidence = [
+            "scope": "synthetic direct events; production buffer, ChatView and renderer; no network or Stop RPC",
+            "source_utf8_bytes": response.utf8.count,
+            "source_characters": characters.count,
+            "fixture_variant": richFinal ? "rich-final-under-80k-characters" : "large-final-over-80k-characters",
+            "received_characters": 0,
+            "started_uptime_seconds": start
+        ]
+        appendStreamingMessage(ChatMessage(role: "user", content: "Show one long growing answer.",
+            timestamp: Date().timeIntervalSince1970, messageId: "long-reply-lab-user"))
+        emit("message.start")
+        emit("thinking.delta", ["text": .string("Preparing the long answer")])
+        do { try await Task.sleep(for: .seconds(3)) } catch { return }
+        emit("message.interim", ["text": .string(interim), "already_streamed": .bool(false)])
+        let interimID = messages.last?.messageId ?? "missing"
+        pacedPerformanceLabEvidence?["interim_id"] = interimID
+        longReplyPerformanceLabPhase = "interim"
+        do { try await Task.sleep(for: .seconds(3)) } catch { return }
+        emit("reasoning.delta", ["text": .string("This is synthetic reasoning and must remain separate from assistant prose.")])
+        var offset = 0
+        var burst = 0
+        var observations: [[String: Any]] = []
+        let sizes = [384, 2048, 96, 4096, 768, 512]
+        let delays: [UInt64] = [60, 180, 40, 500, 90, 850]
+        while offset < characters.count && !Task.isCancelled && !longReplyPerformanceLabCancelRequested {
+            let end = min(offset + sizes[burst % sizes.count], characters.count)
+            emit("message.delta", ["text": .string(String(characters[offset..<end]))])
+            offset = end
+            burst += 1
+            pacedPerformanceLabEvidence?["body_id"] = streamingAssistantMessageID ?? "missing"
+            pacedPerformanceLabEvidence?["received_characters"] = offset
+            longReplyPerformanceLabPhase = "streaming"
+            if burst.isMultiple(of: 6) {
+                observations.append(["uptime_seconds": ProcessInfo.processInfo.systemUptime,
+                    "received_characters": offset, "published_utf8_bytes": messages.last?.content?.utf8.count ?? 0])
+            }
+            do { try await Task.sleep(nanoseconds: delays[(burst - 1) % delays.count] * (richFinal ? 1_600_000 : 1_000_000)) }
+            catch { break }
+        }
+        let bodyID = streamingAssistantMessageID ?? "missing"
+        // A bounded hold gives UI acceptance a deterministic pre-terminal state.
+        // Finish never fabricates missing deltas; Cancel keeps the exact received prefix.
+        longReplyPerformanceLabPhase = "awaiting_terminal"
+        let terminalDeadline = ProcessInfo.processInfo.systemUptime + 30
+        while !Task.isCancelled && !longReplyPerformanceLabCancelRequested
+                && !longReplyPerformanceLabFinishRequested
+                && ProcessInfo.processInfo.systemUptime < terminalDeadline {
+            do { try await Task.sleep(for: .milliseconds(100)) } catch { break }
+        }
+        let cancelled = longReplyPerformanceLabCancelRequested || Task.isCancelled
+        emit("message.complete", ["status": .string(cancelled ? "cancelled" : "complete")])
+        let expected = String(characters.prefix(offset))
+        let actual = messages.first(where: { $0.messageId == bodyID })?.content ?? ""
+        let retainedInterim = messages.filter { $0.messageId == interimID && $0.content == interim }
+        pacedPerformanceLabEvidence?["body_id"] = bodyID
+        pacedPerformanceLabEvidence?["received_characters"] = offset
+        pacedPerformanceLabEvidence?["expected_utf8_bytes"] = expected.utf8.count
+        pacedPerformanceLabEvidence?["expected_sha256"] = SHA256.hash(data: Data(expected.utf8)).map { String(format: "%02x", $0) }.joined()
+        pacedPerformanceLabEvidence?["exact_source"] = actual.utf8.elementsEqual(expected.utf8)
+        pacedPerformanceLabEvidence?["interim_retained_count"] = retainedInterim.count
+        pacedPerformanceLabEvidence?["outcome"] = cancelled ? "cancelled" : "complete"
+        pacedPerformanceLabEvidence?["finished_uptime_seconds"] = ProcessInfo.processInfo.systemUptime
+        pacedPerformanceLabEvidence?["observations"] = observations
+        longReplyPerformanceLabPhase = cancelled ? "cancelled" : "complete"
+    }
+
     @MainActor
     func appendPerformanceLabStreamingTurn() async {
 #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--chat-performance-long-reply")
+            || ProcessInfo.processInfo.arguments.contains("--chat-performance-rich-long-reply") {
+            await appendLongReplyPerformanceLabTurn()
+            return
+        }
         if ProcessInfo.processInfo.arguments.contains("--chat-performance-paced-stream") {
             await appendPacedPerformanceLabStreamingTurn()
             return
@@ -8148,7 +8424,7 @@ extension ChatViewModel {
 }
 #endif
 
-#if SEMREH_INTERNAL_CHAT_PREVIEW && targetEnvironment(simulator) && !DEBUG
+#if targetEnvironment(simulator) && !DEBUG
 extension ChatViewModel {
     @MainActor
     static func makeInternalChatPreviewSmokeFixture() -> (

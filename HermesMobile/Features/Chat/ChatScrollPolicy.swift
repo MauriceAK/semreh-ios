@@ -1008,25 +1008,20 @@ enum ChatLiveReconcilePolicy {
 }
 
 
-/// Device-local opt-in. Capture once per ChatView identity; never read defaults
-/// from a mounted transcript or leaf renderer.
-enum InternalChatRendererPolicy {
-    static let storageKey = "semreh.experimentalChatRenderer"
-    static let toggleIdentifier = "experimental-chat-renderer-toggle"
-    static var isAvailable: Bool {
-#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
-        true
-#else
-        false
-#endif
-    }
+/// The current surface is standard in every build. The previous interface is
+/// a separate device-local opt-in, captured once per ChatView identity.
+enum ChatSurfacePolicy {
+    static let legacyStorageKey = "semreh.useLegacyChatSurface"
+    static let legacyToggleIdentifier = "legacy-chat-surface-toggle"
     static func capture(defaults: UserDefaults = .standard,
                         arguments: [String] = ProcessInfo.processInfo.arguments) -> Bool {
-        guard isAvailable else { return false }
 #if DEBUG
+        if arguments.contains("--chat-legacy-transcript") { return false }
         if arguments.contains("--chat-native-transcript-v2") { return true }
 #endif
-        return defaults.bool(forKey: storageKey)
+        // The former preview flag is deliberately not inverted or migrated:
+        // both preview choices now receive the standard interface on upgrade.
+        return !defaults.bool(forKey: legacyStorageKey)
     }
     static func debugArgument(_ name: String) -> Bool {
 #if DEBUG

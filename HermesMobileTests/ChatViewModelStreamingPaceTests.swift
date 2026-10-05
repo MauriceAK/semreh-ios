@@ -3,7 +3,7 @@ import XCTest
 import CryptoKit
 @testable import HermesMobile
 
-/// Exercises lossless frame batches, injectable pacing, deadline catch-up and
+/// Exercises lossless adaptive batches, injectable pacing, deadline catch-up and
 /// cancellation ownership without contacting a gateway.
 final class ChatViewModelStreamingPaceTests: XCTestCase {
     override func tearDown() {
@@ -12,7 +12,7 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
     }
 
     @MainActor
-    func testResponsivePreviewCoalescesBurstIntoOneFrameAndRearms() async throws {
+    func testResponsivePresentationCoalescesReceivedBurstWithoutWordReplayAndRearms() async throws {
         let stream = DirectPacingEventFixture()
         let viewModel = try makeViewModel(
             streamClient: stream,
@@ -35,25 +35,25 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
         stream.emit(.token(burst))
         let frame = try XCTUnwrap(viewModel.scheduledStreamingContentFlushForTesting)
         await fulfillment(of: [gate.arrival(for: frame.owner)], timeout: 2)
-        XCTAssertEqual(gate.delays[frame.owner], 16_000_000)
+        XCTAssertEqual(gate.delays[frame.owner], 32_000_000)
         XCTAssertEqual(assistantContent(of: viewModel), "")
 
         now = 8_000_000
         stream.emit(.token("cafe"))
         stream.emit(.token("\u{301}\n"))
         XCTAssertEqual(viewModel.scheduledStreamingContentFlushForTesting?.owner, frame.owner)
-        now = 16_000_000
+        now = 32_000_000
         try gate.release(frame.owner)
         await frame.task.value
         let expected = burst + "cafe\u{301}\n"
         XCTAssertEqual(Array((assistantContent(of: viewModel) ?? "").utf8), Array(expected.utf8))
         XCTAssertNil(viewModel.scheduledStreamingContentFlushForTesting, "No artificial word backlog")
 
-        now = 30_000_000
+        now = 40_000_000
         stream.emit(.token("next burst"))
         let next = try XCTUnwrap(viewModel.scheduledStreamingContentFlushForTesting)
         await fulfillment(of: [gate.arrival(for: next.owner)], timeout: 2)
-        XCTAssertEqual(gate.delays[next.owner], 16_000_000, "An emptied buffer begins a new frame window")
+        XCTAssertEqual(gate.delays[next.owner], 32_000_000, "An emptied buffer begins a new coalescing window")
         // An unavailable main actor cannot meet a wall-clock deadline. Its first
         // resumed tick must catch up completely instead of adding further lag.
         now = 200_000_000
@@ -102,6 +102,152 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
         XCTAssertEqual(assistantContent(of: viewModel), initial + fresh,
                        "Fresh arrivals must not restart the older pending text's 300 ms budget")
         XCTAssertNil(viewModel.scheduledStreamingContentFlushForTesting)
+    }
+
+    @MainActor
+    func testLongResponsiveReplyPrioritizesIndependentInteractionsWithoutExtendingDeadline() async throws {
+        let stream = DirectPacingEventFixture()
+        let vm = try makeViewModel(streamClient: stream, wordCadenceNanoseconds: 48_000_000,
+                                   maxLagNanoseconds: 1_000_000_000)
+        vm.setResponsiveStreamingPresentation(true)
+        var now: UInt64 = 0
+        vm.streamingClockForTesting = { now }
+        let gate = StreamingTaskSuspensionGate()
+        vm.streamingTaskWaitForTesting = { owner, delay in await gate.suspend(owner: owner, delay: delay) }
+        defer { vm.setTranscriptPresentationActive(false); gate.finish() }
+        stream.startResponse(on: vm)
+        let source = String(repeating: "Long unbroken paragraph café 👩🏽‍💻 with whitespace. ", count: 1_600)
+        stream.emit(.token(source))
+        let ordinary = try XCTUnwrap(vm.scheduledStreamingContentFlushForTesting)
+        await fulfillment(of: [gate.arrival(for: ordinary.owner)], timeout: 2)
+        XCTAssertEqual(gate.delays[ordinary.owner], 100_000_000)
+        XCTAssertEqual(assistantContent(of: vm), "", "Network bytes are buffered without whole-row publication per arrival")
+
+        now = 20_000_000
+        vm.setStreamingInteractionPriority(true)
+        let reader = try XCTUnwrap(vm.scheduledStreamingContentFlushForTesting)
+        await fulfillment(of: [gate.arrival(for: reader.owner)], timeout: 2)
+        XCTAssertTrue(ordinary.task.isCancelled)
+        XCTAssertEqual(gate.delays[reader.owner], 130_000_000, "Original150ms deadline still owns the pending bytes")
+        vm.setComposerInteractionActive(true)
+        vm.setStreamingInteractionPriority(false)
+        XCTAssertEqual(vm.scheduledStreamingContentFlushForTesting?.owner, reader.owner,
+                       "Ending a drag must not erase focused composer's independent priority")
+
+        now = 145_000_000
+        stream.emit(.token("\r\ncafe"))
+        stream.emit(.token("\u{301} 🧑‍"))
+        stream.emit(.token("💻 end"))
+        vm.setComposerInteractionActive(false)
+        let settle = try XCTUnwrap(vm.scheduledStreamingContentFlushForTesting)
+        await fulfillment(of: [gate.arrival(for: settle.owner)], timeout: 2)
+        XCTAssertEqual(gate.delays[settle.owner], 5_000_000)
+        try gate.release(ordinary.owner)
+        await ordinary.task.value
+        try gate.release(reader.owner)
+        await reader.task.value
+        XCTAssertEqual(vm.scheduledStreamingContentFlushForTesting?.owner, settle.owner)
+        XCTAssertEqual(assistantContent(of: vm), "")
+        now = 150_000_000
+        try gate.release(settle.owner)
+        await settle.task.value
+        let expected = source + "\r\ncafe\u{301} 🧑‍💻 end"
+        XCTAssertEqual(Array((assistantContent(of: vm) ?? "").utf8), Array(expected.utf8))
+        XCTAssertNil(vm.scheduledStreamingContentFlushForTesting, "A coalesced tick shows all received text; no artificial replay queue")
+
+        stream.emit(.token(" final pending bytes"))
+        let final = try XCTUnwrap(vm.scheduledStreamingContentFlushForTesting)
+        await fulfillment(of: [gate.arrival(for: final.owner)], timeout: 2)
+        stream.emit(.cancelled)
+        XCTAssertEqual(assistantContent(of: vm), expected + " final pending bytes")
+        XCTAssertNil(vm.streamingActivityStatus)
+        XCTAssertTrue(final.task.isCancelled)
+        try gate.release(final.owner)
+        await final.task.value
+        XCTAssertEqual(assistantContent(of: vm), expected + " final pending bytes")
+        XCTAssertNil(vm.scheduledStreamingContentFlushForTesting)
+    }
+
+    @MainActor
+    func testGatewayStatusNeverBecomesReasoningAndInterimCommentaryStaysVisible() throws {
+        let stream = DirectPacingEventFixture()
+        let vm = try makeStalledDrainViewModel(streamClient: stream)
+        vm.setResponsiveStreamingPresentation(true)
+        stream.startResponse(on: vm)
+        let transcriptRevisionBeforeStatus = vm.transcriptRenderRevision
+        stream.emit(.thinking("Looking at the workspace"))
+        stream.emit(.thinking("Waiting for the provider"))
+        XCTAssertEqual(vm.streamingActivityStatus, "Waiting for the provider")
+        XCTAssertTrue(vm.messages.isEmpty, "Spinner status must not create an empty assistant/reasoning row")
+        XCTAssertTrue(vm.liveReasoningText.isEmpty)
+        XCTAssertNil(vm.scheduledStreamingContentFlushForTesting)
+        XCTAssertEqual(vm.transcriptRenderRevision, transcriptRevisionBeforeStatus,
+                       "Changing an unused spinner label must not invalidate the transcript")
+
+        stream.emit(.reasoning("Provider plan.\n"))
+        let commentary = "  Got it, looking into that.\n"
+        stream.emit(.token(commentary))
+        stream.emit(.interimAssistant(text: commentary, alreadyStreamed: true))
+        XCTAssertEqual(vm.messages.filter { $0.role == "assistant" }.compactMap(\.content), [commentary])
+        XCTAssertEqual(vm.liveReasoningText, "Provider plan.\n")
+        XCTAssertNotNil(vm.streamingActivityStatus)
+        stream.emit(.thinking(String(repeating: "status ", count: 1_000)))
+        XCTAssertLessThanOrEqual(vm.streamingActivityStatus?.count ?? 0, 160)
+        XCTAssertEqual(vm.liveReasoningText, "Provider plan.\n")
+        stream.emit(.reasoning("Provider conclusion."))
+        stream.emit(.token("Actual final response"))
+        stream.emit(.done)
+        XCTAssertEqual(vm.messages.filter { $0.role == "assistant" }.compactMap(\.content),
+                       [commentary, "Actual final response"])
+        XCTAssertTrue(vm.liveReasoningText.isEmpty)
+        XCTAssertEqual(vm.messages.compactMap(\.reasoning), ["Provider plan.\nProvider conclusion."])
+        XCTAssertEqual(vm.displayedReasoningGroups.map(\.text), ["Provider plan.\nProvider conclusion."])
+        XCTAssertNil(vm.streamingActivityStatus)
+        XCTAssertNil(vm.scheduledStreamingContentFlushForTesting)
+
+        // An unstreamed/recovered interim also remains a visible assistant
+        // message with its original formatting, never a thought disclosure.
+        vm.clearTranscript()
+        stream.startResponse(on: vm)
+        stream.emit(.thinking("Waiting"))
+        stream.emit(.interimAssistant(text: commentary, alreadyStreamed: false))
+        stream.emit(.token("Stopped partial response"))
+        stream.emit(.cancelled)
+        XCTAssertEqual(vm.messages.filter { $0.role == "assistant" }.compactMap(\.content),
+                       [commentary, "Stopped partial response"])
+        XCTAssertNil(vm.streamingActivityStatus)
+        XCTAssertFalse(vm.liveReasoningText.contains("Waiting"))
+    }
+
+    @MainActor
+    func testReasoningOnlyBatchKeepsOriginalDeadlineAndStatusDoesNotRescheduleIt() async throws {
+        let stream = DirectPacingEventFixture()
+        let vm = try makeStalledDrainViewModel(streamClient: stream)
+        vm.setResponsiveStreamingPresentation(true)
+        var now: UInt64 = 0
+        vm.streamingClockForTesting = { now }
+        let gate = StreamingTaskSuspensionGate()
+        vm.streamingTaskWaitForTesting = { owner, delay in await gate.suspend(owner: owner, delay: delay) }
+        defer { vm.setTranscriptPresentationActive(false); gate.finish() }
+        stream.startResponse(on: vm)
+        stream.emit(.reasoning("provider reasoning"))
+        let initial = try XCTUnwrap(vm.scheduledStreamingContentFlushForTesting)
+        await fulfillment(of: [gate.arrival(for: initial.owner)], timeout: 2)
+        now = 145_000_000
+        stream.emit(.thinking("Working"))
+        XCTAssertEqual(vm.scheduledStreamingContentFlushForTesting?.owner, initial.owner)
+        vm.setStreamingInteractionPriority(true)
+        let replacement = try XCTUnwrap(vm.scheduledStreamingContentFlushForTesting)
+        await fulfillment(of: [gate.arrival(for: replacement.owner)], timeout: 2)
+        XCTAssertEqual(gate.delays[replacement.owner], 5_000_000)
+        try gate.release(initial.owner)
+        await initial.task.value
+        XCTAssertTrue(vm.liveReasoningText.isEmpty)
+        now = 150_000_000
+        try gate.release(replacement.owner)
+        await replacement.task.value
+        XCTAssertEqual(vm.liveReasoningText, "provider reasoning")
+        XCTAssertNil(vm.scheduledStreamingContentFlushForTesting)
     }
 
     func testPresentationSleepStopsAtOldestPendingDeadline() {
@@ -830,6 +976,7 @@ final class ChatStreamingMotionTests: XCTestCase {
 private final class DirectPacingEventFixture {
     enum Event {
         case token(String)
+        case thinking(String)
         case reasoning(String)
         case interimAssistant(text: String, alreadyStreamed: Bool)
         case done
@@ -851,6 +998,8 @@ private final class DirectPacingEventFixture {
         switch event {
         case .token(let text):
             emit(type: "message.delta", payload: ["text": .string(text)])
+        case .thinking(let text):
+            emit(type: "thinking.delta", payload: ["text": .string(text)])
         case .reasoning(let text):
             emit(type: "reasoning.delta", payload: ["text": .string(text)])
         case .interimAssistant(let text, let alreadyStreamed):

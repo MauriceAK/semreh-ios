@@ -1,27 +1,29 @@
 # External TestFlight Launch Runbook
 
-## Internal chat-surface preview
+## Chat surface and legacy fallback
 
-The maintainer's `internal_testflight` Fastlane lane adds
-`SEMREH_INTERNAL_CHAT_PREVIEW` to the **Release** archive. It does not define
-`DEBUG`, enable performance labs, or change external distribution. Ordinary
-Release builds do not expose the preview.
+The new chat surface is **on by default in every build**, including ordinary
+Release and internal TestFlight. It includes a measured transcript viewport,
+floating header, unified translucent composer, immediate local pending-send
+presentation, and batched streaming updates. The former preview preference does
+not select the interface after this update.
 
-The preview is device-local and **off by default**. In TestFlight, open
-**Settings → Chat → Experimental chat renderer**, enable it, then leave and
-reopen the chat. The preview includes a measured transcript viewport, floating
-header, unified composer, immediate local pending-send presentation, and batched
-streaming updates. Turning it off and reopening returns to the existing surface.
-Each chat captures its surface choice on first presentation, so changing the setting
-cannot replace a mounted transcript mid-gesture. If a retained iPad detail stays
-open, close that detail or restart the app to apply the choice.
+To use the previous interface, open **Settings → Chat** and enable **Use legacy
+chat interface** in the **Experimental** section, then leave and reopen the chat.
+Disable that setting and reopen to return to the new surface. This is a
+device-local preference. Each chat captures its choice on first presentation,
+so changing the setting cannot replace a mounted transcript mid-gesture. If a
+retained iPad detail stays open, close that detail or restart the app to apply
+the choice.
 
-The internal Release Simulator has an explicit `--internal-chat-preview-smoke`
-route for the production Settings toggle and chat surface with deterministic
-local messages. That route is not compiled for physical devices. Its focused
-UI selector is
-`LongChatScrollUITests/testInternalReleaseRendererTogglePersistenceAndFallback`.
-This is an experimental preview, not a claim of Muse-level smoothness.
+Release Simulator builds have an explicit `--internal-chat-preview-smoke` route
+for the production default, Settings toggle, and legacy fallback with
+deterministic local messages. That route is not compiled for physical devices
+and does not require the former preview compilation flag. Its focused UI
+selector is
+`LongChatScrollUITests/testReleaseChatSurfaceDefaultLegacyPersistenceAndFallback`.
+Release builds do not enable DEBUG performance labs. Simulator verification does
+not replace testing the uploaded build on a physical iPhone.
 
 
 > **Maintainer-only ops.** Everything in this file requires the maintainer's Apple Developer account, App Store Connect access, and signing credentials. Contributors never need this runbook to build, test, or contribute to the app.

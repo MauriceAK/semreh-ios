@@ -519,7 +519,6 @@ final class ChatNativeTranscriptMetadataCache {
 
     struct Metadata: Equatable {
         let renderIDs: [String]
-        let latestCompletedAssistantRenderID: String?
         let retainedActivity: ChatTranscriptRetainedActivityPolicy.State
     }
 
@@ -539,9 +538,6 @@ final class ChatNativeTranscriptMetadataCache {
         derivationCount += 1
         let metadata = Metadata(
             renderIDs: rows.map(\.renderID),
-            latestCompletedAssistantRenderID: AssistantResponseActionPolicy.latestCompletedAssistantRenderID(
-                in: rows, hasActiveStream: key.hasActiveStream,
-                streamingAssistantMessageID: key.streamingAssistantMessageID),
             retainedActivity: retainedActivity()
         )
         if canCache { entry = (key, metadata) }
@@ -967,7 +963,7 @@ struct ChatTranscriptView: View, Equatable {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.self) private var prototypeEnvironment
 
-    var internalChatRendererEnabled = InternalChatRendererPolicy.debugArgument("--chat-native-transcript-v2")
+    var internalChatRendererEnabled = ChatSurfacePolicy.debugArgument("--chat-native-transcript-v2")
     var usesMuseChatSurface = false
 
     let isLoading: Bool
@@ -1024,6 +1020,7 @@ struct ChatTranscriptView: View, Equatable {
     let onLoadOlderMessages: (ChatTranscriptOlderLoadIntent, @MainActor () -> Bool) async -> ChatTranscriptOlderLoadResult
     var scrollMetricPublication = ChatScrollMetricPublication()
     let onUpdateScrollMetrics: (ChatScrollMetrics) -> Void
+    var onStreamingInteractionChanged: (Bool) -> Void = { _ in }
     let onDismissKeyboard: () -> Void
     let onScrollToBottom: (ScrollViewProxy, Bool, Bool, Bool) -> Void
     var debugArrowMotionStatus: String = ""
@@ -1370,7 +1367,6 @@ struct ChatTranscriptView: View, Equatable {
                 onDismissKeyboard()
             }
         } else {
-#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
             if usesMuseChatSurface {
                 museMeasuredTranscript
             } else if nativeTranscriptV2Enabled {
@@ -1378,9 +1374,6 @@ struct ChatTranscriptView: View, Equatable {
             } else {
                 nonNativeTranscript
             }
-#else
-            measuredTranscriptViewport
-#endif
         }
         }
         .onAppear {
@@ -1626,7 +1619,6 @@ struct ChatTranscriptView: View, Equatable {
             retainedActivity: { retainedActivityState(in: rows) }
         )
         let retainedActivity = metadata.retainedActivity
-        let latest = metadata.latestCompletedAssistantRenderID
         return ChatNativeTranscriptViewport(
             ids: metadata.renderIDs,
             revisionAt: { index in
@@ -1635,7 +1627,7 @@ struct ChatTranscriptView: View, Equatable {
                 let isToolCallAnchor = toolCallAnchorMessageID == row.anchorID
                 let isStreamingRow = streamingAssistantMessageID == row.message.messageId
                 return StableViewportRowRevision(
-                    message: row, latestCompletedAssistantRenderID: latest,
+                    message: row,
                     outgoingInsertionEvent: outgoingInsertionEvent?.messageID == row.message.id ? outgoingInsertionEvent : nil,
                     allowsOutgoingMotion: ChatTranscriptRestorePolicy.shouldAllowOutgoingInsertionMotion(
                         shouldFollowLatestMessage: shouldFollowLatestMessage,
@@ -1687,7 +1679,7 @@ struct ChatTranscriptView: View, Equatable {
                 ? .spacer(height: 0) : nil,
             makeRow: { index in
                 AnyView(transcriptMessageRow(
-                    rows[index], latestCompletedAssistantRenderID: latest,
+                    rows[index],
                     isTrailingCurrentActivity: retainedActivity.activeReasoningAnchorID == rows[index].anchorID,
                     observesGeometry: false))
             },
@@ -1717,6 +1709,7 @@ struct ChatTranscriptView: View, Equatable {
             onState: onState,
             onRestore: onRestore,
             metricPublication: scrollMetricPublication,
+            onStreamingInteractionChanged: onStreamingInteractionChanged,
             allowsAutomaticPaging: isPagingStartupReady && hasOlderMessages
                 && !isLoadingOlderMessages && initialRestoreRequest == nil,
             onOlder: { intent, isCurrent in
@@ -1737,9 +1730,6 @@ struct ChatTranscriptView: View, Equatable {
     private var nativeBaselineTranscript: some View {
         let rows = renderedTranscriptMessages
         let retainedActivity = retainedActivityState(in: rows)
-        let latest = AssistantResponseActionPolicy.latestCompletedAssistantRenderID(
-            in: rows, hasActiveStream: activeStreamID != nil,
-            streamingAssistantMessageID: streamingAssistantMessageID)
         // Native target namespace must not collide with the retained production
         // message block's inner renderID. One unique outer target per data row.
         return NativeBaselineTranscript(firstID: rows.first.map { "native-row:\($0.renderID)" }, lastID: rows.last.map { "native-row:\($0.renderID)" }, bottomID: "native-tail:\(bottomAnchorID)",
@@ -1747,7 +1737,7 @@ struct ChatTranscriptView: View, Equatable {
                                         spacing: transcriptMessageSpacing, reduceMotion: reduceMotion) {
             ForEach(rows) { row in
                 transcriptMessageRow(
-                    row, latestCompletedAssistantRenderID: latest,
+                    row,
                     isTrailingCurrentActivity: retainedActivity.activeReasoningAnchorID == row.anchorID,
                     observesGeometry: false
                 )
@@ -1763,10 +1753,6 @@ struct ChatTranscriptView: View, Equatable {
     private var viewportInput: ChatStableViewportPrototype {
         let rows = renderedTranscriptMessages
         let retainedActivity = retainedActivityState(in: rows)
-        let latest = AssistantResponseActionPolicy.latestCompletedAssistantRenderID(
-            in: rows, hasActiveStream: activeStreamID != nil,
-            streamingAssistantMessageID: streamingAssistantMessageID
-        )
         return ChatStableViewportPrototype(
             ids: rows.map(\.renderID),
             revisionAt: { index in
@@ -1775,7 +1761,7 @@ struct ChatTranscriptView: View, Equatable {
                 let isToolCallAnchor = toolCallAnchorMessageID == row.anchorID
                 let isStreamingRow = streamingAssistantMessageID == row.message.messageId
                 return StableViewportRowRevision(
-                    message: row, latestCompletedAssistantRenderID: latest,
+                    message: row,
                     outgoingInsertionEvent: outgoingInsertionEvent?.messageID == row.message.id ? outgoingInsertionEvent : nil,
                     allowsOutgoingMotion: ChatTranscriptRestorePolicy.shouldAllowOutgoingInsertionMotion(
                         shouldFollowLatestMessage: shouldFollowLatestMessage,
@@ -1837,7 +1823,7 @@ struct ChatTranscriptView: View, Equatable {
                 var environment = prototypeEnvironment
                 environment.prototypeCodeViewport = viewport
                 return AnyView(transcriptMessageRow(
-                    rows[index], latestCompletedAssistantRenderID: latest,
+                    rows[index],
                     isTrailingCurrentActivity: retainedActivity.activeReasoningAnchorID == rows[index].anchorID
                 )
                     .environment(\.self, environment))
@@ -3364,11 +3350,6 @@ struct ChatTranscriptView: View, Equatable {
         renderedMessages: [TranscriptMessage]
     ) -> some View {
         let retainedActivity = retainedActivityState(in: renderedMessages)
-        let latestCompletedAssistantRenderID = AssistantResponseActionPolicy.latestCompletedAssistantRenderID(
-            in: renderedMessages,
-            hasActiveStream: activeStreamID != nil,
-            streamingAssistantMessageID: streamingAssistantMessageID
-        )
 
         return transcriptRowsStack {
             olderMessagesButton(proxy: proxy)
@@ -3381,7 +3362,7 @@ struct ChatTranscriptView: View, Equatable {
 
             ForEach(renderedMessages) { transcriptMessage in
                 transcriptMessageRow(
-                    transcriptMessage, latestCompletedAssistantRenderID: latestCompletedAssistantRenderID,
+                    transcriptMessage,
                     isTrailingCurrentActivity: retainedActivity.activeReasoningAnchorID == transcriptMessage.anchorID
                 )
             }
@@ -3486,7 +3467,7 @@ struct ChatTranscriptView: View, Equatable {
     }
 
     @ViewBuilder
-    private func transcriptMessageRow(_ transcriptMessage: TranscriptMessage, latestCompletedAssistantRenderID: String?, isTrailingCurrentActivity: Bool, observesGeometry: Bool = true) -> some View {
+    private func transcriptMessageRow(_ transcriptMessage: TranscriptMessage, isTrailingCurrentActivity: Bool, observesGeometry: Bool = true) -> some View {
         // Scope live-streaming state to the row that actually displays it.
         // Non-anchor / non-streaming rows receive stable empty/nil values so
         // their inputs don't change on every ~16ms flush; combined with the
@@ -3502,7 +3483,6 @@ struct ChatTranscriptView: View, Equatable {
         VStack(alignment: .leading, spacing: transcriptMessageSpacing) {
             ChatTranscriptMessageBlock(
                 transcriptMessage: transcriptMessage,
-                latestCompletedAssistantRenderID: latestCompletedAssistantRenderID,
                 outgoingInsertionEvent: outgoingInsertionEvent?.messageID == transcriptMessage.message.id
                     ? outgoingInsertionEvent : nil,
                 insertionLedger: insertionLedger,
@@ -5035,6 +5015,9 @@ struct ChatTranscriptView: View, Equatable {
         in renderedMessages: [TranscriptMessage],
         retainedActivity suppliedActivity: ChatTranscriptRetainedActivityPolicy.State? = nil
     ) -> Bool {
+        // The compact waiting bubble remains independent of the optional
+        // reasoning disclosure. Actual interim assistant bubbles remain rows.
+        if usesMuseChatSurface { return showsAssistantTypingIndicator }
         let trailingMessage = renderedMessages.last
         let retainedActivity = suppliedActivity ?? retainedActivityState(in: renderedMessages)
         // Completed activity can remain in the current assistant row after
@@ -5053,7 +5036,7 @@ struct ChatTranscriptView: View, Equatable {
     @ViewBuilder
     private func typingIndicator(renderedMessages: [TranscriptMessage]) -> some View {
         if shouldShowBareTypingIndicator(in: renderedMessages) {
-            if ChatTranscriptTypingIndicatorPolicy.usesPreparingResponseLabel(
+            if !usesMuseChatSurface && ChatTranscriptTypingIndicatorPolicy.usesPreparingResponseLabel(
                 hasActiveStream: activeStreamID != nil,
                 showsActivityCards: showsThinkingAndToolCards,
                 trailingMessageRole: renderedMessages.last?.message.role,
@@ -5203,7 +5186,6 @@ extension ChatTranscriptView {
 
 private struct ChatTranscriptMessageBlock: View, Equatable {
     let transcriptMessage: TranscriptMessage
-    let latestCompletedAssistantRenderID: String?
     let outgoingInsertionEvent: OutgoingInsertionEvent?
     let insertionLedger: OutgoingInsertionLedger
     let allowsOutgoingMotion: Bool
@@ -5250,7 +5232,6 @@ private struct ChatTranscriptMessageBlock: View, Equatable {
         lhs.outgoingInsertionEvent == rhs.outgoingInsertionEvent &&
         lhs.allowsOutgoingMotion == rhs.allowsOutgoingMotion &&
         lhs.transcriptMessage == rhs.transcriptMessage &&
-        lhs.latestCompletedAssistantRenderID == rhs.latestCompletedAssistantRenderID &&
         lhs.transcriptBlockSpacing == rhs.transcriptBlockSpacing &&
         lhs.showsThinkingAndToolCards == rhs.showsThinkingAndToolCards &&
         lhs.isTrailingCurrentActivity == rhs.isTrailingCurrentActivity &&
@@ -5294,7 +5275,6 @@ private struct ChatTranscriptMessageBlock: View, Equatable {
                     ),
                     visibleIndex: transcriptMessage.loadedIndex,
                     actionContext: actionContext(transcriptMessage.message, transcriptMessage.loadedIndex),
-                    isLatestCompletedAssistant: latestCompletedAssistantRenderID == transcriptMessage.renderID,
                     localAttachmentPreviews: localAttachmentPreviews,
                     listeningMessageID: listeningMessageID,
                     isViewingCachedData: isViewingCachedData,
@@ -5406,7 +5386,6 @@ private struct ChatTranscriptMessageRow: View {
     let accessibilityRowLabel: String
     let visibleIndex: Int
     let actionContext: MessageActionContext?
-    let isLatestCompletedAssistant: Bool
     let localAttachmentPreviews: [String: Data]?
     let listeningMessageID: String?
     let isViewingCachedData: Bool
@@ -5457,7 +5436,6 @@ private struct ChatTranscriptMessageRow: View {
                             onCopy: onCopy
                         )
                     }
-                responseActionRow(for: actionContext)
             } else {
                 bubble
             }
@@ -5485,28 +5463,6 @@ private struct ChatTranscriptMessageRow: View {
             onPreviewTranscriptMedia: onPreviewTranscriptMedia,
             isStreaming: isStreaming,
             liveTokensPerSecond: liveTokensPerSecond
-        )
-    }
-
-    private func responseActionRow(for context: MessageActionContext) -> some View {
-        Group {
-            if shouldShowResponseActions(for: context) {
-                AssistantResponseActionRow(context: context, onCopy: onCopy)
-                    .transition(reduceMotion ? .identity : .opacity)
-            }
-        }
-        .animation(
-            reduceMotion ? nil : .easeOut(duration: 0.15),
-            value: shouldShowResponseActions(for: context)
-        )
-    }
-
-    private func shouldShowResponseActions(for context: MessageActionContext) -> Bool {
-        AssistantResponseActionPolicy.shouldShowPersistentCopy(
-            context: context,
-            messageRole: message.role,
-            isStreaming: isStreaming,
-            isLatestCompletedAssistant: isLatestCompletedAssistant
         )
     }
 }

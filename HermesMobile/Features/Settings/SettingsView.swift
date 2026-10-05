@@ -95,7 +95,7 @@ struct SettingsView: View {
     @State var notificationStatusMessage: String?
     @AppStorage(AppTheme.storageKey) var appThemeRawValue = AppTheme.system.rawValue
     @AppStorage(AppAccent.storageKey) var appAccentRawValue = AppAccent.defaultValue.rawValue
-    @AppStorage(InternalChatRendererPolicy.storageKey) var experimentalChatRenderer = false
+    @AppStorage(ChatSurfacePolicy.legacyStorageKey) var useLegacyChatSurface = false
     @AppStorage(AppHaptics.isEnabledKey) var isHapticsEnabled = true
     @AppStorage(ResponseCompletionNotifications.isEnabledKey) var isResponseCompletionNotificationsEnabled = false
     @AppStorage(ResponseCompletionNotifications.hasRequestedPermissionKey) var hasRequestedResponseCompletionNotificationPermission = false

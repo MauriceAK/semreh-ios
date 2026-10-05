@@ -342,7 +342,6 @@ extension EnvironmentValues {
 /// when a measured height refines. The existing ScrollView remains the default.
 struct StableViewportRowRevision: Equatable {
     let message: TranscriptMessage
-    let latestCompletedAssistantRenderID: String?
     let outgoingInsertionEvent: OutgoingInsertionEvent?
     let allowsOutgoingMotion: Bool
     let reasoningGroups: [ReasoningGroup]
@@ -1042,7 +1041,6 @@ struct ChatStableViewportPrototype: UIViewControllerRepresentable {
                   old.promptBorder == new.promptBorder else { return false }
             let a = old.revision, b = new.revision
             return a.message == b.message
-                && a.latestCompletedAssistantRenderID == b.latestCompletedAssistantRenderID
                 && a.outgoingInsertionEvent == b.outgoingInsertionEvent
                 && (a.outgoingInsertionEvent == nil || a.allowsOutgoingMotion == b.allowsOutgoingMotion)
                 && a.reasoningGroups == b.reasoningGroups
@@ -1732,18 +1730,14 @@ struct ChatStableViewportPrototype: UIViewControllerRepresentable {
             let preview = previewURL.map { NativeDirectPreparedRow.LinkPreview(url: $0,
                 frame: CGRect(x: 12, y: canvas.maxY + 6,
                               width: min(300, body.width), height: 84)) }
-            let showsCopy = revision.latestCompletedAssistantRenderID == revision.message.renderID
-            let copy = showsCopy ? CGRect(x: 2, y: headerHeight + body.height + previewExtra + 30,
-                                           width: 90, height: 44) : nil
-            return NativeDirectPreparedRow(height: ceil(headerHeight + body.height + previewExtra + 28
-                                                        + (showsCopy ? 46 : 0)),
+            return NativeDirectPreparedRow(height: ceil(headerHeight + body.height + previewExtra + 28),
                 rowIdentifier: ChatMessageAccessibility.rowIdentifier(messageID: message.messageId, renderID: revision.message.renderID),
                 rowLabel: ChatMessageAccessibility.rowLabel(role: message.role, content: message.content,
                     visibleContent: revision.message.attachmentDisplayContent, attachmentCount: 0),
                 content: .assistant(body: body, canvasFrame: canvas, bubbleFrame: bubble,
                     thinkingTitle: thinking ? "Thinking" : nil,
                     thinkingDetail: thinkingDetail, thinkingDetailFrame: detailFrame,
-                    toolActions: actions, linkPreview: preview, copyFrame: copy))
+                    toolActions: actions, linkPreview: preview, copyFrame: nil))
         }
 
         func ensureDirectView(_ index: Int, row: NativeDirectPreparedRow) -> NativeDirectTranscriptRowView {
@@ -2464,8 +2458,7 @@ struct ChatStableViewportPrototype: UIViewControllerRepresentable {
                 return
             }
             let tail = input.revisionAt(121)
-            if !tail.hasActiveStream,
-               tail.latestCompletedAssistantRenderID == tail.message.renderID {
+            if !tail.hasActiveStream {
                 directStreamFollowing = false
                 directStreamLastOffset = nil
                 logger.debug("event=direct_stream_follow_complete")
@@ -3719,13 +3712,46 @@ final class ChatVerticalScrollAxisGuardView: UIView {
 }
 
 struct AssistantTypingIndicatorView: View {
+    @Environment(\.usesMuseChatSurface) private var usesMuseChatSurface
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.appColorPalette) private var palette
+    @Environment(\.appAccent) private var accent
+    @Environment(\.museSurfaceUsesDefaultAccent) private var useDefaultAccent
+
     var body: some View {
-        Text("Thinking")
-            .font(AppFont.subheadline())
-            .modifier(ReasoningTextShineModifier(isActive: true))
-            .padding(.leading, 4)
-            .padding(.vertical, 8)
-            .accessibilityLabel("Semreh is preparing a response")
+        Group {
+            if usesMuseChatSurface {
+                TimelineView(.animation(minimumInterval: 1.0 / 30,
+                                        paused: reduceMotion || scenePhase != .active)) { context in
+                    HStack(spacing: 5) {
+                        ForEach(0..<3) { index in
+                            let phase = context.date.timeIntervalSinceReferenceDate * 2 * .pi / 1.2
+                                - Double(index) * 0.65
+                            let pulse = reduceMotion ? 0.5 : max(0, sin(phase))
+                            Circle()
+                                .fill(.secondary)
+                                .frame(width: 7, height: 7)
+                                .opacity(0.4 + pulse * 0.6)
+                                .offset(y: -2 * pulse)
+                        }
+                    }
+                    .frame(width: 58, height: 36)
+                    .background(ChatSurfaceAppearance.panel(for: colorScheme, palette: palette,
+                        accent: accent, useDefaultAccent: useDefaultAccent), in: Capsule())
+                }
+            } else {
+                Text("Thinking")
+                    .font(AppFont.subheadline())
+                    .modifier(ReasoningTextShineModifier(isActive: true))
+                    .padding(.leading, 4)
+                    .padding(.vertical, 8)
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityIdentifier("assistant-waiting-indicator")
+        .accessibilityLabel("Semreh is preparing a response")
     }
 }
 

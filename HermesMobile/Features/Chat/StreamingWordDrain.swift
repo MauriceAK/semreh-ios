@@ -2,7 +2,7 @@ import Foundation
 
 /// Lossless buffering and bounded presentation scheduling for streamed text.
 ///
-/// The preview flushes frame-sized batches; injected pacing can still reveal
+/// The responsive surface flushes received batches; injected pacing can still reveal
 /// whole words without changing the received bytes. A drainable "unit" is
 /// one word plus its trailing whitespace; leading whitespace attaches to the first
 /// unit, and a trailing in-progress word counts as a unit so buffers without
@@ -10,10 +10,24 @@ import Foundation
 /// emoji/ZWJ sequences and combining marks are never split, and `head + tail`
 /// always reproduces the input exactly — pacing can never alter final content.
 enum StreamingWordDrain {
-    /// Batch network arrivals around one 60 Hz frame. This is a scheduling
-    /// budget, not a claim about display refresh rate or main-thread availability.
-    static let frameIntervalNanoseconds: UInt64 = 16_000_000
-    static let maximumBufferAgeNanoseconds: UInt64 = 16_000_000
+    /// Intentional buffering is bounded independently of row size and gesture
+    /// priority. A busy main actor can still resume late; this is not an FPS or
+    /// wall-clock guarantee. Completion and explicit flushes bypass the delay.
+    static let maximumBufferAgeNanoseconds: UInt64 = 150_000_000
+
+    /// The growing row becomes more expensive to measure as it gets longer.
+    /// Coalesce more arrivals instead of repeatedly replacing a huge row while
+    /// the reader is dragging or composing. Every tick reveals its whole batch.
+    static func presentationCadence(receivedByteCount: Int, prioritizingInteraction: Bool) -> UInt64 {
+        let normal: UInt64
+        switch receivedByteCount {
+        case ..<8_192: normal = 32_000_000
+        case ..<32_768: normal = 64_000_000
+        default: normal = 100_000_000
+        }
+        guard prioritizingInteraction else { return normal }
+        return receivedByteCount < 32_768 ? 100_000_000 : maximumBufferAgeNanoseconds
+    }
 
     /// Keeps the backlog count current as chunks arrive. A paced tick then
     /// scans only the prefix it will reveal, instead of recounting the entire

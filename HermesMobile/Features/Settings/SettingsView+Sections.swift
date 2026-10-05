@@ -48,17 +48,15 @@ extension SettingsView {
 
     var chatSection: some View {
         SettingsCategory(title: "Chat", subtitle: "Responses, dictation, and transcript details", systemImage: "bubble.left.and.bubble.right") {
-        if InternalChatRendererPolicy.isAvailable {
-            SettingsCard(title: String(localized: "Preview")) {
+            SettingsCard(title: String(localized: "Experimental")) {
                 SettingsToggleRow(
-                    title: String(localized: "Experimental chat renderer"),
+                    title: String(localized: "Use legacy chat interface"),
                     systemImage: "bubble.left.and.text.bubble.right",
-                    isOn: $experimentalChatRenderer
+                    isOn: $useLegacyChatSurface
                 )
-                .accessibilityIdentifier(InternalChatRendererPolicy.toggleIdentifier)
-                SettingsFootnote(String(localized: "Try the internal chat preview on this device. Reopen the chat to apply changes. Turn off and reopen to return to the stable renderer."))
+                .accessibilityIdentifier(ChatSurfacePolicy.legacyToggleIdentifier)
+                SettingsFootnote(String(localized: "Use the previous chat interface on this device. Reopen the chat to apply changes."))
             }
-        }
         SettingsCard(title: String(localized: "Interaction")) {
             SettingsToggleRow(
                 title: String(localized: "Haptic Feedback"),
@@ -114,13 +112,15 @@ extension SettingsView {
                 isOn: $showsThinkingAndToolCards
             )
 
-            SettingsDivider()
+            if useLegacyChatSurface {
+                SettingsDivider()
 
-            SettingsToggleRow(
-                title: String(localized: "Expand Thinking by Default"),
-                systemImage: "rectangle.expand.vertical",
-                isOn: $thinkingCardsStartExpanded
-            )
+                SettingsToggleRow(
+                    title: String(localized: "Expand Thinking by Default"),
+                    systemImage: "rectangle.expand.vertical",
+                    isOn: $thinkingCardsStartExpanded
+                )
+            }
 
             SettingsDivider()
 
@@ -130,7 +130,9 @@ extension SettingsView {
                 isOn: $toolCardsStartExpanded
             )
 
-            SettingsFootnote(String(localized: "Thinking and Tool cards start expanded instead of collapsed. Tapping a card still toggles it."))
+            SettingsFootnote(useLegacyChatSurface
+                ? String(localized: "Thinking and Tool cards start expanded instead of collapsed. Tapping a card still toggles it.")
+                : String(localized: "Tool cards start expanded instead of collapsed. Reasoning stays collapsed until you open it."))
 
             SettingsDivider()
 

@@ -1,4 +1,81 @@
 import Foundation
+import MarkdownUI
+
+/// The platform can reject Unicode shaping for a single very long paragraph.
+/// Keep independent final layout units bounded without changing the parsed text.
+struct BoundedMarkdownParagraph {
+    static let minimumSourceBytes = 4_096
+    static let maximumLeafCharacters = 1_024
+    static let maximumLeafUTF8Bytes = 4_096
+    static let maximumLeafUTF16Units = 2_048
+
+    let text: AttributedString
+    let leaves: [AttributedString]
+
+    static func prepare(_ content: MarkdownContent) -> Self? {
+        let markdown = content.renderMarkdown()
+        guard markdown.utf8.count > minimumSourceBytes,
+              let attributed = try? AttributedString(markdown: markdown,
+                options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)),
+              let reconstructed = reconstruct(attributed), reconstructed == content,
+              let leaves = split(attributed) else { return nil }
+        return Self(text: attributed, leaves: leaves)
+    }
+
+    /// Foundation is a compatibility parser here, not the source of truth.
+    /// Require the public MarkdownUI AST to match before accepting its runs.
+    /// Images, HTML, breaks and unmatched nesting retain the original renderer.
+    private static func reconstruct(_ attributed: AttributedString) -> MarkdownContent? {
+        var parts: [InlineContent] = []
+        let supported: InlinePresentationIntent = [.emphasized, .stronglyEmphasized, .strikethrough, .code]
+        for run in attributed.runs {
+            let intent = run.inlinePresentationIntent ?? []
+            guard intent.subtracting(supported).isEmpty else { return nil }
+            let text = String(attributed[run.range].characters)
+            var part = intent.contains(.code) ? Code(text)._inlineContent : InlineContentBuilder.buildExpression(text)
+            if intent.contains(.emphasized) { let child = part; part = Emphasis { child }._inlineContent }
+            if intent.contains(.stronglyEmphasized) { let child = part; part = Strong { child }._inlineContent }
+            if intent.contains(.strikethrough) { let child = part; part = Strikethrough { child }._inlineContent }
+            if let link = run.link { let child = part; part = InlineLink(destination: link) { child }._inlineContent }
+            parts.append(part)
+        }
+        return MarkdownContent { Paragraph { for part in parts { part } } }
+    }
+
+    private static func split(_ attributed: AttributedString) -> [AttributedString]? {
+        let source = String(attributed.characters)
+        var ranges: [Range<String.Index>] = []
+        var start = source.startIndex
+        while start < source.endIndex {
+            var end = start
+            var characters = 0, bytes = 0, units = 0
+            var whitespaceEnd: String.Index?
+            while end < source.endIndex {
+                let next = source.index(after: end)
+                let grapheme = source[end..<next]
+                let nextBytes = grapheme.utf8.count, nextUnits = grapheme.utf16.count
+                guard characters < maximumLeafCharacters,
+                      bytes + nextBytes <= maximumLeafUTF8Bytes,
+                      units + nextUnits <= maximumLeafUTF16Units else { break }
+                characters += 1; bytes += nextBytes; units += nextUnits
+                if source[end].isWhitespace { whitespaceEnd = next }
+                end = next
+            }
+            // Never cut inside a grapheme, including a pathological single
+            // cluster larger than the budget. Such content uses the old path.
+            guard end > start else { return nil }
+            if end < source.endIndex, let whitespaceEnd { end = whitespaceEnd }
+            ranges.append(start..<end)
+            start = end
+        }
+        var cursor = attributed.startIndex
+        return ranges.map { range in
+            let end = attributed.characters.index(cursor, offsetBy: source[range].count)
+            defer { cursor = end }
+            return AttributedString(attributed[cursor..<end])
+        }
+    }
+}
 
 struct StreamingMarkdownChunk: Identifiable, Equatable {
     let id: Int
@@ -119,13 +196,22 @@ enum StreamingMarkdownBlockSplitter {
 /// append. A separate byte cursor avoids searching the unfinished line again.
 /// Stable chunks retain the same IDs and text as the reference splitter.
 struct StreamingMarkdownBlockAccumulator {
+    /// Raw-source streaming must not seal a blank line out of a math expression.
+    /// Conservatively retain the tail after the first math opener; the bounded
+    /// literal lane handles a long tail, and canonical completion resolves it.
+    var preservesRawMath = false
     private var stableChunks: [StreamingMarkdownChunk] = []
+    private var rawMathObserved = false
     private var chunkStartUTF16Offset = 0
     private var pendingLineStartUTF16Offset = 0
     private var newlineSearchUTF8Offset = 0
     private var isInsideFenceBeforePendingLine = false
     private var lastTextUTF16Length = 0
     private var isInitialized = false
+
+    init(preservesRawMath: Bool = false) {
+        self.preservesRawMath = preservesRawMath
+    }
 
     /// `appendOnly` requires a byte-exact UTF-8 extension of the previous input,
     /// including unchanged input. Canonically equivalent replacements must reset.
@@ -150,6 +236,7 @@ struct StreamingMarkdownBlockAccumulator {
 
     mutating func reset() {
         stableChunks = []
+        rawMathObserved = false
         chunkStartUTF16Offset = 0
         pendingLineStartUTF16Offset = 0
         newlineSearchUTF8Offset = 0
@@ -201,6 +288,10 @@ struct StreamingMarkdownBlockAccumulator {
             let lineStart = String.Index(utf16Offset: lineStartOffset, in: text)
             let line = text[lineStart..<lineEnd]
             let trimmedLine = String(line).trimmingCharacters(in: .whitespacesAndNewlines)
+            if preservesRawMath,
+               trimmedLine.contains("$") || trimmedLine.contains(#"\("#) || trimmedLine.contains(#"\["#) {
+                rawMathObserved = true
+            }
             var stableBoundaryOffset: Int?
 
             if StreamingMarkdownBlockSplitter.isFenceDelimiter(trimmedLine) {
@@ -214,7 +305,7 @@ struct StreamingMarkdownBlockAccumulator {
                 }
             }
 
-            if let stableBoundaryOffset,
+            if !rawMathObserved, let stableBoundaryOffset,
                shouldSealChunk(
                    in: text,
                    boundaryOffset: stableBoundaryOffset
@@ -261,7 +352,7 @@ struct StreamingMarkdownBlockAccumulator {
         let start = String.Index(utf16Offset: startOffset, in: text)
         let end = String.Index(utf16Offset: endOffset, in: text)
         let chunkText = String(text[start..<end])
-        guard !chunkText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        guard preservesRawMath || !chunkText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
 
         stableChunks.append(
             StreamingMarkdownChunk(
@@ -280,5 +371,73 @@ struct StreamingMarkdownBlockAccumulator {
             stableChunks: stableChunks,
             activeMarkdown: String(text[activeStart...])
         )
+    }
+}
+
+/// Rendering budgets, independent of transport cadence. A long unfinished
+/// paragraph/fence must not grow the Markdown parser or per-glyph fade workload.
+enum StreamingMarkdownRenderBudget {
+    static let maximumRichTailUTF8Bytes = 4_096
+    static let literalLeafCharacters = 1_024
+
+    static func usesLiteralTail(_ source: String) -> Bool {
+        source.utf8.count > maximumRichTailUTF8Bytes
+    }
+}
+
+/// Exact raw text sliced only for provisional layout. Stable leaves never change
+/// on append; one trailing grapheme remains mutable so later combining marks or
+/// ZWJ scalars cannot invalidate a sealed boundary. Concatenation is byte-exact.
+/// These are not Markdown blocks: canonical completion must still parse the
+/// original source, including cross-block links, math, lists and fence state.
+struct StreamingLiteralAccumulator {
+    private(set) var stableChunks: [StreamingMarkdownChunk] = []
+    private(set) var tail = ""
+    private(set) var source = ""
+    private(set) var appendedUTF8Bytes = 0
+
+    mutating func update(_ next: String) {
+        guard !source.utf8.elementsEqual(next.utf8) else { return }
+        if next.utf8.starts(with: source.utf8) {
+            let addition = String(decoding: next.utf8.dropFirst(source.utf8.count), as: UTF8.self)
+            tail.append(addition)
+            appendedUTF8Bytes += addition.utf8.count
+        } else {
+            stableChunks = []
+            tail = next
+            appendedUTF8Bytes = next.utf8.count
+        }
+        source = next
+        let limit = StreamingMarkdownRenderBudget.literalLeafCharacters
+        var start = tail.startIndex
+        while let hardBoundary = tail.index(start, offsetBy: limit, limitedBy: tail.endIndex), hardBoundary < tail.endIndex {
+            let window = tail[start..<hardBoundary]
+            // Adjacent Text leaves supply a line break. Prefer a source line
+            // ending near the cap, otherwise finish a word rather than showing
+            // fragments such as "th" / "eir" in ordinary prose.
+            let nearbyStart = tail.index(hardBoundary, offsetBy: -min(256, limit))
+            let lineEnd = tail[nearbyStart..<hardBoundary].lastIndex(where: \.isNewline)
+            let whitespace = lineEnd ?? window.lastIndex(where: \.isWhitespace)
+            let boundary: String.Index
+            if let whitespace,
+               tail[whitespace].isNewline || window[..<whitespace].contains(where: { !$0.isWhitespace }) {
+                boundary = tail.index(after: whitespace)
+            } else {
+                // An individual whitespace-free run longer than the cap still
+                // needs ordinary grapheme-safe wrapping to bound layout work.
+                boundary = hardBoundary
+            }
+            stableChunks.append(StreamingMarkdownChunk(id: stableChunks.count, text: String(tail[start..<boundary])))
+            start = boundary
+        }
+        tail = String(tail[start...])
+    }
+
+    /// VStack already supplies the visual boundary after a sealed leaf. Omit
+    /// exactly one terminal newline from its display, including a CRLF grapheme,
+    /// so it does not add an extra empty line. Raw chunk/canonical bytes retain it.
+    static func displayText(forSealedLeaf source: String) -> String {
+        guard source.last?.isNewline == true else { return source }
+        return String(source.dropLast())
     }
 }

@@ -2005,13 +2005,9 @@ final class MarkdownMathRendererTests: XCTestCase {
     }
 
     @MainActor
-    func testNativeUnwrappedTextKitSizingMatchesAttributedDrawingMetrics() {
+    func testNativeUnwrappedTextKitSizingMatchesASCIIDrawingMetrics() {
         let tall = (0..<320).map { "let value_\($0) = Array(0..<1_000).reduce(0, +)" }.joined(separator: "\n")
-        let cases = [
-            "", "\n", "first\n\nlast\n", "a\tb\t中文", "emoji 👩🏽‍💻 and العربية",
-            String(repeating: "wide λ ", count: 50), tall,
-            (0..<320).map { "line \($0) let value = \($0) // λ👩🏽‍💻" }.joined(separator: "\n")
-        ]
+        let cases = ["", "\n", "first\n\nlast\n", String(repeating: "wide code ", count: 50), tall]
         for source in cases {
             let highlighted = NSMutableAttributedString(string: source, attributes: [
                 .foregroundColor: UIColor.systemPink
@@ -2030,24 +2026,262 @@ final class MarkdownMathRendererTests: XCTestCase {
                 view.attributedText = text
                 let mountedText = view.attributedText!
                 XCTAssertEqual(mountedText.string, text.string)
-                if source == tall {
-                    XCTAssertTrue(MarkdownNativeCodeText.isTextKitSizingEligible(mountedText),
-                                  "The rich-code sized fixture must exercise the TextKit path")
-                } else if source.contains("\t") || source.contains("λ") || source.contains("👩🏽‍💻") {
-                    XCTAssertFalse(MarkdownNativeCodeText.isTextKitSizingEligible(mountedText),
-                                   "Unicode and tab metrics must retain the baseline operation")
-                }
                 let baseline = mountedText.boundingRect(
                     with: CGSize(width: 100_000, height: 1_000_000),
                     options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil
                 ).size
                 let measured = MarkdownNativeCodeText.unwrappedTextKitSize(view, width: 100_000)
+                XCTAssertEqual(view.textContainerInset, .zero, "Ordinary ASCII retains zero glyph-origin padding.")
                 XCTAssertEqual(ceil(measured.width), ceil(baseline.width), accuracy: 1,
                                "Width differs for \(source.utf8.count) bytes, highlighted=\(prepared != nil)")
                 XCTAssertEqual(ceil(measured.height), ceil(baseline.height), accuracy: 2,
                                "Height differs for \(source.utf8.count) bytes, highlighted=\(prepared != nil)")
             }
         }
+    }
+
+    @MainActor
+    func testNativeUnwrappedUnicodeAndTabsFitMountedGlyphsWithoutChangingText() {
+        let cases = [
+            "", "\n", "first\n\nlast\n", "\r\n\r\n",
+            "a\tb\t中文", "\tالعربية\t👩🏽‍💻\n\tfinal\t",
+            "emoji 👩🏽‍💻 and العربية", "cafe\u{301}\u{2028}中文\u{2029}\n",
+            "العربية", "שלום", "العربية\nEnglish\nשלום",
+            String(repeating: "wide λ ", count: 50),
+            (0..<320).map { "line \($0) let value = \($0) // λ👩🏽‍💻" }.joined(separator: "\n")
+        ]
+        for source in cases {
+            let highlighted = MarkdownPreparedCode(NSAttributedString(string: source, attributes: [
+                .foregroundColor: UIColor.systemPink
+            ]))
+            for prepared in [nil, highlighted] {
+                _ = assertUnwrappedCodeFitsMountedText(source: source, prepared: prepared)
+            }
+        }
+    }
+
+    @MainActor
+    func testNativeUnwrappedPreparedFontMetricsKeepSeparateMeasurements() {
+        let source = "let café = \"👩🏽‍💻 العربية\"\n\t中文\n\n"
+        let small = MarkdownPreparedCode(NSAttributedString(string: source, attributes: [
+            .font: UIFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        ]))
+        let large = MarkdownPreparedCode(NSAttributedString(string: source, attributes: [
+            .font: UIFont.monospacedSystemFont(ofSize: 25, weight: .bold)
+        ]))
+        let (smallSize, smallMeasurements) = assertUnwrappedCodeFitsMountedText(source: source, prepared: small)
+        let (largeSize, largeMeasurements) = assertUnwrappedCodeFitsMountedText(source: source, prepared: large)
+        XCTAssertFalse(smallMeasurements === largeMeasurements,
+                       "Equal source must not share sizes across different prepared fonts.")
+        XCTAssertGreaterThan(largeSize.width, smallSize.width)
+        XCTAssertGreaterThan(largeSize.height, smallSize.height)
+    }
+
+    @MainActor
+    func testNativeUnwrappedActualLongHighlightedUnicodeFixtureFitsMountedText() async throws {
+        let source = (0..<224).map { index in
+            "let longReplyLine\(index) = \"A deliberately wrapping synthetic code line \(index) keeps every received character intact while a reader scrolls inside this same growing answer. café 👩🏽‍💻\"\n"
+        }.joined() + "let finalMarker = \"SEMREH_LONG_CODE_END\""
+        XCTAssertEqual(source.utf8.count, 42_156, "Keep the measured regression's actual code payload.")
+        let worker = MarkdownCodeHighlightWorker()
+        let result = await worker.highlightedCode(for: MarkdownCodeHighlightRequest(
+            code: source, language: "swift", colorScheme: .dark, isStreaming: false))
+        guard case .highlighted(let prepared) = result else {
+            XCTFail("The regression must exercise actual Swift highlighted attributes.")
+            return
+        }
+        XCTAssertGreaterThan(prepared.fullText.runs.count, 225)
+        _ = assertUnwrappedCodeFitsMountedText(source: source, prepared: nil)
+        _ = assertUnwrappedCodeFitsMountedText(source: source, prepared: prepared)
+    }
+
+    @MainActor
+    func testNativeUnwrappedGlyphInsetsRestoreOnCacheHitsAndResetAcrossWrapAndSource() {
+        let source = "emoji 👩🏽‍💻 and العربية"
+        let highlighted = MarkdownPreparedCode(NSAttributedString(string: source, attributes: [
+            .foregroundColor: UIColor.systemPink
+        ]))
+        for prepared in [nil, highlighted] {
+            let cache = MarkdownNativePlainCodeCache()
+            func update(_ view: UITextView, _ state: MarkdownNativeCodeText.Coordinator,
+                        source: String, prepared: MarkdownPreparedCode?, wraps: Bool) {
+                MarkdownNativeCodeText(source: source, prepared: prepared, wraps: wraps,
+                    colorScheme: .dark, plainCache: cache).update(view, state: state)
+            }
+            func mount() -> (UITextView, MarkdownNativeCodeText.Coordinator) {
+                let view = MarkdownNativeCodeTextView()
+                view.isScrollEnabled = false
+                view.textContainerInset = .zero
+                view.textContainer.lineFragmentPadding = 0
+                let state = MarkdownNativeCodeText.Coordinator()
+                update(view, state, source: source, prepared: prepared, wraps: false)
+                return (view, state)
+            }
+            func measure(_ view: UITextView, _ state: MarkdownNativeCodeText.Coordinator, wraps: Bool) -> CGSize {
+                MarkdownNativeCodeText.measuredSize(view, width: wraps ? 220 : 100_000, wraps: wraps,
+                    colorScheme: .dark, measurements: state.measurements)
+            }
+            let (first, firstState) = mount()
+            let expected = measure(first, firstState, wraps: false)
+            let inset = first.textContainerInset
+            XCTAssertGreaterThan(inset.top + inset.left, 0, "This Unicode case must exercise real negative glyph overhang.")
+            XCTAssertEqual(inset.bottom, 0)
+            XCTAssertEqual(inset.right, 0)
+            let (second, secondState) = mount()
+            XCTAssertEqual(second.textContainerInset, .zero)
+            XCTAssertTrue(firstState.measurements === secondState.measurements)
+            XCTAssertEqual(measure(second, secondState, wraps: false), expected)
+            XCTAssertEqual(second.textContainerInset, inset, "Warm remount must install padding with the cached size.")
+            XCTAssertEqual(secondState.measurements.measurementCount, 1)
+            update(second, secondState, source: source, prepared: prepared, wraps: true)
+            XCTAssertEqual(second.textContainerInset, .zero)
+            let wrapped = measure(second, secondState, wraps: true)
+            XCTAssertEqual(second.textContainerInset, .zero)
+            XCTAssertEqual(secondState.measurements.measurementCount, 2)
+            update(second, secondState, source: source, prepared: prepared, wraps: false)
+            XCTAssertEqual(measure(second, secondState, wraps: false), expected)
+            XCTAssertEqual(second.textContainerInset, inset)
+            update(second, secondState, source: source, prepared: prepared, wraps: true)
+            XCTAssertEqual(measure(second, secondState, wraps: true), wrapped)
+            XCTAssertEqual(second.textContainerInset, .zero, "A wrapped cache hit must also clear unwrapped padding.")
+            XCTAssertEqual(secondState.measurements.measurementCount, 2)
+            update(second, secondState, source: source, prepared: prepared, wraps: false)
+            _ = measure(second, secondState, wraps: false)
+            XCTAssertEqual(second.textContainerInset, inset)
+            update(second, secondState, source: "let value = 1", prepared: nil, wraps: false)
+            XCTAssertEqual(second.textContainerInset, .zero, "Replacing Unicode with ASCII must clear the prior origin.")
+            _ = measure(second, secondState, wraps: false)
+            XCTAssertEqual(second.textContainerInset, .zero)
+            XCTAssertEqual(second.attributedText.string, "let value = 1")
+        }
+    }
+
+    /// Check the actual native leaf after installing its returned size. Unicode
+    /// drawing metrics need not match a second renderer, but every source line
+    /// and glyph must remain inside the frame used for display and selection.
+    @MainActor
+    private func assertUnwrappedCodeFitsMountedText(
+        source: String, prepared: MarkdownPreparedCode?,
+        file: StaticString = #filePath, line: UInt = #line
+    ) -> (CGSize, MarkdownNativeCodeMeasurements) {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 760))
+        let host = UIViewController()
+        window.rootViewController = host
+        window.isHidden = false
+        defer { window.isHidden = true; window.rootViewController = nil }
+        let view = MarkdownNativeCodeTextView()
+        view.isEditable = false
+        view.isSelectable = true
+        view.isScrollEnabled = false
+        view.textContainerInset = .zero
+        view.textContainer.lineFragmentPadding = 0
+        view.semanticContentAttribute = .forceLeftToRight
+        host.view.addSubview(view)
+        let state = MarkdownNativeCodeText.Coordinator()
+        MarkdownNativeCodeText(source: source, prepared: prepared, wraps: false, colorScheme: .dark,
+            plainCache: MarkdownNativePlainCodeCache(enabled: false)).update(view, state: state)
+        let installed = NSAttributedString(attributedString: view.attributedText)
+        let selection = NSRange(location: 0, length: installed.length)
+        view.selectedRange = selection
+        let size = MarkdownNativeCodeText.measuredSize(view, width: 100_000, wraps: false,
+            colorScheme: .dark, measurements: state.measurements)
+        XCTAssertTrue(size.width.isFinite && size.height.isFinite, file: file, line: line)
+        XCTAssertGreaterThan(size.width, 0, file: file, line: line)
+        XCTAssertGreaterThan(size.height, 0, file: file, line: line)
+        if source.count < 80 {
+            XCTAssertLessThan(size.width, 1_024,
+                              "Short RTL text must not inherit the 100,000pt probe width.", file: file, line: line)
+        }
+        view.frame = CGRect(origin: .zero, size: size)
+        view.layoutIfNeeded()
+        let manager = view.layoutManager
+        let container = view.textContainer
+        manager.ensureLayout(for: container)
+        let glyphs = manager.glyphRange(for: container)
+        XCTAssertEqual(NSMaxRange(glyphs), manager.numberOfGlyphs,
+                       "The returned frame must retain every glyph.", file: file, line: line)
+        XCTAssertEqual(NSMaxRange(manager.characterRange(forGlyphRange: glyphs, actualGlyphRange: nil)),
+                       installed.length, file: file, line: line)
+        var lineCount = 0
+        let inset = view.textContainerInset
+        manager.enumerateLineFragments(forGlyphRange: glyphs) { _, containerUsed, _, _, _ in
+            let used = containerUsed.offsetBy(dx: inset.left, dy: inset.top)
+            lineCount += 1
+            XCTAssertGreaterThanOrEqual(used.minX, -1, file: file, line: line)
+            XCTAssertGreaterThanOrEqual(used.minY, -1, file: file, line: line)
+            XCTAssertLessThanOrEqual(used.maxX, size.width + 1, file: file, line: line)
+            XCTAssertLessThanOrEqual(used.maxY, size.height + 1, file: file, line: line)
+        }
+        XCTAssertEqual(lineCount, installed.string.components(separatedBy: "\n").count,
+                       "Unwrapped code must retain blank/trailing lines without soft wrapping.", file: file, line: line)
+        let glyphBounds = manager.boundingRect(forGlyphRange: glyphs, in: container)
+            .offsetBy(dx: inset.left, dy: inset.top)
+        if glyphBounds.minX < -1 || glyphBounds.minY < -1 {
+            var details: [String] = []
+            for index in glyphs.location..<NSMaxRange(glyphs) {
+                let box = manager.boundingRect(forGlyphRange: NSRange(location: index, length: 1), in: container)
+                    .offsetBy(dx: inset.left, dy: inset.top)
+                if box.minX < -1 || box.minY < -1 {
+                    details.append("glyph=\(index); properties=\(manager.propertyForGlyph(at: index).rawValue); bounds=\(box)")
+                    if details.count == 12 { break }
+                }
+            }
+            let receipt = XCTAttachment(string: "source_utf8_bytes=\(source.utf8.count); prepared=\(prepared != nil)\n" + details.joined(separator: "\n"))
+            receipt.name = "Native glyph origin diagnostic"
+            receipt.lifetime = .keepAlways
+            add(receipt)
+        }
+        let glyphDiagnostic = "view_glyph_bounds=\(glyphBounds); inset=\(inset); measured_size=\(size); source_utf8_bytes=\(source.utf8.count); prepared=\(prepared != nil)"
+        XCTAssertGreaterThanOrEqual(glyphBounds.minX, -1, glyphDiagnostic, file: file, line: line)
+        XCTAssertGreaterThanOrEqual(glyphBounds.minY, -1, glyphDiagnostic, file: file, line: line)
+        XCTAssertLessThanOrEqual(glyphBounds.maxX, size.width + 1, glyphDiagnostic, file: file, line: line)
+        XCTAssertLessThanOrEqual(glyphBounds.maxY, size.height + 1, glyphDiagnostic, file: file, line: line)
+        // Accessing layoutManager switches UITextView to TextKit 1, which may
+        // fix unsupported Unicode fonts. Compare all resulting attributes to
+        // an independently laid-out UIKit control given the exact same input;
+        // do not treat platform font fallback as application style mutation.
+        let reference = UITextView(frame: view.frame)
+        reference.textContainerInset = inset
+        reference.textContainer.lineFragmentPadding = 0
+        reference.textContainer.lineBreakMode = .byClipping
+        reference.semanticContentAttribute = .forceLeftToRight
+        reference.attributedText = installed
+        reference.textContainer.size = container.size
+        reference.layoutManager.ensureLayout(for: reference.textContainer)
+        let actual = view.attributedText!
+        let matchesReference = actual.isEqual(to: reference.attributedText)
+        XCTAssertTrue(matchesReference,
+                      "All font/style attributes must match independent UIKit layout for \(source.utf8.count) bytes, prepared=\(prepared != nil).",
+                      file: file, line: line)
+        XCTAssertEqual(Array(actual.string.utf8), Array(installed.string.utf8), file: file, line: line)
+        let preservedKeys: [NSAttributedString.Key] = [
+            .foregroundColor, .backgroundColor, .paragraphStyle, .kern,
+            .underlineStyle, .strikethroughStyle, .link, .baselineOffset
+        ]
+        var changedKeys = Set<String>()
+        installed.enumerateAttributes(in: NSRange(location: 0, length: installed.length)) { before, range, _ in
+            actual.enumerateAttributes(in: range) { after, _, _ in
+                for key in Set(before.keys).union(after.keys) {
+                    let same = before[key] == nil && after[key] == nil
+                        || (before[key] as? NSObject)?.isEqual(after[key]) == true
+                    if !same { changedKeys.insert(key.rawValue) }
+                    if preservedKeys.contains(key) {
+                        XCTAssertTrue(same, "Layout changed explicit style \(key.rawValue).", file: file, line: line)
+                    }
+                }
+            }
+        }
+        if !changedKeys.isEmpty {
+            let receipt = XCTAttachment(string: "source_utf8_bytes=\(source.utf8.count); prepared=\(prepared != nil); changed_attribute_keys=\(changedKeys.sorted()); independent_UIKit_attributes_equal=\(matchesReference)")
+            receipt.name = "Native Unicode layout attribute adjustments"
+            receipt.lifetime = .keepAlways
+            add(receipt)
+        }
+        XCTAssertEqual(view.selectedRange, selection, file: file, line: line)
+        XCTAssertEqual(view.copySource, source, file: file, line: line)
+        XCTAssertEqual(MarkdownNativeCodeTextView.selectedSourceText(source, displayRange: selection),
+                       source, file: file, line: line)
+        return (size, state.measurements)
     }
 
     private func nativeCodeCopySelections() -> [(source: String, range: NSRange, expected: String)] {
@@ -3230,6 +3464,436 @@ extension MarkdownMathRendererTests {
         XCTAssertEqual(calls, 5)
         measure()
         XCTAssertEqual(calls, 6)
+    }
+}
+#endif
+
+final class BoundedMarkdownParagraphTests: XCTestCase {
+#if DEBUG
+    @MainActor
+    func testActualMarkdownViewMountsBoundedLeavesAndRetainsQuoteColor() async throws {
+        let prose = String(repeating: "A paragraph keeps café 👩🏽‍💻 العربية and its inherited style. ", count: 100)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 390, height: 760)
+        defer { window.isHidden = true; window.rootViewController = nil; previousKeyWindow?.makeKey() }
+        for (quoted, scheme) in [(false, ColorScheme.dark), (true, .dark), (true, .light)] {
+            let probe = BoundedMarkdownParagraphMountProbe()
+            let host = UIHostingController(rootView: ScrollView {
+                MarkdownRenderer(content: (quoted ? "> " : "") + prose).frame(width: 322)
+            }.environment(\.colorScheme, scheme).environment(\.boundedParagraphMountProbe, probe))
+            window.rootViewController = host
+            window.makeKeyAndVisible()
+            host.view.frame = window.bounds
+            host.view.layoutIfNeeded()
+            try await Task.sleep(for: .milliseconds(200))
+            host.view.layoutIfNeeded()
+            let receipt = try XCTUnwrap(probe.receipts.first, "The real theme must mount the bounded view, not override it.")
+            XCTAssertEqual(probe.receipts.count, 1)
+            XCTAssertGreaterThan(receipt.leafCount, 1)
+            XCTAssertEqual(receipt.textBytes, prose.utf8.count - 1)
+            XCTAssertLessThanOrEqual(receipt.maximumLeafBytes, BoundedMarkdownParagraph.maximumLeafUTF8Bytes)
+            let expected: Color = !quoted ? .primary : scheme == .dark
+                ? Color(red: 0x92 / 255.0, green: 0x94 / 255.0, blue: 0xa0 / 255.0)
+                : Color(red: 0x6b / 255.0, green: 0x6e / 255.0, blue: 0x7b / 255.0)
+            XCTAssertEqual(receipt.foreground, expected)
+        }
+    }
+#endif
+
+    @MainActor
+    func testLongUnicodeParagraphUsesAcceptedBoundedLayoutWithoutLosingText() throws {
+        let span = "A patient reader should keep the same words under their eyes while this single answer grows. Unicode remains exact: café 👩🏽‍💻 العربية. "
+        let source = "SEMREH_LONG_PARAGRAPH_START " + String(repeating: span, count: 128)
+        let prepared = try XCTUnwrap(BoundedMarkdownParagraph.prepare(MarkdownContent(source)))
+        let expected = String(source.dropLast()) // cmark trims the paragraph's trailing ASCII space.
+        XCTAssertEqual(Array(String(prepared.text.characters).utf8), Array(expected.utf8))
+        XCTAssertGreaterThan(prepared.leaves.count, 1)
+        var rejoined = AttributedString()
+        for leaf in prepared.leaves {
+            let text = String(leaf.characters)
+            XCTAssertLessThanOrEqual(text.count, BoundedMarkdownParagraph.maximumLeafCharacters)
+            XCTAssertLessThanOrEqual(text.utf8.count, BoundedMarkdownParagraph.maximumLeafUTF8Bytes)
+            XCTAssertLessThanOrEqual(text.utf16.count, BoundedMarkdownParagraph.maximumLeafUTF16Units)
+            let native = NSAttributedString(string: text, attributes: [.font: UIFont.systemFont(ofSize: 16)])
+            XCTAssertNotNil(CTTypesetterCreateWithAttributedStringAndOptions(native, nil),
+                            "Each real output slice must receive default Unicode typesetting, without unbounded layout.")
+            rejoined += leaf
+        }
+        XCTAssertEqual(rejoined, prepared.text)
+        XCTAssertEqual(Array(String(rejoined.characters).utf8), Array(expected.utf8))
+        XCTAssertTrue(prepared.leaves.dropLast().allSatisfy { String($0.characters).last?.isWhitespace == true })
+    }
+
+    func testBoundedLeavesPreserveLinkCodeEmphasisAndStrikeAttributesAcrossCuts() throws {
+        let linkText = String(repeating: "linked café 👩🏽‍💻 العربية ", count: 170)
+        let source = "[\(linkText)](https://example.test/target) **strong** *emphasis* ~~strike~~ `inline code`"
+        let prepared = try XCTUnwrap(BoundedMarkdownParagraph.prepare(MarkdownContent(source)))
+        var rejoined = AttributedString()
+        for leaf in prepared.leaves { rejoined += leaf }
+        XCTAssertEqual(rejoined, prepared.text, "Slicing must retain all attributes, not just display characters.")
+        XCTAssertEqual(Array(String(rejoined.characters).utf8), Array((linkText + " strong emphasis strike inline code").utf8))
+        let link = try XCTUnwrap(URL(string: "https://example.test/target"))
+        XCTAssertGreaterThan(prepared.leaves.filter { $0.runs.contains(where: { $0.link == link }) }.count, 1)
+        for (word, intent) in [("strong", InlinePresentationIntent.stronglyEmphasized),
+                               ("emphasis", .emphasized), ("strike", .strikethrough), ("inline code", .code)] {
+            XCTAssertTrue(rejoined.runs.contains { run in
+                String(rejoined[run.range].characters) == word && run.inlinePresentationIntent?.contains(intent) == true
+            }, "The canonical \(word) style must survive the bounded path.")
+        }
+    }
+
+    func testUnsupportedOrOrdinaryParagraphsKeepTheOriginalRenderer() {
+        XCTAssertNil(BoundedMarkdownParagraph.prepare(MarkdownContent("Ordinary **rich** text 👩🏽‍💻 العربية.")))
+        let prefix = String(repeating: "Long paragraph text. ", count: 230)
+        for suffix in ["![visible image](https://example.test/image.png)",
+                       "<span title=\"retained\">raw HTML</span>",
+                       "before  \nafter", "before\nafter"] {
+            XCTAssertNil(BoundedMarkdownParagraph.prepare(MarkdownContent(prefix + suffix)),
+                         "Unsupported structures must not silently lose image/HTML/break semantics: \(suffix)")
+        }
+        XCTAssertNil(BoundedMarkdownParagraph.prepare(MarkdownContent("```swift\n" + prefix + "\n```")))
+    }
+
+    func testUTF8BudgetKeepsRepeatedJoinedEmojiWhole() throws {
+        let source = String(repeating: "👩🏽‍💻 العربية cafe\u{301} ", count: 400)
+        let prepared = try XCTUnwrap(BoundedMarkdownParagraph.prepare(MarkdownContent(source)))
+        let joined = prepared.leaves.map { String($0.characters) }.joined()
+        XCTAssertEqual(Array(joined.utf8), Array(String(source.dropLast()).utf8))
+        for leaf in prepared.leaves {
+            let text = String(leaf.characters)
+            XCTAssertLessThanOrEqual(text.utf8.count, BoundedMarkdownParagraph.maximumLeafUTF8Bytes)
+            XCTAssertLessThanOrEqual(text.utf16.count, BoundedMarkdownParagraph.maximumLeafUTF16Units)
+            XCTAssertFalse(text.hasPrefix("\u{200D}"))
+        }
+    }
+}
+
+final class CanonicalStreamingPreparationTests: XCTestCase {
+    func testCanonicalPreparationPreservesJoinedEmojiCombiningMarksAndArabicScalars() async throws {
+        // This verifies parser/text bytes, not the platform's final glyph shaping.
+        let prose = "Unicode remains exact: cafe\u{301} 👩🏽‍💻 العربية. "
+        let source = String(repeating: prose, count: 1_000).trimmingCharacters(in: .whitespaces)
+        XCTAssertGreaterThan(source.utf8.count, 60_000)
+        XCTAssertLessThan(source.count, MarkdownContentRenderingPolicy.maxMarkdownCharacterCount)
+        let result = await MarkdownPresentationWorker.shared.prepare(source)
+        let prepared = try XCTUnwrap(result)
+        XCTAssertNil(prepared.fallbackReason)
+        guard case .markdown(let text, let document) = prepared.pieces.first else {
+            return XCTFail("Expected one canonical prose document")
+        }
+        XCTAssertEqual(prepared.pieces.count, 1)
+        XCTAssertEqual(Array(text.utf8), Array(source.utf8))
+        XCTAssertEqual(Array(document.renderPlainText().utf8), Array(source.utf8))
+        XCTAssertEqual(Array(document.renderHTML().utf8), Array(("<p>" + source + "</p>\n").utf8))
+    }
+
+    func testSixtyKilobyteRichCompletionResolvesLateReferencesAndExactSource() async throws {
+        let paragraph = "[Source][late] **bold text** with café 👩🏽‍💻 and a long answer. "
+        let source = String(repeating: paragraph, count: 810) + "\n\n[late]: https://example.test/reference"
+        XCTAssertGreaterThan(source.utf8.count, 60_000)
+        XCTAssertLessThan(source.count, MarkdownContentRenderingPolicy.maxMarkdownCharacterCount)
+        let result = await MarkdownPresentationWorker.shared.prepare(source)
+        let prepared = try XCTUnwrap(result)
+        XCTAssertNil(prepared.fallbackReason)
+        XCTAssertEqual(Array(prepared.source.utf8), Array(source.utf8))
+        guard case .markdown(let text, let document) = prepared.pieces.first else {
+            return XCTFail("Expected a canonical full Markdown document")
+        }
+        XCTAssertEqual(Array(text.utf8), Array(source.utf8))
+        XCTAssertEqual(document.renderHTML(), MarkdownContent(source).renderHTML())
+        XCTAssertTrue(document.renderHTML().contains("href=\"https://example.test/reference\""))
+    }
+
+    func testLongClosedCodeAndMathMatchCanonicalPreparation() async throws {
+        let code = String(repeating: "let value = \"café 👩🏽‍💻\" // " + String(repeating: "x", count: 90) + "\n", count: 470)
+        let source = "```swift\n" + code + "```\n\n$$x^2 + y^2$$\n\nThe value is $z_1$."
+        XCTAssertGreaterThan(source.utf8.count, 60_000)
+        let result = await MarkdownPresentationWorker.shared.prepare(source)
+        let prepared = try XCTUnwrap(result)
+        XCTAssertNil(prepared.fallbackReason)
+        let expected = MarkdownMathSegmenter.presentation(in: source)
+        XCTAssertEqual(prepared.pieces.count, expected.segments.count)
+        for (actual, segment) in zip(prepared.pieces, expected.segments) {
+            switch (actual, segment) {
+            case (.markdown(let text, let document), .markdown(let expectedText)):
+                XCTAssertEqual(Array(text.utf8), Array(expectedText.utf8))
+                XCTAssertEqual(document.renderHTML(), MarkdownContent(expectedText).renderHTML())
+            case (.math(let text), .displayMath(let expectedText)):
+                XCTAssertEqual(text, expectedText)
+            default: XCTFail("Canonical math boundaries changed")
+            }
+        }
+    }
+
+    func testOversizedCompletionKeepsOriginalFallbackAndSource() async throws {
+        let source = String(repeating: "x", count: 100_000)
+        let result = await MarkdownPresentationWorker.shared.prepare(source)
+        let prepared = try XCTUnwrap(result)
+        XCTAssertEqual(prepared.fallbackReason, .tooManyCharacters)
+        XCTAssertTrue(prepared.pieces.isEmpty)
+        XCTAssertEqual(Array(prepared.source.utf8), Array(source.utf8))
+    }
+}
+
+#if DEBUG
+@MainActor
+private final class CanonicalStreamingMountModel: ObservableObject {
+    @Published var content: String
+    @Published var streaming = true
+    let interaction = MarkdownPresentationInteraction()
+    var prepared: ((String) -> Void)?
+    var committed: ((String) -> Void)?
+    var committedSources: [String] = []
+    init(content: String) { self.content = content }
+}
+
+private struct CanonicalStreamingMountRoot: View {
+    @ObservedObject var model: CanonicalStreamingMountModel
+    var body: some View {
+        MarkdownRenderer(content: model.content, isStreaming: model.streaming,
+            onCanonicalPrepared: { model.prepared?($0) },
+            onCanonicalCommitted: {
+                model.committedSources.append($0)
+                model.committed?($0)
+            })
+            .environment(\.markdownPresentationInteraction, model.interaction)
+    }
+}
+
+@MainActor
+final class CanonicalStreamingMountTests: XCTestCase {
+    func testDetachedReaderKeepsPreparedCompletionUntilBothReaderAndGestureRelease() async throws {
+        let source = String(repeating: "A parked reader keeps **the same words**. ", count: 180)
+        XCTAssertGreaterThan(source.utf8.count, StreamingMarkdownRenderBudget.maximumRichTailUTF8Bytes)
+        let model = CanonicalStreamingMountModel(content: source)
+        let host = UIHostingController(rootView: CanonicalStreamingMountRoot(model: model))
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        host.view.layoutIfNeeded()
+        defer { window.isHidden = true; window.rootViewController = nil }
+
+        model.interaction.isInteracting = true
+        model.interaction.holdsCanonicalPresentation = true
+        let prepared = expectation(description: "Terminal presentation prepared during reader hold")
+        model.prepared = { _ in prepared.fulfill() }
+        model.streaming = false
+        await fulfillment(of: [prepared], timeout: 5)
+        XCTAssertTrue(model.committedSources.isEmpty)
+
+        // Ending the drag must not format the paragraph under a stationary reader.
+        model.interaction.isInteracting = false
+        let correction = source + "\n\nExact correction cafe\u{301} 👩🏽‍💻 العربية."
+        let corrected = expectation(description: "Source correction stays live while reader remains detached")
+        model.prepared = { text in if text.utf8.elementsEqual(correction.utf8) { corrected.fulfill() } }
+        model.content = correction
+        await fulfillment(of: [corrected], timeout: 5)
+        XCTAssertTrue(model.committedSources.isEmpty)
+        XCTAssertEqual(model.interaction.canonicalPreparationCount, 2)
+        XCTAssertEqual(model.interaction.canonicalCommitCount, 0)
+
+        // Conversely, releasing reader ownership must not override a newer gesture.
+        model.interaction.isInteracting = true
+        model.interaction.holdsCanonicalPresentation = false
+        let latest = correction + " Final **canonical** source."
+        let latestPrepared = expectation(description: "Latest correction prepared during newer gesture")
+        model.prepared = { text in if text.utf8.elementsEqual(latest.utf8) { latestPrepared.fulfill() } }
+        model.content = latest
+        await fulfillment(of: [latestPrepared], timeout: 5)
+        XCTAssertTrue(model.committedSources.isEmpty)
+
+        let committed = expectation(description: "Current presentation commits once after both holds release")
+        model.committed = { _ in committed.fulfill() }
+        model.interaction.isInteracting = false
+        await fulfillment(of: [committed], timeout: 5)
+        XCTAssertEqual(model.committedSources.count, 1)
+        XCTAssertEqual(Array(model.committedSources[0].utf8), Array(latest.utf8))
+        XCTAssertEqual(model.interaction.canonicalPreparationCount, 3)
+        XCTAssertEqual(model.interaction.canonicalCommitCount, 1)
+    }
+
+    func testPreparedCompletionWaitsForLiveGestureAndCommitsExactCorrectionOnce() async throws {
+        let source = String(repeating: "A long unfinished paragraph with **formatting**. ", count: 1_250)
+        XCTAssertGreaterThan(source.utf8.count, 60_000)
+        let model = CanonicalStreamingMountModel(content: source)
+        let host = UIHostingController(rootView: CanonicalStreamingMountRoot(model: model))
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        host.view.layoutIfNeeded()
+        defer { window.isHidden = true; window.rootViewController = nil }
+        let prepared = expectation(description: "Canonical completion prepared off main actor")
+        model.prepared = { _ in prepared.fulfill() }
+        model.interaction.isInteracting = true
+        model.streaming = false
+        await fulfillment(of: [prepared], timeout: 10)
+        XCTAssertTrue(model.committedSources.isEmpty, "Preparing must not change a body under an active gesture")
+
+        let correction = "[Exact][ref] cafe\u{301}\n\n[ref]: https://example.test/final"
+        let corrected = expectation(description: "Canonical correction prepared")
+        model.prepared = { text in if text.utf8.elementsEqual(correction.utf8) { corrected.fulfill() } }
+        model.content = correction
+        await fulfillment(of: [corrected], timeout: 5)
+        XCTAssertTrue(model.committedSources.isEmpty)
+        let committed = expectation(description: "Latest canonical source committed once after gesture")
+        model.committed = { _ in committed.fulfill() }
+        model.interaction.isInteracting = false
+        await fulfillment(of: [committed], timeout: 5)
+        XCTAssertEqual(model.committedSources.count, 1)
+        XCTAssertEqual(Array(model.committedSources[0].utf8), Array(correction.utf8))
+    }
+}
+#endif
+
+#if DEBUG
+private enum UnicodeShapingDiagnosticVariant: String, CaseIterable {
+    case literal, attributed, markdown, uiKit
+}
+
+private struct UnicodeShapingDiagnosticLabel: UIViewRepresentable {
+    let source: String
+
+    static var font: UIFont {
+        let system = UIFont.systemFont(ofSize: 16)
+        return system.fontDescriptor.withDesign(.rounded).map { UIFont(descriptor: $0, size: 16) } ?? system
+    }
+
+    func makeUIView(context: Context) -> UILabel {
+        let label = UILabel()
+        label.numberOfLines = 0
+        label.lineBreakMode = .byWordWrapping
+        label.font = Self.font
+        label.textColor = .white
+        label.backgroundColor = .clear
+        return label
+    }
+
+    func updateUIView(_ label: UILabel, context: Context) { label.text = source }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: UILabel, context: Context) -> CGSize? {
+        let width = proposal.width ?? 322
+        return uiView.sizeThatFits(CGSize(width: width, height: CGFloat.greatestFiniteMagnitude))
+    }
+}
+
+private struct UnicodeShapingDiagnosticRoot: View {
+    let source: String
+    let variant: UnicodeShapingDiagnosticVariant
+    let sizeName: String
+
+    private var attributed: AttributedString {
+        var value = AttributedString(source)
+        value.font = .system(size: 16, design: .rounded)
+        value.foregroundColor = .white
+        return value
+    }
+
+    @ViewBuilder private var sample: some View {
+        switch variant {
+        case .literal:
+            Text(verbatim: source).font(.system(size: 16, design: .rounded))
+                .lineSpacing(16 * 0.18)
+        case .attributed:
+            Text(attributed).lineSpacing(16 * 0.18)
+        case .markdown:
+            MarkdownRenderer(content: source)
+        case .uiKit:
+            UnicodeShapingDiagnosticLabel(source: source)
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("\(sizeName) / \(variant.rawValue) / \(source.utf8.count) bytes")
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.cyan)
+            ScrollView {
+                sample
+                    .frame(width: 322, alignment: .topLeading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            }
+            .scrollDisabled(true)
+        }
+        .frame(width: 322, alignment: .topLeading)
+        .padding(.top, 16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(.black)
+        .foregroundStyle(.white)
+        .environment(\.colorScheme, .dark)
+        .dynamicTypeSize(.large)
+    }
+}
+
+@MainActor
+final class CanonicalUnicodeShapingDiagnosticTests: XCTestCase {
+    /// Diagnostic pixels, not an automated assertion that Unicode glyphs are correct.
+    func testShortAndLongMountedUnicodeShaping() async throws {
+        guard ProcessInfo.processInfo.environment["SEMREH_UNICODE_SHAPING_DIAGNOSTIC"] == "1" else {
+            throw XCTSkip("Mounted Unicode shaping images require explicit diagnostic opt-in.")
+        }
+        let span = "A patient reader should keep the same words under their eyes while this single answer grows. Unicode remains exact: café 👩🏽‍💻 العربية. "
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 390, height: 760)
+        window.overrideUserInterfaceStyle = .dark
+        window.backgroundColor = .black
+        defer { window.isHidden = true; window.rootViewController = nil; previousKeyWindow?.makeKey() }
+        var receipts = ["Diagnostic only: source/mount/capture assertions do not establish correct glyph shaping. PNGs are real mounted window drawHierarchy captures, not H264 frames or ImageRenderer views."]
+        for (sizeName, repeats) in [("short", 1), ("long", 128)] {
+            let source = "SEMREH_LONG_PARAGRAPH_START " + String(repeating: span, count: repeats)
+            if sizeName == "long" { XCTAssertEqual(source.utf8.count, 19_740) }
+            var attributed = AttributedString(source)
+            attributed.font = .system(size: 16, design: .rounded)
+            XCTAssertEqual(Array(String(attributed.characters).utf8), Array(source.utf8))
+            XCTAssertEqual(attributed.runs.count, 1, "The explicit-font control must not split Unicode into attribute runs.")
+            let nativeText = NSAttributedString(string: source, attributes: [.font: UnicodeShapingDiagnosticLabel.font])
+            let defaultTypesetter = CTTypesetterCreateWithAttributedStringAndOptions(nativeText, nil)
+            let unboundedTypesetter = CTTypesetterCreateWithAttributedStringAndOptions(nativeText,
+                [kCTTypesetterOptionAllowUnboundedLayout as String: true] as CFDictionary)
+            receipts.append("size=\(sizeName); source_utf8_bytes=\(source.utf8.count); source_utf16_units=\(source.utf16.count); explicit_font_runs=\(attributed.runs.count); default_typesetter=\(defaultTypesetter != nil); unbounded_typesetter=\(unboundedTypesetter != nil)")
+            for variant in UnicodeShapingDiagnosticVariant.allCases {
+                let mountProbe = BoundedMarkdownParagraphMountProbe()
+                let host = UIHostingController(rootView: UnicodeShapingDiagnosticRoot(
+                    source: source, variant: variant, sizeName: sizeName)
+                    .environment(\.boundedParagraphMountProbe, mountProbe))
+                window.rootViewController = host
+                host.view.backgroundColor = .black
+                window.makeKeyAndVisible()
+                host.view.frame = window.bounds
+                host.view.layoutIfNeeded()
+                try await Task.sleep(for: .milliseconds(200))
+                host.view.layoutIfNeeded()
+                XCTAssertTrue(host.view.window === window)
+                if variant == .markdown && sizeName == "long" {
+                    let mounted = try XCTUnwrap(mountProbe.receipts.first,
+                        "The real Markdown paragraph must mount bounded leaves before a visual PASS is considered.")
+                    XCTAssertGreaterThan(mounted.leafCount, 1)
+                    XCTAssertEqual(mounted.textBytes, source.utf8.count - 1)
+                    XCTAssertLessThanOrEqual(mounted.maximumLeafBytes, BoundedMarkdownParagraph.maximumLeafUTF8Bytes)
+                    receipts.append("actual_bounded_mounts=\(mountProbe.receipts.count); text_bytes=\(mounted.textBytes); leaves=\(mounted.leafCount); maximum_leaf_bytes=\(mounted.maximumLeafBytes)")
+                } else {
+                    XCTAssertTrue(mountProbe.receipts.isEmpty)
+                }
+                let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+                    XCTAssertTrue(window.drawHierarchy(in: window.bounds, afterScreenUpdates: true))
+                }
+                let png = try XCTUnwrap(image.pngData())
+                XCTAssertGreaterThan(png.count, 1_024)
+                let attachment = XCTAttachment(data: png, uniformTypeIdentifier: "public.png")
+                attachment.name = "unicode-shaping-\(sizeName)-\(variant.rawValue)"
+                attachment.lifetime = .keepAlways
+                add(attachment)
+                receipts.append("capture=\(sizeName)-\(variant.rawValue); width_points=322; font_points=16; design=rounded; dynamic_type=large; window=\(window.bounds); image_scale=\(image.scale); png_bytes=\(png.count)")
+            }
+        }
+        let receipt = XCTAttachment(string: receipts.joined(separator: "\n"))
+        receipt.name = "unicode-shaping-diagnostic-receipt"
+        receipt.lifetime = .keepAlways
+        add(receipt)
     }
 }
 #endif

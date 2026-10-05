@@ -1392,7 +1392,7 @@ final class ChatTranscriptViewRestoreTests: XCTestCase {
                 return StableViewportRowRevision(
                     message: TranscriptMessage(loadedIndex: index, renderID: ids[index],
                                                anchorID: ids[index], message: message),
-                    latestCompletedAssistantRenderID: nil, outgoingInsertionEvent: nil,
+                    outgoingInsertionEvent: nil,
                     allowsOutgoingMotion: false, reasoningGroups: [], toolCallGroups: [],
                     liveReasoningText: "", liveToolCalls: [], streamingAssistantMessageID: nil,
                     liveTokensPerSecond: nil, localAttachmentPreviews: nil,
@@ -4407,7 +4407,7 @@ final class ChatTranscriptViewRestoreTests: XCTestCase {
             return StableViewportRowRevision(
                 message: TranscriptMessage(loadedIndex: index, renderID: ids[index],
                                            anchorID: ids[index], message: message),
-                latestCompletedAssistantRenderID: nil, outgoingInsertionEvent: nil,
+                outgoingInsertionEvent: nil,
                 allowsOutgoingMotion: false, reasoningGroups: [], toolCallGroups: [],
                 liveReasoningText: "", liveToolCalls: [],
                 streamingAssistantMessageID: active ? ids[6] : nil,
