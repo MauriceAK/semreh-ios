@@ -2449,43 +2449,72 @@ final class ChatScrollPolicyTests: XCTestCase {
 
 }
 
-final class InternalChatRendererPolicyTests: XCTestCase {
-    func testCompiledAvailability() {
-#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
-        XCTAssertTrue(InternalChatRendererPolicy.isAvailable)
-#else
-        XCTAssertFalse(InternalChatRendererPolicy.isAvailable)
-#endif
-    }
-
-    func testDefaultOffPersistenceAndSelectionChangesOnlyOnReopen() throws {
-        let suite = "InternalChatRendererPolicyTests.\(UUID().uuidString)"
+final class ChatSurfacePolicyTests: XCTestCase {
+    func testDefaultSurfaceDoesNotInvertFormerPreviewPreference() throws {
+        let suite = "ChatSurfacePolicyUpgradeTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
-        let firstOpen = InternalChatRendererPolicy.capture(defaults: defaults, arguments: [])
-        XCTAssertFalse(firstOpen)
-        defaults.set(true, forKey: InternalChatRendererPolicy.storageKey)
+        XCTAssertTrue(ChatSurfacePolicy.capture(defaults: defaults, arguments: []))
+        for formerPreviewEnabled in [false, true] {
+            defaults.set(formerPreviewEnabled, forKey: "semreh.experimentalChatRenderer")
+            XCTAssertTrue(ChatSurfacePolicy.capture(defaults: defaults, arguments: []),
+                          "Both previous choices receive the new standard surface on upgrade")
+            XCTAssertEqual(defaults.bool(forKey: "semreh.experimentalChatRenderer"), formerPreviewEnabled)
+            XCTAssertNil(defaults.object(forKey: ChatSurfacePolicy.legacyStorageKey),
+                         "Reading the selection must not rewrite device preferences")
+        }
+    }
+
+    func testLegacyFallbackPersistsAndSelectionChangesOnlyOnReopen() throws {
+        let suite = "ChatSurfacePolicyPersistenceTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let firstOpen = ChatSurfacePolicy.capture(defaults: defaults, arguments: [])
+        XCTAssertTrue(firstOpen)
+        defaults.set(true, forKey: ChatSurfacePolicy.legacyStorageKey)
         let readback = try XCTUnwrap(UserDefaults(suiteName: suite))
-        XCTAssertTrue(readback.bool(forKey: InternalChatRendererPolicy.storageKey))
-        XCTAssertFalse(firstOpen, "Mounted chat retains the captured stable selection")
-        let secondOpen = InternalChatRendererPolicy.capture(defaults: readback, arguments: [])
-        XCTAssertEqual(secondOpen, InternalChatRendererPolicy.isAvailable)
-        defaults.set(false, forKey: InternalChatRendererPolicy.storageKey)
-        XCTAssertEqual(secondOpen, InternalChatRendererPolicy.isAvailable,
-                       "Turning off cannot swap an active transcript")
-        XCTAssertFalse(InternalChatRendererPolicy.capture(defaults: defaults, arguments: []))
+        XCTAssertTrue(readback.bool(forKey: ChatSurfacePolicy.legacyStorageKey))
+        XCTAssertTrue(firstOpen, "Changing the setting must not swap the mounted surface")
+        let secondOpen = ChatSurfacePolicy.capture(defaults: readback, arguments: [])
+        XCTAssertFalse(secondOpen)
+        defaults.set(false, forKey: ChatSurfacePolicy.legacyStorageKey)
+        XCTAssertFalse(secondOpen, "The legacy surface also keeps its captured selection")
+        XCTAssertTrue(ChatSurfacePolicy.capture(defaults: defaults, arguments: []))
     }
 
-    func testLaunchExperimentsRemainDebugOnly() throws {
-        let suite = "InternalChatRendererArgumentsTests.\(UUID().uuidString)"
+    func testExplicitLegacyChoiceTakesPrecedenceOverFormerPreviewPreference() throws {
+        let suite = "ChatSurfacePolicyLegacyTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
-        let selection = InternalChatRendererPolicy.capture(
+        defaults.set(true, forKey: ChatSurfacePolicy.legacyStorageKey)
+        for formerPreviewEnabled in [false, true] {
+            defaults.set(formerPreviewEnabled, forKey: "semreh.experimentalChatRenderer")
+            XCTAssertFalse(ChatSurfacePolicy.capture(defaults: defaults, arguments: []))
+        }
+    }
+
+    func testLaunchOverridesRemainDebugOnlyAndDoNotPersist() throws {
+        let suite = "ChatSurfacePolicyArgumentsTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let legacyOverride = ChatSurfacePolicy.capture(
+            defaults: defaults, arguments: ["--chat-legacy-transcript"])
+#if DEBUG
+        XCTAssertFalse(legacyOverride)
+#else
+        XCTAssertTrue(legacyOverride)
+#endif
+        XCTAssertTrue(ChatSurfacePolicy.capture(defaults: defaults, arguments: []))
+        XCTAssertNil(defaults.object(forKey: ChatSurfacePolicy.legacyStorageKey))
+        defaults.set(true, forKey: ChatSurfacePolicy.legacyStorageKey)
+        let nativeOverride = ChatSurfacePolicy.capture(
             defaults: defaults, arguments: ["--chat-native-transcript-v2"])
 #if DEBUG
-        XCTAssertTrue(selection)
+        XCTAssertTrue(nativeOverride)
 #else
-        XCTAssertFalse(selection)
+        XCTAssertFalse(nativeOverride)
 #endif
+        XCTAssertTrue(defaults.bool(forKey: ChatSurfacePolicy.legacyStorageKey))
+        XCTAssertFalse(ChatSurfacePolicy.capture(defaults: defaults, arguments: []))
     }
 }

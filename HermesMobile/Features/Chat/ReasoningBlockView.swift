@@ -324,6 +324,7 @@ struct ReasoningBlockView: View {
     let isActive: Bool
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.usesMuseChatSurface) private var usesMuseChatSurface
     @AppStorage(ChatTranscriptDisplaySettings.thinkingCardsStartExpandedKey) private var startsExpanded = false
     @State private var userToggledExpansion: Bool?
 #if DEBUG
@@ -344,7 +345,7 @@ struct ReasoningBlockView: View {
 #endif
         return ChatTranscriptDisplaySettings.isCardExpanded(
             userToggled: userToggledExpansion,
-            startsExpanded: startsExpanded
+            startsExpanded: usesMuseChatSurface ? false : startsExpanded
         )
     }
 
@@ -371,7 +372,7 @@ struct ReasoningBlockView: View {
                 }
                 .buttonStyle(.plain)
                 .chatMinimumHitTarget(horizontalPadding: 0, verticalPadding: 5, in: Rectangle())
-                .accessibilityLabel(title)
+                .accessibilityLabel(displayTitle)
                 .accessibilityHint(isExpanded ? "Double tap to collapse details." : "Double tap to expand details.")
 
                 if isExpanded {
@@ -424,12 +425,17 @@ struct ReasoningBlockView: View {
 
     private var header: some View {
         TranscriptActivityDisclosureLabel(
-            title: title,
+            title: displayTitle,
             status: nil,
             isExpanded: isExpanded,
             isActive: isActive,
             isCompact: true
         )
+    }
+
+    private var displayTitle: String {
+        usesMuseChatSurface && title == String(localized: "Thinking")
+            ? String(localized: "Reasoning") : title
     }
 
     private var disclosureTransition: AnyTransition {

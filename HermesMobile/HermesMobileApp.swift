@@ -512,7 +512,7 @@ struct HermesMobileApp: App {
             }
             #else
             Group {
-#if SEMREH_INTERNAL_CHAT_PREVIEW && targetEnvironment(simulator)
+#if targetEnvironment(simulator)
                 if ProcessInfo.processInfo.arguments.contains("--internal-chat-preview-smoke") {
                     InternalChatPreviewSmokeView()
                 } else {
@@ -945,9 +945,25 @@ private struct ChatPerformanceLabView: View {
                                     }
                                     .disabled(nativeRichLifecycleStreaming)
                                     .accessibilityIdentifier("rich30-stream-turn")
+                                    .accessibilityValue(ProcessInfo.processInfo.arguments.contains("--chat-performance-long-reply")
+                                        ? fixture.viewModel.longReplyPerformanceLabStatus : "")
                                     Spacer(minLength: 0)
                                 }
                                 .padding(.vertical, 4)
+                                if ProcessInfo.processInfo.arguments.contains("--chat-performance-long-reply") {
+                                    HStack {
+                                        Button("Finish synthetic reply") {
+                                            fixture.viewModel.requestLongReplyPerformanceLabFinish(cancelled: false)
+                                        }
+                                        .accessibilityIdentifier("long-reply-finish")
+                                        .disabled(fixture.viewModel.longReplyPerformanceLabPhase != "awaiting_terminal")
+                                        Button("Cancel synthetic reply") {
+                                            fixture.viewModel.requestLongReplyPerformanceLabFinish(cancelled: true)
+                                        }
+                                        .accessibilityIdentifier("long-reply-cancel")
+                                        .disabled(!fixture.viewModel.isPerformanceLabStreamingTurnInFlight)
+                                    }
+                                }
                                 chat.environment(\.nativePreparedHighlights, prepared)
                             }
                         }
@@ -2094,6 +2110,15 @@ private struct ChatPerformanceAppWideMonitorHost: View {
                 Button("Stop app-wide cadence monitor") {
                     report = monitor.stopSampling().formattedReport
                     isSampling = false
+                    // Export only for an explicitly identified diagnostic run.
+                    // This does not activate the separate automatic-switch driver.
+                    let prefix = "--chat-performance-invalidation-run-id="
+                    let ids = ProcessInfo.processInfo.arguments.filter { $0.hasPrefix(prefix) }
+                    if let probe = ChatPerformanceInvalidationProbe.shared,
+                       ids.count == 1,
+                       let runID = UUID(uuidString: String(ids[0].dropFirst(prefix.count))) {
+                        probe.write(runID: runID)
+                    }
                 }
                 .accessibilityIdentifier("chat-performance-app-wide-monitor-stop")
             } else if let report {
@@ -2215,8 +2240,8 @@ private struct SidebarBrandLabView: View {
 }
 #endif
 
-#if SEMREH_INTERNAL_CHAT_PREVIEW && targetEnvironment(simulator) && !DEBUG
-/// Signed Release smoke route, compiled only for the internal simulator build.
+#if targetEnvironment(simulator) && !DEBUG
+/// Signed Release smoke route, compiled only for Simulator, never the device app.
 /// Settings and each newly opened chat use their production preference policy.
 @MainActor
 private struct InternalChatPreviewSmokeView: View {

@@ -727,3 +727,147 @@ final class TableCellWidthCapTests: XCTestCase {
         XCTAssertEqual(calls, 3)
     }
 }
+
+final class StreamingLiteralProjectionTests: XCTestCase {
+    func testHundredKilobyteParagraphKeepsLeavesBoundedAndEveryByte() {
+        let source = String(repeating: "A long paragraph keeps growing without a newline. ", count: 2_100)
+        XCTAssertGreaterThan(source.utf8.count, 100_000)
+        var state = StreamingLiteralAccumulator()
+        var previous: [StreamingMarkdownChunk] = []
+        for length in stride(from: 1_013, to: source.utf8.count, by: 1_013) {
+            let next = String(decoding: source.utf8.prefix(length), as: UTF8.self)
+            state.update(next)
+            XCTAssertEqual(Array(state.stableChunks.prefix(previous.count)), previous)
+            XCTAssertTrue(state.stableChunks.allSatisfy { $0.text.count <= StreamingMarkdownRenderBudget.literalLeafCharacters })
+            XCTAssertLessThanOrEqual(state.tail.count, StreamingMarkdownRenderBudget.literalLeafCharacters)
+            XCTAssertEqual(Array((state.stableChunks.map(\.text).joined() + state.tail).utf8), Array(next.utf8))
+            previous = state.stableChunks
+        }
+        state.update(source)
+        XCTAssertEqual(state.appendedUTF8Bytes, source.utf8.count, "Only new suffix bytes enter the projection")
+        XCTAssertEqual(Array((state.stableChunks.map(\.text).joined() + state.tail).utf8), Array(source.utf8))
+    }
+
+    func testCombiningAndZWJArrivalsCannotChangeSealedLeaf() {
+        var state = StreamingLiteralAccumulator()
+        let prefix = String(repeating: "a", count: StreamingMarkdownRenderBudget.literalLeafCharacters)
+        var source = prefix + "e"
+        state.update(source)
+        let stable = state.stableChunks
+        for addition in ["\u{301}", " 👩", "🏽", "\u{200D}", "💻", "\r", "\n"] {
+            source += addition
+            state.update(source)
+            XCTAssertEqual(state.stableChunks, stable)
+            XCTAssertEqual(Array((state.stableChunks.map(\.text).joined() + state.tail).utf8), Array(source.utf8))
+        }
+    }
+
+    func testCanonicalReplacementAndShrinkResetLiteralProjection() {
+        var state = StreamingLiteralAccumulator()
+        state.update(String(repeating: "old ", count: 1_000))
+        state.update("caf\u{e9}")
+        state.update("cafe\u{301}")
+        XCTAssertTrue(state.stableChunks.isEmpty)
+        XCTAssertEqual(Array(state.tail.utf8), Array("cafe\u{301}".utf8))
+        state.update("")
+        XCTAssertEqual(state.source, "")
+        XCTAssertEqual(state.tail, "")
+    }
+
+    func testRichTailBudgetUsesBytesAndBoundsHugeOpenFence() {
+        XCTAssertFalse(StreamingMarkdownRenderBudget.usesLiteralTail(String(repeating: "a", count: 4_096)))
+        XCTAssertTrue(StreamingMarkdownRenderBudget.usesLiteralTail(String(repeating: "a", count: 4_097)))
+        XCTAssertTrue(StreamingMarkdownRenderBudget.usesLiteralTail(String(repeating: "👩🏽‍💻", count: 300)))
+        let fence = "```swift\n" + String(repeating: "let value = 42\n", count: 8_000)
+        var state = StreamingMarkdownBlockAccumulator(preservesRawMath: true)
+        let result = state.update(fence, appendOnly: false)
+        XCTAssertTrue(result.stableChunks.isEmpty)
+        XCTAssertTrue(StreamingMarkdownRenderBudget.usesLiteralTail(result.activeMarkdown))
+        XCTAssertEqual(Array(result.activeMarkdown.utf8), Array(fence.utf8))
+    }
+
+    func testRawMathProtectionKeepsMultilineMathTogetherAndPreservesWhitespace() {
+        var state = StreamingMarkdownBlockAccumulator(preservesRawMath: true)
+        let first = "\n\nIntroduction.\n\n$$\nx + y\n\n"
+        _ = state.update(first, appendOnly: false)
+        let final = first + "z\n$$\n\nFinal words"
+        let result = state.update(final, appendOnly: true)
+        XCTAssertTrue(result.activeMarkdown.contains("$$\nx + y\n\nz\n$$"))
+        XCTAssertEqual(Array((result.stableChunks.map(\.text).joined() + result.activeMarkdown).utf8), Array(final.utf8))
+    }
+}
+
+@MainActor
+final class StreamingRawWhitespaceLayoutTests: XCTestCase {
+    func testRawLeadingAndInterblockWhitespaceDoesNotAddPlaceholderRows() {
+        func height(_ source: String) -> CGFloat {
+            let host = UIHostingController(rootView:
+                StreamingMarkdownRenderer(content: source)
+                    .frame(width: 320, alignment: .leading))
+            host.view.frame = CGRect(x: 0, y: 0, width: 320, height: 2_000)
+            host.view.layoutIfNeeded()
+            return host.sizeThatFits(in: CGSize(width: 320, height: 10_000)).height
+        }
+        let compact = "# Heading\nParagraph being streamed."
+        let spaced = "\n\n# Heading\n\n\nParagraph being streamed."
+        XCTAssertGreaterThan(height(compact), 0)
+        XCTAssertEqual(height(spaced), height(compact), accuracy: 0.5,
+                       "Raw blank chunks must not mount MarkdownRenderer's placeholder Text rows")
+    }
+}
+
+extension StreamingLiteralProjectionTests {
+    func testOrdinaryWordsStayWholeAtLeafBoundaryWithoutLosingSeparators() {
+        let source = String(repeating: "a ", count: 510) + "their eyes stay on these words "
+            + String(repeating: "more words café 👩🏽‍💻 العربية ", count: 150)
+        var state = StreamingLiteralAccumulator()
+        state.update(source)
+        XCTAssertEqual(state.stableChunks.first?.text, String(repeating: "a ", count: 510))
+        XCTAssertTrue(state.stableChunks.allSatisfy { $0.text.last?.isWhitespace == true })
+        XCTAssertTrue(state.stableChunks.allSatisfy { $0.text.count <= StreamingMarkdownRenderBudget.literalLeafCharacters })
+        XCTAssertEqual(Array((state.stableChunks.map(\.text).joined() + state.tail).utf8), Array(source.utf8))
+        let sealed = state.stableChunks
+        state.update(source + " fresh append")
+        XCTAssertEqual(Array(state.stableChunks.prefix(sealed.count)), sealed)
+    }
+
+    func testNearbyCRLFBoundaryIsRetainedOnceWithoutExtraDisplayedNewline() {
+        let firstLine = String(repeating: "word ", count: 180)
+        let source = firstLine + "\r\n" + String(repeating: "next ", count: 80)
+        var state = StreamingLiteralAccumulator()
+        state.update(source)
+        let first = state.stableChunks.first?.text ?? ""
+        XCTAssertEqual(Array(first.utf8), Array((firstLine + "\r\n").utf8))
+        XCTAssertEqual(StreamingLiteralAccumulator.displayText(forSealedLeaf: first), firstLine)
+        XCTAssertEqual(StreamingLiteralAccumulator.displayText(forSealedLeaf: "one\n\n"), "one\n",
+                       "Only the separator supplied by VStack is omitted; intentional blank lines remain")
+        XCTAssertEqual(Array((state.stableChunks.map(\.text).joined() + state.tail).utf8), Array(source.utf8))
+    }
+
+    func testWhitespaceFreeOverlongTokenUsesBoundedGraphemeFallback() {
+        let source = String(repeating: "👩🏽‍💻", count: 2_049)
+        var state = StreamingLiteralAccumulator()
+        state.update(source)
+        XCTAssertEqual(state.stableChunks.map { $0.text.count }, [1_024, 1_024])
+        XCTAssertEqual(state.tail.count, 1)
+        XCTAssertEqual(Array((state.stableChunks.map(\.text).joined() + state.tail).utf8), Array(source.utf8))
+    }
+}
+
+extension StreamingRawWhitespaceLayoutTests {
+    func testSealedCRLFBoundaryDoesNotAddAnotherVisualBlankLine() {
+        let source = String(repeating: "word ", count: 180) + "\r\n" + String(repeating: "next ", count: 80)
+        var state = StreamingLiteralAccumulator()
+        state.update(source)
+        let whole = UIHostingController(rootView: Text(verbatim: source).font(AppFont.body()))
+        let split = UIHostingController(rootView: VStack(alignment: .leading, spacing: 0) {
+            ForEach(state.stableChunks) { chunk in
+                Text(verbatim: StreamingLiteralAccumulator.displayText(forSealedLeaf: chunk.text)).font(AppFont.body())
+            }
+            Text(verbatim: state.tail).font(AppFont.body())
+        })
+        let proposal = CGSize(width: 320, height: 10_000)
+        XCTAssertEqual(split.sizeThatFits(in: proposal).height, whole.sizeThatFits(in: proposal).height, accuracy: 2,
+                       "A leaf separator already supplies the source CRLF; it must not insert a second blank line")
+    }
+}

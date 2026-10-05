@@ -437,7 +437,7 @@ struct ChatView: View {
             ?? (UserDefaults.standard.object(forKey: AppAccent.storageKey) == nil)
     }
     private var internalChatRendererEnabled: Bool {
-        internalChatRendererSelection ?? InternalChatRendererPolicy.capture()
+        internalChatRendererSelection ?? ChatSurfacePolicy.capture()
     }
     private let bottomAnchorID = "chat-bottom-anchor"
     /// Keep ordinary transcript messages separated while compacting adjacent
@@ -576,6 +576,7 @@ struct ChatView: View {
     @State private var composerHeight: CGFloat = 52
     @State private var surfaceHeaderHeight: CGFloat = 96
     @State private var surfaceBottomHeight: CGFloat = 52
+    @State private var surfaceBottomUnderlap: CGFloat = 0
     @State private var showsChatControls = false
     @State private var showsChatFiles = false
     @State private var workspacePickerRequest = 0
@@ -1155,7 +1156,8 @@ struct ChatView: View {
     private var museChatSurface: some View {
         ChatSurfaceLayout(
             onHeaderHeightChange: { surfaceHeaderHeight = $0 },
-            onBottomHeightChange: { surfaceBottomHeight = $0 }
+            onBottomHeightChange: { surfaceBottomHeight = $0 },
+            onBottomUnderlapChange: { surfaceBottomUnderlap = $0 }
         ) {
             messageContent
                 .environment(\.layoutDirection, chatLayoutDirection)
@@ -1488,6 +1490,9 @@ struct ChatView: View {
             .onChange(of: canFocusComposer) { _, canFocus in
                 if canFocus { restoreComposerFocusAfterPreviewIfNeeded() }
             }
+            .onChange(of: composerIsFocused) { _, focused in
+                viewModel.setComposerInteractionActive(focused && effectivePresentationActive)
+            }
     }
 
     var body: some View {
@@ -1600,7 +1605,7 @@ struct ChatView: View {
         // NavigationLink may construct a destination before Settings changes.
         // Capture at first presentation, then retain through covers/backgrounding.
         if internalChatRendererSelection == nil {
-            internalChatRendererSelection = InternalChatRendererPolicy.capture()
+            internalChatRendererSelection = ChatSurfacePolicy.capture()
             museSurfaceDefaultAccentSelection = UserDefaults.standard.object(forKey: AppAccent.storageKey) == nil
         }
         viewModel.setResponsiveStreamingPresentation(internalChatRendererEnabled)
@@ -1883,7 +1888,7 @@ struct ChatView: View {
             transcriptBlockSpacing: transcriptBlockSpacing,
             transcriptTopInsetHeight: internalChatRendererEnabled ? surfaceHeaderHeight : 0,
             transcriptBottomInsetHeight: transcriptBottomInsetHeight,
-            latestButtonBottomInset: internalChatRendererEnabled ? surfaceBottomHeight + 12 : nil,
+            latestButtonBottomInset: internalChatRendererEnabled ? surfaceBottomHeight + surfaceBottomUnderlap + 12 : nil,
             scrollToBottomButtonBottomPadding: scrollToBottomButtonBottomPadding,
             localAttachmentPreviews: viewModel.localAttachmentPreviews,
             listeningMessageID: viewModel.listeningMessageID,
@@ -1949,6 +1954,9 @@ struct ChatView: View {
             },
             scrollMetricPublication: scrollMetricPublication,
             onUpdateScrollMetrics: updateScrollMetrics,
+            onStreamingInteractionChanged: { isInteracting in
+                viewModel.setStreamingInteractionPriority(isInteracting && effectivePresentationActive)
+            },
             onDismissKeyboard: dismissKeyboard,
             onScrollToBottom: { proxy, sameMountedWindow, directlyInteracting, decelerating in
                 scrollToBottom(proxy, sameMountedWindow: sameMountedWindow,
@@ -2122,7 +2130,7 @@ struct ChatView: View {
             hasPendingClarificationPrompt: viewModel.clarificationPrompt != nil,
             liveReasoningText: viewModel.liveReasoningText,
             hasLiveToolCalls: !viewModel.liveToolCalls.isEmpty,
-            showsThinkingAndToolCards: showsThinkingAndToolCards
+            showsThinkingAndToolCards: showsThinkingAndToolCards && !internalChatRendererEnabled
         )
     }
 
@@ -2132,7 +2140,7 @@ struct ChatView: View {
 
     private var transcriptBottomInsetHeight: CGFloat {
         internalChatRendererEnabled
-            ? surfaceBottomHeight + 8
+            ? surfaceBottomHeight + surfaceBottomUnderlap + 8
             : max(96, composerHeight + 44 + composerAccessorySpacerHeight)
     }
 
@@ -2938,12 +2946,14 @@ struct ChatView: View {
         let wasActive = presentationOwnership.isActive
         presentationOwnership.update(isActive: effectivePresentationActive, isSelected: isPresentationActive)
         viewModel.setTranscriptPresentationActive(effectivePresentationActive)
+        viewModel.setComposerInteractionActive(composerIsFocused && effectivePresentationActive)
         if effectivePresentationActive, !wasActive {
             onPresentationActivation?()
             applyInitialComposerFocusPolicyIfNeeded()
             restoreComposerFocusAfterPreviewIfNeeded()
         }
         guard !effectivePresentationActive else { return }
+        viewModel.setStreamingInteractionPriority(false)
         composerIsFocused = false
         // Scene inactivity and full-screen covers suspend effects, not ownership.
         if !isPresentationActive {

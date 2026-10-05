@@ -2046,6 +2046,60 @@ final class ChatViewModelSendTests: XCTestCase {
     }
 
     @MainActor
+    func testAlreadyStreamedInterimRecoversReasoningOnlyRowWithoutLosingItsAnchor() throws {
+        let interim = "  Got it, looking into that. 👋\n"
+        let reasoning = "Inspect the workspace.\n"
+        for emptyBody in ["", " \n"] {
+            let viewModel = try makeDirectRendererViewModel()
+            viewModel.handleDirectEventForTesting(directEvent(type: "message.start", sequence: 1))
+            viewModel.handleDirectEventForTesting(directEvent(type: "reasoning.delta", sequence: 2,
+                payload: ["text": .string(reasoning)]))
+            viewModel.handleDirectEventForTesting(directEvent(type: "message.delta", sequence: 3,
+                payload: ["text": .string(emptyBody)]))
+            viewModel.flushPendingStreamingContent()
+            let reasoningRowID = try XCTUnwrap(viewModel.reasoningAnchorMessageID)
+
+            viewModel.handleDirectEventForTesting(directEvent(type: "message.interim", sequence: 4,
+                payload: ["text": .string(interim), "already_streamed": .bool(true)]))
+            XCTAssertEqual(viewModel.messages.count, 1)
+            XCTAssertEqual(viewModel.messages.first?.messageId, reasoningRowID)
+            XCTAssertEqual(Array((viewModel.messages.first?.content ?? "").utf8), Array(interim.utf8))
+            XCTAssertEqual(viewModel.reasoningAnchorMessageID, reasoningRowID)
+            XCTAssertEqual(viewModel.liveReasoningText, reasoning)
+
+            viewModel.handleDirectEventForTesting(directEvent(type: "message.complete", sequence: 5,
+                payload: ["text": .string("Final answer")]))
+            XCTAssertEqual(assistantContents(in: viewModel), [interim, "Final answer"])
+            XCTAssertEqual(viewModel.messages.count, 2, "The recovered seal must reuse the reasoning row.")
+            XCTAssertEqual(viewModel.messages.first?.messageId, reasoningRowID)
+            XCTAssertNil(viewModel.reasoningAnchorMessageID)
+            XCTAssertTrue(viewModel.liveReasoningText.isEmpty)
+            XCTAssertEqual(viewModel.messages.first?.reasoning, reasoning)
+            XCTAssertEqual(viewModel.displayedReasoningGroups.count, 1)
+        }
+    }
+
+    @MainActor
+    func testAlreadyStreamedInterimCompletesExactPrefixWithoutDuplicatingOrMergingDivergentBody() throws {
+        let seal = "Got it, looking into that. 👋\n"
+        for streamed in ["Got it,", seal, "Different commentary"] {
+            let viewModel = try makeDirectRendererViewModel()
+            viewModel.handleDirectEventForTesting(directEvent(type: "message.start", sequence: 1))
+            viewModel.handleDirectEventForTesting(directEvent(type: "message.delta", sequence: 2,
+                payload: ["text": .string(streamed)]))
+            viewModel.handleDirectEventForTesting(directEvent(type: "message.interim", sequence: 3,
+                payload: ["text": .string(seal), "already_streamed": .bool(true)]))
+            viewModel.handleDirectEventForTesting(directEvent(type: "message.complete", sequence: 4,
+                payload: ["text": .string("Final answer")]))
+
+            let expectedInterim = seal.hasPrefix(streamed) ? seal : streamed
+            XCTAssertEqual(assistantContents(in: viewModel), [expectedInterim, "Final answer"])
+            XCTAssertEqual(Array((viewModel.messages.first?.content ?? "").utf8), Array(expectedInterim.utf8))
+            XCTAssertEqual(viewModel.messages.count, 2)
+        }
+    }
+
+    @MainActor
     func testUnstreamedInterimIsAddedAndSealedBeforeDifferentFinal() throws {
         let viewModel = try makeDirectRendererViewModel()
         viewModel.handleDirectEventForTesting(directEvent(type: "message.start", sequence: 1))
@@ -2182,6 +2236,109 @@ final class ChatViewModelSendTests: XCTestCase {
         ])
         viewModel.flushPendingStreamingContent()
         XCTAssertEqual(viewModel.messages.last?.content, "Authoritative")
+    }
+
+    @MainActor
+    func testStatusOnlyTerminalRetainsExactProviderReasoningAndCachesItWithoutStatusOrInterim() throws {
+        let reasoning = "  Provider plan cafe\u{301} 🧑‍💻\r\nKeep each byte.\n"
+        let body = "An unchanged partial answer.\n"
+        for status in ["complete", "cancelled", "error"] {
+            let context = try makeContext()
+            let viewModel = try makeViewModel(directLoad: true) { request in
+                XCTFail("Terminal renderer must not issue HTTP: \(request)")
+                throw URLError(.badURL)
+            }
+            viewModel.seedTranscriptForTesting([
+                ChatMessage(role: "user", content: "Inspect", timestamp: 1, messageId: "user-1")
+            ])
+            viewModel.handleDirectEventForTesting(directEvent(type: "message.start", sequence: 1))
+            viewModel.handleDirectEventForTesting(directEvent(type: "thinking.delta", sequence: 2,
+                payload: ["text": .string("Transient status")]))
+            viewModel.handleDirectEventForTesting(directEvent(type: "message.interim", sequence: 3,
+                payload: ["text": .string("Got it, looking into that."), "already_streamed": .bool(false)]))
+            viewModel.handleDirectEventForTesting(directEvent(type: "reasoning.delta", sequence: 4,
+                payload: ["text": .string(reasoning)]))
+            viewModel.handleDirectEventForTesting(directEvent(type: "message.delta", sequence: 5,
+                payload: ["text": .string(body)]))
+            let bodyID = try XCTUnwrap(viewModel.streamingAssistantMessageID)
+            var terminalPayload: [String: JSONValue] = ["status": .string(status)]
+            if status == "error" { terminalPayload["error"] = .string("Provider stopped") }
+            viewModel.handleDirectEventForTesting(directEvent(type: "message.complete", sequence: 6,
+                payload: terminalPayload))
+
+            let retained = try XCTUnwrap(viewModel.messages.first { $0.messageId == bodyID })
+            XCTAssertEqual(Array((retained.reasoning ?? "").utf8), Array(reasoning.utf8))
+            XCTAssertEqual(retained.content, body)
+            XCTAssertEqual(viewModel.displayedReasoningGroups.count, 1)
+            XCTAssertEqual(viewModel.displayedReasoningGroups.first?.anchorMessageID, bodyID)
+            XCTAssertTrue(viewModel.liveReasoningText.isEmpty)
+            XCTAssertNil(viewModel.reasoningAnchorMessageID)
+            XCTAssertNil(viewModel.streamingActivityStatus)
+            XCTAssertEqual(assistantContents(in: viewModel), ["Got it, looking into that.", body])
+
+            let snapshot = viewModel.messages
+            viewModel.handleDirectEventForTesting(directEvent(type: "message.complete", sequence: 7,
+                payload: terminalPayload))
+            XCTAssertEqual(viewModel.messages, snapshot, "Repeated terminal must not duplicate reasoning or rows")
+            XCTAssertEqual(viewModel.displayedReasoningGroups.count, 1)
+            viewModel.cacheCompletedResponse(modelContext: context)
+            let cached = try CacheStore.cachedMessages(serverURL: URL(string: "https://example.test")!,
+                sessionID: "direct:7:default:session-abc", in: context)
+            XCTAssertEqual(Array((cached.first { $0.messageId == bodyID }?.reasoning ?? "").utf8), Array(reasoning.utf8))
+            XCTAssertEqual(ChatViewModel.reasoningDisplayGroups(messages: cached, archivedGroups: []).count, 1)
+
+            viewModel.seedTranscriptForTesting(snapshot + [
+                ChatMessage(role: "user", content: "Next turn", timestamp: 2, messageId: "user-2")
+            ])
+            viewModel.handleDirectEventForTesting(directEvent(type: "message.start", sequence: 8))
+            viewModel.handleDirectEventForTesting(directEvent(type: "thinking.delta", sequence: 9,
+                payload: ["text": .string("New status")]))
+            viewModel.handleDirectEventForTesting(directEvent(type: "message.delta", sequence: 10,
+                payload: ["text": .string("Next answer")]))
+            viewModel.handleDirectEventForTesting(directEvent(type: "message.complete", sequence: 11,
+                payload: ["status": .string("complete")]))
+            XCTAssertNil(viewModel.messages.last?.reasoning, "Prior reasoning and new status must not enter the next answer")
+            XCTAssertEqual(viewModel.messages.compactMap(\.reasoning), [reasoning])
+            XCTAssertEqual(viewModel.displayedReasoningGroups.first?.anchorMessageID, bodyID)
+        }
+    }
+
+    @MainActor
+    func testExplicitTextlessTerminalReasoningReplacesLiveFallbackOnTheSameRow() throws {
+        let viewModel = try makeDirectRendererViewModel()
+        viewModel.handleDirectEventForTesting(directEvent(type: "message.start", sequence: 1))
+        viewModel.handleDirectEventForTesting(directEvent(type: "reasoning.delta", sequence: 2,
+            payload: ["text": .string("Partial provider draft")]))
+        viewModel.handleDirectEventForTesting(directEvent(type: "message.delta", sequence: 3,
+            payload: ["text": .string("Visible body stays exact.\n")]))
+        let bodyID = try XCTUnwrap(viewModel.streamingAssistantMessageID)
+        let explicit = "  Final provider reasoning.\r\n"
+        viewModel.handleDirectEventForTesting(directEvent(type: "message.complete", sequence: 4,
+            payload: ["status": .string("complete"), "reasoning": .string(explicit)]))
+        XCTAssertEqual(viewModel.messages.count, 1)
+        XCTAssertEqual(viewModel.messages.first?.messageId, bodyID)
+        XCTAssertEqual(viewModel.messages.first?.content, "Visible body stays exact.\n")
+        XCTAssertEqual(Array((viewModel.messages.first?.reasoning ?? "").utf8), Array(explicit.utf8))
+        XCTAssertEqual(viewModel.displayedReasoningGroups.map(\.text), ["Final provider reasoning."])
+        XCTAssertTrue(viewModel.liveReasoningText.isEmpty)
+    }
+
+    @MainActor
+    func testReasoningOnlyTerminalOwnsANewRowInsteadOfAttachingToPriorAnswer() throws {
+        let viewModel = try makeDirectRendererViewModel()
+        let previous = ChatMessage(role: "assistant", content: "Prior answer", timestamp: 1, messageId: "prior")
+        viewModel.seedTranscriptForTesting([previous])
+        viewModel.handleDirectEventForTesting(directEvent(type: "message.start", sequence: 1))
+        let payload: [String: JSONValue] = ["status": .string("complete"), "reasoning": .string("Provider reasoning only")]
+        viewModel.handleDirectEventForTesting(directEvent(type: "message.complete", sequence: 2, payload: payload))
+        XCTAssertEqual(viewModel.messages.count, 2)
+        XCTAssertEqual(viewModel.messages.first, previous)
+        XCTAssertEqual(viewModel.messages.last?.content, "")
+        XCTAssertEqual(viewModel.messages.last?.reasoning, "Provider reasoning only")
+        let snapshot = viewModel.messages
+        viewModel.handleDirectEventForTesting(directEvent(type: "message.complete", sequence: 3, payload: payload))
+        XCTAssertEqual(viewModel.messages, snapshot)
+        XCTAssertEqual(viewModel.displayedReasoningGroups.count, 1)
     }
 
     @MainActor

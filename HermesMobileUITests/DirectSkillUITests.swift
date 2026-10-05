@@ -2,6 +2,7 @@ import XCTest
 import UIKit
 import UniformTypeIdentifiers
 import CoreFoundation
+import CryptoKit
 
 private final class P09CalibrationSignal {
     let expectation = XCTestExpectation(description: "P09 automatic request paused before dispatch")
@@ -44,6 +45,601 @@ private enum P09CalibrationGeometry {
 }
 
 final class DirectSkillUITests: XCTestCase {
+    private var containedOriginalMuseSurface: Bool?
+
+    @MainActor
+    func testOptInLongGrowingReplyReaderKeyboardCompletionAndReopen() throws {
+        try exerciseLongGrowingReply(cancelled: false)
+    }
+
+    @MainActor
+    func testOptInLongGrowingReplySyntheticCancellationAndReopen() throws {
+        try exerciseLongGrowingReply(cancelled: true)
+    }
+
+    @MainActor
+    func testOptInLongGrowingReplyCanonicalLatestCallbackDiagnostic() throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SEMREH_CANONICAL_LATEST_CALLBACK_DIAGNOSTIC"] == "1" else {
+            throw XCTSkip("The partial canonical Latest callback diagnostic requires explicit opt-in.")
+        }
+        guard environment["SEMREH_LONG_REPLY_UI"] == "1",
+              environment["SEMREH_LONG_REPLY_RICH_FINAL"] == "1" else {
+            return XCTFail("The callback diagnostic requires the existing bounded rich long-reply fixture.")
+        }
+        try exerciseLongGrowingReply(cancelled: false, callbackDiagnostic: true)
+    }
+
+    /// Local direct-event fixture only. Actual Stop RPC remains a separate
+    /// approved-backend gate; these controls inject a synthetic terminal event.
+    @MainActor
+    private func exerciseLongGrowingReply(cancelled: Bool, callbackDiagnostic: Bool = false) throws {
+        guard ProcessInfo.processInfo.environment["SEMREH_LONG_REPLY_UI"] == "1" else {
+            throw XCTSkip("Long single-answer UI acceptance requires explicit local-fixture opt-in.")
+        }
+        continueAfterFailure = false
+        let richFinal = ProcessInfo.processInfo.environment["SEMREH_LONG_REPLY_RICH_FINAL"] == "1"
+        let app = XCUIApplication()
+        app.launchArguments = ["--chat-performance-rich30-back-lab", "--chat-performance-long-reply",
+            "--chat-rich-native-code-text", "--chat-viewport-follow-latest-open",
+            "--composer-test-fresh-draft", "--chat-performance-signposts"]
+        if richFinal { app.launchArguments.append("--chat-performance-rich-long-reply") }
+        if callbackDiagnostic {
+            app.launchArguments.append("--chat-performance-app-wide-monitor")
+            if let raw = ProcessInfo.processInfo.environment["SEMREH_INVALIDATION_RUN_ID"] {
+                let runID = try XCTUnwrap(UUID(uuidString: raw), "Diagnostic run identity must be a UUID.")
+                app.launchArguments += ["--chat-performance-invalidation-probe",
+                    "--chat-performance-invalidation-run-id=\(runID.uuidString)"]
+            }
+        }
+        // No preview argument or renderer preference override: exercise the new default.
+        app.terminate()
+        app.launch()
+        defer { app.terminate(); UIPasteboard.general.items = [] }
+        let open = app.buttons["Open rich30 chat"].firstMatch
+        XCTAssertTrue(open.waitForExistence(timeout: 15) && open.isHittable)
+        open.tap()
+        requireSelectedChatSurface(in: app, muse: true)
+        let transcript = app.collectionViews["chat-native-transcript-v2"]
+        let stream = app.buttons["rich30-stream-turn"]
+        XCTAssertTrue(stream.waitForExistence(timeout: 10) && stream.isEnabled && stream.isHittable)
+        var receipts: [String] = ["Scope: synthetic gateway events through production buffering/rendering; no live transport or Stop RPC; callback timing is not compositor FPS."]
+        if callbackDiagnostic {
+            receipts.append("PARTIAL DIAGNOSTIC: rich completion through Latest only; exits before prose scrolling, Select Text, Copy, and warm reopen. Aggregate main-loop callback gaps include setup/typing/streaming; no native arrow phase attribution or FPS claim.")
+        }
+        defer {
+            let attachment = XCTAttachment(string: receipts.joined(separator: "\n"))
+            attachment.name = callbackDiagnostic ? "long-rich-latest-partial-diagnostic-receipt"
+                : cancelled ? "long-reply-cancel-receipt" : richFinal ? "rich-long-reply-complete-receipt" : "long-reply-complete-receipt"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+        let monitorStop = app.buttons["chat-performance-app-wide-monitor-stop"]
+        if callbackDiagnostic {
+            XCTAssertTrue(monitorStop.waitForExistence(timeout: 10) && monitorStop.isEnabled && monitorStop.isHittable)
+        }
+        func diagnosticClearance(_ frame: CGRect, phase: String) {
+            guard callbackDiagnostic else { return }
+            let overlay = monitorStop.frame
+            receipts.append("diagnostic-clearance \(phase): gestureOrControl=\(frame); monitor=\(overlay)")
+            let valid = [frame, overlay].allSatisfy {
+                !$0.isEmpty && !$0.isNull && !$0.isInfinite
+                    && [$0.minX, $0.minY, $0.width, $0.height].allSatisfy(\.isFinite)
+            } && !frame.intersects(overlay.insetBy(dx: -4, dy: -4))
+            if !valid { retainPreviewScreenshot("Latest diagnostic overlay clearance failure", app: app) }
+            XCTAssertTrue(valid && monitorStop.isHittable,
+                          "The diagnostic monitor must not intercept this actual gesture or control.")
+        }
+        func status() -> [String: Any] {
+            guard let raw = stream.value as? String, let data = raw.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
+            return json
+        }
+        func waitUntil(_ description: String, timeout: TimeInterval = 12, _ predicate: @escaping () -> Bool) {
+            let result = XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+                predicate: NSPredicate { _, _ in predicate() }, object: nil)], timeout: timeout)
+            if result != .completed {
+                // XCTest can stop this test before Swift's deferred attachment
+                // runs. Retain bounded actual AX evidence before the assertion.
+                let rawStatus = String((stream.value as? String ?? "missing").prefix(4_096))
+                let rawProbe = String((app.staticTexts["chat-native-transcript-v2"].firstMatch.value as? String ?? "missing").prefix(4_096))
+                let attachment = XCTAttachment(string: description + "\nstatus=" + rawStatus
+                    + "\nviewport_probe=" + rawProbe + "\n" + receipts.suffix(3).joined(separator: "\n"))
+                attachment.name = "long-reply-predicate-failure"
+                attachment.lifetime = .keepAlways
+                add(attachment)
+                print("SEMREH_LONG_REPLY predicate_failure status=\(rawStatus)")
+                retainPreviewScreenshot("Long reply predicate failure", app: app)
+            }
+            XCTAssertEqual(result, .completed, description)
+        }
+        func record(_ phase: String, _ body: XCUIElement? = nil) {
+            let frame = body?.frame ?? .zero
+            let compact = stream.value as? String ?? "missing"
+            receipts.append("\(phase): uptime=\(ProcessInfo.processInfo.systemUptime); body=\(frame); viewport=\(transcript.frame); \(compact)")
+        }
+        func viewportStatus() -> [String: String] {
+            let probe = app.staticTexts["chat-native-transcript-v2"].firstMatch
+            return (probe.value as? String ?? "").split(separator: ";").reduce(into: [:]) { fields, field in
+                let pair = field.split(separator: "=", maxSplits: 1)
+                if pair.count == 2 { fields[String(pair[0])] = String(pair[1]) }
+            }
+        }
+        func readableRegion() throws -> CGRect {
+            let fields = viewportStatus()
+            let top = try XCTUnwrap(fields["surfaceTop"].flatMap(Double.init))
+            let bottom = try XCTUnwrap(fields["surfaceBottom"].flatMap(Double.init))
+            XCTAssertTrue(top.isFinite && bottom.isFinite && top > 0 && bottom > 0)
+            let viewport = transcript.frame.intersection(app.windows.firstMatch.frame)
+            let header = app.descendants(matching: .any).matching(identifier: "muse-chat-header").firstMatch.frame
+            let dock = app.descendants(matching: .any).matching(identifier: "muse-chat-dock").firstMatch.frame
+            let minY = max(viewport.minY + CGFloat(top), header.maxY)
+            let maxY = min(viewport.maxY - CGFloat(bottom), dock.minY)
+            let region = CGRect(x: viewport.minX, y: minY, width: viewport.width, height: maxY - minY)
+            XCTAssertGreaterThan(region.height, 60)
+            return region
+        }
+        func assertBodyReadable(_ body: XCUIElement, region: CGRect) {
+            let frame = body.frame
+            XCTAssertTrue(body.exists && frame.minY.isFinite && frame.maxY.isFinite && frame.height > 0)
+            XCTAssertGreaterThan(frame.intersection(region).height, 40,
+                                 "The growing answer must remain rendered in the readable viewport.")
+        }
+        if callbackDiagnostic { diagnosticClearance(stream.frame, phase: "stream") }
+        stream.tap()
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "assistant-waiting-indicator")
+            .firstMatch.waitForExistence(timeout: 5), "The initial waiting state must show the subtle assistant indicator.")
+        let interimText = "Got it — I will work through this carefully. SEMREH_LONG_INTERIM"
+        let interimBubble = app.staticTexts.matching(NSPredicate(format: "label == %@", interimText)).firstMatch
+        XCTAssertTrue(interimBubble.waitForExistence(timeout: 8) && interimBubble.isHittable,
+                      "A genuine message.interim event must remain a visible assistant bubble.")
+        waitUntil("The fixture must publish a genuinely tall single answer.", timeout: 15) {
+            (status()["published_utf8_bytes"] as? Int ?? 0) >= 12_000
+        }
+        let initial = status()
+        XCTAssertGreaterThan(initial["source_utf8_bytes"] as? Int ?? 0, richFinal ? 60_000 : 90_000)
+        if richFinal {
+            XCTAssertLessThan(initial["source_characters"] as? Int ?? Int.max, 80_000,
+                              "This variant must finish below the rich-rendering size fallback threshold.")
+        } else {
+            XCTAssertGreaterThan(initial["source_characters"] as? Int ?? 0, 80_000)
+        }
+        let bodyID = try XCTUnwrap(initial["body_id"] as? String)
+        let body = transcript.staticTexts["message-row:\(bodyID)"]
+        XCTAssertTrue(body.waitForExistence(timeout: 5))
+        let region = try readableRegion()
+        let readerX = callbackDiagnostic ? region.maxX - 12 : region.midX
+        if callbackDiagnostic {
+            diagnosticClearance(CGRect(x: readerX - 2, y: region.minY + region.height * 0.2,
+                                       width: 4, height: region.height * 0.6), phase: "park-reader-gutter")
+        }
+        let start = app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: readerX, dy: region.minY + region.height * 0.2))
+        let end = app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: readerX, dy: region.minY + region.height * 0.8))
+        start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0)
+        let latest = app.buttons["Scroll to latest message"]
+        waitUntil("Dragging within the growing answer must detach the reader.") { latest.exists && latest.isHittable }
+        assertBodyReadable(body, region: region)
+        XCTAssertLessThan(body.frame.minY, region.minY - 100,
+                          "The anchor must lie inside this answer, not on an older message.")
+        XCTAssertGreaterThan(body.frame.maxY, region.maxY + 40)
+        let beforeFrame = body.frame
+        let beforeReceived = status()["received_characters"] as? Int ?? 0
+        let beforePublished = status()["published_utf8_bytes"] as? Int ?? 0
+        record("parked-inside-answer", body)
+        waitUntil("New bursts must arrive while the reader stays inside the same answer.", timeout: 10) {
+            (status()["received_characters"] as? Int ?? 0) >= beforeReceived + 4_000
+                && (status()["published_utf8_bytes"] as? Int ?? 0) > beforePublished
+        }
+        assertBodyReadable(body, region: region)
+        XCTAssertLessThanOrEqual(abs(body.frame.minY - beforeFrame.minY), 24,
+                                 "Appending below an intra-answer reader must preserve the same reading offset.")
+        record("same-answer-after-bursts", body)
+        retainPreviewScreenshot("Long reply parked while growing", app: app)
+
+        if !cancelled {
+            let composer = app.textViews["chat-composer-input"]
+            XCTAssertTrue(composer.exists && composer.isEnabled && composer.isHittable)
+            XCTAssertEqual(status()["phase"] as? String, "streaming", "Typing must overlap real synthetic arrivals.")
+            if callbackDiagnostic { diagnosticClearance(composer.frame, phase: "focus-composer") }
+            composer.tap()
+            XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+            let typedAt = ProcessInfo.processInfo.systemUptime
+            let receivedBeforeTyping = status()["received_characters"] as? Int ?? 0
+            let streamingDraft = "Responsive draft\nwhile one answer grows, I can keep typing a complete thought without losing focus or any characters."
+            composer.typeText(streamingDraft)
+            XCTAssertEqual(composer.value as? String, streamingDraft)
+            XCTAssertGreaterThan(status()["received_characters"] as? Int ?? 0, receivedBeforeTyping,
+                                 "New reply data must arrive during the actual keyboard typing action.")
+            receipts.append("typing-action-seconds=\(ProcessInfo.processInfo.systemUptime - typedAt); XCTest action duration, not touch-to-present latency")
+            XCTAssertTrue(composer.isHittable && app.keyboards.firstMatch.exists)
+            assertBodyReadable(body, region: try readableRegion())
+            record("typed-during-stream", body)
+            // Native interactive dismissal follows the finger offscreen. One
+            // continuous pan must cross the keyboard, not end above the dock.
+            let keyboardRegion = try readableRegion()
+            let keyboardWindow = app.windows.firstMatch.frame
+            let keyboardFrame = app.keyboards.firstMatch.frame
+            let keyboardX = callbackDiagnostic ? keyboardRegion.maxX - 12 : keyboardRegion.midX
+            let startPoint = CGPoint(x: keyboardX, y: keyboardRegion.minY + 20)
+            let endPoint = CGPoint(x: keyboardX, y: keyboardWindow.maxY - 8)
+            if callbackDiagnostic {
+                diagnosticClearance(CGRect(x: keyboardX - 2, y: startPoint.y,
+                                           width: 4, height: endPoint.y - startPoint.y), phase: "dismiss-keyboard-gutter")
+            }
+            let nativeKeyboard = app.staticTexts["chat-native-transcript-v2"].firstMatch.value as? String ?? "missing"
+            let geometry = "start=\(startPoint); end=\(endPoint); readable=\(keyboardRegion); window=\(keyboardWindow); AXkeyboard=\(keyboardFrame); native=\(nativeKeyboard)"
+            let gestureReceipt = XCTAttachment(string: geometry)
+            gestureReceipt.name = "long-reply-keyboard-dismiss-gesture"
+            gestureReceipt.lifetime = .keepAlways
+            add(gestureReceipt)
+            receipts.append("keyboard-dismiss: " + geometry)
+            XCTAssertTrue(endPoint.y.isFinite && endPoint.y > keyboardFrame.minY
+                && endPoint.y < keyboardWindow.maxY,
+                "The one delivered interactive pan must cross the occupied keyboard toward the window bottom.")
+            let dismissStart = app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: startPoint.x, dy: startPoint.y))
+            let dismissEnd = app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: endPoint.x, dy: endPoint.y))
+            dismissStart.press(forDuration: 0.05, thenDragTo: dismissEnd, withVelocity: .slow, thenHoldForDuration: 0)
+            XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5))
+        }
+        let terminal = app.buttons[cancelled ? "long-reply-cancel" : "long-reply-finish"]
+        if cancelled {
+            let beforeCancel = status()
+            XCTAssertLessThan(beforeCancel["received_characters"] as? Int ?? 0,
+                              beforeCancel["source_characters"] as? Int ?? 0,
+                              "The synthetic cancellation must interrupt an incomplete answer.")
+        } else {
+            waitUntil("Every burst must arrive before synthetic completion.", timeout: 35) {
+                status()["phase"] as? String == "awaiting_terminal"
+            }
+        }
+        // Capture a real visible literal leaf, including its occurrence when
+        // repeated prose has the same text. A stable row origin alone cannot
+        // detect a canonical rewrap moving the words inside that row.
+        waitUntil("The reader must be stationary and detached before terminal geometry is captured.") {
+            let probe = viewportStatus()
+            return probe["state"] == "reading" && probe["motion"] == "idle"
+                && probe["tracking"] == "false" && probe["dragging"] == "false"
+                && probe["decelerating"] == "false" && probe["streamInteraction"] == "false"
+                && probe["canonicalHold"] == "true"
+        }
+        let terminalRegion = try readableRegion()
+        let beforeTerminalFrame = body.frame
+        let beforeCanonicalPrepared = try XCTUnwrap(viewportStatus()["canonicalPrepared"].flatMap(Int.init))
+        let beforeCanonicalCommitted = try XCTUnwrap(viewportStatus()["canonicalCommitted"].flatMap(Int.init))
+        var literalLeaves: [(text: String, frame: CGRect)] = []
+        func collectLiteralLeaves(_ node: XCUIElementSnapshot) {
+            if node.elementType == .staticText && node.children.isEmpty {
+                literalLeaves.append((node.label, node.frame))
+            }
+            for child in node.children { collectLiteralLeaves(child) }
+        }
+        collectLiteralLeaves(try body.snapshot())
+        let visibleLeafIndex = try XCTUnwrap(literalLeaves.indices.filter {
+            let leaf = literalLeaves[$0]
+            return leaf.text.count > 80 && leaf.text.count <= 1_024
+                && leaf.frame.minY.isFinite && leaf.frame.height.isFinite
+                && leaf.frame.intersection(terminalRegion).height > 40
+        }.min { abs(literalLeaves[$0].frame.midY - terminalRegion.midY)
+            < abs(literalLeaves[$1].frame.midY - terminalRegion.midY) },
+            "The detached reader must be looking at a bounded literal leaf before completion.")
+        let beforeTerminalLeaf = literalLeaves[visibleLeafIndex]
+        let leafOccurrence = literalLeaves[..<visibleLeafIndex].filter { $0.text == beforeTerminalLeaf.text }.count
+        let literalHash = SHA256.hash(data: Data(beforeTerminalLeaf.text.utf8)).map { String(format: "%02x", $0) }.joined()
+        XCTAssertTrue(latest.exists && latest.isHittable,
+                      "Completion must be scored while the reader remains detached.")
+        XCTAssertTrue(terminal.exists && terminal.isEnabled && terminal.isHittable)
+        if callbackDiagnostic { diagnosticClearance(terminal.frame, phase: "finish-synthetic-reply") }
+        terminal.tap()
+        waitUntil("The requested terminal state must flush the exact received source.") {
+            status()["phase"] as? String == (cancelled ? "cancelled" : "complete")
+        }
+        let completed = status()
+        XCTAssertEqual(completed["exact_source"] as? Bool, true)
+        XCTAssertEqual(completed["interim_retained_count"] as? Int, 1)
+        let expectedHash = try XCTUnwrap(completed["expected_sha256"] as? String)
+        let expectedBytes = try XCTUnwrap(completed["expected_utf8_bytes"] as? Int)
+        XCTAssertGreaterThan(expectedBytes, 12_000)
+        if cancelled {
+            XCTAssertLessThan(expectedBytes, try XCTUnwrap(completed["source_utf8_bytes"] as? Int),
+                              "The actual cancelled reply must retain an incomplete source prefix.")
+        }
+        XCTAssertFalse(app.buttons["assistant-response-copy"].exists,
+                       "Completion must not insert an inline Copy footer.")
+        XCTAssertFalse(app.descendants(matching: .any).matching(identifier: "assistant-waiting-indicator").firstMatch.exists)
+        waitUntil("Completed formatting must stay held for a detached reader after the real gesture ends.") {
+            let probe = viewportStatus()
+            return probe["inputStreaming"] == "false" && probe["streamInteraction"] == "false"
+                && probe["markdownInteraction"] == "false" && probe["canonicalHold"] == "true"
+                && probe["canonicalBlocked"] == "true"
+                && (probe["canonicalPrepared"].flatMap(Int.init) ?? 0) > beforeCanonicalPrepared
+        }
+        XCTAssertEqual(viewportStatus()["canonicalCommitted"].flatMap(Int.init), beforeCanonicalCommitted,
+                       "Prepared canonical formatting must not replace the detached reader's visible text.")
+        XCTAssertTrue(latest.exists && latest.isHittable)
+        // Match the same leaf-only snapshot domain on both sides; an AX wrapper
+        // with an identical label must not change the occurrence index.
+        literalLeaves.removeAll(keepingCapacity: true)
+        collectLiteralLeaves(try body.snapshot())
+        let matchingLeaves = literalLeaves.filter { $0.text == beforeTerminalLeaf.text }
+        XCTAssertGreaterThan(matchingLeaves.count, leafOccurrence,
+                             "Completion must retain the exact visible literal leaf until Latest is requested.")
+        let retainedLeaf = try XCTUnwrap(matchingLeaves.dropFirst(leafOccurrence).first)
+        let leafReceipt = XCTAttachment(string: "literal_sha256=\(literalHash); occurrence=\(leafOccurrence); before=\(beforeTerminalLeaf.frame); after=\(retainedLeaf.frame); body_before=\(beforeTerminalFrame); body_after=\(body.frame); viewport_probe=\(viewportStatus())")
+        leafReceipt.name = "long-reply-terminal-visible-words"
+        leafReceipt.lifetime = .keepAlways
+        add(leafReceipt)
+        XCTAssertEqual(retainedLeaf.text, beforeTerminalLeaf.text)
+        XCTAssertLessThanOrEqual(abs(body.frame.minY - beforeTerminalFrame.minY), 24,
+                                 "Completion must preserve the detached reader's row position.")
+        XCTAssertLessThanOrEqual(abs(retainedLeaf.frame.minY - beforeTerminalLeaf.frame.minY), 3,
+                                 "Completion must not move the words being read inside the same answer.")
+        XCTAssertLessThanOrEqual(abs(retainedLeaf.frame.minX - beforeTerminalLeaf.frame.minX), 3)
+        XCTAssertLessThanOrEqual(abs(retainedLeaf.frame.width - beforeTerminalLeaf.frame.width), 3)
+        XCTAssertLessThanOrEqual(abs(retainedLeaf.frame.height - beforeTerminalLeaf.frame.height), 3,
+                                 "The held visible leaf must retain its line wrapping.")
+        retainPreviewScreenshot("Long reply terminal keeps visible words", app: app)
+        // Explicit follow intent releases held canonical formatting. This is a
+        // separate acceptance boundary from completion while reading older text.
+        if callbackDiagnostic {
+            XCTAssertTrue(latest.exists && latest.isEnabled && latest.isHittable)
+            diagnosticClearance(latest.frame, phase: "latest")
+        }
+        let diagnosticBeforeProbe = callbackDiagnostic
+            ? app.staticTexts["chat-native-transcript-v2"].firstMatch.value as? String : nil
+        let diagnosticLatestStartedAt = callbackDiagnostic ? ProcessInfo.processInfo.systemUptime : nil
+        latest.tap()
+        waitUntil("Explicit Latest must release canonical formatting and settle at the completed tail.") {
+            let probe = viewportStatus()
+            return probe["canonicalHold"] == "false" && probe["canonicalBlocked"] == "false"
+                && probe["state"] == "following" && probe["motion"] == "idle"
+                && (probe["canonicalCommitted"].flatMap(Int.init) ?? 0) > beforeCanonicalCommitted
+        }
+        if callbackDiagnostic {
+            let settledAt = ProcessInfo.processInfo.systemUptime
+            let beforeLatest = try XCTUnwrap(diagnosticLatestStartedAt)
+            let afterProbe = app.staticTexts["chat-native-transcript-v2"].firstMatch.value as? String ?? "missing"
+            XCTAssertTrue(monitorStop.exists && monitorStop.isEnabled && monitorStop.isHittable)
+            let monitorFrame = monitorStop.frame
+            XCTAssertTrue(!monitorFrame.isEmpty && !monitorFrame.isNull && !monitorFrame.isInfinite)
+            retainPreviewScreenshot("Latest callback diagnostic — canonical committed before monitor readout", app: app)
+            let beforeStop = ProcessInfo.processInfo.systemUptime
+            monitorStop.tap()
+            let afterStop = ProcessInfo.processInfo.systemUptime
+            let summary = app.staticTexts["chat-performance-app-wide-monitor-summary"]
+            XCTAssertTrue(summary.waitForExistence(timeout: 10))
+            let report = summary.label
+            let fullReport = XCTAttachment(string: report)
+            fullReport.name = "long-rich-latest-partial-diagnostic-callback-report"
+            fullReport.lifetime = .keepAlways
+            add(fullReport)
+            let window = "PARTIAL DIAGNOSTIC; runner ProcessInfo.systemUptime window, not touch/presentation latency. Callback report uses its stated mach clock and sample-relative gap offsets; no native arrow phase attribution.\n"
+                + "before_latest_uptime=\(beforeLatest); committed_following_idle_observed_uptime=\(settledAt); before_monitor_stop_uptime=\(beforeStop); after_monitor_stop_uptime=\(afterStop); monitor_frame=\(monitorFrame)\n"
+                + "before_probe=\(diagnosticBeforeProbe ?? "missing")\nafter_probe=\(afterProbe)"
+            let receipt = XCTAttachment(string: window)
+            receipt.name = "long-rich-latest-partial-diagnostic-window"
+            receipt.lifetime = .keepAlways
+            add(receipt)
+            receipts.append(window)
+            XCTAssertTrue(report.contains("measurement=CADisplayLink main-run-loop callback timing only")
+                && report.contains("fps=not_measured") && report.contains("phase=aggregate")
+                && report.contains("worst_callback_gap_seconds="))
+            let callbackLine = try XCTUnwrap(report.split(separator: "\n").first { $0.hasPrefix("callbacks=") })
+            let callbacks = try XCTUnwrap(Int(callbackLine.dropFirst("callbacks=".count)))
+            XCTAssertGreaterThan(callbacks, 1, "The full-interval monitor must contain real callback samples.")
+            // Intentional early return: existing full selectors separately score
+            // canonical glyphs, exact Select/Copy, and warm reader restoration.
+            return
+        }
+        if richFinal && !cancelled {
+            // Retain compact terminal state before XCTest can stop at the
+            // canonical-rendering assertion; never attach the reply itself.
+            let terminalStatus = String((stream.value as? String ?? "missing").prefix(4_096))
+            let terminalProbe = String((app.staticTexts["chat-native-transcript-v2"].firstMatch.value as? String ?? "missing").prefix(4_096))
+            let terminalReceipt = "status=\(terminalStatus)\nviewport_probe=\(terminalProbe)\nbody=\(body.frame); viewport=\(transcript.frame); window=\(app.windows.firstMatch.frame)"
+            let terminalAttachment = XCTAttachment(string: terminalReceipt)
+            terminalAttachment.name = "long-reply-before-canonical-rendering"
+            terminalAttachment.lifetime = .keepAlways
+            add(terminalAttachment)
+            receipts.append("before-canonical-rendering: " + terminalReceipt)
+            let code = body.textViews["native-inline-code-text"].firstMatch
+            XCTAssertTrue(code.waitForExistence(timeout: 10),
+                          "Explicit Latest must release the bounded rich reply's canonical code renderer.")
+            XCTAssertTrue((code.value as? String ?? "").contains("SEMREH_LONG_CODE_END"),
+                          "Canonical rich completion must retain the entire terminal code block.")
+        }
+        if !cancelled {
+            let endMarker = body.staticTexts.matching(NSPredicate(
+                format: "label CONTAINS %@ AND identifier == ''", "SEMREH_LONG_REPLY_END")).firstMatch
+            waitUntil("One Latest tap must present the actual terminal text after canonical completion.") {
+                endMarker.exists && endMarker.isHittable
+            }
+            XCTAssertGreaterThan(endMarker.frame.intersection(try readableRegion()).height, 0)
+        }
+        record("terminal", body)
+
+        let canonicalParagraphs = body.descendants(matching: .any)
+            .matching(identifier: "bounded-markdown-paragraph")
+        let canonicalParagraph = canonicalParagraphs.firstMatch
+        // CommonMark drops the fixture paragraph's one terminal ASCII space.
+        // Preserve every boundary space between actual styled leaves below.
+        let expectedCanonicalParagraph = ("SEMREH_LONG_PARAGRAPH_START " + String(repeating:
+            "A patient reader should keep the same words under their eyes while this single answer grows. Unicode remains exact: café 👩🏽‍💻 العربية. ",
+            count: 128)).dropLast()
+        let expectedCanonicalParagraphHash = SHA256.hash(data: Data(expectedCanonicalParagraph.utf8))
+            .map { String(format: "%02x", $0) }.joined()
+        var canonicalParagraphHash: String?
+        func waitForStationaryReader() {
+            waitUntil("Canonical prose screenshots require a stationary, detached reader.") {
+                let probe = viewportStatus()
+                return probe["state"] == "reading" && probe["motion"] == "idle"
+                    && probe["tracking"] == "false" && probe["dragging"] == "false"
+                    && probe["decelerating"] == "false" && probe["streamInteraction"] == "false"
+            }
+        }
+        func captureCanonicalParagraph(_ phase: String) throws -> String {
+            let visible = try readableRegion()
+            let exists = canonicalParagraph.exists
+            let frame = exists ? canonicalParagraph.frame : .zero
+            var leaves: [(index: Int, label: String)] = []
+            func collectStyledLeaves(_ node: XCUIElementSnapshot) {
+                let prefix = "bounded-markdown-leaf-"
+                if node.identifier.hasPrefix(prefix),
+                   let index = Int(node.identifier.dropFirst(prefix.count)) {
+                    leaves.append((index, node.label))
+                    return
+                }
+                for child in node.children { collectStyledLeaves(child) }
+            }
+            if exists { collectStyledLeaves(try canonicalParagraph.snapshot()) }
+            leaves.sort { $0.index < $1.index }
+            let indices = leaves.map(\.index)
+            let label = leaves.map(\.label).joined()
+            let hash = SHA256.hash(data: Data(label.utf8)).map { String(format: "%02x", $0) }.joined()
+            // Fresh lossless stills distinguish actual glyph rendering from
+            // artifacts introduced by the separate H.264 screen recording.
+            let screenshot = XCTAttachment(data: app.screenshot().pngRepresentation, uniformTypeIdentifier: "public.png")
+            screenshot.name = phase
+            screenshot.lifetime = .keepAlways
+            add(screenshot)
+            let receipt = XCTAttachment(string: "exists=\(exists); leaf_indices=\(indices); paragraph_sha256=\(hash); expected_paragraph_sha256=\(expectedCanonicalParagraphHash); paragraph_utf8_bytes=\(label.utf8.count); paragraph=\(frame); readable=\(visible); body=\(body.frame); viewport_probe=\(viewportStatus())")
+            receipt.name = phase + "-geometry"
+            receipt.lifetime = .keepAlways
+            add(receipt)
+            XCTAssertEqual(canonicalParagraphs.count, 1, "The rich answer must expose its unique canonical prose paragraph.")
+            XCTAssertTrue(exists && frame.minY.isFinite && frame.height.isFinite)
+            XCTAssertGreaterThan(leaves.count, 1, "Oversized canonical prose must mount multiple actual styled Text leaves.")
+            XCTAssertEqual(indices, Array(0..<leaves.count), "Actual styled leaf indices must be complete, ordered and unique.")
+            XCTAssertTrue(leaves.allSatisfy { $0.label.count <= 1_024 }, "Every mounted prose leaf must remain bounded.")
+            XCTAssertEqual(expectedCanonicalParagraph.utf8.count, 19_739)
+            XCTAssertEqual(label.utf8.count, expectedCanonicalParagraph.utf8.count)
+            XCTAssertEqual(hash, expectedCanonicalParagraphHash,
+                           "Concatenating untouched actual leaf labels must preserve the entire canonical paragraph.")
+            XCTAssertGreaterThanOrEqual(frame.intersection(visible).height, 80,
+                                        "At least 80pt of actual canonical prose must be visible for glyph review.")
+            return hash
+        }
+        if richFinal && !cancelled {
+            // Find the prose above the large canonical code block using at
+            // most eight real flings, without any programmatic scroll hook.
+            for _ in 0..<8 {
+                let visible = try readableRegion()
+                if canonicalParagraph.exists
+                    && canonicalParagraph.frame.intersection(visible).height >= 80 { break }
+                let start = app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(
+                    dx: visible.maxX - 6, dy: visible.minY + visible.height * 0.15))
+                let end = app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(
+                    dx: visible.maxX - 6, dy: visible.minY + visible.height * 0.85))
+                start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .fast, thenHoldForDuration: 0)
+                waitForStationaryReader()
+            }
+            waitForStationaryReader()
+            canonicalParagraphHash = try captureCanonicalParagraph("rich-canonical-prose-after-latest")
+            let beforeSmallScroll = canonicalParagraph.frame.minY
+            let visible = try readableRegion()
+            let smallStart = app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(
+                dx: visible.maxX - 6, dy: visible.midY - 40))
+            let smallEnd = app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(
+                dx: visible.maxX - 6, dy: visible.midY + 40))
+            smallStart.press(forDuration: 0.05, thenDragTo: smallEnd, withVelocity: .slow, thenHoldForDuration: 0)
+            waitForStationaryReader()
+            XCTAssertEqual(try captureCanonicalParagraph("rich-canonical-prose-after-small-scroll"), canonicalParagraphHash)
+            XCTAssertGreaterThan(abs(canonicalParagraph.frame.minY - beforeSmallScroll), 8,
+                                 "The second glyph still must follow a real, measurable scroll.")
+        } else {
+            let completedRegion = try readableRegion()
+            // The transcript's trailing gutter avoids the completed code block's
+            // nested horizontal scroller, matching the existing rich-reader recipe.
+            let detachX = completedRegion.maxX - 6
+            let detachStart = app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(
+                dx: detachX, dy: completedRegion.minY + completedRegion.height * 0.2))
+            let detachEnd = app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(
+                dx: detachX, dy: completedRegion.minY + completedRegion.height * 0.8))
+            detachStart.press(forDuration: 0.05, thenDragTo: detachEnd, withVelocity: .slow, thenHoldForDuration: 0)
+        }
+        waitUntil("A real post-completion drag must detach the reader again before warm restoration is scored.") {
+            latest.exists && latest.isHittable
+        }
+        assertBodyReadable(body, region: try readableRegion())
+
+        func openWholeMessageMenu(_ phase: String) throws {
+            let target = body.frame.intersection(try readableRegion())
+            XCTAssertTrue(target.width.isFinite && target.height.isFinite && target.width > 0 && target.height > 40)
+            // MessageBubbleView owns 12pt horizontal padding and its context
+            // menu. Press its inner left padding, outside selectable code text.
+            let point = CGPoint(x: body.frame.minX + 6, y: target.midY)
+            XCTAssertTrue(target.contains(point))
+            for code in body.textViews.matching(identifier: "native-inline-code-text").allElementsBoundByIndex {
+                XCTAssertFalse(code.frame.contains(point), "Whole-message actions must not target the code editor's selection menu.")
+            }
+            receipts.append("\(phase): whole-message-menu-point=\(point); readable_body=\(target)")
+            app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: point.x, dy: point.y)).press(forDuration: 1)
+        }
+
+        func verifyExactSelection(_ phase: String) throws {
+            let visible = try readableRegion()
+            assertBodyReadable(body, region: visible)
+            try openWholeMessageMenu(phase)
+            let select = app.buttons["Select Text"]
+            XCTAssertTrue(select.waitForExistence(timeout: 5) && select.isHittable)
+            select.tap()
+            let selection = app.textViews["selectable-response-text"]
+            XCTAssertTrue(selection.waitForExistence(timeout: 5))
+            let selected = try XCTUnwrap(selection.value as? String)
+            let hash = SHA256.hash(data: Data(selected.utf8)).map { String(format: "%02x", $0) }.joined()
+            XCTAssertEqual(selected.utf8.count, expectedBytes)
+            XCTAssertEqual(hash, expectedHash, "Full-response selection must expose the exact received source.")
+            receipts.append("\(phase): selection_utf8_bytes=\(selected.utf8.count); selection_sha256=\(hash)")
+            app.buttons["Done"].firstMatch.tap()
+            XCTAssertTrue(selection.waitForNonExistence(timeout: 5))
+        }
+        try verifyExactSelection("terminal-selection")
+        let beforeBack = body.frame
+        let back = chatBackButton(app: app)
+        XCTAssertTrue(back.exists && back.isHittable)
+        back.tap()
+        XCTAssertTrue(open.waitForExistence(timeout: 10) && open.isHittable)
+        open.tap()
+        requireSelectedChatSurface(in: app, muse: true)
+        XCTAssertTrue(body.waitForExistence(timeout: 10))
+        XCTAssertLessThanOrEqual(abs(body.frame.minY - beforeBack.minY), 24,
+                                 "Warm reopen must preserve the intra-answer reader offset.")
+        if richFinal && !cancelled {
+            waitForStationaryReader()
+            XCTAssertEqual(try captureCanonicalParagraph("rich-canonical-prose-warm-reopen"), canonicalParagraphHash,
+                           "The warm static renderer must expose the same canonical paragraph for visual comparison.")
+        }
+        // The fixture deliberately resets its composer on each mount. Transcript
+        // persistence is independent; this receipt re-counts the retained model rows.
+        XCTAssertEqual(status()["interim_retained_count"] as? Int, 1)
+        try verifyExactSelection("reopened-selection")
+        retainPreviewScreenshot("Long reply reopened exact source", app: app)
+        record("reopened", body)
+        if !cancelled {
+            // The lab intentionally provides a fresh empty draft on reopen.
+            // Exercise the real message Copy menu and native Paste; never seed
+            // the expected source into UIPasteboard from the test process.
+            let composer = app.textViews["chat-composer-input"]
+            let draft = composer.value as? String ?? ""
+            XCTAssertTrue(draft.isEmpty || draft == composer.placeholderValue)
+            try openWholeMessageMenu("reopened-copy")
+            let copy = app.buttons.matching(NSPredicate(format: "label == %@", "Copy")).firstMatch
+            XCTAssertTrue(copy.waitForExistence(timeout: 5) && copy.isHittable)
+            copy.tap()
+            composer.tap()
+            composer.press(forDuration: 1)
+            let paste = app.menuItems["Paste"]
+            let pasteButton = app.buttons["Paste"].firstMatch
+            XCTAssertTrue(paste.waitForExistence(timeout: 3) || pasteButton.waitForExistence(timeout: 3))
+            if paste.exists { paste.tap() } else { pasteButton.tap() }
+            let pasted = try XCTUnwrap(composer.value as? String)
+            let pastedHash = SHA256.hash(data: Data(pasted.utf8)).map { String(format: "%02x", $0) }.joined()
+            XCTAssertEqual(pasted.utf8.count, expectedBytes)
+            XCTAssertEqual(pastedHash, expectedHash, "Message Copy and native Paste must preserve the entire exact answer.")
+            receipts.append("message-copy-native-paste: utf8_bytes=\(pasted.utf8.count); sha256=\(pastedHash)")
+            try clearDailyDriverDraft(composer, expectedText: pasted, style: "long-reply-copy", app: app)
+        }
+    }
+
     /// Actual disposable-server UI flow; no lab injection, fake send or direct navigation.
     @MainActor
     func testDailyDriverDraftReopenRestartAndCanonicalSend() async throws {
@@ -1139,9 +1735,8 @@ final class DirectSkillUITests: XCTestCase {
             return
         }
         contextRow.press(forDuration: 1.1)
-        // Completed assistant rows can expose a persistent Copy button behind
-        // the context-menu presentation. Select the visible menu action rather
-        // than letting XCTest bind to that obscured, non-hittable sibling.
+        // Copy remains available from the completed row's context menu after
+        // removal of the layout-shifting inline completion action.
         let copyButtons = app.buttons.matching(NSPredicate(format: "label == %@", "Copy"))
         let copyIsVisible = NSPredicate { _, _ in
             copyButtons.allElementsBoundByIndex.contains { $0.isHittable }
@@ -3935,8 +4530,9 @@ final class DirectSkillUITests: XCTestCase {
         app.launch()
         defer { UIPasteboard.general.items = [] }
         defer {
-            if verifiesMuseSurface, app.state == .runningForeground {
-                try? setContainedChatPreview(app: app, enabled: false)
+            if verifiesMuseSurface, app.state == .runningForeground, let original = containedOriginalMuseSurface {
+                try? setContainedChatPreview(app: app, enabled: original)
+                containedOriginalMuseSurface = nil
             }
         }
         let composer = try openContainedNewChat(app: app, museSurface: verifiesMuseSurface ? true : nil)
@@ -4193,8 +4789,9 @@ final class DirectSkillUITests: XCTestCase {
             app.launchArguments = []
             app.launch()
             defer {
-                if muse, app.state == .runningForeground {
-                    try? setContainedChatPreview(app: app, enabled: false)
+                if app.state == .runningForeground, let original = containedOriginalMuseSurface {
+                    try? setContainedChatPreview(app: app, enabled: original)
+                    containedOriginalMuseSurface = nil
                 }
             }
             let composer = try openContainedNewChat(app: app, museSurface: muse)
@@ -4363,6 +4960,231 @@ final class DirectSkillUITests: XCTestCase {
     }
 
     @MainActor
+    func testOptInProductionDefaultSurfaceDockUnderlapAndKeyboard() async throws {
+        continueAfterFailure = false
+        let initialFailureCount = testRun?.failureCount ?? 0
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("Production dock verification is simulator-only.")
+        #endif
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SEMREH_PRODUCTION_CHROME_UI"] == "1" else {
+            throw XCTSkip("Production dock verification requires explicit opt-in.")
+        }
+        guard environment["SEMREH_SLICE2_UI_LIVE"] == "1",
+              environment["SEMREH_SLICE1_HTTPS"] == "1",
+              environment["SEMREH_SLICE2_UI_BACKEND_MODE"] == "stock",
+              environment["SEMREH_SLICE2_UI_BACKEND_SHA"] == backendSHA,
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == credentialsPath,
+              environment["SEMREH_SLICE2_TOOL_CWD"] == "/Users/maurice/workspace/semreh-slice1-runtime/tools" else {
+            return XCTFail("Production dock verification requires the contained pinned stock fixture.")
+        }
+        let observer = try await LifecycleCanonicalObserver(
+            origin: try XCTUnwrap(URL(string: origin)), credentials: try readCredentials()
+        )
+        defer { observer.invalidate(); UIPasteboard.general.items = [] }
+        let app = XCUIApplication()
+        app.terminate()
+        app.launchArguments = []
+        app.launch()
+        // No lab route, preview argument, or renderer preference mutation. The
+        // guarded shared login consumes ordinary production AppShell navigation.
+        let composer = try openContainedNewChat(app: app)
+        continueAfterFailure = false
+        func mayContinue(_ stage: String) -> Bool {
+            guard (testRun?.failureCount ?? 0) == initialFailureCount else {
+                let receipt = XCTAttachment(string: "Stopped after recorded failure at \(stage); subsequent gestures and owned-draft cleanup were not attempted.")
+                receipt.name = "production-chrome-stopped-after-failure"
+                receipt.lifetime = .keepAlways
+                add(receipt)
+                return false
+            }
+            return true
+        }
+        guard mayContinue("guarded login") else { return }
+        assertContainedSurfaceSelection(app: app, muse: true, needsTranscript: false)
+        let warmup = "SEMREH_PRODUCTION_CHROME_\(UUID().uuidString)"
+        send(warmup, through: composer, app: app)
+        waitForIdle(app: app)
+        let storedID = try await observer.discoverStoredID(uniquePrompt: warmup)
+        let baseline = try await waitForCanonical(observer: observer, storedID: storedID) {
+            self.exactCanonicalPairs($0, users: [warmup])
+        }
+        let richPrompt = "SEMREH_RICH_FIXTURE 800005"
+        send(richPrompt, through: composer, app: app)
+        waitForIdle(app: app)
+        let canonical = try await waitForCanonical(observer: observer, storedID: storedID) { rows in
+            guard rows.count == 4, self.hasStableBaseline(rows, baseline: baseline),
+                  self.canonicalTexts(rows, role: "user") == [warmup, richPrompt],
+                  rows.last?["role"] as? String == "assistant",
+                  let text = rows.last.flatMap({ self.canonicalText($0) }) else { return false }
+            return text.utf8.count == 1_065
+                && SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
+                    == "2b1fe73a711b33403480259c518fa4472a9bdf612b5587736b1e286824d12486"
+        }
+        // Reload through the real list so the observed row is the exact durable
+        // canonical ID, independent of the optimistic send row's local identity.
+        let back = chatBackButton(app: app)
+        XCTAssertTrue(back.waitForExistence(timeout: 5) && back.isEnabled && back.isHittable)
+        back.tap()
+        let storedRow = app.buttons["session-row:\(storedID)"]
+        XCTAssertTrue(storedRow.waitForExistence(timeout: 20) && storedRow.isEnabled && storedRow.isHittable)
+        storedRow.tap()
+        assertContainedSurfaceSelection(app: app, muse: true)
+        let transcript = app.collectionViews["chat-native-transcript-v2"]
+        let expectedRow = try XCTUnwrap(canonical.last.flatMap(accessibleTranscriptRow))
+        let body = transcript.staticTexts[expectedRow.identifier]
+        XCTAssertTrue(body.waitForExistence(timeout: 15))
+        XCTAssertEqual(transcript.staticTexts.matching(identifier: expectedRow.identifier).count, 1)
+        XCTAssertEqual(body.label, expectedRow.label)
+        let dock = app.otherElements["muse-chat-dock"]
+        let header = app.otherElements["muse-chat-header"]
+        let tabs = app.tabBars.firstMatch
+        let keyboard = app.keyboards.firstMatch
+        let probe = app.staticTexts["chat-native-transcript-v2"].firstMatch
+
+        func fields() -> [String: String] {
+            (probe.value as? String ?? "").split(separator: ";").reduce(into: [:]) { result, entry in
+                let pair = entry.split(separator: "=", maxSplits: 1)
+                if pair.count == 2 { result[String(pair[0])] = String(pair[1]) }
+            }
+        }
+        func capture(_ phase: String) {
+            let text = "Scope: live contained deterministic fixture, production native tabs; geometry and PNG review, not presented FPS.\n"
+                + "phase=\(phase); viewport=\(transcript.frame); row=\(body.frame); header=\(header.frame); dock=\(dock.frame); composer=\(composer.frame); tabs=\(tabs.exists ? tabs.frame : .null); AXkeyboard=\(keyboard.exists ? keyboard.frame : .null); window=\(app.windows.firstMatch.frame)\n"
+                + "probe=\(probe.value as? String ?? "missing"); canonicalBytes=1065; canonicalSHA256=2b1fe73a711b33403480259c518fa4472a9bdf612b5587736b1e286824d12486"
+            let receipt = XCTAttachment(string: text)
+            receipt.name = "production-chrome-\(phase)-geometry"
+            receipt.lifetime = .keepAlways
+            add(receipt)
+            retainPreviewScreenshot("production-chrome-\(phase)", app: app)
+        }
+        func settle() {
+            let result = XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                let current = fields()
+                return current["motion"] == "idle" && current["tracking"] == "false"
+                    && current["dragging"] == "false" && current["decelerating"] == "false"
+            }, object: nil)], timeout: 5)
+            if result != .completed { capture("FAIL-stationary") }
+            XCTAssertEqual(result, .completed, "Sample only after the actual native viewport is stationary.")
+        }
+        func readableRegion() throws -> CGRect {
+            let current = fields()
+            let top = try XCTUnwrap(current["surfaceTop"].flatMap(Double.init))
+            let bottom = try XCTUnwrap(current["surfaceBottom"].flatMap(Double.init))
+            XCTAssertTrue(top.isFinite && bottom.isFinite && top > 0 && bottom > 0)
+            let viewport = transcript.frame.intersection(app.windows.firstMatch.frame)
+            let minY = max(viewport.minY + CGFloat(top), header.frame.maxY)
+            let maxY = min(viewport.maxY - CGFloat(bottom), dock.frame.minY)
+            let region = CGRect(x: viewport.minX, y: minY, width: viewport.width, height: maxY - minY)
+            XCTAssertGreaterThan(region.height, 60)
+            return region
+        }
+        func assertTabs() {
+            XCTAssertEqual(app.tabBars.count, 1, "This journey must mount the real AppShell native tab bar.")
+            for title in ["Bots", "Chats"] {
+                let matches = tabs.buttons.matching(NSPredicate(format: "label == %@", title))
+                XCTAssertEqual(matches.count, 1)
+                XCTAssertTrue(matches.firstMatch.isEnabled && matches.firstMatch.isHittable)
+            }
+        }
+        func parkUnderChrome(_ phase: String) throws {
+            XCTAssertFalse(keyboard.exists)
+            assertTabs()
+            for _ in 0..<3 {
+                settle()
+                let region = try readableRegion()
+                // Keep the reply near the readable top before the keyboard
+                // reduces the viewport. A full-height pan overshoots this
+                // fixture while correctly preserving its reader anchor.
+                let delta = region.minY + 20 - body.frame.minY
+                if abs(delta) <= 20 && body.frame.intersection(dock.frame).height >= 12
+                    && body.frame.intersection(tabs.frame).height >= 12 { break }
+                let x = region.maxX - 10
+                let travel = min(abs(delta), region.height - 40)
+                let startY = delta > 0 ? region.minY + 20 : region.maxY - 20
+                let endY = startY + (delta > 0 ? travel : -travel)
+                XCTAssertTrue(delta.isFinite && startY.isFinite && endY.isFinite)
+                guard mayContinue("parked fixture geometry") else { return }
+                let origin = app.coordinate(withNormalizedOffset: .zero)
+                origin.withOffset(CGVector(dx: x, dy: startY)).press(forDuration: 0.1,
+                    thenDragTo: origin.withOffset(CGVector(dx: x, dy: endY)),
+                    withVelocity: .slow, thenHoldForDuration: 0.15)
+            }
+            settle()
+            capture(phase)
+            let region = try readableRegion()
+            XCTAssertTrue([transcript.frame, body.frame, dock.frame, tabs.frame].allSatisfy {
+                !$0.isEmpty && !$0.isNull && !$0.isInfinite
+            })
+            XCTAssertGreaterThan(body.frame.intersection(region).height, 60, "The visible transcript must remain populated.")
+            XCTAssertGreaterThanOrEqual(transcript.frame.maxY, tabs.frame.maxY - 1,
+                                       "The actual collection must extend behind the native bottom navigation.")
+            XCTAssertGreaterThanOrEqual(body.frame.intersection(dock.frame).height, 12)
+            XCTAssertGreaterThanOrEqual(body.frame.intersection(tabs.frame).height, 12)
+            XCTAssertGreaterThanOrEqual(body.frame.minY, region.minY,
+                                        "Place the reply at the readable top before keyboard avoidance.")
+            XCTAssertLessThanOrEqual(body.frame.minY, region.minY + 40,
+                                     "The same reply must remain inside the shorter keyboard viewport.")
+            XCTAssertTrue(app.buttons["Scroll to latest message"].isHittable, "Real scrolling must detach this reader from the tail.")
+        }
+        // Three retained PNGs require visual review of real text through glass;
+        // overlapping AX frames alone cannot prove translucent pixels.
+        if keyboard.exists {
+            let region = try readableRegion()
+            let origin = app.coordinate(withNormalizedOffset: .zero)
+            origin.withOffset(CGVector(dx: region.maxX - 10, dy: region.minY + 20)).press(forDuration: 0.1,
+                thenDragTo: origin.withOffset(CGVector(dx: region.maxX - 10, dy: app.windows.firstMatch.frame.maxY - 8)))
+            XCTAssertTrue(keyboard.waitForNonExistence(timeout: 5))
+        }
+        try parkUnderChrome("01-parked-underlap")
+        guard mayContinue("initial parked fixture") else { return }
+        composer.tap()
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5))
+        let oneLineHeight = composer.frame.height
+        let draft = "Owned production draft\nSecond visible line\nThird visible line\nFourth visible line"
+        composer.typeText(draft)
+        XCTAssertEqual(composer.value as? String, draft)
+        settle()
+        capture("02-multiline-keyboard")
+        XCTAssertTrue(composer.isEnabled && composer.isHittable)
+        XCTAssertGreaterThan(composer.frame.height, oneLineHeight + 20)
+        let current = fields()
+        let keyboardTop = try XCTUnwrap(current["keyboardTop"].flatMap(Double.init))
+        let keyboardHeight = try XCTUnwrap(current["keyboardHeight"].flatMap(Double.init))
+        XCTAssertTrue(keyboardTop.isFinite && keyboardHeight.isFinite && keyboardTop > 0 && keyboardHeight > 100)
+        XCTAssertLessThanOrEqual(CGFloat(keyboardTop), keyboard.frame.minY)
+        XCTAssertLessThanOrEqual(CGFloat(keyboardTop + keyboardHeight), app.windows.firstMatch.frame.maxY + 1)
+        XCTAssertLessThanOrEqual(composer.frame.maxY, CGFloat(keyboardTop) + 1)
+        XCTAssertGreaterThanOrEqual(CGFloat(keyboardTop) - dock.frame.maxY, -1)
+        XCTAssertLessThanOrEqual(CGFloat(keyboardTop) - dock.frame.maxY, 12)
+        XCTAssertGreaterThan(body.frame.intersection(try readableRegion()).height, 40)
+        guard mayContinue("multiline keyboard geometry") else { return }
+        let region = try readableRegion()
+        let origin = app.coordinate(withNormalizedOffset: .zero)
+        origin.withOffset(CGVector(dx: region.maxX - 10, dy: region.minY + 20)).press(forDuration: 0.1,
+            thenDragTo: origin.withOffset(CGVector(dx: region.maxX - 10, dy: app.windows.firstMatch.frame.maxY - 8)))
+        XCTAssertTrue(keyboard.waitForNonExistence(timeout: 5))
+        XCTAssertEqual(composer.value as? String, draft)
+        guard mayContinue("keyboard dismissal") else { return }
+        try parkUnderChrome("03-dismissed-native-tabs")
+        guard mayContinue("restored native tabs") else { return }
+        composer.tap()
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5))
+        XCTAssertTrue(composer.isHittable)
+        XCTAssertEqual(composer.value as? String, draft, "Refocus must preserve every owned draft character.")
+        guard mayContinue("draft refocus") else { return }
+        try clearDailyDriverDraft(composer, expectedText: draft, style: "production-chrome", app: app)
+        let afterDraft = try await observer.transcript(storedID: storedID)
+        XCTAssertTrue(NSArray(array: afterDraft).isEqual(to: canonical), "Typing and keyboard changes must not mutate the canonical transcript.")
+        let done = chatBackButton(app: app)
+        XCTAssertTrue(done.waitForExistence(timeout: 5) && done.isEnabled && done.isHittable)
+        done.tap()
+        XCTAssertTrue(storedRow.waitForExistence(timeout: 10) && storedRow.isHittable)
+        // No renderer/appearance preference was changed; the shared optional
+        // settings helper is deliberately left at its nil default.
+    }
+
+    @MainActor
     func testOptInProductionInterimHeadingSurvivesFinalAndCanonicalReopen() async throws {
         continueAfterFailure = false
         #if !targetEnvironment(simulator)
@@ -4376,118 +5198,107 @@ final class DirectSkillUITests: XCTestCase {
               environment["SEMREH_SLICE1_HTTPS"] == "1",
               environment["SEMREH_SLICE2_UI_BACKEND_MODE"] == "stock",
               environment["SEMREH_SLICE2_UI_BACKEND_SHA"] == backendSHA,
-              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == credentialsPath else {
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == credentialsPath,
+              environment["SEMREH_SLICE2_TOOL_CWD"] == "/Users/maurice/workspace/semreh-slice1-runtime/tools" else {
             return XCTFail("Interim-heading verification requires the contained pinned stock fixture.")
         }
 
-        let credentials = try readCredentials()
+        let observer = try await LifecycleCanonicalObserver(
+            origin: try XCTUnwrap(URL(string: origin)), credentials: try readCredentials()
+        )
+        defer { observer.invalidate(); UIPasteboard.general.items = [] }
         let app = XCUIApplication()
         app.terminate()
+        app.launchArguments = []
         app.launch()
-        defer { UIPasteboard.general.items = [] }
-        dismissKnownPasswordSavePrompt(app, timeout: 1)
-
-        let server = app.textFields["onboarding-server-url"]
-        if !(server.waitForExistence(timeout: 4) && server.isHittable) {
-            let welcome = containing("Your Hermes companion", app: app)
-            guard welcome.waitForExistence(timeout: 5) && welcome.isHittable else {
-                return XCTFail("Refusing to sign out or navigate an authenticated non-fixture account.")
-            }
-            let existingServer = app.buttons["Get Started"]
-            XCTAssertTrue(existingServer.waitForExistence(timeout: 5) && existingServer.isHittable)
-            existingServer.tap()
-            advanceOnboardingAppearanceIfNeeded(app: app)
-            XCTAssertTrue(server.waitForExistence(timeout: 5) && server.isHittable)
+        // Shared guarded login handles authenticated fixture state, optional
+        // Personalize, and the current Chats navigation. Consume the new default.
+        let composer = try openContainedNewChat(app: app)
+        assertContainedSurfaceSelection(app: app, muse: true, needsTranscript: false)
+        let warmup = "SEMREH_INTERIM_REOPEN_\(UUID().uuidString)"
+        send(warmup, through: composer, app: app)
+        waitForIdle(app: app)
+        let storedID = try await observer.discoverStoredID(uniquePrompt: warmup)
+        let baseline = try await waitForCanonical(observer: observer, storedID: storedID) {
+            self.exactCanonicalPairs($0, users: [warmup])
         }
-        replace(server, with: origin, app: app)
-        let testConnection = app.buttons["Test Connection"]
-        XCTAssertTrue(testConnection.waitForExistence(timeout: 5) && testConnection.isHittable)
-        testConnection.tap()
-        let username = app.textFields["onboarding-username"]
-        let password = app.secureTextFields["onboarding-password"]
-        XCTAssertTrue(username.waitForExistence(timeout: 30))
-        replace(username, with: credentials.username, app: app)
-        paste(credentials.password, into: password, app: app)
-        app.buttons["Connect"].tap()
-
-        let sessions = app.buttons["Sessions"]
-        let restoredChat = app.otherElements.matching(
-            NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
-        ).firstMatch
-        let destinationDeadline = Date().addingTimeInterval(45)
-        while !sessions.exists && !restoredChat.exists && Date() < destinationDeadline {
-            dismissKnownPasswordSavePrompt(app, timeout: 0)
-            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
-        }
-        dismissKnownPasswordSavePrompt(app, timeout: 3)
-        if restoredChat.exists {
-            let back = app.navigationBars.buttons["BackButton"]
-            XCTAssertTrue(back.waitForExistence(timeout: 5) && back.isHittable)
-            back.tap()
-        }
-        XCTAssertTrue(sessions.waitForExistence(timeout: 30) && sessions.isHittable)
-        sessions.tap()
-        let newSession = app.buttons["New chat"]
-        XCTAssertTrue(newSession.waitForExistence(timeout: 15) && newSession.isHittable)
-        newSession.tap()
-
-        let composer = app.descendants(matching: .any)
-            .matching(identifier: "chat-composer-input").firstMatch
-        XCTAssertTrue(composer.waitForExistence(timeout: 20) && composer.isHittable)
         send(interimHeadingMarker, through: composer, app: app)
 
-        let interimHeading = containing(interimHeadingText, app: app)
-        // The blocking approval overlay deliberately intercepts background
-        // touches. The transcript must remain rendered, not tappable through it.
-        XCTAssertTrue(
-            interimHeading.waitForExistence(timeout: 30)
-                && !interimHeading.frame.isEmpty
-                && app.frame.intersects(interimHeading.frame),
-            "The Markdown heading must be visible while the tool is still awaiting approval."
-        )
+        let interimHeading = app.staticTexts.matching(NSPredicate(format: "label == %@", interimHeadingText)).firstMatch
+        // Approval deliberately intercepts background touches; require rendered
+        // heading geometry here, and actual hittability after the fixture settles.
+        XCTAssertTrue(interimHeading.waitForExistence(timeout: 30)
+            && !interimHeading.frame.isEmpty && app.frame.intersects(interimHeading.frame),
+            "The Markdown heading must remain visible while the tool awaits approval.")
         let beforeApproval = XCTAttachment(screenshot: app.screenshot())
         beforeApproval.name = "Interim heading while approval blocks transcript touches"
         beforeApproval.lifetime = .keepAlways
         add(beforeApproval)
+        XCTAssertTrue(containing("synthetic approval cancellation fixture", app: app).exists,
+                      "Only the contained fixture's bounded approval callback may be answered.")
         let approveOnce = app.buttons["approval-request-choice-once"]
-        XCTAssertTrue(approveOnce.waitForExistence(timeout: 15) && approveOnce.isHittable)
+        XCTAssertTrue(approveOnce.waitForExistence(timeout: 15) && approveOnce.isEnabled && approveOnce.isHittable)
         approveOnce.tap()
 
-        let final = containing(interimFinalText, app: app)
+        let final = app.staticTexts.matching(NSPredicate(format: "label == %@", interimFinalText)).firstMatch
         XCTAssertTrue(final.waitForExistence(timeout: 45) && final.isHittable)
         waitForIdle(app: app)
+        assertContainedSurfaceSelection(app: app, muse: true)
         XCTAssertTrue(interimHeading.exists && interimHeading.isHittable)
         XCTAssertTrue(final.exists && final.isHittable)
+        let expectedHeading = "## \(interimHeadingText)"
+        let canonical = try await waitForCanonical(observer: observer, storedID: storedID) { rows in
+            self.hasStableBaseline(rows, baseline: baseline)
+                && self.canonicalTexts(rows, role: "user") == [warmup, self.interimHeadingMarker]
+                && self.canonicalTexts(rows, role: "assistant").filter { !$0.isEmpty }
+                    == ["SEMREH_SLICE1_ACK", expectedHeading, self.interimFinalText]
+                && self.canonicalOccurrences(rows, role: "assistant", text: expectedHeading) == 1
+                && self.canonicalOccurrences(rows, role: "assistant", text: self.interimFinalText) == 1
+        }
+        let assistantRows = canonical.filter {
+            $0["role"] as? String == "assistant"
+                && [expectedHeading, interimFinalText].contains(canonicalText($0) ?? "")
+        }
+        XCTAssertEqual(assistantRows.count, 2, "Interim and final must remain two distinct durable assistant rows.")
 
-        // Give this specific conversation a unique durable identity assertion.
-        // Older fixture chats have the same heading/final text, so those alone
-        // could falsely pass if navigation selected an older session.
-        let reopenMarker = "SEMREH_INTERIM_REOPEN_\(UUID().uuidString)"
-        send(reopenMarker, through: composer, app: app)
-        XCTAssertTrue(containing("SEMREH_SLICE1_ACK", app: app).waitForExistence(timeout: 30))
-        waitForIdle(app: app)
-
+        // Leave through the production Back action before the cold restart.
+        // Reopen the exact observer-resolved durable ID, never the newest ACK title.
+        let back = chatBackButton(app: app)
+        XCTAssertTrue(back.waitForExistence(timeout: 5) && back.isEnabled && back.isHittable)
+        back.tap()
+        let storedRow = app.buttons["session-row:\(storedID)"]
+        XCTAssertTrue(storedRow.waitForExistence(timeout: 20) && storedRow.isEnabled && storedRow.isHittable)
         app.terminate()
         app.launch()
         dismissKnownPasswordSavePrompt(app, timeout: 3)
-        // Cold launch legitimately returns to Sessions. This fixture is the
-        // only writer, and its title is the deterministic ACK; open the newest
-        // row, then prove identity using the unique marker rather than its title.
-        XCTAssertTrue(sessions.waitForExistence(timeout: 30))
+        let sessions = app.buttons["Chats"]
+        let detail = app.otherElements.matching(NSPredicate(format: "identifier BEGINSWITH 'chat-detail:'")).firstMatch
+        let destinationDeadline = Date().addingTimeInterval(30)
+        while !sessions.exists && !detail.exists && Date() < destinationDeadline {
+            dismissKnownPasswordSavePrompt(app, timeout: 0)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        }
+        if detail.exists {
+            let restoredBack = chatBackButton(app: app)
+            XCTAssertTrue(restoredBack.waitForExistence(timeout: 5) && restoredBack.isEnabled && restoredBack.isHittable)
+            restoredBack.tap()
+        }
+        XCTAssertTrue(sessions.waitForExistence(timeout: 15) && sessions.isHittable)
         sessions.tap()
-        let latestFixtureSession = app.buttons.matching(
-            NSPredicate(format: "label BEGINSWITH %@", "SEMREH_SLICE1_ACK")
-        ).firstMatch
-        XCTAssertTrue(latestFixtureSession.waitForExistence(timeout: 15) && latestFixtureSession.isHittable)
-        latestFixtureSession.tap()
-        let reopenedChat = app.otherElements.matching(
-            NSPredicate(format: "identifier BEGINSWITH[c] 'chat-detail:'")
-        ).firstMatch
-        XCTAssertTrue(reopenedChat.waitForExistence(timeout: 30))
-        XCTAssertTrue(containing(reopenMarker, app: app).waitForExistence(timeout: 30))
-        XCTAssertTrue(containing(interimHeadingText, app: app).waitForExistence(timeout: 30))
-        XCTAssertTrue(containing(interimFinalText, app: app).waitForExistence(timeout: 30))
-
+        XCTAssertTrue(storedRow.waitForExistence(timeout: 20) && storedRow.isEnabled && storedRow.isHittable)
+        storedRow.tap()
+        XCTAssertTrue(detail.waitForExistence(timeout: 30))
+        assertContainedSurfaceSelection(app: app, muse: true)
+        try assertAccessibleTranscriptRows(assistantRows, in: detail,
+            context: "canonical interim and distinct final after cold reopen", museSurface: true)
+        _ = try await waitForCanonical(observer: observer, storedID: storedID) { rows in
+            rows.count == canonical.count && self.hasStableBaseline(rows, baseline: canonical)
+        }
+        let receipt = XCTAttachment(string:
+            "Exact durable conversation selected by session-row ID; canonical rows=\(canonical.count); interim count=1; distinct final count=1; canonical rows unchanged after cold reopen.")
+        receipt.name = "Production interim canonical identity and content receipt"
+        receipt.lifetime = .keepAlways
+        add(receipt)
         let screenshot = XCTAttachment(screenshot: app.screenshot())
         screenshot.name = "Production interim heading and distinct final after canonical reopen"
         screenshot.lifetime = .keepAlways
@@ -4768,19 +5579,20 @@ final class DirectSkillUITests: XCTestCase {
         let chatSettings = app.staticTexts["Chat"]
         try requireUsable(chatSettings, "Chat settings section")
         chatSettings.tap()
-        let toggle = app.switches["experimental-chat-renderer-toggle"]
-        try requireUsable(toggle, "experimental renderer toggle")
-        let desired = enabled ? "1" : "0"
+        let toggle = app.switches["legacy-chat-surface-toggle"]
+        try requireUsable(toggle, "legacy chat interface toggle")
+        let desired = enabled ? "0" : "1"
         guard let current = toggle.value as? String, ["0", "1"].contains(current) else {
-            XCTFail("The experimental renderer switch must expose a definite on/off value.")
+            XCTFail("The legacy interface switch must expose a definite on/off value.")
             throw NSError(domain: "DirectSkillUITests", code: 33)
         }
+        if containedOriginalMuseSurface == nil { containedOriginalMuseSurface = current == "0" }
         if current != desired { toggle.tap() }
         guard toggle.value as? String == desired else {
-            XCTFail("The persisted preview switch must read back its requested value.")
+            XCTFail("The persisted legacy interface switch must read back its requested value.")
             throw NSError(domain: "DirectSkillUITests", code: 34)
         }
-        let receipt = XCTAttachment(string: "Production Settings > Chat preview toggle readback=\(desired); no renderer launch override")
+        let receipt = XCTAttachment(string: "Production Settings > Chat legacy interface toggle readback=\(desired); muse=\(enabled); no renderer launch override")
         receipt.name = "Contained persisted chat preview selection"
         receipt.lifetime = .keepAlways
         add(receipt)

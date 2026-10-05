@@ -2303,7 +2303,9 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
             payload: ["text": .string("old answer")]
         ))
         await waitUntil { viewModel.activeStreamID == nil }
-        XCTAssertEqual(viewModel.liveReasoningText, "old plan")
+        XCTAssertTrue(viewModel.liveReasoningText.isEmpty)
+        XCTAssertEqual(viewModel.messages.first { $0.messageId == oldAnchor }?.reasoning, "old plan")
+        XCTAssertEqual(viewModel.displayedReasoningGroups.map(\.text), ["old plan"])
         XCTAssertEqual(viewModel.liveToolCalls.count, 1)
 
         // This is an externally originated next turn. The failed terminal read
@@ -2315,7 +2317,7 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         ))
         await waitUntil { viewModel.activeStreamID != nil && viewModel.liveReasoningText.isEmpty }
 
-        XCTAssertTrue(viewModel.completedReasoningGroups.contains {
+        XCTAssertTrue(viewModel.displayedReasoningGroups.contains {
             $0.anchorMessageID == oldAnchor && $0.text == "old plan"
         })
         XCTAssertEqual(viewModel.completedToolCallGroupsForAnchor(oldAnchor).flatMap(\.toolCalls).map(\.id), ["old-tool"])
@@ -2333,7 +2335,7 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         let client = makeClient { request in
             XCTAssertEqual(request.url?.path, "/api/sessions/durable-1/messages")
             return apiTestJSONResponse(
-                "{\"session_id\":\"durable-1\",\"messages\":[{\"id\":1,\"role\":\"user\",\"content\":\"hello\",\"timestamp\":1},{\"id\":2,\"role\":\"assistant\",\"content\":\"## Interim heading\",\"timestamp\":2},{\"id\":3,\"role\":\"assistant\",\"content\":\"Canonical final\",\"timestamp\":3}],\"pagination\":{\"limit\":120,\"offset\":0,\"order\":\"latest\",\"returned\":3}}",
+                "{\"session_id\":\"durable-1\",\"messages\":[{\"id\":1,\"role\":\"user\",\"content\":\"hello\",\"timestamp\":1},{\"id\":2,\"role\":\"assistant\",\"content\":\"## Interim heading\",\"timestamp\":2},{\"id\":3,\"role\":\"assistant\",\"content\":\"Canonical final\",\"reasoning\":\"Canonical provider reasoning\",\"timestamp\":3}],\"pagination\":{\"limit\":120,\"offset\":0,\"order\":\"latest\",\"returned\":3}}",
                 for: request
             )
         }
@@ -2342,9 +2344,16 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         let didSend = await viewModel.sendMessage("hello")
         XCTAssertTrue(didSend)
         await waitUntil { viewModel.messages.contains { $0.content == "streamed answer" } }
-        fake.emit(ChatDirectEventFactory.event(sessionID: "runtime-1", type: "message.interim", sequence: 3,
+        fake.emit(ChatDirectEventFactory.event(sessionID: "runtime-1", type: "thinking.delta", sequence: 3,
+            payload: ["text": .string("Transient waiting status")]))
+        fake.emit(ChatDirectEventFactory.event(sessionID: "runtime-1", type: "reasoning.delta", sequence: 4,
+            payload: ["text": .string("Provider reasoning")]))
+        fake.emit(ChatDirectEventFactory.event(sessionID: "runtime-1", type: "message.interim", sequence: 5,
             payload: ["text": .string("streamed answer"), "already_streamed": .bool(true)]))
-        fake.emit(ChatDirectEventFactory.event(sessionID: "runtime-1", type: "message.complete", sequence: 4,
+        await waitUntil { viewModel.liveReasoningText == "Provider reasoning" }
+        XCTAssertFalse(viewModel.liveReasoningText.contains("Transient waiting status"))
+        XCTAssertEqual(viewModel.messages.filter { $0.role == "assistant" && $0.content == "streamed answer" }.count, 1)
+        fake.emit(ChatDirectEventFactory.event(sessionID: "runtime-1", type: "message.complete", sequence: 6,
             payload: ["text": .string("Live final")]))
 
         await waitUntil {
@@ -2355,8 +2364,19 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
             viewModel.messages.filter { $0.role == "assistant" }.compactMap(\.content),
             ["## Interim heading", "Canonical final"]
         )
+        XCTAssertNil(viewModel.streamingActivityStatus)
+        XCTAssertEqual(viewModel.displayedReasoningGroups.map(\.text), ["Canonical provider reasoning"])
+        XCTAssertTrue(viewModel.liveReasoningText.isEmpty)
+        XCTAssertTrue(viewModel.completedReasoningGroups.isEmpty)
 
         await viewModel.disposeDirectConversation()
+        let reopened = makeViewModel(client: client, runtime: runtime, sessionID: "durable-1")
+        await reopened.loadMessages()
+        XCTAssertEqual(reopened.messages.filter { $0.role == "assistant" }.compactMap(\.content),
+                       ["## Interim heading", "Canonical final"])
+        XCTAssertEqual(reopened.displayedReasoningGroups.map(\.text), ["Canonical provider reasoning"])
+        XCTAssertNil(reopened.streamingActivityStatus)
+        await reopened.disposeDirectConversation()
         await runtime.stop()
     }
 
@@ -2415,7 +2435,7 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
             sequence: 13
         ))
         await waitUntil { viewModel.activeStreamID != nil && viewModel.liveReasoningText.isEmpty }
-        XCTAssertTrue(viewModel.completedReasoningGroups.contains {
+        XCTAssertTrue(viewModel.displayedReasoningGroups.contains {
             $0.anchorMessageID == oldAnchor && $0.text == "first turn plan"
         })
         XCTAssertEqual(viewModel.completedToolCallGroupsForAnchor(oldAnchor).flatMap(\.toolCalls).map(\.id), ["first-tool"])

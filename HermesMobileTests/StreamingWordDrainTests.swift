@@ -2,6 +2,22 @@ import XCTest
 @testable import HermesMobile
 
 final class StreamingWordDrainTests: XCTestCase {
+    func testPresentationCadenceScalesWithGrowingRowAndInteraction() {
+        XCTAssertEqual(StreamingWordDrain.presentationCadence(receivedByteCount: 0, prioritizingInteraction: false), 32_000_000)
+        XCTAssertEqual(StreamingWordDrain.presentationCadence(receivedByteCount: 8_192, prioritizingInteraction: false), 64_000_000)
+        XCTAssertEqual(StreamingWordDrain.presentationCadence(receivedByteCount: 32_768, prioritizingInteraction: false), 100_000_000)
+        XCTAssertEqual(StreamingWordDrain.presentationCadence(receivedByteCount: 1_000, prioritizingInteraction: true), 100_000_000)
+        XCTAssertEqual(StreamingWordDrain.presentationCadence(receivedByteCount: 1_000_000, prioritizingInteraction: true), 150_000_000)
+        for bytes in [0, 8_192, 32_768, Int.max] {
+            for interacting in [false, true] {
+                XCTAssertLessThanOrEqual(
+                    StreamingWordDrain.presentationCadence(receivedByteCount: bytes, prioritizingInteraction: interacting),
+                    StreamingWordDrain.maximumBufferAgeNanoseconds
+                )
+            }
+        }
+    }
+
     func testBufferKeepsExactCountAndContentAcrossSmallDrainsAndAppends() {
         var buffer = StreamingWordDrain.Buffer()
         let chunks = ["  alpha ", "beta  ", "gamma\n", "delta ", "epsilon"]

@@ -735,9 +735,11 @@ struct MessageComposerView: View {
                 .padding(.trailing, 4)
                 .padding(.vertical, 2)
             }
-            .background(
-                ChatSurfaceAppearance.panel(for: colorScheme, palette: palette, accent: accent,
-                                            useDefaultAccent: museSurfaceUsesDefaultAccent),
+            .adaptiveGlass(
+                .regular, isInteractive: true,
+                tint: ChatSurfaceAppearance.panel(for: colorScheme, palette: palette, accent: accent,
+                                                 useDefaultAccent: museSurfaceUsesDefaultAccent).opacity(0.55),
+                fallbackMaterial: .thinMaterial,
                 in: RoundedRectangle(cornerRadius: composerCornerRadius, style: .continuous)
             )
             .overlay {

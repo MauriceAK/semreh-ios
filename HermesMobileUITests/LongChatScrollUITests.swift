@@ -81,9 +81,9 @@ extension XCTestCase {
 
 final class LongChatScrollUITests: XCTestCase {
     @MainActor
-    func testInternalReleaseRendererTogglePersistenceAndFallback() throws {
-#if !SEMREH_INTERNAL_CHAT_PREVIEW || DEBUG
-        throw XCTSkip("Requires the internal-preview Release Simulator build")
+    func testReleaseChatSurfaceDefaultLegacyPersistenceAndFallback() throws {
+#if DEBUG
+        throw XCTSkip("Requires the ordinary Release Simulator build")
 #else
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -97,10 +97,10 @@ final class LongChatScrollUITests: XCTestCase {
             }
             XCTAssertTrue(open.waitForExistence(timeout: 8))
         }
-        func setPreview(_ enabled: Bool) {
+        func setLegacy(_ enabled: Bool) {
             root()
             app.buttons["internal-preview-settings"].tap()
-            let toggle = app.switches["experimental-chat-renderer-toggle"]
+            let toggle = app.switches["legacy-chat-surface-toggle"]
             XCTAssertTrue(toggle.waitForExistence(timeout: 8))
             if (toggle.value as? String == "1") != enabled { toggle.tap() }
             XCTAssertEqual(toggle.value as? String, enabled ? "1" : "0")
@@ -128,16 +128,20 @@ final class LongChatScrollUITests: XCTestCase {
             }
             attachScreenshot(named: native ? "internal-release-native" : "internal-release-stable")
         }
-        setPreview(false)
+        // No renderer launch override: this is the ordinary Release default.
+        openChat(native: true)
+        setLegacy(true)
         openChat(native: false)
-        setPreview(true)
+        app.terminate()
+        app.launch()
+        root()
+        openChat(native: false)
+        setLegacy(false)
         openChat(native: true)
         app.terminate()
         app.launch()
         root()
         openChat(native: true)
-        setPreview(false)
-        openChat(native: false)
 #endif
     }
 
@@ -6541,10 +6545,10 @@ final class LongChatScrollUITests: XCTestCase {
             + (readerReopen ? ["--chat-performance-stream-rich-code"] : [])
             + (enablesMuseSurface ? ["--chat-native-transcript-v2"] : [])
         if museSurface != nil {
-            // Argument-domain defaults make the off/on pair independent of a
-            // persisted preview preference, without changing that preference.
-            // The explicit opt-in flag above is the pair's only differing input.
-            app.launchArguments += ["-semreh.experimentalChatRenderer", "NO",
+            // Explicit DEBUG arguments select both sides independently of
+            // persisted defaults. This compares current and legacy surfaces.
+            if !enablesMuseSurface { app.launchArguments.append("--chat-legacy-transcript") }
+            app.launchArguments += [
                                     "--chat-performance-app-wide-monitor",
                                     "--chat-performance-signposts"]
         }
@@ -7163,10 +7167,23 @@ extension LongChatScrollUITests {
     func testMuseSurfaceComposerKeyboardAndDraftGeometry() throws {
         continueAfterFailure = false
         let app = XCUIApplication()
-        app.launchArguments = ["--chat-performance-lab", "--chat-performance-tall-lab", "--chat-performance-four-tall-lab",
+        let intendedArguments = ["--chat-performance-lab", "--chat-performance-tall-lab", "--chat-performance-four-tall-lab",
                                "--chat-native-transcript-v2", "--chat-rich-native-code-text",
                                "--chat-full-inline-code", "--chat-viewport-follow-latest-open",
                                "--composer-test-fresh-draft"]
+        app.launchArguments = intendedArguments
+        app.terminate()
+        let configuredArguments = app.launchArguments
+        let launchReceipt = String(decoding: try JSONSerialization.data(withJSONObject: [
+            "marker": "SEMREH_MUSE_KEYBOARD_ENTRY",
+            "matches_intended": configuredArguments == intendedArguments,
+            "argument_count": configuredArguments.count,
+            "known_arguments": configuredArguments.filter { intendedArguments.contains($0) }
+        ], options: [.sortedKeys]), as: UTF8.self)
+        attachPlainText(launchReceipt, named: "muse-keyboard-launch-arguments")
+        print("SEMREH_MUSE_KEYBOARD_ENTRY \(launchReceipt)")
+        XCTAssertTrue(configuredArguments == intendedArguments,
+                      "The launch-argument property must retain exactly the eight configured lab flags.")
         app.launch()
         requireMuseSurface(in: app)
         let transcript = app.collectionViews["chat-native-transcript-v2"]

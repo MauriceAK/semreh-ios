@@ -38,6 +38,7 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
     let onState: (ChatScrollMetrics, String?, Bool, Bool) -> Void
     let onRestore: (ChatTranscriptRestoreRequest, ChatTranscriptRestoreOutcome) -> Void
     var metricPublication: ChatScrollMetricPublication? = nil
+    var onStreamingInteractionChanged: (Bool) -> Void = { _ in }
     var allowsAutomaticPaging = false
     var onOlder: @MainActor (ChatTranscriptOlderLoadIntent, @escaping @MainActor () -> Bool) async -> Bool = { _, _ in false }
     let onRefresh: @MainActor (@escaping @MainActor () -> Bool) async -> Void
@@ -343,7 +344,7 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             }
         }
         private(set) var boundaryConfigurations = 0
-        var reusesBoundaryConfigurations = !InternalChatRendererPolicy.debugArgument("--chat-native-eager-boundaries")
+        var reusesBoundaryConfigurations = !ChatSurfacePolicy.debugArgument("--chat-native-eager-boundaries")
 
         func boundaryStamp(for item: Item) -> BoundaryStamp? {
             let revision: BoundaryRevision?
@@ -415,6 +416,11 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
         private let edgeMask = CAGradientLayer()
         var dataSource: UICollectionViewDiffableDataSource<Int, Item>!
         var revisions: [String: StableViewportRowRevision] = [:]
+        private(set) var deferredStreamingRowIDs: Set<String> = []
+        private(set) var streamingInteractionActive = false
+        private var interactionEndTask: Task<Void, Never>?
+        private var interactionEndGeneration = 0
+        let markdownPresentationInteraction = MarkdownPresentationInteraction()
         var indices: [String: Int] = [:]
         var appliedIDs: [String]?
         var identityBuilds = 0
@@ -513,6 +519,7 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
         var motionProgress: CGFloat = 0
         var motionTailSample: CGRect?
         var motionTailOffset: CGFloat?
+        private var motionDeadlineConfirmationPending = false
         var motionCompleted = 0
         var motionCancelled = 0
         var motionSamples = 0
@@ -554,7 +561,31 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
         var publication = 0
         let latest = UIButton(type: .system)
         private var latestBottomConstraint: NSLayoutConstraint?
+#if DEBUG
+        final class DebugProbeLabel: UILabel {
+            weak var presentationInteraction: MarkdownPresentationInteraction?
+            override var accessibilityValue: String? {
+                get {
+                    // Held async preparation need not cause another native
+                    // layout. AX samples these counters directly from the owner.
+                    let interaction = presentationInteraction
+                    return (super.accessibilityValue ?? "")
+                        + ";canonicalHold=\(interaction?.holdsCanonicalPresentation ?? false)"
+                        + ";canonicalBlocked=\(interaction?.blocksCanonicalPresentation ?? false)"
+                        + ";canonicalPrepared=\(interaction?.canonicalPreparationCount ?? 0)"
+                        + ";canonicalCommitted=\(interaction?.canonicalCommitCount ?? 0)"
+                }
+                set { super.accessibilityValue = newValue }
+            }
+        }
+        let probe = DebugProbeLabel()
+        private var debugDragEndCallbacks = 0
+        private var debugDecelerationEndCallbacks = 0
+        private var debugLastInteractionEndFlags = "none"
+        private var debugMotionReceipt = "none"
+#else
         let probe = UILabel()
+#endif
 
         let reduceMotionEnabled: () -> Bool
         let reusesIdentitySnapshot: Bool
@@ -582,7 +613,7 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
         required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
         func makeLayout() -> UICollectionViewLayout {
-            if !InternalChatRendererPolicy.debugArgument("--chat-native-compositional-layout") {
+            if !ChatSurfacePolicy.debugArgument("--chat-native-compositional-layout") {
                 return ColumnLayout()
             }
             let item = NSCollectionLayoutItem(layoutSize: .init(widthDimension: .fractionalWidth(1), heightDimension: .estimated(160)))
@@ -651,6 +682,7 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             latestBottomConstraint = bottomConstraint
             NSLayoutConstraint.activate([latest.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20), bottomConstraint, latest.widthAnchor.constraint(equalToConstant: 44), latest.heightAnchor.constraint(equalToConstant: 44)])
 #if DEBUG
+            probe.presentationInteraction = markdownPresentationInteraction
             probe.font = .systemFont(ofSize: 1)
             probe.textColor = .clear
             probe.isAccessibilityElement = true
@@ -683,6 +715,8 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
         }
         func suspendPresentation() {
             guard !stopped, !presentationSuspended else { return }
+            setStreamingInteraction(false)
+            deferredStreamingRowIDs.removeAll()
             presentationSuspended = true
             cancelOlder()
             invalidatePublications()
@@ -764,6 +798,8 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
         }
 
         func configure(_ cell: UICollectionViewCell, item: Item) {
+            synchronizeCanonicalPresentationHold()
+            if case .row(let id) = item { deferredStreamingRowIDs.remove(id) }
             let column = collection.collectionViewLayout as? ColumnLayout
             column?.needsFit(item)
             (cell as? Cell)?.layoutPolicy = column == nil ? 0 : 1
@@ -809,8 +845,14 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
                 revisions[id] = rowStamp?.revision
             }
             let rowWidth = max(1, collection.bounds.width - input.horizontalPadding * 2)
+            var hostedEnvironment = input.environment
+            if case .row = item {
+                hostedEnvironment.markdownPresentationInteraction = markdownPresentationInteraction
+            }
             cell.contentConfiguration = UIHostingConfiguration {
-                content.environment(\.self, input.environment)
+                // Compose the row-specific value into the snapshot: an inner
+                // whole-environment modifier would override an outer key modifier.
+                content.environment(\.self, hostedEnvironment)
                     .id(item)
                     .frame(width: rowWidth, alignment: .leading)
             }.margins(.all, 0)
@@ -820,9 +862,156 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             value.latestBottomInset.map { max(0, $0) } ?? max(16, value.bottomInset - 32)
         }
 
+        private func setStreamingInteraction(_ active: Bool) {
+            if !active { cancelPendingInteractionEnd() }
+            // Establish the stationary reader hold before the gesture gate opens.
+            // Model publication and terminal row configuration remain independent.
+            synchronizeCanonicalPresentationHold()
+            guard streamingInteractionActive != active else { return }
+            streamingInteractionActive = active
+            markdownPresentationInteraction.isInteracting = active
+            input.onStreamingInteractionChanged(active)
+        }
+
+        private func synchronizeCanonicalPresentationHold() {
+            let restoresReader: Bool
+            if case .restoring(let target) = ownership {
+                if target != nil { restoresReader = true }
+                else if let request = input.restoreRequest, case .message = request.target { restoresReader = true }
+                else { restoresReader = false }
+            } else { restoresReader = false }
+            let held: Bool
+            if stopped || !input.environment.usesMuseChatSurface {
+                held = false
+            } else if presentationSuspended {
+                // A covered same-scope reader can return to the existing host.
+                return
+            } else if explicitLatestOwnsViewport {
+                held = false
+            } else if restoresReader {
+                // The currently realized tail may belong to the old viewport,
+                // before the requested reader anchor has been positioned.
+                held = true
+            } else if initialized, collection != nil, !systemTopActive, realizedTailArrival {
+                held = false
+            } else {
+                switch ownership {
+                case .reading: held = true
+                case .restoring, .following:
+                    // A follow hint alone cannot reformat a detached reader.
+                    // Actual measured tail arrival releases an existing hold.
+                    return
+                }
+            }
+            if markdownPresentationInteraction.holdsCanonicalPresentation != held {
+                markdownPresentationInteraction.holdsCanonicalPresentation = held
+            }
+        }
+
+        private func cancelPendingInteractionEnd() {
+            interactionEndGeneration &+= 1
+            interactionEndTask?.cancel()
+            interactionEndTask = nil
+        }
+
+        private func deferInteractionEndUntilTrackingSettles() {
+            guard streamingInteractionActive, interactionEndTask == nil else { return }
+            let ticket = interactionEndGeneration
+            let scope = input.scope
+            interactionEndTask = Task { [weak self] in
+                // UIKit can deliver didEndDragging while isTracking is still
+                // true. Yield its cleanup without dropping the only end event.
+                do { try await Task.sleep(for: .milliseconds(16)) }
+                catch { return }
+                guard let self, !Task.isCancelled,
+                      self.interactionEndGeneration == ticket,
+                      self.input.scope == scope, !self.stopped,
+                      !self.presentationSuspended else { return }
+                self.interactionEndTask = nil
+                self.endInteraction()
+            }
+        }
+
+        /// Only the body text/rate (including final formatting) of an already
+        /// fitted plain streaming row can wait for the gesture. Changed durable
+        /// identity, tools, attachments and actions keep immediate presentation.
+        private func shouldDeferStreamingRow(_ cell: UICollectionViewCell, id: String,
+                                            next: StableViewportRowRevision) -> Bool {
+            guard input.environment.usesMuseChatSurface,
+                  !systemTopActive, !explicitLatestOwnsViewport, motionLink == nil,
+                  streamingInteractionActive || collection.isDragging || collection.isDecelerating,
+                  (collection.collectionViewLayout as? ColumnLayout)?.measured.contains(.row(id)) == true,
+                  let stamp = (cell as? Cell)?.rowStamp,
+                  stamp.key == rowStamp(for: id)?.key
+            else { return false }
+            return Self.isOnlyStreamingBodyChange(from: stamp.revision, to: next)
+        }
+
+        static func isOnlyStreamingBodyChange(from old: StableViewportRowRevision,
+                                             to next: StableViewportRowRevision) -> Bool {
+            let before = old.message.message
+            let after = next.message.message
+            guard old.hasActiveStream,
+                  let streamID = old.streamingAssistantMessageID,
+                  (next.hasActiveStream && next.streamingAssistantMessageID == streamID)
+                    || (!next.hasActiveStream && next.streamingAssistantMessageID == nil),
+                  before.messageId == streamID, after.messageId == streamID,
+                  before.role == "assistant", after.role == "assistant",
+                  before.contentParts == nil, after.contentParts == nil,
+                  before.attachments == nil, after.attachments == nil else { return false }
+            let unchangedBody = ChatMessage(role: after.role, content: before.content,
+                timestamp: after.timestamp, messageId: after.messageId, name: after.name,
+                toolCallId: after.toolCallId, toolUseId: after.toolUseId, toolCalls: after.toolCalls,
+                contentParts: after.contentParts, reasoning: after.reasoning,
+                attachments: after.attachments, turnTps: before.turnTps)
+            let unchangedRow = TranscriptMessage(loadedIndex: next.message.loadedIndex,
+                renderID: next.message.renderID, anchorID: next.message.anchorID,
+                message: unchangedBody, attachmentDisplayContent: next.message.attachmentDisplayContent)
+            let normalized = StableViewportRowRevision(message: unchangedRow,
+                outgoingInsertionEvent: next.outgoingInsertionEvent, allowsOutgoingMotion: next.allowsOutgoingMotion,
+                reasoningGroups: next.reasoningGroups, toolCallGroups: next.toolCallGroups,
+                liveReasoningText: next.liveReasoningText, liveToolCalls: next.liveToolCalls,
+                streamingAssistantMessageID: old.streamingAssistantMessageID,
+                liveTokensPerSecond: old.liveTokensPerSecond,
+                localAttachmentPreviews: next.localAttachmentPreviews,
+                compressionReferenceCard: next.compressionReferenceCard, listeningMessageID: next.listeningMessageID,
+                showsThinkingAndToolCards: next.showsThinkingAndToolCards, isViewingCachedData: next.isViewingCachedData,
+                hasActiveStream: old.hasActiveStream, isRegeneratingMessage: next.isRegeneratingMessage,
+                isEditingMessage: next.isEditingMessage, isForkingMessage: next.isForkingMessage,
+                transcriptMediaCacheNamespace: next.transcriptMediaCacheNamespace)
+            return normalized == old
+        }
+
+        private func flushDeferredStreamingRows() {
+            guard !deferredStreamingRowIDs.isEmpty else { return }
+            let current = !systemTopActive && !explicitLatestOwnsViewport && motionLink == nil
+                ? currentAnchor() : nil
+            let pending = deferredStreamingRowIDs
+            deferredStreamingRowIDs.removeAll()
+            let wasCorrecting = correcting
+            correcting = true
+            defer { correcting = wasCorrecting }
+            for path in collection.indexPathsForVisibleItems {
+                guard case .row(let id) = dataSource.itemIdentifier(for: path), pending.contains(id),
+                      let cell = collection.cellForItem(at: path) else { continue }
+                configure(cell, item: .row(id))
+            }
+            collection.layoutIfNeeded()
+            if let current, indices[current.id] != nil {
+                anchor = current
+                _ = align(current)
+                collection.layoutIfNeeded()
+            }
+        }
+
         func update(_ next: ChatNativeTranscriptViewport) {
             guard !stopped else { return }
             let old = input
+            if old.scope != next.scope || !next.environment.usesMuseChatSurface {
+                setStreamingInteraction(false)
+                markdownPresentationInteraction.holdsCanonicalPresentation = false
+                deferredStreamingRowIDs.removeAll()
+            }
             if old.metricPublication !== next.metricPublication {
                 old.metricPublication?.detachMeasuredViewport(source: ObjectIdentifier(self))
             }
@@ -1002,7 +1191,14 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
                 case .row(let id):
                     if let index = indices[id], revisions[id] != next.revisionAt(index) || old.typeKey != next.typeKey
                         || old.horizontalPadding != next.horizontalPadding {
-                        configure(cell, item: item)
+                        let nextRevision = next.revisionAt(index)
+                        if !scopeChanged, !restoreChanged, !cancelled,
+                           old.typeKey == next.typeKey, old.horizontalPadding == next.horizontalPadding,
+                           shouldDeferStreamingRow(cell, id: id, next: nextRevision) {
+                            deferredStreamingRowIDs.insert(id)
+                        } else {
+                            configure(cell, item: item)
+                        }
                     }
                 default:
                     if !reusesBoundaryConfigurations || boundaryStamp(for: item) == nil
@@ -1258,14 +1454,31 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
         // Read UIKit's completed keyboard transition, including the prediction
         // strip omitted by XCTest's Keyboard AX element. No layout is driven here.
         private func updateDebugProbe() {
+            let mountedStreamingRows = collection.visibleCells.reduce(into: 0) { count, cell in
+                guard let row = (cell as? Cell)?.rowStamp?.revision,
+                      row.hasActiveStream,
+                      row.streamingAssistantMessageID == row.message.message.messageId else { return }
+                count += 1
+            }
             probe.accessibilityLabel = "Native transcript v2"
-            probe.accessibilityValue = "mounted=\(collection.visibleCells.count);logical=\(input.ids.count);state=\(follows ? "following" : "reading");motion=\(motionLink == nil ? "idle" : "animating");motionCompleted=\(motionCompleted);motionCancelled=\(motionCancelled);motionSamples=\(motionSamples);decelerationTakeovers=\(decelerationTakeovers);topRequests=\(systemTopRequests);topCompleted=\(systemTopCompleted);topActive=\(systemTopActive);surfaceTop=\(input.topInset);surfaceBottom=\(input.bottomInset);keyboardTop=\(observedKeyboardFrame.minY);keyboardHeight=\(observedKeyboardFrame.height)"
+            probe.accessibilityValue = "mounted=\(collection.visibleCells.count);logical=\(input.ids.count);state=\(follows ? "following" : "reading");motion=\(motionLink == nil ? "idle" : "animating");motionCompleted=\(motionCompleted);motionCancelled=\(motionCancelled);motionSamples=\(motionSamples);motionReceipt=\(debugMotionReceipt);decelerationTakeovers=\(decelerationTakeovers);topRequests=\(systemTopRequests);topCompleted=\(systemTopCompleted);topActive=\(systemTopActive);surfaceTop=\(input.topInset);surfaceBottom=\(input.bottomInset);keyboardTop=\(observedKeyboardFrame.minY);keyboardHeight=\(observedKeyboardFrame.height);streamInteraction=\(streamingInteractionActive);markdownInteraction=\(markdownPresentationInteraction.isInteracting);tracking=\(collection.isTracking);dragging=\(collection.isDragging);decelerating=\(collection.isDecelerating);deferredRows=\(deferredStreamingRowIDs.count);inputStreaming=\(input.isStreaming);mountedStreamingRows=\(mountedStreamingRows);dragEndCallbacks=\(debugDragEndCallbacks);decelerationEndCallbacks=\(debugDecelerationEndCallbacks);lastInteractionEndFlags=\(debugLastInteractionEndFlags)"
+        }
+
+        private func recordDebugMotion(_ reason: String, elapsed: CFTimeInterval) {
+            let footer = dataSource.indexPath(for: .footer).flatMap { collection.cellForItem(at: $0) }
+            debugMotionReceipt = "\(reason),elapsed:\(elapsed),tail:\(realizedTailArrival),gap:\(bottomOffset - collection.contentOffset.y),offset:\(collection.contentOffset.y),bottom:\(bottomOffset),previousTail:\(String(describing: motionTailSample)),footer:\(String(describing: footer?.frame))"
+        }
+
+        private func recordDebugInteractionEnd(_ kind: String) {
+            debugLastInteractionEndFlags = "\(kind),tracking:\(collection.isTracking),dragging:\(collection.isDragging),decelerating:\(collection.isDecelerating),stopped:\(stopped),suspended:\(presentationSuspended)"
+            updateDebugProbe()
         }
 #endif
 
         func publish() {
             pendingScrollObservation = nil
             guard !stopped, !presentationSuspended, !batchingMotionObservations else { return }
+            synchronizeCanonicalPresentationHold()
             publishComputations += 1
             let distance = max(0, bottomOffset - collection.contentOffset.y)
             let observedVisible = currentAnchor()?.id
@@ -1307,6 +1520,8 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             cancelMotion()
             systemTopActive = true
             systemTopReaderIntent = true
+            flushDeferredStreamingRows()
+            setStreamingInteraction(false)
             systemTopEchoCancellationToken = input.cancellationToken &+ 1
             ownership = .reading
             anchor = currentAnchor()
@@ -1334,6 +1549,8 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
         }
         func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
             guard !stopped, !presentationSuspended else { return }
+            cancelPendingInteractionEnd()
+            setStreamingInteraction(input.environment.usesMuseChatSurface)
             cancelOlder()
             invalidatePublications()
             pendingRestore = nil
@@ -1351,9 +1568,29 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             if interacting { anchor = currentAnchor() }
             enqueueScrollObservation()
         }
-        func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) { if !decelerate { endInteraction() } else { publish() } }
-        func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) { endInteraction() }
+        func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+#if DEBUG
+            debugDragEndCallbacks += 1
+            recordDebugInteractionEnd("drag-end,willDecelerate:\(decelerate)")
+#endif
+            if !decelerate { endInteraction() } else { publish() }
+        }
+        func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
+#if DEBUG
+            debugDecelerationEndCallbacks += 1
+            recordDebugInteractionEnd("deceleration-end")
+#endif
+            endInteraction()
+        }
         func endInteraction() {
+            guard !stopped, !presentationSuspended,
+                  !collection.isDragging, !collection.isDecelerating else { return }
+            if collection.isTracking {
+                deferInteractionEndUntilTrackingSettles()
+                return
+            }
+            flushDeferredStreamingRows()
+            setStreamingInteraction(false)
             // A real drag moves ownership to reading before its end callback.
             // An obsolete momentum-end callback cannot revoke newer follow intent.
             guard !stopped, !presentationSuspended, !interacting, !follows,
@@ -1449,7 +1686,10 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             publish()
         }
         private func updateEdgeMask() {
-            let edge = ChatTranscriptEdgeGeometry(height: collection.bounds.height, bottomInset: input.bottomInset)
+            let edge = visualEdgeGeometry
+            if #available(iOS 26.0, *) {
+                collection.bottomEdgeEffect.isHidden = input.environment.usesMuseChatSurface
+            }
             let edgeColor = input.environment.accessibilityReduceTransparency ? UIColor.black.cgColor : UIColor.clear.cgColor
             CATransaction.begin()
             CATransaction.setDisableActions(true)
@@ -1462,10 +1702,24 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             CATransaction.commit()
         }
 
+        var visualEdgeGeometry: ChatTranscriptEdgeGeometry {
+            // Composer clearance remains in the layout. Muse content draws under
+            // its floating controls and fades only at the physical viewport edge.
+            ChatTranscriptEdgeGeometry(height: collection.bounds.height,
+                bottomInset: input.environment.usesMuseChatSurface ? 32 : input.bottomInset)
+        }
+
         func beginMotion() {
             cancelFollow()
             guard isPresentationActive, !presentationSuspended, motionLink == nil,
                   !systemTopActive, !collection.isTracking, !collection.isDragging else { return }
+#if DEBUG
+            // The optional call reads the mach clock only when the trace is opted
+            // in, before opening the canonical gate or synchronously fitting rows.
+            ChatPerformanceInvalidationProbe.shared?.record("native_latest_begin",
+                a: input.ids.count, b: markdownPresentationInteraction.canonicalPreparationCount,
+                c: markdownPresentationInteraction.canonicalCommitCount)
+#endif
             explicitLatestOwnsViewport = true
             ownership = .following
             // Claim ownership before stopping UIKit: it can synchronously deliver
@@ -1478,17 +1732,31 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
                 collection.setContentOffset(visibleOffset, animated: false)
                 correcting = wasCorrecting
             }
+            flushDeferredStreamingRows()
+            setStreamingInteraction(false)
             systemTopReaderIntent = false
             systemTopEchoCancellationToken = nil
             guard !input.environment.accessibilityReduceMotion, !reduceMotionEnabled() else {
                 collection.setNeedsLayout()
+#if DEBUG
+                ChatPerformanceInvalidationProbe.shared?.record("native_latest_no_motion", a: 0)
+#endif
                 return
             }
-            guard !realizedTailArrival else { return }
+            guard !realizedTailArrival else {
+#if DEBUG
+                ChatPerformanceInvalidationProbe.shared?.record("native_latest_no_motion", a: 1)
+#endif
+                return
+            }
             motionStarted = CACurrentMediaTime()
             motionProgress = 0
             motionTailSample = nil
             motionTailOffset = nil
+            motionDeadlineConfirmationPending = false
+#if DEBUG
+            debugMotionReceipt = "started"
+#endif
             let link = CADisplayLink(target: MotionTarget(self), selector: #selector(MotionTarget.tick(_:)))
             motionLink = link
             link.add(to: .main, forMode: .common)
@@ -1502,12 +1770,24 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             let publicationsBefore = publishComputations, scansBefore = descendantScanPasses
             motionTicks += 1
             let finishObservations = beginObservationBatch()
+#if DEBUG
+            var completedLatestForProbe = false
+#endif
             defer {
                 finishObservations()
                 motionPublishComputations += publishComputations - publicationsBefore
                 motionDescendantScanPasses += descendantScanPasses - scansBefore
+#if DEBUG
+                if completedLatestForProbe {
+                    // Timestamp after the final tick's fitting/publication work;
+                    // link.timestamp would omit a synchronous stall inside it.
+                    ChatPerformanceInvalidationProbe.shared?.record("native_latest_end",
+                        a: motionCompleted, b: motionCancelled,
+                        c: markdownPresentationInteraction.canonicalCommitCount)
+                }
+#endif
             }
-            guard !interacting else { cancelMotion(); publish(); return }
+            guard !interacting else { cancelMotion(reason: "interaction"); publish(); return }
             if input.environment.accessibilityReduceMotion || reduceMotionEnabled() {
                 cancelMotion()
                 explicitLatestOwnsViewport = true
@@ -1537,6 +1817,11 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
                 motionLink?.invalidate()
                 motionLink = nil
                 motionCompleted += 1
+                motionDeadlineConfirmationPending = false
+#if DEBUG
+                recordDebugMotion("completed", elapsed: elapsed)
+                completedLatestForProbe = true
+#endif
                 anchor = currentAnchor()
                 ownership = .following
                 finishRestore(.success)
@@ -1546,21 +1831,34 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             }
             motionTailSample = realizedTailArrival ? tail?.frame : nil
             motionTailOffset = realizedTailArrival ? collection.contentOffset.y : nil
-            // One bounded phase, including self-sizing settlement. Do not silently
-            // fall into instant follow or a retry ladder when the tail cannot settle.
+            // A late self-sizing change can make the deadline-ending tick the
+            // first actual tail arrival. Allow exactly one fresh confirmation
+            // sample; it must pass the same unchanged-frame/offset check above.
+            // An unrealized or changing tail still exhausts without a retry ladder.
             if elapsed >= 0.9 {
-                cancelMotion()
-                finishRestore(.exhausted)
-                saveMemory(scope: input.scope)
+                if realizedTailArrival, !motionDeadlineConfirmationPending {
+                    motionDeadlineConfirmationPending = true
+#if DEBUG
+                    recordDebugMotion("deadline-confirmation", elapsed: elapsed)
+#endif
+                } else {
+                    cancelMotion(reason: "exhausted", elapsed: elapsed)
+                    finishRestore(.exhausted)
+                    saveMemory(scope: input.scope)
+                }
             }
             publish()
         }
-        func cancelMotion() {
+        func cancelMotion(reason: String = "superseded", elapsed: CFTimeInterval? = nil) {
             cancelFollow()
             explicitLatestOwnsViewport = false
             // Retain the token until its parent echo is consumed. Cancellation
             // must not turn that queued same-tap echo into a fresh follow command.
             guard let link = motionLink else { return }
+#if DEBUG
+            recordDebugMotion(reason, elapsed: elapsed ?? max(0, CACurrentMediaTime() - motionStarted))
+#endif
+            motionDeadlineConfirmationPending = false
             link.invalidate()
             motionLink = nil
             motionCancelled += 1
@@ -1568,6 +1866,11 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             ownership = .reading
             motionTailSample = nil
             motionTailOffset = nil
+#if DEBUG
+            ChatPerformanceInvalidationProbe.shared?.record("native_latest_cancel",
+                a: reason == "exhausted" ? 2 : (reason == "interaction" ? 1 : 0),
+                b: motionCancelled, c: markdownPresentationInteraction.canonicalCommitCount)
+#endif
         }
         @objc func jumpToLatest() {
             guard isPresentationActive, !presentationSuspended,
@@ -1695,6 +1998,8 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
         }
         func stop() {
             guard !stopped else { return }
+            setStreamingInteraction(false)
+            deferredStreamingRowIDs.removeAll()
             input.metricPublication?.detachMeasuredViewport(source: ObjectIdentifier(self))
             cancelOlder()
             invalidatePublications()
@@ -1704,6 +2009,7 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             cancelMotion()
             if isViewLoaded { saveMemory(scope: input.scope) }
             stopped = true
+            markdownPresentationInteraction.holdsCanonicalPresentation = false
             generation += 1
             cancelRefresh()
             collection?.willLayout = nil

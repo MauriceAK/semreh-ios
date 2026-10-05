@@ -1,9 +1,37 @@
 import Highlightr
 import MarkdownUI
 import OSLog
+import Observation
 import Splash
 import SwiftUI
 import UIKit
+
+/// A live per-viewport signal. Hosted environment snapshots retain this owner,
+/// allowing async completion to respect reader ownership after mounting.
+@MainActor
+@Observable
+final class MarkdownPresentationInteraction {
+    var isInteracting = false
+    /// Formatting may rewrap a long provisional paragraph. Keep the current
+    /// presentation while its reader is detached, independently of input pacing.
+    var holdsCanonicalPresentation = false
+    var blocksCanonicalPresentation: Bool { isInteracting || holdsCanonicalPresentation }
+#if DEBUG
+    var canonicalPreparationCount = 0
+    var canonicalCommitCount = 0
+#endif
+}
+
+private struct MarkdownPresentationInteractionKey: EnvironmentKey {
+    static let defaultValue: MarkdownPresentationInteraction? = nil
+}
+
+extension EnvironmentValues {
+    var markdownPresentationInteraction: MarkdownPresentationInteraction? {
+        get { self[MarkdownPresentationInteractionKey.self] }
+        set { self[MarkdownPresentationInteractionKey.self] = newValue }
+    }
+}
 
 /// Paragraph-leading style for markdown bodies. `.standard` matches the chat
 /// transcript; `.thinking` is the expanded-Thinking reading variant and is
@@ -35,6 +63,47 @@ private extension EnvironmentValues {
     }
 }
 
+private struct BoundedParagraphForegroundKey: EnvironmentKey {
+    static let defaultValue: SwiftUI.Color = .primary
+}
+
+private extension EnvironmentValues {
+    var boundedParagraphForeground: SwiftUI.Color {
+        get { self[BoundedParagraphForegroundKey.self] }
+        set { self[BoundedParagraphForegroundKey.self] = newValue }
+    }
+}
+
+#if DEBUG
+@MainActor
+final class BoundedMarkdownParagraphMountProbe {
+    struct Receipt {
+        let textBytes: Int
+        let leafCount: Int
+        let maximumLeafBytes: Int
+        let foreground: SwiftUI.Color
+    }
+    var receipts: [Receipt] = []
+    func record(_ prepared: BoundedMarkdownParagraph, foreground: SwiftUI.Color) {
+        receipts.append(Receipt(textBytes: String(prepared.text.characters).utf8.count,
+            leafCount: prepared.leaves.count,
+            maximumLeafBytes: prepared.leaves.map { String($0.characters).utf8.count }.max() ?? 0,
+            foreground: foreground))
+    }
+}
+
+private struct BoundedParagraphMountProbeKey: EnvironmentKey {
+    static let defaultValue: BoundedMarkdownParagraphMountProbe? = nil
+}
+
+extension EnvironmentValues {
+    var boundedParagraphMountProbe: BoundedMarkdownParagraphMountProbe? {
+        get { self[BoundedParagraphMountProbeKey.self] }
+        set { self[BoundedParagraphMountProbeKey.self] = newValue }
+    }
+}
+#endif
+
 /// Instruments only the synchronous production presentation call. The formatter
 /// closure is nonescaping, without shared mutable state or task-local storage.
 @MainActor
@@ -58,25 +127,41 @@ struct MarkdownRenderer: View {
     let isThinkingBody: Bool
 
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.markdownPresentationInteraction) private var presentationInteraction
+#if DEBUG
+    private let onCanonicalPrepared: ((String) -> Void)?
+    private let onCanonicalCommitted: ((String) -> Void)?
+#endif
 
-    init(content: String, isStreaming: Bool = false, isThinkingBody: Bool = false) {
+    init(content: String, isStreaming: Bool = false, isThinkingBody: Bool = false,
+         onCanonicalPrepared: ((String) -> Void)? = nil,
+         onCanonicalCommitted: ((String) -> Void)? = nil) {
         self.content = content
         self.isStreaming = isStreaming
         self.isThinkingBody = isThinkingBody
+        _hasStreamed = State(initialValue: isStreaming)
+#if DEBUG
+        self.onCanonicalPrepared = onCanonicalPrepared
+        self.onCanonicalCommitted = onCanonicalCommitted
+#endif
     }
 
-    /// Keeps the streaming renderer mounted briefly after streaming ends so
-    /// the trailing text opacity reveal can finish before switching to the
-    /// solid static renderer.
-    @State private var lingersAfterStreaming = false
+    @State private var hasStreamed = false
+    @State private var completedPresentation: PreparedMarkdownPresentation?
+    @State private var pendingPresentation: PreparedMarkdownPresentation?
+
+    private var awaitsCanonicalPresentation: Bool {
+        hasStreamed && completedPresentation?.source.utf8.elementsEqual(content.utf8) != true
+    }
 #if DEBUG
     @Environment(\.prototypeCodeViewport) private var nativeRichViewport
 #endif
 
     var body: some View {
         Group {
-            if isStreaming || lingersAfterStreaming {
-                StreamingMarkdownRenderer(content: content)
+            if isStreaming || hasStreamed {
+                StreamingMarkdownRenderer(content: content,
+                    canonicalPresentation: isStreaming || awaitsCanonicalPresentation ? nil : completedPresentation)
             } else if content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 Text(verbatim: " ")
             } else if let fallbackReason = MarkdownContentRenderingPolicy.fallbackReason(for: content) {
@@ -104,17 +189,38 @@ struct MarkdownRenderer: View {
             }
         }
         .environment(\.markdownBodyStyle, isThinkingBody ? .thinking : .standard)
-        .onChange(of: isStreaming) { wasStreaming, nowStreaming in
-            if wasStreaming, !nowStreaming {
-                lingersAfterStreaming = true
-            }
+        .onChange(of: isStreaming) { _, nowStreaming in
+            if nowStreaming { hasStreamed = true }
         }
-        .task(id: isStreaming) {
-            guard !isStreaming else { return }
-            try? await Task.sleep(for: .seconds(StreamingTrailingContentReveal.pauseDelay))
-            guard !Task.isCancelled else { return }
-            lingersAfterStreaming = false
+        .onChange(of: presentationInteraction?.blocksCanonicalPresentation ?? false) { _, blocked in
+            if !blocked { commitPreparedPresentationIfReady() }
         }
+        .task(id: MarkdownPresentationRequest(content: content, isStreaming: isStreaming)) {
+            guard !isStreaming, hasStreamed else { return }
+            let prepared = await MarkdownPresentationWorker.shared.prepare(content)
+            guard !Task.isCancelled, let prepared else { return }
+            pendingPresentation = prepared
+#if DEBUG
+            presentationInteraction?.canonicalPreparationCount += 1
+            onCanonicalPrepared?(prepared.source)
+#endif
+            commitPreparedPresentationIfReady()
+        }
+    }
+
+    private func commitPreparedPresentationIfReady() {
+        guard !isStreaming, presentationInteraction?.blocksCanonicalPresentation != true,
+              let pendingPresentation,
+              pendingPresentation.source.utf8.elementsEqual(content.utf8) else { return }
+        // One solid canonical presentation, never a replay of the received text.
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) { completedPresentation = pendingPresentation }
+        self.pendingPresentation = nil
+#if DEBUG
+        presentationInteraction?.canonicalCommitCount += 1
+        onCanonicalCommitted?(pendingPresentation.source)
+#endif
     }
 
 
@@ -152,67 +258,229 @@ struct MarkdownRenderer: View {
     }
 }
 
+/// Parsing input is bounded before math preprocessing or MarkdownUI sees it.
+/// Completed raw chunks retain their identities; only the final raw block grows.
 struct StreamingMarkdownRenderer: View {
     let content: String
-
+    let canonicalPresentation: PreparedMarkdownPresentation?
     @Environment(\.colorScheme) private var colorScheme
-    @State private var displayedContent: String
+    @StateObject private var state: StreamingRawMarkdownState
 
-    init(content: String) {
+    init(content: String, canonicalPresentation: PreparedMarkdownPresentation? = nil) {
         self.content = content
-        _displayedContent = State(initialValue: content)
+        self.canonicalPresentation = canonicalPresentation
+        _state = StateObject(wrappedValue: StreamingRawMarkdownState(content: content))
     }
 
     var body: some View {
         Group {
-            if displayedContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                Text(verbatim: " ")
-            } else if let fallbackReason = MarkdownContentRenderingPolicy.fallbackReason(for: displayedContent) {
-                PlainMarkdownFallbackView(
-                    content: displayedContent,
-                    reason: fallbackReason
-                )
+            if let canonicalPresentation, !retainsLiteralProjection {
+                PreparedMarkdownView(presentation: canonicalPresentation, colorScheme: colorScheme)
             } else {
-                streamingMarkdownContent
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(state.segments.stableChunks) { chunk in
+                        StreamingRawMarkdownChunk(content: chunk.text, colorScheme: colorScheme, active: false)
+                            .equatable()
+                    }
+                    StreamingRawMarkdownChunk(content: state.segments.activeMarkdown, colorScheme: colorScheme, active: true)
+                }
             }
         }
-        .task(id: content) {
-            await Task.yield()
-            guard !Task.isCancelled else { return }
-            guard displayedContent != content else { return }
-            displayedContent = content
+        .onChange(of: StreamingMarkdownSourceRevision(content: content)) { _, new in
+            state.update(new.content)
         }
     }
 
-    @ViewBuilder
-    private var streamingMarkdownContent: some View {
-        let presentation = preparedMarkdownMathPresentation(in: displayedContent)
-        let segments = presentation.segments
+    private var retainsLiteralProjection: Bool {
+        canonicalPresentation?.fallbackReason != nil && state.segments.stableChunks.isEmpty
+            && StreamingMarkdownRenderBudget.usesLiteralTail(state.segments.activeMarkdown)
+            && state.segments.activeMarkdown.utf8.elementsEqual(content.utf8)
+    }
+}
 
-        if segments.containsMath {
+@MainActor
+private final class StreamingRawMarkdownState: ObservableObject {
+    private var accumulator = StreamingMarkdownBlockAccumulator(preservesRawMath: true)
+    private var source: String
+    @Published private(set) var segments: StreamingMarkdownBlockSegments
+
+    init(content: String) {
+        source = content
+        segments = accumulator.update(content, appendOnly: false)
+    }
+
+    func update(_ content: String) {
+        segments = accumulator.update(content, appendOnly: content.utf8.starts(with: source.utf8))
+        source = content
+    }
+}
+
+private struct StreamingRawMarkdownChunk: View, Equatable {
+    let content: String
+    let colorScheme: ColorScheme
+    let active: Bool
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.active == rhs.active && lhs.colorScheme == rhs.colorScheme
+            && lhs.content.utf8.elementsEqual(rhs.content.utf8)
+    }
+
+    var body: some View {
+        if content.allSatisfy(\.isWhitespace) {
+            // Whitespace is retained in raw source for canonical completion,
+            // but it is not a separate Markdown paragraph or a placeholder row.
+            EmptyView()
+        } else if StreamingMarkdownRenderBudget.usesLiteralTail(content) {
+            StreamingLiteralText(content: content)
+        } else if active {
+            StreamingRichMarkdownTail(content: content, colorScheme: colorScheme)
+        } else {
+            MarkdownRenderer(content: content)
+        }
+    }
+}
+
+/// At most 4 KiB enters the existing rich/fade machinery. No TimelineView is
+/// mounted for an oversized block, including one enormous open code fence.
+private struct StreamingRichMarkdownTail: View {
+    let content: String
+    let colorScheme: ColorScheme
+
+    var body: some View {
+        let presentation = preparedMarkdownMathPresentation(in: content)
+        if presentation.segments.containsMath {
             VStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(segments.enumerated()), id: \.offset) { _, segment in
+                ForEach(Array(presentation.segments.enumerated()), id: \.offset) { _, segment in
                     switch segment {
                     case .markdown(let markdown):
-                        if !markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            StreamingMarkdownChunkedView(
-                                content: markdown,
-                                colorScheme: colorScheme
-                            )
-                        }
+                        StreamingMarkdownChunkedView(content: markdown, colorScheme: colorScheme)
                     case .displayMath(let latex):
                         DisplayMathView(latex: latex)
                     }
                 }
             }
         } else {
-            StreamingMarkdownChunkedView(
-                content: presentation.inlineMarkdown,
-                colorScheme: colorScheme
-            )
+            StreamingMarkdownChunkedView(content: presentation.inlineMarkdown, colorScheme: colorScheme)
         }
     }
+}
 
+@MainActor
+private final class StreamingLiteralState: ObservableObject {
+    @Published private(set) var projection = StreamingLiteralAccumulator()
+    init(content: String) { projection.update(content) }
+    func update(_ content: String) { projection.update(content) }
+}
+
+/// Literal provisional leaves may wrap at their slice boundary. They retain
+/// every source byte; final rich rendering always uses the canonical source.
+private struct StreamingLiteralText: View {
+    let content: String
+    @StateObject private var state: StreamingLiteralState
+
+    init(content: String) {
+        self.content = content
+        _state = StateObject(wrappedValue: StreamingLiteralState(content: content))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(state.projection.stableChunks) { chunk in
+                StreamingLiteralLeaf(content: StreamingLiteralAccumulator.displayText(forSealedLeaf: chunk.text))
+                    .equatable()
+            }
+            StreamingLiteralLeaf(content: state.projection.tail)
+        }
+        .textSelection(.enabled)
+        .onChange(of: StreamingMarkdownSourceRevision(content: content)) { _, new in
+            state.update(new.content)
+        }
+    }
+}
+
+private struct StreamingLiteralLeaf: View, Equatable {
+    let content: String
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.content.utf8.elementsEqual(rhs.content.utf8)
+    }
+    var body: some View {
+        Text(verbatim: content)
+            .font(AppFont.body())
+            .foregroundStyle(.primary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+private struct MarkdownPresentationRequest: Equatable {
+    let content: String
+    let isStreaming: Bool
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.isStreaming == rhs.isStreaming && lhs.content.utf8.elementsEqual(rhs.content.utf8)
+    }
+}
+
+/// MarkdownUI's pinned MarkdownContent owns immutable value-tree nodes, not its
+/// temporary cmark parser. cmark's extension registration uses CMARK_RUN_ONCE.
+/// The worker alone builds this value and transfers it after parsing; no UIKit,
+/// layout, styled text, mutable parser, or cache crosses executors.
+struct PreparedMarkdownPresentation: @unchecked Sendable {
+    enum Piece {
+        case markdown(source: String, document: MarkdownContent)
+        case math(String)
+    }
+    let source: String
+    let fallbackReason: MarkdownContentFallbackReason?
+    let pieces: [Piece]
+}
+
+actor MarkdownPresentationWorker {
+    static let shared = MarkdownPresentationWorker()
+
+    func prepare(_ source: String) -> PreparedMarkdownPresentation? {
+        guard !Task.isCancelled else { return nil }
+        if let reason = MarkdownContentRenderingPolicy.fallbackReason(for: source) {
+            return PreparedMarkdownPresentation(source: source, fallbackReason: reason, pieces: [])
+        }
+        let presentation = MarkdownMathSegmenter.presentation(in: source)
+        guard !Task.isCancelled else { return nil }
+        let pieces: [PreparedMarkdownPresentation.Piece]
+        if presentation.segments.containsMath {
+            pieces = presentation.segments.map { segment in
+                switch segment {
+                case .markdown(let text): return .markdown(source: text, document: MarkdownContent(text))
+                case .displayMath(let latex): return .math(latex)
+                }
+            }
+        } else {
+            let text = presentation.inlineMarkdown
+            pieces = [.markdown(source: text, document: MarkdownContent(text))]
+        }
+        guard !Task.isCancelled else { return nil }
+        return PreparedMarkdownPresentation(source: source, fallbackReason: nil, pieces: pieces)
+    }
+}
+
+private struct PreparedMarkdownView: View {
+    let presentation: PreparedMarkdownPresentation
+    let colorScheme: ColorScheme
+    var body: some View {
+        if let reason = presentation.fallbackReason {
+            PlainMarkdownFallbackView(content: presentation.source, reason: reason)
+        } else {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(presentation.pieces.enumerated()), id: \.offset) { _, piece in
+                    switch piece {
+                    case .markdown(let source, let document):
+                        ChatMarkdownView(content: source, colorScheme: colorScheme, isStreaming: false,
+                                         preparedDocument: document)
+                    case .math(let latex):
+                        DisplayMathView(latex: latex)
+                    }
+                }
+            }
+            .textSelection(.enabled)
+        }
+    }
 }
 
 /// The first split belongs to the mounted view identity. StateObject's lazy
@@ -673,8 +941,8 @@ private struct ChatMarkdownView: View, Equatable {
     let content: String
     let colorScheme: ColorScheme
     let isStreaming: Bool
+    var preparedDocument: MarkdownContent? = nil
 
-    @Environment(\.markdownBodyStyle) private var markdownBodyStyle
     @State private var documentCache = MarkdownDocumentCache()
 
     static func == (lhs: ChatMarkdownView, rhs: ChatMarkdownView) -> Bool {
@@ -684,8 +952,8 @@ private struct ChatMarkdownView: View, Equatable {
     }
 
     var body: some View {
-        Markdown(documentCache.document(for: content))
-            .markdownTheme(MarkdownUI.Theme.chat(colorScheme: colorScheme, isStreaming: isStreaming))
+        Markdown(preparedDocument ?? documentCache.document(for: content))
+            .markdownTheme(paragraphTheme)
             .markdownTextStyle {
                 ForegroundColor(.primary)
                 BackgroundColor(nil)
@@ -696,13 +964,111 @@ private struct ChatMarkdownView: View, Equatable {
                 BackgroundColor(SwiftUI.Color(.tertiarySystemGroupedBackground))
             }
             .markdownCodeSyntaxHighlighter(.plainText)
-            .markdownBlockStyle(\.paragraph) { configuration in
-                configuration.label
+    }
+
+    private var paragraphTheme: MarkdownUI.Theme {
+        // Compose before installing the whole theme. An outer paragraph
+        // environment modifier is overwritten by the inner markdownTheme.
+        MarkdownUI.Theme.chat(colorScheme: colorScheme, isStreaming: isStreaming)
+            .paragraph { configuration in
+                ChatMarkdownParagraph(content: configuration.content, original: configuration.label,
+                                      documentSource: content)
                     .fixedSize(horizontal: false, vertical: true)
-                    .relativeLineSpacing(.em(markdownBodyStyle.paragraphLeadingEm))
-                    .markdownMargin(top: 0, bottom: 8)
+                    // Preserve the effective pinned GitHub paragraph style.
+                    .relativeLineSpacing(.em(0.25))
+                    .markdownMargin(top: 0, bottom: 16)
                     .prototypeMeasuredBlock("paragraph")
             }
+    }
+}
+
+@MainActor
+private final class BoundedMarkdownParagraphCache {
+    private var content: MarkdownContent?
+    private var documentSource = ""
+    private var prepared: BoundedMarkdownParagraph?
+
+    func presentation(for content: MarkdownContent, documentSource: String) -> BoundedMarkdownParagraph? {
+        if self.content != content || !self.documentSource.utf8.elementsEqual(documentSource.utf8) {
+            self.content = content
+            self.documentSource = documentSource
+#if DEBUG
+            let probe = ChatPerformanceInvalidationProbe.shared
+            let started = probe.map { _ in CACurrentMediaTime() }
+            probe?.record("bounded_paragraph_prepare", at: started ?? 0,
+                          a: documentSource.utf8.count)
+            defer {
+                if let probe, let started {
+                    let ended = CACurrentMediaTime()
+                    probe.record("bounded_paragraph_prepare_end", at: ended,
+                        a: Int(exactly: ((ended - started) * 1_000_000).rounded()) ?? -1,
+                        b: prepared?.leaves.count ?? 0, c: prepared == nil ? 0 : 1)
+                }
+            }
+#endif
+            prepared = documentSource.utf8.count > BoundedMarkdownParagraph.minimumSourceBytes
+                ? BoundedMarkdownParagraph.prepare(content) : nil
+        }
+        return prepared
+    }
+}
+
+/// Separate Text leaves are essential: concatenation would recreate the large
+/// typesetter input that loses emoji/Arabic shaping. Paragraph margins belong
+/// to the surrounding block, never each continuation leaf.
+private struct ChatMarkdownParagraph: View {
+    let content: MarkdownContent
+    let original: BlockConfiguration.Label
+    let documentSource: String
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.boundedParagraphForeground) private var paragraphForeground
+#if DEBUG
+    @Environment(\.boundedParagraphMountProbe) private var mountProbe
+#endif
+    @ScaledMetric(relativeTo: .body) private var pointSize: CGFloat = 16
+    @State private var cache = BoundedMarkdownParagraphCache()
+
+    var body: some View {
+        if let prepared = cache.presentation(for: content, documentSource: documentSource) {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(prepared.leaves.indices, id: \.self) { index in
+                    Text(styled(prepared.leaves[index]))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("bounded-markdown-leaf-\(index)")
+                }
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("bounded-markdown-paragraph")
+#if DEBUG
+            .onAppear { mountProbe?.record(prepared, foreground: paragraphForeground) }
+#endif
+        } else {
+            original
+        }
+    }
+
+    private func styled(_ source: AttributedString) -> AttributedString {
+        var result = source
+        for run in source.runs {
+            let intent = run.inlinePresentationIntent ?? []
+            var font = Font.system(size: pointSize.rounded(), design: .rounded)
+            if intent.contains(.code) {
+                font = .system(size: (pointSize * 0.85).rounded(), design: .rounded).monospaced()
+                result[run.range].backgroundColor = colorScheme == .dark
+                    ? SwiftUI.Color(red: 0.08, green: 0.09, blue: 0.12) : SwiftUI.Color(.tertiarySystemGroupedBackground)
+            }
+            if intent.contains(.stronglyEmphasized) { font = font.weight(.semibold) }
+            if intent.contains(.emphasized) { font = font.italic() }
+            result[run.range].font = font
+            if run.link != nil {
+                result[run.range].foregroundColor = colorScheme == .dark
+                    ? SwiftUI.Color(red: 0x4c / 255.0, green: 0x8e / 255.0, blue: 0xf8 / 255.0)
+                    : SwiftUI.Color(red: 0x2c / 255.0, green: 0x65 / 255.0, blue: 0xcf / 255.0)
+            } else {
+                result[run.range].foregroundColor = paragraphForeground
+            }
+        }
+        return result
     }
 }
 
@@ -795,20 +1161,16 @@ private struct ChatCodeBlock: View {
     @AppStorage(ChatTranscriptDisplaySettings.wrapsCodeBlockLinesKey) private var wrapsCodeBlockLines = false
     @State private var didCopy = false
     @State private var highlightedCode: MarkdownPreparedCode?
-#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
     @State private var highlightedForRequest: MarkdownCodeHighlightRequest?
     @State private var synchronousHighlight = MarkdownPreparedSyncLookup()
-#endif
     @State private var showsFullCode = false
 #if DEBUG
     @Environment(\.prototypeCodeViewport) private var prototypeViewport
 #endif
-#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
     @Environment(\.chatNativeCodeText) private var chatNativeCodeText
     @Environment(\.internalChatRendererEnabled) private var internalChatRendererEnabled
     @Environment(\.nativePreparedHighlights) private var nativePreparedHighlights
     @Environment(\.chatFullInlineCode) private var chatFullInlineCode
-#endif
 
     private let logger = Logger.hermesMarkdownRendering
 
@@ -920,8 +1282,7 @@ private struct ChatCodeBlock: View {
     }
 
     @ViewBuilder private var originalCodeText: some View {
-#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
-        if (internalChatRendererEnabled || chatNativeCodeText || InternalChatRendererPolicy.debugArgument("--chat-rich-native-code-text")),
+        if (internalChatRendererEnabled || chatNativeCodeText || ChatSurfacePolicy.debugArgument("--chat-rich-native-code-text")),
            MarkdownNativeCodeText.isEligible(inlineCode) {
             MarkdownNativeCodeText(source: inlineCode, prepared: displayHighlightedCode,
                                    wraps: wrapsCodeBlockLines, colorScheme: colorScheme,
@@ -931,13 +1292,6 @@ private struct ChatCodeBlock: View {
         } else {
             PlainCodeBlockText(content: inlineCode, wraps: wrapsCodeBlockLines)
         }
-#else
-        if let highlightedCode = displayHighlightedCode {
-            HighlightedCodeBlockText(content: highlightedCode, wraps: wrapsCodeBlockLines)
-        } else {
-            PlainCodeBlockText(content: inlineCode, wraps: wrapsCodeBlockLines)
-        }
-#endif
     }
 
     private var logicalLineCount: Int {
@@ -945,11 +1299,7 @@ private struct ChatCodeBlock: View {
     }
 
     private var isInlinePreview: Bool {
-#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
-        let fullInline = internalChatRendererEnabled || chatFullInlineCode || InternalChatRendererPolicy.debugArgument("--chat-full-inline-code")
-#else
-        let fullInline = false
-#endif
+        let fullInline = internalChatRendererEnabled || chatFullInlineCode || ChatSurfacePolicy.debugArgument("--chat-full-inline-code")
         return allowsInlinePreview && !fullInline && logicalLineCount > ChatCodeInlinePreviewPolicy.maximumVisibleLines
     }
 
@@ -958,13 +1308,11 @@ private struct ChatCodeBlock: View {
     }
 
     private var displayHighlightedCode: MarkdownPreparedCode? {
-#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
         if let prepared = nativePreparedHighlights.first(where: { $0.request == highlightRequest }) { return prepared.code }
         if let warm = synchronousPreparedCode(for: highlightRequest) { return warm }
-        if (internalChatRendererEnabled || chatNativeCodeText || InternalChatRendererPolicy.debugArgument("--chat-rich-native-code-text")),
+        if (internalChatRendererEnabled || chatNativeCodeText || ChatSurfacePolicy.debugArgument("--chat-rich-native-code-text")),
            MarkdownNativeCodeText.isEligible(inlineCode),
            highlightedForRequest != highlightRequest { return nil }
-#endif
         return highlightedCode
     }
 
@@ -993,23 +1341,19 @@ private struct ChatCodeBlock: View {
         )
     }
 
-#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
     private func synchronousPreparedCode(for request: MarkdownCodeHighlightRequest) -> MarkdownPreparedCode? {
         synchronousHighlight.completedCode(
             for: request, worker: .shared,
-            nativeEnabled: internalChatRendererEnabled || chatNativeCodeText || InternalChatRendererPolicy.debugArgument("--chat-rich-native-code-text"),
+            nativeEnabled: internalChatRendererEnabled || chatNativeCodeText || ChatSurfacePolicy.debugArgument("--chat-rich-native-code-text"),
             arguments: ProcessInfo.processInfo.arguments
         )
     }
-#endif
 
     @MainActor
     private func updateHighlightedCode(for request: MarkdownCodeHighlightRequest) async {
-#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
         // The first body already displayed this revision. Do not clear it or yield.
         if synchronousPreparedCode(for: request) != nil { return }
         if nativePreparedHighlights.contains(where: { $0.request == request }) { return }
-#endif
 #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--viewport-virtual-code") {
             Logger(subsystem: "com.maurice.semreh", category: "ViewportPrototype").debug("event=virtual_code_gate hasViewport=\(self.prototypeViewport != nil, privacy: .public)")
@@ -1017,9 +1361,7 @@ private struct ChatCodeBlock: View {
         if ProcessInfo.processInfo.arguments.contains("--tail-geometry-no-highlight") { return }
 #endif
         highlightedCode = nil
-#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
         highlightedForRequest = nil
-#endif
         await Task.yield()
 
         guard !Task.isCancelled else { return }
@@ -1030,9 +1372,7 @@ private struct ChatCodeBlock: View {
         switch result {
         case .highlighted(let attributedString):
             highlightedCode = attributedString
-#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
             highlightedForRequest = request
-#endif
 #if DEBUG
             if ProcessInfo.processInfo.arguments.contains("--native-refinement-trace") {
                 Logger(subsystem: "com.maurice.semreh", category: "NativeBaseline").debug("event=highlight_applied characters=\(request.code.count, privacy: .public)")
@@ -1169,11 +1509,7 @@ private struct FullCodeTextView: UIViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeUIView(context: Context) -> UITextView {
-#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
         let view = ParagraphSelectableTextView()
-#else
-        let view = UITextView()
-#endif
         view.isEditable = false
         view.isSelectable = true
         view.isScrollEnabled = true
@@ -1238,7 +1574,6 @@ private struct FullCodeTextView: UIViewRepresentable {
     }
 }
 
-#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
 private struct ChatNativeCodeTextKey: EnvironmentKey {
     static let defaultValue = false
 }
@@ -1341,8 +1676,18 @@ struct MarkdownNativeCodeText: UIViewRepresentable {
 
     private static func assembleDisplayText(_ attributedSource: NSAttributedString, prepared: Bool = false) -> NSAttributedString {
 #if DEBUG
-        ChatPerformanceInvalidationProbe.shared?.record("native_code_display_assembly",
+        let probe = ChatPerformanceInvalidationProbe.shared
+        let started = probe.map { _ in CACurrentMediaTime() }
+        probe?.record("native_code_display_assembly", at: started ?? 0,
             a: attributedSource.length, b: prepared ? 1 : 0)
+        defer {
+            if let probe, let started {
+                let ended = CACurrentMediaTime()
+                probe.record("native_code_display_assembly_end", at: ended,
+                    a: Int(exactly: ((ended - started) * 1_000_000).rounded()) ?? -1,
+                    b: attributedSource.length, c: prepared ? 1 : 0)
+            }
+        }
 #endif
         let string = attributedSource.string as NSString
         let result = NSMutableAttributedString(string: "")
@@ -1422,14 +1767,30 @@ struct MarkdownNativeCodeText: UIViewRepresentable {
 
     // Diagnostic opt-out keeps the prior per-leaf sizing cache for exact-binary
     // A/B captures; both prepared and plain revision measurement sharing are disabled.
-    private static let reusesPreparedMeasurements = !InternalChatRendererPolicy.debugArgument(
+    private static let reusesPreparedMeasurements = !ChatSurfacePolicy.debugArgument(
         "--chat-native-code-size-cache-disabled")
 
     func update(_ view: UITextView, state: Coordinator) {
+#if DEBUG
+        let probe = ChatPerformanceInvalidationProbe.shared
+        let started = probe.map { _ in CACurrentMediaTime() }
+        var assignedText = false
+        probe?.record("native_code_update", at: started ?? 0,
+                      a: source.utf8.count, b: prepared == nil ? 0 : 1, c: wraps ? 1 : 0)
+        defer {
+            if let probe, let started {
+                let ended = CACurrentMediaTime()
+                probe.record("native_code_update_end", at: ended,
+                    a: Int(exactly: ((ended - started) * 1_000_000).rounded()) ?? -1,
+                    b: source.utf8.count, c: assignedText ? 1 : 0)
+            }
+        }
+#endif
         (view as? MarkdownNativeCodeTextView)?.copySource = source
         if !state.source.utf8.elementsEqual(source.utf8) ||
             state.prepared?.nativeDisplay !== prepared?.nativeDisplay || state.colorScheme != colorScheme ||
             state.isStreaming != isStreaming {
+            if view.textContainerInset != .zero { view.textContainerInset = .zero }
             let selection = view.selectedRange
             let wasSameSource = state.source.utf8.elementsEqual(source.utf8)
             // A nonnil prepared input remains authoritative, including stale-input
@@ -1445,6 +1806,9 @@ struct MarkdownNativeCodeText: UIViewRepresentable {
                 display = Self.displayText(source: source, prepared: prepared)
             }
             view.attributedText = display
+#if DEBUG
+            assignedText = true
+#endif
             state.plainDisplay = plainRevision
             let sharedMeasurements = (prepared?.nativeDisplay ?? plainRevision)?.measurements(for: display)
             state.measurements = Self.reusesPreparedMeasurements
@@ -1472,6 +1836,7 @@ struct MarkdownNativeCodeText: UIViewRepresentable {
             state.isStreaming = isStreaming
         }
         if state.wraps != wraps {
+            if view.textContainerInset != .zero { view.textContainerInset = .zero }
             view.textContainer.lineBreakMode = wraps ? .byWordWrapping : .byClipping
             state.wraps = wraps
         }
@@ -1484,43 +1849,70 @@ struct MarkdownNativeCodeText: UIViewRepresentable {
     }
 
     /// The lookup precedes all native measurement. Remounted leaves still own
-    /// their text storage/layout manager; only the resulting CGSize is reused.
+    /// their text storage/layout manager; size and required glyph-origin padding
+    /// are reused together, and each mounted view receives the cached padding.
     static func measuredSize(_ view: UITextView, width: CGFloat, wraps: Bool,
                              colorScheme: ColorScheme,
                              measurements: MarkdownNativeCodeMeasurements) -> CGSize {
-        measurements.value(width: width, wraps: wraps, colorScheme: colorScheme,
-                           traits: view.traitCollection) {
+        let layout = measurements.layout(width: width, wraps: wraps, colorScheme: colorScheme,
+                                         traits: view.traitCollection) {
+            if view.textContainerInset != .zero { view.textContainerInset = .zero }
             let measured = wraps
-                ? view.sizeThatFits(CGSize(width: width, height: 1_000_000))
-                : Self.unwrappedTextKitSize(view, width: width)
-            return CGSize(width: wraps ? width : max(1, ceil(measured.width)),
-                          height: max(1, ceil(measured.height)))
+                ? MarkdownNativeCodeMeasurements.Layout(size: view.sizeThatFits(CGSize(width: width, height: 1_000_000)))
+                : Self.unwrappedTextKitLayout(view, width: width)
+            return MarkdownNativeCodeMeasurements.Layout(
+                size: CGSize(width: wraps ? width : max(1, ceil(measured.size.width)),
+                             height: max(1, ceil(measured.size.height))),
+                inset: measured.inset)
         }
+        if view.textContainerInset != layout.inset { view.textContainerInset = layout.inset }
+        return layout.size
     }
 
-    /// Reuse the selectable text's TextKit layout for ordinary code. Drawing
-    /// the attributed string separately builds another typesetter per mount.
-    /// Keep the original metrics for tabs and non-ASCII glyphs, where the two
-    /// layout engines can return different widths.
+    /// Measure the same layout that draws and selects the code, including
+    /// Unicode and tabs. Separately drawing the whole attributed string creates
+    /// another typesetter and can stall on large highlighted Unicode blocks.
     static func unwrappedTextKitSize(_ view: UITextView, width: CGFloat) -> CGSize {
-        let text = view.attributedText!
-        guard isTextKitSizingEligible(text) else {
-            return text.boundingRect(
-                with: CGSize(width: width, height: 1_000_000),
-                options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil
-            ).size
-        }
+        let layout = unwrappedTextKitLayout(view, width: width)
+        if view.textContainerInset != layout.inset { view.textContainerInset = layout.inset }
+        return layout.size
+    }
+
+    private static func unwrappedTextKitLayout(_ view: UITextView, width: CGFloat) -> MarkdownNativeCodeMeasurements.Layout {
+        if view.textContainerInset != .zero { view.textContainerInset = .zero }
         let container = view.textContainer
         container.size = CGSize(width: width, height: 1_000_000)
-        view.layoutManager.ensureLayout(for: container)
-        return view.layoutManager.usedRect(for: container).size
-    }
-
-    static func isTextKitSizingEligible(_ text: NSAttributedString) -> Bool {
-        text.string.utf8.allSatisfy { $0 == 10 || ($0 >= 32 && $0 <= 126) }
+        let manager = view.layoutManager
+        manager.ensureLayout(for: container)
+        let used = manager.usedRect(for: container)
+        let glyphRange = manager.glyphRange(for: container)
+        var glyphs = CGRect.null
+        var drawingStart = glyphRange.location
+        for index in glyphRange.location..<NSMaxRange(glyphRange) {
+            let properties = manager.propertyForGlyph(at: index)
+            if properties.contains(.controlCharacter) || properties.contains(.null) || properties.contains(.elastic) {
+                if drawingStart < index {
+                    glyphs = glyphs.union(manager.boundingRect(
+                        forGlyphRange: NSRange(location: drawingStart, length: index - drawingStart), in: container))
+                }
+                drawingStart = index + 1
+            }
+        }
+        if drawingStart < NSMaxRange(glyphRange) {
+            glyphs = glyphs.union(manager.boundingRect(
+                forGlyphRange: NSRange(location: drawingStart, length: NSMaxRange(glyphRange) - drawingStart), in: container))
+        }
+        // Fallback Unicode fonts can draw beyond the line's typographic box.
+        // Include their actual extent without creating a second typesetter.
+        // Control/newline glyphs have sentinel bounds, not ink; usedRect already
+        // owns their line, tab, whitespace and blank-paragraph advances.
+        guard !glyphs.isNull else { return .init(size: used.size) }
+        let inset = UIEdgeInsets(top: ceil(max(0, -glyphs.minY)), left: ceil(max(0, -glyphs.minX)),
+                                 bottom: 0, right: 0)
+        return .init(size: CGSize(width: max(used.maxX, glyphs.maxX) + inset.left,
+                                  height: max(used.maxY, glyphs.maxY) + inset.top), inset: inset)
     }
 }
-#endif
 
 private struct PlainCodeBlockText: View {
     let content: String
@@ -1779,7 +2171,6 @@ struct MarkdownPreparedCode: Equatable, Sendable {
     let lines: [Line]
     let fullText: AttributedString
 
-#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
     let nativeDisplay = MarkdownNativeCodeDisplay()
 
     static func == (lhs: Self, rhs: Self) -> Bool {
@@ -1787,7 +2178,6 @@ struct MarkdownPreparedCode: Equatable, Sendable {
         if lhs.nativeDisplay === rhs.nativeDisplay { return true }
         return lhs.fullText == rhs.fullText && lhs.lines == rhs.lines
     }
-#endif
 
     init(_ source: NSAttributedString) {
         fullText = AttributedString(source)
@@ -1799,18 +2189,22 @@ struct MarkdownPreparedCode: Equatable, Sendable {
     }
 }
 
-#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
 /// Two most-recent layout identities per prepared revision (or plain leaf).
 /// Full trait equality includes Dynamic Type, scale, direction and legibility;
 /// attributes/content are scoped by the owning immutable display revision.
 @MainActor
 final class MarkdownNativeCodeMeasurements {
+    struct Layout {
+        let size: CGSize
+        var inset: UIEdgeInsets = .zero
+    }
+
     private struct Entry {
         let width: CGFloat
         let wraps: Bool
         let colorScheme: ColorScheme
         let traits: UITraitCollection
-        let size: CGSize
+        let layout: Layout
     }
     private var entries: [Entry] = []
     private(set) var measurementCount = 0
@@ -1818,6 +2212,13 @@ final class MarkdownNativeCodeMeasurements {
 
     func value(width: CGFloat, wraps: Bool, colorScheme: ColorScheme,
                traits: UITraitCollection, measure: () -> CGSize) -> CGSize {
+        layout(width: width, wraps: wraps, colorScheme: colorScheme, traits: traits) {
+            Layout(size: measure())
+        }.size
+    }
+
+    func layout(width: CGFloat, wraps: Bool, colorScheme: ColorScheme,
+                traits: UITraitCollection, measure: () -> Layout) -> Layout {
 #if DEBUG
         let probe = ChatPerformanceInvalidationProbe.shared
 #endif
@@ -1841,20 +2242,31 @@ final class MarkdownNativeCodeMeasurements {
 #if DEBUG
             probe?.record("native_code_size_hit", a: diagnosticWidth)
 #endif
-            return hit.size
+            return hit.layout
         }
 #if DEBUG
-        probe?.record("native_code_size_measure", a: diagnosticWidth, b: entries.count,
+        let started = probe.map { _ in CACurrentMediaTime() }
+        probe?.record("native_code_size_measure", at: started ?? 0, a: diagnosticWidth, b: entries.count,
                       c: entries.isEmpty ? 0 : (layoutMatch ? 1 : 2))
 #endif
-        let size = measure()
+        let result = measure()
+#if DEBUG
+        if let probe, let started {
+            let ended = CACurrentMediaTime()
+            probe.record("native_code_size_measure_end", at: ended,
+                a: Int(exactly: ((ended - started) * 1_000_000).rounded()) ?? -1,
+                b: diagnosticWidth, c: wraps ? 1 : 0)
+        }
+#endif
         measurementCount += 1
         // Nonfinite proposals/results must never poison subsequent layout.
-        guard width.isFinite, size.width.isFinite, size.height.isFinite else { return size }
+        guard width.isFinite, result.size.width.isFinite, result.size.height.isFinite,
+              result.inset.top.isFinite, result.inset.left.isFinite,
+              result.inset.bottom.isFinite, result.inset.right.isFinite else { return result }
         if entries.count == 2 { entries.removeFirst() }
         entries.append(Entry(width: width, wraps: wraps, colorScheme: colorScheme,
-                             traits: traits, size: size))
-        return size
+                             traits: traits, layout: result))
+        return result
     }
 }
 
@@ -1964,7 +2376,6 @@ final class MarkdownNativeCodeDisplay {
         return value
     }
 }
-#endif
 
 struct MarkdownPlainCodeLine: Equatable, Identifiable {
     let id: Int
@@ -2380,7 +2791,6 @@ enum MarkdownHighlightPolicy {
     }
 }
 
-#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
 /// Per-mount, bounded representative-fixture payload. No production cache.
 struct NativePreparedHighlight: Sendable {
     let request: MarkdownCodeHighlightRequest
@@ -2395,25 +2805,14 @@ extension EnvironmentValues {
         set { self[NativePreparedHighlightsKey.self] = newValue }
     }
 }
-#endif
 
 struct MarkdownCodeHighlightRequest: Equatable, @unchecked Sendable {
     let code: String
     let language: String?
     let colorScheme: ColorScheme
     let isStreaming: Bool
-#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
     static func == (lhs: Self, rhs: Self) -> Bool {
-#if SEMREH_INTERNAL_CHAT_PREVIEW && !DEBUG
-        return lhs.exactlyMatches(rhs)
-#else
-        if MarkdownPreparedSyncLookup.isEnabled(
-            nativeEnabled: InternalChatRendererPolicy.debugArgument("--chat-rich-native-code-text"),
-            arguments: ProcessInfo.processInfo.arguments
-        ) { return lhs.exactlyMatches(rhs) }
-        return lhs.code == rhs.code && lhs.language == rhs.language &&
-            lhs.colorScheme == rhs.colorScheme && lhs.isStreaming == rhs.isStreaming
-#endif
+        lhs.exactlyMatches(rhs)
     }
 
     func exactlyMatches(_ rhs: Self) -> Bool {
@@ -2424,7 +2823,6 @@ struct MarkdownCodeHighlightRequest: Equatable, @unchecked Sendable {
          (lhs.language != nil && rhs.language != nil &&
           lhs.language!.utf8.elementsEqual(rhs.language!.utf8)))
     }
-#endif
 }
 
 enum MarkdownCodeHighlightResult: @unchecked Sendable {
@@ -2469,7 +2867,6 @@ enum MarkdownCodeHighlighter {
     }
 }
 
-#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
 /// Cost units estimate all retained representations, including a future lazy
 /// native display. This is a retention budget, not a measured heap-byte limit.
 struct MarkdownPreparedRevisionCacheConfiguration: Sendable {
@@ -2479,7 +2876,7 @@ struct MarkdownPreparedRevisionCacheConfiguration: Sendable {
     static let nativeExperiment = Self(maxEntries: 32, maxCost: 32 * 1_024 * 1_024)
 
     static func experiment(arguments: [String]) -> Self {
-#if SEMREH_INTERNAL_CHAT_PREVIEW && !DEBUG
+#if !DEBUG
         return .nativeExperiment
 #else
         return arguments.contains("--chat-rich-native-code-text") &&
@@ -2575,7 +2972,7 @@ final class MarkdownPreparedSyncLookup {
     private var code: MarkdownPreparedCode?
 
     static func isEnabled(nativeEnabled: Bool, arguments: [String]) -> Bool {
-#if SEMREH_INTERNAL_CHAT_PREVIEW && !DEBUG
+#if !DEBUG
         return nativeEnabled
 #else
         return nativeEnabled && arguments.contains("--chat-native-prepared-sync-hit") &&
@@ -2602,13 +2999,11 @@ final class MarkdownPreparedSyncLookup {
     }
 }
 
-#endif
 
 /// Serializes the non-thread-safe JavaScript/Splash highlighters on a dedicated
 /// executor. `ChatCodeBlock` awaits this actor from MainActor, allowing scrolling,
 /// typing, and layout to continue while completed code is parsed and colored.
 actor MarkdownCodeHighlightWorker {
-#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
     static let shared = MarkdownCodeHighlightWorker(
         cacheConfiguration: .experiment(arguments: ProcessInfo.processInfo.arguments)
     )
@@ -2634,9 +3029,6 @@ actor MarkdownCodeHighlightWorker {
         code.lines.count * 128 + code.lines.reduce(0) { $0 + $1.segments.count * 256 } +
         code.fullText.runs.count * 256
     }
-#else
-    static let shared = MarkdownCodeHighlightWorker()
-#endif
 
 #if DEBUG
     func rawHighlightedCode(for request: MarkdownCodeHighlightRequest) -> MarkdownCodeHighlightResult {
@@ -2645,19 +3037,15 @@ actor MarkdownCodeHighlightWorker {
 #endif
 
     func highlightedCode(for request: MarkdownCodeHighlightRequest) -> MarkdownPreparedCodeResult {
-#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
         let key = completedStore.cacheKey(for: request)
         if let key, let hit = completedStore.completed(for: key) { return .highlighted(hit) }
-#endif
         switch MarkdownCodeHighlighter.highlightedCode(for: request) {
         case .highlighted(let source):
             let prepared = MarkdownPreparedCode(source)
-#if DEBUG || SEMREH_INTERNAL_CHAT_PREVIEW
             if let key {
                 let cost = Self.preparedRevisionCost(prepared, for: request)
                 completedStore.publish(prepared, key: key, cost: cost)
             }
-#endif
             return .highlighted(prepared)
         case .plain(let reason, let language):
             return .plain(reason: reason, normalizedLanguage: language)
@@ -2717,11 +3105,7 @@ private struct PlainMarkdownFallbackView: View {
     private let logger = Logger.hermesMarkdownRendering
 
     var body: some View {
-        Text(verbatim: content)
-            .font(AppFont.body())
-            .foregroundStyle(.primary)
-            .fixedSize(horizontal: false, vertical: true)
-            .textSelection(.enabled)
+        StreamingLiteralText(content: content)
             .onAppear {
                 logger.info(
                     "Markdown plain fallback reason=\(reason.rawValue, privacy: .public) characters=\(content.count, privacy: .public) lines=\(MarkdownHighlightPolicy.lineCount(in: content), privacy: .public)"
@@ -2747,6 +3131,26 @@ private extension MarkdownUI.Theme {
                         ? SwiftUI.Color(red: 0.08, green: 0.09, blue: 0.12)
                         : SwiftUI.Color(.tertiarySystemGroupedBackground)
                 )
+            }
+            .blockquote { (configuration: MarkdownUI.BlockConfiguration) in
+                // Match the pinned GitHub blockquote and make its inherited
+                // foreground available to our separate bounded Text leaves.
+                let secondary = colorScheme == .dark
+                    ? SwiftUI.Color(red: 0x92 / 255.0, green: 0x94 / 255.0, blue: 0xa0 / 255.0)
+                    : SwiftUI.Color(red: 0x6b / 255.0, green: 0x6e / 255.0, blue: 0x7b / 255.0)
+                let border = colorScheme == .dark
+                    ? SwiftUI.Color(red: 0x42 / 255.0, green: 0x44 / 255.0, blue: 0x4e / 255.0)
+                    : SwiftUI.Color(red: 0xe4 / 255.0, green: 0xe4 / 255.0, blue: 0xe8 / 255.0)
+                HStack(spacing: 0) {
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(border)
+                        .relativeFrame(width: .em(0.2))
+                    configuration.label
+                        .markdownTextStyle { ForegroundColor(secondary) }
+                        .environment(\.boundedParagraphForeground, secondary)
+                        .relativePadding(.horizontal, length: .em(1))
+                }
+                .fixedSize(horizontal: false, vertical: true)
             }
             .codeBlock { configuration in
                 MathFenceOrCodeBlock(
