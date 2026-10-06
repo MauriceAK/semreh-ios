@@ -470,7 +470,12 @@ struct ChatView: View {
     @AppStorage(StreamingSendBehavior.storageKey) private var streamingSendBehaviorRawValue = StreamingSendBehavior.steer.rawValue
     @AppStorage(ResponseCompletionNotifications.isEnabledKey) private var isResponseCompletionNotificationsEnabled = false
     @AppStorage(AgentRunLiveActivityPrivacy.showsResponseExcerptsKey) private var showsLiveActivityResponseExcerpts = false
-    @AppStorage(ChatTranscriptDisplaySettings.showsThinkingAndToolCardsKey) private var showsThinkingAndToolCards = true
+    @AppStorage(ChatTranscriptDisplaySettings.showsThinkingAndToolCardsKey) private var legacyShowsThinkingAndToolCards = true
+    @AppStorage(ChatTranscriptDisplaySettings.showsInternalActivityKey) private var showsInternalActivity = false
+    private var showsThinkingAndToolCards: Bool {
+        ChatTranscriptDisplaySettings.showsActivity(usesCurrentSurface: internalChatRendererEnabled,
+            legacyPreference: legacyShowsThinkingAndToolCards, internalActivityPreference: showsInternalActivity)
+    }
     @AppStorage(ChatTranscriptDisplaySettings.rtlChatLayoutEnabledKey) private var rtlChatLayoutEnabled = ChatTranscriptDisplaySettings.rtlChatLayoutDefaultEnabled
     @AppStorage(SectionVisibilitySettings.chatFilesKey) private var showsFilesButton = true
     @AppStorage(SectionVisibilitySettings.chatGitKey) private var showsGitControls = true

@@ -2683,14 +2683,23 @@ final class ChatViewModel {
             let key = "\(event.connectionGeneration.map { String($0) } ?? "none"):\(event.sequence.map { String($0) } ?? "none"):"
                 + "\(event.sessionID ?? "none"):goal:\(text)"
             if directGoalStatusEventKeys.insert(key).inserted {
+                flushPendingStreamingContent()
                 appendLocalNoticeMessage(text)
             }
         }
         if event.type == "message.start" {
             cancelContextUsageSnapshotTask()
         }
-        if !["message.delta", "thinking.delta", "reasoning.delta"].contains(event.type) {
+        let presentation = GatewayConversationController.presentationEvent(for: event)
+        // Only visible/ordering boundaries end a text batch. Ignored progress,
+        // usage and unknown frames must not turn each received token into layout.
+        switch presentation {
+        case .interim, .toolStart, .toolComplete, .terminal:
             flushPendingStreamingContent()
+        case .control(let raw) where ["message.start", "error", "clarify.request",
+                                     "approval.request", "sudo.request", "secret.request", "background.complete", "btw.complete"].contains(raw.type):
+            flushPendingStreamingContent()
+        default: break
         }
         defer {
             // A token is not an ownership transition. Avoid invalidating every
@@ -2699,7 +2708,7 @@ final class ChatViewModel {
                 OpenChatSessionStore.shared.noteStreamingStateChanged()
             }
         }
-        switch GatewayConversationController.presentationEvent(for: event) {
+        switch presentation {
         case .textDelta(let text):
             guard !suppressUnwatermarkedContent else { break }
             setStreamingActivityStatus(nil)
@@ -2971,13 +2980,20 @@ final class ChatViewModel {
     }
 
     private func directToolEvent(_ tool: GatewayConversationController.PresentationTool, completed: Bool) -> ToolStreamEvent {
-        let resultText: String?
-        if case .string(let text) = tool.result { resultText = text }
-        else if let result = tool.result, let data = try? JSONEncoder().encode(result) { resultText = String(data: data, encoding: .utf8) }
-        else { resultText = nil }
+        // The fallback is lazy: a potentially huge result need not be encoded
+        // on the main actor when Hermes already supplied its display summary.
+        let preview = Self.directToolPreview(error: tool.error, summary: tool.summary) {
+            if case .string(let text) = tool.result { return text }
+            guard let result = tool.result, let data = try? JSONEncoder().encode(result) else { return nil }
+            return String(data: data, encoding: .utf8)
+        }
         return ToolStreamEvent(eventType: completed ? "tool_complete" : "tool_start", name: tool.name,
-            preview: tool.error ?? tool.summary ?? resultText, args: tool.args, duration: tool.duration,
+            preview: preview, args: tool.args, duration: tool.duration,
             isError: tool.error != nil, stableID: tool.toolID)
+    }
+
+    static func directToolPreview(error: String?, summary: String?, result: () -> String?) -> String? {
+        error ?? summary ?? result()
     }
 
     func setShowsLiveActivityResponseExcerpts(_ shows: Bool) {
@@ -8187,6 +8203,7 @@ extension ChatViewModel {
         let start = ProcessInfo.processInfo.systemUptime
         let interim = "Got it — I will work through this carefully. SEMREH_LONG_INTERIM"
         let richFinal = ProcessInfo.processInfo.arguments.contains("--chat-performance-rich-long-reply")
+        let surfaceReply = ProcessInfo.processInfo.arguments.contains("--chat-performance-surface-reply")
         // One uninterrupted paragraph, followed by one growing fenced block.
         // This deliberately exceeds the old 567-byte stream by two orders of magnitude.
         let paragraph = String(repeating:
@@ -8194,7 +8211,9 @@ extension ChatViewModel {
         let code = (0..<(richFinal ? 224 : 360)).map { index in
             "let longReplyLine\(index) = \"A deliberately wrapping synthetic code line \(index) keeps every received character intact while a reader scrolls inside this same growing answer. café 👩🏽‍💻\"\n"
         }.joined()
-        let response = "## One growing answer\n\nSEMREH_LONG_PARAGRAPH_START \(paragraph)\n\n```swift\n\(code)let finalMarker = \"SEMREH_LONG_CODE_END\"\n```\n\nSEMREH_LONG_REPLY_END"
+        let response = surfaceReply ? (0..<48).map { index in
+            "**Step \(index + 1)**\n\nA smooth reply keeps the same words under your eyes while new text arrives. Unicode stays exact: café 👩🏽‍💻 العربية.\n\n- Read the current paragraph without losing your place.\n- Keep the composer responsive while the answer grows.\n\n"
+        }.joined() + "SEMREH_SURFACE_REPLY_END" : "## One growing answer\n\nSEMREH_LONG_PARAGRAPH_START \(paragraph)\n\n```swift\n\(code)let finalMarker = \"SEMREH_LONG_CODE_END\"\n```\n\nSEMREH_LONG_REPLY_END"
         let characters = Array(response)
         var sequence = 0
         func emit(_ type: String, _ payload: [String: JSONValue] = [:]) {
@@ -8208,7 +8227,7 @@ extension ChatViewModel {
             "scope": "synthetic direct events; production buffer, ChatView and renderer; no network or Stop RPC",
             "source_utf8_bytes": response.utf8.count,
             "source_characters": characters.count,
-            "fixture_variant": richFinal ? "rich-final-under-80k-characters" : "large-final-over-80k-characters",
+            "fixture_variant": surfaceReply ? "surface-prose-progress" : richFinal ? "rich-final-under-80k-characters" : "large-final-over-80k-characters",
             "received_characters": 0,
             "started_uptime_seconds": start
         ]
@@ -8226,11 +8245,15 @@ extension ChatViewModel {
         var offset = 0
         var burst = 0
         var observations: [[String: Any]] = []
-        let sizes = [384, 2048, 96, 4096, 768, 512]
-        let delays: [UInt64] = [60, 180, 40, 500, 90, 850]
+        let sizes = surfaceReply ? [16, 32, 8, 64, 24, 48] : [384, 2048, 96, 4096, 768, 512]
+        let delays: [UInt64] = surfaceReply ? [20, 30, 50, 20, 30, 50] : [60, 180, 40, 500, 90, 850]
         while offset < characters.count && !Task.isCancelled && !longReplyPerformanceLabCancelRequested {
             let end = min(offset + sizes[burst % sizes.count], characters.count)
             emit("message.delta", ["text": .string(String(characters[offset..<end]))])
+            if surfaceReply {
+                emit("tool.progress", ["tool_id": .string("surface-progress"), "name": .string("fixture_progress")])
+                emit("status.update", ["kind": .string("fixture")])
+            }
             offset = end
             burst += 1
             pacedPerformanceLabEvidence?["body_id"] = streamingAssistantMessageID ?? "missing"
@@ -8240,7 +8263,7 @@ extension ChatViewModel {
                 observations.append(["uptime_seconds": ProcessInfo.processInfo.systemUptime,
                     "received_characters": offset, "published_utf8_bytes": messages.last?.content?.utf8.count ?? 0])
             }
-            do { try await Task.sleep(nanoseconds: delays[(burst - 1) % delays.count] * (richFinal ? 1_600_000 : 1_000_000)) }
+            do { try await Task.sleep(nanoseconds: delays[(burst - 1) % delays.count] * (richFinal && !surfaceReply ? 1_600_000 : 1_000_000)) }
             catch { break }
         }
         let bodyID = streamingAssistantMessageID ?? "missing"

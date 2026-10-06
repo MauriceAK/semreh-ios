@@ -109,6 +109,7 @@ struct SettingsView: View {
     @AppStorage(StreamingSendBehavior.storageKey) var streamingSendBehaviorRawValue = StreamingSendBehavior.steer.rawValue
     @AppStorage(ComposerSTTProviderPreference.storageKey) var sttProviderPreferenceRawValue = ComposerSTTProviderPreference.defaultValue.rawValue
     @AppStorage(ChatTranscriptDisplaySettings.showsThinkingAndToolCardsKey) var showsThinkingAndToolCards = true
+    @AppStorage(ChatTranscriptDisplaySettings.showsInternalActivityKey) var showsInternalActivity = false
     @AppStorage(ChatTranscriptDisplaySettings.thinkingCardsStartExpandedKey) var thinkingCardsStartExpanded = false
     @AppStorage(ChatTranscriptDisplaySettings.toolCardsStartExpandedKey) var toolCardsStartExpanded = false
     @AppStorage(ChatTranscriptDisplaySettings.hidesAttachmentPathsKey) var hidesAttachmentPaths = true

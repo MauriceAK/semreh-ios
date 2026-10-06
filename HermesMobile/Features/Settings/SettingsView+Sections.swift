@@ -50,6 +50,14 @@ extension SettingsView {
         SettingsCategory(title: "Chat", subtitle: "Responses, dictation, and transcript details", systemImage: "bubble.left.and.bubble.right") {
             SettingsCard(title: String(localized: "Experimental")) {
                 SettingsToggleRow(
+                    title: String(localized: "Show internal activity"),
+                    systemImage: "wrench.and.screwdriver",
+                    isOn: $showsInternalActivity
+                )
+                .accessibilityIdentifier(ChatTranscriptDisplaySettings.internalActivityToggleIdentifier)
+                SettingsFootnote(String(localized: "Show reasoning and tool details in the current chat interface. Progress messages from Hermes still appear when this is off."))
+                SettingsDivider()
+                SettingsToggleRow(
                     title: String(localized: "Use legacy chat interface"),
                     systemImage: "bubble.left.and.text.bubble.right",
                     isOn: $useLegacyChatSurface
@@ -106,13 +114,12 @@ extension SettingsView {
         }
 
         SettingsCard(title: String(localized: "Chat")) {
-            SettingsToggleRow(
-                title: String(localized: "Thinking and Tool Cards"),
-                systemImage: "brain.head.profile",
-                isOn: $showsThinkingAndToolCards
-            )
-
             if useLegacyChatSurface {
+                SettingsToggleRow(
+                    title: String(localized: "Thinking and Tool Cards"),
+                    systemImage: "brain.head.profile",
+                    isOn: $showsThinkingAndToolCards
+                )
                 SettingsDivider()
 
                 SettingsToggleRow(

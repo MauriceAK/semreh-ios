@@ -1168,7 +1168,12 @@ final class DirectSkillUITests: XCTestCase {
         continueAfterFailure = false
         try requirePreviewShellFixture()
         let app = XCUIApplication()
+        // Disclosure is now explicit opt-in. Use the argument domain only for
+        // this contained fixture; leave the durable user preference untouched.
+        app.launchArguments = ["-chatTranscript.showsInternalActivity", "YES"]
+        app.terminate()
         app.launch()
+        defer { app.terminate() }
         returnToPreviewSessionsRoot(app)
         let search = app.otherElements["Search sessions"]
         XCTAssertTrue(search.waitForExistence(timeout: 5) && search.isHittable); search.tap()
@@ -5176,6 +5181,46 @@ final class DirectSkillUITests: XCTestCase {
         try clearDailyDriverDraft(composer, expectedText: draft, style: "production-chrome", app: app)
         let afterDraft = try await observer.transcript(storedID: storedID)
         XCTAssertTrue(NSArray(array: afterDraft).isEqual(to: canonical), "Typing and keyboard changes must not mutate the canonical transcript.")
+        let correctionDraft = "Owned correction draft \(UUID().uuidString)\nI typed teh "
+        composer.typeText(correctionDraft)
+        let sentDraft = try XCTUnwrap(composer.value as? String)
+        XCTAssertTrue(sentDraft.hasPrefix("Owned correction draft ") && sentDraft.contains("\n"))
+        // Existing direct sends trim surrounding whitespace. Keep the trailing
+        // space that triggers UIKit spelling/correction, and score delivery
+        // against that established send contract, including every interior byte.
+        let submittedDraft = sentDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let correctionReceipt = XCTAttachment(string: "Typed multiline correction candidate; correctionObserved=\(sentDraft != correctionDraft); sentUTF8Bytes=\(sentDraft.utf8.count). PNGs establish the visible state; absence of a marked range is not decoration proof.")
+        correctionReceipt.name = "Production composer correction provenance"
+        correctionReceipt.lifetime = .keepAlways
+        add(correctionReceipt)
+        capture("04-correction-before-send")
+        let sendButton = app.buttons["Send"]
+        XCTAssertTrue(sendButton.waitForExistence(timeout: 5) && sendButton.isEnabled && sendButton.isHittable)
+        sendButton.tap()
+        waitForIdle(app: app)
+        let afterSend = try await waitForCanonical(observer: observer, storedID: storedID) { rows in
+            self.hasStableBaseline(rows, baseline: canonical)
+                && self.canonicalTexts(rows, role: "user") == [warmup, richPrompt, submittedDraft]
+        }
+        XCTAssertEqual(composer.value as? String ?? "", "")
+        XCTAssertTrue(keyboard.exists, "Sending must preserve the focused editor")
+        capture("05-empty-after-send")
+        let emptyRegion = try readableRegion()
+        origin.withOffset(CGVector(dx: emptyRegion.maxX - 10, dy: emptyRegion.minY + 20)).press(forDuration: 0.1,
+            thenDragTo: origin.withOffset(CGVector(dx: emptyRegion.maxX - 10, dy: app.windows.firstMatch.frame.maxY - 8)))
+        XCTAssertTrue(keyboard.waitForNonExistence(timeout: 5))
+        XCTAssertEqual(composer.value as? String ?? "", "")
+        capture("06-empty-keyboard-dismissed")
+        composer.tap()
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5))
+        XCTAssertEqual(composer.value as? String ?? "", "")
+        capture("07-empty-refocused")
+        let nextDraft = "Next exact café 👩🏽‍💻 draft"
+        composer.typeText(nextDraft)
+        XCTAssertEqual(composer.value as? String, nextDraft)
+        try clearDailyDriverDraft(composer, expectedText: nextDraft, style: "production-correction-next", app: app)
+        let afterRefocus = try await observer.transcript(storedID: storedID)
+        XCTAssertTrue(NSArray(array: afterRefocus).isEqual(to: afterSend))
         let done = chatBackButton(app: app)
         XCTAssertTrue(done.waitForExistence(timeout: 5) && done.isEnabled && done.isHittable)
         done.tap()
@@ -5303,6 +5348,68 @@ final class DirectSkillUITests: XCTestCase {
         screenshot.name = "Production interim heading and distinct final after canonical reopen"
         screenshot.lifetime = .keepAlways
         add(screenshot)
+
+        let completedActivities = app.buttons.matching(NSPredicate(format: "label ENDSWITH %@", ", Completed"))
+        XCTAssertEqual(completedActivities.count, 0, "The new default must hide internal tool details while retaining real interim bubbles and approval prompts")
+        func selectActivityPreference(_ enabled: Bool) throws {
+            let settingsBack = chatBackButton(app: app)
+            XCTAssertTrue(settingsBack.waitForExistence(timeout: 5) && settingsBack.isHittable)
+            settingsBack.tap()
+            let settings = app.buttons["Settings"]
+            XCTAssertTrue(settings.waitForExistence(timeout: 5) && settings.isHittable)
+            settings.tap()
+            XCTAssertTrue(app.staticTexts["semreh-slice1-test.tailda8427.ts.net"].waitForExistence(timeout: 15), "Settings mutation is limited to the contained fixture")
+            app.staticTexts["Chat"].tap()
+            let legacy = app.switches["legacy-chat-surface-toggle"]
+            XCTAssertTrue(legacy.waitForExistence(timeout: 5))
+            XCTAssertEqual(legacy.value as? String, "0", "Internal activity must not change the selected renderer")
+            let activity = app.switches["chat-internal-activity-toggle"]
+            XCTAssertTrue(activity.waitForExistence(timeout: 5) && activity.isHittable)
+            let desired = enabled ? "1" : "0"
+            if activity.value as? String != desired { activity.tap() }
+            XCTAssertEqual(activity.value as? String, desired)
+            retainPreviewScreenshot(enabled ? "Internal activity setting enabled" : "Internal activity setting disabled", app: app)
+            app.buttons["Done"].tap()
+            XCTAssertTrue(storedRow.waitForExistence(timeout: 15) && storedRow.isHittable)
+            storedRow.tap()
+        }
+        func coldReopenWithActivity(_ enabled: Bool) throws {
+            let leave = chatBackButton(app: app)
+            XCTAssertTrue(leave.waitForExistence(timeout: 5) && leave.isHittable)
+            leave.tap()
+            app.terminate(); app.launch()
+            dismissKnownPasswordSavePrompt(app, timeout: 3)
+            let coldDestinationDeadline = Date().addingTimeInterval(30)
+            while !sessions.exists && !detail.exists && Date() < coldDestinationDeadline {
+                dismissKnownPasswordSavePrompt(app, timeout: 0)
+                RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+            }
+            if detail.exists {
+                let restoredBack = chatBackButton(app: app)
+                XCTAssertTrue(restoredBack.waitForExistence(timeout: 5) && restoredBack.isHittable)
+                restoredBack.tap()
+            }
+            XCTAssertTrue(sessions.waitForExistence(timeout: 20) && sessions.isHittable)
+            sessions.tap()
+            XCTAssertTrue(storedRow.waitForExistence(timeout: 20) && storedRow.isHittable)
+            storedRow.tap()
+            assertContainedSurfaceSelection(app: app, muse: true)
+            try assertAccessibleTranscriptRows(assistantRows, in: detail,
+                context: "actual cold activity consumer", museSurface: true)
+            if enabled {
+                XCTAssertTrue(completedActivities.firstMatch.waitForExistence(timeout: 10))
+                XCTAssertEqual(completedActivities.count, 1)
+            } else {
+                XCTAssertEqual(completedActivities.count, 0)
+            }
+            retainPreviewScreenshot(enabled ? "Cold chat with retained tool details" : "Cold chat with internal details hidden", app: app)
+        }
+        try selectActivityPreference(true)
+        try coldReopenWithActivity(true)
+        try selectActivityPreference(false)
+        try coldReopenWithActivity(false)
+        let afterPreferences = try await observer.transcript(storedID: storedID)
+        XCTAssertTrue(NSArray(array: afterPreferences).isEqual(to: canonical), "Visibility changes must not erase interim, tool, or canonical message data")
     }
 
     @MainActor
