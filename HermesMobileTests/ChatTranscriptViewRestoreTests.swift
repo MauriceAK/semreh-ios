@@ -5490,12 +5490,86 @@ private final class MountedSteerFixture {
 
     private func wait(_ condition: () -> Bool, phase: String = "mounted composer") async throws {
         if try await MountedReadinessWait.poll(condition: condition) { return }
-        XCTFail("Mounted composer condition did not settle (\(phase)); "
+        let failureMessage = "Mounted composer condition did not settle (\(phase)); "
             + "keyWindow=\(window.isKeyWindow), scene=\(String(describing: window.windowScene?.activationState)), "
             + "composerMounted=\(find("chat-composer-input", in: window) is UITextView), "
             + "starting=\(model.isStartingChat), activeRun=\(model.activeStreamID != nil), "
-            + "sendError=\(model.sendErrorMessage ?? "nil")")
+            + "sendError=\(model.sendErrorMessage ?? "nil")"
+        await attachWaitFailureDiagnostic(phase: phase)
+        XCTFail(failureMessage)
         throw DirectSessionError.invalidResponse
+    }
+
+    private func attachWaitFailureDiagnostic(phase: String) async {
+        // Capture UI/model state before hopping to the controlled transport actor.
+        // No transcript, identifiers, request parameters or error text is attached.
+        let stateCapturedAtUptime = ProcessInfo.processInfo.systemUptime
+        let allowedPhases = ["mounted composer", "startup: composer mounted",
+                             "startup: initial prompt running", "startup: initial draft cleared",
+                             "keyboard Send enabled"]
+        func frameJSON(_ frame: CGRect) -> Any {
+            let values = [Double(frame.minX), Double(frame.minY), Double(frame.width), Double(frame.height)]
+            return values.allSatisfy { $0.isFinite } ? values as Any : NSNull()
+        }
+        func editors(in view: UIView) -> [UITextView] {
+            let current = (view as? UITextView).map {
+                $0.accessibilityIdentifier == "chat-composer-input" ? [$0] : []
+            } ?? []
+            return current + view.subviews.flatMap { editors(in: $0) }
+        }
+        let mountedEditors = editors(in: window)
+        let runtimeState: String
+        switch runtime.state {
+        case .disconnected: runtimeState = "disconnected"
+        case .connecting: runtimeState = "connecting"
+        case .ready: runtimeState = "ready"
+        case .stopped: runtimeState = "stopped"
+        }
+        var receipt: [String: Any] = [
+            "schemaVersion": 1,
+            "phase": allowedPhases.contains(phase) ? phase : "other",
+            "stateCapturedAtUptime": stateCapturedAtUptime,
+            "applicationState": UIApplication.shared.applicationState.rawValue,
+            "sceneActivationState": window.windowScene.map { $0.activationState.rawValue as Any } ?? NSNull(),
+            "windowIsKey": window.isKeyWindow,
+            "windowIsHidden": window.isHidden,
+            "windowFrame": frameJSON(window.frame),
+            "routePresented": route.presented,
+            "editorCount": mountedEditors.count,
+            "editors": mountedEditors.prefix(2).map { editor -> [String: Any] in
+                ["attachedToOwnedWindow": editor.window === window,
+                 "frameInOwnedWindow": frameJSON(editor.convert(editor.bounds, to: window)),
+                 "isFirstResponder": editor.isFirstResponder,
+                 "isEditable": editor.isEditable,
+                 "isSelectable": editor.isSelectable,
+                 "isHidden": editor.isHidden,
+                 "isUserInteractionEnabled": editor.isUserInteractionEnabled]
+            },
+            "model": ["isStartingChat": model.isStartingChat,
+                      "hasActiveRun": model.activeStreamID != nil,
+                      "hasSendError": model.sendErrorMessage != nil,
+                      "isEstablishingConnection": model.isEstablishingConnection,
+                      "hasPromptDeliveryUncertainty": model.directConversationHasPromptDeliveryUncertainty,
+                      "hasConfirmedAcceptance": model.directPromptDeliveryHasConfirmedAcceptance],
+            "runtime": ["state": runtimeState, "connectionGeneration": runtime.connectionGeneration]
+        ]
+        let allowedMethods = ["session.resume", "session.info", "prompt.submit", "session.steer",
+                              "session.status", "session.usage", "approval.pending"]
+        let calls = await transport.calls()
+        receipt["rpcMethodCounts"] = Dictionary(uniqueKeysWithValues: allowedMethods.map { method in
+            (method, calls.filter { $0.method == method }.count)
+        })
+        receipt["unlistedMethodCount"] = calls.filter { !allowedMethods.contains($0.method) }.count
+        receipt["steerResponsePending"] = await transport.isWaiting
+        let transportSampledAtUptime = ProcessInfo.processInfo.systemUptime
+        receipt["transportSampledAtUptime"] = transportSampledAtUptime
+        receipt["transportSnapshotLagSeconds"] = transportSampledAtUptime - stateCapturedAtUptime
+        let data = (try? JSONSerialization.data(withJSONObject: receipt, options: [.sortedKeys]))
+            ?? Data("{\"schemaVersion\":1,\"serializationFailed\":true}".utf8)
+        let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+        attachment.name = "mounted-steer-readiness-failure"
+        attachment.lifetime = .keepAlways
+        XCTContext.runActivity(named: "Mounted steer readiness failure") { $0.add(attachment) }
     }
 
     private func find(_ identifier: String, in view: UIView) -> UIView? {
