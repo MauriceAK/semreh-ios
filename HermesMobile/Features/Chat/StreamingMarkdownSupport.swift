@@ -380,6 +380,30 @@ enum StreamingMarkdownRenderBudget {
     static let maximumRichTailUTF8Bytes = 4_096
     static let literalLeafCharacters = 1_024
 
+    /// A stamp store is safe only for one Text leaf. Complex Markdown stays
+    /// solid instead of splitting/regrouping its document to animate arrival.
+    static func isSingleTextFadeCandidate(_ source: String) -> Bool {
+        let firstLine = source.split(whereSeparator: \.isNewline)
+            .first(where: { $0.contains(where: { !$0.isWhitespace }) }) ?? ""
+        let indentation = firstLine.prefix(while: { $0 == " " || $0 == "\t" })
+        guard indentation.count < 4, !indentation.contains("\t") else { return false }
+        let line = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !line.isEmpty, !line.contains(where: \.isNewline),
+              !line.hasPrefix(">"), !line.hasPrefix("|"),
+              !line.hasPrefix("```"), !line.hasPrefix("~~~"),
+              line != "-", line != "*", line != "+",
+              !line.hasPrefix("- "), !line.hasPrefix("* "), !line.hasPrefix("+ "),
+              !line.hasPrefix("-\t"), !line.hasPrefix("*\t"), !line.hasPrefix("+\t"),
+              !line.contains("!["), !line.contains("<"),
+              !line.contains("$"), !line.contains(#"\("#), !line.contains(#"\["#)
+        else { return false }
+        let afterDigits = line.drop(while: \.isNumber)
+        return afterDigits.count == line.count
+            || !(afterDigits == "." || afterDigits == ")"
+                 || afterDigits.hasPrefix(". ") || afterDigits.hasPrefix(") ")
+                 || afterDigits.hasPrefix(".\t") || afterDigits.hasPrefix(")\t"))
+    }
+
     static func usesLiteralTail(_ source: String) -> Bool {
         source.utf8.count > maximumRichTailUTF8Bytes
     }

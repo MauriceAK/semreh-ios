@@ -273,45 +273,53 @@ struct StreamingMarkdownRenderer: View {
     }
 
     var body: some View {
+        // Fit the exact incoming source on the first pass. Publishing a new
+        // projection from onChange allowed an old tail to be measured before
+        // SwiftUI inserted its sealed copy and replaced that tail.
+        let segments = state.segments(for: content)
+        let chunks = segments.stableChunks + [StreamingMarkdownChunk(
+            id: segments.stableChunks.count, text: segments.activeMarkdown)]
         Group {
-            if let canonicalPresentation, !retainsLiteralProjection {
+            if let canonicalPresentation, !retainsLiteralProjection(segments) {
                 PreparedMarkdownView(presentation: canonicalPresentation, colorScheme: colorScheme)
             } else {
                 VStack(alignment: .leading, spacing: 0) {
-                    ForEach(state.segments.stableChunks) { chunk in
-                        StreamingRawMarkdownChunk(content: chunk.text, colorScheme: colorScheme, active: false)
+                    ForEach(chunks) { chunk in
+                        // The growing block keeps this identity when sealed.
+                        StreamingRawMarkdownChunk(content: chunk.text, colorScheme: colorScheme,
+                            active: chunk.id == segments.stableChunks.count)
                             .equatable()
                     }
-                    StreamingRawMarkdownChunk(content: state.segments.activeMarkdown, colorScheme: colorScheme, active: true)
                 }
             }
         }
-        .onChange(of: StreamingMarkdownSourceRevision(content: content)) { _, new in
-            state.update(new.content)
-        }
     }
 
-    private var retainsLiteralProjection: Bool {
-        canonicalPresentation?.fallbackReason != nil && state.segments.stableChunks.isEmpty
-            && StreamingMarkdownRenderBudget.usesLiteralTail(state.segments.activeMarkdown)
-            && state.segments.activeMarkdown.utf8.elementsEqual(content.utf8)
+    private func retainsLiteralProjection(_ segments: StreamingMarkdownBlockSegments) -> Bool {
+        canonicalPresentation?.fallbackReason != nil && segments.stableChunks.isEmpty
+            && StreamingMarkdownRenderBudget.usesLiteralTail(segments.activeMarkdown)
+            && segments.activeMarkdown.utf8.elementsEqual(content.utf8)
     }
 }
 
+/// A derived cache, not a second presentation publisher. Its result is always
+/// synchronous with the body source, including replacements and Unicode edits.
 @MainActor
 private final class StreamingRawMarkdownState: ObservableObject {
     private var accumulator = StreamingMarkdownBlockAccumulator(preservesRawMath: true)
     private var source: String
-    @Published private(set) var segments: StreamingMarkdownBlockSegments
+    private var cached: StreamingMarkdownBlockSegments
 
     init(content: String) {
         source = content
-        segments = accumulator.update(content, appendOnly: false)
+        cached = accumulator.update(content, appendOnly: false)
     }
 
-    func update(_ content: String) {
-        segments = accumulator.update(content, appendOnly: content.utf8.starts(with: source.utf8))
+    func segments(for content: String) -> StreamingMarkdownBlockSegments {
+        guard !content.utf8.elementsEqual(source.utf8) else { return cached }
+        cached = accumulator.update(content, appendOnly: content.utf8.starts(with: source.utf8))
         source = content
+        return cached
     }
 }
 
@@ -327,49 +335,148 @@ private struct StreamingRawMarkdownChunk: View, Equatable {
 
     var body: some View {
         if content.allSatisfy(\.isWhitespace) {
-            // Whitespace is retained in raw source for canonical completion,
-            // but it is not a separate Markdown paragraph or a placeholder row.
             EmptyView()
         } else if StreamingMarkdownRenderBudget.usesLiteralTail(content) {
             StreamingLiteralText(content: content)
-        } else if active {
-            StreamingRichMarkdownTail(content: content, colorScheme: colorScheme)
         } else {
-            MarkdownRenderer(content: content)
+            // The same keyed rich block handles current and completed text.
+            StreamingRichMarkdownTail(content: content, colorScheme: colorScheme, active: active)
         }
     }
 }
 
-/// At most 4 KiB enters the existing rich/fade machinery. No TimelineView is
-/// mounted for an oversized block, including one enormous open code fence.
+/// Completed blocks use normal drawing; only an eligible current paragraph
+/// owns an animation clock. Both paths derive grouping from the same source.
 private struct StreamingRichMarkdownTail: View {
     let content: String
     let colorScheme: ColorScheme
+    let active: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @AppStorage(StreamedTextAnimationSettings.isEnabledKey) private var animationEnabled = true
 
     var body: some View {
         let presentation = preparedMarkdownMathPresentation(in: content)
+        let segments = StreamingMarkdownBlockSplitter.split(presentation.inlineMarkdown)
+        let chunks = segments.stableChunks + [StreamingMarkdownChunk(
+            id: segments.stableChunks.count, text: segments.activeMarkdown)]
+        let document = StreamingRichMarkdownDocument(presentation: presentation,
+            chunks: chunks, activeChunkID: segments.stableChunks.count,
+            colorScheme: colorScheme, active: active)
+        let fadeEnabled = active && animationEnabled && !reduceMotion
+            && StreamingMarkdownRenderBudget.isSingleTextFadeCandidate(content)
+            && !presentation.segments.containsMath
+        Group {
+            if fadeEnabled {
+                StreamingAnimatedMarkdownBlock(source: content,
+                    text: presentation.inlineMarkdown, colorScheme: colorScheme)
+                    // Native selectable text bypasses the custom fade draw.
+                    // Message Copy/Select actions still expose the full source.
+                    .textSelection(.disabled)
+            } else {
+                document
+            }
+        }
+        // Solid text is selectable. Source-driven branch swaps are synchronous;
+        // completing a fade never changes this grouping.
+        .textSelection(.enabled)
+    }
+}
+
+private struct StreamingRichMarkdownDocument: View {
+    let presentation: MarkdownMathPresentation
+    let chunks: [StreamingMarkdownChunk]
+    let activeChunkID: Int
+    let colorScheme: ColorScheme
+    let active: Bool
+
+    var body: some View {
         if presentation.segments.containsMath {
             VStack(alignment: .leading, spacing: 0) {
                 ForEach(Array(presentation.segments.enumerated()), id: \.offset) { _, segment in
                     switch segment {
                     case .markdown(let markdown):
-                        StreamingMarkdownChunkedView(content: markdown, colorScheme: colorScheme)
+                        ChatMarkdownView(content: markdown, colorScheme: colorScheme, isStreaming: active)
                     case .displayMath(let latex):
                         DisplayMathView(latex: latex)
                     }
                 }
             }
         } else {
-            StreamingMarkdownChunkedView(content: presentation.inlineMarkdown, colorScheme: colorScheme)
+            // Freeze completed semantic blocks even after the outer raw-source
+            // cap packs later paragraphs together. The current block keeps its
+            // keyed identity as it seals, without delayed projection updates.
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(chunks) { chunk in
+                    if !chunk.text.allSatisfy(\.isWhitespace) {
+                        ChatMarkdownView(content: chunk.text, colorScheme: colorScheme,
+                            isStreaming: active && chunk.id == activeChunkID)
+                            .equatable()
+                    }
+                }
+            }
+        }
+    }
+}
+
+#if DEBUG
+// Mounted regression tests freeze fade time while exercising real settings,
+// source updates and drawing. Normal app launches use the Timeline date.
+private struct StreamingMarkdownAnimationClockKey: EnvironmentKey {
+    static let defaultValue: TimeInterval? = nil
+}
+
+extension EnvironmentValues {
+    var streamingMarkdownAnimationClock: TimeInterval? {
+        get { self[StreamingMarkdownAnimationClockKey.self] }
+        set { self[StreamingMarkdownAnimationClockKey.self] = newValue }
+    }
+}
+#endif
+
+/// Animation ownership exists only during an eligible fade lifetime. Turning
+/// animation back on mounts a fresh store: received text is its solid baseline,
+/// and delayed draws from the discarded store cannot change that baseline.
+private struct StreamingAnimatedMarkdownBlock: View {
+    let source: String
+    let text: String
+    let colorScheme: ColorScheme
+    @StateObject private var owner = StreamingFadeStoreOwner(
+        chain: StreamingTextFadeStampChain(), armOnAppear: false)
+    @State private var fading = false
+#if DEBUG
+    @Environment(\.streamingMarkdownAnimationClock) private var clockOverride
+#endif
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: nil, paused: !fading)) { context in
+#if DEBUG
+            let clock = clockOverride ?? context.date.timeIntervalSinceReferenceDate
+#else
+            let clock = context.date.timeIntervalSinceReferenceDate
+#endif
+            // Eligible source has one Markdown text leaf. Repaint its glyphs
+            // without rebuilding the semantic block list on every clock tick.
+            ChatMarkdownView(content: text, colorScheme: colorScheme, isStreaming: true)
+                .textRenderer(StreamingTrailingContentOpacityRenderer(
+                    clock: clock, store: owner.stampStore))
+        }
+        .task(id: StreamingMarkdownSourceRevision(content: source)) {
+            fading = true
+            do { try await Task.sleep(for: .seconds(StreamingTrailingContentReveal.pauseDelay)) }
+            catch { return }
+            fading = false
         }
     }
 }
 
 @MainActor
 private final class StreamingLiteralState: ObservableObject {
-    @Published private(set) var projection = StreamingLiteralAccumulator()
+    private var projection = StreamingLiteralAccumulator()
     init(content: String) { projection.update(content) }
-    func update(_ content: String) { projection.update(content) }
+    func presentation(for content: String) -> StreamingLiteralAccumulator {
+        projection.update(content)
+        return projection
+    }
 }
 
 /// Literal provisional leaves may wrap at their slice boundary. They retain
@@ -384,17 +491,15 @@ private struct StreamingLiteralText: View {
     }
 
     var body: some View {
+        let projection = state.presentation(for: content)
         VStack(alignment: .leading, spacing: 0) {
-            ForEach(state.projection.stableChunks) { chunk in
+            ForEach(projection.stableChunks) { chunk in
                 StreamingLiteralLeaf(content: StreamingLiteralAccumulator.displayText(forSealedLeaf: chunk.text))
                     .equatable()
             }
-            StreamingLiteralLeaf(content: state.projection.tail)
+            StreamingLiteralLeaf(content: projection.tail)
         }
         .textSelection(.enabled)
-        .onChange(of: StreamingMarkdownSourceRevision(content: content)) { _, new in
-            state.update(new.content)
-        }
     }
 }
 
@@ -946,7 +1051,7 @@ private struct ChatMarkdownView: View, Equatable {
     @State private var documentCache = MarkdownDocumentCache()
 
     static func == (lhs: ChatMarkdownView, rhs: ChatMarkdownView) -> Bool {
-        lhs.content == rhs.content
+        lhs.content.utf8.elementsEqual(rhs.content.utf8)
             && lhs.colorScheme == rhs.colorScheme
             && lhs.isStreaming == rhs.isStreaming
     }
