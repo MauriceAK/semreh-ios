@@ -79,37 +79,40 @@ jobs:
         id: sim
         run: |
           set -euo pipefail
-          name=$(xcrun simctl list devices available --json | python3 -c '
+          device=$(xcrun simctl list devices available --json | python3 -c '
           import json, sys
           data = json.load(sys.stdin)
           phones = [
-              device["name"]
+              device
               for runtime, devices in data["devices"].items()
               if "iOS" in runtime
               for device in devices
               if device.get("isAvailable") and device["name"].startswith("iPhone")
           ]
           preferred = "iPhone 17"
-          print(preferred if preferred in phones else phones[0] if phones else "")
+          selected = next((phone for phone in phones if phone["name"] == preferred), phones[0] if phones else None)
+          print(selected["udid"] + "|" + selected["name"] if selected else "")
           ')
-          if [[ -z "${name}" ]]; then
+          if [[ -z "${device}" ]]; then
             echo "No available iPhone simulator found:" >&2
             xcrun simctl list devices available >&2
             exit 1
           fi
-          echo "Using simulator: ${name}"
-          echo "name=${name}" >> "$GITHUB_OUTPUT"
+          simulator_id=${device%%|*}
+          simulator_name=${device#*|}
+          echo "Using simulator: ${simulator_name} (${simulator_id})"
+          echo "id=${simulator_id}" >> "$GITHUB_OUTPUT"
 
       - name: Build for testing
         env:
-          SIMULATOR_NAME: ${{ steps.sim.outputs.name }}
+          SIMULATOR_ID: ${{ steps.sim.outputs.id }}
         run: |
           set -euo pipefail
           start_seconds=${SECONDS}
           xcodebuild build-for-testing \
             -project "${PROJECT_PATH}" \
             -scheme "${SCHEME}" \
-            -destination "platform=iOS Simulator,name=${SIMULATOR_NAME}" \
+            -destination "platform=iOS Simulator,id=${SIMULATOR_ID}" \
             -derivedDataPath "${DERIVED_DATA_PATH}" \
             -showBuildTimingSummary \
             CODE_SIGNING_ALLOWED=NO
@@ -120,16 +123,20 @@ jobs:
 
       - name: Test without building
         env:
-          SIMULATOR_NAME: ${{ steps.sim.outputs.name }}
+          SIMULATOR_ID: ${{ steps.sim.outputs.id }}
         run: |
           set -euo pipefail
           start_seconds=${SECONDS}
+          python3 ci/watch_mounted_startup.py --simulator "${SIMULATOR_ID}" \
+            --output MountedStartupDiagnostics > mounted-watchdog.log 2>&1 &
+          watchdog_pid=$!
+          trap 'kill -TERM "${watchdog_pid}" 2>/dev/null || true; wait "${watchdog_pid}" 2>/dev/null || true' EXIT
           # Hosted mounted-view tests share scene/window ownership. Match the
           # serial local harness rather than creating a clone with one worker.
           xcodebuild test-without-building \
             -project "${PROJECT_PATH}" \
             -scheme "${SCHEME}" \
-            -destination "platform=iOS Simulator,name=${SIMULATOR_NAME}" \
+            -destination "platform=iOS Simulator,id=${SIMULATOR_ID}" \
             -derivedDataPath "${DERIVED_DATA_PATH}" \
             -resultBundlePath "${RESULT_BUNDLE_PATH}" \
             -parallel-testing-enabled NO \
@@ -137,6 +144,16 @@ jobs:
           duration_seconds=$((SECONDS - start_seconds))
           echo "Test-without-building duration: ${duration_seconds}s"
           echo "- Test without building (serial mounted host): ${duration_seconds}s" >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Retain safe mounted-startup diagnostics
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: mounted-startup-safe
+          path: MountedStartupDiagnostics/safe
+          retention-days: 1
+          if-no-files-found: ignore
 
       - name: Report slowest tests
         if: always()

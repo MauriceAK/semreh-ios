@@ -5535,18 +5535,70 @@ private final class MountedSteerFixture {
 
     private func wait(_ condition: () -> Bool, phase: String = "mounted composer") async throws {
         let waitStartedAtUptime = ProcessInfo.processInfo.systemUptime
-        if try await MountedReadinessWait.poll(condition: condition) { return }
+        let tracesStartup = phase == "startup: initial prompt running"
+        let token = UUID().uuidString
+        let markerBeginWritten = tracesStartup && writeStartupMarker(token: token, active: true)
+        var markerEnded = false
+        defer { if tracesStartup && !markerEnded { writeStartupMarker(token: token, active: false) } }
+        var pollCount = 0
+        var previousPoll = waitStartedAtUptime
+        var maximumPollGap = 0.0
+        var transitions: [[String: Any]] = []
+        var previousState: String?
+        let satisfied = try await MountedReadinessWait.poll(condition: {
+            if tracesStartup {
+                let uptime = ProcessInfo.processInfo.systemUptime
+                pollCount += 1
+                maximumPollGap = max(maximumPollGap, uptime - previousPoll)
+                previousPoll = uptime
+                let state = String(describing: self.runtime.state)
+                if state != previousState, transitions.count < 16 {
+                    transitions.append(["uptime": uptime, "runtimeState": state,
+                        "starting": self.model.isStartingChat, "activeRun": self.model.activeStreamID != nil])
+                    previousState = state
+                }
+            }
+            return condition()
+        })
+        let finalPollState: [String: Any] = ["uptime": previousPoll,
+            "runtimeState": String(describing: runtime.state),
+            "starting": model.isStartingChat, "activeRun": model.activeStreamID != nil]
+        // End the external sample window before failure attachment/actor hops.
+        let markerEndWritten = tracesStartup && writeStartupMarker(token: token, active: false)
+        markerEnded = markerEndWritten || !tracesStartup
+        if satisfied { return }
         let failureMessage = "Mounted composer condition did not settle (\(phase)); "
             + "keyWindow=\(window.isKeyWindow), scene=\(String(describing: window.windowScene?.activationState)), "
             + "composerMounted=\(find("chat-composer-input", in: window) is UITextView), "
             + "starting=\(model.isStartingChat), activeRun=\(model.activeStreamID != nil), "
             + "sendError=\(model.sendErrorMessage ?? "nil")"
-        await attachWaitFailureDiagnostic(phase: phase, waitStartedAtUptime: waitStartedAtUptime)
+        await attachWaitFailureDiagnostic(phase: phase, waitStartedAtUptime: waitStartedAtUptime,
+            readinessProgress: tracesStartup ? ["pollCount": pollCount,
+                "maximumPollGapSeconds": maximumPollGap, "runtimeTransitions": transitions,
+                "finalPollState": finalPollState, "markerBeginWritten": markerBeginWritten,
+                "markerEndWritten": markerEndWritten] : nil)
         XCTFail(failureMessage)
         throw DirectSessionError.invalidResponse
     }
 
-    private func attachWaitFailureDiagnostic(phase: String, waitStartedAtUptime: Double) async {
+    @discardableResult
+    private func writeStartupMarker(token: String, active: Bool) -> Bool {
+        // Test-only, fixed-schema metadata for the bounded CI watchdog. No text,
+        // scope/session/server identifiers, parameters or error strings are written.
+        guard let cache = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first,
+              let data = try? JSONSerialization.data(withJSONObject: [
+                "schemaVersion": 1, "phase": "initial-prompt-running", "token": token,
+                "active": active, "pid": ProcessInfo.processInfo.processIdentifier,
+                "uptime": ProcessInfo.processInfo.systemUptime], options: [.sortedKeys]) else { return false }
+        do {
+            try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
+            try data.write(to: cache.appendingPathComponent("semreh-mounted-startup.json"), options: .atomic)
+            return true
+        } catch { return false }
+    }
+
+    private func attachWaitFailureDiagnostic(phase: String, waitStartedAtUptime: Double,
+                                             readinessProgress: [String: Any]?) async {
         // Capture UI/model state before hopping to the controlled transport actor.
         // No transcript, identifiers, request parameters or error text is attached.
         let stateCapturedAtUptime = ProcessInfo.processInfo.systemUptime
@@ -5572,7 +5624,7 @@ private final class MountedSteerFixture {
         case .stopped: runtimeState = "stopped"
         }
         var receipt: [String: Any] = [
-            "schemaVersion": 2,
+            "schemaVersion": 3,
             "phase": allowedPhases.contains(phase) ? phase : "other",
             "readinessWaitStartedAtUptime": waitStartedAtUptime,
             "readinessElapsedSeconds": stateCapturedAtUptime - waitStartedAtUptime,
@@ -5601,6 +5653,7 @@ private final class MountedSteerFixture {
                       "hasConfirmedAcceptance": model.directPromptDeliveryHasConfirmedAcceptance],
             "runtime": ["state": runtimeState, "connectionGeneration": runtime.connectionGeneration]
         ]
+        receipt["readinessProgress"] = readinessProgress ?? [:]
         let allowedMethods = ["session.resume", "session.info", "prompt.submit", "session.steer",
                               "session.status", "session.usage", "approval.pending"]
         let calls = await transport.calls()
@@ -5622,7 +5675,7 @@ private final class MountedSteerFixture {
         receipt["transportSampledAtUptime"] = transportSampledAtUptime
         receipt["transportSnapshotLagSeconds"] = transportSampledAtUptime - stateCapturedAtUptime
         let data = (try? JSONSerialization.data(withJSONObject: receipt, options: [.sortedKeys]))
-            ?? Data("{\"schemaVersion\":2,\"serializationFailed\":true}".utf8)
+            ?? Data("{\"schemaVersion\":3,\"serializationFailed\":true}".utf8)
         let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
         attachment.name = "mounted-steer-readiness-failure"
         attachment.lifetime = .keepAlways
