@@ -1121,8 +1121,7 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             if collection.contentInset.top != next.topInset {
                 collection.contentInset.top = next.topInset
             }
-            latest.backgroundColor = UIColor(SemrehVisualTheme.raisedPanel(for: next.environment.colorScheme,
-                palette: next.environment.appColorPalette))
+            latest.backgroundColor = .clear
             latest.tintColor = UIColor(SemrehVisualTheme.primaryText(for: next.environment.colorScheme,
                 palette: next.environment.appColorPalette))
             if old.scope != next.scope {
