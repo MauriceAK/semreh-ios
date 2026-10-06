@@ -97,12 +97,16 @@ struct ComposerTextView: UIViewRepresentable {
         Coordinator(text: $text, isFocused: $isFocused, onHeightChange: onHeightChange)
     }
 
-    func makeUIView(context: Context) -> PastingTextView {
+    func makeUIView(context: Context) -> InputHostView {
+        let textView = makeTextView()
+        context.coordinator.attach(textView)
+        let host = InputHostView(textView: textView)
+        context.coordinator.reportHeight(for: textView, force: true)
+        return host
+    }
+
+    private func makeTextView() -> PastingTextView {
         let textView = PastingTextView()
-        textView.delegate = context.coordinator
-        textView.onLayout = { [weak coordinator = context.coordinator] textView in
-            coordinator?.reportHeight(for: textView)
-        }
         textView.backgroundColor = .clear
         textView.font = .preferredFont(forTextStyle: .body)
         textView.adjustsFontForContentSizeCategory = true
@@ -130,16 +134,15 @@ struct ComposerTextView: UIViewRepresentable {
         textView.onPasteFileURLs = onPasteFileURLs
         textView.onPasteImageProviders = onPasteImageProviders
         textView.onPasteImages = onPasteImages
-        context.coordinator.reportHeight(for: textView, force: true)
         return textView
     }
 
     // A non-scrolling UITextView's intrinsic width can grow with a restored
     // draft. SwiftUI owns the available width; measure wrapping at that width
     // without publishing state or forcing a layout during proposal evaluation.
-    func sizeThatFits(_ proposal: ProposedViewSize, uiView: PastingTextView, context: Context) -> CGSize? {
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: InputHostView, context: Context) -> CGSize? {
         guard let width = proposal.width, width.isFinite, width >= 0 else { return nil }
-        return CGSize(width: width, height: Self.visibleHeight(context.coordinator.contentHeight(for: uiView, width: width)))
+        return CGSize(width: width, height: Self.visibleHeight(context.coordinator.contentHeight(for: uiView.textView, width: width)))
     }
 
     private static let maximumVisibleHeight: CGFloat = 120
@@ -152,19 +155,34 @@ struct ComposerTextView: UIViewRepresentable {
         min(maximumVisibleHeight, max(22, contentHeight))
     }
 
-    static func dismantleUIView(_ textView: PastingTextView, coordinator: Coordinator) {
+    static func dismantleUIView(_ host: InputHostView, coordinator: Coordinator) {
+        let textView = host.textView
         textView.onLayout = nil
         coordinator.cancelFocus()
         textView.resignFirstResponder()
+        textView.delegate = nil
     }
 
-    func updateUIView(_ textView: PastingTextView, context: Context) {
+    func updateUIView(_ host: InputHostView, context: Context) {
         context.coordinator.onHeightChange = onHeightChange
+        configure(host.textView, context: context)
+        let didChangeText = context.coordinator.synchronizeExternalText(text, in: host,
+            keepingFocus: isFocused && !isDisabled && !isAccessibilityHidden) {
+                let replacement = makeTextView()
+                configure(replacement, context: context)
+                return replacement
+            }
+        let textView = host.textView
+        context.coordinator.syncFocus(for: textView,
+            shouldFocus: isFocused && !isAccessibilityHidden, isDisabled: isDisabled)
+        context.coordinator.reportHeight(for: textView, force: didChangeText)
+    }
+
+    private func configure(_ textView: PastingTextView, context: Context) {
         // Opacity/SwiftUI AX hiding alone did not exclude the retained UIKit leaf.
         // Explicit root selection controls AX independently of offline editability.
         textView.isAccessibilityElement = !isAccessibilityHidden
         textView.accessibilityElementsHidden = isAccessibilityHidden
-        let didChangeText = context.coordinator.synchronizeExternalText(text, in: textView)
         // Mirror the chat RTL toggle onto the text view itself (#259): SwiftUI's
         // layoutDirection environment does not propagate into a wrapped UITextView,
         // so set the base direction directly so the cursor/empty-field rests on the
@@ -186,8 +204,27 @@ struct ComposerTextView: UIViewRepresentable {
         textView.onPasteFileURLs = onPasteFileURLs
         textView.onPasteImageProviders = onPasteImageProviders
         textView.onPasteImages = onPasteImages
-        context.coordinator.syncFocus(for: textView, shouldFocus: isFocused, isDisabled: isDisabled)
-        context.coordinator.reportHeight(for: textView, force: didChangeText)
+    }
+
+    /// SwiftUI keeps the same sizing/placement owner when a sent document ends.
+    /// Only the native text-input leaf (and its private editing decorations) is
+    /// retired; normal typing and nonempty external draft updates keep that leaf.
+    final class InputHostView: UIView {
+        fileprivate(set) var textView: PastingTextView
+
+        init(textView: PastingTextView) {
+            self.textView = textView
+            super.init(frame: .zero)
+            isAccessibilityElement = false
+            addSubview(textView)
+        }
+
+        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            textView.frame = bounds
+        }
     }
 
     @MainActor
@@ -198,6 +235,7 @@ struct ComposerTextView: UIViewRepresentable {
         private var pendingFocusTarget: Bool?
         private var focusGeneration = 0
         private var focusTask: Task<Void, Never>?
+        private weak var attachedTextView: PastingTextView?
         private weak var measuredView: UITextView?
         private var measurements: [(key: MeasurementKey, height: CGFloat)] = []
         private let measurementCacheCapacity: Int
@@ -324,6 +362,15 @@ struct ComposerTextView: UIViewRepresentable {
             pendingFocusTarget = nil
         }
 
+        func attach(_ textView: PastingTextView) {
+            attachedTextView = textView
+            textView.delegate = self
+            textView.onLayout = { [weak self] textView in
+                guard let self, self.attachedTextView === textView else { return }
+                self.reportHeight(for: textView)
+            }
+        }
+
         func syncFocus(for textView: UITextView, shouldFocus: Bool, isDisabled: Bool) {
             let target = shouldFocus && !isDisabled
             if pendingFocusTarget == target { return }
@@ -350,6 +397,7 @@ struct ComposerTextView: UIViewRepresentable {
         }
 
         func textViewDidBeginEditing(_ textView: UITextView) {
+            guard acceptsCallback(from: textView) else { return }
             guard textView.isEditable else { textView.resignFirstResponder(); return }
             if !isFocused {
                 isFocused = true
@@ -357,15 +405,67 @@ struct ComposerTextView: UIViewRepresentable {
         }
 
         func textViewDidEndEditing(_ textView: UITextView) {
+            guard acceptsCallback(from: textView) else { return }
             if isFocused {
                 isFocused = false
             }
         }
 
         // A send/restored draft is an external edit, not an input-method callback.
-        // Use UITextInput's document replacement for clearing so UIKit retires
-        // autocorrection/composition decorations before the field collapses.
         private var isSynchronizingExternalText = false
+
+        private func acceptsCallback(from textView: UITextView) -> Bool {
+            !isSynchronizingExternalText && (attachedTextView == nil || attachedTextView === textView)
+        }
+
+        @discardableResult
+        func synchronizeExternalText(_ value: String, in host: InputHostView,
+                                     keepingFocus: Bool, makeReplacement: () -> PastingTextView) -> Bool {
+            let previous = host.textView
+            guard value.isEmpty, !(previous.text ?? "").isEmpty else {
+                return synchronizeExternalText(value, in: previous)
+            }
+
+            // Document replacement/unmarkText alone left a blue correction
+            // decoration on a physical phone after Send. A fresh input document
+            // also retires its native decoration owner without disabling IME,
+            // spelling or predictions for subsequent drafts.
+            cancelFocus()
+            isSynchronizingExternalText = true
+            let replacement = makeReplacement()
+            replacement.frame = host.bounds
+            let previousAccessibility = previous.isAccessibilityElement
+            let previousAccessibilityHidden = previous.accessibilityElementsHidden
+            previous.delegate = nil
+            previous.onLayout = nil
+            previous.isAccessibilityElement = false
+            previous.accessibilityElementsHidden = true
+            host.addSubview(replacement)
+            attach(replacement)
+
+            // Ask the new in-window leaf to take ownership directly. Never
+            // explicitly resign first: that would hide/reopen the keyboard.
+            if previous.isFirstResponder && keepingFocus && !replacement.becomeFirstResponder() {
+                replacement.delegate = nil
+                replacement.onLayout = nil
+                replacement.removeFromSuperview()
+                previous.isAccessibilityElement = previousAccessibility
+                previous.accessibilityElementsHidden = previousAccessibilityHidden
+                attach(previous)
+                isSynchronizingExternalText = false
+                // Do not discard a focused editor if UIKit refuses transfer.
+                return synchronizeExternalText(value, in: previous)
+            }
+
+            host.textView = replacement
+            previous.removeFromSuperview()
+            // The retired delegate intentionally cannot publish didEndEditing.
+            // Honor hidden/disabled ownership here so revealing the host cannot
+            // revive a focus request belonging to the discarded document.
+            if !keepingFocus, isFocused { isFocused = false }
+            isSynchronizingExternalText = false
+            return true
+        }
 
         @discardableResult
         func synchronizeExternalText(_ value: String, in textView: UITextView) -> Bool {
@@ -386,12 +486,13 @@ struct ComposerTextView: UIViewRepresentable {
         }
 
         func textViewDidChange(_ textView: UITextView) {
-            guard !isSynchronizingExternalText else { return }
+            guard acceptsCallback(from: textView) else { return }
             text = textView.text
             reportHeight(for: textView, force: true)
         }
 
         func reportHeight(for textView: UITextView, force: Bool = false) {
+            guard attachedTextView == nil || attachedTextView === textView else { return }
             guard textView.bounds.width > 0 else { return }
 
             let height = contentHeight(for: textView, width: textView.bounds.width)

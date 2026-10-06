@@ -164,6 +164,111 @@ final class AppShellNavigationTests: XCTestCase {
         XCTAssertEqual(unique.first?.name, "default")
     }
 
+    func testBotCatalogFirstLoadFailureStopsSkeletonAndCanRetry() throws {
+        let server = URL(staticString: "https://bots.example.test")
+        var state = AppShellBotCatalogState(server: server, cachedProfiles: nil)
+        XCTAssertTrue(state.showsSkeleton)
+        XCTAssertFalse(state.showsRetry)
+        let first = state.beginLoad(server: server)
+        XCTAssertTrue(state.fail(first, cancelled: false))
+        XCTAssertFalse(state.showsSkeleton)
+        XCTAssertTrue(state.showsRetry)
+
+        let retry = state.beginLoad(server: server)
+        XCTAssertTrue(state.showsSkeleton)
+        let profiles = try JSONDecoder().decode([ProfileSummary].self,
+            from: Data(#"[{"name":"research"},{"name":" research "}]"#.utf8))
+        XCTAssertTrue(state.accept(profiles, for: retry, cancelled: false))
+        XCTAssertEqual(state.profiles.compactMap(\.normalizedName), ["research"])
+        XCTAssertFalse(state.showsSkeleton)
+        XCTAssertFalse(state.showsRetry)
+    }
+
+    func testBotCatalogRetainsCachedRowsOnRefreshFailureButAcceptsAuthoritativeEmpty() throws {
+        let server = URL(staticString: "https://bots.example.test")
+        let profiles = try JSONDecoder().decode([ProfileSummary].self,
+            from: Data(#"[{"name":"research","model":"fixture-model"}]"#.utf8))
+        var state = AppShellBotCatalogState(server: server, cachedProfiles: profiles)
+        XCTAssertEqual(state.profiles, profiles)
+        XCTAssertFalse(state.showsSkeleton)
+        let refresh = state.beginLoad(server: server)
+        XCTAssertTrue(state.fail(refresh, cancelled: false))
+        XCTAssertEqual(state.profiles, profiles)
+        XCTAssertFalse(state.showsRetry)
+
+        let emptied = state.beginLoad(server: server)
+        XCTAssertTrue(state.accept([], for: emptied, cancelled: false))
+        XCTAssertTrue(state.profiles.isEmpty)
+        XCTAssertTrue(state.hasSnapshot)
+        let failedAfterEmpty = state.beginLoad(server: server)
+        XCTAssertTrue(state.fail(failedAfterEmpty, cancelled: false))
+        XCTAssertTrue(state.profiles.isEmpty)
+        XCTAssertFalse(state.showsSkeleton)
+        XCTAssertFalse(state.showsRetry)
+        XCTAssertFalse(AppShellBotCatalogState(server: server, cachedProfiles: []).showsSkeleton,
+                       "A persisted successful empty catalog must not become an unknown first load.")
+    }
+
+    func testBotCatalogRejectsLateCancelledReplacedAndOtherServerResults() throws {
+        let firstServer = URL(staticString: "https://first.example.test")
+        let secondServer = URL(staticString: "https://second.example.test")
+        let profiles = try JSONDecoder().decode([ProfileSummary].self,
+            from: Data(#"[{"name":"first-server-only"}]"#.utf8))
+        var state = AppShellBotCatalogState(server: firstServer, cachedProfiles: profiles)
+        let old = state.beginLoad(server: firstServer)
+        let newer = state.beginLoad(server: firstServer)
+        XCTAssertFalse(state.accept([], for: old, cancelled: false))
+        state.finishLoad(old)
+        XCTAssertTrue(state.isLoading, "An old task's defer cannot end the replacement load.")
+        XCTAssertFalse(state.accept([], for: newer, cancelled: true))
+        XCTAssertEqual(state.profiles, profiles)
+        state.finishLoad(newer)
+        XCTAssertFalse(state.isLoading)
+
+        let pending = state.beginLoad(server: firstServer)
+        state.cancelLoad()
+        XCTAssertFalse(state.accept([], for: pending, cancelled: false))
+        let second = state.beginLoad(server: secondServer)
+        XCTAssertTrue(state.profiles.isEmpty, "The previous server's metadata must disappear immediately.")
+        XCTAssertFalse(state.accept(profiles, for: pending, cancelled: false))
+        XCTAssertTrue(state.accept([], for: second, cancelled: false))
+        XCTAssertEqual(state.server, secondServer)
+    }
+
+    func testBotCatalogSwitchHydratesSelectedServerCacheAndRejectsDepartedLoad() throws {
+        let firstServer = URL(staticString: "https://first.example.test")
+        let secondServer = URL(staticString: "https://second.example.test")
+        let firstProfiles = try JSONDecoder().decode([ProfileSummary].self,
+            from: Data(#"[{"name":"first-server-only"}]"#.utf8))
+        let secondCachedProfiles = try JSONDecoder().decode([ProfileSummary].self,
+            from: Data(#"[{"name":"second-cached"}]"#.utf8))
+        let secondLiveProfiles = try JSONDecoder().decode([ProfileSummary].self,
+            from: Data(#"[{"name":"second-refreshed"}]"#.utf8))
+        var state = AppShellBotCatalogState(server: firstServer, cachedProfiles: firstProfiles)
+        let departed = state.beginLoad(server: firstServer)
+
+        let selected = state.beginLoad(server: secondServer, cachedProfiles: secondCachedProfiles)
+        XCTAssertEqual(state.server, secondServer)
+        XCTAssertEqual(state.profiles, secondCachedProfiles)
+        XCTAssertFalse(state.showsSkeleton, "Switching to a cached server must show its saved catalog immediately.")
+        XCTAssertFalse(state.accept(firstProfiles, for: departed, cancelled: false))
+        state.finishLoad(departed)
+        XCTAssertTrue(state.isLoading)
+        XCTAssertEqual(state.profiles, secondCachedProfiles)
+
+        XCTAssertTrue(state.accept(secondLiveProfiles, for: selected, cancelled: false))
+        let refresh = state.beginLoad(server: secondServer, cachedProfiles: secondCachedProfiles)
+        XCTAssertEqual(state.profiles, secondLiveProfiles,
+                       "Refreshing the same server must retain newer live rows rather than reread stale metadata.")
+        XCTAssertTrue(state.fail(refresh, cancelled: false))
+        XCTAssertEqual(state.profiles, secondLiveProfiles)
+
+        _ = state.beginLoad(server: firstServer, cachedProfiles: [])
+        XCTAssertTrue(state.profiles.isEmpty)
+        XCTAssertTrue(state.hasSnapshot)
+        XCTAssertFalse(state.showsSkeleton, "A selected server's saved empty result is also authoritative.")
+    }
+
     func testShellLoadRejectsCancelledReplacedDepartedAndOtherServerResponses() {
         let server = URL(staticString: "https://one.example.test")
         let request = AppShellLoadIdentity(server: server)

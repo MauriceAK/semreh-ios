@@ -100,6 +100,8 @@ struct ComposerVoiceControlButton: View {
     let onRecordingStart: () -> Void
     let onRecordingDragChanged: (CGFloat) -> Void
     let onRecordingEnd: (CGFloat) -> Void
+    var controlSize: CGFloat? = nil
+    var symbolHorizontalOffset: CGFloat = 0
 
     @State private var isPressing = false
     @State private var didTriggerRecording = false
@@ -108,14 +110,21 @@ struct ComposerVoiceControlButton: View {
     var body: some View {
         Image(systemName: symbolName)
             .font(.system(size: 18, weight: .regular))
+            // Only the glyph moves toward Send; the gesture and AX target keep
+            // their fixed slot, including while the recording glyph animates.
+            .scaleEffect(controlSize != nil && isRecordingVoiceNote ? 1.3 : 1)
+            .offset(x: symbolHorizontalOffset)
             .frame(width: 28, height: 28)
-            .chatMinimumHitTarget(in: Circle())
+            .frame(width: controlSize, height: controlSize)
+            .chatMinimumHitTarget(horizontalPadding: controlSize == nil ? 8 : 0,
+                                  verticalPadding: controlSize == nil ? 8 : 0, in: Circle())
             .foregroundStyle(isListening || isRecordingVoiceNote ? Color.red : color)
-            .scaleEffect(isRecordingVoiceNote ? 1.3 : 1)
+            .scaleEffect(controlSize == nil && isRecordingVoiceNote ? 1.3 : 1)
             .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isRecordingVoiceNote)
             .contentShape(Circle())
             .opacity(isDisabled && !isRecordingVoiceNote ? 0.4 : 1)
             .gesture(pressGesture)
+            .accessibilityElement(children: .ignore)
             .accessibilityLabel(accessibilityLabel)
             .accessibilityAddTraits(.isButton)
             .accessibilityAction {

@@ -669,9 +669,30 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             let refresh = UIRefreshControl()
             refresh.addTarget(self, action: #selector(refreshHistory), for: .valueChanged)
             collection.refreshControl = refresh
-            latest.setImage(UIImage(systemName: "arrow.down"), for: .normal)
-            latest.backgroundColor = .secondarySystemBackground
-            latest.layer.cornerRadius = 22
+            // Keep the UIKit action/AX owner at 44pt while the decorative glass
+            // matches the shared 32pt Latest visual. The existing modifier owns
+            // glass preference, Reduce Transparency and contrast fallbacks.
+            let latestVisual = UIHostingConfiguration {
+                Image(systemName: "arrow.down")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .frame(width: 32, height: 32)
+                    .adaptiveGlass(.regular, fallbackMaterial: .regularMaterial, in: Circle())
+                    .accessibilityHidden(true)
+            }.margins(.all, 0).makeContentView()
+            latestVisual.backgroundColor = .clear
+            latestVisual.isUserInteractionEnabled = false
+            latestVisual.accessibilityElementsHidden = true
+            latest.addSubview(latestVisual)
+            latestVisual.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                latestVisual.centerXAnchor.constraint(equalTo: latest.centerXAnchor),
+                latestVisual.centerYAnchor.constraint(equalTo: latest.centerYAnchor),
+                latestVisual.widthAnchor.constraint(equalToConstant: 32),
+                latestVisual.heightAnchor.constraint(equalToConstant: 32)
+            ])
+            latest.isAccessibilityElement = true
+            latest.accessibilityTraits = .button
             latest.accessibilityLabel = "Scroll to latest message"
             latest.accessibilityIdentifier = "chat-scroll-to-bottom"
             latest.addTarget(self, action: #selector(jumpToLatest), for: .touchUpInside)
@@ -680,7 +701,8 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             let bottomConstraint = latest.bottomAnchor.constraint(equalTo: view.bottomAnchor,
                 constant: -resolvedLatestBottomInset(input))
             latestBottomConstraint = bottomConstraint
-            NSLayoutConstraint.activate([latest.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20), bottomConstraint, latest.widthAnchor.constraint(equalToConstant: 44), latest.heightAnchor.constraint(equalToConstant: 44)])
+            NSLayoutConstraint.activate([latest.centerXAnchor.constraint(equalTo: view.centerXAnchor), bottomConstraint,
+                latest.widthAnchor.constraint(equalToConstant: 44), latest.heightAnchor.constraint(equalToConstant: 44)])
 #if DEBUG
             probe.presentationInteraction = markdownPresentationInteraction
             probe.font = .systemFont(ofSize: 1)
@@ -966,7 +988,8 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
                 attachments: after.attachments, turnTps: before.turnTps)
             let unchangedRow = TranscriptMessage(loadedIndex: next.message.loadedIndex,
                 renderID: next.message.renderID, anchorID: next.message.anchorID,
-                message: unchangedBody, attachmentDisplayContent: next.message.attachmentDisplayContent)
+                message: unchangedBody, attachmentDisplayContent: next.message.attachmentDisplayContent,
+                localDelivery: next.message.localDelivery)
             let normalized = StableViewportRowRevision(message: unchangedRow,
                 outgoingInsertionEvent: next.outgoingInsertionEvent, allowsOutgoingMotion: next.allowsOutgoingMotion,
                 reasoningGroups: next.reasoningGroups, toolCallGroups: next.toolCallGroups,

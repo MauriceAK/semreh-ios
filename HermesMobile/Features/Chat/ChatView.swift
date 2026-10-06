@@ -112,37 +112,50 @@ private struct DirectPromptDeliveryRecoveryBanner: View {
     let hasConfirmedAcceptance: Bool
     let onAllow: () -> Void
 
+    @State private var showsDetails = false
+
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.orange)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(hasConfirmedAcceptance ? "Message accepted; cleanup needed" : "Message delivery needs attention")
-                    .font(.subheadline.weight(.semibold))
-                    .accessibilityIdentifier("direct-prompt-uncertainty-banner")
-                Text(recoveryExplanation)
-                    .font(.caption)
-                    .accessibilityIdentifier("direct-prompt-uncertainty-explanation")
-            }
+        HStack(spacing: 8) {
+            Text(shortTitle)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .accessibilityIdentifier("direct-prompt-uncertainty-banner")
+                .accessibilityHint(recoveryExplanation)
             Spacer(minLength: 8)
             if isBusy {
                 ProgressView()
+                    .scaleEffect(0.8)
                     .accessibilityLabel("Checking latest conversation")
             } else if isActionAvailable {
-                Button("Allow a new message…", action: onAllow)
+                // Existing guarded confirmation explains the uncertain outcome;
+                // this action never retries the pending prompt.
+                Button("Review", action: onAllow)
                     .font(.caption.weight(.semibold))
+                    .accessibilityLabel("Review message delivery")
                     .accessibilityIdentifier("direct-prompt-uncertainty-allow-new-message")
+            } else {
+                Button("Details") { showsDetails = true }
+                    .font(.caption.weight(.semibold))
+                    .accessibilityLabel("Message delivery details")
             }
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(Color.orange.opacity(0.35), lineWidth: 0.5)
+        .padding(.vertical, 4)
+        .popover(isPresented: $showsDetails) {
+            Text(recoveryExplanation)
+                .font(.body)
+                .padding(20)
+                .accessibilityIdentifier("direct-prompt-uncertainty-explanation")
+                .presentationCompactAdaptation(.popover)
         }
         .accessibilityElement(children: .contain)
+    }
+
+    private var shortTitle: String {
+        if hasConfirmedAcceptance { return "Sent · connection needs attention" }
+        if isSafetyRecordUnavailable { return "Sending unavailable" }
+        return "Delivery unconfirmed"
     }
 
     private var recoveryExplanation: String {
@@ -682,7 +695,7 @@ struct ChatView: View {
             isPresentationSelected: isPresentationActive,
             isParentPresentationOpen: hasOwnedModalPresentation,
             isChromeCompact: isComposerChromeCompact,
-            errorMessage: viewModel.sendErrorMessage,
+            errorMessage: viewModel.composerSendErrorMessage,
             configurationErrorMessage: viewModel.composerConfigurationErrorMessage,
             configurationDiagnosticCode: viewModel.composerConfigurationDiagnostic?.displayCode,
             contextWindowSnapshot: viewModel.contextWindowSnapshot,
@@ -1074,15 +1087,10 @@ struct ChatView: View {
     private var legacyChatSurface: some View {
         ZStack(alignment: .bottom) {
             VStack(spacing: 0) {
-                if viewModel.isViewingCachedData {
-                    ChatOfflineCacheBanner()
-                }
-
                 listenPlaybackBar
 
                 messageContent
-                    // Scope RTL to the chat transcript only (#259): the offline
-                    // banner above stays in the app's default direction.
+                    // Scope RTL to the chat transcript only (#259).
                     .environment(\.layoutDirection, chatLayoutDirection)
 
             }
@@ -1169,7 +1177,6 @@ struct ChatView: View {
         } header: {
             VStack(spacing: 0) {
                 museChatNavigationBar
-                if viewModel.isViewingCachedData { ChatOfflineCacheBanner() }
                 listenPlaybackBar
             }
         } bottom: {

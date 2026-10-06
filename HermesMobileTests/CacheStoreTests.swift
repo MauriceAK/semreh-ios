@@ -1241,6 +1241,139 @@ final class CacheStoreTests: XCTestCase {
         )
     }
 
+    func testBotCatalogRoundTripPersistsOnlyDisplayMetadataAndKeepsServersIsolated() throws {
+        let suite = "BotCatalogTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let firstServer = URL(staticString: "https://first.example.test")
+        let secondServer = URL(staticString: "https://second.example.test")
+        let now = Date(timeIntervalSince1970: 1_780_000_000)
+        let profile = ProfileSummary(name: " research ", path: "/private/profile-path", isDefault: true,
+            isActive: true, gatewayRunning: true, model: "fixture-model", provider: "fixture-provider",
+            hasEnv: true, skillCount: 42)
+        CacheStore.cacheBotProfiles([profile, profile], serverURL: firstServer, defaults: defaults, cachedAt: now)
+        let reopened = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let restored = try XCTUnwrap(CacheStore.cachedBotProfiles(serverURL: firstServer,
+            defaults: reopened, now: now.addingTimeInterval(1)))
+        XCTAssertEqual(restored.count, 1)
+        XCTAssertEqual(restored.first?.name, "research")
+        XCTAssertEqual(restored.first?.model, "fixture-model")
+        XCTAssertEqual(restored.first?.provider, "fixture-provider")
+        XCTAssertNil(restored.first?.path)
+        XCTAssertNil(restored.first?.isDefault)
+        XCTAssertNil(restored.first?.isActive)
+        XCTAssertNil(restored.first?.gatewayRunning)
+        XCTAssertNil(restored.first?.hasEnv)
+        XCTAssertNil(restored.first?.skillCount)
+        XCTAssertNil(CacheStore.cachedBotProfiles(serverURL: secondServer, defaults: reopened, now: now))
+        let stored = try XCTUnwrap(defaults.data(forKey: CacheStore.BotCatalogPolicy.storageKey))
+        let text = try XCTUnwrap(String(data: stored, encoding: .utf8))
+        XCTAssertFalse(text.contains("first.example.test"), "Catalog scopes are hashed origins, not raw URLs.")
+        XCTAssertFalse(text.contains("profile-path"))
+        XCTAssertFalse(text.contains("gatewayRunning"))
+    }
+
+    func testBotCatalogSuccessfulEmptyReplacesOldRowsAndExpiresNormally() throws {
+        let suite = "BotCatalogTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let server = URL(staticString: "https://bots.example.test")
+        let now = Date(timeIntervalSince1970: 1_780_000_000)
+        CacheStore.cacheBotProfiles([botProfile("old")], serverURL: server, defaults: defaults, cachedAt: now)
+        CacheStore.cacheBotProfiles([], serverURL: server, defaults: defaults, cachedAt: now.addingTimeInterval(1))
+        XCTAssertEqual(CacheStore.cachedBotProfiles(serverURL: server, defaults: defaults, now: now.addingTimeInterval(2)), [])
+        XCTAssertNil(CacheStore.cachedBotProfiles(serverURL: server, defaults: defaults,
+            now: now.addingTimeInterval(CachePolicy.ttl + 1)))
+    }
+
+    func testBotCatalogClearCachePurgesOnlySelectedServerAndRejectsInflightWrite() throws {
+        let suite = "BotCatalogTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let first = URL(staticString: "https://first.example.test")
+        let second = URL(staticString: "https://second.example.test")
+        CacheStore.cacheBotProfiles([botProfile("first")], serverURL: first, defaults: defaults)
+        CacheStore.cacheBotProfiles([botProfile("second")], serverURL: second, defaults: defaults)
+        let generation = CacheStore.botCatalogWriteGeneration
+        try CacheStore.clearCache(for: first, in: makeContext(), defaults: defaults)
+        CacheStore.cacheBotProfiles([botProfile("late")], serverURL: first,
+                                   defaults: defaults, expectedGeneration: generation)
+        XCTAssertNil(CacheStore.cachedBotProfiles(serverURL: first, defaults: defaults))
+        XCTAssertEqual(CacheStore.cachedBotProfiles(serverURL: second, defaults: defaults)?.compactMap(\.name), ["second"])
+        CacheStore.cacheBotProfiles([botProfile("fresh")], serverURL: first, defaults: defaults,
+                                   expectedGeneration: CacheStore.botCatalogWriteGeneration)
+        XCTAssertEqual(CacheStore.cachedBotProfiles(serverURL: first, defaults: defaults)?.compactMap(\.name), ["fresh"])
+    }
+
+    func testBotCatalogNormalizesOriginsAndRejectsCredentialBearingURLs() throws {
+        let suite = "BotCatalogTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let canonical = URL(staticString: "https://bots.example.test")
+        CacheStore.cacheBotProfiles([botProfile("same")],
+            serverURL: URL(staticString: "https://BOTS.example.test:443/"), defaults: defaults)
+        XCTAssertEqual(CacheStore.cachedBotProfiles(serverURL: canonical, defaults: defaults)?.compactMap(\.name), ["same"])
+        CacheStore.clearBotCatalog(for: URL(staticString: "https://BOTS.example.test:443/"), defaults: defaults)
+        XCTAssertNil(CacheStore.cachedBotProfiles(serverURL: canonical, defaults: defaults))
+        for raw in ["https://user:password@bots.example.test", "https://bots.example.test?token=fixture",
+                    "https://bots.example.test/private-path", "file:///fixture"] {
+            CacheStore.cacheBotProfiles([botProfile("never-store")], serverURL: try XCTUnwrap(URL(string: raw)), defaults: defaults)
+        }
+        XCTAssertNil(defaults.data(forKey: CacheStore.BotCatalogPolicy.storageKey))
+    }
+
+    func testBotCatalogCapsProfilesServersAndBytesAndIgnoresCorruptSnapshot() throws {
+        let suite = "BotCatalogTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let now = Date(timeIntervalSince1970: 1_780_000_000)
+        let first = URL(staticString: "https://server-0.example.test")
+        let profiles = (0..<(CacheStore.BotCatalogPolicy.maxProfiles + 5)).map {
+            botProfile("bot-\($0)", model: String(repeating: "m", count: 500))
+        }
+        CacheStore.cacheBotProfiles(profiles, serverURL: first, defaults: defaults, cachedAt: now)
+        let restored = try XCTUnwrap(CacheStore.cachedBotProfiles(serverURL: first, defaults: defaults, now: now))
+        XCTAssertEqual(restored.count, CacheStore.BotCatalogPolicy.maxProfiles)
+        XCTAssertEqual(restored.first?.model?.count, 256)
+        for index in 1...CacheStore.BotCatalogPolicy.maxServers {
+            let server = try XCTUnwrap(URL(string: "https://server-\(index).example.test"))
+            CacheStore.cacheBotProfiles(profiles, serverURL: server, defaults: defaults,
+                                       cachedAt: now.addingTimeInterval(Double(index)))
+        }
+        XCTAssertNil(CacheStore.cachedBotProfiles(serverURL: first, defaults: defaults, now: now))
+        XCTAssertLessThanOrEqual(try XCTUnwrap(defaults.data(forKey: CacheStore.BotCatalogPolicy.storageKey)).count,
+                                 CacheStore.BotCatalogPolicy.maxBytes)
+        defaults.set(Data("not-json".utf8), forKey: CacheStore.BotCatalogPolicy.storageKey)
+        XCTAssertNil(CacheStore.cachedBotProfiles(serverURL: first, defaults: defaults, now: now))
+        defaults.set(Data(repeating: 1, count: CacheStore.BotCatalogPolicy.maxBytes + 1),
+                     forKey: CacheStore.BotCatalogPolicy.storageKey)
+        XCTAssertNil(CacheStore.cachedBotProfiles(serverURL: first, defaults: defaults, now: now))
+    }
+
+    func testBotCatalogCombiningUnicodeLabelCannotEvictOtherServerSnapshots() throws {
+        let suite = "BotCatalogTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let sibling = URL(staticString: "https://sibling.example.test")
+        let server = URL(staticString: "https://bots.example.test")
+        CacheStore.cacheBotProfiles([botProfile("sibling")], serverURL: sibling, defaults: defaults)
+        // This is one Character with many scalars: a character limit alone does
+        // not bound encoded metadata or protect sibling entries from eviction.
+        let largeGrapheme = "m" + String(repeating: "\u{0301}", count: 150_000)
+        CacheStore.cacheBotProfiles([botProfile("unicode", model: largeGrapheme)],
+                                   serverURL: server, defaults: defaults)
+        let restored = try XCTUnwrap(CacheStore.cachedBotProfiles(serverURL: server, defaults: defaults)?.first)
+        XCTAssertLessThanOrEqual(try XCTUnwrap(restored.model).utf8.count, 256)
+        XCTAssertEqual(CacheStore.cachedBotProfiles(serverURL: sibling, defaults: defaults)?.compactMap(\.name), ["sibling"])
+        XCTAssertLessThan(try XCTUnwrap(defaults.data(forKey: CacheStore.BotCatalogPolicy.storageKey)).count, 4_096)
+    }
+
+    private func botProfile(_ name: String, model: String = "fixture-model") -> ProfileSummary {
+        ProfileSummary(name: name, path: nil, isDefault: nil, isActive: nil,
+                       gatewayRunning: nil, model: model, provider: "fixture-provider",
+                       hasEnv: nil, skillCount: nil)
+    }
+
     private func makeContext() throws -> ModelContext {
         let configuration = ModelConfiguration(isStoredInMemoryOnly: true)
         let container = try ModelContainer(

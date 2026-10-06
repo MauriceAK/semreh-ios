@@ -1,7 +1,154 @@
+import CryptoKit
 import Foundation
 import SwiftData
 
 enum CacheStore {
+    enum BotCatalogPolicy {
+        static let storageKey = "cache.botCatalog.v1"
+        static let maxServers = 8
+        static let maxProfiles = 64
+        static let maxBytes = 256 * 1_024
+    }
+
+    /// One bounded generation invalidates outstanding metadata writes on cache
+    /// clearing. Existing snapshots for other servers remain intact.
+    @MainActor private(set) static var botCatalogWriteGeneration = UUID()
+
+    @MainActor
+    static func cachedBotProfiles(
+        serverURL: URL,
+        defaults: UserDefaults = .standard,
+        now: Date = Date()
+    ) -> [ProfileSummary]? {
+        guard let key = botCatalogKey(serverURL),
+              let snapshot = botCatalogSnapshots(defaults: defaults)[key],
+              let cachedAt = snapshot.cachedAt,
+              cachedAt.addingTimeInterval(CachePolicy.ttl) > now,
+              let profiles = snapshot.profiles else { return nil }
+        // An empty, successful catalog is different from never having loaded.
+        return profiles.prefix(BotCatalogPolicy.maxProfiles).compactMap(\.profile)
+    }
+
+    @MainActor
+    static func cacheBotProfiles(
+        _ profiles: [ProfileSummary],
+        serverURL: URL,
+        defaults: UserDefaults = .standard,
+        cachedAt: Date = Date(),
+        expectedGeneration: UUID? = nil
+    ) {
+        guard expectedGeneration == nil || expectedGeneration == botCatalogWriteGeneration,
+              let key = botCatalogKey(serverURL) else { return }
+        var names = Set<String>()
+        var compact: [CachedBotProfile] = []
+        for profile in profiles {
+            guard let record = CachedBotProfile(profile), let name = record.name,
+                  names.insert(name).inserted else { continue }
+            compact.append(record)
+            if compact.count == BotCatalogPolicy.maxProfiles { break }
+        }
+        var snapshots = botCatalogSnapshots(defaults: defaults).filter {
+            guard let date = $0.value.cachedAt else { return false }
+            return date.addingTimeInterval(CachePolicy.ttl) > cachedAt
+        }
+        snapshots[key] = CachedBotCatalog(cachedAt: cachedAt, profiles: compact)
+        let oldestKeys = snapshots.keys.sorted {
+            let lhs = snapshots[$0]?.cachedAt ?? .distantPast
+            let rhs = snapshots[$1]?.cachedAt ?? .distantPast
+            return lhs == rhs ? $0 < $1 : lhs < rhs
+        }
+        var evictionIndex = 0
+        while snapshots.count > BotCatalogPolicy.maxServers {
+            snapshots.removeValue(forKey: oldestKeys[evictionIndex])
+            evictionIndex += 1
+        }
+        while let data = try? JSONEncoder().encode(snapshots) {
+            if data.count <= BotCatalogPolicy.maxBytes {
+                defaults.set(data, forKey: BotCatalogPolicy.storageKey)
+                return
+            }
+            guard evictionIndex < oldestKeys.count else { return }
+            snapshots.removeValue(forKey: oldestKeys[evictionIndex])
+            evictionIndex += 1
+        }
+    }
+
+    @MainActor
+    static func clearBotCatalog(for serverURL: URL, defaults: UserDefaults = .standard) {
+        guard let key = botCatalogKey(serverURL) else { return }
+        botCatalogWriteGeneration = UUID()
+        var snapshots = botCatalogSnapshots(defaults: defaults)
+        snapshots.removeValue(forKey: key)
+        if snapshots.isEmpty {
+            defaults.removeObject(forKey: BotCatalogPolicy.storageKey)
+        } else if let data = try? JSONEncoder().encode(snapshots) {
+            defaults.set(data, forKey: BotCatalogPolicy.storageKey)
+        }
+    }
+
+    private struct CachedBotCatalog: Codable {
+        let cachedAt: Date?
+        let profiles: [CachedBotProfile]?
+    }
+
+    private struct CachedBotProfile: Codable {
+        let name: String?
+        let model: String?
+        let provider: String?
+
+        init?(_ profile: ProfileSummary) {
+            guard let name = profile.normalizedName, name.utf8.count <= 256 else { return nil }
+            self.name = name
+            model = Self.boundedLabel(profile.model, maxBytes: 256)
+            provider = Self.boundedLabel(profile.provider, maxBytes: 128)
+        }
+
+        var profile: ProfileSummary? {
+            guard let name, !name.isEmpty, name.utf8.count <= 256 else { return nil }
+            return ProfileSummary(name: name, path: nil, isDefault: nil, isActive: nil,
+                                  gatewayRunning: nil,
+                                  model: Self.boundedLabel(model, maxBytes: 256),
+                                  provider: Self.boundedLabel(provider, maxBytes: 128),
+                                  hasEnv: nil, skillCount: nil)
+        }
+
+        /// Character counts do not bound storage: one grapheme can contain many
+        /// combining scalars. Keep only a small, valid UTF-8 display prefix.
+        private static func boundedLabel(_ value: String?, maxBytes: Int) -> String? {
+            guard let value else { return nil }
+            var bytes = Array(value.utf8.prefix(maxBytes))
+            while !bytes.isEmpty {
+                if let label = String(bytes: bytes, encoding: .utf8) { return label }
+                bytes.removeLast()
+            }
+            return ""
+        }
+    }
+
+    private static func botCatalogSnapshots(defaults: UserDefaults) -> [String: CachedBotCatalog] {
+        guard let data = defaults.data(forKey: BotCatalogPolicy.storageKey),
+              data.count <= BotCatalogPolicy.maxBytes,
+              let snapshots = try? JSONDecoder().decode([String: CachedBotCatalog].self, from: data),
+              snapshots.count <= BotCatalogPolicy.maxServers else { return [:] }
+        return snapshots
+    }
+
+    private static func botCatalogKey(_ serverURL: URL) -> String? {
+        guard var origin = URLComponents(url: serverURL, resolvingAgainstBaseURL: false),
+              let scheme = origin.scheme?.lowercased(), ["https", "http"].contains(scheme),
+              let host = origin.host?.lowercased(), !host.isEmpty,
+              origin.user == nil, origin.password == nil, origin.query == nil, origin.fragment == nil,
+              origin.path.isEmpty || origin.path == "/" else { return nil }
+        origin.scheme = scheme
+        origin.host = host
+        origin.path = ""
+        if (scheme == "https" && origin.port == 443) || (scheme == "http" && origin.port == 80) {
+            origin.port = nil
+        }
+        guard let normalized = origin.string else { return nil }
+        return SHA256.hash(data: Data(normalized.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
     @MainActor
     static func cachedSessions(
         serverURL: URL,
@@ -271,7 +418,14 @@ enum CacheStore {
     /// of a server's cache when it is removed, so a removed/reset server never
     /// leaves orphaned rows behind.
     @MainActor
-    static func clearCache(for serverURL: URL, in context: ModelContext) throws {
+    static func clearCache(
+        for serverURL: URL,
+        in context: ModelContext,
+        defaults: UserDefaults = .standard
+    ) throws {
+        // Clear compact metadata before any throwing SwiftData operation. A late
+        // catalog request must not repopulate a removed account's local snapshot.
+        clearBotCatalog(for: serverURL, defaults: defaults)
         let serverURLString = serverURL.absoluteString
 
         let sessionDescriptor = FetchDescriptor<CachedSession>(

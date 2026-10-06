@@ -515,6 +515,24 @@ final class ChatViewModel {
     /// A send being prepared belongs to presentation, not canonical history:
     /// resume can replace that history before the prompt is submitted.
     @ObservationIgnored private var pendingLocalSendMessage: ChatMessage?
+    private struct LocalSendPresentationScope: Equatable {
+        let sessionID: String?
+        let profile: String
+        let controllerID: ObjectIdentifier?
+    }
+    private struct LocalSendAttempt {
+        let localID: String
+        let message: ChatMessage
+        let draft: String
+        let attachmentIDs: Set<UUID>
+        var scope: LocalSendPresentationScope
+        var representedError: String?
+        var echoComparison: LocalSendEchoCandidate?
+        var usesRecoveryNotice = false
+    }
+    @ObservationIgnored private var localSendAttempt: LocalSendAttempt?
+    /// Footer reservations follow proven render identities, never persisted DTOs.
+    @ObservationIgnored private var localSendDelivery: [String: LocalMessageDelivery] = [:]
     private struct LocalSendEchoCandidate {
         let localMessageID: String
         let text: String
@@ -533,7 +551,9 @@ final class ChatViewModel {
     @ObservationIgnored private var localSendAliasScope: String?
 
     func setLocalSendPresentationEnabled(_ isEnabled: Bool) {
+        guard localSendPresentationEnabled != isEnabled else { return }
         localSendPresentationEnabled = isEnabled
+        if !isEnabled { resetLocalSendPresentation() }
     }
     #if DEBUG
     @ObservationIgnored private(set) var transcriptFullRecomputeCountForTesting = 0
@@ -624,6 +644,17 @@ final class ChatViewModel {
     var liveTokensPerSecond: Double? { nil }
     private(set) var errorMessage: String?
     private(set) var sendErrorMessage: String?
+    var composerSendErrorMessage: String? {
+        _ = transcriptRenderRevision
+        guard let error = sendErrorMessage, let attempt = localSendAttempt,
+              attempt.representedError == error,
+              (attempt.usesRecoveryNotice && directConversationHasPromptDeliveryUncertainty)
+                || displayedTranscriptMessages.contains(where: {
+                    $0.message.messageId == attempt.localID
+                        && ($0.localDelivery == .notSent || $0.localDelivery == .unconfirmed)
+                }) else { return sendErrorMessage }
+        return nil
+    }
     private(set) var messageActionErrorMessage: String?
     private(set) var cacheErrorMessage: String?
     private(set) var lastError: Error?
@@ -757,7 +788,10 @@ final class ChatViewModel {
             message: message,
             attachmentDisplayContent: usesDirectGateway
                 ? Self.directAttachmentDisplayContent(for: message)
-                : nil
+                : nil,
+            localDelivery: localSendDelivery[message.messageId.flatMap { localSendRenderAliases[$0] }
+                ?? Self.transcriptRenderID(for: message, absoluteIndex: offset + loadedIndex,
+                                          preferDurableID: usesDirectGateway)]
         )
 
         if let rowIndex = displayedTranscriptRowIndexByLoadedIndex[loadedIndex],
@@ -769,7 +803,7 @@ final class ChatViewModel {
         }
 
         if loadedIndex == messages.index(before: messages.endIndex) {
-            let rowIndex = displayedTranscriptMessages.endIndex - (pendingLocalSendMessage == nil ? 0 : 1)
+            let rowIndex = displayedTranscriptMessages.endIndex - (displayedTranscriptMessages.last?.loadedIndex == -1 ? 1 : 0)
             displayedTranscriptRowIndexByLoadedIndex[loadedIndex] = rowIndex
             displayedTranscriptMessages.insert(transcriptMessage, at: rowIndex)
             // An append cannot shift any existing transcript/reasoning anchor or
@@ -795,40 +829,179 @@ final class ChatViewModel {
             isOlderPagePrepend: isApplyingOlderDirectHistoryPage,
             renderAliases: localSendRenderAliases
         )
+        if !localSendDelivery.isEmpty {
+            displayedTranscriptMessages = displayedTranscriptMessages.map { row in
+                TranscriptMessage(loadedIndex: row.loadedIndex, renderID: row.renderID,
+                    anchorID: row.anchorID, message: row.message,
+                    attachmentDisplayContent: row.attachmentDisplayContent,
+                    localDelivery: localSendDelivery[row.renderID])
+            }
+        }
         displayedTranscriptRowIndexByLoadedIndex = Dictionary(
             uniqueKeysWithValues: displayedTranscriptMessages.enumerated().map { rowIndex, message in
                 (message.loadedIndex, rowIndex)
             }
         )
-        if let pendingLocalSendMessage {
-            displayedTranscriptMessages.append(localSendTranscriptMessage(pendingLocalSendMessage))
+        if let pendingLocalSendMessage, let attempt = localSendAttempt {
+            displayedTranscriptMessages.append(localSendTranscriptMessage(pendingLocalSendMessage, localID: attempt.localID))
+        } else if let attempt = localSendAttempt, !attempt.usesRecoveryNotice,
+                  localSendDelivery[localSendRenderID(for: attempt.localID)] == .unconfirmed,
+                  !displayedTranscriptMessages.contains(where: { $0.message.messageId == attempt.message.messageId }) {
+            // A canonical empty refresh cannot turn an unacknowledged send into
+            // an apparent safe retry. Keep its status outside canonical history.
+            displayedTranscriptMessages.append(localSendTranscriptMessage(attempt.message, localID: attempt.localID))
+        }
+        if !localSendDelivery.isEmpty {
+            var retainedIDs = Set(displayedTranscriptMessages.map(\.renderID))
+            if let attempt = localSendAttempt, attempt.usesRecoveryNotice {
+                retainedIDs.insert(localSendRenderID(for: attempt.localID))
+            }
+            localSendDelivery = localSendDelivery.filter { retainedIDs.contains($0.key) }
         }
         recomputeCompressionReferenceCard()
         recomputeDisplayedReasoningGroups()
     }
 
-    private func localSendTranscriptMessage(_ message: ChatMessage) -> TranscriptMessage {
+    private func localSendRenderID(for localID: String) -> String {
+        // This key comes only from our nonempty generated local ID, unlike
+        // the optional IDs admitted by canonical transcript decoding.
+        TranscriptRenderIdentity.directPrefix + localID
+    }
+
+    private func localSendTranscriptMessage(_ message: ChatMessage, localID: String) -> TranscriptMessage {
         TranscriptMessage(
             loadedIndex: -1,
-            renderID: Self.transcriptRenderID(for: message, absoluteIndex: 0, preferDurableID: true),
+            renderID: localSendRenderID(for: localID),
             anchorID: TranscriptTurnClassifier.anchorID(for: message, at: -1),
-            message: message
+            message: message,
+            localDelivery: localSendDelivery[localSendRenderID(for: localID)]
         )
     }
 
-    private func presentLocalSend(_ message: ChatMessage) {
+    private var currentLocalSendScope: LocalSendPresentationScope {
+        LocalSendPresentationScope(sessionID: canonicalSessionID,
+            profile: requestProfileName ?? "default",
+            controllerID: directConversation.map(ObjectIdentifier.init))
+    }
+
+    private func reusableLocalSend(draft: String, attachmentIDs: Set<UUID>) -> LocalSendAttempt? {
+        guard localSendPresentationEnabled, let attempt = localSendAttempt,
+              localSendDelivery[localSendRenderID(for: attempt.localID)] == .notSent,
+              attempt.draft.utf8.elementsEqual(draft.utf8), attempt.attachmentIDs == attachmentIDs,
+              attempt.scope == currentLocalSendScope else { return nil }
+        return attempt
+    }
+
+    private func presentLocalSend(_ message: ChatMessage, localID: String, draft: String, attachmentIDs: Set<UUID>) {
+        let isRetry = pendingLocalSendMessage?.messageId == localID
+        // Only the most recent failed intent remains. An explicit different
+        // send replaces that local presentation; it never alters saved history.
+        if let previous = localSendAttempt,
+           localSendDelivery[localSendRenderID(for: previous.localID)] != .accepted {
+            localSendDelivery.removeValue(forKey: localSendRenderID(for: previous.localID))
+        }
         pendingLocalSendMessage = message
-        recordOutgoingInsertion(messageID: message.id)
-        withAnimation(ChatMotion.outgoingBubble(reduceMotion: UIAccessibility.isReduceMotionEnabled)) {
-            displayedTranscriptMessages.append(localSendTranscriptMessage(message))
+        localSendAttempt = LocalSendAttempt(localID: localID, message: message, draft: draft, attachmentIDs: attachmentIDs,
+            scope: currentLocalSendScope, representedError: nil, echoComparison: nil)
+        localSendDelivery[localSendRenderID(for: localID)] = .sending
+        if !isRetry { recordOutgoingInsertion(messageID: localID) }
+        withAnimation(isRetry ? nil : ChatMotion.outgoingBubble(reduceMotion: UIAccessibility.isReduceMotionEnabled)) {
+            recomputeDisplayedTranscriptMessages()
             transcriptRenderRevision &+= 1
         }
     }
 
+    private func updateLocalSendScope(id: String) {
+        guard localSendAttempt?.localID == id else { return }
+        localSendAttempt?.scope = currentLocalSendScope
+    }
+
+    private func finishLocalSend(id: String, delivery: LocalMessageDelivery) {
+        guard !directInvalidated, let attempt = localSendAttempt, attempt.localID == id else { return }
+        updateLocalSendScope(id: id)
+        localSendDelivery[localSendRenderID(for: id)] = delivery
+        localSendAttempt?.representedError = delivery == .notSent || delivery == .unconfirmed ? sendErrorMessage : nil
+        if delivery == .notSent { pendingLocalSendMessage = attempt.message }
+        if delivery == .accepted { localSendAttempt?.usesRecoveryNotice = false }
+        recomputeDisplayedTranscriptMessages()
+        transcriptRenderRevision &+= 1
+    }
+
+    private func retainFailedLocalSend(id: String) {
+        // Roll back the canonical optimistic row exactly as before, but install
+        // its local replacement in the same synchronous derived-state batch.
+        if !directInvalidated, let attempt = localSendAttempt, attempt.localID == id {
+            updateLocalSendScope(id: id)
+            pendingLocalSendMessage = attempt.message
+            localSendDelivery[localSendRenderID(for: id)] = .notSent
+            localSendAttempt?.representedError = sendErrorMessage
+        }
+        withBatchedTranscriptDerivedState {
+            rollbackOptimisticMessage(id: id)
+        }
+    }
+
     private func clearUnpromotedLocalSend(id: String) {
-        guard pendingLocalSendMessage?.messageId == id else { return }
+        let delivery = localSendDelivery[localSendRenderID(for: id)]
+        guard delivery == .sending || (delivery == nil && localSendAttempt?.localID == id) else { return }
+        if pendingLocalSendMessage?.messageId == id { pendingLocalSendMessage = nil }
+        if localSendAttempt?.localID == id { localSendAttempt = nil }
+        localSendDelivery.removeValue(forKey: localSendRenderID(for: id))
+        recomputeDisplayedTranscriptMessages()
+        transcriptRenderRevision &+= 1
+    }
+
+    private func useRecoveryNoticeForRedundantLocalBody(_ page: DirectHermesTranscriptPage, profile: String) {
+        guard let attempt = localSendAttempt,
+              localSendDelivery[localSendRenderID(for: attempt.localID)] == .sending
+                || localSendDelivery[localSendRenderID(for: attempt.localID)] == .unconfirmed else { return }
+        // Re-evaluate on each authoritative tail. If the canonical body later
+        // disappears, the still-unconfirmed local body becomes visible again.
+        localSendAttempt?.usesRecoveryNotice = false
+        guard let candidate = attempt.echoComparison, let controller = directConversation,
+              candidate.controllerID == ObjectIdentifier(controller),
+              candidate.sessionID == page.sessionID, candidate.profile == profile,
+              candidate.runtimeID == controller.binding?.runtimeID,
+              candidate.connectionGeneration == controller.sharedRuntime.connectionGeneration else { return }
+        let ids = page.messages.compactMap(\.messageId)
+        guard ids.count == page.messages.count, Set(ids).count == ids.count,
+              !ids.contains(attempt.localID) else { return }
+        let suffix: ArraySlice<ChatMessage>
+        if let predecessor = candidate.predecessorID {
+            guard let index = page.messages.firstIndex(where: { $0.messageId == predecessor }) else { return }
+            suffix = page.messages.suffix(from: index + 1)
+        } else {
+            guard candidate.previousIDs.isEmpty else { return }
+            suffix = page.messages[...]
+        }
+        guard let user = suffix.first, user.role == "user", let content = user.content,
+              content.utf8.elementsEqual(candidate.text.utf8),
+              user.contentParts == nil, user.attachments?.isEmpty != false,
+              suffix.filter({ $0.role == "user" }).count == 1,
+              suffix.allSatisfy({ row in
+                  guard let id = row.messageId else { return false }
+                  return !candidate.previousIDs.contains(id)
+              }) else { return }
+        // The canonical body is already visible. The compact recovery notice
+        // still owns uncertainty; equal text is never an ACK or a render alias.
+        localSendAttempt?.usesRecoveryNotice = true
+    }
+
+    private func retireUnconfirmedLocalSend(id: String?) {
+        guard let id, let attempt = localSendAttempt, attempt.localID == id,
+              localSendDelivery[localSendRenderID(for: id)] == .unconfirmed else { return }
+        if pendingLocalSendMessage?.messageId == id { pendingLocalSendMessage = nil }
+        localSendAttempt = nil
+        localSendDelivery.removeValue(forKey: localSendRenderID(for: id))
+        recomputeDisplayedTranscriptMessages()
+        transcriptRenderRevision &+= 1
+    }
+
+    private func resetLocalSendPresentation() {
         pendingLocalSendMessage = nil
-        displayedTranscriptMessages.removeAll { $0.loadedIndex == -1 && $0.message.messageId == id }
+        localSendAttempt = nil
+        localSendDelivery.removeAll()
+        recomputeDisplayedTranscriptMessages()
         transcriptRenderRevision &+= 1
     }
 
@@ -2002,6 +2175,10 @@ final class ChatViewModel {
 
     private func adoptDirectID(_ id: String) {
         guard !directInvalidated, sessionID != id else { return }
+        if let attempt = localSendAttempt,
+           localSendDelivery[localSendRenderID(for: attempt.localID)] != .sending {
+            resetLocalSendPresentation()
+        }
         sessionID = id
         applyDirectReasoningGating()
         onDirectCanonicalID?(id)
@@ -2014,6 +2191,7 @@ final class ChatViewModel {
         btwLocalRowScopes.removeAll()
         backgroundLocalRowScopes.removeAll()
         directInvalidated = true
+        resetLocalSendPresentation()
         localSendEchoCandidate = nil
         localSendRenderAliases.removeAll()
         localSendAliasScope = nil
@@ -2340,6 +2518,7 @@ final class ChatViewModel {
         adoptDirectID(page.sessionID)
         directHistoryID = page.sessionID
         let profile = directConversation?.profile ?? (Self.nonEmpty(currentProfile) ?? "default")
+        if !older { useRecoveryNoticeForRedundantLocalBody(page, profile: profile) }
         reconcileLocalSendEcho(page, profile: profile)
         let retainedLocalRows: [ChatMessage]
         if older {
@@ -2435,8 +2614,10 @@ final class ChatViewModel {
         cancelContextUsageSnapshotTask()
         sendErrorMessage = nil
         lastError = nil
-        let localID = "local-\(UUID().uuidString)"
-        let localMessage = ChatMessage(
+        let attachmentIDs = selectedAttachmentIDs ?? Set(directPendingAttachments.map(\.id))
+        let reusableAttempt = reusableLocalSend(draft: draft, attachmentIDs: attachmentIDs)
+        let localID = reusableAttempt?.localID ?? "local-\(UUID().uuidString)"
+        let localMessage = reusableAttempt?.message ?? ChatMessage(
             role: "user", content: text,
             timestamp: Date().timeIntervalSince1970, messageId: localID
         )
@@ -2448,10 +2629,9 @@ final class ChatViewModel {
         }
         let wasDraft = canonicalSessionID == nil
         let hasExplicitAttachmentSelection = selectedAttachmentIDs != nil
-        let attachmentIDs = selectedAttachmentIDs ?? Set(directPendingAttachments.map(\.id))
         let selectionGeneration = directAttachmentSelectionGeneration
         if localSendPresentationEnabled {
-            presentLocalSend(localMessage)
+            presentLocalSend(localMessage, localID: localID, draft: draft, attachmentIDs: attachmentIDs)
         }
         do {
             let controller = try await ensureDirectConversation()
@@ -2477,6 +2657,7 @@ final class ChatViewModel {
                   requiredConnectionGeneration == nil || controller.sharedRuntime.state == .ready else {
                 throw DirectSessionError.ambiguousPrompt
             }
+            updateLocalSendScope(id: localID)
             var creation: [String: JSONValue] = [:]
             if let value = Self.nonEmpty(currentWorkspace) { creation["cwd"] = .string(value) }
             if let value = Self.nonEmpty(currentModel) { creation["model"] = .string(value) }
@@ -2518,6 +2699,9 @@ final class ChatViewModel {
             directResponseComplete = false
             let preparedEcho = prepareLocalSendEcho(localMessage, controller: controller,
                                                     hasAttachments: !attachmentIDs.isEmpty)
+            if localSendAttempt?.localID == localID {
+                localSendAttempt?.echoComparison = preparedEcho
+            }
             if pendingLocalSendMessage?.messageId == localID {
                 // Same identity and timestamp, one insertion event. No await
                 // can expose a frame between removal and canonical promotion.
@@ -2539,6 +2723,7 @@ final class ChatViewModel {
             guard stagedAttachments.count == attachmentIDs.count else { throw DirectSessionError.staleOperation }
             try await controller.submit(text, stagedAttachments: stagedAttachments, create: creation)
             acceptLocalSendEcho(preparedEcho, controller: controller)
+            finishLocalSend(id: localID, delivery: .accepted)
             removeDirectPendingAttachments(ids: attachmentIDs)
             if wasDraft {
                 // Discover per-session support after acceptance, without holding
@@ -2564,11 +2749,11 @@ final class ChatViewModel {
             case .unknown:
                 sendErrorMessage = "Staging \(failure.filename) is uncertain. Your draft was kept and will not be retried automatically."
             }
-            rollbackOptimisticMessage(id: localID)
+            retainFailedLocalSend(id: localID)
             return false
         } catch is DirectPromptDeliveryUncertaintyError {
-            rollbackOptimisticMessage(id: localID)
             sendErrorMessage = "Semreh could not save the delivery safety state, so the message was not sent. Your draft was kept."
+            retainFailedLocalSend(id: localID)
             return false
         } catch is CancellationError {
             if directConversation?.hasAmbiguousPromptDelivery == true
@@ -2577,6 +2762,7 @@ final class ChatViewModel {
                     removeDirectPendingAttachments(ids: attachmentIDs)
                 }
                 sendErrorMessage = promptDeliveryWarning(for: directConversation)
+                finishLocalSend(id: localID, delivery: .unconfirmed)
                 return true
             }
             rollbackOptimisticMessage(id: localID)
@@ -2591,10 +2777,11 @@ final class ChatViewModel {
                     removeDirectPendingAttachments(ids: attachmentIDs)
                 }
                 sendErrorMessage = promptDeliveryWarning(for: directConversation)
+                finishLocalSend(id: localID, delivery: .unconfirmed)
                 return true
             }
-            rollbackOptimisticMessage(id: localID)
             sendErrorMessage = "Hermes could not accept this message. Your draft was kept."
+            retainFailedLocalSend(id: localID)
             return false
         }
     }
@@ -3804,6 +3991,7 @@ final class ChatViewModel {
             return false
         }
 
+        let recoveringLocalID = localSendAttempt?.localID
         promptDeliveryRecoveryIsBusy = true
         defer { promptDeliveryRecoveryIsBusy = false }
         do {
@@ -3822,6 +4010,7 @@ final class ChatViewModel {
                 || sendErrorMessage == Self.directPromptRecoveryFailureMessage {
                 sendErrorMessage = nil
             }
+            retireUnconfirmedLocalSend(id: recoveringLocalID)
             return true
         } catch {
             guard !directInvalidated, directConversation === controller else { return false }
@@ -4633,6 +4822,7 @@ final class ChatViewModel {
 
     func clearTranscript() {
         // An explicit clear always wins over a pending resume reconciliation.
+        resetLocalSendPresentation()
         sendTranscriptSessionID = nil
         localSendEchoCandidate = nil
         localSendRenderAliases.removeAll()
@@ -5207,6 +5397,7 @@ final class ChatViewModel {
     }
 
     func setSendErrorMessage(_ message: String?) {
+        localSendAttempt?.representedError = nil
         sendErrorMessage = message
     }
 
@@ -6897,6 +7088,22 @@ final class DirectFallbackRenderIdentityLedger {
     }
 }
 
+enum LocalMessageDelivery: Equatable {
+    case sending
+    case notSent
+    case unconfirmed
+    case accepted
+
+    var label: String? {
+        switch self {
+        case .sending: return String(localized: "Sending…")
+        case .notSent: return String(localized: "Not sent")
+        case .unconfirmed: return String(localized: "Delivery unconfirmed")
+        case .accepted: return nil
+        }
+    }
+}
+
 struct TranscriptMessage: Identifiable, Equatable {
     let loadedIndex: Int
     let renderID: String
@@ -6905,19 +7112,22 @@ struct TranscriptMessage: Identifiable, Equatable {
     /// Presentation-only direct attachment projection. `message.content` remains
     /// the canonical raw text for actions, caching, recovery, and persistence.
     let attachmentDisplayContent: String?
+    let localDelivery: LocalMessageDelivery?
 
     init(
         loadedIndex: Int,
         renderID: String,
         anchorID: String,
         message: ChatMessage,
-        attachmentDisplayContent: String? = nil
+        attachmentDisplayContent: String? = nil,
+        localDelivery: LocalMessageDelivery? = nil
     ) {
         self.loadedIndex = loadedIndex
         self.renderID = renderID
         self.anchorID = anchorID
         self.message = message
         self.attachmentDisplayContent = attachmentDisplayContent
+        self.localDelivery = localDelivery
     }
 
     var id: String { renderID }
