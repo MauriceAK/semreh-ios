@@ -12,6 +12,80 @@ final class ChatViewModelStreamingPaceTests: XCTestCase {
     }
 
     @MainActor
+    func testVisibleGoalAndBackgroundResultBoundariesFlushPendingText() async throws {
+        let boundaries: [(String, [String: JSONValue])] = [
+            ("status.update", ["kind": .string("goal"), "text": .string("Visible goal notice")]),
+            ("background.complete", [:]), ("btw.complete", [:])
+        ]
+        for (type, payload) in boundaries {
+            let stream = DirectPacingEventFixture()
+            let vm = try makeStalledDrainViewModel(streamClient: stream)
+            vm.setResponsiveStreamingPresentation(true)
+            var now: UInt64 = 0
+            vm.streamingClockForTesting = { now }
+            let gate = StreamingTaskSuspensionGate()
+            vm.streamingTaskWaitForTesting = { owner, delay in await gate.suspend(owner: owner, delay: delay) }
+            defer { vm.setTranscriptPresentationActive(false); gate.finish() }
+            stream.startResponse(on: vm)
+            stream.emit(.token("Exact pending café 👩🏽‍💻"))
+            let batch = try XCTUnwrap(vm.scheduledStreamingContentFlushForTesting)
+            await fulfillment(of: [gate.arrival(for: batch.owner)], timeout: 2)
+            stream.emitRaw(type, payload: payload)
+            XCTAssertEqual(assistantContent(of: vm), "Exact pending café 👩🏽‍💻", type)
+            XCTAssertNil(vm.scheduledStreamingContentFlushForTesting, type)
+            if type == "status.update" {
+                XCTAssertEqual(vm.messages.last?.role, "local_notice")
+                XCTAssertEqual(vm.messages.last?.content, "Visible goal notice")
+            }
+            now = 32_000_000
+            try gate.release(batch.owner)
+            await batch.task.value
+            XCTAssertEqual(assistantContent(of: vm), "Exact pending café 👩🏽‍💻", "A canceled scheduled task must not duplicate a boundary flush")
+        }
+    }
+
+    @MainActor
+    func testIgnoredGatewayFramesPreservePendingBatchOwnerAndExactText() async throws {
+        let stream = DirectPacingEventFixture()
+        let vm = try makeStalledDrainViewModel(streamClient: stream)
+        vm.setResponsiveStreamingPresentation(true)
+        var now: UInt64 = 0
+        vm.streamingClockForTesting = { now }
+        let gate = StreamingTaskSuspensionGate()
+        vm.streamingTaskWaitForTesting = { owner, delay in await gate.suspend(owner: owner, delay: delay) }
+        defer { vm.setTranscriptPresentationActive(false); gate.finish() }
+        stream.startResponse(on: vm)
+        let expected = "cafe\u{301} 👩🏽‍💻 العربية\r\nSecond line"
+        stream.emit(.token(expected))
+        let batch = try XCTUnwrap(vm.scheduledStreamingContentFlushForTesting)
+        await fulfillment(of: [gate.arrival(for: batch.owner)], timeout: 2)
+        for type in ["tool.progress", "tool.generating", "session.usage", "status.update", "future.unknown"] {
+            stream.emitRaw(type, payload: type == "session.usage" ? ["usage": .object(["context_used": .number(88)])] : [:])
+            XCTAssertEqual(vm.scheduledStreamingContentFlushForTesting?.owner, batch.owner, type)
+            XCTAssertEqual(assistantContent(of: vm), "", "An ignored frame must not publish pending text: \(type)")
+        }
+        now = 32_000_000
+        try gate.release(batch.owner)
+        await batch.task.value
+        XCTAssertEqual(Array((assistantContent(of: vm) ?? "").utf8), Array(expected.utf8))
+        stream.emit(.token(" exact terminal suffix"))
+        stream.emit(.done)
+        XCTAssertEqual(Array((assistantContent(of: vm) ?? "").utf8), Array((expected + " exact terminal suffix").utf8))
+        XCTAssertNil(vm.scheduledStreamingContentFlushForTesting)
+    }
+
+    @MainActor
+    func testToolPreviewOnlyEvaluatesResultWhenNoErrorOrSummaryExists() {
+        var evaluations = 0
+        func result() -> String? { evaluations += 1; return "structured result" }
+        XCTAssertEqual(ChatViewModel.directToolPreview(error: "error", summary: "summary", result: result), "error")
+        XCTAssertEqual(ChatViewModel.directToolPreview(error: nil, summary: "summary", result: result), "summary")
+        XCTAssertEqual(evaluations, 0, "An unused structured result must not be serialized")
+        XCTAssertEqual(ChatViewModel.directToolPreview(error: nil, summary: nil, result: result), "structured result")
+        XCTAssertEqual(evaluations, 1)
+    }
+
+    @MainActor
     func testResponsivePresentationCoalescesReceivedBurstWithoutWordReplayAndRearms() async throws {
         let stream = DirectPacingEventFixture()
         let viewModel = try makeViewModel(
@@ -1013,6 +1087,8 @@ private final class DirectPacingEventFixture {
             emit(type: "message.complete", payload: ["status": .string("cancelled")])
         }
     }
+
+    func emitRaw(_ type: String, payload: [String: JSONValue] = [:]) { emit(type: type, payload: payload) }
 
     private func emit(type: String, payload: [String: JSONValue] = [:]) {
         sequence += 1

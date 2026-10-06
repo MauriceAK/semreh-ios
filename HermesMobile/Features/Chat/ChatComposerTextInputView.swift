@@ -164,10 +164,7 @@ struct ComposerTextView: UIViewRepresentable {
         // Explicit root selection controls AX independently of offline editability.
         textView.isAccessibilityElement = !isAccessibilityHidden
         textView.accessibilityElementsHidden = isAccessibilityHidden
-        let didChangeText = textView.text != text
-        if didChangeText {
-            textView.text = text
-        }
+        let didChangeText = context.coordinator.synchronizeExternalText(text, in: textView)
         // Mirror the chat RTL toggle onto the text view itself (#259): SwiftUI's
         // layoutDirection environment does not propagate into a wrapped UITextView,
         // so set the base direction directly so the cursor/empty-field rests on the
@@ -365,7 +362,31 @@ struct ComposerTextView: UIViewRepresentable {
             }
         }
 
+        // A send/restored draft is an external edit, not an input-method callback.
+        // Use UITextInput's document replacement for clearing so UIKit retires
+        // autocorrection/composition decorations before the field collapses.
+        private var isSynchronizingExternalText = false
+
+        @discardableResult
+        func synchronizeExternalText(_ value: String, in textView: UITextView) -> Bool {
+            guard textView.text != value else { return false }
+            isSynchronizingExternalText = true
+            defer { isSynchronizingExternalText = false }
+            textView.unmarkText()
+            if value.isEmpty,
+               let document = textView.textRange(from: textView.beginningOfDocument,
+                                                 to: textView.endOfDocument) {
+                textView.replace(document, withText: "")
+                textView.selectedRange = NSRange(location: 0, length: 0)
+                textView.setContentOffset(.zero, animated: false)
+            } else {
+                textView.text = value
+            }
+            return true
+        }
+
         func textViewDidChange(_ textView: UITextView) {
+            guard !isSynchronizingExternalText else { return }
             text = textView.text
             reportHeight(for: textView, force: true)
         }

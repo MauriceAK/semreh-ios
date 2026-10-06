@@ -53,15 +53,15 @@ final class ChatMeasuredTranscriptSurfaceTests: XCTestCase {
     func testMuseStreamingDeferralDoesNotHoldActivityScopeOrLegacyChanges() async throws {
         let scope = UUID().uuidString
         let receipt = StreamingReceipt()
-        let fixture = try await mountStreaming(viewport: streamingViewport(scope: scope, content: "initial", receipt: receipt))
+        let fixture = try await mountStreaming(viewport: streamingViewport(scope: scope, content: "initial", showsActivity: true, receipt: receipt))
         defer { unmountStreaming(fixture) }
         fixture.collection.directTouch = true
         fixture.owner.scrollViewWillBeginDragging(fixture.collection)
-        fixture.owner.update(streamingViewport(scope: scope, content: "held", revision: 1, receipt: receipt))
+        fixture.owner.update(streamingViewport(scope: scope, content: "held", revision: 1, showsActivity: true, receipt: receipt))
         XCTAssertEqual(fixture.owner.deferredStreamingRowIDs, ["row-0"])
 
         fixture.owner.update(streamingViewport(scope: scope, content: "tool boundary", revision: 2,
-            activity: "Tool state changed", receipt: receipt))
+            activity: "Tool state changed", showsActivity: true, receipt: receipt))
         XCTAssertEqual(receipt.contents.last, "tool boundary")
         XCTAssertTrue(fixture.owner.deferredStreamingRowIDs.isEmpty)
         fixture.owner.update(streamingViewport(scope: "replacement", content: "new scope", revision: 3, receipt: receipt))
@@ -72,6 +72,47 @@ final class ChatMeasuredTranscriptSurfaceTests: XCTestCase {
             muse: false, receipt: receipt))
         XCTAssertEqual(receipt.contents.last, "legacy live")
         XCTAssertTrue(fixture.owner.deferredStreamingRowIDs.isEmpty)
+    }
+
+    func testHiddenActivityDoesNotReconfigureMountedBodyButOptInAndTextDo() async throws {
+        let scope = UUID().uuidString
+        let receipt = StreamingReceipt()
+        let fixture = try await mountStreaming(viewport: streamingViewport(scope: scope, content: "visible body", receipt: receipt))
+        defer { unmountStreaming(fixture) }
+        let configurations = receipt.contents.count
+        let height = fixture.collection.contentSize.height
+        let offset = fixture.collection.contentOffset
+        fixture.owner.update(streamingViewport(scope: scope, content: "visible body", revision: 1,
+            activity: "Hidden reasoning", receipt: receipt))
+        fixture.collection.layoutIfNeeded()
+        XCTAssertEqual(receipt.contents.count, configurations)
+        XCTAssertEqual(fixture.collection.contentSize.height, height, accuracy: 0.5)
+        XCTAssertEqual(fixture.collection.contentOffset.y, offset.y, accuracy: 0.5)
+        fixture.owner.update(streamingViewport(scope: scope, content: "visible body", revision: 2,
+            toolActivity: "Retained tool result", receipt: receipt))
+        fixture.collection.layoutIfNeeded()
+        XCTAssertEqual(receipt.contents.count, configurations)
+        XCTAssertEqual(fixture.collection.contentSize.height, height, accuracy: 0.5)
+        fixture.owner.update(streamingViewport(scope: scope, content: "new visible body", revision: 3,
+            toolActivity: "Retained tool result", receipt: receipt))
+        fixture.collection.layoutIfNeeded()
+        XCTAssertGreaterThan(receipt.contents.count, configurations, "Hidden details must not suppress a real body change")
+        XCTAssertEqual(receipt.contents.last, "new visible body")
+        let withNewBody = receipt.contents.count
+        fixture.owner.update(streamingViewport(scope: scope, content: "new visible body", revision: 4,
+            activity: "Retained reasoning", toolActivity: "Retained tool result", showsActivity: true, receipt: receipt))
+        fixture.collection.layoutIfNeeded()
+        XCTAssertGreaterThan(receipt.contents.count, withNewBody)
+        let visible = fixture.owner.input.revisionAt(0)
+        XCTAssertEqual(visible.liveToolCalls.first?.preview, "Retained tool result")
+        XCTAssertEqual(visible.toolCallGroups.first?.toolCalls.first?.preview, "Retained tool result")
+        XCTAssertEqual(visible.message.message.toolCalls, [.string("Retained tool result")])
+        let withDetails = receipt.contents.count
+        fixture.owner.update(streamingViewport(scope: scope, content: "final visible body", revision: 5,
+            activity: "Retained reasoning", showsActivity: true, receipt: receipt))
+        fixture.collection.layoutIfNeeded()
+        XCTAssertGreaterThan(receipt.contents.count, withDetails)
+        XCTAssertEqual(receipt.contents.last, "final visible body")
     }
 
     func testMuseStationaryTouchWithoutDraggingCannotHoldTerminalBody() async throws {
@@ -703,7 +744,7 @@ final class ChatMeasuredTranscriptSurfaceTests: XCTestCase {
 
     private func streamingViewport(scope: String, content: String, revision: Int = 0,
                                    height: CGFloat = 3_000, streaming: Bool = true,
-                                   activity: String = "", muse: Bool = true, bottom: CGFloat = 0,
+                                   activity: String = "", toolActivity: String = "", showsActivity: Bool = false, muse: Bool = true, bottom: CGFloat = 0,
                                    receipt: StreamingReceipt) -> ChatNativeTranscriptViewport {
         var environment = EnvironmentValues()
         environment.usesMuseChatSurface = muse
@@ -713,14 +754,18 @@ final class ChatMeasuredTranscriptSurfaceTests: XCTestCase {
                 return AnyView(Text(content).background(StreamingInteractionWitness(receipt: receipt))
                     .frame(height: height, alignment: .top))
             }, revision: revision, isStreaming: streaming, rowRevision: { _ in
-                let message = ChatMessage(role: "assistant", content: content, timestamp: 0, messageId: "row-0")
+                let tools = toolActivity.isEmpty ? [] : [ToolCall(id: "fixture-tool", name: "fixture", preview: toolActivity, args: nil, startedAt: 0)]
+                let message = ChatMessage(role: "assistant", content: content, timestamp: 0, messageId: "row-0",
+                    toolCalls: toolActivity.isEmpty ? nil : [.string(toolActivity)], reasoning: activity.isEmpty ? nil : activity)
                 return StableViewportRowRevision(
                     message: TranscriptMessage(loadedIndex: 0, renderID: "row-0", anchorID: "row-0", message: message),
                     outgoingInsertionEvent: nil, allowsOutgoingMotion: false,
-                    reasoningGroups: [], toolCallGroups: [], liveReasoningText: activity, liveToolCalls: [],
+                    reasoningGroups: activity.isEmpty ? [] : [ReasoningGroup(id: "fixture-reasoning", anchorMessageID: "row-0", text: activity)],
+                    toolCallGroups: tools.isEmpty ? [] : [ToolCallGroup(id: "fixture-tools", anchorMessageID: "row-0", toolCalls: tools)],
+                    liveReasoningText: activity, liveToolCalls: tools,
                     streamingAssistantMessageID: streaming ? "row-0" : nil, liveTokensPerSecond: nil,
                     localAttachmentPreviews: nil, compressionReferenceCard: nil, listeningMessageID: nil,
-                    showsThinkingAndToolCards: false, isViewingCachedData: false, hasActiveStream: streaming,
+                    showsThinkingAndToolCards: showsActivity, isViewingCachedData: false, hasActiveStream: streaming,
                     isRegeneratingMessage: false, isEditingMessage: false, isForkingMessage: false,
                     transcriptMediaCacheNamespace: scope)
             })

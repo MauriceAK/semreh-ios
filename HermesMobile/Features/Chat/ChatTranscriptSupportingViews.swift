@@ -360,6 +360,44 @@ struct StableViewportRowRevision: Equatable {
     let isEditingMessage: Bool
     let isForkingMessage: Bool
     let transcriptMediaCacheNamespace: String
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        guard lhs.showsThinkingAndToolCards == rhs.showsThinkingAndToolCards,
+              lhs.outgoingInsertionEvent == rhs.outgoingInsertionEvent,
+              lhs.allowsOutgoingMotion == rhs.allowsOutgoingMotion,
+              lhs.streamingAssistantMessageID == rhs.streamingAssistantMessageID,
+              lhs.liveTokensPerSecond == rhs.liveTokensPerSecond,
+              lhs.localAttachmentPreviews == rhs.localAttachmentPreviews,
+              lhs.compressionReferenceCard == rhs.compressionReferenceCard,
+              lhs.listeningMessageID == rhs.listeningMessageID,
+              lhs.isViewingCachedData == rhs.isViewingCachedData,
+              lhs.hasActiveStream == rhs.hasActiveStream,
+              lhs.isRegeneratingMessage == rhs.isRegeneratingMessage,
+              lhs.isEditingMessage == rhs.isEditingMessage,
+              lhs.isForkingMessage == rhs.isForkingMessage,
+              lhs.transcriptMediaCacheNamespace == rhs.transcriptMediaCacheNamespace else { return false }
+        if lhs.showsThinkingAndToolCards {
+            return lhs.message == rhs.message
+                && lhs.reasoningGroups == rhs.reasoningGroups
+                && lhs.toolCallGroups == rhs.toolCallGroups
+                && lhs.liveReasoningText == rhs.liveReasoningText
+                && lhs.liveToolCalls == rhs.liveToolCalls
+        }
+        // Keep the original row/source for actions and for a later opt-in. Only
+        // presentation equality excludes metadata that has no visible consumer.
+        return lhs.messageWithoutHiddenActivity == rhs.messageWithoutHiddenActivity
+    }
+
+    private var messageWithoutHiddenActivity: TranscriptMessage {
+        let value = message.message
+        let body = ChatMessage(role: value.role, content: value.content,
+            timestamp: value.timestamp, messageId: value.messageId, name: value.name,
+            toolCallId: value.toolCallId, toolUseId: value.toolUseId, toolCalls: nil,
+            contentParts: value.contentParts, reasoning: nil, attachments: value.attachments,
+            turnTps: value.turnTps)
+        return TranscriptMessage(loadedIndex: message.loadedIndex, renderID: message.renderID,
+            anchorID: message.anchorID, message: body, attachmentDisplayContent: message.attachmentDisplayContent)
+    }
 }
 
 struct ChatStableViewportPrototype: UIViewControllerRepresentable {

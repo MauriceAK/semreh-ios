@@ -1179,6 +1179,55 @@ private func makeComposerSizingCoordinator(onHeight: @escaping (CGFloat) -> Void
 
 @MainActor
 final class ComposerProposalSizingTests: XCTestCase {
+    func testExternalClearRetiresCompositionAndSelectionWithoutReplacingFocusedEditor() async throws {
+        var draft = "First line\nSecond line "
+        var heights: [CGFloat] = []
+        let coordinator = ComposerTextView.Coordinator(
+            text: Binding(get: { draft }, set: { draft = $0 }), isFocused: .constant(true),
+            onHeightChange: { heights.append($0) })
+        let editor = makeComposerSizingView(draft)
+        editor.delegate = coordinator
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            .first(where: { $0.activationState == .foregroundActive }))
+        let previous = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        window.frame = scene.coordinateSpace.bounds
+        let controller = UIViewController()
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        controller.view.addSubview(editor)
+        defer { editor.resignFirstResponder(); window.isHidden = true; window.rootViewController = nil; previous?.makeKeyAndVisible() }
+        XCTAssertTrue(editor.becomeFirstResponder())
+        editor.selectedRange = NSRange(location: draft.utf16.count, length: 0)
+        editor.setMarkedText("漢字", selectedRange: NSRange(location: 1, length: 0))
+        coordinator.textViewDidChange(editor)
+        XCTAssertNotNil(editor.markedTextRange)
+        // Ordinary bridge refreshes must leave the input method in control.
+        XCTAssertFalse(coordinator.synchronizeExternalText(draft, in: editor))
+        XCTAssertNotNil(editor.markedTextRange)
+        draft = ""
+        XCTAssertTrue(coordinator.synchronizeExternalText(draft, in: editor))
+        coordinator.reportHeight(for: editor, force: true)
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertEqual(draft, "", "UIKit callbacks must not resurrect a cleared draft")
+        XCTAssertEqual(editor.text, "")
+        XCTAssertNil(editor.markedTextRange)
+        XCTAssertEqual(editor.selectedRange, NSRange(location: 0, length: 0))
+        XCTAssertEqual(editor.contentOffset, .zero)
+        XCTAssertTrue(editor.isFirstResponder)
+        XCTAssertFalse(editor.isScrollEnabled)
+        XCTAssertEqual(heights.last, max(22, min(120, ComposerTextView.contentHeight(for: editor, width: 280))))
+        let next = "cafe\u{301} 👩🏽‍💻 العربية"
+        editor.insertText(next)
+        coordinator.textViewDidChange(editor)
+        XCTAssertEqual(Array(draft.utf8), Array(next.utf8))
+        // A failed send/restored draft is exact and does not dismiss the keyboard.
+        draft = "Restored\r\n" + next
+        XCTAssertTrue(coordinator.synchronizeExternalText(draft, in: editor))
+        XCTAssertEqual(Array(editor.text.utf8), Array(draft.utf8))
+        XCTAssertTrue(editor.isFirstResponder)
+    }
+
     func testLongDraftHonorsProposedWidthAndCapsHeightAcrossRelayout() async throws {
         let draft = String(repeating: "Preserved draft with selectable words and wrapping. ", count: 100)
         var reportedHeight: CGFloat = 0

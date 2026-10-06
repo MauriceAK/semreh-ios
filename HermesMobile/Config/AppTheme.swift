@@ -267,6 +267,15 @@ enum StreamedTextAnimationSettings {
 
 enum ChatTranscriptDisplaySettings {
     static let showsThinkingAndToolCardsKey = "chatTranscript.showsThinkingAndToolCards"
+    // Independent from the old true-default preference: upgrading the surface
+    // must not silently enable internal activity again.
+    static let showsInternalActivityKey = "chatTranscript.showsInternalActivity"
+    static let internalActivityToggleIdentifier = "chat-internal-activity-toggle"
+
+    static func showsActivity(usesCurrentSurface: Bool, legacyPreference: Bool,
+                              internalActivityPreference: Bool) -> Bool {
+        usesCurrentSurface ? internalActivityPreference : legacyPreference
+    }
     static let thinkingCardsStartExpandedKey = "chatTranscript.thinkingCardsStartExpanded"
     static let toolCardsStartExpandedKey = "chatTranscript.toolCardsStartExpanded"
     static let hidesAttachmentPathsKey = "chatTranscript.hidesAttachmentPaths"

@@ -3,6 +3,31 @@ import XCTest
 @testable import HermesMobile
 
 final class ChatSurfaceAppearanceTests: XCTestCase {
+    func testCurrentActivityPreferenceDefaultsOffAndDoesNotMigrateLegacyOptIn() throws {
+        let suite = "SemrehActivityPreferenceTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(true, forKey: ChatTranscriptDisplaySettings.showsThinkingAndToolCardsKey)
+        func consumed(_ store: UserDefaults, current: Bool) -> Bool {
+            ChatTranscriptDisplaySettings.showsActivity(usesCurrentSurface: current,
+                legacyPreference: store.object(forKey: ChatTranscriptDisplaySettings.showsThinkingAndToolCardsKey) == nil
+                    ? true : store.bool(forKey: ChatTranscriptDisplaySettings.showsThinkingAndToolCardsKey),
+                internalActivityPreference: store.bool(forKey: ChatTranscriptDisplaySettings.showsInternalActivityKey))
+        }
+        XCTAssertNil(defaults.object(forKey: ChatTranscriptDisplaySettings.showsInternalActivityKey))
+        XCTAssertFalse(consumed(defaults, current: true))
+        XCTAssertTrue(consumed(defaults, current: false))
+        defaults.set(true, forKey: ChatTranscriptDisplaySettings.showsInternalActivityKey)
+        let cold = try XCTUnwrap(UserDefaults(suiteName: suite))
+        XCTAssertTrue(consumed(cold, current: true))
+        defaults.set(false, forKey: ChatTranscriptDisplaySettings.showsThinkingAndToolCardsKey)
+        XCTAssertTrue(consumed(cold, current: true))
+        XCTAssertFalse(consumed(cold, current: false))
+        defaults.set(false, forKey: ChatTranscriptDisplaySettings.showsInternalActivityKey)
+        XCTAssertFalse(consumed(cold, current: true))
+        XCTAssertFalse(defaults.bool(forKey: ChatTranscriptDisplaySettings.showsThinkingAndToolCardsKey))
+    }
+
     func testSurfaceOptInsAreOffWithoutShellContext() {
         let environment = EnvironmentValues()
         XCTAssertFalse(environment.usesMuseChatSurface)
