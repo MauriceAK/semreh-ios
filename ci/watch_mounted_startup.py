@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Capped private samples of one exact Simulator test host during startup.
 
-Diagnostic only: never changes the test process, predicate, deadline or exit code.
+Diagnostic only: preserves test logic and exit code; sampling can perturb timing.
 Run alongside xcodebuild and stop it when xcodebuild finishes. Raw stacks stay
 worker-local; uploaded receipts contain only counts and predefined frame labels.
 """
@@ -13,13 +13,17 @@ import os
 from pathlib import Path
 import re
 import signal
+import stat
 import subprocess
 import time
 
 MARKER = Path("Library/Caches/semreh-mounted-startup.json")
 BUNDLE_ID = "com.maurice.semreh"
 MAX_SAMPLES = 4
-TRIGGER_SECONDS = 2.0
+MAX_PHASES = 32
+TRIGGER_SECONDS = 0.5
+MAX_MARKER_AGE_SECONDS = 30.0
+MAX_MARKER_UPTIME_SECONDS = 10 * 365 * 24 * 60 * 60
 running = True
 
 
@@ -123,21 +127,88 @@ def container(simulator, kind):
 
 def marker(path):
     try:
-        if path.is_symlink() or path.stat().st_size > 1024:
-            return None
-        value = json.loads(path.read_text())
+        # Atomic writer replacement cannot pair one marker's bytes with another
+        # marker's timestamp: read and fstat the same non-symlink descriptor.
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "rb") as stream:
+            before = os.fstat(stream.fileno())
+            if not stat.S_ISREG(before.st_mode) or not 0 < before.st_size <= 1024:
+                return None
+            raw = stream.read(1025)
+            after = os.fstat(stream.fileno())
+            if (len(raw) != before.st_size or before.st_size != after.st_size
+                    or before.st_mtime_ns != after.st_mtime_ns):
+                return None
+        value = json.loads(raw)
         if (set(value) != {"schemaVersion", "phase", "token", "active", "pid", "uptime"}
                 or value["schemaVersion"] != 1 or value["phase"] != "initial-prompt-running"
                 or not isinstance(value["active"], bool)
-                or not isinstance(value["pid"], int) or isinstance(value["pid"], bool) or value["pid"] <= 0
+                or not isinstance(value["pid"], int) or isinstance(value["pid"], bool)
+                or not 0 < value["pid"] <= 2_147_483_647
                 or not isinstance(value["token"], str)
                 or not re.fullmatch(r"[A-Fa-f0-9-]{36}", value["token"])
                 or not isinstance(value["uptime"], (int, float))
-                or isinstance(value["uptime"], bool) or not math.isfinite(value["uptime"])):
+                or isinstance(value["uptime"], bool)
+                or not 0 <= value["uptime"] <= MAX_MARKER_UPTIME_SECONDS
+                or not math.isfinite(value["uptime"])):
             return None
+        value["_mtime_ns"] = before.st_mtime_ns
         return value
     except (OSError, ValueError, TypeError):
         return None
+
+
+def marker_age(value, now_ns=None):
+    """Both timestamps use this host's filesystem/wall clock, not app uptime."""
+    age = ((time.time_ns() if now_ns is None else now_ns) - value["_mtime_ns"]) / 1_000_000_000
+    if not math.isfinite(age):
+        return None, "nonfinite-file-age"
+    if age < 0:
+        return None, "future-file-time"
+    if age > MAX_MARKER_AGE_SECONDS:
+        return None, "implausible-file-age"
+    return age, None
+
+
+def observe_phase(receipt, phases, value, age, age_guard, now, watch_started):
+    """Capped safe ledger; private dictionary keys never enter the receipt."""
+    if not value:
+        return None
+    key = (value["pid"], value["token"])
+    existing = phases.get(key)
+    if not value["active"]:
+        if existing and not existing["record"]["endMarkerObserved"]:
+            record = existing["record"]
+            record["endMarkerObserved"] = True
+            record["endMarkerUptime"] = value["uptime"]
+            record["endObservedElapsedSeconds"] = now - watch_started
+            record["maximumWatcherGapSeconds"] = max(
+                record["maximumWatcherGapSeconds"], now - existing["last_seen"])
+            existing["last_seen"] = now
+        return None
+    if existing is None:
+        if len(phases) >= MAX_PHASES:
+            receipt["phaseLedgerTruncated"] = True
+            return None
+        record = {"index": len(phases) + 1, "markerUptime": value["uptime"],
+                  "firstObservedElapsedSeconds": now - watch_started,
+                  "firstObservedFileAgeSeconds": age, "observationCount": 0,
+                  "maximumWatcherGapSeconds": 0.0, "endMarkerObserved": False,
+                  "ageGuard": None}
+        existing = {"record": record, "last_seen": now}
+        phases[key] = existing
+        receipt["phases"].append(record)
+        receipt["markersSeen"] += 1
+    record = existing["record"]
+    record["observationCount"] += 1
+    record["maximumWatcherGapSeconds"] = max(record["maximumWatcherGapSeconds"], now - existing["last_seen"])
+    record["lastObservedElapsedSeconds"] = now - watch_started
+    record["lastObservedFileAgeSeconds"] = age
+    if age_guard and record["ageGuard"] != age_guard:
+        receipt["guardFailures"] += 1
+    record["ageGuard"] = age_guard
+    existing["last_seen"] = now
+    return record
 
 
 def process_path(pid):
@@ -182,20 +253,23 @@ def main():
     safe_output.mkdir()
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    receipt = {"schemaVersion": 1, "simulator": args.simulator,
-               "triggerSecondsAfterFirstObservation": TRIGGER_SECONDS,
+    receipt = {"schemaVersion": 2, "simulator": args.simulator,
+               "triggerMarkerFileAgeSeconds": TRIGGER_SECONDS,
+               "maximumMarkerFileAgeSeconds": MAX_MARKER_AGE_SECONDS,
                "maximumSamples": MAX_SAMPLES, "sampleDurationSeconds": 1,
                "sampleIntervalMilliseconds": 10, "samples": [], "guardFailures": 0,
-               "markersSeen": 0, "containersResolved": False}
+               "markersSeen": 0, "containersResolved": False,
+               "maximumPhases": MAX_PHASES, "phases": [], "phaseLedgerTruncated": False,
+               "observationLimits": "Watcher gaps include time spent collecting a sample; phase ledger continues after sample cap"}
     data = bundle = None
     observed = None
-    observed_at = 0.0
     observed_birth = None
     sampled = set()
-    seen = set()
-    deadline = time.monotonic() + 3600
+    phases = {}
+    watch_started = time.monotonic()
+    deadline = watch_started + 3600
     try:
-        while running and time.monotonic() < deadline and len(receipt["samples"]) < MAX_SAMPLES:
+        while running and time.monotonic() < deadline:
             if data is None or bundle is None:
                 data = container(args.simulator, "data")
                 bundle = container(args.simulator, "app")
@@ -204,31 +278,39 @@ def main():
                     continue
                 receipt["containersResolved"] = True
             current = marker(data / MARKER)
+            age, age_guard = marker_age(current) if current else (None, None)
+            phase = observe_phase(receipt, phases, current, age, age_guard, time.monotonic(), watch_started)
             key = (current["pid"], current["token"]) if current and current["active"] else None
             if key != observed:
-                observed, observed_at = key, time.monotonic()
+                observed = key
                 observed_birth = process_birth(current["pid"]) if key else None
-            if key and key not in seen:
-                seen.add(key)
-                receipt["markersSeen"] += 1
-            if key and key not in sampled and time.monotonic() - observed_at >= TRIGGER_SECONDS:
+            if (phase and key not in sampled and len(receipt["samples"]) < MAX_SAMPLES
+                    and age is not None and age >= TRIGGER_SECONDS):
                 # Both containers come from the same UDID as xcodebuild. Require
                 # the actual PID executable to match that exact bundle leaf.
                 if (process_path(current["pid"]) != (bundle / "HermesMobile").resolve()
                         or observed_birth is None or process_birth(current["pid"]) != observed_birth
-                        or (data / MARKER).stat().st_mtime_ns < observed_birth):
+                        or current["_mtime_ns"] < observed_birth):
                     receipt["guardFailures"] += 1
                     sampled.add(key)
                     continue
                 latest = marker(data / MARKER)
-                if not latest or not latest["active"] or (latest["pid"], latest["token"]) != key:
+                latest_age, latest_guard = marker_age(latest) if latest else (None, None)
+                if (not latest or not latest["active"] or (latest["pid"], latest["token"]) != key
+                        or latest["_mtime_ns"] != current["_mtime_ns"]):
+                    continue
+                if latest_guard or latest_age < TRIGGER_SECONDS:
+                    receipt["guardFailures"] += 1
+                    sampled.add(key)
                     continue
                 sampled.add(key)
                 index = len(receipt["samples"]) + 1
                 output = private_output / f"sample-{index:02d}.private.txt"
-                record = {"index": index, "pid": current["pid"],
+                phase["sampleIndex"] = index
+                record = {"index": index, "phaseIndex": phase["index"], "pid": current["pid"],
                           "markerUptimeAtObservation": current["uptime"],
-                          "observedElapsedSecondsAtTrigger": time.monotonic() - observed_at,
+                          "markerFileAgeSecondsAtTrigger": latest_age,
+                          "observedElapsedSecondsAtTrigger": time.monotonic() - watch_started - phase["firstObservedElapsedSeconds"],
                           "ownedExecutableVerified": True, "processBirthRevalidated": True,
                           "samePhaseActiveAtSampleStart": True}
                 started = time.monotonic()
@@ -239,6 +321,8 @@ def main():
                 except subprocess.TimeoutExpired:
                     record["sampleTimedOut"] = True
                 ended = marker(data / MARKER)
+                ended_age, ended_guard = marker_age(ended) if ended else (None, None)
+                observe_phase(receipt, phases, ended, ended_age, ended_guard, time.monotonic(), watch_started)
                 record["durationSeconds"] = time.monotonic() - started
                 record["samePhaseStillActiveAtSampleEnd"] = bool(
                     ended and ended["active"] and (ended["pid"], ended["token"]) == key)

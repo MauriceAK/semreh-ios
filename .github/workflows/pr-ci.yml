@@ -145,6 +145,13 @@ jobs:
           echo "Test-without-building duration: ${duration_seconds}s"
           echo "- Test without building (serial mounted host): ${duration_seconds}s" >> "${GITHUB_STEP_SUMMARY}"
 
+      - name: Export safe mounted-readiness state
+        if: always()
+        continue-on-error: true
+        run: |
+          python3 ci/export_mounted_readiness.py --result "${RESULT_BUNDLE_PATH}" \
+            --output MountedStartupDiagnostics
+
       - name: Retain safe mounted-startup diagnostics
         if: always()
         continue-on-error: true
