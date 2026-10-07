@@ -212,6 +212,10 @@ struct MarkdownRenderer: View {
         guard !isStreaming, presentationInteraction?.blocksCanonicalPresentation != true,
               let pendingPresentation,
               pendingPresentation.source.utf8.elementsEqual(content.utf8) else { return }
+#if DEBUG
+        let commitProbe = ChatPerformanceInvalidationProbe.shared
+        commitProbe?.record("canonical_commit_begin")
+#endif
         // One solid canonical presentation, never a replay of the received text.
         var transaction = Transaction(animation: nil)
         transaction.disablesAnimations = true
@@ -220,6 +224,7 @@ struct MarkdownRenderer: View {
 #if DEBUG
         presentationInteraction?.canonicalCommitCount += 1
         onCanonicalCommitted?(pendingPresentation.source)
+        commitProbe?.record("canonical_commit_end")
 #endif
     }
 
@@ -1153,6 +1158,11 @@ private struct ChatMarkdownParagraph: View {
     }
 
     private func styled(_ source: AttributedString) -> AttributedString {
+#if DEBUG
+        let styleProbe = ChatPerformanceInvalidationProbe.shared
+        styleProbe?.record("canonical_paragraph_style_begin")
+        defer { styleProbe?.record("canonical_paragraph_style_end") }
+#endif
         var result = source
         for run in source.runs {
             let intent = run.inlinePresentationIntent ?? []
@@ -1851,6 +1861,11 @@ struct MarkdownNativeCodeText: UIViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeUIView(context: Context) -> UITextView {
+#if DEBUG
+        let mountProbe = ChatPerformanceInvalidationProbe.shared
+        mountProbe?.record("native_code_mount_begin")
+        defer { mountProbe?.record("native_code_mount_end") }
+#endif
         let view = MarkdownNativeCodeTextView()
         view.isEditable = false
         view.isSelectable = true

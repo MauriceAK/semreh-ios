@@ -70,6 +70,281 @@ final class DirectSkillUITests: XCTestCase {
         try exerciseLongGrowingReply(cancelled: false, callbackDiagnostic: true)
     }
 
+    @MainActor
+    func testOptInLongGrowingReplyQuietParkedCadenceDiagnostic() throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SEMREH_QUIET_PARKED_CALLBACK_DIAGNOSTIC"] == "1" else {
+            throw XCTSkip("The quiet parked callback diagnostic requires explicit opt-in.")
+        }
+        guard environment["SEMREH_LONG_REPLY_UI"] == "1",
+              environment["SEMREH_LONG_REPLY_RICH_FINAL"] == "1" else {
+            return XCTFail("The quiet diagnostic requires the existing bounded rich long-reply fixture.")
+        }
+        let runID = try XCTUnwrap(environment["SEMREH_INVALIDATION_RUN_ID"].flatMap(UUID.init(uuidString:)),
+                                  "The quiet diagnostic requires one explicit run UUID.")
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.terminate()
+        app.launchArguments = ["--chat-performance-rich30-back-lab", "--chat-performance-long-reply",
+            "--chat-rich-native-code-text", "--chat-viewport-follow-latest-open",
+            "--composer-test-fresh-draft", "--chat-performance-signposts",
+            "--chat-performance-rich-long-reply", "--chat-performance-app-wide-monitor",
+            "--chat-performance-invalidation-probe",
+            "--chat-performance-invalidation-run-id=\(runID.uuidString)"]
+        var stages = ["schema=semreh.long-reply.quiet-parked.v1", "run_id=\(runID.uuidString)",
+            "diagnostic_only=true", "acceptance_sample=false",
+            "measurement=CADisplayLink main-run-loop callback timing only; not FPS or physical input latency",
+            "phase_histograms_include_setup_and_readout=true; no isolated quiet-window p95 claim"]
+        func attach(_ name: String, _ text: String) {
+            let attachment = XCTAttachment(string: text)
+            attachment.name = name
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+        func retainLaunchRequest(_ stage: String) {
+            let identifiers = app.launchArguments.filter {
+                $0.hasPrefix("--chat-performance-invalidation-run-id=")
+            }
+            attach("quiet-parked-launch-request-\(stage)", [
+                "schema=semreh.long-reply.launch-request.v1", "stage=\(stage)",
+                "run_id=\(runID.uuidString)", "argument_count=\(app.launchArguments.count)",
+                "run_id_count=\(identifiers.count)",
+                "run_id_matches_expected=\(identifiers == ["--chat-performance-invalidation-run-id=\(runID.uuidString)"])",
+                "unit_test_host=\(app.launchArguments.contains("--semreh-unit-test-host"))",
+                "requested_arguments=\(app.launchArguments.joined(separator: ","))"
+            ].joined(separator: "\n"))
+        }
+        retainLaunchRequest("before-launch")
+        app.launch()
+        retainLaunchRequest("after-launch")
+        defer {
+            attach("long-rich-quiet-parked-diagnostic-stages", stages.joined(separator: "\n"))
+            app.terminate()
+        }
+        let open = app.buttons["Open rich30 chat"].firstMatch
+        XCTAssertTrue(open.waitForExistence(timeout: 15) && open.isHittable)
+        open.tap()
+        requireSelectedChatSurface(in: app, muse: true)
+        let transcript = app.collectionViews["chat-native-transcript-v2"]
+        let probe = app.staticTexts["chat-native-transcript-v2"].firstMatch
+        let stream = app.buttons["rich30-stream-turn"]
+        let monitorStop = app.buttons["chat-performance-app-wide-monitor-stop"]
+        XCTAssertTrue(stream.waitForExistence(timeout: 10) && stream.isEnabled && stream.isHittable)
+        XCTAssertTrue(monitorStop.waitForExistence(timeout: 10) && monitorStop.isEnabled && monitorStop.isHittable)
+        let monitorFrame = monitorStop.frame
+        XCTAssertTrue(!monitorFrame.isEmpty && !monitorFrame.isNull && !monitorFrame.isInfinite)
+        XCTAssertFalse(stream.frame.intersects(monitorFrame.insetBy(dx: -4, dy: -4)))
+        func status() throws -> (raw: String, fields: [String: Any]) {
+            let raw = try XCTUnwrap(stream.value as? String)
+            XCTAssertLessThanOrEqual(raw.utf8.count, 4_096, "Fixture status must remain compact.")
+            let data = try XCTUnwrap(raw.data(using: .utf8))
+            let fields = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+            return (raw, fields)
+        }
+        func viewportStatus() throws -> (raw: String, fields: [String: String]) {
+            let raw = try XCTUnwrap(probe.value as? String)
+            XCTAssertLessThanOrEqual(raw.utf8.count, 4_096, "Native probe must remain compact.")
+            let fields = raw.split(separator: ";").reduce(into: [String: String]()) { result, field in
+                let pair = field.split(separator: "=", maxSplits: 1)
+                if pair.count == 2 { result[String(pair[0])] = String(pair[1]) }
+            }
+            return (raw, fields)
+        }
+        func waitUntil(_ description: String, timeout: TimeInterval, _ predicate: @escaping () -> Bool) {
+            XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+                predicate: NSPredicate { _, _ in predicate() }, object: nil)], timeout: timeout),
+                .completed, description)
+        }
+        stream.tap()
+        let interim = app.staticTexts.matching(NSPredicate(format: "label == %@",
+            "Got it — I will work through this carefully. SEMREH_LONG_INTERIM")).firstMatch
+        XCTAssertTrue(interim.waitForExistence(timeout: 8) && interim.isHittable)
+        waitUntil("The quiet fixture must publish a genuinely tall answer.", timeout: 15) {
+            ((try? status().fields["published_utf8_bytes"] as? Int) ?? 0) >= 12_000
+        }
+        let initial = try status().fields
+        XCTAssertEqual(initial["fixture_variant"] as? String, "rich-final-under-80k-characters")
+        XCTAssertGreaterThan(initial["source_utf8_bytes"] as? Int ?? 0, 60_000)
+        XCTAssertLessThan(initial["source_characters"] as? Int ?? Int.max, 80_000)
+        let bodyID = try XCTUnwrap(initial["body_id"] as? String)
+        let body = transcript.staticTexts["message-row:\(bodyID)"]
+        XCTAssertTrue(body.waitForExistence(timeout: 5))
+        let geometry = try viewportStatus().fields
+        let top = try XCTUnwrap(geometry["surfaceTop"].flatMap(Double.init))
+        let bottom = try XCTUnwrap(geometry["surfaceBottom"].flatMap(Double.init))
+        XCTAssertTrue(top.isFinite && bottom.isFinite && top > 0 && bottom > 0)
+        let viewport = transcript.frame.intersection(app.windows.firstMatch.frame)
+        let header = app.descendants(matching: .any).matching(identifier: "muse-chat-header").firstMatch.frame
+        let dock = app.descendants(matching: .any).matching(identifier: "muse-chat-dock").firstMatch.frame
+        let minY = max(viewport.minY + CGFloat(top), header.maxY)
+        let maxY = min(viewport.maxY - CGFloat(bottom), dock.minY)
+        let region = CGRect(x: viewport.minX, y: minY, width: viewport.width, height: maxY - minY)
+        XCTAssertGreaterThan(region.height, 60)
+        let readerX = region.maxX - 12
+        let path = CGRect(x: readerX - 2, y: region.minY + region.height * 0.2,
+                          width: 4, height: region.height * 0.6)
+        XCTAssertFalse(path.intersects(monitorFrame.insetBy(dx: -4, dy: -4)))
+        let start = app.coordinate(withNormalizedOffset: .zero).withOffset(
+            CGVector(dx: readerX, dy: region.minY + region.height * 0.2))
+        let end = app.coordinate(withNormalizedOffset: .zero).withOffset(
+            CGVector(dx: readerX, dy: region.minY + region.height * 0.8))
+        start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0)
+        let latest = app.buttons["Scroll to latest message"]
+        waitUntil("The quiet reader must be detached and stationary before the no-AX interval.", timeout: 10) {
+            guard let fields = try? viewportStatus().fields else { return false }
+            return latest.exists && latest.isHittable && fields["state"] == "reading"
+                && fields["motion"] == "idle" && fields["tracking"] == "false"
+                && fields["dragging"] == "false" && fields["decelerating"] == "false"
+                && fields["streamInteraction"] == "false" && fields["canonicalHold"] == "true"
+        }
+        let beforeBodyFrame = body.frame
+        XCTAssertGreaterThan(beforeBodyFrame.intersection(region).height, 40)
+        XCTAssertLessThan(beforeBodyFrame.minY, region.minY - 100)
+        XCTAssertGreaterThan(beforeBodyFrame.maxY, region.maxY + 40)
+        let before = try status()
+        let beforeProbe = try viewportStatus()
+        let beforeReceived = try XCTUnwrap(before.fields["received_characters"] as? Int)
+        let beforePublished = try XCTUnwrap(before.fields["published_utf8_bytes"] as? Int)
+        XCTAssertEqual(before.fields["phase"] as? String, "streaming")
+        XCTAssertEqual(before.fields["body_id"] as? String, bodyID)
+        stages.append("quiet-window-start-ready=true")
+
+        // Only local runner clock reads and sleep occur between these endpoints.
+        // The separate application's main run loop continues to receive bursts.
+        let quietStart = CACurrentMediaTime()
+        Thread.sleep(forTimeInterval: 8)
+        let quietEnd = CACurrentMediaTime()
+
+        let after = try status()
+        let afterProbe = try viewportStatus()
+        let afterBodyFrame = body.frame
+        let window = stages + ["clock_domain=CACurrentMediaTime mach_absolute_seconds",
+            "quiet_start_mach_seconds=\(String(format: "%.9f", quietStart))",
+            "quiet_end_mach_seconds=\(String(format: "%.9f", quietEnd))",
+            "quiet_requested_seconds=8", "quiet_observed_seconds=\(quietEnd - quietStart)",
+            "no_ax_or_input_calls_inside_window=true", "pre_status=\(before.raw)",
+            "post_status=\(after.raw)", "pre_probe=\(beforeProbe.raw)", "post_probe=\(afterProbe.raw)",
+            "pre_body_frame=\(beforeBodyFrame)", "post_body_frame=\(afterBodyFrame)",
+            "boundary_overlapping_callback_gaps_must_be_reported=true"]
+        attach("long-rich-quiet-parked-diagnostic-window", window.joined(separator: "\n"))
+        let stopBefore = CACurrentMediaTime()
+        monitorStop.tap()
+        let stopAfter = CACurrentMediaTime()
+        attach("long-rich-quiet-parked-diagnostic-stop-bracket", [
+            "clock_domain=CACurrentMediaTime mach_absolute_seconds",
+            "monitor_stop_before_mach_seconds=\(String(format: "%.9f", stopBefore))",
+            "monitor_stop_after_mach_seconds=\(String(format: "%.9f", stopAfter))"
+        ].joined(separator: "\n"))
+        let summary = app.staticTexts["chat-performance-app-wide-monitor-summary"]
+        XCTAssertTrue(summary.waitForExistence(timeout: 10))
+        let report = summary.label
+        attach("long-rich-quiet-parked-diagnostic-callback-report", report)
+        stages.append("monitor-stopped-and-report-retained=true")
+        XCTAssertTrue(report.contains("measurement=CADisplayLink main-run-loop callback timing only"))
+        let reportLines = report.components(separatedBy: "\n")
+        func reportedValue(_ prefix: String, in lines: [String]) throws -> String {
+            let matches = lines.filter { $0.hasPrefix(prefix) }
+            XCTAssertEqual(matches.count, 1, "The scoped timing proof requires one exact report field: \(prefix)")
+            return String(try XCTUnwrap(matches.first).dropFirst(prefix.count))
+        }
+        let phaseHeader = "phase=streamParked phase_events="
+        let phaseEvents = try XCTUnwrap(Int(try reportedValue(phaseHeader, in: reportLines)))
+        let phaseStart = try XCTUnwrap(reportLines.firstIndex { $0.hasPrefix(phaseHeader) })
+        let phaseLines = Array(reportLines.dropFirst(phaseStart + 1).prefix { !$0.hasPrefix("phase=") })
+        let interactionEvents = try XCTUnwrap(Int(try reportedValue("interaction_events=", in: phaseLines)))
+        let timedEvents = try XCTUnwrap(Int(try reportedValue("interaction_timed_events=", in: phaseLines)))
+        let activeMilliseconds = try XCTUnwrap(Double(try reportedValue("interaction_duration_total_ms=", in: phaseLines)))
+        let sampleDuration = try XCTUnwrap(Double(try reportedValue("sample_duration_seconds=", in: reportLines)))
+        XCTAssertTrue(activeMilliseconds.isFinite && activeMilliseconds > 0)
+        XCTAssertTrue(sampleDuration.isFinite && sampleDuration > 0)
+        XCTAssertTrue(stopBefore.isFinite && stopAfter.isFinite && stopAfter >= stopBefore)
+        let boundaryText = try reportedValue("phase_boundary_intervals_from_sample=", in: reportLines)
+        let knownPhases: Set<String> = ["entry", "back", "send", "scroll", "arrow", "paging",
+                                       "streamFollow", "streamParked", "switchChat"]
+        var parkedIntervals: [(start: Double, end: Double)] = []
+        for entry in boundaryText.split(separator: ",", omittingEmptySubsequences: false) {
+            let parts = entry.split(separator: ":", omittingEmptySubsequences: false)
+            XCTAssertEqual(parts.count, 2, "Every retained phase boundary must parse completely.")
+            guard parts.count == 2 else { throw NSError(domain: "SemrehQuietTimingProof", code: 1) }
+            XCTAssertTrue(knownPhases.contains(String(parts[0])))
+            let endpoints = parts[1].split(separator: "-", omittingEmptySubsequences: false)
+            XCTAssertEqual(endpoints.count, 2)
+            guard endpoints.count == 2 else { throw NSError(domain: "SemrehQuietTimingProof", code: 2) }
+            let start = try XCTUnwrap(Double(endpoints[0]))
+            let end = try XCTUnwrap(Double(endpoints[1]))
+            XCTAssertTrue(start.isFinite && end.isFinite && start >= 0 && end >= start)
+            XCTAssertLessThanOrEqual(end, sampleDuration + 0.001,
+                "A retained boundary cannot extend beyond the rounded sample duration.")
+            if parts[0] == "streamParked" {
+                if let previous = parkedIntervals.last {
+                    XCTAssertGreaterThanOrEqual(start, previous.end,
+                        "Distinct parked intervals must remain ordered and nonoverlapping.")
+                }
+                parkedIntervals.append((start, end))
+            }
+        }
+        let elapsedMilliseconds = parkedIntervals.reduce(0) { $0 + ($1.end - $1.start) * 1_000 }
+        // Each boundary has two endpoints rounded to 0.001s: at most 1ms
+        // duration error. The active total is rounded to 0.01ms: another
+        // 0.005ms. A 0.01ms allowance conservatively includes that rounding.
+        let roundingBoundMilliseconds = Double(parkedIntervals.count) + 0.01
+        let durationDifference = elapsedMilliseconds - activeMilliseconds
+        let completeAccounting = phaseEvents > 0 && parkedIntervals.count == phaseEvents
+            && interactionEvents == phaseEvents && timedEvents == phaseEvents
+        let lossWithinPrecision = abs(durationDifference) <= roundingBoundMilliseconds
+        // The app's stop lies inside the runner's monotonic tap bracket. Its
+        // rounded sample duration and each boundary endpoint add +/-0.5ms.
+        // Require enclosure even at the latest possible start and earliest
+        // possible end; a broad tap bracket must fail rather than waive proof.
+        let originLower = stopBefore - sampleDuration - 0.0005
+        let originUpper = stopAfter - sampleDuration + 0.0005
+        let containingIntervals = parkedIntervals.filter {
+            quietStart >= originUpper + $0.start + 0.0005
+                && quietEnd <= originLower + $0.end - 0.0005
+        }
+        let enclosedForEveryOrigin = containingIntervals.count == 1
+        let scenePause = try reportedValue("phase=scene_pause ", in: reportLines)
+        attach("long-rich-quiet-parked-diagnostic-scoped-scene-proof", [
+            "schema=semreh.long-reply.quiet-parked.scene-proof.v1",
+            "scope=all retained streamParked intervals; quiet enclosed for every allowed sample origin",
+            "phase_events=\(phaseEvents)", "interaction_events=\(interactionEvents)",
+            "interaction_timed_events=\(timedEvents)", "parked_boundary_count=\(parkedIntervals.count)",
+            "parked_elapsed_ms=\(elapsedMilliseconds)", "parked_active_ms=\(activeMilliseconds)",
+            "elapsed_minus_active_ms=\(durationDifference)", "rounding_bound_ms=\(roundingBoundMilliseconds)",
+            "complete_parked_accounting=\(completeAccounting)", "inactive_loss_within_report_precision=\(lossWithinPrecision)",
+            "sample_origin_lower_mach_seconds=\(String(format: "%.9f", originLower))",
+            "sample_origin_upper_mach_seconds=\(String(format: "%.9f", originUpper))",
+            "quiet_enclosed_for_every_allowed_origin=\(enclosedForEveryOrigin)",
+            "containing_parked_intervals=\(containingIntervals.map { "\($0.start)-\($0.end)" }.joined(separator: ","))",
+            "global_scene_pause=\(scenePause)",
+            "limit=no detectable parked inactive loss within report precision; not literal zero scene pauses or a proven global pause location"
+        ].joined(separator: "\n"))
+        XCTAssertTrue(completeAccounting,
+            "All parked events must have retained boundaries and completed active-duration accounting.")
+        XCTAssertTrue(lossWithinPrecision,
+            "Parked elapsed and active duration must agree within endpoint/total rounding precision.")
+        XCTAssertTrue(enclosedForEveryOrigin,
+            "One parked interval must contain all eight quiet seconds for every sample origin allowed by the stop bracket.")
+        XCTAssertGreaterThanOrEqual(quietEnd - quietStart, 8)
+        XCTAssertEqual(after.fields["phase"] as? String, "streaming",
+                       "A terminal fixture cannot score this as quiet growing-answer streaming.")
+        XCTAssertEqual(after.fields["body_id"] as? String, bodyID)
+        XCTAssertGreaterThan(after.fields["received_characters"] as? Int ?? 0, beforeReceived)
+        XCTAssertGreaterThan(after.fields["published_utf8_bytes"] as? Int ?? 0, beforePublished)
+        for fields in [beforeProbe.fields, afterProbe.fields] {
+            XCTAssertEqual(fields["state"], "reading")
+            XCTAssertEqual(fields["motion"], "idle")
+            XCTAssertEqual(fields["tracking"], "false")
+            XCTAssertEqual(fields["dragging"], "false")
+            XCTAssertEqual(fields["decelerating"], "false")
+            XCTAssertEqual(fields["streamInteraction"], "false")
+            XCTAssertEqual(fields["canonicalHold"], "true")
+        }
+        XCTAssertGreaterThan(afterBodyFrame.intersection(region).height, 40)
+        XCTAssertLessThanOrEqual(abs(afterBodyFrame.minY - beforeBodyFrame.minY), 24,
+                                 "Quiet incoming bursts must preserve this intra-answer reading offset.")
+    }
+
     /// Local direct-event fixture only. Actual Stop RPC remains a separate
     /// approved-backend gate; these controls inject a synthetic terminal event.
     @MainActor
@@ -80,6 +355,8 @@ final class DirectSkillUITests: XCTestCase {
         continueAfterFailure = false
         let richFinal = ProcessInfo.processInfo.environment["SEMREH_LONG_REPLY_RICH_FINAL"] == "1"
         let app = XCUIApplication()
+        app.terminate()
+        var expectedInvalidationRunID: UUID?
         app.launchArguments = ["--chat-performance-rich30-back-lab", "--chat-performance-long-reply",
             "--chat-rich-native-code-text", "--chat-viewport-follow-latest-open",
             "--composer-test-fresh-draft", "--chat-performance-signposts"]
@@ -88,13 +365,43 @@ final class DirectSkillUITests: XCTestCase {
             app.launchArguments.append("--chat-performance-app-wide-monitor")
             if let raw = ProcessInfo.processInfo.environment["SEMREH_INVALIDATION_RUN_ID"] {
                 let runID = try XCTUnwrap(UUID(uuidString: raw), "Diagnostic run identity must be a UUID.")
+                expectedInvalidationRunID = runID
                 app.launchArguments += ["--chat-performance-invalidation-probe",
                     "--chat-performance-invalidation-run-id=\(runID.uuidString)"]
             }
         }
         // No preview argument or renderer preference override: exercise the new default.
-        app.terminate()
+        func retainLaunchRequest(_ stage: String) {
+            guard callbackDiagnostic else { return }
+            let arguments = app.launchArguments
+            let prefix = "--chat-performance-invalidation-run-id="
+            let identifiers = arguments.filter { $0.hasPrefix(prefix) }
+            let matchesExpectedID = expectedInvalidationRunID.map {
+                identifiers == [prefix + $0.uuidString]
+            } ?? identifiers.isEmpty
+            let receipt = XCTAttachment(string: [
+                "schema=semreh.long-reply.launch-request.v1",
+                "stage=\(stage)",
+                "runner_pid=\(ProcessInfo.processInfo.processIdentifier)",
+                "application_state=\(app.state.rawValue)",
+                "argument_count=\(arguments.count)",
+                "rich30_back_lab=\(arguments.contains("--chat-performance-rich30-back-lab"))",
+                "long_reply=\(arguments.contains("--chat-performance-long-reply"))",
+                "rich_long_reply=\(arguments.contains("--chat-performance-rich-long-reply"))",
+                "app_wide_monitor=\(arguments.contains("--chat-performance-app-wide-monitor"))",
+                "invalidation_probe=\(arguments.contains("--chat-performance-invalidation-probe"))",
+                "unit_test_host=\(arguments.contains("--semreh-unit-test-host"))",
+                "run_id_count=\(identifiers.count)",
+                "expected_run_id_present=\(expectedInvalidationRunID != nil)",
+                "run_id_matches_expected=\(matchesExpectedID)"
+            ].joined(separator: "\n"))
+            receipt.name = "long-reply-launch-request-\(stage)"
+            receipt.lifetime = .keepAlways
+            add(receipt)
+        }
+        retainLaunchRequest("before-launch")
         app.launch()
+        retainLaunchRequest("after-launch")
         defer { app.terminate(); UIPasteboard.general.items = [] }
         let open = app.buttons["Open rich30 chat"].firstMatch
         XCTAssertTrue(open.waitForExistence(timeout: 15) && open.isHittable)
@@ -5291,6 +5598,136 @@ final class DirectSkillUITests: XCTestCase {
         XCTAssertTrue(storedRow.waitForExistence(timeout: 10) && storedRow.isHittable)
         // No renderer/appearance preference was changed; the shared optional
         // settings helper is deliberately left at its nil default.
+    }
+
+    /// Ordinary Release-compatible chrome journey: real production navigation,
+    /// existing bounded delayed-provider fixture, and no DEBUG viewport probes.
+    @MainActor
+    func testOptInProductionReleaseChromeActivityAndMultilineKeyboard() async throws {
+        continueAfterFailure = false
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("Production chrome verification is simulator-only.")
+        #endif
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SEMREH_PRODUCTION_CHROME_UI"] == "1" else {
+            throw XCTSkip("Production chrome verification requires explicit opt-in.")
+        }
+        guard environment["SEMREH_SLICE2_UI_LIVE"] == "1",
+              environment["SEMREH_SLICE1_HTTPS"] == "1",
+              environment["SEMREH_SLICE2_UI_BACKEND_MODE"] == "stock",
+              environment["SEMREH_SLICE2_UI_BACKEND_SHA"] == backendSHA,
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == credentialsPath,
+              environment["SEMREH_SLICE2_TOOL_CWD"] == "/Users/maurice/workspace/semreh-slice1-runtime/tools" else {
+            return XCTFail("Production chrome verification requires the contained pinned stock fixture.")
+        }
+        let observer = try await LifecycleCanonicalObserver(
+            origin: try XCTUnwrap(URL(string: origin)), credentials: try readCredentials()
+        )
+        defer { observer.invalidate(); UIPasteboard.general.items = [] }
+        let app = XCUIApplication()
+        defer { app.terminate() }
+        app.terminate()
+        app.launchArguments = []
+        app.launch()
+        let composer = try openContainedNewChat(app: app)
+        assertContainedSurfaceSelection(app: app, muse: true, needsTranscript: false)
+        let warmup = "SEMREH_RELEASE_CHROME_\(UUID().uuidString)"
+        send(warmup, through: composer, app: app)
+        waitForIdle(app: app)
+        let storedID = try await observer.discoverStoredID(uniquePrompt: warmup)
+        let baseline = try await waitForCanonical(observer: observer, storedID: storedID) {
+            self.exactCanonicalPairs($0, users: [warmup])
+        }
+        assertContainedSurfaceSelection(app: app, muse: true)
+        let header = app.otherElements["muse-chat-header"]
+        let dock = app.otherElements["muse-chat-dock"]
+        let profile = app.buttons["chatProfileConfiguration"]
+        let transcript = app.collectionViews["chat-native-transcript-v2"]
+        let keyboard = app.keyboards.firstMatch
+        let stop = app.buttons["Stop response"]
+        let idleHeaderFrame = header.frame
+        let idleProfileFrame = profile.frame
+
+        func captureAndCheck(_ phase: String, keyboardVisible: Bool) {
+            let window = app.windows.firstMatch.frame
+            let headerFrame = header.frame, dockFrame = dock.frame, composerFrame = composer.frame
+            let profileFrame = profile.frame, transcriptFrame = transcript.frame
+            let keyboardFrame = keyboard.exists ? keyboard.frame : CGRect.null
+            let frames = [headerFrame, dockFrame, composerFrame, profileFrame, transcriptFrame]
+            XCTAssertTrue(frames.allSatisfy {
+                !$0.isEmpty && !$0.isNull && !$0.isInfinite
+                    && $0.minX.isFinite && $0.minY.isFinite
+                    && $0.width.isFinite && $0.height.isFinite
+            })
+            XCTAssertTrue(window.contains(headerFrame) && window.contains(dockFrame))
+            XCTAssertTrue(profile.isEnabled && profile.isHittable)
+            XCTAssertTrue(composer.isEnabled && composer.isHittable)
+            XCTAssertLessThan(headerFrame.maxY, dockFrame.minY)
+            XCTAssertGreaterThan(min(transcriptFrame.maxY, dockFrame.minY)
+                - max(transcriptFrame.minY, headerFrame.maxY), 44,
+                "The chrome must leave a usable transcript region.")
+            XCTAssertGreaterThanOrEqual(composerFrame.minX, dockFrame.minX - 1)
+            XCTAssertLessThanOrEqual(composerFrame.maxX, dockFrame.maxX + 1)
+            XCTAssertGreaterThanOrEqual(composerFrame.minY, dockFrame.minY - 1)
+            XCTAssertLessThanOrEqual(composerFrame.maxY, dockFrame.maxY + 1)
+            if keyboardVisible {
+                XCTAssertFalse(keyboardFrame.isNull)
+                XCTAssertLessThanOrEqual(composerFrame.maxY, keyboardFrame.minY + 1)
+                XCTAssertLessThanOrEqual(dockFrame.maxY, keyboardFrame.minY + 1)
+            }
+            let receipt = XCTAttachment(string:
+                "Scope: contained production Release-compatible AX geometry, not presented FPS.\n"
+                + "phase=\(phase); header=\(headerFrame); profile=\(profileFrame); dock=\(dockFrame); composer=\(composerFrame); transcript=\(transcriptFrame); AXkeyboard=\(keyboardFrame); window=\(window)\n"
+                + "AX keyboard may omit its prediction strip; rendered PNG review is required.")
+            receipt.name = "production-release-chrome-\(phase)-geometry"
+            receipt.lifetime = .keepAlways
+            add(receipt)
+            retainPreviewScreenshot("production-release-chrome-\(phase)", app: app)
+        }
+        XCTAssertFalse(stop.exists)
+        XCTAssertFalse((profile.value as? String ?? "").contains("Working"))
+        captureAndCheck("01-idle", keyboardVisible: keyboard.exists)
+
+        // The existing fixture delays only this exact current prompt for 15s.
+        // This holds a real acknowledged turn; it is NOT a pending-ACK fixture.
+        let heldPrompt = "SEMREH_INTERRUPT_FIXTURE"
+        send(heldPrompt, through: composer, app: app)
+        XCTAssertTrue(stop.waitForExistence(timeout: 10) && stop.isEnabled && stop.isHittable)
+        let working = NSPredicate { _, _ in
+            (profile.value as? String ?? "").contains("Working")
+        }
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: working, object: nil)],
+            timeout: 5), .completed)
+        XCTAssertEqual(header.frame.height, idleHeaderFrame.height, accuracy: 2,
+            "Idle and active subtitle reserve the same header footprint.")
+        XCTAssertEqual(profile.frame.height, idleProfileFrame.height, accuracy: 2)
+        composer.tap()
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5))
+        let oneLineHeight = composer.frame.height
+        let draft = "One\nTwo\nThree\nFour"
+        composer.typeText(draft)
+        XCTAssertEqual(composer.value as? String, draft)
+        XCTAssertGreaterThan(composer.frame.height, oneLineHeight + 20)
+        let sendButton = app.buttons["Send"]
+        XCTAssertTrue(sendButton.exists && sendButton.isEnabled && sendButton.isHittable,
+            "The existing busy composer exposes Send when later unsent text is present.")
+        XCTAssertTrue((profile.value as? String ?? "").contains("Working"))
+        captureAndCheck("02-working-multiline-keyboard", keyboardVisible: true)
+        // Do not silently pass if the bounded provider hold expired mid-capture.
+        XCTAssertTrue((profile.value as? String ?? "").contains("Working"))
+        let canonical = try await waitForCanonical(observer: observer, storedID: storedID) { rows in
+            self.hasStableBaseline(rows, baseline: baseline)
+                && self.exactCanonicalPairs(rows, users: [warmup, heldPrompt])
+        }
+        waitForIdle(app: app)
+        XCTAssertFalse((profile.value as? String ?? "").contains("Working"))
+        XCTAssertEqual(composer.value as? String, draft,
+            "Canonical completion must preserve later unsent text.")
+        captureAndCheck("03-completed-multiline-keyboard", keyboardVisible: true)
+        try clearDailyDriverDraft(composer, expectedText: draft, style: "production-release-chrome", app: app)
+        let afterDraft = try await observer.transcript(storedID: storedID)
+        XCTAssertTrue(NSArray(array: afterDraft).isEqual(to: canonical),
+            "Typing and removing the owned draft must not resend or mutate canonical history.")
     }
 
     @MainActor

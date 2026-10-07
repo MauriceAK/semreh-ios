@@ -7,6 +7,277 @@ import XCTest
 final class ChatMeasuredTranscriptSurfaceTests: XCTestCase {
     private typealias Owner = ChatNativeTranscriptViewport.Controller
 
+    func testMuseLatestTransitionPolicyKeepsNearbyGlideAndBoundsSnapshotTravel() {
+        XCTAssertFalse(ChatMotion.usesLatestViewportTransition(distance: 2_400, viewportHeight: 800))
+        XCTAssertTrue(ChatMotion.usesLatestViewportTransition(distance: 2_401, viewportHeight: 800))
+        XCTAssertTrue(ChatMotion.usesLatestViewportTransition(distance: 1_000_000, viewportHeight: 800))
+        XCTAssertFalse(ChatMotion.usesLatestViewportTransition(distance: .infinity, viewportHeight: 800))
+        XCTAssertFalse(ChatMotion.usesLatestViewportTransition(distance: 1_000, viewportHeight: 0))
+        XCTAssertLessThanOrEqual(ChatMotion.latestViewportTransitionTravel(viewportHeight: 2_000), 96)
+    }
+
+    func testMuseFarLatestSkipsMiddleRowsAndKeepsOutgoingViewportUntilRealTailIsStable() async throws {
+        try XCTSkipIf(UIAccessibility.isReduceMotionEnabled, "Animated viewport transition requires Reduce Motion off")
+        for count in [200, 2_000] {
+            let receipt = LatestRowsReceipt()
+            let fixture = try await mountStreaming(viewport: latestTransitionInput(count: count, receipt: receipt))
+            defer { unmountStreaming(fixture) }
+            let owner = fixture.owner
+            receipt.configured.removeAll()
+            let oldOffset = fixture.collection.contentOffset
+            owner.beginMotion()
+            let link = try XCTUnwrap(owner.motionLink)
+            link.isPaused = true
+            let snapshot = try XCTUnwrap(owner.latestViewportSnapshot)
+            XCTAssertEqual(snapshot.frame, fixture.collection.frame,
+                "The outgoing picture must cover the original viewport during hidden preparation")
+            XCTAssertGreaterThan(fixture.collection.contentOffset.y, oldOffset.y,
+                "Destination preparation should start under the opaque outgoing picture")
+            XCTAssertNil(owner.motionTailSample,
+                "Synchronous preparation cannot count as a stable display sample")
+            XCTAssertNil(owner.motionTailOffset)
+            XCTAssertEqual(snapshot.alpha, 1)
+            XCTAssertFalse(snapshot.isUserInteractionEnabled)
+            XCTAssertTrue(snapshot.accessibilityElementsHidden)
+            XCTAssertTrue(snapshot.superview === owner.view)
+
+            owner.motionStarted = link.timestamp - 0.05
+            owner.advanceMotion(link)
+            XCTAssertNotNil(owner.latestViewportSnapshot,
+                "One destination layout cannot retire the only displayed outgoing picture")
+            XCTAssertEqual(snapshot.alpha, 1)
+            XCTAssertNil(owner.latestSnapshotRevealStarted,
+                "A first realized sample cannot begin revealing the destination")
+            for _ in 0..<6 { owner.advanceMotion(link) }
+            XCTAssertTrue(owner.realizedTailArrival, "The destination must be realized before reveal begins")
+            XCTAssertFalse(fixture.collection.visibleCells.isEmpty)
+            XCTAssertEqual(snapshot.alpha, 1, "A frozen clock must keep the outgoing viewport at reveal start")
+            owner.motionStarted = link.timestamp - 0.15
+            owner.advanceMotion(link)
+            XCTAssertGreaterThan(snapshot.alpha, 0)
+            XCTAssertLessThan(snapshot.alpha, 1)
+            XCTAssertLessThan(snapshot.transform.ty, 0)
+            XCTAssertGreaterThanOrEqual(snapshot.transform.ty, -96)
+            owner.motionStarted = link.timestamp - 0.30
+            owner.advanceMotion(link)
+            XCTAssertNil(owner.motionLink)
+            XCTAssertNil(owner.latestViewportSnapshot)
+            XCTAssertNil(snapshot.superview)
+            XCTAssertEqual(owner.motionCompleted, 1)
+            XCTAssertEqual(owner.motionCancelled, 0)
+            XCTAssertTrue(owner.realizedTailArrival && owner.follows)
+            XCTAssertEqual(fixture.collection.contentOffset.y, owner.bottomOffset, accuracy: 1)
+            XCTAssertTrue(receipt.configured.contains(count - 1))
+            XCTAssertFalse(receipt.configured.contains { $0 >= 20 && $0 < count - 20 },
+                "Latest must not construct intervening messages just to travel past them")
+            XCTAssertLessThanOrEqual(Set(receipt.configured).count, 32,
+                "Realization is bounded by the destination viewport, not 200 versus 2,000 traversed rows")
+        }
+    }
+
+    func testMuseFarLatestDragBeforeRevealRestoresDisplayedReaderAndRejectsStaleTick() async throws {
+        try XCTSkipIf(UIAccessibility.isReduceMotionEnabled, "Animated viewport transition requires Reduce Motion off")
+        let fixture = try await mountStreaming(viewport: latestTransitionInput(count: 200, receipt: LatestRowsReceipt()))
+        defer { unmountStreaming(fixture) }
+        let owner = fixture.owner
+        let oldAnchor = try XCTUnwrap(owner.currentAnchor())
+        let oldOffset = fixture.collection.contentOffset
+        owner.beginMotion()
+        let link = try XCTUnwrap(owner.motionLink)
+        link.isPaused = true
+        let snapshot = try XCTUnwrap(owner.latestViewportSnapshot)
+        owner.motionStarted = link.timestamp - 0.05
+        owner.advanceMotion(link)
+        XCTAssertEqual(snapshot.alpha, 1)
+        XCTAssertGreaterThan(fixture.collection.contentOffset.y, oldOffset.y)
+        fixture.collection.directTouch = true
+        owner.scrollViewWillBeginDragging(fixture.collection)
+        XCTAssertNil(owner.latestViewportSnapshot)
+        XCTAssertNil(snapshot.superview)
+        XCTAssertNil(owner.motionLink)
+        XCTAssertEqual(owner.motionCancelled, 1)
+        XCTAssertFalse(owner.follows)
+        XCTAssertEqual(owner.currentAnchor()?.id, oldAnchor.id)
+        XCTAssertEqual(try XCTUnwrap(owner.currentAnchor()).delta, oldAnchor.delta, accuracy: 1)
+        XCTAssertEqual(fixture.collection.contentOffset.y, oldOffset.y, accuracy: 1)
+        owner.advanceMotion(link)
+        XCTAssertEqual(fixture.collection.contentOffset.y, oldOffset.y, accuracy: 1)
+        XCTAssertEqual(owner.motionCompleted, 0)
+    }
+
+    func testMuseFarLatestTouchGateCancelsOpaqueRevealBeforeDescendantActionsAndAllowsPan() async throws {
+        try XCTSkipIf(UIAccessibility.isReduceMotionEnabled, "Animated viewport transition requires Reduce Motion off")
+        let fixture = try await mountStreaming(viewport: latestTransitionInput(count: 200, receipt: LatestRowsReceipt()))
+        defer { unmountStreaming(fixture) }
+        let owner = fixture.owner
+        let gate = owner.latestTransitionTouchGate
+        let touch = UITouch()
+        XCTAssertFalse(owner.gestureRecognizer(gate, shouldReceive: touch),
+            "Ordinary transcript links and controls must bypass the cancellation gate")
+        let oldOffset = fixture.collection.contentOffset
+        owner.beginMotion()
+        let link = try XCTUnwrap(owner.motionLink)
+        link.isPaused = true
+        let snapshot = try XCTUnwrap(owner.latestViewportSnapshot)
+        owner.motionStarted = link.timestamp - 0.05
+        for _ in 0..<6 { owner.advanceMotion(link) }
+        XCTAssertNotNil(owner.latestSnapshotRevealStarted)
+        XCTAssertEqual(snapshot.alpha, 1, "Exercise the zero-progress first reveal frame")
+        XCTAssertTrue(owner.gestureRecognizer(gate, shouldReceive: touch))
+        XCTAssertTrue(gate.delegate === owner)
+        XCTAssertTrue(gate.view === fixture.collection)
+        XCTAssertEqual(gate.minimumPressDuration, 0)
+        XCTAssertTrue(gate.delaysTouchesBegan && gate.cancelsTouchesInView,
+            "An unseen destination control must never receive a complete touch sequence")
+        XCTAssertTrue(owner.gestureRecognizer(gate,
+            shouldRecognizeSimultaneouslyWith: fixture.collection.panGestureRecognizer))
+        XCTAssertFalse(owner.gestureRecognizer(gate, shouldRecognizeSimultaneouslyWith: UITapGestureRecognizer()),
+            "A destination SwiftUI/link tap cannot recognize alongside transition cancellation")
+
+        // Model UIKit's recognized .began callback through the actual handler.
+        // Physical event arbitration still requires separate UI verification.
+        owner.latestTransitionTouchBegan(RecognizedLatestTouch())
+        XCTAssertNil(owner.latestViewportSnapshot)
+        XCTAssertNil(owner.motionLink)
+        XCTAssertNil(snapshot.superview)
+        XCTAssertEqual(fixture.collection.contentOffset.y, oldOffset.y, accuracy: 1)
+        XCTAssertFalse(owner.gestureRecognizer(gate, shouldReceive: touch))
+        fixture.collection.directTouch = true
+        owner.scrollViewWillBeginDragging(fixture.collection)
+        fixture.collection.setContentOffset(CGPoint(x: 0, y: oldOffset.y + 50), animated: false)
+        owner.scrollViewDidScroll(fixture.collection)
+        owner.advanceMotion(link)
+        XCTAssertEqual(fixture.collection.contentOffset.y, oldOffset.y + 50, accuracy: 1,
+            "The same native pan must continue after transition cancellation")
+    }
+
+    func testMuseFarLatestLateReadinessKeepsOriginalDeadline() async throws {
+        try XCTSkipIf(UIAccessibility.isReduceMotionEnabled, "Animated viewport transition requires Reduce Motion off")
+        let fixture = try await mountStreaming(viewport: latestTransitionInput(count: 200, receipt: LatestRowsReceipt()))
+        defer { unmountStreaming(fixture) }
+        let owner = fixture.owner
+        owner.beginMotion()
+        let link = try XCTUnwrap(owner.motionLink)
+        link.isPaused = true
+        owner.motionStarted = link.timestamp - 0.85
+        for _ in 0..<6 { owner.advanceMotion(link) }
+        XCTAssertNotNil(owner.latestViewportSnapshot)
+        XCTAssertTrue(owner.realizedTailArrival)
+        owner.motionStarted = link.timestamp - 0.9
+        owner.advanceMotion(link)
+        XCTAssertNil(owner.motionLink, "A late ready tail shortens reveal instead of extending the old deadline")
+        XCTAssertNil(owner.latestViewportSnapshot)
+        XCTAssertEqual(owner.motionCompleted, 1)
+        XCTAssertEqual(owner.motionCancelled, 0)
+    }
+
+    func testMuseFarLatestPausesRevealWhenLiveDestinationNeedsNewTailConfirmation() async throws {
+        try XCTSkipIf(UIAccessibility.isReduceMotionEnabled, "Animated viewport transition requires Reduce Motion off")
+        let scope = UUID().uuidString
+        let receipt = StreamingReceipt()
+        let fixture = try await mountStreaming(viewport: streamingViewport(scope: scope, content: "long body",
+            height: 8_000, streaming: false, receipt: receipt))
+        defer { unmountStreaming(fixture) }
+        let owner = fixture.owner
+        owner.ownership = .reading
+        fixture.collection.setContentOffset(CGPoint(x: 0, y: 400), animated: false)
+        owner.anchor = owner.currentAnchor()
+        owner.beginMotion()
+        let link = try XCTUnwrap(owner.motionLink)
+        link.isPaused = true
+        let snapshot = try XCTUnwrap(owner.latestViewportSnapshot)
+        owner.motionStarted = link.timestamp - 0.05
+        for _ in 0..<6 { owner.advanceMotion(link) }
+        owner.motionStarted = link.timestamp - 0.1
+        owner.advanceMotion(link)
+        let opacity = snapshot.alpha
+        XCTAssertGreaterThan(opacity, 0)
+        XCTAssertLessThan(opacity, 1)
+        owner.update(streamingViewport(scope: scope, content: "changed long body", revision: 1,
+            height: 8_500, streaming: false, receipt: receipt))
+        owner.motionStarted = link.timestamp - 0.15
+        owner.advanceMotion(link)
+        XCTAssertEqual(snapshot.alpha, opacity,
+            "A changed destination cannot fade away its outgoing cover before reconfirmation")
+        XCTAssertNotNil(owner.motionLink)
+        owner.motionStarted = link.timestamp - 0.35
+        for _ in 0..<3 { owner.advanceMotion(link) }
+        XCTAssertNil(owner.latestViewportSnapshot)
+        XCTAssertTrue(owner.realizedTailArrival)
+        XCTAssertEqual(owner.motionCompleted, 1)
+    }
+
+    func testMuseFarLatestSuspendAndScopeChangeRemoveSnapshotOwnership() async throws {
+        try XCTSkipIf(UIAccessibility.isReduceMotionEnabled, "Animated viewport transition requires Reduce Motion off")
+        for replaceScope in [false, true] {
+            let fixture = try await mountStreaming(viewport: latestTransitionInput(count: 200, receipt: LatestRowsReceipt()))
+            defer { unmountStreaming(fixture) }
+            let owner = fixture.owner
+            owner.beginMotion()
+            let link = try XCTUnwrap(owner.motionLink)
+            link.isPaused = true
+            let snapshot = try XCTUnwrap(owner.latestViewportSnapshot)
+            owner.motionStarted = link.timestamp - 0.05
+            owner.advanceMotion(link)
+            if replaceScope {
+                owner.update(latestTransitionInput(count: 200, receipt: LatestRowsReceipt()))
+            } else {
+                owner.suspendPresentation()
+            }
+            XCTAssertNil(owner.latestViewportSnapshot)
+            XCTAssertNil(snapshot.superview)
+            XCTAssertNil(owner.motionLink)
+            let offset = fixture.collection.contentOffset
+            owner.advanceMotion(link)
+            XCTAssertEqual(fixture.collection.contentOffset, offset)
+            XCTAssertEqual(owner.motionCompleted, 0)
+        }
+    }
+
+    func testMuseNearbyLatestGlidesAndReduceMotionUsesNoSnapshot() async throws {
+        for reduced in [false, true] {
+            if !reduced { try XCTSkipIf(UIAccessibility.isReduceMotionEnabled, "Nearby animation requires Reduce Motion off") }
+            let fixture = try await mountStreaming(viewport: latestTransitionInput(
+                count: 200, receipt: LatestRowsReceipt()), reduceMotionEnabled: { reduced })
+            defer { unmountStreaming(fixture) }
+            let owner = fixture.owner
+            if !reduced {
+                // Establish a measured destination before parking. A bare
+                // offset change would otherwise restore the old row-0 anchor.
+                owner.ownership = .following
+                try realizeStreamingTail(fixture)
+                fixture.collection.directTouch = true
+                owner.scrollViewWillBeginDragging(fixture.collection)
+                for _ in 0..<4 {
+                    fixture.collection.setContentOffset(CGPoint(x: 0, y: owner.bottomOffset - 200), animated: false)
+                    fixture.collection.layoutIfNeeded()
+                }
+                fixture.collection.directTouch = false
+                owner.scrollViewDidEndDragging(fixture.collection, willDecelerate: false)
+                fixture.collection.layoutIfNeeded()
+                XCTAssertEqual(owner.bottomOffset - fixture.collection.contentOffset.y, 200, accuracy: 1,
+                    "The nearby case must begin 200 points above the fitted destination")
+                XCTAssertFalse(owner.realizedTailArrival)
+                XCTAssertFalse(owner.follows, "The parked reader must own the viewport before Latest")
+            }
+            let offset = fixture.collection.contentOffset.y
+            owner.beginMotion()
+            XCTAssertNil(owner.latestViewportSnapshot)
+            if reduced {
+                XCTAssertNil(owner.motionLink)
+                try realizeStreamingTail(fixture)
+                XCTAssertTrue(owner.realizedTailArrival && owner.follows)
+            } else {
+                let link = try XCTUnwrap(owner.motionLink)
+                link.isPaused = true
+                owner.motionStarted = link.timestamp - 0.1
+                owner.advanceMotion(link)
+                XCTAssertGreaterThan(fixture.collection.contentOffset.y, offset)
+                XCTAssertLessThan(fixture.collection.contentOffset.y, owner.bottomOffset)
+            }
+        }
+    }
+
     func testMountedDeliveryChangesReconfigureOneUserRowWithoutAcknowledgementHeightJump() async throws {
         let scope = UUID().uuidString
         let message = ChatMessage(role: "user", content: "Keep this message stable", timestamp: 1,
@@ -743,6 +1014,28 @@ final class ChatMeasuredTranscriptSurfaceTests: XCTestCase {
         var interactionReference: MarkdownPresentationInteraction?
     }
 
+    private final class LatestRowsReceipt {
+        var configured: [Int] = []
+    }
+
+    private final class RecognizedLatestTouch: UILongPressGestureRecognizer {
+        override var state: UIGestureRecognizer.State {
+            get { .began }
+            set { }
+        }
+    }
+
+    private func latestTransitionInput(count: Int, receipt: LatestRowsReceipt) -> ChatNativeTranscriptViewport {
+        let scope = UUID()
+        var environment = EnvironmentValues()
+        environment.usesMuseChatSurface = true
+        return viewport(ids: (0..<count).map { "row-\($0)" }, scope: scope.uuidString,
+            environment: environment, makeRow: { index in
+                receipt.configured.append(index)
+                return AnyView(Text("Bounded Latest row \(index)").frame(height: 120))
+            }, request: ChatTranscriptRestoreRequest(scope: scope, generation: 1, target: .message(id: "row-0")))
+    }
+
     private struct StreamingInteractionWitness: UIViewRepresentable {
         let receipt: StreamingReceipt
         func makeUIView(context: Context) -> UIView {
@@ -762,9 +1055,10 @@ final class ChatMeasuredTranscriptSurfaceTests: XCTestCase {
         let previous: UIWindow?
     }
 
-    private func mountStreaming(viewport: ChatNativeTranscriptViewport) async throws -> MountedStreaming {
+    private func mountStreaming(viewport: ChatNativeTranscriptViewport,
+                                reduceMotionEnabled: @escaping () -> Bool = { UIAccessibility.isReduceMotionEnabled }) async throws -> MountedStreaming {
         let collection = StreamingCollection(frame: .zero, collectionViewLayout: Owner.ColumnLayout())
-        let owner = Owner(input: viewport, makeCollection: { layout in
+        let owner = Owner(input: viewport, reduceMotionEnabled: reduceMotionEnabled, makeCollection: { layout in
             collection.setCollectionViewLayout(layout, animated: false)
             return collection
         })

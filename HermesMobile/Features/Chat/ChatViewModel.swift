@@ -682,6 +682,22 @@ final class ChatViewModel {
     /// Ephemeral gateway activity, separate from provider reasoning and visible
     /// assistant commentary. Repeated spinner labels never become transcript.
     private(set) var streamingActivityStatus: String?
+    /// Header-only coarse publication; received tokens never invalidate the
+    /// transcript just to update this label.
+    private(set) var headerActivityPhase: ChatActivityPhase?
+    private var headerActivityConnectionGeneration: Int?
+    private var headerRunHasCompleted = false
+    var displayedHeaderActivityPhase: ChatActivityPhase? {
+        guard !directInvalidated, directConversation?.runState != .deliveryUnknown else { return nil }
+        if headerActivityPhase == .summarizing {
+            guard let directRuntime, directRuntime.state == .ready,
+                  headerActivityConnectionGeneration == directRuntime.connectionGeneration else { return nil }
+            return .summarizing
+        }
+        guard activeStreamID != nil, !headerRunHasCompleted else { return nil }
+        guard directConversation?.runState != .submitting || headerActivityPhase != nil else { return nil }
+        return headerActivityPhase ?? .working
+    }
     @ObservationIgnored private var streamingHapticPulseGate = StreamingHapticPulseGate()
     @ObservationIgnored private var suppressedProgressUnitsRemaining = 0
     @ObservationIgnored private var pendingReasoningTextBuffer: String = ""
@@ -1945,8 +1961,10 @@ final class ChatViewModel {
             guard let self, let controller,
                   !self.directInvalidated, self.directConversation === controller,
                   controller.storedID == recoveredID, self.canonicalSessionID == recoveredID,
-                  self.directHistoryID == recoveredID,
-                  let ownedRun = self.directLiveActivityRun,
+                  self.directHistoryID == recoveredID else { return }
+            self.setHeaderActivityPhase(nil)
+            self.headerRunHasCompleted = true
+            guard let ownedRun = self.directLiveActivityRun,
                   ownedRun.sessionID == recoveredID, ownedRun.profile == controller.profile else { return }
             self.endDirectLiveActivity(status: .ended, activity: String(localized: "No longer running"))
         }
@@ -1967,6 +1985,8 @@ final class ChatViewModel {
                   !self.directInvalidated,
                   self.directConversation === controller,
                   controller.storedID == self.canonicalSessionID else { return }
+            self.setHeaderActivityPhase(nil)
+            self.headerRunHasCompleted = result?.gatewayFields["running"] != .bool(true)
             self.applyDirectSessionInfo(result?.gatewayFields["info"])
             self.syncDirectClarificationPrompt()
             self.directBlockingInteractionErrorMessage = nil
@@ -2697,6 +2717,7 @@ final class ChatViewModel {
             reasoningAnchorMessageID = nil
             toolCallAnchorMessageID = nil
             directResponseComplete = false
+            headerRunHasCompleted = false
             let preparedEcho = prepareLocalSendEcho(localMessage, controller: controller,
                                                     hasAttachments: !attachmentIDs.isEmpty)
             if localSendAttempt?.localID == localID {
@@ -2899,33 +2920,46 @@ final class ChatViewModel {
         case .textDelta(let text):
             guard !suppressUnwatermarkedContent else { break }
             setStreamingActivityStatus(nil)
+            if !text.isEmpty { setHeaderActivityPhase(.replying) }
             _ = appendAssistantToken(text)
             if showsLiveActivityResponseExcerpts { liveActivityManager.update(.token(text)) }
         case .interim(let text, let alreadyStreamed):
             guard !suppressUnwatermarkedContent else { break }
             _ = appendInterimAssistant(InterimAssistantStreamEvent(text: text, alreadyStreamed: alreadyStreamed))
             setStreamingActivityStatus(String(localized: "Thinking"))
+            setHeaderActivityPhase(activeHeaderToolPhase ?? .working)
             if showsLiveActivityResponseExcerpts { liveActivityManager.update(.interimAssistant(text)) }
         case .thinkingDelta(let text):
             guard !suppressUnwatermarkedContent else { break }
             setStreamingActivityStatus(text)
+            if headerActivityPhase != .replying,
+               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                setHeaderActivityPhase(activeHeaderToolPhase ?? .working)
+            }
         case .reasoningDelta(let text):
             guard !suppressUnwatermarkedContent else { break }
             setStreamingActivityStatus(String(localized: "Thinking"))
+            if headerActivityPhase != .replying {
+                setHeaderActivityPhase(activeHeaderToolPhase ?? .working)
+            }
             _ = appendReasoning(text)
             liveActivityManager.update(.reasoning(text))
         case .toolStart(let tool):
             setStreamingActivityStatus(nil)
             _ = appendToolCall(directToolEvent(tool, completed: false))
+            setHeaderActivityPhase(ChatActivityPhase.tool(named: tool.name))
             liveActivityManager.update(.toolStarted(name: tool.name))
         case .toolComplete(let tool):
             setStreamingActivityStatus(nil)
             _ = completeToolCall(directToolEvent(tool, completed: true))
+            setHeaderActivityPhase(activeHeaderToolPhase ?? .working)
             liveActivityManager.update(.toolCompleted)
         case .toolProgress: break // Progress is not a second tool call.
         case .usage(let usage): contextWindowSnapshot = usage
         case .terminal(let terminal):
             setStreamingActivityStatus(nil)
+            setHeaderActivityPhase(nil)
+            headerRunHasCompleted = true
             flushPendingStreamingContent()
             withBatchedTranscriptDerivedState {
                 if !suppressUnwatermarkedContent, let text = terminal.text, !text.isEmpty {
@@ -2969,8 +3003,10 @@ final class ChatViewModel {
                 archiveDirectLiveTurnBeforeNewStart()
                 streamingReceivedByteCount = 0
                 setStreamingActivityStatus(String(localized: "Thinking"))
+                setHeaderActivityPhase(.working)
                 isReasoningChangeDeferred = false
                 directResponseComplete = false
+                headerRunHasCompleted = false
                 // Item 4: the elapsed readout starts when the gateway starts the
                 // response, alongside the live-activity run.
                 activeRunStartedAt = Date()
@@ -2986,7 +3022,17 @@ final class ChatViewModel {
                 applyDirectSessionInfo(raw.payload)
             } else if raw.type == "error" {
                 setStreamingActivityStatus(nil)
+                setHeaderActivityPhase(nil)
+                // Some errors are recoverable within a running turn. The
+                // controller retires the exact terminal pre-agent errors.
                 sendErrorMessage = raw.payload?.gatewayFields["message"]?.gatewayString ?? "Hermes reported an error."
+            } else if raw.type == "status.update",
+                      let phase = ChatActivityPhase.semanticStatus(kind: raw.payload?.gatewayFields["kind"]?.gatewayString) {
+                setHeaderActivityPhase(phase)
+            } else if raw.type == "status.update", headerActivityPhase == .summarizing,
+                      ChatActivityPhase.endsSemanticStatus(kind: raw.payload?.gatewayFields["kind"]?.gatewayString,
+                                                           text: raw.payload?.gatewayFields["text"]?.gatewayString) {
+                setHeaderActivityPhase(nil)
             } else if ["approval.request", "sudo.request", "secret.request"].contains(raw.type) {
                 // The live controller owns the typed prompt projection. The
                 // overlay observes that projection directly; do not route a
@@ -3001,6 +3047,19 @@ final class ChatViewModel {
         let next = bounded?.isEmpty == false ? bounded : nil
         guard next != streamingActivityStatus else { return }
         streamingActivityStatus = next
+    }
+
+    private func setHeaderActivityPhase(_ phase: ChatActivityPhase?) {
+        let generation = phase == .summarizing ? directRuntime?.connectionGeneration : nil
+        if headerActivityConnectionGeneration != generation {
+            headerActivityConnectionGeneration = generation
+        }
+        guard headerActivityPhase != phase else { return }
+        headerActivityPhase = phase
+    }
+
+    private var activeHeaderToolPhase: ChatActivityPhase? {
+        liveToolCalls.last(where: { !$0.isCompleted }).map { ChatActivityPhase.tool(named: $0.name) }
     }
 
     /// Terminal frames can omit reasoning (including interruption/error frames).
@@ -3560,6 +3619,7 @@ final class ChatViewModel {
         pendingStreamingBufferStartedAt = nil
         streamingReceivedByteCount = 0
         setStreamingActivityStatus(nil)
+        setHeaderActivityPhase(nil)
         streamingReentryNeedsCatchup = false
         streamingHapticPulseGate.reset()
         suppressedProgressUnitsRemaining = 0

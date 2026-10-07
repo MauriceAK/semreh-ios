@@ -955,7 +955,9 @@ struct ChatView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Configure \(viewModel.selectedProfileTitle)")
-        .accessibilityValue(headerSubtitle ?? viewModel.selectedProfileTitle)
+        .accessibilityValue([headerSubtitle ?? viewModel.selectedProfileTitle,
+                             internalChatRendererEnabled ? viewModel.displayedHeaderActivityPhase?.label : nil]
+            .compactMap { $0 }.joined(separator: ", "))
         .accessibilityHint("Choose a profile and configure this chat.")
         .accessibilityIdentifier("chatProfileConfiguration")
     }
@@ -968,14 +970,21 @@ struct ChatView: View {
                     .offset(y: 2)
             }
 
-            Text(viewModel.selectedProfileTitle)
-                .font(.system(.body, design: .rounded).weight(.medium))
-                .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
-                .truncationMode(.middle)
-                .minimumScaleFactor(0.75)
-                .padding(.horizontal, 12)
-                .frame(minHeight: 32)
-                .adaptiveGlass(.regular, isInteractive: true, fallbackMaterial: .thinMaterial, in: Capsule())
+            VStack(spacing: 0) {
+                Text(viewModel.selectedProfileTitle)
+                    .font(.system(.body, design: .rounded).weight(.medium))
+                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
+                    .truncationMode(.middle)
+                    .minimumScaleFactor(0.75)
+                    .frame(minHeight: internalChatRendererEnabled ? 22 : 32)
+
+                if internalChatRendererEnabled {
+                    ChatBotActivitySubtitle(viewModel: viewModel)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, internalChatRendererEnabled ? 2 : 0)
+            .adaptiveGlass(.regular, isInteractive: true, fallbackMaterial: .thinMaterial, in: Capsule())
         }
     }
 
@@ -4420,6 +4429,29 @@ enum PastedFileLoader {
         }.value
         try Task.checkCancellation()
         return file
+    }
+}
+
+/// Keep idle and active headers the same size. This child reads only coarse
+/// activity, never token/reasoning text or transcript revisions.
+private struct ChatBotActivitySubtitle: View {
+    let viewModel: ChatViewModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @ScaledMetric(relativeTo: .caption2) private var reservedHeight = 16.0
+
+    var body: some View {
+        let phase = viewModel.displayedHeaderActivityPhase
+        Text(phase?.label ?? ChatActivityPhase.working.label)
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
+            .contentTransition(.opacity)
+            .opacity(phase == nil ? 0 : 1)
+            .frame(height: reservedHeight)
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.16), value: phase)
+            // The encompassing configuration button exposes the phase once.
+            .accessibilityHidden(true)
     }
 }
 
