@@ -122,12 +122,13 @@ jobs:
           echo "- Build for testing: ${duration_seconds}s" >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Test without building
+        id: full-tests
         env:
           SIMULATOR_ID: ${{ steps.sim.outputs.id }}
         run: |
           set -euo pipefail
           start_seconds=${SECONDS}
-          python3 ci/watch_mounted_startup.py --simulator "${SIMULATOR_ID}" \
+          python3 ci/watch_mounted_startup.py --observe-only --simulator "${SIMULATOR_ID}" \
             --output MountedStartupDiagnostics > mounted-watchdog.log 2>&1 &
           watchdog_pid=$!
           trap 'kill -TERM "${watchdog_pid}" 2>/dev/null || true; wait "${watchdog_pid}" 2>/dev/null || true' EXIT
@@ -151,6 +152,111 @@ jobs:
         run: |
           python3 ci/export_mounted_readiness.py --result "${RESULT_BUNDLE_PATH}" \
             --output MountedStartupDiagnostics
+
+      - name: Select failed-startup diagnostics
+        id: startup-diagnostic
+        if: ${{ failure() && steps.full-tests.outcome == 'failure' }}
+        continue-on-error: true
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          path = Path("MountedStartupDiagnostics/safe/readiness.json")
+          report = json.loads(path.read_text()) if path.is_file() else {}
+          needed = any(item.get("receipt", {}).get("phase") == "startup: initial prompt running"
+                       for item in report.get("diagnostics", []))
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write("needed=" + str(needed).lower() + "\n")
+          PY
+
+      - name: Create separate startup diagnostic simulator
+        id: diagnostic-sim
+        if: ${{ failure() && steps.startup-diagnostic.outputs.needed == 'true' }}
+        continue-on-error: true
+        timeout-minutes: 4
+        env:
+          SOURCE_SIMULATOR_ID: ${{ steps.sim.outputs.id }}
+        run: |
+          python3 ci/diagnostic_simulator.py create --source "${SOURCE_SIMULATOR_ID}" \
+            --ownership MountedDiagnosticSimulator/ownership.json
+
+      - name: Validate capture outside scored tests
+        id: capture-validation
+        if: ${{ failure() && steps.diagnostic-sim.outputs.id != '' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        env:
+          SIMULATOR_ID: ${{ steps.diagnostic-sim.outputs.id }}
+        run: |
+          python3 ci/validate_mounted_capture.py --simulator "${SIMULATOR_ID}" \
+            --app "${PWD}/${DERIVED_DATA_PATH}/Build/Products/Debug-iphonesimulator/HermesMobile.app" \
+            --output MountedCaptureValidation
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          report = json.loads(Path("MountedCaptureValidation/safe/validation.json").read_text())
+          ready = report.get("captureSucceeded") is True and report.get("cleanupSucceeded") is True
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write("ready=" + str(ready).lower() + "\n")
+          PY
+
+      - name: Profile failed startup separately
+        if: ${{ failure() && steps.capture-validation.outputs.ready == 'true' }}
+        continue-on-error: true
+        timeout-minutes: 10
+        env:
+          SIMULATOR_ID: ${{ steps.diagnostic-sim.outputs.id }}
+        run: |
+          set -euo pipefail
+          python3 ci/watch_mounted_startup.py --max-samples 1 --sample-timeout 30 --simulator "${SIMULATOR_ID}" \
+            --output MountedFocusedDiagnostics > mounted-focused-watchdog.log 2>&1 &
+          watchdog_pid=$!
+          trap 'kill -TERM "${watchdog_pid}" 2>/dev/null || true; wait "${watchdog_pid}" 2>/dev/null || true' EXIT
+          # Diagnostic only: this cannot change the earlier full-suite outcome.
+          xcodebuild test-without-building \
+            -project "${PROJECT_PATH}" \
+            -scheme "${SCHEME}" \
+            -destination "platform=iOS Simulator,id=${SIMULATOR_ID}" \
+            -derivedDataPath "${DERIVED_DATA_PATH}" \
+            -resultBundlePath MountedFocusedResults.xcresult \
+            -parallel-testing-enabled NO \
+            -only-testing:HermesMobileTests/ChatTranscriptViewRestoreTests/testMountedSteerAcceptanceClearsUnchangedDraft \
+            -only-testing:HermesMobileTests/ChatTranscriptViewRestoreTests/testMountedSteerBackReopenRetiresOldCompletionOwnership \
+            -only-testing:HermesMobileTests/ChatTranscriptViewRestoreTests/testMountedSteerClearAndRetypeRetainsDraft \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Export focused diagnostic state
+        if: ${{ always() && steps.diagnostic-sim.outputs.id != '' }}
+        continue-on-error: true
+        run: |
+          python3 ci/export_mounted_readiness.py --result MountedFocusedResults.xcresult \
+            --output MountedFocusedDiagnostics
+
+      - name: Clean up separate diagnostic simulator
+        if: ${{ always() && steps.diagnostic-sim.outputs.id != '' }}
+        continue-on-error: true
+        run: |
+          python3 ci/diagnostic_simulator.py cleanup --ownership MountedDiagnosticSimulator/ownership.json
+
+      - name: Retain safe capture validation
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: mounted-capture-validation-safe
+          path: MountedCaptureValidation/safe
+          retention-days: 1
+          if-no-files-found: ignore
+
+      - name: Retain safe focused diagnostics
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: mounted-focused-safe
+          path: MountedFocusedDiagnostics/safe
+          retention-days: 1
+          if-no-files-found: ignore
 
       - name: Retain safe mounted-startup diagnostics
         if: always()

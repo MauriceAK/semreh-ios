@@ -24,6 +24,7 @@ MAX_PHASES = 32
 TRIGGER_SECONDS = 0.5
 MAX_MARKER_AGE_SECONDS = 30.0
 MAX_MARKER_UPTIME_SECONDS = 10 * 365 * 24 * 60 * 60
+MAX_CAPTURE_BYTES = 8 * 1024 * 1024
 running = True
 
 
@@ -103,6 +104,69 @@ def safe_call_graph(raw):
                                       "samples": int(frame[1]), "module": module, "operation": operation})
     return {"mainThreadIdentified": any(t["mainThread"] for t in threads), "threads": threads,
             "limits": "Capped call-tree frame counts are diagnostic weights, not compositor FPS or CPU percentages"}
+
+
+def bounded_private_text(path):
+    """Read only a bounded regular private file; never follow a replaced symlink."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "rb") as stream:
+            metadata = os.fstat(stream.fileno())
+            if not stat.S_ISREG(metadata.st_mode) or not 0 <= metadata.st_size <= MAX_CAPTURE_BYTES:
+                return None
+            raw = stream.read(MAX_CAPTURE_BYTES + 1)
+            return raw.decode(errors="replace") if len(raw) <= MAX_CAPTURE_BYTES else None
+    except OSError:
+        return None
+
+
+def sample_status_categories(raw):
+    """Literal categories only: never export sampler messages, symbols or paths."""
+    lower = raw.lower()
+    categories = []
+    for needles, category in (
+            (("operation not permitted", "permission denied", "requires root"), "permission-denied"),
+            (("task_for_pid", "unable to get task", "failed to get task"), "task-port-unavailable"),
+            (("no such process", "process not found", "does not exist"), "process-unavailable"),
+            (("sampling process",), "sampling-started"),
+            (("analyzing sample", "analysis of sampling"), "analysis-started"),
+            (("sample analysis of process", "sample saved", "written to"), "sample-output-reported"),
+            (("usage: sample",), "usage-error")):
+        if any(needle in lower for needle in needles):
+            categories.append(category)
+    return categories or (["unclassified-output"] if raw.strip() else ["empty-output"])
+
+
+def capture_sample(pid, private_output, index, timeout):
+    """One sampler invocation. Raw stack/stdout/stderr stay in the private directory."""
+    output = private_output / f"sample-{index:02d}.private.txt"
+    stdout = private_output / f"sample-{index:02d}.stdout.private.txt"
+    stderr = private_output / f"sample-{index:02d}.stderr.private.txt"
+    record = {}
+    started = time.monotonic()
+    with stdout.open("xb") as out, stderr.open("xb") as err:
+        os.chmod(stdout, 0o600)
+        os.chmod(stderr, 0o600)
+        try:
+            result = subprocess.run(["/usr/bin/sample", str(pid), "1", "10", "-file", str(output)],
+                                    stdout=out, stderr=err, timeout=timeout)
+            record["exitCode"] = result.returncode
+        except subprocess.TimeoutExpired:
+            record["sampleTimedOut"] = True
+        except OSError:
+            record["sampleLaunchFailed"] = True
+    record["durationSeconds"] = time.monotonic() - started
+    record["bytes"] = output.stat().st_size if output.is_file() else 0
+    raw = bounded_private_text(output)
+    if raw:
+        record["safeCallGraph"] = safe_call_graph(raw)
+    else:
+        record["unavailableReason"] = "raw-sample-missing-empty-or-exceeds-8MiB"
+    for name, path in (("stdout", stdout), ("stderr", stderr)):
+        record[name + "Bytes"] = path.stat().st_size
+        raw = bounded_private_text(path)
+        record[name + "Status"] = sample_status_categories(raw) if raw is not None else ["output-unreadable-or-exceeds-8MiB"]
+    return record
 
 
 def stop(_signum, _frame):
@@ -243,9 +307,16 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--simulator", required=True)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--observe-only", action="store_true", help="Record marker observations without invoking sample")
+    parser.add_argument("--max-samples", type=int, default=MAX_SAMPLES)
+    parser.add_argument("--sample-timeout", type=int, default=10)
     args = parser.parse_args()
     if not re.fullmatch(r"[A-Fa-f0-9-]{36}", args.simulator):
         parser.error("expected exact Simulator UDID")
+    if not 1 <= args.max_samples <= MAX_SAMPLES:
+        parser.error("max-samples must be between 1 and 4")
+    if not 10 <= args.sample_timeout <= 30:
+        parser.error("sample-timeout must be between 10 and 30 seconds")
     args.output.mkdir(parents=True, exist_ok=False)
     private_output = args.output / "private"
     safe_output = args.output / "safe"
@@ -253,10 +324,11 @@ def main():
     safe_output.mkdir()
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    receipt = {"schemaVersion": 2, "simulator": args.simulator,
+    receipt = {"schemaVersion": 3, "simulator": args.simulator, "observeOnly": args.observe_only,
                "triggerMarkerFileAgeSeconds": TRIGGER_SECONDS,
                "maximumMarkerFileAgeSeconds": MAX_MARKER_AGE_SECONDS,
-               "maximumSamples": MAX_SAMPLES, "sampleDurationSeconds": 1,
+               "maximumSamples": 0 if args.observe_only else args.max_samples, "sampleDurationSeconds": 1,
+               "sampleTimeoutSeconds": args.sample_timeout,
                "sampleIntervalMilliseconds": 10, "samples": [], "guardFailures": 0,
                "markersSeen": 0, "containersResolved": False,
                "maximumPhases": MAX_PHASES, "phases": [], "phaseLedgerTruncated": False,
@@ -266,6 +338,7 @@ def main():
     observed_birth = None
     sampled = set()
     phases = {}
+    sampling_disabled = args.observe_only
     watch_started = time.monotonic()
     deadline = watch_started + 3600
     try:
@@ -283,8 +356,8 @@ def main():
             key = (current["pid"], current["token"]) if current and current["active"] else None
             if key != observed:
                 observed = key
-                observed_birth = process_birth(current["pid"]) if key else None
-            if (phase and key not in sampled and len(receipt["samples"]) < MAX_SAMPLES
+                observed_birth = process_birth(current["pid"]) if key and not sampling_disabled else None
+            if (not sampling_disabled and phase and key not in sampled and len(receipt["samples"]) < args.max_samples
                     and age is not None and age >= TRIGGER_SECONDS):
                 # Both containers come from the same UDID as xcodebuild. Require
                 # the actual PID executable to match that exact bundle leaf.
@@ -305,7 +378,6 @@ def main():
                     continue
                 sampled.add(key)
                 index = len(receipt["samples"]) + 1
-                output = private_output / f"sample-{index:02d}.private.txt"
                 phase["sampleIndex"] = index
                 record = {"index": index, "phaseIndex": phase["index"], "pid": current["pid"],
                           "markerUptimeAtObservation": current["uptime"],
@@ -313,24 +385,15 @@ def main():
                           "observedElapsedSecondsAtTrigger": time.monotonic() - watch_started - phase["firstObservedElapsedSeconds"],
                           "ownedExecutableVerified": True, "processBirthRevalidated": True,
                           "samePhaseActiveAtSampleStart": True}
-                started = time.monotonic()
-                try:
-                    result = subprocess.run(["/usr/bin/sample", str(current["pid"]), "1", "10",
-                                             "-file", str(output)], capture_output=True, timeout=10)
-                    record["exitCode"] = result.returncode
-                except subprocess.TimeoutExpired:
-                    record["sampleTimedOut"] = True
+                record.update(capture_sample(current["pid"], private_output, index, timeout=args.sample_timeout))
+                if record.get("sampleTimedOut"):
+                    sampling_disabled = True
+                    receipt["samplingDisabledReason"] = "first-sample-timeout"
                 ended = marker(data / MARKER)
                 ended_age, ended_guard = marker_age(ended) if ended else (None, None)
                 observe_phase(receipt, phases, ended, ended_age, ended_guard, time.monotonic(), watch_started)
-                record["durationSeconds"] = time.monotonic() - started
                 record["samePhaseStillActiveAtSampleEnd"] = bool(
                     ended and ended["active"] and (ended["pid"], ended["token"]) == key)
-                record["bytes"] = output.stat().st_size if output.is_file() else 0
-                if 0 < record["bytes"] <= 8 * 1024 * 1024:
-                    record["safeCallGraph"] = safe_call_graph(output.read_text(errors="replace"))
-                else:
-                    record["unavailableReason"] = "raw-sample-missing-or-exceeds-8MiB"
                 receipt["samples"].append(record)
             time.sleep(0.05)
     except (OSError, ValueError, subprocess.TimeoutExpired) as error:
@@ -342,7 +405,7 @@ def main():
             receipt["unavailableReason"] = "owned-app-containers-not-resolved"
         elif not receipt["markersSeen"]:
             receipt["unavailableReason"] = "no-active-startup-marker-observed"
-        elif not receipt["samples"]:
+        elif not receipt["samples"] and not args.observe_only:
             receipt["unavailableReason"] = "no-owned-active-phase-reached-trigger"
         receipt["stopped"] = True
         (safe_output / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
