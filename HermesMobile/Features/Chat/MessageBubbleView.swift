@@ -120,13 +120,12 @@ struct MessageBubbleView: View {
             .opacity(localDelivery == nil || localDelivery == .accepted ? 1 : 0.6)
 
             if let localDelivery {
-                // Keep this attempt's one-line footprint after acknowledgement,
-                // so the following response does not jump when Sending clears.
+                // Keep this attempt's footprint through acknowledgement. Clear
+                // glyphs preserve pending accessibility without visible Sending.
                 Text(localDelivery.label ?? String(localized: "Sending…"))
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(localDelivery.showsVisibleLabel ? Color.secondary : Color.clear)
                     .lineLimit(1)
-                    .opacity(localDelivery == .accepted ? 0 : 1)
                     .accessibilityHidden(localDelivery == .accepted)
                     .accessibilityIdentifier("message-delivery-status")
             }

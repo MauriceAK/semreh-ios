@@ -433,6 +433,8 @@
 		994580EC78CF3BEC0D238F66 /* ChatMeasuredTranscriptSurfaceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0B6683D9ED814FB3F7FC2D7 /* ChatMeasuredTranscriptSurfaceTests.swift */; };
 		3DFD89433647764A2C93B642 /* ChatSurfaceAppearanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E272709E7AAF0F589BD556F /* ChatSurfaceAppearanceTests.swift */; };
 		35833301A55CAA50C2582A34 /* LocalSendPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 19BFC52531A7F12B19B863FC /* LocalSendPresentationTests.swift */; };
+		A7C107000000000000000001 /* ChatActivityPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7C107000000000000000002 /* ChatActivityPresentation.swift */; };
+		A7C107000000000000000101 /* ChatActivityPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7C107000000000000000102 /* ChatActivityPresentationTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -902,6 +904,8 @@
 		A0B6683D9ED814FB3F7FC2D7 /* ChatMeasuredTranscriptSurfaceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatMeasuredTranscriptSurfaceTests.swift; sourceTree = "<group>"; };
 		2E272709E7AAF0F589BD556F /* ChatSurfaceAppearanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSurfaceAppearanceTests.swift; sourceTree = "<group>"; };
 		19BFC52531A7F12B19B863FC /* LocalSendPresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalSendPresentationTests.swift; sourceTree = "<group>"; };
+		A7C107000000000000000002 /* ChatActivityPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatActivityPresentation.swift; sourceTree = "<group>"; };
+		A7C107000000000000000102 /* ChatActivityPresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatActivityPresentationTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -1097,6 +1101,7 @@
 				19BFC52531A7F12B19B863FC /* LocalSendPresentationTests.swift */,
 				2E272709E7AAF0F589BD556F /* ChatSurfaceAppearanceTests.swift */,
 				A0B6683D9ED814FB3F7FC2D7 /* ChatMeasuredTranscriptSurfaceTests.swift */,
+				A7C107000000000000000102 /* ChatActivityPresentationTests.swift */,
 				D91100000000000000000002 /* ChatTranscriptViewRestoreTests.swift */,
 				F21000000000000000000004 /* ChatFrameCallbackTimingAccumulatorTests.swift */,
 				C21300000000000000000006 /* StreamingTextFadeTests.swift */,
@@ -1390,6 +1395,7 @@
 				C042A000000000000000004 /* ChatComposerSelectorSheets.swift */,
 				C0DE20000000000000000002 /* ChatTactileButtonStyle.swift */,
 				C0DE21000000000000000002 /* ChatMotion.swift */,
+				A7C107000000000000000002 /* ChatActivityPresentation.swift */,
 				C0DE25000000000000000002 /* ChatScrollPolicy.swift */,
 				F21000000000000000000002 /* ChatFrameCallbackTimingProbe.swift */,
 				C0DE22000000000000000002 /* ChatHaptics.swift */,
@@ -2061,6 +2067,7 @@
 				C0DE12000000000000000005 /* TranscriptLinkPreviewView.swift in Sources */,
 				C0DE20000000000000000001 /* ChatTactileButtonStyle.swift in Sources */,
 				C0DE21000000000000000001 /* ChatMotion.swift in Sources */,
+				A7C107000000000000000001 /* ChatActivityPresentation.swift in Sources */,
 				C0DE25000000000000000001 /* ChatScrollPolicy.swift in Sources */,
 				F21000000000000000000001 /* ChatFrameCallbackTimingProbe.swift in Sources */,
 				C0DE22000000000000000001 /* ChatHaptics.swift in Sources */,
@@ -2215,6 +2222,7 @@
 					35833301A55CAA50C2582A34 /* LocalSendPresentationTests.swift in Sources */,
 					3DFD89433647764A2C93B642 /* ChatSurfaceAppearanceTests.swift in Sources */,
 					994580EC78CF3BEC0D238F66 /* ChatMeasuredTranscriptSurfaceTests.swift in Sources */,
+					A7C107000000000000000101 /* ChatActivityPresentationTests.swift in Sources */,
 				D91100000000000000000001 /* ChatTranscriptViewRestoreTests.swift in Sources */,
 				F21000000000000000000003 /* ChatFrameCallbackTimingAccumulatorTests.swift in Sources */,
 				C21300000000000000000005 /* StreamingTextFadeTests.swift in Sources */,

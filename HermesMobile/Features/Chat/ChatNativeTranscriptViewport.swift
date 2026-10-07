@@ -53,7 +53,7 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
         override func layoutSubviews() { willLayout?(); super.layoutSubviews(); didLayout?() }
     }
 
-    final class Controller: UIViewController, UICollectionViewDelegate {
+    final class Controller: UIViewController, UICollectionViewDelegate, UIGestureRecognizerDelegate {
         enum Item: Hashable { case header, row(String), footer }
         /// Scalar-only LRU. Heights are hints until this mount fits the hosted cell.
         struct EstimateKey: Hashable {
@@ -520,6 +520,15 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
         var motionTailSample: CGRect?
         var motionTailOffset: CGFloat?
         private var motionDeadlineConfirmationPending = false
+        private(set) var latestViewportSnapshot: UIView?
+        private var latestSnapshotAnchor: Anchor?
+        private var latestSnapshotOffset: CGPoint?
+        private var latestSnapshotSize = CGSize.zero
+        private(set) var latestSnapshotRevealStarted: CFTimeInterval?
+        private var latestNeedsDestinationFlush = false
+        let latestTransitionTouchGate = UILongPressGestureRecognizer()
+        private(set) var latestViewportTransitions = 0
+        private(set) var latestSnapshotFallbacks = 0
         var motionCompleted = 0
         var motionCancelled = 0
         var motionSamples = 0
@@ -641,6 +650,15 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             collection.contentInsetAdjustmentBehavior = .never
             collection.accessibilityIdentifier = "chat-transcript-scroll"
             collection.delegate = self
+            // A snapshot is a picture, not a second interactive transcript. A
+            // touch cancels that picture before an unseen destination control
+            // can act, while the collection's own pan can recognize concurrently.
+            latestTransitionTouchGate.minimumPressDuration = 0
+            latestTransitionTouchGate.cancelsTouchesInView = true
+            latestTransitionTouchGate.delaysTouchesBegan = true
+            latestTransitionTouchGate.delegate = self
+            latestTransitionTouchGate.addTarget(self, action: #selector(latestTransitionTouchBegan(_:)))
+            collection.addGestureRecognizer(latestTransitionTouchGate)
             collection.register(Cell.self, forCellWithReuseIdentifier: "rich")
             view.addSubview(collection)
             collection.translatesAutoresizingMaskIntoConstraints = false
@@ -908,6 +926,11 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             } else if presentationSuspended {
                 // A covered same-scope reader can return to the existing host.
                 return
+            } else if latestNeedsDestinationFlush {
+                // Keep the outgoing viewport stable until destination rows are
+                // mounted. Opening canonical formatting here would refit content
+                // which a distant Latest is about to discard.
+                held = true
             } else if explicitLatestOwnsViewport {
                 held = false
             } else if restoresReader {
@@ -1373,6 +1396,7 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             disableNestedScrollToTop(in: collection)
             if viewportSize != collection.bounds.size || viewportInsets != collection.adjustedContentInset {
                 if viewportSize != .zero { immediateFollowRevision = input.revision }
+                if latestViewportSnapshot != nil { cancelMotion(reason: "viewport-change") }
                 cancelFollow()
                 viewportSize = collection.bounds.size
                 viewportInsets = collection.adjustedContentInset
@@ -1583,6 +1607,23 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             finishRestore(.cancelled)
             publish()
         }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+            gestureRecognizer === latestTransitionTouchGate && latestViewportSnapshot != nil
+                && isPresentationActive && !presentationSuspended
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+            (gestureRecognizer === latestTransitionTouchGate && otherGestureRecognizer === collection.panGestureRecognizer)
+                || (otherGestureRecognizer === latestTransitionTouchGate && gestureRecognizer === collection.panGestureRecognizer)
+        }
+
+        @objc func latestTransitionTouchBegan(_ recognizer: UILongPressGestureRecognizer) {
+            guard recognizer.state == .began, latestViewportSnapshot != nil else { return }
+            cancelMotion(reason: "interaction")
+            publish()
+        }
         func scrollViewDidScroll(_ scrollView: UIScrollView) {
             // Native callback count is telemetry, never a frame-rate estimate.
             if motionLink != nil { motionSamples += 1 }
@@ -1742,6 +1783,36 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
                 a: input.ids.count, b: markdownPresentationInteraction.canonicalPreparationCount,
                 c: markdownPresentationInteraction.canonicalCommitCount)
 #endif
+            let animated = !input.environment.accessibilityReduceMotion && !reduceMotionEnabled()
+            if animated, input.environment.usesMuseChatSurface,
+               ChatMotion.usesLatestViewportTransition(
+                    distance: bottomOffset - collection.contentOffset.y,
+                    viewportHeight: collection.bounds.height),
+               !realizedTailArrival {
+                // Capture only what is already displayed. No offscreen message
+                // preparation or full-history rendering belongs on this path.
+                if let snapshot = collection.snapshotView(afterScreenUpdates: false) {
+                    latestSnapshotAnchor = currentAnchor()
+                    latestSnapshotOffset = collection.contentOffset
+                    latestSnapshotSize = collection.bounds.size
+                    snapshot.frame = collection.frame
+                    snapshot.isUserInteractionEnabled = false
+                    snapshot.accessibilityElementsHidden = true
+                    view.insertSubview(snapshot, aboveSubview: collection)
+                    latestViewportSnapshot = snapshot
+                    latestNeedsDestinationFlush = true
+                    latestViewportTransitions += 1
+                } else {
+                    // A failed capture retains the existing visible glide; it
+                    // must not expose an unprepared destination as a blank jump.
+                    latestSnapshotFallbacks += 1
+                }
+            }
+#if DEBUG
+            ChatPerformanceInvalidationProbe.shared?.record("native_latest_transition",
+                a: latestViewportSnapshot == nil ? 0 : 1,
+                b: latestViewportTransitions, c: latestSnapshotFallbacks)
+#endif
             explicitLatestOwnsViewport = true
             ownership = .following
             // Claim ownership before stopping UIKit: it can synchronously deliver
@@ -1754,11 +1825,11 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
                 collection.setContentOffset(visibleOffset, animated: false)
                 correcting = wasCorrecting
             }
-            flushDeferredStreamingRows()
+            if !latestNeedsDestinationFlush { flushDeferredStreamingRows() }
             setStreamingInteraction(false)
             systemTopReaderIntent = false
             systemTopEchoCancellationToken = nil
-            guard !input.environment.accessibilityReduceMotion, !reduceMotionEnabled() else {
+            guard animated else {
                 collection.setNeedsLayout()
 #if DEBUG
                 ChatPerformanceInvalidationProbe.shared?.record("native_latest_no_motion", a: 0)
@@ -1766,6 +1837,7 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
                 return
             }
             guard !realizedTailArrival else {
+                removeLatestViewportSnapshot(restoreReader: false)
 #if DEBUG
                 ChatPerformanceInvalidationProbe.shared?.record("native_latest_no_motion", a: 1)
 #endif
@@ -1776,16 +1848,48 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             motionTailSample = nil
             motionTailOffset = nil
             motionDeadlineConfirmationPending = false
+            latestSnapshotRevealStarted = nil
 #if DEBUG
             debugMotionReceipt = "started"
 #endif
             let link = CADisplayLink(target: MotionTarget(self), selector: #selector(MotionTarget.tick(_:)))
             motionLink = link
+            let epoch = generation, presentation = presentationEpoch, scope = input.scope
+            if latestViewportSnapshot != nil {
+                // The outgoing picture covers this destination-only work. Open
+                // its canonical gate before scheduling the first display tick;
+                // the clock and link already own any reentrant layout callbacks.
+                let finishObservations = beginObservationBatch()
+                defer { finishObservations() }
+                collection.layoutIfNeeded()
+                guard motionLink === link, !stopped, !presentationSuspended,
+                      generation == epoch, presentationEpoch == presentation, input.scope == scope else { return }
+                collection.setContentOffset(CGPoint(x: collection.contentOffset.x,
+                    y: bottomOffset), animated: false)
+                collection.layoutIfNeeded()
+                guard motionLink === link, !stopped, !presentationSuspended,
+                      generation == epoch, presentationEpoch == presentation, input.scope == scope else { return }
+                if latestNeedsDestinationFlush {
+                    // Old visible rows have left realization; only held rows
+                    // still mounted at the destination need synchronous work.
+                    latestNeedsDestinationFlush = false
+                    flushDeferredStreamingRows()
+                    setStreamingInteraction(false)
+                }
+                // Leave both tail samples empty: only separate display ticks
+                // may confirm stable arrival and start the existing reveal.
+            }
+            guard motionLink === link, !stopped, !presentationSuspended,
+                  generation == epoch, presentationEpoch == presentation, input.scope == scope else { return }
             link.add(to: .main, forMode: .common)
             publish()
         }
         func advanceMotion(_ link: CADisplayLink) {
             guard motionLink === link, isPresentationActive, !presentationSuspended else { return }
+#if DEBUG
+            let tickProbe = ChatPerformanceInvalidationProbe.shared
+            tickProbe?.record("native_latest_tick_begin")
+#endif
             // Only this synchronous invocation owns suppression. Clear before the
             // final observation, including cancellation and Reduce Motion exits.
             let epoch = generation, presentation = presentationEpoch, scope = input.scope
@@ -1800,6 +1904,7 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
                 motionPublishComputations += publishComputations - publicationsBefore
                 motionDescendantScanPasses += descendantScanPasses - scansBefore
 #if DEBUG
+                tickProbe?.record("native_latest_tick_end")
                 if completedLatestForProbe {
                     // Timestamp after the final tick's fitting/publication work;
                     // link.timestamp would omit a synchronous stall inside it.
@@ -1824,7 +1929,8 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             let t = min(1, CGFloat(elapsed / ChatMotion.scrollToLatestDuration))
             // Zero velocity at both ends avoids the abrupt cubic ease-out launch.
             let eased = t * t * (3 - 2 * t)
-            let fraction = motionProgress < 1 ? min(1, (eased - motionProgress) / (1 - motionProgress)) : 1
+            let fraction = latestViewportSnapshot != nil ? 1
+                : (motionProgress < 1 ? min(1, (eased - motionProgress) / (1 - motionProgress)) : 1)
             motionProgress = eased
             let current = collection.contentOffset.y
             let y = current + (bottomOffset - current) * fraction
@@ -1832,12 +1938,46 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             collection.layoutIfNeeded()
             guard motionLink === link, !stopped, !presentationSuspended,
                   generation == epoch, presentationEpoch == presentation, input.scope == scope else { return }
+            if latestNeedsDestinationFlush {
+                // The old visible rows have now left realization. Only a held
+                // row still visible at the destination needs synchronous work.
+                latestNeedsDestinationFlush = false
+                flushDeferredStreamingRows()
+                setStreamingInteraction(false)
+                guard motionLink === link, !stopped, !presentationSuspended,
+                      generation == epoch, presentationEpoch == presentation, input.scope == scope else { return }
+            }
             let tail = dataSource.indexPath(for: .footer).flatMap { collection.cellForItem(at: $0) }
             // A second realized, unchanged sample proves arrival after self-sizing.
-            if t == 1, realizedTailArrival, let tail,
-               motionTailSample == tail.frame, motionTailOffset == collection.contentOffset.y {
+            let stableTail = realizedTailArrival && tail != nil
+                && motionTailSample == tail?.frame && motionTailOffset == collection.contentOffset.y
+            var visualFinished = t == 1
+            if let snapshot = latestViewportSnapshot {
+                if stableTail, latestSnapshotRevealStarted == nil {
+                    latestSnapshotRevealStarted = elapsed
+#if DEBUG
+                    ChatPerformanceInvalidationProbe.shared?.record("native_latest_destination_ready",
+                        a: motionTicks, b: input.ids.count)
+#endif
+                }
+                visualFinished = false
+                if let started = latestSnapshotRevealStarted, stableTail {
+                    // A late fit gets only the budget still available. A changed
+                    // tail pauses the outgoing picture and must reconfirm before
+                    // any further reveal, including its final removal.
+                    let duration = min(ChatMotion.latestViewportTransitionDuration, max(0, 0.9 - started))
+                    let progress = duration > 0 ? min(1, max(0, (elapsed - started) / duration)) : 1
+                    let eased = CGFloat(progress * progress * (3 - 2 * progress))
+                    snapshot.alpha = 1 - eased
+                    snapshot.transform = CGAffineTransform(translationX: 0,
+                        y: -ChatMotion.latestViewportTransitionTravel(viewportHeight: latestSnapshotSize.height) * eased)
+                    visualFinished = progress == 1
+                }
+            }
+            if visualFinished, stableTail {
                 motionLink?.invalidate()
                 motionLink = nil
+                removeLatestViewportSnapshot(restoreReader: false)
                 motionCompleted += 1
                 motionDeadlineConfirmationPending = false
 #if DEBUG
@@ -1876,7 +2016,10 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             explicitLatestOwnsViewport = false
             // Retain the token until its parent echo is consumed. Cancellation
             // must not turn that queued same-tap echo into a fresh follow command.
-            guard let link = motionLink else { return }
+            guard let link = motionLink else {
+                removeLatestViewportSnapshot(restoreReader: true)
+                return
+            }
 #if DEBUG
             recordDebugMotion(reason, elapsed: elapsed ?? max(0, CACurrentMediaTime() - motionStarted))
 #endif
@@ -1884,8 +2027,9 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             link.invalidate()
             motionLink = nil
             motionCancelled += 1
-            anchor = currentAnchor()
             ownership = .reading
+            removeLatestViewportSnapshot(restoreReader: true)
+            anchor = currentAnchor()
             motionTailSample = nil
             motionTailOffset = nil
 #if DEBUG
@@ -1893,6 +2037,41 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
                 a: reason == "exhausted" ? 2 : (reason == "interaction" ? 1 : 0),
                 b: motionCancelled, c: markdownPresentationInteraction.canonicalCommitCount)
 #endif
+        }
+
+        private func removeLatestViewportSnapshot(restoreReader: Bool) {
+            guard let snapshot = latestViewportSnapshot else { return }
+            let restore = restoreReader && snapshot.alpha == 1
+            let offset = latestSnapshotOffset
+            let target = latestSnapshotAnchor
+            // Retire ownership before layout: a fitting callback can suspend,
+            // replace or stop this controller while the old picture still covers
+            // restoration. Reentrant cancellation must not restore it twice.
+            latestViewportSnapshot = nil
+            latestSnapshotAnchor = nil
+            latestSnapshotOffset = nil
+            latestSnapshotSize = .zero
+            latestSnapshotRevealStarted = nil
+            latestNeedsDestinationFlush = false
+            if restore, let offset {
+                // A touch before reveal belongs to the still-displayed reader,
+                // not the destination hidden behind its snapshot.
+                let wasCorrecting = correcting
+                let epoch = generation, scope = input.scope
+                correcting = true
+                ownership = .reading
+                synchronizeCanonicalPresentationHold()
+                collection.setContentOffset(offset, animated: false)
+                collection.layoutIfNeeded()
+                if !stopped, generation == epoch, input.scope == scope,
+                   let target, indices[target.id] != nil {
+                    anchor = target
+                    _ = align(target)
+                    collection.layoutIfNeeded()
+                }
+                correcting = wasCorrecting
+            }
+            snapshot.removeFromSuperview()
         }
         @objc func jumpToLatest() {
             guard isPresentationActive, !presentationSuspended,

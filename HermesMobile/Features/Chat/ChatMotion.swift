@@ -26,6 +26,19 @@ enum ChatMotion {
 
     // Explicit user navigation has a longer glide than streaming follow.
     static let scrollToLatestDuration: TimeInterval = 0.65
+    /// Nearby navigation keeps its spatial glide. A distant reader does not
+    /// need to realize every intervening message to reach the current tail.
+    static func usesLatestViewportTransition(distance: CGFloat, viewportHeight: CGFloat) -> Bool {
+        distance.isFinite && viewportHeight.isFinite && viewportHeight > 0
+            && distance > viewportHeight * 3
+    }
+
+    static let latestViewportTransitionDuration: TimeInterval = 0.15
+
+    static func latestViewportTransitionTravel(viewportHeight: CGFloat) -> CGFloat {
+        min(96, max(0, viewportHeight * 0.12))
+    }
+
     static func scrollToLatest(reduceMotion: Bool) -> Animation? {
         reduceMotion ? nil : .easeInOut(duration: scrollToLatestDuration)
     }
