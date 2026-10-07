@@ -151,6 +151,9 @@ struct AppShellView: View {
                     pendingNewChatRequest = NewChatRequest(profileName: name)
                     selectedSurface = .sessions
                 }
+                // Rehydrate before the first frame for a different server, including
+                // its detail-sheet state, even when this shell keeps its identity.
+                .id(server)
                 .navigationTitle("Bots")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
@@ -238,10 +241,7 @@ private struct AppShellBotsView: View {
     let onAPIError: (Error) -> Void
     let onViewSessions: ((String) -> Void)?
     let onOpenChat: (String) -> Void
-    @State private var profiles: [ProfileSummary] = []
-    @State private var isLoading = true
-    @State private var loadFailed = false
-    @State private var loadIdentity: AppShellLoadIdentity?
+    @State private var catalog: AppShellBotCatalogState
     @State private var selectedProfileForDetails: ProfileSummary?
 
     init(
@@ -254,20 +254,28 @@ private struct AppShellBotsView: View {
         self.onAPIError = onAPIError
         self.onViewSessions = onViewSessions
         self.onOpenChat = onOpenChat
+        _catalog = State(initialValue: AppShellBotCatalogState(
+            server: server, cachedProfiles: CacheStore.cachedBotProfiles(serverURL: server)
+        ))
     }
 
     var body: some View {
         List {
             Section("Your Team") {
-                if isLoading && profiles.isEmpty {
-                    ProgressView("Loading bots")
-                } else if loadFailed && profiles.isEmpty {
-                    Text("Bots couldn’t be loaded.").foregroundStyle(.secondary)
-                    Button("Retry") { Task { await load() } }
-                } else if profiles.isEmpty {
+                if catalog.showsSkeleton {
+                    ForEach(0..<3) { index in
+                        AppShellBotSkeletonRow(index: index)
+                    }
+                } else if catalog.showsRetry {
+                    Button("Retry", systemImage: "arrow.clockwise") { Task { await load() } }
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel("Retry loading bots")
+                        .accessibilityIdentifier("bots-retry")
+                } else if catalog.profiles.isEmpty {
                     Text("No server profiles are available.").foregroundStyle(.secondary)
                 } else {
-                    ForEach(profiles, id: \.normalizedName) { profile in
+                    ForEach(catalog.profiles, id: \.normalizedName) { profile in
                         if let name = profile.normalizedName {
                             botProfileRow(profile, name: name)
                         }
@@ -280,10 +288,7 @@ private struct AppShellBotsView: View {
         .scrollContentBackground(.hidden)
         .background { SemrehBackdrop().ignoresSafeArea() }
         .task(id: server) { await load() }
-        .onDisappear {
-            loadIdentity = nil
-            isLoading = false
-        }
+        .onDisappear { catalog.cancelLoad() }
         .refreshable { await load() }
         .sheet(item: $selectedProfileForDetails) { profile in
             NavigationStack {
@@ -353,22 +358,118 @@ private struct AppShellBotsView: View {
     }
 
     @MainActor private func load() async {
+        let cachedProfiles = catalog.server == server ? nil : CacheStore.cachedBotProfiles(serverURL: server)
+        let request = catalog.beginLoad(server: server, cachedProfiles: cachedProfiles)
+        let cacheGeneration = CacheStore.botCatalogWriteGeneration
+        defer { catalog.finishLoad(request) }
+        do {
+            let response = try await APIClient(baseURL: server).directProfiles()
+            guard catalog.accept(response.profiles ?? [], for: request, cancelled: Task.isCancelled) else { return }
+            CacheStore.cacheBotProfiles(catalog.profiles, serverURL: server,
+                                        expectedGeneration: cacheGeneration)
+        } catch {
+            guard catalog.fail(request, cancelled: Task.isCancelled) else { return }
+            onAPIError(error)
+        }
+    }
+}
+
+private struct AppShellBotSkeletonRow: View {
+    let index: Int
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var shimmers = false
+
+    private var shapes: some View {
+        HStack(spacing: 14) {
+            Circle().frame(width: 48, height: 48)
+            VStack(alignment: .leading, spacing: 8) {
+                Capsule().frame(width: index == 1 ? 112 : 88, height: 13)
+                Capsule().frame(width: index == 2 ? 148 : 128, height: 10)
+            }
+            Spacer()
+        }
+        .padding(.vertical, 4)
+    }
+
+    var body: some View {
+        shapes
+            .foregroundStyle(Color.primary.opacity(0.08))
+            .overlay {
+                if !reduceMotion, scenePhase == .active {
+                    GeometryReader { geometry in
+                        LinearGradient(colors: [.clear, Color.primary.opacity(0.08), .clear],
+                                       startPoint: .leading, endPoint: .trailing)
+                            .frame(width: geometry.size.width * 0.7)
+                            .offset(x: shimmers ? geometry.size.width : -geometry.size.width)
+                    }
+                    .mask(shapes)
+                }
+            }
+            .animation(reduceMotion || scenePhase != .active ? nil
+                       : .linear(duration: 1.6).repeatForever(autoreverses: false), value: shimmers)
+            .onAppear { shimmers = !reduceMotion && scenePhase == .active }
+            .onChange(of: reduceMotion) { shimmers = !reduceMotion && scenePhase == .active }
+            .onChange(of: scenePhase) { shimmers = !reduceMotion && scenePhase == .active }
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+    }
+}
+
+/// Keeps the last authoritative catalog while a fresh read is outstanding. An
+/// empty successful response remains authoritative; failure never erases rows.
+struct AppShellBotCatalogState {
+    private(set) var server: URL
+    private(set) var profiles: [ProfileSummary]
+    private(set) var hasSnapshot: Bool
+    private(set) var isLoading = true
+    private(set) var loadIdentity: AppShellLoadIdentity?
+
+    init(server: URL, cachedProfiles: [ProfileSummary]?) {
+        self.server = server
+        profiles = AppShellBotCatalog.uniqueProfiles(cachedProfiles ?? [])
+        hasSnapshot = cachedProfiles != nil
+    }
+
+    var showsSkeleton: Bool { isLoading && !hasSnapshot }
+    var showsRetry: Bool { !isLoading && !hasSnapshot }
+
+    mutating func beginLoad(server: URL, cachedProfiles: [ProfileSummary]? = nil) -> AppShellLoadIdentity {
+        if self.server != server {
+            self = Self(server: server, cachedProfiles: cachedProfiles)
+        }
         let request = AppShellLoadIdentity(server: server)
         loadIdentity = request
         isLoading = true
-        loadFailed = false
-        defer {
-            if loadIdentity == request { isLoading = false }
-        }
-        do {
-            let response = try await APIClient(baseURL: server).directProfiles()
-            guard request.accepts(current: loadIdentity, cancelled: Task.isCancelled) else { return }
-            profiles = AppShellBotCatalog.uniqueProfiles(response.profiles ?? [])
-        } catch {
-            guard request.accepts(current: loadIdentity, cancelled: Task.isCancelled) else { return }
-            loadFailed = true
-            onAPIError(error)
-        }
+        return request
+    }
+
+    mutating func accept(_ profiles: [ProfileSummary], for request: AppShellLoadIdentity,
+                         cancelled: Bool) -> Bool {
+        guard request.accepts(current: loadIdentity, cancelled: cancelled), request.server == server else { return false }
+        self.profiles = AppShellBotCatalog.uniqueProfiles(profiles)
+        hasSnapshot = true
+        isLoading = false
+        loadIdentity = nil
+        return true
+    }
+
+    mutating func fail(_ request: AppShellLoadIdentity, cancelled: Bool) -> Bool {
+        guard request.accepts(current: loadIdentity, cancelled: cancelled), request.server == server else { return false }
+        isLoading = false
+        loadIdentity = nil
+        return true
+    }
+
+    mutating func finishLoad(_ request: AppShellLoadIdentity) {
+        guard loadIdentity == request else { return }
+        loadIdentity = nil
+        isLoading = false
+    }
+
+    mutating func cancelLoad() {
+        loadIdentity = nil
+        isLoading = false
     }
 }
 

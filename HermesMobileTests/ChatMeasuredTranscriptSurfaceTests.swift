@@ -7,6 +7,62 @@ import XCTest
 final class ChatMeasuredTranscriptSurfaceTests: XCTestCase {
     private typealias Owner = ChatNativeTranscriptViewport.Controller
 
+    func testMountedDeliveryChangesReconfigureOneUserRowWithoutAcknowledgementHeightJump() async throws {
+        let scope = UUID().uuidString
+        let message = ChatMessage(role: "user", content: "Keep this message stable", timestamp: 1,
+                                  messageId: "row-0")
+        var configured: [LocalMessageDelivery] = []
+        func input(_ delivery: LocalMessageDelivery, revision: Int) -> ChatNativeTranscriptViewport {
+            var environment = EnvironmentValues()
+            environment.usesMuseChatSurface = true
+            environment.colorScheme = .dark
+            environment.museSurfaceUsesDefaultAccent = true
+            return viewport(ids: ["row-0"], scope: scope, environment: environment,
+                makeRow: { _ in
+                    configured.append(delivery)
+                    return AnyView(MessageBubbleView(message: message, localDelivery: delivery))
+                }, revision: revision, rowRevision: { _ in
+                    StableViewportRowRevision(
+                        message: TranscriptMessage(loadedIndex: -1, renderID: "row-0", anchorID: "row-0",
+                                                   message: message, localDelivery: delivery),
+                        outgoingInsertionEvent: nil, allowsOutgoingMotion: false,
+                        reasoningGroups: [], toolCallGroups: [], liveReasoningText: "", liveToolCalls: [],
+                        streamingAssistantMessageID: nil, liveTokensPerSecond: nil,
+                        localAttachmentPreviews: nil, compressionReferenceCard: nil, listeningMessageID: nil,
+                        showsThinkingAndToolCards: false, isViewingCachedData: false, hasActiveStream: false,
+                        isRegeneratingMessage: false, isEditingMessage: false, isForkingMessage: false,
+                        transcriptMediaCacheNamespace: scope)
+                })
+        }
+        let fixture = try await mountStreaming(viewport: input(.sending, revision: 0))
+        defer { unmountStreaming(fixture) }
+        fixture.owner.overrideUserInterfaceStyle = .dark
+        fixture.owner.view.backgroundColor = .systemBackground
+        let path = try XCTUnwrap(fixture.owner.dataSource.indexPath(for: .row("row-0")))
+        let cell = try XCTUnwrap(fixture.collection.cellForItem(at: path))
+        let height = try XCTUnwrap(fixture.collection.layoutAttributesForItem(at: path)).frame.height
+        XCTAssertGreaterThan(height, 30)
+        for (index, delivery) in [LocalMessageDelivery.notSent, .unconfirmed, .sending, .accepted].enumerated() {
+            fixture.owner.update(input(delivery, revision: index + 1))
+            for _ in 0..<4 {
+                fixture.owner.view.layoutIfNeeded()
+                fixture.collection.layoutIfNeeded()
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            XCTAssertEqual(configured.last, delivery, "A status-only change must reach the mounted production bubble")
+            XCTAssertTrue(fixture.collection.cellForItem(at: path) === cell)
+            XCTAssertEqual(try XCTUnwrap(fixture.collection.layoutAttributesForItem(at: path)).frame.height,
+                           height, accuracy: 0.5, "Delivery changes must keep the one-line footer footprint")
+            let image = UIGraphicsImageRenderer(bounds: fixture.owner.view.bounds).image { _ in
+                fixture.owner.view.drawHierarchy(in: fixture.owner.view.bounds, afterScreenUpdates: true)
+            }
+            let attachment = XCTAttachment(image: image)
+            attachment.name = "controlled-production-bubble-\(delivery)"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+    }
+
     func testMuseStreamingBodyWaitsThroughDragAndMomentumThenKeepsCurrentIntraRowAnchor() async throws {
         let scope = UUID().uuidString
         let receipt = StreamingReceipt()
@@ -485,15 +541,52 @@ final class ChatMeasuredTranscriptSurfaceTests: XCTestCase {
         controller.loadViewIfNeeded()
         defer { controller.stop() }
 
-        for height: CGFloat in [772, 437] {
-            controller.view.frame = CGRect(x: 0, y: 0, width: 390, height: height)
+        for size in [CGSize(width: 390, height: 772), CGSize(width: 430, height: 437)] {
+            controller.view.frame = CGRect(origin: .zero, size: size)
             controller.view.setNeedsLayout()
             controller.view.layoutIfNeeded()
             XCTAssertEqual(controller.collection.contentInset.top, 72)
-            XCTAssertEqual(controller.latest.frame.maxY, height - 164, accuracy: 0.5)
+            XCTAssertEqual(controller.latest.frame.maxY, size.height - 164, accuracy: 0.5)
+            XCTAssertEqual(controller.latest.frame.midX, size.width / 2, accuracy: 0.5,
+                "Latest stays centered when keyboard or rotation changes the viewport")
+            XCTAssertGreaterThanOrEqual(controller.latest.bounds.width, 44)
+            XCTAssertGreaterThanOrEqual(controller.latest.bounds.height, 44)
             XCTAssertEqual(controller.input.bottomInset, 152,
                 "Keyboard-sized viewport changes must not add another keyboard reservation")
         }
+    }
+
+    func testLatestSmallVisualKeepsOneFullTouchAndAccessibilityTargetInRTLAndLargeText() throws {
+        let controller = Owner(input: viewport(ids: ["row-0"], top: 72, bottom: 152, latest: 164))
+        controller.loadViewIfNeeded()
+        defer { controller.stop() }
+        controller.traitOverrides.preferredContentSizeCategory = .accessibilityExtraExtraExtraLarge
+        controller.traitOverrides.accessibilityContrast = .high
+        controller.view.semanticContentAttribute = .forceRightToLeft
+        controller.view.frame = CGRect(x: 0, y: 0, width: 430, height: 600)
+        controller.view.setNeedsLayout()
+        controller.view.layoutIfNeeded()
+
+        let button = controller.latest
+        let visual = try XCTUnwrap(button.subviews.first(where: { $0.accessibilityElementsHidden }))
+        XCTAssertEqual(button.frame.midX, 215, accuracy: 0.5)
+        XCTAssertEqual(button.frame.maxY, 436, accuracy: 0.5)
+        XCTAssertEqual(visual.bounds.width, 32, accuracy: 0.5)
+        XCTAssertEqual(visual.bounds.height, 32, accuracy: 0.5)
+        XCTAssertEqual(visual.center.x, button.bounds.midX, accuracy: 0.5)
+        XCTAssertEqual(visual.center.y, button.bounds.midY, accuracy: 0.5)
+        XCTAssertFalse(visual.isUserInteractionEnabled, "Decorative glass must not intercept Latest taps")
+        XCTAssertTrue(button.isAccessibilityElement)
+        XCTAssertEqual(button.accessibilityIdentifier, "chat-scroll-to-bottom")
+        XCTAssertEqual(button.accessibilityLabel, "Scroll to latest message")
+        XCTAssertTrue(button.accessibilityTraits.contains(.button))
+        for point in [CGPoint(x: 1, y: 22), CGPoint(x: 43, y: 22),
+                      CGPoint(x: 22, y: 1), CGPoint(x: 22, y: 43)] {
+            XCTAssertTrue(button.point(inside: point, with: nil),
+                "The touch area outside the 32pt visual must remain usable")
+        }
+        XCTAssertEqual(button.actions(forTarget: controller, forControlEvent: .touchUpInside)?.count, 1,
+            "The existing UIKit Latest action remains the only activation owner")
     }
 
     func testTypedRestoreKeepsReaderBelowTheMeasuredHeader() async throws {

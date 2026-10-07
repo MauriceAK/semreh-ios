@@ -396,7 +396,8 @@ struct StableViewportRowRevision: Equatable {
             contentParts: value.contentParts, reasoning: nil, attachments: value.attachments,
             turnTps: value.turnTps)
         return TranscriptMessage(loadedIndex: message.loadedIndex, renderID: message.renderID,
-            anchorID: message.anchorID, message: body, attachmentDisplayContent: message.attachmentDisplayContent)
+            anchorID: message.anchorID, message: body, attachmentDisplayContent: message.attachmentDisplayContent,
+            localDelivery: message.localDelivery)
     }
 }
 

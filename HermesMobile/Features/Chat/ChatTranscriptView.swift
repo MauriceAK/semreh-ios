@@ -5295,6 +5295,7 @@ private struct ChatTranscriptMessageBlock: View, Equatable {
                     loadTranscriptMediaData: loadTranscriptMediaData,
                     transcriptMediaCacheNamespace: transcriptMediaCacheNamespace,
                     attachmentDisplayContent: transcriptMessage.attachmentDisplayContent,
+                    localDelivery: transcriptMessage.localDelivery,
                     onPreviewAttachment: onPreviewAttachment,
                     onPreviewTranscriptMedia: onPreviewTranscriptMedia,
                     onToggleListening: onToggleListening,
@@ -5401,6 +5402,7 @@ private struct ChatTranscriptMessageRow: View {
     let loadTranscriptMediaData: (TranscriptMediaReference) async -> Data?
     let transcriptMediaCacheNamespace: String
     let attachmentDisplayContent: String?
+    let localDelivery: LocalMessageDelivery?
     let onPreviewAttachment: (MessageAttachment, Data?) -> Void
     let onPreviewTranscriptMedia: (TranscriptMediaReference) -> Void
     let onToggleListening: (MessageActionContext) -> Void
@@ -5458,6 +5460,7 @@ private struct ChatTranscriptMessageRow: View {
             loadTranscriptMediaData: loadTranscriptMediaData,
             transcriptMediaCacheNamespace: transcriptMediaCacheNamespace,
             attachmentDisplayContent: attachmentDisplayContent,
+            localDelivery: localDelivery,
             localAttachmentPreviews: localAttachmentPreviews,
             onPreviewAttachment: onPreviewAttachment,
             onPreviewTranscriptMedia: onPreviewTranscriptMedia,

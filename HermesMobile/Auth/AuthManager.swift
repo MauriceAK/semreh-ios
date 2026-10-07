@@ -542,9 +542,10 @@ final class AuthManager {
         }
     }
 
-    /// Deletes one server's local auth artifacts — its scoped custom headers and
-    /// its cookies — without touching the registry or the global `server_url` key.
+    /// Deletes one server's local auth artifacts and cached bot catalog without
+    /// touching the registry or the global `server_url` key.
     private func clearLocalArtifacts(for server: URL) {
+        CacheStore.clearBotCatalog(for: server)
         try? keychain.delete(.customHeaders, scope: server.absoluteString)
         try? keychain.delete(.officialAPIKey, scope: server.absoluteString)
         clearSessionCookies(for: server)

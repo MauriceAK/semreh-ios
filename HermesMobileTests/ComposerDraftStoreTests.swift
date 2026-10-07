@@ -1,6 +1,7 @@
 import XCTest
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 @testable import HermesMobile
 
 @MainActor
@@ -1179,7 +1180,7 @@ private func makeComposerSizingCoordinator(onHeight: @escaping (CGFloat) -> Void
 
 @MainActor
 final class ComposerProposalSizingTests: XCTestCase {
-    func testExternalClearRetiresCompositionAndSelectionWithoutReplacingFocusedEditor() async throws {
+    func testDocumentReplacementRetiresCompositionAndSelectionWithoutDismissingFocus() async throws {
         var draft = "First line\nSecond line "
         var heights: [CGFloat] = []
         let coordinator = ComposerTextView.Coordinator(
@@ -1226,6 +1227,184 @@ final class ComposerProposalSizingTests: XCTestCase {
         XCTAssertTrue(coordinator.synchronizeExternalText(draft, in: editor))
         XCTAssertEqual(Array(editor.text.utf8), Array(draft.utf8))
         XCTAssertTrue(editor.isFirstResponder)
+    }
+
+    func testMountedExternalClearKeepsKeyboardFocusAndNextDraftInput() async throws {
+        var draft = "First line\nالعربية and cafe\u{301} "
+        var focused = true
+        var accessibilityHidden = false
+        var focusWrites: [Bool] = []
+        var reportedHeight: CGFloat = 0
+        var pastedFiles = 0
+        var keyboardSends = 0
+        let makeInput = {
+            ComposerTextView(
+                text: Binding(get: { draft }, set: { draft = $0 }),
+                isFocused: Binding(get: { focused }, set: { focused = $0; focusWrites.append($0) }),
+                isDisabled: false, isAccessibilityHidden: accessibilityHidden,
+                isKeyboardSendEnabled: true, onKeyboardSend: { keyboardSends += 1 },
+                onHeightChange: { reportedHeight = $0 },
+                onPasteFileProviders: { pastedFiles += $0.count }, onPasteFileURLs: { _ in },
+                onPasteImageProviders: { _ in }, onPasteImages: { _ in }
+            ).environment(\.layoutDirection, .rightToLeft)
+        }
+        let host = UIHostingController(rootView: makeInput())
+        host.safeAreaRegions = []
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            .first(where: { $0.activationState == .foregroundActive }))
+        let previous = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        window.frame = scene.coordinateSpace.bounds
+        let container = UIViewController()
+        window.rootViewController = container
+        window.makeKeyAndVisible()
+        container.addChild(host)
+        container.view.addSubview(host.view)
+        host.didMove(toParent: container)
+        host.view.frame = CGRect(x: 0, y: 100, width: 280, height: 120)
+        let previousPasteboard = UIPasteboard.general.items
+        defer {
+            UIPasteboard.general.items = previousPasteboard
+            host.view.endEditing(true)
+            host.willMove(toParent: nil)
+            host.view.removeFromSuperview()
+            host.removeFromParent()
+            window.isHidden = true
+            window.rootViewController = nil
+            previous?.makeKeyAndVisible()
+        }
+        func refresh() async throws {
+            host.rootView = makeInput()
+            host.view.setNeedsLayout()
+            host.view.layoutIfNeeded()
+            try await Task.sleep(for: .milliseconds(100))
+            host.view.layoutIfNeeded()
+        }
+        try await refresh()
+        let original = try XCTUnwrap(findTextView(in: host.view) as? ComposerTextView.PastingTextView)
+        XCTAssertTrue(original.becomeFirstResponder())
+        try await Task.sleep(for: .milliseconds(350))
+        let stableContainer = try XCTUnwrap(original.superview)
+        let retiredCoordinator = original.delegate
+        original.selectedRange = NSRange(location: draft.utf16.count, length: 0)
+        original.setMarkedText("漢字", selectedRange: NSRange(location: 1, length: 0))
+        original.delegate?.textViewDidChange?(original)
+        XCTAssertNotNil(original.markedTextRange)
+        try await refresh()
+        XCTAssertTrue(findTextView(in: host.view) === original,
+                      "An ordinary binding echo must keep the active input-method document")
+        XCTAssertNotNil(original.markedTextRange)
+
+        let keyboardHide = expectation(description: "External clear must not hide the keyboard")
+        keyboardHide.isInverted = true
+        let observer = NotificationCenter.default.addObserver(forName: UIResponder.keyboardWillHideNotification,
+            object: nil, queue: .main) { _ in keyboardHide.fulfill() }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        focusWrites.removeAll()
+        draft = ""
+        try await refresh()
+        let editor = try XCTUnwrap(findTextView(in: host.view) as? ComposerTextView.PastingTextView)
+        XCTAssertFalse(editor === original, "The completed input document must retire its native decoration owner")
+        XCTAssertTrue(editor.superview === stableContainer)
+        XCTAssertNil(original.superview)
+        XCTAssertNil(original.delegate)
+        XCTAssertTrue(editor.isFirstResponder && focused)
+        XCTAssertFalse(focusWrites.contains(false), "Retiring the old document must not clear the new focus owner")
+        XCTAssertEqual(editor.text, "")
+        XCTAssertNil(editor.markedTextRange)
+        XCTAssertEqual(editor.selectedRange, NSRange(location: 0, length: 0))
+        XCTAssertEqual(editor.contentOffset, .zero)
+        XCTAssertEqual(editor.accessibilityIdentifier, "chat-composer-input")
+        XCTAssertTrue(editor.isAccessibilityElement)
+        XCTAssertEqual(stableContainer.subviews.compactMap { $0 as? UITextView }.count, 1)
+        XCTAssertEqual(editor.semanticContentAttribute, .forceRightToLeft)
+        XCTAssertEqual(editor.textAlignment, .right)
+        XCTAssertEqual(editor.autocorrectionType, original.autocorrectionType)
+        XCTAssertEqual(editor.spellCheckingType, original.spellCheckingType)
+        XCTAssertNotEqual(editor.autocorrectionType, .no)
+        XCTAssertNotEqual(editor.spellCheckingType, .no)
+        XCTAssertFalse(editor.scrollsToTop)
+        XCTAssertEqual(reportedHeight, max(22, min(120, ComposerTextView.contentHeight(for: editor, width: editor.bounds.width))))
+        // A queued callback from the removed leaf must not resurrect the sent
+        // draft, end focus, or report its old multiline geometry.
+        retiredCoordinator?.textViewDidChange?(original)
+        retiredCoordinator?.textViewDidEndEditing?(original)
+        let currentHeight = reportedHeight
+        (retiredCoordinator as? ComposerTextView.Coordinator)?.reportHeight(for: original, force: true)
+        XCTAssertEqual(draft, "")
+        XCTAssertTrue(focused)
+        XCTAssertEqual(reportedHeight, currentHeight)
+        try await refresh()
+        XCTAssertTrue(findTextView(in: host.view) === editor, "An already empty external document must not churn editors")
+        await fulfillment(of: [keyboardHide], timeout: 0.15)
+        NotificationCenter.default.removeObserver(observer)
+
+        let next = "cafe\u{301} 👩🏽‍💻 العربية\nsecond line"
+        UIPasteboard.general.string = next
+        editor.paste(nil)
+        // UIKit may load paste providers asynchronously. Wait for the actual
+        // document edit and its delegate-driven binding update before beginning
+        // another composition; a manual callback here observes the old empty
+        // document and lets the eventual paste interrupt the IME assertion.
+        func pasteCompletedExactly() -> Bool {
+            (editor.text ?? "").utf8.elementsEqual(next.utf8) && draft.utf8.elementsEqual(next.utf8)
+        }
+        let pasteDeadline = ProcessInfo.processInfo.systemUptime + 2
+        while !pasteCompletedExactly(), ProcessInfo.processInfo.systemUptime < pasteDeadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(Array((editor.text ?? "").utf8), Array(next.utf8))
+        XCTAssertEqual(Array(draft.utf8), Array(next.utf8))
+        guard pasteCompletedExactly() else { return }
+        editor.setMarkedText("漢字", selectedRange: NSRange(location: 1, length: 0))
+        editor.delegate?.textViewDidChange?(editor)
+        try await refresh()
+        XCTAssertTrue(findTextView(in: host.view) === editor)
+        XCTAssertNotNil(editor.markedTextRange, "The next draft must retain working IME composition")
+        editor.unmarkText()
+        draft += " dictated continuation"
+        try await refresh()
+        XCTAssertTrue(findTextView(in: host.view) === editor, "Voice/restored nonempty edits must keep the editor")
+        XCTAssertEqual(Array(editor.text.utf8), Array(draft.utf8))
+        XCTAssertTrue(editor.isFirstResponder)
+        let file = NSItemProvider(item: Data("file:///tmp/composer-fixture.txt".utf8) as NSData,
+                                  typeIdentifier: UTType.fileURL.identifier)
+        editor.pasteItemProviders([file])
+        XCTAssertEqual(pastedFiles, 1, "The new document must keep attachment paste routing")
+        let sendCommand = try XCTUnwrap(editor.keyCommands?.first {
+            $0.input == ComposerKeyboardCommand.input && $0.modifierFlags == ComposerKeyboardCommand.modifierFlags
+        })
+        let sendAction = try XCTUnwrap(sendCommand.action)
+        XCTAssertTrue(UIApplication.shared.sendAction(sendAction, to: editor, from: nil, for: nil))
+        XCTAssertEqual(keyboardSends, 1, "The replacement must retain the hardware keyboard Send callback")
+
+        editor.selectedRange = NSRange(location: 0, length: editor.text.utf16.count)
+        editor.deleteBackward()
+        editor.delegate?.textViewDidChange?(editor)
+        XCTAssertEqual(draft, "")
+        try await refresh()
+        XCTAssertTrue(findTextView(in: host.view) === editor,
+                      "Deleting the draft through UIKit is not an external clear")
+
+        draft = "A retained hidden-root draft"
+        try await refresh()
+        XCTAssertTrue(editor.isFirstResponder && focused)
+        // Hide and clear together while the editor still owns focus. The input
+        // itself must relinquish ownership even before the parent reconciles it.
+        accessibilityHidden = true
+        draft = ""
+        try await refresh()
+        let hiddenEditor = try XCTUnwrap(findTextView(in: host.view))
+        XCTAssertFalse(hiddenEditor.isFirstResponder, "A hidden root's clear must not reactivate its keyboard")
+        XCTAssertFalse(hiddenEditor.isAccessibilityElement)
+        XCTAssertTrue(hiddenEditor.accessibilityElementsHidden)
+        XCTAssertFalse(focused)
+        accessibilityHidden = false
+        try await refresh()
+        XCTAssertTrue(findTextView(in: host.view) === hiddenEditor)
+        XCTAssertFalse(hiddenEditor.isFirstResponder,
+                       "Revealing a cleared retained root must not revive its discarded focus request")
+        XCTAssertFalse(focused)
     }
 
     func testLongDraftHonorsProposedWidthAndCapsHeightAcrossRelayout() async throws {

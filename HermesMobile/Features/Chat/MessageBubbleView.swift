@@ -50,6 +50,7 @@ struct MessageBubbleView: View {
     let loadTranscriptMediaData: ((TranscriptMediaReference) async -> Data?)?
     let transcriptMediaCacheNamespace: String
     let attachmentDisplayContent: String?
+    let localDelivery: LocalMessageDelivery?
     let localAttachmentPreviews: [String: Data]?
     let onPreviewAttachment: ((MessageAttachment, Data?) -> Void)?
     let onPreviewTranscriptMedia: ((TranscriptMediaReference) -> Void)?
@@ -64,6 +65,7 @@ struct MessageBubbleView: View {
         loadTranscriptMediaData: ((TranscriptMediaReference) async -> Data?)? = nil,
         transcriptMediaCacheNamespace: String = "",
         attachmentDisplayContent: String? = nil,
+        localDelivery: LocalMessageDelivery? = nil,
         localAttachmentPreviews: [String: Data]? = nil,
         onPreviewAttachment: ((MessageAttachment, Data?) -> Void)? = nil,
         onPreviewTranscriptMedia: ((TranscriptMediaReference) -> Void)? = nil,
@@ -77,6 +79,7 @@ struct MessageBubbleView: View {
         self.loadTranscriptMediaData = loadTranscriptMediaData
         self.transcriptMediaCacheNamespace = transcriptMediaCacheNamespace
         self.attachmentDisplayContent = attachmentDisplayContent
+        self.localDelivery = localDelivery
         self.localAttachmentPreviews = localAttachmentPreviews
         self.onPreviewAttachment = onPreviewAttachment
         self.onPreviewTranscriptMedia = onPreviewTranscriptMedia
@@ -97,24 +100,35 @@ struct MessageBubbleView: View {
     }
 
     private var userMessageRow: some View {
-        VStack(alignment: .trailing, spacing: 8) {
-            if let attachments = message.attachments, !attachments.isEmpty {
-                attachmentPreviews
-            }
+        VStack(alignment: .trailing, spacing: 4) {
+            VStack(alignment: .trailing, spacing: 8) {
+                if let attachments = message.attachments, !attachments.isEmpty {
+                    attachmentPreviews
+                }
 
-            // When the attachment-path line is hidden, an attachment-only
-            // message has no bubble text left; skip the empty pill so only the
-            // attachment grid shows.
-            if hasVisibleUserBubbleText || hasLinkPreview {
-                HStack(alignment: .bottom, spacing: 0) {
-                    Spacer(minLength: userBubbleLeadingGutter)
-                    VStack(alignment: .trailing, spacing: 8) {
-                        if hasVisibleUserBubbleText {
-                            userBubble
+                // Attachment-only messages do not need an empty text pill.
+                if hasVisibleUserBubbleText || hasLinkPreview {
+                    HStack(alignment: .bottom, spacing: 0) {
+                        Spacer(minLength: userBubbleLeadingGutter)
+                        VStack(alignment: .trailing, spacing: 8) {
+                            if hasVisibleUserBubbleText { userBubble }
+                            linkPreview
                         }
-                        linkPreview
                     }
                 }
+            }
+            .opacity(localDelivery == nil || localDelivery == .accepted ? 1 : 0.6)
+
+            if let localDelivery {
+                // Keep this attempt's one-line footprint after acknowledgement,
+                // so the following response does not jump when Sending clears.
+                Text(localDelivery.label ?? String(localized: "Sending…"))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .opacity(localDelivery == .accepted ? 0 : 1)
+                    .accessibilityHidden(localDelivery == .accepted)
+                    .accessibilityIdentifier("message-delivery-status")
             }
         }
         .frame(maxWidth: .infinity, alignment: .trailing)

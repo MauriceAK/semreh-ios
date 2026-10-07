@@ -712,26 +712,90 @@ final class DirectSkillUITests: XCTestCase {
             }
             retainPreviewScreenshot("\(style) exact draft reconstructed through its row", app: app)
 
+            // Establish a real focused input before the single scored Send.
+            // Reopening the persisted draft does not itself promise focus.
+            composer.tap()
+            XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
             let sendButton = app.buttons["Send"]
             XCTAssertTrue(sendButton.isEnabled && sendButton.isHittable)
             sendButton.tap() // Exactly one send; canonical observer rejects duplicates.
+            // Capture the input immediately, before canonical/idle waits could
+            // hide a lingering correction decoration or a keyboard transition.
+            retainPreviewScreenshot("\(style) immediate Send clears composer with keyboard retained", app: app)
+            XCTAssertTrue(composer.exists && composer.isHittable)
+            let clearedComposerValue = try XCTUnwrap(composer.value as? String)
+            XCTAssertTrue(clearedComposerValue.isEmpty || clearedComposerValue == composer.placeholderValue,
+                          "The native input must clear at Send, before the canonical reply arrives.")
+            XCTAssertTrue(app.keyboards.firstMatch.exists,
+                          "Clearing the sent draft must retain the already visible keyboard.")
+            XCTAssertEqual(app.textViews.matching(identifier: "chat-composer-input").count, 1,
+                           "Retiring the sent input document must leave one accessible editor.")
             let storedID = try await observer.discoverStoredID(uniquePrompt: marker)
             _ = try await waitForCanonical(observer: observer, storedID: storedID) {
                 self.exactCanonicalPairs($0, users: [marker])
             }
             waitForIdle(app: app)
+            XCTAssertEqual(app.buttons.matching(NSPredicate(format: "label == %@", "Send")).count, 0,
+                           "The idle empty composer must not expose a ghost Send button.")
             XCTAssertTrue(containing(marker, app: app).exists)
             let postSendDraft = "SEMREH_DAILY_CANONICAL_DRAFT_\(style)_\(UUID().uuidString)"
             composer.tap()
-            composer.typeText(postSendDraft)
+            let voice = app.buttons["Voice input"]
+            XCTAssertTrue(voice.exists && voice.isHittable)
+            let emptyEditorFrame = composer.frame
+            let emptyVoiceFrame = voice.frame
+            let firstCharacter = String(postSendDraft.prefix(1))
+            composer.typeText(firstCharacter)
+            XCTAssertEqual(composer.value as? String, firstCharacter)
+            let enabledSend = app.buttons.matching(NSPredicate(format: "label == %@", "Send"))
+            XCTAssertEqual(enabledSend.count, 1, "The first character must expose exactly one Send button.")
+            XCTAssertTrue(enabledSend.firstMatch.isEnabled && enabledSend.firstMatch.isHittable)
+            let firstCharacterEditorFrame = composer.frame
+            let firstCharacterVoiceFrame = voice.frame
+            let geometry = XCTAttachment(string:
+                "empty_editor=\(emptyEditorFrame); first_character_editor=\(firstCharacterEditorFrame); "
+                + "empty_voice=\(emptyVoiceFrame); first_character_voice=\(firstCharacterVoiceFrame)")
+            geometry.name = "\(style) daily composer empty-to-first-character geometry"
+            geometry.lifetime = .keepAlways
+            add(geometry)
+            XCTAssertGreaterThan(emptyEditorFrame.width, 0)
+            XCTAssertGreaterThan(emptyVoiceFrame.width, 0)
+            XCTAssertEqual(firstCharacterEditorFrame.minX, emptyEditorFrame.minX, accuracy: 2,
+                           "Typing the first character must not move the editor sideways.")
+            XCTAssertEqual(firstCharacterEditorFrame.width, emptyEditorFrame.width, accuracy: 2,
+                           "The reserved Send slot must keep the input width stable.")
+            XCTAssertEqual(firstCharacterVoiceFrame.midX, emptyVoiceFrame.midX, accuracy: 2,
+                           "The microphone must not move when the first character enables Send.")
+            retainPreviewScreenshot("\(style) first character keeps composer and mic geometry", app: app)
+            composer.typeText(String(postSendDraft.dropFirst()))
             XCTAssertEqual(composer.value as? String, postSendDraft)
             XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
-            let transcript = app.descendants(matching: .any)
-                .matching(identifier: "chat-transcript-scroll").firstMatch
-            XCTAssertTrue(transcript.waitForExistence(timeout: 5) && !transcript.frame.isEmpty)
+            let transcript = app.collectionViews["chat-native-transcript-v2"]
+            let header = app.descendants(matching: .any).matching(identifier: "muse-chat-header").firstMatch
+            let dock = app.descendants(matching: .any).matching(identifier: "muse-chat-dock").firstMatch
+            XCTAssertTrue(transcript.waitForExistence(timeout: 5))
+            XCTAssertTrue(header.exists && dock.exists, "This journey must use the production Muse chrome.")
+            let transcriptFrame = transcript.frame
+            let viewport = transcriptFrame.intersection(app.windows.firstMatch.frame)
+            let readableTop = max(viewport.minY, header.frame.maxY)
+            let readableBottom = min(viewport.maxY, dock.frame.minY)
+            XCTAssertTrue(!viewport.isNull && !viewport.isInfinite && viewport.width.isFinite)
+            XCTAssertGreaterThan(viewport.width, 44)
+            XCTAssertTrue(readableTop.isFinite && readableBottom.isFinite)
+            XCTAssertGreaterThan(readableBottom - readableTop, 44,
+                                 "The native collection's readable area must exclude the overlaid header and dock.")
+            let tapPoint = CGPoint(x: viewport.maxX - 8, y: readableTop + 20)
+            let tapGeometry = XCTAttachment(string:
+                "collection=\(transcriptFrame); header=\(header.frame); dock=\(dock.frame); "
+                + "readable_top=\(readableTop); readable_bottom=\(readableBottom); one_tap=\(tapPoint)")
+            tapGeometry.name = "\(style) native transcript keyboard-dismiss tap geometry"
+            tapGeometry.lifetime = .keepAlways
+            add(tapGeometry)
             // Scored ordinary transcript tap, outside hosted row controls. No
             // swipes or second tap may conceal lost tap-to-dismiss behavior.
-            transcript.coordinate(withNormalizedOffset: CGVector(dx: 0.98, dy: 0.1)).tap()
+            transcript.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(
+                dx: tapPoint.x - transcriptFrame.minX, dy: tapPoint.y - transcriptFrame.minY
+            )).tap()
             let keyboardDismissed = NSPredicate { _, _ in !app.keyboards.firstMatch.exists }
             guard XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: keyboardDismissed,
                     object: nil)], timeout: 5) == .completed else {

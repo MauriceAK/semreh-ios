@@ -21,35 +21,18 @@ private struct ComposerStatusView: View {
                     Image(systemName: "xmark")
                         .font(AppFont.caption(weight: .bold))
                         .foregroundStyle(textColor)
-                        .frame(width: 22, height: 22)
+                        .frame(width: 44, height: 44)
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Dismiss attachment error")
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(backgroundColor)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(borderColor, lineWidth: 0.5)
-        )
         .padding(.horizontal, 16)
+        .padding(.vertical, 2)
     }
 
     private var textColor: Color {
         isError ? Color(.label) : Color.secondary
-    }
-
-    private var backgroundColor: Color {
-        isError ? Color.red.opacity(0.08) : Color(.secondarySystemBackground)
-    }
-
-    private var borderColor: Color {
-        isError ? Color.red.opacity(0.25) : Color(.separator).opacity(0.25)
     }
 }
 
@@ -78,13 +61,15 @@ enum ChatComposerAttachPolicy {
 /// Repositions one persistent editor; changing between the capsule and expanded
 /// arrangement never replaces its UITextView or its first-responder ownership.
 private struct MuseComposerEntryLayout: Layout {
+    // Plus, voice and Send always retain their slots, including an empty draft.
+    static let controlCount = 3
     let isExpanded: Bool
     let controlSlotSize: CGFloat
     let layoutDirection: LayoutDirection
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        guard subviews.count >= 3 else { return .zero }
-        let controlsWidth = CGFloat(subviews.count - 1) * controlSlotSize
+        guard subviews.count == Self.controlCount + 1 else { return .zero }
+        let controlsWidth = CGFloat(Self.controlCount) * controlSlotSize
         let width = max(0, proposal.width ?? (subviews[1].sizeThatFits(.unspecified).width + controlsWidth))
         let editorWidth = isExpanded ? width : max(0, width - controlsWidth)
         let editorHeight = subviews[1].sizeThatFits(ProposedViewSize(width: editorWidth, height: nil)).height
@@ -94,8 +79,8 @@ private struct MuseComposerEntryLayout: Layout {
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        guard subviews.count >= 3 else { return }
-        let controlsWidth = CGFloat(subviews.count - 1) * controlSlotSize
+        guard subviews.count == Self.controlCount + 1 else { return }
+        let controlsWidth = CGFloat(Self.controlCount) * controlSlotSize
         let editorWidth = isExpanded ? bounds.width : max(0, bounds.width - controlsWidth)
         let editorProposal = ProposedViewSize(width: editorWidth, height: nil)
         let editorHeight = subviews[1].sizeThatFits(editorProposal).height
@@ -724,10 +709,8 @@ struct MessageComposerView: View {
                     composerTextInput
                     composerVoiceButton
                         .frame(width: museControlSlotSize, height: museControlSlotSize)
-                    if showsComposerSendButton {
-                        composerSendButton
-                            .frame(width: museControlSlotSize, height: museControlSlotSize)
-                    }
+                    composerSendButton
+                        .frame(width: museControlSlotSize, height: museControlSlotSize)
                 }
                 .onGeometryChange(for: CGFloat.self) { $0.size.width } action: {
                     museComposerAvailableWidth = $0
@@ -841,7 +824,9 @@ struct MessageComposerView: View {
             onRecordingDragChanged: { height in
                 voiceNoteCancelArmed = ComposerVoiceNoteGesture.isCancelArmed(dragTranslationHeight: height)
             },
-            onRecordingEnd: { height in finishVoiceNote(translationHeight: height) }
+            onRecordingEnd: { height in finishVoiceNote(translationHeight: height) },
+            controlSize: usesMuseChatSurface ? museControlSlotSize : nil,
+            symbolHorizontalOffset: usesMuseChatSurface ? (layoutDirection == .rightToLeft ? -4 : 4) : 0
         )
     }
 
@@ -855,6 +840,10 @@ struct MessageComposerView: View {
 
     @ViewBuilder
     private var composerSendButton: some View {
+        // Muse reserves this slot even when empty; changing Send/Stop visibility
+        // must not move the microphone or rewrap the persistent editor. An empty
+        // slot has no button: UIKit can expose an opacity-zero disabled action
+        // to accessibility even when SwiftUI marks it hidden.
         if showsComposerSendButton {
             Button(action: actionButtonTapped) {
                 actionButtonLabel
@@ -862,11 +851,19 @@ struct MessageComposerView: View {
                     .background(actionButtonBackground)
                     .foregroundStyle(actionButtonForeground)
                     .clipShape(Circle())
-                    .chatMinimumHitTarget(in: Circle())
+                    .frame(width: usesMuseChatSurface ? museControlSlotSize : nil,
+                           height: usesMuseChatSurface ? museControlSlotSize : nil)
+                    .chatMinimumHitTarget(horizontalPadding: usesMuseChatSurface ? 0 : 8,
+                                          verticalPadding: usesMuseChatSurface ? 0 : 8, in: Circle())
             }
             .buttonStyle(.chatTactile(.icon))
             .disabled(isActionButtonDisabled)
             .accessibilityLabel(showsStopButton ? "Stop response" : "Send")
+        } else if usesMuseChatSurface {
+            Color.clear
+                .frame(width: museControlSlotSize, height: museControlSlotSize)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
         }
     }
 
@@ -1242,7 +1239,7 @@ struct MessageComposerView: View {
 
     private var composerStatus: (text: String, isError: Bool, isDismissible: Bool)? {
         if isOfflineReadOnly {
-            return (String(localized: "Reconnect to send messages."), false, false)
+            return nil
         } else if isWaitingForStream && isCancellingStream {
             return (String(localized: "Stopping response..."), false, false)
         } else if isCompressingSession {
@@ -1445,8 +1442,8 @@ struct MessageComposerView: View {
             let measuredDraft = draftMessage.prefix(1_025)
             if measuredDraft.count > 1_024 || measuredDraft.contains(where: \.isNewline) { return true }
             guard museComposerAvailableWidth > 0 else { return false }
-            let controlCount = showsComposerSendButton ? 3 : 2
-            let collapsedWidth = max(1, museComposerAvailableWidth - CGFloat(controlCount) * museControlSlotSize)
+            let collapsedWidth = max(1, museComposerAvailableWidth
+                - CGFloat(MuseComposerEntryLayout.controlCount) * museControlSlotSize)
             let font = UIFont.preferredFont(forTextStyle: .body)
             return (String(measuredDraft) as NSString).size(withAttributes: [.font: font]).width > collapsedWidth
         }

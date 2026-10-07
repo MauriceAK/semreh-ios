@@ -21,6 +21,7 @@ final class LocalSendPresentationTests: APIClientTestCase {
         let insertion = vm.outgoingInsertionEvent
         XCTAssertEqual(pending?.message.content, "New question")
         XCTAssertEqual(pending?.loadedIndex, -1)
+        XCTAssertEqual(pending?.localDelivery, .sending)
         XCTAssertNotNil(insertion)
         XCTAssertFalse(vm.messages.contains { $0.content == "New question" })
         if let pending {
@@ -47,6 +48,7 @@ final class LocalSendPresentationTests: APIClientTestCase {
         await waitUntil { transport.calls.contains("prompt.submit") }
         let promoted = vm.displayedTranscriptMessages.last
         XCTAssertEqual(promoted?.loadedIndex, 2)
+        XCTAssertEqual(promoted?.localDelivery, .sending)
         XCTAssertEqual(promoted?.message, pending?.message)
         XCTAssertEqual(promoted?.renderID, pending?.renderID)
         XCTAssertEqual(vm.outgoingInsertionEvent, insertion, "Promotion must not replay the outgoing animation")
@@ -57,6 +59,9 @@ final class LocalSendPresentationTests: APIClientTestCase {
         await promptGate.release()
         let accepted = await send.value
         XCTAssertTrue(accepted)
+        XCTAssertEqual(vm.displayedTranscriptMessages.last?.localDelivery, .accepted)
+        XCTAssertNil(vm.displayedTranscriptMessages.last?.localDelivery?.label)
+        XCTAssertTrue(vm.displayedTranscriptMessages.dropLast().allSatisfy { $0.localDelivery == nil })
         XCTAssertTrue(vm.directPendingAttachments.isEmpty)
         XCTAssertEqual(transport.calls.filter { $0 == "prompt.submit" }.count, 1)
         await vm.disposeDirectConversation()
@@ -99,7 +104,7 @@ final class LocalSendPresentationTests: APIClientTestCase {
         await runtime.stop()
     }
 
-    func testDefiniteAttachmentRefusalRemovesPendingBubbleAndKeepsDraftRetryable() async throws {
+    func testDefiniteAttachmentRefusalKeepsLocalNotSentBubbleAndDraftRetryable() async throws {
         let stageGate = LocalSendGate()
         let transport = LocalSendTransport(stageGate: stageGate, stageError: .server(
             code: 4015, message: "path or data_url required", data: nil,
@@ -112,12 +117,17 @@ final class LocalSendPresentationTests: APIClientTestCase {
         await waitUntil { transport.calls.contains("file.attach") }
         XCTAssertEqual(vm.displayedTranscriptMessages.last?.message.content, "Keep this draft")
         XCTAssertEqual(vm.displayedTranscriptMessages.last?.loadedIndex, -1)
+        let pendingID = vm.displayedTranscriptMessages.last?.renderID
 
         await stageGate.release()
         let accepted = await send.value
         XCTAssertFalse(accepted, "The composer uses false to restore the submitted draft")
         XCTAssertEqual(vm.messages.compactMap(\.content), ["Earlier question", "Earlier answer"])
-        XCTAssertEqual(vm.displayedTranscriptMessages.map(\.message.content), ["Earlier question", "Earlier answer"])
+        XCTAssertEqual(vm.displayedTranscriptMessages.map(\.message.content), ["Earlier question", "Earlier answer", "Keep this draft"])
+        XCTAssertEqual(vm.displayedTranscriptMessages.last?.loadedIndex, -1)
+        XCTAssertEqual(vm.displayedTranscriptMessages.last?.renderID, pendingID)
+        XCTAssertEqual(vm.displayedTranscriptMessages.last?.localDelivery, .notSent)
+        XCTAssertNil(vm.composerSendErrorMessage)
         XCTAssertEqual(vm.directPendingAttachments.map(\.id), attachmentIDs)
         XCTAssertTrue(vm.sendErrorMessage?.contains("Your draft was kept") == true)
         XCTAssertFalse(vm.isStartingChat)
@@ -145,7 +155,7 @@ final class LocalSendPresentationTests: APIClientTestCase {
         await runtime.stop()
     }
 
-    func testResumeFailureRemovesUnsubmittedPresentationAndKeepsDraft() async throws {
+    func testResumeFailureKeepsUnsubmittedPresentationAndDraft() async throws {
         let resumeGate = LocalSendGate()
         let transport = LocalSendTransport(resumeGate: resumeGate, resumeError: .timeout(
             method: "session.resume", requestID: "fixture-resume"
@@ -158,7 +168,10 @@ final class LocalSendPresentationTests: APIClientTestCase {
         let accepted = await send.value
         XCTAssertFalse(accepted)
         XCTAssertTrue(vm.messages.isEmpty)
-        XCTAssertTrue(vm.displayedTranscriptMessages.isEmpty)
+        XCTAssertEqual(vm.displayedTranscriptMessages.count, 1)
+        XCTAssertEqual(vm.displayedTranscriptMessages.last?.loadedIndex, -1)
+        XCTAssertEqual(vm.displayedTranscriptMessages.last?.localDelivery, .notSent)
+        XCTAssertNil(vm.composerSendErrorMessage)
         XCTAssertFalse(vm.isStartingChat)
         XCTAssertFalse(transport.calls.contains("prompt.submit"))
         XCTAssertTrue(vm.sendErrorMessage?.contains("Your draft was kept") == true)
@@ -181,7 +194,10 @@ final class LocalSendPresentationTests: APIClientTestCase {
         await promptGate.release()
         let acceptedOrUncertain = await send.value
         XCTAssertTrue(acceptedOrUncertain, "Unknown delivery must not restore a resendable composer draft")
-        XCTAssertEqual(vm.displayedTranscriptMessages.last, promoted)
+        XCTAssertEqual(vm.displayedTranscriptMessages.last?.message, promoted?.message)
+        XCTAssertEqual(vm.displayedTranscriptMessages.last?.renderID, promoted?.renderID)
+        XCTAssertEqual(vm.displayedTranscriptMessages.last?.localDelivery, .unconfirmed)
+        XCTAssertNil(vm.composerSendErrorMessage)
         XCTAssertTrue(vm.sendErrorMessage?.contains("cannot confirm") == true)
         let retryAccepted = await vm.sendMessage("Possibly delivered")
         XCTAssertFalse(retryAccepted)
@@ -206,6 +222,7 @@ final class LocalSendPresentationTests: APIClientTestCase {
         XCTAssertTrue(accepted)
         XCTAssertEqual(vm.displayedTranscriptMessages.last?.message.content, "Control surface")
         XCTAssertEqual(vm.displayedTranscriptMessages.last?.loadedIndex, 2)
+        XCTAssertNil(vm.displayedTranscriptMessages.last?.localDelivery)
         XCTAssertEqual(vm.outgoingInsertionEvent?.sequence, 1)
         await stream("Control answer", through: transport, vm: vm)
         transport.setTranscript(LocalSendTransport.baseline + [
@@ -247,6 +264,7 @@ final class LocalSendPresentationTests: APIClientTestCase {
         let user = try XCTUnwrap(vm.displayedTranscriptMessages.first { $0.message.messageId == "3" })
         let assistant = try XCTUnwrap(vm.displayedTranscriptMessages.last)
         XCTAssertEqual(user.renderID, localUser.renderID)
+        XCTAssertEqual(user.localDelivery, .accepted)
         XCTAssertEqual(assistant.renderID, liveAssistant.renderID)
         XCTAssertEqual(user.anchorID, "3", "Canonical actions and turn anchors retain durable identity")
         XCTAssertEqual(MessageActionContext(message: user.message, visibleIndex: user.loadedIndex, messagesOffset: 0)?.messageID, "3")
@@ -311,6 +329,7 @@ final class LocalSendPresentationTests: APIClientTestCase {
         let (vm, runtime) = try makeFixture(transport, emptyTranscript: true, sessionID: nil)
         let accepted = await vm.sendMessage("First question")
         XCTAssertTrue(accepted)
+        XCTAssertEqual(vm.displayedTranscriptMessages.last?.localDelivery, .accepted)
         let userID = vm.displayedTranscriptMessages.last?.renderID
         await stream("First answer", through: transport, vm: vm)
         let assistantID = vm.displayedTranscriptMessages.last?.renderID
@@ -388,9 +407,34 @@ final class LocalSendPresentationTests: APIClientTestCase {
         transport.emit("message.complete", sequence: 3, text: "Answer")
         await waitUntil { vm.messages.last?.messageId == "4" }
         XCTAssertEqual(vm.displayedTranscriptMessages.first { $0.message.messageId == "3" }?.renderID, "transcript:row:3")
-        XCTAssertFalse(vm.displayedTranscriptMessages.contains { $0.renderID == localID })
+        XCTAssertFalse(vm.displayedTranscriptMessages.contains { $0.renderID == localID },
+                       "Canonical body replaces only the redundant body, never the delivery barrier")
+        XCTAssertEqual(vm.displayedTranscriptMessages.count, 4)
+        XCTAssertEqual(vm.messages.count, 4)
+        XCTAssertTrue(vm.directConversationHasPromptDeliveryUncertainty)
+        XCTAssertNil(vm.composerSendErrorMessage, "The compact recovery notice owns this attempt error")
         let retried = await vm.sendMessage("Question")
         XCTAssertFalse(retried)
+        XCTAssertEqual(transport.calls.filter { $0 == "prompt.submit" }.count, 1)
+        transport.setTranscript([])
+        transport.emit("message.complete", sequence: 4)
+        await waitUntil { vm.messages.isEmpty }
+        XCTAssertEqual(vm.displayedTranscriptMessages.last?.renderID, localID)
+        XCTAssertEqual(vm.displayedTranscriptMessages.last?.localDelivery, .unconfirmed,
+                       "Hiding a redundant body must not prune its uncertain delivery state")
+        transport.setTranscript(LocalSendTransport.baseline + [
+            LocalSendTransport.row(3, role: "user", text: "Question"), LocalSendTransport.row(4, role: "assistant", text: "Answer")
+        ])
+        transport.emit("message.complete", sequence: 5)
+        await waitUntil { vm.messages.last?.messageId == "4" }
+        XCTAssertFalse(vm.displayedTranscriptMessages.contains { $0.renderID == localID })
+        let target = try XCTUnwrap(vm.directPromptDeliveryRecoveryTarget)
+        let recovered = await vm.abandonDirectPromptDeliveryUncertainty(target)
+        XCTAssertTrue(recovered)
+        XCTAssertFalse(vm.directConversationHasPromptDeliveryUncertainty)
+        XCTAssertNil(vm.sendErrorMessage)
+        XCTAssertEqual(vm.displayedTranscriptMessages.count, 4)
+        XCTAssertTrue(vm.displayedTranscriptMessages.allSatisfy { $0.localDelivery == nil })
         XCTAssertEqual(transport.calls.filter { $0 == "prompt.submit" }.count, 1)
         await vm.disposeDirectConversation()
         await runtime.stop()
@@ -423,12 +467,202 @@ final class LocalSendPresentationTests: APIClientTestCase {
         await waitUntil { vm.messages.last?.role == "assistant" && vm.messages.last?.content == text }
     }
 
+    func testDefiniteRejectionReusesOnlyExactFailedIntentAndRetainsOneLocalFailure() async throws {
+        let transport = LocalSendTransport(promptError: .server(code: 4001, message: "rejected", data: nil,
+            method: "prompt.submit", requestID: "fixture-rejected", server: "fixture"))
+        let (vm, runtime) = try makeFixture(transport)
+        let draft = "  Keep exact 👩🏽‍💻\n"
+        let firstResult = await vm.sendMessage(draft)
+        XCTAssertFalse(firstResult)
+        let first = try XCTUnwrap(vm.displayedTranscriptMessages.last)
+        let insertion = vm.outgoingInsertionEvent
+        XCTAssertEqual(first.localDelivery, .notSent)
+        XCTAssertEqual(first.loadedIndex, -1)
+        XCTAssertNil(MessageActionContext(message: first.message, visibleIndex: -1, messagesOffset: 0))
+        XCTAssertEqual(vm.messages.compactMap(\.content), ["Earlier question", "Earlier answer"])
+        XCTAssertNil(vm.composerSendErrorMessage)
+        let secondResult = await vm.sendMessage(draft)
+        XCTAssertFalse(secondResult)
+        XCTAssertEqual(vm.displayedTranscriptMessages.last?.renderID, first.renderID)
+        XCTAssertEqual(vm.displayedTranscriptMessages.last?.message.timestamp, first.message.timestamp)
+        XCTAssertEqual(vm.outgoingInsertionEvent, insertion)
+        XCTAssertEqual(vm.displayedTranscriptMessages.filter { $0.loadedIndex == -1 }.count, 1)
+
+        let differentResult = await vm.sendMessage("A different intent")
+        XCTAssertFalse(differentResult)
+        XCTAssertNotEqual(vm.displayedTranscriptMessages.last?.renderID, first.renderID)
+        XCTAssertEqual(vm.displayedTranscriptMessages.last?.localDelivery, .notSent)
+        XCTAssertFalse(vm.displayedTranscriptMessages.contains { $0.message.id == first.message.id })
+        XCTAssertEqual(vm.displayedTranscriptMessages.filter { $0.loadedIndex == -1 }.count, 1)
+        XCTAssertEqual(transport.calls.filter { $0 == "prompt.submit" }.count, 3, "Only explicit sends dispatch")
+        XCTAssertEqual(vm.messages.compactMap(\.content), ["Earlier question", "Earlier answer"])
+        vm.setSendErrorMessage("Hermes has not confirmed that the response stopped.")
+        XCTAssertEqual(vm.composerSendErrorMessage, "Hermes has not confirmed that the response stopped.",
+                       "An unrelated later error remains visible while the failed row stays mounted")
+        XCTAssertEqual(vm.displayedTranscriptMessages.last?.localDelivery, .notSent)
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testSafetyMarkerWriteFailureIsLocalNotSentWithoutDispatch() async throws {
+        let store = InMemoryDirectPromptDeliveryUncertaintyStore()
+        store.failWrite = true
+        let transport = LocalSendTransport()
+        let (vm, runtime) = try makeFixture(transport, promptStore: store)
+        let accepted = await vm.sendMessage("Do not dispatch")
+        XCTAssertFalse(accepted)
+        XCTAssertFalse(transport.calls.contains("prompt.submit"))
+        XCTAssertFalse(vm.messages.contains { $0.content == "Do not dispatch" })
+        XCTAssertEqual(vm.displayedTranscriptMessages.last?.localDelivery, .notSent)
+        XCTAssertEqual(vm.displayedTranscriptMessages.last?.loadedIndex, -1)
+        XCTAssertNil(vm.composerSendErrorMessage)
+        XCTAssertTrue(vm.sendErrorMessage?.contains("not sent") == true)
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testAcceptedMarkerCleanupFailureKeepsAcceptedRowAndSafetyAttention() async throws {
+        let store = InMemoryDirectPromptDeliveryUncertaintyStore()
+        store.failRemove = true
+        let transport = LocalSendTransport()
+        let (vm, runtime) = try makeFixture(transport, promptStore: store)
+        let accepted = await vm.sendMessage("Accepted once")
+        XCTAssertTrue(accepted)
+        XCTAssertEqual(vm.displayedTranscriptMessages.last?.localDelivery, .accepted)
+        XCTAssertTrue(vm.directConversationHasPromptDeliveryUncertainty)
+        XCTAssertTrue(vm.directPromptDeliveryHasConfirmedAcceptance)
+        XCTAssertEqual(vm.composerSendErrorMessage, vm.sendErrorMessage)
+        let blocked = await vm.sendMessage("Accepted once")
+        XCTAssertFalse(blocked)
+        XCTAssertEqual(transport.calls.filter { $0 == "prompt.submit" }.count, 1)
+        XCTAssertEqual(vm.displayedTranscriptMessages.last?.localDelivery, .accepted)
+        XCTAssertNotNil(vm.composerSendErrorMessage, "Accepted cleanup attention is not an unconfirmed delivery label")
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testUnconfirmedRowSurvivesCanonicalEmptyWithoutBecomingRetryable() async throws {
+        let transport = LocalSendTransport(promptError: .timeout(method: "prompt.submit", requestID: "lost-ack"))
+        let (vm, runtime) = try makeFixture(transport)
+        let result = await vm.sendMessage("Possibly received")
+        XCTAssertTrue(result)
+        let original = try XCTUnwrap(vm.displayedTranscriptMessages.last)
+        // Exercise the actual terminal REST reconciliation, not an echo guess.
+        transport.setTranscript([])
+        transport.emit("message.complete", sequence: 1)
+        await waitUntil { vm.messages.isEmpty }
+        XCTAssertTrue(vm.messages.isEmpty)
+        XCTAssertEqual(vm.displayedTranscriptMessages.count, 1)
+        XCTAssertEqual(vm.displayedTranscriptMessages.last?.renderID, original.renderID)
+        XCTAssertEqual(vm.displayedTranscriptMessages.last?.localDelivery, .unconfirmed)
+        XCTAssertEqual(vm.displayedTranscriptMessages.last?.loadedIndex, -1)
+        let blocked = await vm.sendMessage("Possibly received")
+        XCTAssertFalse(blocked)
+        XCTAssertEqual(transport.calls.filter { $0 == "prompt.submit" }.count, 1)
+        let target = try XCTUnwrap(vm.directPromptDeliveryRecoveryTarget)
+        let recovered = await vm.abandonDirectPromptDeliveryUncertainty(target)
+        XCTAssertTrue(recovered)
+        XCTAssertTrue(vm.displayedTranscriptMessages.isEmpty, "Successful explicit recovery retires the unresolved local row")
+        XCTAssertTrue(vm.messages.isEmpty)
+        XCTAssertFalse(vm.directConversationHasPromptDeliveryUncertainty)
+        XCTAssertNil(vm.sendErrorMessage)
+        XCTAssertEqual(transport.calls.filter { $0 == "prompt.submit" }.count, 1)
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testUnchangedEarlierHistoryKeepsUnknownBodyAndRecoveryPreservesAcceptedFooter() async throws {
+        let transport = LocalSendTransport()
+        let (vm, runtime) = try makeFixture(transport)
+        let firstResult = await vm.sendMessage("Repeated question")
+        XCTAssertTrue(firstResult)
+        let acceptedID = try XCTUnwrap(vm.displayedTranscriptMessages.last?.renderID)
+        await stream("Previous answer", through: transport, vm: vm)
+        transport.setTranscript(LocalSendTransport.baseline + [
+            LocalSendTransport.row(3, role: "user", text: "Repeated question"),
+            LocalSendTransport.row(4, role: "assistant", text: "Previous answer")
+        ])
+        transport.emit("message.complete", sequence: 3, text: "Previous answer")
+        await waitUntil { vm.messages.last?.messageId == "4" }
+        XCTAssertEqual(vm.displayedTranscriptMessages.first { $0.renderID == acceptedID }?.localDelivery, .accepted)
+
+        transport.setPromptError(.timeout(method: "prompt.submit", requestID: "later-unknown"))
+        let uncertain = await vm.sendMessage("Repeated question")
+        XCTAssertTrue(uncertain)
+        let localID = try XCTUnwrap(vm.displayedTranscriptMessages.last?.renderID)
+        transport.emit("message.complete", sequence: 4)
+        await waitUntil { vm.messages.count == 4 }
+        XCTAssertEqual(vm.displayedTranscriptMessages.last?.renderID, localID)
+        XCTAssertEqual(vm.displayedTranscriptMessages.last?.localDelivery, .unconfirmed)
+        XCTAssertEqual(vm.displayedTranscriptMessages.last?.loadedIndex, -1)
+        XCTAssertEqual(vm.displayedTranscriptMessages.count, 5, "Unchanged old history cannot erase the current unknown question")
+        XCTAssertNil(vm.composerSendErrorMessage)
+        let target = try XCTUnwrap(vm.directPromptDeliveryRecoveryTarget)
+        let recovered = await vm.abandonDirectPromptDeliveryUncertainty(target)
+        XCTAssertTrue(recovered)
+        XCTAssertFalse(vm.displayedTranscriptMessages.contains { $0.renderID == localID })
+        XCTAssertEqual(vm.displayedTranscriptMessages.first { $0.renderID == acceptedID }?.localDelivery, .accepted,
+                       "Recovery retires only its current unconfirmed presentation")
+        XCTAssertEqual(vm.messages.count, 4)
+        XCTAssertEqual(transport.calls.filter { $0 == "prompt.submit" }.count, 2)
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testFailedPresentationCannotOverwriteNewerComposerDraft() async throws {
+        let suite = "LocalSendDraft-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let origin = URL(string: "https://example.test")!
+        let configuration = SessionSummary(sessionId: "durable-1", profile: "work")
+        let store = ComposerDraftStore(defaults: defaults)
+        let writer = store.claimWriter(server: origin, sessionID: configuration.id, owner: UUID())
+        store.save("", configuration: configuration, server: origin, sessionID: configuration.id, writer: writer)
+        let checkpoint = try XCTUnwrap(store.submissionCheckpoint(server: origin, sessionID: configuration.id, writer: writer))
+        let gate = LocalSendGate()
+        let transport = LocalSendTransport(resumeGate: gate,
+            resumeError: .timeout(method: "session.resume", requestID: "offline"))
+        let (vm, runtime) = try makeFixture(transport, defaults: defaults)
+        let submitted = "  Original 👩🏽‍💻\n"
+        let send = Task { await vm.sendMessage(submitted) }
+        await waitUntil { transport.calls.contains("session.resume") }
+        let newer = "  New draft\n"
+        store.noteWriterEdit(newer, writer: writer, server: origin, sessionID: configuration.id)
+        await gate.release()
+        let accepted = await send.value
+        XCTAssertFalse(accepted)
+        XCTAssertEqual(vm.displayedTranscriptMessages.last?.localDelivery, .notSent)
+        XCTAssertFalse(store.restoreFailedSubmission(submitted, checkpoint: checkpoint, server: origin, sessionID: configuration.id))
+        XCTAssertTrue(store.save(newer, configuration: configuration, server: origin, sessionID: configuration.id, writer: writer))
+        XCTAssertEqual(store.load(server: origin, sessionID: configuration.id).utf8.map { $0 }, Array(newer.utf8))
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
+    func testInvalidationDuringHeldFailureCannotReviveLocalAttempt() async throws {
+        let gate = LocalSendGate()
+        let transport = LocalSendTransport(resumeGate: gate,
+            resumeError: .timeout(method: "session.resume", requestID: "old-owner"))
+        let (vm, runtime) = try makeFixture(transport)
+        let send = Task { await vm.sendMessage("Old conversation") }
+        await waitUntil { transport.calls.contains("session.resume") }
+        vm.invalidateDirectConversation()
+        await gate.release()
+        let accepted = await send.value
+        XCTAssertFalse(accepted)
+        XCTAssertTrue(vm.displayedTranscriptMessages.isEmpty)
+        XCTAssertFalse(transport.calls.contains("prompt.submit"))
+        await vm.disposeDirectConversation()
+        await runtime.stop()
+    }
+
     private func makeFixture(
         _ transport: LocalSendTransport,
         previewEnabled: Bool = true,
         emptyTranscript: Bool = false,
         defaults: UserDefaults = .standard,
-        sessionID: String? = "durable-1"
+        sessionID: String? = "durable-1",
+        promptStore: InMemoryDirectPromptDeliveryUncertaintyStore = InMemoryDirectPromptDeliveryUncertaintyStore()
     ) throws -> (ChatViewModel, HermesServerRuntime) {
         let origin = URL(string: "https://example.test")!
         let runtime = try HermesServerRuntime(origin: origin) { sink in
@@ -448,7 +682,7 @@ final class LocalSendPresentationTests: APIClientTestCase {
             userDefaults: defaults,
             gatewayRuntimeProvider: { _ in runtime },
             directAttachmentRecoveryMarkerStore: LocalSendAttachmentMarkerStore(),
-            promptUncertaintyStore: InMemoryDirectPromptDeliveryUncertaintyStore()
+            promptUncertaintyStore: promptStore
         )
         vm.setLocalSendPresentationEnabled(previewEnabled)
         return (vm, runtime)
@@ -498,7 +732,7 @@ private final class LocalSendTransport: HermesGatewayTransport, @unchecked Senda
     private let promptGate: LocalSendGate?
     private let resumeError: HermesGatewayError?
     private let stageError: HermesGatewayError?
-    private let promptError: HermesGatewayError?
+    private var promptError: HermesGatewayError?
     let resumedSessionID: String
 
     init(resumeGate: LocalSendGate? = nil, stageGate: LocalSendGate? = nil,
@@ -517,6 +751,9 @@ private final class LocalSendTransport: HermesGatewayTransport, @unchecked Senda
     var calls: [String] { lock.withLock { recordedCalls } }
     func installSink(_ sink: @escaping @Sendable (HermesGatewayEvent) -> Void) {
         lock.withLock { self.sink = sink }
+    }
+    func setPromptError(_ error: HermesGatewayError?) {
+        lock.withLock { promptError = error }
     }
     func setTranscript(_ rows: [JSONValue], sessionID: String? = nil) {
         lock.withLock {
@@ -565,7 +802,7 @@ private final class LocalSendTransport: HermesGatewayTransport, @unchecked Senda
             return .object(["attached": .bool(true), "name": .string("notes.txt"), "ref_text": .string("@file:attachments/notes.txt")])
         case "prompt.submit":
             await promptGate?.wait()
-            if let promptError { throw promptError }
+            if let promptError = lock.withLock({ self.promptError }) { throw promptError }
             return .object(["status": .string("streaming")])
         default:
             return .object([:])

@@ -1694,12 +1694,22 @@ final class ChatTranscriptViewRestoreTests: XCTestCase {
             window.rootViewController = UIHostingController(rootView: root)
             let completed = capture.beginVisit()
             window.makeKeyAndVisible()
-            route.chatPresented = true
             defer {
                 window.isHidden = true
                 window.rootViewController = nil
                 previous?.makeKey()
             }
+            if navigates {
+                // Match the production-shell prerequisite. Do not construct or
+                // pre-render the destination before its scored first attachment.
+                guard try await MountedReadinessWait.poll(condition: {
+                    capture.neutralRootAppearanceCompleted && window.isKeyWindow && !window.isHidden
+                }) else {
+                    XCTFail("Timed out waiting for the plain control's neutral navigation root")
+                    return
+                }
+            }
+            route.chatPresented = true
             await fulfillment(of: [completed], timeout: 4)
             XCTAssertEqual(capture.samples.map(\.tick), [1, 2, 3, 4])
             for sample in capture.samples {
@@ -4709,7 +4719,11 @@ private struct PlainReaderShellRoot: View {
         Group {
             if navigates {
                 NavigationStack {
-                    Color.clear.navigationDestination(isPresented: $route.chatPresented) { label }
+                    Color.clear
+                        .background(NavigationAppearanceCompletionObserver {
+                            capture.neutralRootAppearanceCompleted = true
+                        })
+                        .navigationDestination(isPresented: $route.chatPresented) { label }
                 }
             } else { label }
         }
@@ -5220,15 +5234,46 @@ private actor MountedSteerTransport: HermesGatewayTransport {
     private var running = false
     private var recorded: [Call] = []
     private var pending: CheckedContinuation<JSONValue?, Error>?
+    struct ConnectionProgress: Sendable {
+        let enteredAtUptime: Double?
+        let returnedAtUptime: Double?
+        let identifierReadCount: Int
+        let firstIdentifierReadAtUptime: Double?
+        let lastIdentifierReadAtUptime: Double?
+        let isConnected: Bool
+    }
+    private var connectEnteredAtUptime: Double?
+    private var connectReturnedAtUptime: Double?
+    private var identifierReadCount = 0
+    private var firstIdentifierReadAtUptime: Double?
+    private var lastIdentifierReadAtUptime: Double?
 
     init(storedID: String, runtimeID: String) {
         self.storedID = storedID
         self.runtimeID = runtimeID
     }
-    func connect() async throws { connected = true }
+    func connect() async throws {
+        connectEnteredAtUptime = ProcessInfo.processInfo.systemUptime
+        connected = true
+        connectReturnedAtUptime = ProcessInfo.processInfo.systemUptime
+    }
     func close() async { connected = false; resolve(.transportFailure) }
-    func connectionIdentifier() async -> Int? { connected ? 1 : nil }
+    func connectionIdentifier() async -> Int? {
+        let uptime = ProcessInfo.processInfo.systemUptime
+        identifierReadCount += 1
+        if firstIdentifierReadAtUptime == nil { firstIdentifierReadAtUptime = uptime }
+        lastIdentifierReadAtUptime = uptime
+        return connected ? 1 : nil
+    }
     func calls() -> [Call] { recorded }
+    func connectionProgress() -> ConnectionProgress {
+        ConnectionProgress(enteredAtUptime: connectEnteredAtUptime,
+                           returnedAtUptime: connectReturnedAtUptime,
+                           identifierReadCount: identifierReadCount,
+                           firstIdentifierReadAtUptime: firstIdentifierReadAtUptime,
+                           lastIdentifierReadAtUptime: lastIdentifierReadAtUptime,
+                           isConnected: connected)
+    }
     var isWaiting: Bool { pending != nil }
 
     func resolve(_ response: MountedSteerResponse) {
@@ -5489,13 +5534,152 @@ private final class MountedSteerFixture {
     }
 
     private func wait(_ condition: () -> Bool, phase: String = "mounted composer") async throws {
-        if try await MountedReadinessWait.poll(condition: condition) { return }
-        XCTFail("Mounted composer condition did not settle (\(phase)); "
+        let waitStartedAtUptime = ProcessInfo.processInfo.systemUptime
+        let tracesStartup = phase == "startup: initial prompt running"
+        let token = UUID().uuidString
+        let markerBeginWritten = tracesStartup && writeStartupMarker(token: token, active: true)
+        var markerEnded = false
+        defer { if tracesStartup && !markerEnded { writeStartupMarker(token: token, active: false) } }
+        var pollCount = 0
+        var previousPoll = waitStartedAtUptime
+        var maximumPollGap = 0.0
+        var transitions: [[String: Any]] = []
+        var previousState: String?
+        let satisfied = try await MountedReadinessWait.poll(condition: {
+            if tracesStartup {
+                let uptime = ProcessInfo.processInfo.systemUptime
+                pollCount += 1
+                maximumPollGap = max(maximumPollGap, uptime - previousPoll)
+                previousPoll = uptime
+                let state = String(describing: self.runtime.state)
+                if state != previousState, transitions.count < 16 {
+                    transitions.append(["uptime": uptime, "runtimeState": state,
+                        "starting": self.model.isStartingChat, "activeRun": self.model.activeStreamID != nil])
+                    previousState = state
+                }
+            }
+            return condition()
+        })
+        let finalPollState: [String: Any] = ["uptime": previousPoll,
+            "runtimeState": String(describing: runtime.state),
+            "starting": model.isStartingChat, "activeRun": model.activeStreamID != nil]
+        // End the external sample window before failure attachment/actor hops.
+        let markerEndWritten = tracesStartup && writeStartupMarker(token: token, active: false)
+        markerEnded = markerEndWritten || !tracesStartup
+        if satisfied { return }
+        let failureMessage = "Mounted composer condition did not settle (\(phase)); "
             + "keyWindow=\(window.isKeyWindow), scene=\(String(describing: window.windowScene?.activationState)), "
             + "composerMounted=\(find("chat-composer-input", in: window) is UITextView), "
             + "starting=\(model.isStartingChat), activeRun=\(model.activeStreamID != nil), "
-            + "sendError=\(model.sendErrorMessage ?? "nil")")
+            + "sendError=\(model.sendErrorMessage ?? "nil")"
+        await attachWaitFailureDiagnostic(phase: phase, waitStartedAtUptime: waitStartedAtUptime,
+            readinessProgress: tracesStartup ? ["pollCount": pollCount,
+                "maximumPollGapSeconds": maximumPollGap, "runtimeTransitions": transitions,
+                "finalPollState": finalPollState, "markerBeginWritten": markerBeginWritten,
+                "markerEndWritten": markerEndWritten] : nil)
+        XCTFail(failureMessage)
         throw DirectSessionError.invalidResponse
+    }
+
+    @discardableResult
+    private func writeStartupMarker(token: String, active: Bool) -> Bool {
+        // Test-only, fixed-schema metadata for the bounded CI watchdog. No text,
+        // scope/session/server identifiers, parameters or error strings are written.
+        guard let cache = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first,
+              let data = try? JSONSerialization.data(withJSONObject: [
+                "schemaVersion": 1, "phase": "initial-prompt-running", "token": token,
+                "active": active, "pid": ProcessInfo.processInfo.processIdentifier,
+                "uptime": ProcessInfo.processInfo.systemUptime], options: [.sortedKeys]) else { return false }
+        do {
+            try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
+            try data.write(to: cache.appendingPathComponent("semreh-mounted-startup.json"), options: .atomic)
+            return true
+        } catch { return false }
+    }
+
+    private func attachWaitFailureDiagnostic(phase: String, waitStartedAtUptime: Double,
+                                             readinessProgress: [String: Any]?) async {
+        // Capture UI/model state before hopping to the controlled transport actor.
+        // No transcript, identifiers, request parameters or error text is attached.
+        let stateCapturedAtUptime = ProcessInfo.processInfo.systemUptime
+        let allowedPhases = ["mounted composer", "startup: composer mounted",
+                             "startup: initial prompt running", "startup: initial draft cleared",
+                             "keyboard Send enabled"]
+        func frameJSON(_ frame: CGRect) -> Any {
+            let values = [Double(frame.minX), Double(frame.minY), Double(frame.width), Double(frame.height)]
+            return values.allSatisfy { $0.isFinite } ? values as Any : NSNull()
+        }
+        func editors(in view: UIView) -> [UITextView] {
+            let current = (view as? UITextView).map {
+                $0.accessibilityIdentifier == "chat-composer-input" ? [$0] : []
+            } ?? []
+            return current + view.subviews.flatMap { editors(in: $0) }
+        }
+        let mountedEditors = editors(in: window)
+        let runtimeState: String
+        switch runtime.state {
+        case .disconnected: runtimeState = "disconnected"
+        case .connecting: runtimeState = "connecting"
+        case .ready: runtimeState = "ready"
+        case .stopped: runtimeState = "stopped"
+        }
+        var receipt: [String: Any] = [
+            "schemaVersion": 3,
+            "phase": allowedPhases.contains(phase) ? phase : "other",
+            "readinessWaitStartedAtUptime": waitStartedAtUptime,
+            "readinessElapsedSeconds": stateCapturedAtUptime - waitStartedAtUptime,
+            "stateCapturedAtUptime": stateCapturedAtUptime,
+            "applicationState": UIApplication.shared.applicationState.rawValue,
+            "sceneActivationState": window.windowScene.map { $0.activationState.rawValue as Any } ?? NSNull(),
+            "windowIsKey": window.isKeyWindow,
+            "windowIsHidden": window.isHidden,
+            "windowFrame": frameJSON(window.frame),
+            "routePresented": route.presented,
+            "editorCount": mountedEditors.count,
+            "editors": mountedEditors.prefix(2).map { editor -> [String: Any] in
+                ["attachedToOwnedWindow": editor.window === window,
+                 "frameInOwnedWindow": frameJSON(editor.convert(editor.bounds, to: window)),
+                 "isFirstResponder": editor.isFirstResponder,
+                 "isEditable": editor.isEditable,
+                 "isSelectable": editor.isSelectable,
+                 "isHidden": editor.isHidden,
+                 "isUserInteractionEnabled": editor.isUserInteractionEnabled]
+            },
+            "model": ["isStartingChat": model.isStartingChat,
+                      "hasActiveRun": model.activeStreamID != nil,
+                      "hasSendError": model.sendErrorMessage != nil,
+                      "isEstablishingConnection": model.isEstablishingConnection,
+                      "hasPromptDeliveryUncertainty": model.directConversationHasPromptDeliveryUncertainty,
+                      "hasConfirmedAcceptance": model.directPromptDeliveryHasConfirmedAcceptance],
+            "runtime": ["state": runtimeState, "connectionGeneration": runtime.connectionGeneration]
+        ]
+        receipt["readinessProgress"] = readinessProgress ?? [:]
+        let allowedMethods = ["session.resume", "session.info", "prompt.submit", "session.steer",
+                              "session.status", "session.usage", "approval.pending"]
+        let calls = await transport.calls()
+        let connection = await transport.connectionProgress()
+        receipt["mockConnectionProgress"] = [
+            "enteredAtUptime": connection.enteredAtUptime.map { $0 as Any } ?? NSNull(),
+            "returnedAtUptime": connection.returnedAtUptime.map { $0 as Any } ?? NSNull(),
+            "identifierReadCount": connection.identifierReadCount,
+            "firstIdentifierReadAtUptime": connection.firstIdentifierReadAtUptime.map { $0 as Any } ?? NSNull(),
+            "lastIdentifierReadAtUptime": connection.lastIdentifierReadAtUptime.map { $0 as Any } ?? NSNull(),
+            "isConnected": connection.isConnected
+        ]
+        receipt["rpcMethodCounts"] = Dictionary(uniqueKeysWithValues: allowedMethods.map { method in
+            (method, calls.filter { $0.method == method }.count)
+        })
+        receipt["unlistedMethodCount"] = calls.filter { !allowedMethods.contains($0.method) }.count
+        receipt["steerResponsePending"] = await transport.isWaiting
+        let transportSampledAtUptime = ProcessInfo.processInfo.systemUptime
+        receipt["transportSampledAtUptime"] = transportSampledAtUptime
+        receipt["transportSnapshotLagSeconds"] = transportSampledAtUptime - stateCapturedAtUptime
+        let data = (try? JSONSerialization.data(withJSONObject: receipt, options: [.sortedKeys]))
+            ?? Data("{\"schemaVersion\":3,\"serializationFailed\":true}".utf8)
+        let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+        attachment.name = "mounted-steer-readiness-failure"
+        attachment.lifetime = .keepAlways
+        XCTContext.runActivity(named: "Mounted steer readiness failure") { $0.add(attachment) }
     }
 
     private func find(_ identifier: String, in view: UIView) -> UIView? {
