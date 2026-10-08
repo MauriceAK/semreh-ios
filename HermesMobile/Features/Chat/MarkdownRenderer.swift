@@ -341,6 +341,11 @@ private struct StreamingRawMarkdownChunk: View, Equatable {
     var body: some View {
         if content.allSatisfy(\.isWhitespace) {
             EmptyView()
+        } else if let fence = StreamingFencedCodeProjection.prepare(content) {
+            // Use the same code shell before/after the rich-tail budget and when
+            // this keyed raw block seals. Native TextKit/segmented code limits
+            // and streaming highlight policy remain owned by ChatCodeBlock.
+            ChatCodeBlock(language: fence.language, content: fence.content, isStreaming: active)
         } else if StreamingMarkdownRenderBudget.usesLiteralTail(content) {
             StreamingLiteralText(content: content)
         } else {

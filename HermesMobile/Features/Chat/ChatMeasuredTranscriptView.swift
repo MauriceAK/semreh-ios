@@ -38,6 +38,7 @@ struct ChatMeasuredTranscriptView: View {
 
     var body: some View {
         viewport
+            .contentShape(Rectangle())
             .simultaneousGesture(
                 TapGesture().onEnded {
                     guard dismissesKeyboardOnTap else { return }
