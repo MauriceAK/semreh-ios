@@ -1665,6 +1665,7 @@ struct ChatTranscriptView: View, Equatable {
             spacing: transcriptMessageSpacing,
             bottomInset: transcriptBottomInsetHeight,
             topInset: transcriptTopInsetHeight,
+            bottomAlignsShortContent: internalChatRendererEnabled,
             latestBottomInset: latestButtonBottomInset,
             environment: prototypeEnvironment,
             // Only empty boundaries are canonical inert spacers. Every rich branch

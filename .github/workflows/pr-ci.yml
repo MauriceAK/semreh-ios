@@ -180,39 +180,23 @@ jobs:
           python3 ci/diagnostic_simulator.py create --source "${SOURCE_SIMULATOR_ID}" \
             --ownership MountedDiagnosticSimulator/ownership.json
 
-      - name: Validate capture outside scored tests
-        id: capture-validation
-        if: ${{ failure() && steps.diagnostic-sim.outputs.id != '' }}
-        continue-on-error: true
-        timeout-minutes: 5
-        env:
-          SIMULATOR_ID: ${{ steps.diagnostic-sim.outputs.id }}
-        run: |
-          python3 ci/validate_mounted_capture.py --simulator "${SIMULATOR_ID}" \
-            --app "${PWD}/${DERIVED_DATA_PATH}/Build/Products/Debug-iphonesimulator/HermesMobile.app" \
-            --output MountedCaptureValidation
-          python3 - <<'PY'
-          import json, os
-          from pathlib import Path
-          report = json.loads(Path("MountedCaptureValidation/safe/validation.json").read_text())
-          ready = report.get("captureSucceeded") is True and report.get("cleanupSucceeded") is True
-          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-              output.write("ready=" + str(ready).lower() + "\n")
-          PY
-
       - name: Profile failed startup separately
-        if: ${{ failure() && steps.capture-validation.outputs.ready == 'true' }}
+        if: ${{ failure() && steps.diagnostic-sim.outputs.id != '' }}
         continue-on-error: true
         timeout-minutes: 10
         env:
           SIMULATOR_ID: ${{ steps.diagnostic-sim.outputs.id }}
         run: |
           set -euo pipefail
-          python3 ci/watch_mounted_startup.py --max-samples 1 --sample-timeout 30 --simulator "${SIMULATOR_ID}" \
+          python3 ci/watch_mounted_startup.py --max-samples 1 --sample-timeout 10 --simulator "${SIMULATOR_ID}" \
+            --built-app "${PWD}/${DERIVED_DATA_PATH}/Build/Products/Debug-iphonesimulator/HermesMobile.app" \
+            --scheme "${SCHEME}" --ownership MountedDiagnosticSimulator/ownership.json \
             --output MountedFocusedDiagnostics > mounted-focused-watchdog.log 2>&1 &
           watchdog_pid=$!
           trap 'kill -TERM "${watchdog_pid}" 2>/dev/null || true; wait "${watchdog_pid}" 2>/dev/null || true' EXIT
-          # Diagnostic only: this cannot change the earlier full-suite outcome.
+          # Perturbed diagnostic only: cannot override the full-suite outcome.
+          # The watcher binds the actual XCTest host; no manual app launch.
+          # At most one 2s/10ms sample; raw stacks remain private on this worker.
           xcodebuild test-without-building \
             -project "${PROJECT_PATH}" \
             -scheme "${SCHEME}" \
@@ -222,7 +206,6 @@ jobs:
             -parallel-testing-enabled NO \
             -only-testing:HermesMobileTests/ChatTranscriptViewRestoreTests/testMountedSteerAcceptanceClearsUnchangedDraft \
             -only-testing:HermesMobileTests/ChatTranscriptViewRestoreTests/testMountedSteerBackReopenRetiresOldCompletionOwnership \
-            -only-testing:HermesMobileTests/ChatTranscriptViewRestoreTests/testMountedSteerClearAndRetypeRetainsDraft \
             CODE_SIGNING_ALLOWED=NO
 
       - name: Export focused diagnostic state
@@ -237,16 +220,6 @@ jobs:
         continue-on-error: true
         run: |
           python3 ci/diagnostic_simulator.py cleanup --ownership MountedDiagnosticSimulator/ownership.json
-
-      - name: Retain safe capture validation
-        if: always()
-        continue-on-error: true
-        uses: actions/upload-artifact@v7
-        with:
-          name: mounted-capture-validation-safe
-          path: MountedCaptureValidation/safe
-          retention-days: 1
-          if-no-files-found: ignore
 
       - name: Retain safe focused diagnostics
         if: always()

@@ -78,6 +78,13 @@ def filtered(raw):
         result["readinessProgress"]["finalPollState"] = state(progress.get("finalPollState"))
         transitions = progress.get("runtimeTransitions")
         result["readinessProgress"]["runtimeTransitions"] = [state(item) for item in transitions[:16]] if isinstance(transitions, list) else []
+    boundaries = raw.get("startupBoundaries")
+    result["startupBoundaries"] = fields(boundaries, (
+        "initialKeyboardSendBeganAtUptime", "initialKeyboardSendReturnedAtUptime",
+        "runtimeProviderEnteredAtUptime", "initialPromptPollBeganAtUptime"), number)
+    result["startupBoundaries"].update(fields(boundaries, (
+        "navigationTransitionActiveAtKeyboardSend", "editorFirstResponderAtKeyboardSend",
+        "editorAttachedToOwnedWindowAtKeyboardSend", "navigationTransitionActiveAtFailure"), boolean))
     return result
 
 
