@@ -293,29 +293,55 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         await runtime.stop()
     }
 
-    func testDirectBackgroundBufferedCloseAfterAcknowledgementReturnsUnknownNotStarted() async throws {
-        let fake = ChatDirectFakeTransport()
-        let gate = ChatDirectAsyncGate()
-        fake.setBackgroundGate(gate)
-        let runtime = try makeRuntime(fake)
-        let vm = makeViewModel(client: makeDirectBlockingTestClient(), runtime: runtime, sessionID: "durable-1")
-        let command = try XCTUnwrap(SlashCommandCatalog.command(named: "background"))
+    func testDirectBackgroundCloseAroundAcknowledgementReportsUnknownWithoutReplay() async throws {
+        for closeBeforeAcknowledgement in [true, false] {
+            let fake = ChatDirectFakeTransport()
+            let gate = ChatDirectAsyncGate()
+            fake.setBackgroundGate(gate)
+            let runtime = try makeRuntime(fake)
+            let vm = makeViewModel(client: makeDirectBlockingTestClient(), runtime: runtime, sessionID: "durable-1")
+            let command = try XCTUnwrap(SlashCommandCatalog.command(named: "background"))
+            let status = try XCTUnwrap(SlashCommandCatalog.command(named: "status"))
+            let unknownCard = "**Background** Close at ACK\n\nOutcome unknown. Check Hermes before starting it again."
 
-        let request = Task { await vm.executeSlashCommand(command, args: "Close at ACK") }
-        await waitUntil { fake.calls().contains { $0.method == "prompt.background" } }
-        fake.emitClosed()
-        await gate.release()
+            let request = Task { await vm.executeSlashCommand(command, args: "Close at ACK") }
+            await waitUntil { fake.calls().contains { $0.method == "prompt.background" } }
+            if closeBeforeAcknowledgement {
+                fake.emitClosed()
+                // emitClosed only enqueues the event in the runtime's AsyncStream.
+                // Observe delivery before releasing the independent RPC continuation.
+                await waitUntil {
+                    runtime.state == .disconnected && vm.messages.contains { $0.content == unknownCard }
+                }
+                await gate.release()
+                if case .unsupported(let message) = await request.value {
+                    XCTAssertTrue(message.contains("Check Hermes"))
+                } else {
+                    XCTFail("A processed close before ACK must not report that the background task started")
+                }
+            } else {
+                await gate.release()
+                if case .executed(let message) = await request.value {
+                    XCTAssertEqual(message, "Background task started. I'll add the result here when it completes.")
+                } else {
+                    XCTFail("A valid ACK before close must report the accepted background start")
+                }
+                fake.emitClosed()
+                await waitUntil {
+                    runtime.state == .disconnected && vm.messages.contains { $0.content == unknownCard }
+                }
+            }
 
-        guard case .unsupported(let message) = await request.value else {
-            return XCTFail("A buffered close must not report that the background task started")
+            XCTAssertEqual(vm.messages.filter { $0.content == unknownCard }.count, 1)
+            if case .executed(let message) = await vm.executeSlashCommand(status) {
+                XCTAssertTrue(message?.contains("Background tasks: 0") == true)
+            } else {
+                XCTFail("Status must expose the resolved pending background count")
+            }
+            XCTAssertEqual(fake.calls().filter { $0.method == "prompt.background" }.count, 1)
+            await vm.disposeDirectConversation()
+            await runtime.stop()
         }
-        XCTAssertTrue(message.contains("Check Hermes"))
-        XCTAssertEqual(vm.messages.filter {
-            $0.content == "**Background** Close at ACK\n\nOutcome unknown. Check Hermes before starting it again."
-        }.count, 1)
-        XCTAssertEqual(fake.calls().filter { $0.method == "prompt.background" }.count, 1)
-        await vm.disposeDirectConversation()
-        await runtime.stop()
     }
 
     func testDirectBackgroundUnknownClearsPendingCountAndNeverRetries() async throws {
