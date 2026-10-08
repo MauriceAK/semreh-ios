@@ -4472,9 +4472,14 @@ private struct ChatBotActivitySubtitle: View {
         let phase = viewModel.displayedHeaderActivityPhase
         Text(phase?.label ?? ChatActivityPhase.working.label)
             .font(.caption2)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(.primary)
             .lineLimit(1)
             .minimumScaleFactor(0.8)
+            // The transcript draws beneath this overlay. Give the coarse status
+            // its own quiet backing so it cannot merge with message lettering.
+            .padding(.horizontal, 6)
+            .padding(.vertical, 1)
+            .background(.regularMaterial, in: Capsule())
             .contentTransition(.opacity)
             .opacity(phase == nil ? 0 : 1)
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.16), value: phase)
