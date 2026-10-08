@@ -1995,7 +1995,10 @@ final class GatewayConversationController {
         destructiveTarget: DestructivePromptTarget? = nil
     ) async throws {
         guard !compressionOutcomeUnknown else { throw DirectSessionCompressionError.outcomeUnknown }
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw DirectSessionError.invalidResponse }
+        let hasCaption = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        // Stock consumes confirmed queued image/PDF stages even with no caption.
+        // Stage scope validation below remains mandatory before dispatch.
+        guard hasCaption || !stagedAttachments.isEmpty else { throw DirectSessionError.invalidResponse }
         if let destructiveTarget {
             guard destructiveTarget.userRowID > 0,
                   Double(exactly: destructiveTarget.userRowID) != nil,
@@ -2129,6 +2132,10 @@ final class GatewayConversationController {
             }
             stagedScope = scope
             stagedReferenceTexts = stagedAttachments.compactMap { $0.referenceText(for: scope) }
+            guard hasCaption || stagedAttachments.contains(where: { !$0.isGenericFile })
+                || !stagedReferenceTexts.isEmpty else {
+                throw DirectSessionError.invalidResponse
+            }
             if let recoveryMarker,
                locallyConfirmedRecoveryStageCount > 0 {
                 recoveryTokenForSubmit = recoveryMarker.token
@@ -2155,7 +2162,7 @@ final class GatewayConversationController {
         let capturedConnectionGeneration = runtime.connectionGeneration
         let previousHasSubmittedPrompt = hasSubmittedPrompt
         let previousTerminalReceipt = terminalReceipt
-        let submittedText = ([text] + stagedReferenceTexts).joined(separator: "\n")
+        let submittedText = ((hasCaption ? [text] : []) + stagedReferenceTexts).joined(separator: "\n")
         terminalReceipt = nil
         hasSubmittedPrompt = true
         var submitRequestWasDispatched = false

@@ -47,6 +47,208 @@ private enum P09CalibrationGeometry {
 final class DirectSkillUITests: XCTestCase {
     private var containedOriginalMuseSurface: Bool?
 
+    // This contained measurement uses an ordinary Release build, reviewed
+    // provider and bounded video/diagnostic-log capture.
+    // An XCTest pass alone does not establish the video/provider-count gates.
+    @MainActor
+    func testOptInProductionLongStreamQuiet() async throws {
+        try await exerciseProductionLongStream(typing: false)
+    }
+
+    @MainActor
+    func testOptInProductionLongStreamTyping() async throws {
+        try await exerciseProductionLongStream(typing: true)
+    }
+
+    @MainActor
+    private func exerciseProductionLongStream(typing: Bool) async throws {
+        continueAfterFailure = false
+        try requirePreviewShellFixture() // Contained origin/stock/SHA guard only.
+        guard ProcessInfo.processInfo.environment["SEMREH_PRODUCTION_LONG_STREAM_UI"] == "1" else {
+            throw XCTSkip("The reviewed contained long-provider measurement requires explicit opt-in.")
+        }
+        let marker = "SEMREH_LONG_STREAM_FIXTURE_V1"
+        let expectedHash = "751ffc66fdfae090064c9b8c2b0d2471aa17cd0615ea1d0f650a88d1c65cf4f4"
+        let draft = "Responsive draft\nwhile one answer grows, I can keep typing a complete thought without losing focus or any characters."
+        let observer = try await LifecycleCanonicalObserver(
+            origin: try XCTUnwrap(URL(string: origin)), credentials: readCredentials())
+        defer { observer.invalidate(); UIPasteboard.general.items = [] }
+        let app = XCUIApplication()
+        defer { app.terminate() }
+        let activeProfileBefore = try await observer.activeProfile()
+        let defaultProfileBefore = try await observer.defaultProfile()
+
+        func retain(_ name: String, _ fields: [String: Any]) throws {
+            let data = try JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys])
+            let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+            attachment.name = name
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+
+        do {
+            let phase = typing ? "typing" : "quiet"
+            // Snapshot before opening New Chat, covering either eager or lazy
+            // canonical creation. Never discover by title or repeated marker.
+            let beforeIDs = try await observer.longStreamSessionInventory()
+            app.terminate()
+            app.launchArguments = []
+            app.launch()
+            let composer = try openContainedNewChat(app: app)
+            assertContainedSurfaceSelection(app: app, muse: true, needsTranscript: false)
+            XCTAssertTrue(app.otherElements["chat-detail:New Chat"].exists)
+            send(marker, through: composer, app: app) // One actual Send, no warmup.
+            XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+            XCTAssertEqual(app.textViews.matching(identifier: "chat-composer-input").count, 1)
+            let cleared = try XCTUnwrap(composer.value as? String)
+            XCTAssertTrue(cleared.isEmpty || cleared == composer.placeholderValue)
+
+            let transcript = app.collectionViews["chat-native-transcript-v2"]
+            let responseRows = transcript.staticTexts.matching(NSPredicate(
+                format: "identifier BEGINSWITH %@ AND label BEGINSWITH %@",
+                "message-row:", "Assistant message: ## One growing answer\n\nSEMREH_LONG_PARAGRAPH_START "))
+            // AX polling is confined to this PRE-window readiness boundary.
+            let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                guard responseRows.count == 1 else { return false }
+                let label = responseRows.firstMatch.label
+                return label.contains("let longReplyLine0") && !label.contains("SEMREH_LONG_REPLY_END")
+            }, object: nil)
+            XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 25), .completed)
+            let row = responseRows.firstMatch
+            let prefixBefore = row.label
+            XCTAssertFalse(prefixBefore.contains("SEMREH_LONG_REPLY_END"))
+            let keyboardBefore = app.keyboards.firstMatch.frame
+            XCTAssertTrue(composer.isHittable && app.buttons["Stop response"].exists)
+            retainPreviewScreenshot("long-stream-\(phase)-before-window", app: app)
+
+            // Do not add AX queries, predicates, screenshots or backend reads
+            // between these timestamps. Input automation has its own overhead.
+            let windowStart = Date().timeIntervalSince1970
+            let uptimeStart = ProcessInfo.processInfo.systemUptime
+            if typing {
+                composer.typeText(draft)
+            } else {
+                try await Task.sleep(for: .seconds(6))
+            }
+            let uptimeEnd = ProcessInfo.processInfo.systemUptime
+            let windowEnd = Date().timeIntervalSince1970
+
+            // Single post-window snapshot. Growth across these observations is
+            // necessary but video must establish growth DURING the typed action.
+            let prefixAfter = row.label
+            XCTAssertTrue(prefixAfter.hasPrefix(prefixBefore))
+            XCTAssertGreaterThan(prefixAfter.utf8.count, prefixBefore.utf8.count)
+            XCTAssertFalse(prefixAfter.contains("SEMREH_LONG_REPLY_END"),
+                           "The measured window must end while this long reply is still growing.")
+            XCTAssertTrue(app.keyboards.firstMatch.exists && composer.isHittable)
+            XCTAssertEqual(app.textViews.matching(identifier: "chat-composer-input").count, 1)
+            XCTAssertEqual(app.keyboards.firstMatch.frame.minY, keyboardBefore.minY, accuracy: 2)
+            XCTAssertEqual(app.keyboards.firstMatch.frame.height, keyboardBefore.height, accuracy: 2)
+            let actualDraft = try XCTUnwrap(composer.value as? String)
+            if typing { XCTAssertEqual(actualDraft, draft) }
+            else { XCTAssertTrue(actualDraft.isEmpty || actualDraft == composer.placeholderValue) }
+            try retain("long-stream-\(phase)-window", [
+                "phase": phase, "window_start_epoch": windowStart, "window_end_epoch": windowEnd,
+                "action_or_quiet_seconds": uptimeEnd - uptimeStart,
+                "before_accessible_prefix_bytes": prefixBefore.utf8.count,
+                "after_accessible_prefix_bytes": prefixAfter.utf8.count,
+                "no_explicit_ax_queries_inside_window": true,
+                "typing": typing, "actual_in_window_growth_requires_video_review": true,
+                "presented_fps_measured": false,
+            ])
+            retainPreviewScreenshot("long-stream-\(phase)-after-window", app: app)
+            waitForIdle(app: app) // Outside the scored window only.
+
+            let afterIDs = try await observer.longStreamSessionInventory()
+            XCTAssertTrue(afterIDs.isSuperset(of: beforeIDs))
+            let added = afterIDs.subtracting(beforeIDs)
+            XCTAssertEqual(added.count, 1, "Exactly one fresh canonical conversation must be identifiable.")
+            let storedID = try XCTUnwrap(added.first)
+            let canonical = try await waitForCanonical(observer: observer, storedID: storedID) { rows in
+                guard rows.count == 2, self.canonicalIDsAreUnique(rows),
+                      rows[0]["role"] as? String == "user", self.canonicalText(rows[0]) == marker,
+                      rows[1]["role"] as? String == "assistant", let body = self.canonicalText(rows[1]) else { return false }
+                return body.utf8.count == 61_957
+                    && SHA256.hash(data: Data(body.utf8)).map { String(format: "%02x", $0) }.joined() == expectedHash
+            }
+            let expectedRow = try XCTUnwrap(accessibleTranscriptRow(canonical[1]))
+            let canonicalBody = try XCTUnwrap(canonicalText(canonical[1]))
+            let finalRow = transcript.staticTexts[expectedRow.identifier]
+            XCTAssertEqual(finalRow.label, expectedRow.label)
+            try retain("long-stream-\(phase)-canonical", [
+                "phase": phase, "stored_id": storedID,
+                "row_ids": canonical.compactMap { self.canonicalMessageID($0) },
+                "assistant_utf8_bytes": canonicalBody.utf8.count, "assistant_sha256": expectedHash,
+                "provider_request_classification_requires_separate_receipt": true,
+            ])
+
+            if typing {
+                let header = app.descendants(matching: .any).matching(identifier: "muse-chat-header").firstMatch
+                let dock = app.descendants(matching: .any).matching(identifier: "muse-chat-dock").firstMatch
+                let viewport = transcript.frame.intersection(app.windows.firstMatch.frame)
+                let top = max(viewport.minY, header.frame.maxY)
+                let bottom = min(viewport.maxY, dock.frame.minY)
+                XCTAssertTrue(top.isFinite && bottom.isFinite && viewport.width.isFinite)
+                XCTAssertGreaterThan(bottom - top, 44)
+                let origin = app.coordinate(withNormalizedOffset: .zero)
+                origin.withOffset(CGVector(dx: viewport.maxX - 8, dy: top + 20)).tap()
+                XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5))
+                XCTAssertEqual(composer.value as? String, draft)
+                transcript.swipeDown() // One ordinary pan away from the tail.
+                let latest = app.buttons["Scroll to latest message"]
+                XCTAssertTrue(latest.waitForExistence(timeout: 5) && latest.isHittable)
+                // Resolve the control before scoring. After the one delivered
+                // tap, do not observe AX/UI/backend state inside this window.
+                let latestWindowStart = Date().timeIntervalSince1970
+                let latestUptimeStart = ProcessInfo.processInfo.systemUptime
+                latest.tap() // One actual Latest, no retries or rescue swipes.
+                try await Task.sleep(for: .milliseconds(1_500))
+                let latestUptimeEnd = ProcessInfo.processInfo.systemUptime
+                let latestWindowEnd = Date().timeIntervalSince1970
+                XCTAssertFalse(latest.exists)
+                XCTAssertTrue(finalRow.exists && !finalRow.frame.intersection(transcript.frame).isEmpty)
+                XCTAssertEqual(finalRow.label, expectedRow.label)
+                try retain("long-stream-typing-latest-window", [
+                    "window_start_epoch": latestWindowStart, "window_end_epoch": latestWindowEnd,
+                    "tap_and_quiet_seconds": latestUptimeEnd - latestUptimeStart,
+                    "fixed_post_tap_observation_free_seconds": 1.5,
+                    "no_explicit_ax_ui_backend_observation_inside_window": true,
+                    "one_pre_resolved_latest_tap": true,
+                    "presented_fps_measured": false,
+                ])
+                let tailFrame = finalRow.frame
+                try await Task.sleep(for: .milliseconds(400))
+                XCTAssertEqual(finalRow.frame.maxY, tailFrame.maxY, accuracy: 2)
+                retainPreviewScreenshot("long-stream-typing-stable-latest", app: app)
+                composer.tap()
+                XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+                XCTAssertEqual(composer.value as? String, draft)
+            }
+
+            let back = chatBackButton(app: app)
+            XCTAssertTrue(back.isHittable)
+            back.tap()
+            let storedRow = app.buttons["session-row:\(storedID)"]
+            XCTAssertTrue(storedRow.waitForExistence(timeout: 15) && storedRow.isHittable)
+            storedRow.tap()
+            XCTAssertTrue(composer.waitForExistence(timeout: 15))
+            let reopened = app.collectionViews["chat-native-transcript-v2"].staticTexts[expectedRow.identifier]
+            XCTAssertTrue(reopened.waitForExistence(timeout: 10))
+            XCTAssertEqual(reopened.label, expectedRow.label)
+            let reloadedCanonical = try await observer.transcript(storedID: storedID)
+            XCTAssertTrue(NSArray(array: reloadedCanonical).isEqual(to: canonical))
+            if typing {
+                XCTAssertEqual(composer.value as? String, draft)
+                try clearDailyDriverDraft(composer, expectedText: draft, style: "long-stream-typing", app: app)
+            }
+            retainPreviewScreenshot("long-stream-\(phase)-canonical-reopen", app: app)
+        }
+        let activeProfileAfter = try await observer.activeProfile()
+        let defaultProfileAfter = try await observer.defaultProfile()
+        XCTAssertEqual(activeProfileAfter, activeProfileBefore)
+        XCTAssertEqual(defaultProfileAfter, defaultProfileBefore)
+    }
+
     @MainActor
     func testOptInLongGrowingReplyReaderKeyboardCompletionAndReopen() throws {
         try exerciseLongGrowingReply(cancelled: false)
@@ -1069,11 +1271,16 @@ final class DirectSkillUITests: XCTestCase {
             XCTAssertGreaterThan(emptyVoiceFrame.width, 0)
             XCTAssertEqual(firstCharacterEditorFrame.minX, emptyEditorFrame.minX, accuracy: 2,
                            "Typing the first character must not move the editor sideways.")
-            XCTAssertEqual(firstCharacterEditorFrame.width, emptyEditorFrame.width, accuracy: 2,
-                           "The reserved Send slot must keep the input width stable.")
-            XCTAssertEqual(firstCharacterVoiceFrame.midX, emptyVoiceFrame.midX, accuracy: 2,
-                           "The microphone must not move when the first character enables Send.")
-            retainPreviewScreenshot("\(style) first character keeps composer and mic geometry", app: app)
+            let sendSlotWidth = enabledSend.firstMatch.frame.width
+            XCTAssertEqual(emptyEditorFrame.width - firstCharacterEditorFrame.width, sendSlotWidth, accuracy: 2,
+                           "The empty composer must give the unused Send slot back to the editor.")
+            XCTAssertEqual(emptyVoiceFrame.midX - firstCharacterVoiceFrame.midX, sendSlotWidth, accuracy: 2,
+                           "Voice moves by one adjacent action slot when Send appears.")
+            XCTAssertLessThanOrEqual(app.windows.firstMatch.frame.maxX - emptyVoiceFrame.maxX, 32,
+                                     "Empty voice control must sit at the trailing edge, without a ghost slot.")
+            XCTAssertEqual(enabledSend.firstMatch.frame.minX, firstCharacterVoiceFrame.maxX, accuracy: 2,
+                           "Send and voice hit targets must be adjacent.")
+            retainPreviewScreenshot("\(style) first character exposes adjacent composer actions", app: app)
             composer.typeText(String(postSendDraft.dropFirst()))
             XCTAssertEqual(composer.value as? String, postSendDraft)
             XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
@@ -5730,6 +5937,203 @@ final class DirectSkillUITests: XCTestCase {
             "Typing and removing the owned draft must not resend or mutate canonical history.")
     }
 
+    /// Exact reported regressions through the signed production entry point.
+    @MainActor
+    func testOptInProductionComposerImageOnlyAndCompactIdleHeader() async throws {
+        continueAfterFailure = false
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("Contained composer verification is simulator-only.")
+        #endif
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SEMREH_PRODUCTION_COMPOSER_UI"] == "1" else {
+            throw XCTSkip("Composer regression verification requires explicit opt-in.")
+        }
+        guard environment["SEMREH_SLICE2_UI_LIVE"] == "1",
+              environment["SEMREH_SLICE1_HTTPS"] == "1",
+              environment["SEMREH_SLICE2_UI_BACKEND_MODE"] == "stock",
+              environment["SEMREH_SLICE2_UI_BACKEND_SHA"] == backendSHA,
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == credentialsPath,
+              environment["SEMREH_SLICE2_TOOL_CWD"] == "/Users/maurice/workspace/semreh-slice1-runtime/tools" else {
+            return XCTFail("Composer verification requires the contained pinned stock fixture.")
+        }
+        let observer = try await LifecycleCanonicalObserver(
+            origin: try XCTUnwrap(URL(string: origin)), credentials: try readCredentials())
+        let app = XCUIApplication()
+        defer { app.terminate(); observer.invalidate(); UIPasteboard.general.items = [] }
+        app.terminate()
+        app.launchArguments = ["-appTheme", "semrehDark", "-AppleInterfaceStyle", "Dark"]
+        app.launch()
+        let composer = try openContainedNewChat(app: app)
+        assertContainedSurfaceSelection(app: app, muse: true, needsTranscript: false)
+        let profile = app.buttons["chatProfileConfiguration"]
+        let voice = app.buttons["Voice input"]
+        let sends = app.buttons.matching(NSPredicate(format: "label == %@", "Send"))
+        let removals = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Remove attachment "))
+        func assertEmptyEditor() {
+            let value = composer.value as? String ?? ""
+            XCTAssertTrue(value.isEmpty || value == composer.placeholderValue)
+        }
+        func assertTrailingVoice() {
+            XCTAssertTrue(voice.exists && voice.isHittable && voice.isEnabled)
+            XCTAssertEqual(sends.count, 0)
+            XCTAssertLessThanOrEqual(app.windows.firstMatch.frame.maxX - voice.frame.maxX, 32,
+                                     "No empty Send slot may remain after the microphone.")
+        }
+        func assertAdjacentActions() {
+            XCTAssertEqual(sends.count, 1)
+            XCTAssertTrue(sends.firstMatch.isEnabled && sends.firstMatch.isHittable)
+            XCTAssertEqual(sends.firstMatch.frame.minX, voice.frame.maxX, accuracy: 2,
+                           "Voice and Send must have adjacent hit targets.")
+        }
+        let idleProfileHeight = profile.frame.height
+        // AX exposes the whole avatar/name button, not the visible glass bounds.
+        // Hosted native tests measure the capsule; real PNG review must establish
+        // compact idle appearance. New Chat uses Menu; the established chat uses
+        // Button, whose AX union excludes some padded label bounds. Compare stable
+        // geometry only after the warmup has established the same Button role.
+        XCTAssertGreaterThan(idleProfileHeight, 0)
+        XCTAssertTrue(profile.isHittable)
+        XCTAssertTrue(app.windows.firstMatch.frame.contains(profile.frame))
+        composer.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        assertEmptyEditor()
+        assertTrailingVoice()
+        retainPreviewScreenshot("composer-regression 01 empty focused compact header", app: app)
+        let emptyVoiceFrame = voice.frame
+        composer.typeText("a")
+        XCTAssertEqual(composer.value as? String, "a")
+        assertAdjacentActions()
+        retainPreviewScreenshot("composer-regression 02 first character adjacent actions", app: app)
+        try clearDailyDriverDraft(composer, expectedText: "a", style: "composer-regression", app: app)
+        assertEmptyEditor()
+        assertTrailingVoice()
+        XCTAssertEqual(voice.frame.midX, emptyVoiceFrame.midX, accuracy: 2)
+        retainPreviewScreenshot("composer-regression 03 cleared returns voice to edge", app: app)
+
+        func pasteOwnedImage() throws {
+            let image = UIGraphicsImageRenderer(size: CGSize(width: 96, height: 96)).image { context in
+                UIColor.systemTeal.setFill()
+                context.fill(CGRect(x: 0, y: 0, width: 96, height: 96))
+                UIColor.systemYellow.setFill()
+                context.fill(CGRect(x: 24, y: 24, width: 48, height: 48))
+            }
+            UIPasteboard.general.image = image
+            composer.press(forDuration: 1.1)
+            let pasteMenu = app.menuItems["Paste"]
+            let pasteButton = app.buttons["Paste"].firstMatch
+            XCTAssertTrue(pasteMenu.waitForExistence(timeout: 3) || pasteButton.waitForExistence(timeout: 3))
+            if pasteMenu.exists { pasteMenu.tap() } else { pasteButton.tap() }
+            let allowPaste = app.alerts.buttons["Allow Paste"]
+            if allowPaste.waitForExistence(timeout: 1) { allowPaste.tap() }
+            XCTAssertTrue(removals.firstMatch.waitForExistence(timeout: 10))
+            XCTAssertEqual(removals.count, 1, "Exactly one locally prepared image must be present.")
+            assertEmptyEditor()
+            assertAdjacentActions()
+        }
+        // Exercise image-only readiness on the completely empty New Chat first.
+        try pasteOwnedImage()
+        retainPreviewScreenshot("composer-regression 04 image-only new chat enabled Send", app: app)
+        removals.firstMatch.tap()
+        XCTAssertTrue(removals.firstMatch.waitForNonExistence(timeout: 5))
+        assertTrailingVoice()
+        let warmup = "SEMREH_COMPOSER_IMAGE_\(UUID().uuidString)"
+        send(warmup, through: composer, app: app)
+        waitForIdle(app: app)
+        let storedID = try await observer.discoverStoredID(uniquePrompt: warmup)
+        let baseline = try await waitForCanonical(observer: observer, storedID: storedID) {
+            self.exactCanonicalPairs($0, users: [warmup])
+        }
+        let establishedIdleProfileFrame = profile.frame
+        func assertEstablishedIdleHeader() {
+            let frame = profile.frame
+            XCTAssertTrue(profile.isEnabled && profile.isHittable)
+            XCTAssertTrue(app.windows.firstMatch.frame.contains(frame))
+            XCTAssertEqual(frame.minX, establishedIdleProfileFrame.minX, accuracy: 2)
+            XCTAssertEqual(frame.minY, establishedIdleProfileFrame.minY, accuracy: 2)
+            XCTAssertEqual(frame.width, establishedIdleProfileFrame.width, accuracy: 2)
+            XCTAssertEqual(frame.height, establishedIdleProfileFrame.height, accuracy: 2)
+        }
+        assertEstablishedIdleHeader()
+        composer.tap()
+        try pasteOwnedImage()
+        assertEstablishedIdleHeader()
+        retainPreviewScreenshot("composer-regression 05 image-only canonical chat before send", app: app)
+        sends.firstMatch.tap() // One actual image-only send, with no caption or synthetic text.
+        XCTAssertTrue(removals.firstMatch.waitForNonExistence(timeout: 10))
+        assertEmptyEditor()
+        waitForIdle(app: app)
+        let canonical = try await waitForCanonical(observer: observer, storedID: storedID) { rows in
+            self.hasStableBaseline(rows, baseline: baseline) && rows.count == 4
+                && rows[2]["role"] as? String == "user"
+                && rows[3]["role"] as? String == "assistant"
+                && self.canonicalText(rows[3]) == "SEMREH_SLICE1_ACK"
+        }
+        // Exact attachment/caption assertions follow the pinned storage contract below.
+        let imageText = try XCTUnwrap(canonicalText(canonical[2]))
+        XCTAssertTrue(imageText.hasPrefix("@image:"), "Canonical user row must retain the real image directive.")
+        XCTAssertEqual(imageText.components(separatedBy: "\n").count, 1,
+                       "An image-only prompt must persist exactly its image directive, without a caption.")
+        XCTAssertGreaterThan(imageText.count, "@image:".count)
+        assertTrailingVoice()
+        assertEstablishedIdleHeader()
+        retainPreviewScreenshot("composer-regression 06 image-only delivered compact idle header", app: app)
+        let back = chatBackButton(app: app)
+        XCTAssertTrue(back.isHittable)
+        back.tap()
+        let storedRow = app.buttons["session-row:\(storedID)"]
+        XCTAssertTrue(storedRow.waitForExistence(timeout: 20) && storedRow.isHittable)
+        app.terminate()
+        app.launch()
+        dismissKnownPasswordSavePrompt(app, timeout: 3)
+        let sessions = app.buttons["Chats"]
+        let detail = app.otherElements.matching(NSPredicate(format: "identifier BEGINSWITH 'chat-detail:'")).firstMatch
+        let destinationDeadline = Date().addingTimeInterval(30)
+        while !sessions.exists && !detail.exists && Date() < destinationDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        }
+        if detail.exists {
+            let restoredBack = chatBackButton(app: app)
+            XCTAssertTrue(restoredBack.waitForExistence(timeout: 5) && restoredBack.isHittable)
+            restoredBack.tap()
+        }
+        XCTAssertTrue(sessions.waitForExistence(timeout: 15) && sessions.isHittable)
+        sessions.tap()
+        XCTAssertTrue(storedRow.waitForExistence(timeout: 20) && storedRow.isHittable)
+        storedRow.tap()
+        XCTAssertTrue(detail.waitForExistence(timeout: 30))
+        // Canonical attachments expose the actionable parent Button. Its label
+        // intentionally overrides the decorative image child's label.
+        let canonicalImageName = URL(fileURLWithPath:
+            String(imageText.dropFirst("@image:".count))).lastPathComponent
+        XCTAssertFalse(canonicalImageName.isEmpty)
+        let imageButtons = app.buttons.matching(NSPredicate(format: "label == %@",
+            "Open attachment \(canonicalImageName)"))
+        let imageElement = imageButtons.firstMatch
+        XCTAssertTrue(imageElement.waitForExistence(timeout: 15) && imageElement.isHittable,
+                      "Cold reopen must expose the canonical image's actual preview action.")
+        XCTAssertEqual(imageButtons.count, 1)
+        imageElement.tap()
+        let previewImage = app.images[canonicalImageName]
+        XCTAssertTrue(previewImage.waitForExistence(timeout: 15),
+                      "The canonical attachment must decode in its full preview after restart.")
+        XCTAssertFalse(previewImage.frame.intersection(app.windows.firstMatch.frame).isEmpty)
+        retainPreviewScreenshot("composer-regression 07a canonical image full preview", app: app)
+        let done = app.buttons["Done"]
+        XCTAssertTrue(done.waitForExistence(timeout: 5) && done.isHittable)
+        done.tap()
+        XCTAssertTrue(done.waitForNonExistence(timeout: 5))
+        _ = try await waitForCanonical(observer: observer, storedID: storedID) {
+            $0.count == canonical.count && self.hasStableBaseline($0, baseline: canonical)
+        }
+        assertTrailingVoice()
+        assertEstablishedIdleHeader()
+        retainPreviewScreenshot("composer-regression 07 canonical image after cold reopen", app: app)
+        let receipt = XCTAttachment(string: "Production entry point; new-chat image-only Send enabled; existing-chat image-only submitted once; canonicalRows=4; uniqueIDs=true; baselinePreserved=true; realImageDirective=true; noCaption=true; exactCanonicalColdReopen=true. No raw payload retained.")
+        receipt.name = "Composer image-only canonical verification"
+        receipt.lifetime = .keepAlways
+        add(receipt)
+    }
+
     @MainActor
     func testOptInProductionInterimHeadingSurvivesFinalAndCanonicalReopen() async throws {
         continueAfterFailure = false
@@ -7499,6 +7903,47 @@ final class DirectSkillUITests: XCTestCase {
                 try await Task.sleep(for: .milliseconds(100))
             }
             throw NSError(domain: "DirectSkillUITests", code: 26)
+        }
+
+        // Complete bounded inventory for the contained long-stream measurement.
+        // Pinned stock list total includes hidden roots, while rows omit them.
+        // Use total as a pagination UPPER bound, never require ID-count equality.
+        func longStreamSessionInventory(profile: String = "default") async throws -> Set<String> {
+            var upperBound: Int?
+            var ids = Set<String>()
+            for offset in [0, 100, 200, 300] {
+                if let upperBound, offset >= upperBound, offset > 0 { break }
+                var components = URLComponents()
+                components.path = "/api/sessions"
+                components.queryItems = [
+                    URLQueryItem(name: "profile", value: profile),
+                    URLQueryItem(name: "limit", value: "100"),
+                    URLQueryItem(name: "offset", value: String(offset)),
+                    URLQueryItem(name: "order", value: "created"),
+                    URLQueryItem(name: "archived", value: "include"),
+                ]
+                let (data, response) = try await request(path: try XCTUnwrap(components.string), method: "GET")
+                guard (200..<300).contains(response.statusCode),
+                      let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let total = payload["total"] as? Int, (0...400).contains(total),
+                      payload["limit"] as? Int == 100, payload["offset"] as? Int == offset,
+                      let rows = payload["sessions"] as? [[String: Any]], rows.count <= 400,
+                      upperBound == nil || upperBound == total else {
+                    throw NSError(domain: "SemrehLongStreamInventory", code: 1,
+                                  userInfo: [NSLocalizedDescriptionKey: "Bounded stock session inventory was invalid or changed while paging."])
+                }
+                upperBound = total
+                for row in rows {
+                    guard row["profile"] as? String == profile, let id = row["id"] as? String,
+                          id.range(of: "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$", options: .regularExpression) != nil else {
+                        throw NSError(domain: "SemrehLongStreamInventory", code: 2)
+                    }
+                    ids.insert(id) // Pinned rows are intentionally backfilled on each page.
+                }
+                guard ids.count <= total else { throw NSError(domain: "SemrehLongStreamInventory", code: 3) }
+            }
+            guard upperBound != nil else { throw NSError(domain: "SemrehLongStreamInventory", code: 4) }
+            return ids
         }
 
         func transcript(

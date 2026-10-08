@@ -23,6 +23,9 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
     /// Extra chrome above the viewport, independent of its keyboard-sized bounds.
     /// Content inset keeps native anchor/restore geometry below that chrome.
     var topInset: CGFloat = 0
+    /// Muse-only short conversations keep their realized tail above the dock.
+    /// The extra space is a viewport inset, never a row or a height estimate.
+    var bottomAlignsShortContent = false
     /// Explicit button clearance for measured chrome. Nil retains the old surface.
     var latestBottomInset: CGFloat? = nil
     let environment: EnvironmentValues
@@ -678,9 +681,11 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             collection.willLayout = { [weak self] in
                 guard let self else { return }
                 (self.collection.collectionViewLayout as? ColumnLayout)?.configure(input: self.input, width: self.collection.bounds.width)
+                self.applyResolvedTopInset()
                 self.primeInitialViewport()
             }
             collection.didLayout = { [weak self] in
+                self?.applyResolvedTopInset()
                 self?.updateEdgeMask()
                 self?.settleLayout()
             }
@@ -1107,7 +1112,14 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             if scopeChanged { saveMemory(scope: old.scope, typeKey: old.typeKey) }
             if old.typeKey != next.typeKey || old.horizontalPadding != next.horizontalPadding
                 || old.spacing != next.spacing || old.bottomInset != next.bottomInset
-                || old.topInset != next.topInset {
+                || old.topInset != next.topInset || old.bottomAlignsShortContent != next.bottomAlignsShortContent {
+                // Explicit geometry can be masked by the larger short-content
+                // inset. Its later self-sizing still belongs to this immediate
+                // revision, even if the short tail settles in the meantime.
+                if initialized, (old.bottomAlignsShortContent || next.bottomAlignsShortContent),
+                   (old.environment.usesMuseChatSurface || next.environment.usesMuseChatSurface) {
+                    immediateFollowRevision = next.revision
+                }
                 cancelFollow()
             }
             if followLink != nil && (old.revision != next.revision || old.isStreaming != next.isStreaming) {
@@ -1141,9 +1153,6 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             guard isViewLoaded else { return }
             // Use the same composer clearance as the legacy sibling control.
             latestBottomConstraint?.constant = -resolvedLatestBottomInset(next)
-            if collection.contentInset.top != next.topInset {
-                collection.contentInset.top = next.topInset
-            }
             latest.backgroundColor = .clear
             latest.tintColor = UIColor(SemrehVisualTheme.primaryText(for: next.environment.colorScheme,
                 palette: next.environment.appColorPalette))
@@ -1252,6 +1261,7 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
                     }
                 }
             }
+            applyResolvedTopInset()
             collection.setNeedsLayout()
             if let handoff { commitReaderHandoff(handoff) }
         }
@@ -1346,6 +1356,31 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             }
             return false
         }
+        /// Resolve against canonical layout extent, which already contains the
+        /// measured composer/underlap clearance. Keyboard avoidance is represented
+        /// only by collection bounds. Keep this inset independent of follow input
+        /// and gesture ownership so touching a short transcript cannot move it.
+        private func applyResolvedTopInset() {
+            guard isViewLoaded, !applying else { return }
+            var resolved = input.topInset
+            if input.bottomAlignsShortContent, input.environment.usesMuseChatSurface,
+               collection.bounds.height > 0, collection.bounds.height.isFinite {
+                collection.collectionViewLayout.prepare()
+                let naturalHeight = collection.collectionViewLayout.collectionViewContentSize.height
+                if naturalHeight.isFinite, naturalHeight >= 0 {
+                    resolved = max(resolved, collection.bounds.height - naturalHeight
+                        - collection.adjustedContentInset.bottom)
+                }
+            }
+            guard abs(collection.contentInset.top - resolved) > 0.5 else { return }
+            // Inset mutation can synchronously report an intermediate offset.
+            // Existing settlement remains the sole owner of the final position.
+            let wasCorrecting = correcting
+            correcting = true
+            collection.contentInset.top = resolved
+            correcting = wasCorrecting
+        }
+
         var memoryKey: String { "\(input.scope)|\(Int(collection.bounds.width.rounded()))|\(input.typeKey)" }
         var bottomOffset: CGFloat { max(-collection.adjustedContentInset.top, collection.contentSize.height - collection.bounds.height + collection.adjustedContentInset.bottom) }
         var interacting: Bool {
@@ -1394,12 +1429,35 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             // Only descendants owned by this transcript are ineligible. Hosted
             // selectable text and horizontal code scroll views must not compete.
             disableNestedScrollToTop(in: collection)
-            if viewportSize != collection.bounds.size || viewportInsets != collection.adjustedContentInset {
-                if viewportSize != .zero { immediateFollowRevision = input.revision }
-                if latestViewportSnapshot != nil { cancelMotion(reason: "viewport-change") }
-                cancelFollow()
+            let adjustedInsets = collection.adjustedContentInset
+            if viewportSize != collection.bounds.size || viewportInsets != adjustedInsets {
+                // A growing short transcript consumes derived top padding; it
+                // has not resized the viewport. Preserve only an already-owned
+                // streaming glide through that top-only change. Explicit chrome
+                // changes were marked immediate in update(_:).
+                let preservesGrowingContentFollow = input.bottomAlignsShortContent
+                    && input.environment.usesMuseChatSurface && canGlideFollow
+                    && viewportSize == collection.bounds.size
+                    && adjustedInsets.top < viewportInsets.top
+                    && adjustedInsets.left == viewportInsets.left
+                    && adjustedInsets.right == viewportInsets.right
+                    && adjustedInsets.bottom == viewportInsets.bottom
+                if preservesGrowingContentFollow {
+                    // Shrinking the inset can make the old negative offset
+                    // illegal. Clamp once, then glide only the remaining legal
+                    // distance; never animate an out-of-range scroll position.
+                    let current = collection.contentOffset.y
+                    let legal = min(bottomOffset, max(-adjustedInsets.top, current))
+                    if abs(current - legal) > 0.5 {
+                        collection.setContentOffset(CGPoint(x: collection.contentOffset.x, y: legal), animated: false)
+                    }
+                } else {
+                    if viewportSize != .zero { immediateFollowRevision = input.revision }
+                    if latestViewportSnapshot != nil { cancelMotion(reason: "viewport-change") }
+                    cancelFollow()
+                }
                 viewportSize = collection.bounds.size
-                viewportInsets = collection.adjustedContentInset
+                viewportInsets = adjustedInsets
             }
             let widthChanged = width != collection.bounds.width
             if widthChanged {

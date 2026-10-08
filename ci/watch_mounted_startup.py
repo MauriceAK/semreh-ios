@@ -7,19 +7,23 @@ worker-local; uploaded receipts contain only counts and predefined frame labels.
 """
 import argparse
 import ctypes
+import hashlib
 import json
 import math
 import os
 from pathlib import Path
+import plistlib
 import re
 import signal
+import shlex
 import stat
 import subprocess
 import time
+import uuid
 
 MARKER = Path("Library/Caches/semreh-mounted-startup.json")
 BUNDLE_ID = "com.maurice.semreh"
-MAX_SAMPLES = 4
+MAX_SAMPLES = 1
 MAX_PHASES = 32
 TRIGGER_SECONDS = 0.5
 MAX_MARKER_AGE_SECONDS = 30.0
@@ -137,6 +141,19 @@ def sample_status_categories(raw):
     return categories or (["unclassified-output"] if raw.strip() else ["empty-output"])
 
 
+def host_uptime_seconds():
+    # Match ProcessInfo.systemUptime explicitly. Python monotonic is used only
+    # for command duration, never assumed to be the marker's clock domain.
+    class Timebase(ctypes.Structure):
+        _fields_ = [("numer", ctypes.c_uint32), ("denom", ctypes.c_uint32)]
+    library = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+    library.mach_absolute_time.restype = ctypes.c_uint64
+    timebase = Timebase()
+    if library.mach_timebase_info(ctypes.byref(timebase)) != 0 or not timebase.denom:
+        raise ValueError("host-uptime-unavailable")
+    return library.mach_absolute_time() * timebase.numer / timebase.denom / 1_000_000_000
+
+
 def capture_sample(pid, private_output, index, timeout):
     """One sampler invocation. Raw stack/stdout/stderr stay in the private directory."""
     output = private_output / f"sample-{index:02d}.private.txt"
@@ -144,18 +161,24 @@ def capture_sample(pid, private_output, index, timeout):
     stderr = private_output / f"sample-{index:02d}.stderr.private.txt"
     record = {}
     started = time.monotonic()
+    record["captureLaunchMonotonicSeconds"] = started
+    record["captureLaunchUptimeSeconds"] = host_uptime_seconds()
     with stdout.open("xb") as out, stderr.open("xb") as err:
         os.chmod(stdout, 0o600)
         os.chmod(stderr, 0o600)
         try:
-            result = subprocess.run(["/usr/bin/sample", str(pid), "1", "10", "-file", str(output)],
+            result = subprocess.run(["/usr/bin/sample", str(pid), "2", "10", "-file", str(output)],
                                     stdout=out, stderr=err, timeout=timeout)
             record["exitCode"] = result.returncode
         except subprocess.TimeoutExpired:
             record["sampleTimedOut"] = True
         except OSError:
             record["sampleLaunchFailed"] = True
-    record["durationSeconds"] = time.monotonic() - started
+    record["captureReturnMonotonicSeconds"] = time.monotonic()
+    record["captureReturnUptimeSeconds"] = host_uptime_seconds()
+    record["durationSeconds"] = record["captureReturnMonotonicSeconds"] - started
+    if output.is_file() and not output.is_symlink():
+        os.chmod(output, 0o600)
     record["bytes"] = output.stat().st_size if output.is_file() else 0
     raw = bounded_private_text(output)
     if raw:
@@ -184,9 +207,26 @@ def container(simulator, kind):
     if result.returncode:
         return None
     path = Path(result.stdout.strip())
-    if not path.is_absolute() or not path.is_dir():
+    if not path.is_absolute() or not path.is_dir() or path.is_symlink() or path.resolve() != path:
         return None
-    return path.resolve()
+    device = Path.home() / "Library/Developer/CoreSimulator/Devices" / simulator
+    try:
+        relative = path.relative_to(device)
+    except ValueError:
+        return None
+    expected = ("data", "Containers", "Data" if kind == "data" else "Bundle", "Application")
+    if (relative.parts[:4] != expected or len(relative.parts) != (5 if kind == "data" else 6)
+            or not exact_uuid(relative.parts[4])
+            or (kind != "data" and relative.parts[5] != "HermesMobile.app")):
+        return None
+    return path
+
+
+def exact_uuid(value):
+    try:
+        return isinstance(value, str) and str(uuid.UUID(value)) == value.lower()
+    except (ValueError, AttributeError):
+        return False
 
 
 def marker(path):
@@ -210,7 +250,7 @@ def marker(path):
                 or not isinstance(value["pid"], int) or isinstance(value["pid"], bool)
                 or not 0 < value["pid"] <= 2_147_483_647
                 or not isinstance(value["token"], str)
-                or not re.fullmatch(r"[A-Fa-f0-9-]{36}", value["token"])
+                or not exact_uuid(value["token"])
                 or not isinstance(value["uptime"], (int, float))
                 or isinstance(value["uptime"], bool)
                 or not 0 <= value["uptime"] <= MAX_MARKER_UPTIME_SECONDS
@@ -303,20 +343,144 @@ def process_birth(pid):
     return info.startSeconds * 1_000_000_000 + info.startMicroseconds * 1000
 
 
+
+MACHO_MAGIC = {bytes.fromhex(value) for value in (
+    "feedface", "cefaedfe", "feedfacf", "cffaedfe", "cafebabe", "bebafeca", "cafebabf", "bfbafeca")}
+
+
+def file_sha(path):
+    if path.is_symlink() or path.resolve() != path or not path.is_file():
+        raise ValueError("identity-file-unavailable")
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def bounded_plist(path):
+    if path.is_symlink() or path.resolve() != path:
+        raise ValueError("identity-plist-unavailable")
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as stream:
+        metadata = os.fstat(stream.fileno())
+        if not stat.S_ISREG(metadata.st_mode) or not 0 < metadata.st_size <= 1024 * 1024:
+            raise ValueError("identity-plist-unavailable")
+        raw = stream.read(1024 * 1024 + 1)
+        if len(raw) != metadata.st_size:
+            raise ValueError("identity-plist-changed")
+    value = plistlib.loads(raw)
+    if not isinstance(value, dict):
+        raise ValueError("identity-plist-not-dictionary")
+    return value
+
+
+def implementation_hashes(bundle):
+    if bundle.is_symlink() or bundle.resolve() != bundle or not bundle.is_dir():
+        raise ValueError("identity-bundle-unavailable")
+    result = {}
+    for path in sorted(bundle.rglob("*")):
+        if path.is_symlink():
+            raise ValueError("identity-bundle-symlink")
+        if path.is_file():
+            with path.open("rb") as stream:
+                is_macho = stream.read(4) in MACHO_MAGIC
+            if is_macho:
+                result[str(path.relative_to(bundle))] = file_sha(path)
+    if "HermesMobile" not in result:
+        raise ValueError("identity-executable-missing")
+    return result
+
+
+def signing_status(path):
+    # Contributor CI intentionally disables bundle signing. Record that honestly;
+    # identical implementation hashes remain mandatory for every sample.
+    result = subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(path)],
+                            capture_output=True, text=True, timeout=8)
+    if result.returncode == 0:
+        return "verified"
+    lower = result.stderr.lower()
+    return "unsigned" if "not signed" in lower else "unverified"
+
+
+def diagnostic_owner(path, simulator):
+    path = path.absolute()
+    if (not path.is_relative_to(Path.cwd()) or path.is_symlink() or path.resolve() != path
+            or not path.is_file() or path.stat().st_size > 4096):
+        raise ValueError("owned-diagnostic-receipt-unavailable")
+    owner = json.loads(path.read_text())
+    if (os.environ.get("GITHUB_ACTIONS") != "true"
+            or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted"
+            or owner.get("schemaVersion") != 1 or owner.get("id") != simulator
+            or owner.get("source") == simulator
+            or owner.get("run") != os.environ.get("GITHUB_RUN_ID")
+            or owner.get("attempt") != os.environ.get("GITHUB_RUN_ATTEMPT")
+            or owner.get("name") != "Semreh Mounted Diagnostics " + owner.get("run", "")):
+        raise ValueError("owned-diagnostic-receipt-mismatch")
+    return file_sha(path)
+
+
+def built_identity(app, scheme):
+    app = app.absolute()
+    if (scheme != "HermesMobile" or not app.is_relative_to(Path.cwd())
+            or app.parts[-4:] != ("Build", "Products", "Debug-iphonesimulator", "HermesMobile.app")):
+        raise ValueError("built-host-scheme-mismatch")
+    info = bounded_plist(app / "Info.plist")
+    if info.get("CFBundleIdentifier") != BUNDLE_ID or info.get("CFBundleExecutable") != "HermesMobile":
+        raise ValueError("built-host-info-mismatch")
+    return {"implementation": implementation_hashes(app), "infoSHA256": file_sha(app / "Info.plist"),
+            "executableSigningStatus": signing_status(app / "HermesMobile"),
+            "bundleSigningStatus": signing_status(app)}
+
+
+def actual_host_identity(pid, bundle, data, expected, watch_started_ns):
+    birth = process_birth(pid)
+    executable = process_path(pid)
+    if (birth is None or birth < watch_started_ns or executable != bundle / "HermesMobile"):
+        raise ValueError("owned-process-birth-or-executable-mismatch")
+    result = subprocess.run(["/bin/ps", "-p", str(pid), "-o", "args="],
+                            capture_output=True, text=True, timeout=3)
+    arguments = shlex.split(result.stdout.strip()) if result.returncode == 0 else []
+    if not arguments or arguments[0] != str(executable) or arguments.count("--semreh-unit-test-host") != 1:
+        raise ValueError("owned-unit-host-arguments-mismatch")
+    metadata = bounded_plist(data / ".com.apple.mobile_container_manager.metadata.plist")
+    if metadata.get("MCMMetadataIdentifier") != BUNDLE_ID:
+        raise ValueError("owned-data-container-mismatch")
+    if (implementation_hashes(bundle) != expected["implementation"]
+            or file_sha(bundle / "Info.plist") != expected["infoSHA256"]):
+        raise ValueError("installed-built-implementation-mismatch")
+    executable_signing = signing_status(executable)
+    bundle_signing = signing_status(bundle)
+    if (expected["executableSigningStatus"] == "verified" and executable_signing != "verified"
+            or expected["bundleSigningStatus"] == "verified" and bundle_signing != "verified"):
+        raise ValueError("installed-signature-weakened")
+    if process_birth(pid) != birth or process_path(pid) != executable:
+        raise ValueError("owned-process-changed-during-verification")
+    return {"birthNanoseconds": birth, "argvSHA256": hashlib.sha256(
+                json.dumps(arguments, separators=(",", ":")).encode()).hexdigest(),
+            "executableSHA256": expected["implementation"]["HermesMobile"],
+            "installedExecutableSigningStatus": executable_signing,
+            "installedBundleSigningStatus": bundle_signing}
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--simulator", required=True)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--observe-only", action="store_true", help="Record marker observations without invoking sample")
+    parser.add_argument("--built-app", type=Path)
+    parser.add_argument("--scheme")
+    parser.add_argument("--ownership", type=Path)
     parser.add_argument("--max-samples", type=int, default=MAX_SAMPLES)
     parser.add_argument("--sample-timeout", type=int, default=10)
     args = parser.parse_args()
-    if not re.fullmatch(r"[A-Fa-f0-9-]{36}", args.simulator):
+    if not exact_uuid(args.simulator):
         parser.error("expected exact Simulator UDID")
     if not 1 <= args.max_samples <= MAX_SAMPLES:
-        parser.error("max-samples must be between 1 and 4")
-    if not 10 <= args.sample_timeout <= 30:
-        parser.error("sample-timeout must be between 10 and 30 seconds")
+        parser.error("max-samples must be exactly 1")
+    if not 5 <= args.sample_timeout <= 10:
+        parser.error("sample-timeout must be between 5 and 10 seconds")
+    if not args.observe_only and not (args.built_app and args.scheme and args.ownership):
+        parser.error("sampling requires built app, scheme and separate owned diagnostic Simulator receipt")
     args.output.mkdir(parents=True, exist_ok=False)
     private_output = args.output / "private"
     safe_output = args.output / "safe"
@@ -324,24 +488,35 @@ def main():
     safe_output.mkdir()
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    receipt = {"schemaVersion": 3, "simulator": args.simulator, "observeOnly": args.observe_only,
+    watch_started_ns = time.time_ns()
+    receipt = {"schemaVersion": 4, "simulator": args.simulator, "observeOnly": args.observe_only,
                "triggerMarkerFileAgeSeconds": TRIGGER_SECONDS,
                "maximumMarkerFileAgeSeconds": MAX_MARKER_AGE_SECONDS,
-               "maximumSamples": 0 if args.observe_only else args.max_samples, "sampleDurationSeconds": 1,
+               "maximumSamples": 0 if args.observe_only else args.max_samples, "sampleDurationSeconds": 2,
                "sampleTimeoutSeconds": args.sample_timeout,
                "sampleIntervalMilliseconds": 10, "samples": [], "guardFailures": 0,
                "markersSeen": 0, "containersResolved": False,
                "maximumPhases": MAX_PHASES, "phases": [], "phaseLedgerTruncated": False,
-               "observationLimits": "Watcher gaps include time spent collecting a sample; phase ledger continues after sample cap"}
+               "observationLimits": "Watcher gaps include identity checks and sampling; phase ledger continues after cap. Launch/return bound the sampling command, not each stack timestamp.",
+               "perturbedDiagnosticOnly": not args.observe_only, "acceptanceResult": False,
+               "markerCaptureClockDomain": "host mach_absolute_time seconds / ProcessInfo.systemUptime"}
     data = bundle = None
-    observed = None
-    observed_birth = None
+    expected = None
+    baseline_key = None
     sampled = set()
     phases = {}
     sampling_disabled = args.observe_only
     watch_started = time.monotonic()
     deadline = watch_started + 3600
     try:
+        if not args.observe_only:
+            receipt["ownedDiagnosticReceiptSHA256"] = diagnostic_owner(args.ownership, args.simulator)
+            expected = built_identity(args.built_app, args.scheme)
+            receipt["builtIdentity"] = {"scheme": args.scheme,
+                "executableSHA256": expected["implementation"]["HermesMobile"],
+                "implementationMapSHA256": hashlib.sha256(json.dumps(expected["implementation"], sort_keys=True).encode()).hexdigest(),
+                "executableSigningStatus": expected["executableSigningStatus"],
+                "bundleSigningStatus": expected["bundleSigningStatus"]}
         while running and time.monotonic() < deadline:
             if data is None or bundle is None:
                 data = container(args.simulator, "data")
@@ -350,20 +525,25 @@ def main():
                     time.sleep(0.5)
                     continue
                 receipt["containersResolved"] = True
+                baseline = marker(data / MARKER)
+                baseline_key = ((baseline["pid"], baseline["token"]) if baseline
+                    and baseline["_mtime_ns"] < watch_started_ns else None)
             current = marker(data / MARKER)
             age, age_guard = marker_age(current) if current else (None, None)
             phase = observe_phase(receipt, phases, current, age, age_guard, time.monotonic(), watch_started)
             key = (current["pid"], current["token"]) if current and current["active"] else None
-            if key != observed:
-                observed = key
-                observed_birth = process_birth(current["pid"]) if key and not sampling_disabled else None
             if (not sampling_disabled and phase and key not in sampled and len(receipt["samples"]) < args.max_samples
                     and age is not None and age >= TRIGGER_SECONDS):
-                # Both containers come from the same UDID as xcodebuild. Require
-                # the actual PID executable to match that exact bundle leaf.
-                if (process_path(current["pid"]) != (bundle / "HermesMobile").resolve()
-                        or observed_birth is None or process_birth(current["pid"]) != observed_birth
-                        or current["_mtime_ns"] < observed_birth):
+                # Only a new marker from the actual focused XCTest host on the
+                # separately owned diagnostic device can authorize a sample.
+                if key == baseline_key or current["_mtime_ns"] < watch_started_ns:
+                    continue
+                verification_started = time.monotonic()
+                try:
+                    before_identity = actual_host_identity(current["pid"], bundle, data, expected, watch_started_ns)
+                    if current["_mtime_ns"] < before_identity["birthNanoseconds"]:
+                        raise ValueError("marker-predates-owned-process")
+                except (OSError, ValueError, subprocess.TimeoutExpired):
                     receipt["guardFailures"] += 1
                     sampled.add(key)
                     continue
@@ -383,9 +563,27 @@ def main():
                           "markerUptimeAtObservation": current["uptime"],
                           "markerFileAgeSecondsAtTrigger": latest_age,
                           "observedElapsedSecondsAtTrigger": time.monotonic() - watch_started - phase["firstObservedElapsedSeconds"],
+                          "identityVerificationSecondsBeforeCapture": time.monotonic() - verification_started,
+                          "processBirthNanoseconds": before_identity["birthNanoseconds"],
+                          "argvSHA256": before_identity["argvSHA256"],
                           "ownedExecutableVerified": True, "processBirthRevalidated": True,
+                          "installedBuiltImplementationVerified": True,
+                          "unitHostFlagVerified": True, "signingStatus": {key: value for key, value in before_identity.items() if key.endswith("SigningStatus")},
                           "samePhaseActiveAtSampleStart": True}
                 record.update(capture_sample(current["pid"], private_output, index, timeout=args.sample_timeout))
+                try:
+                    after_identity = actual_host_identity(current["pid"], bundle, data, expected, watch_started_ns)
+                    record["sameIdentityVerifiedAfterSample"] = (
+                        after_identity == before_identity
+                        and diagnostic_owner(args.ownership, args.simulator) == receipt["ownedDiagnosticReceiptSHA256"]
+                        and built_identity(args.built_app, args.scheme) == expected
+                        and container(args.simulator, "data") == data
+                        and container(args.simulator, "app") == bundle)
+                except (OSError, ValueError, subprocess.TimeoutExpired):
+                    record["sameIdentityVerifiedAfterSample"] = False
+                if not record["sameIdentityVerifiedAfterSample"]:
+                    record.pop("safeCallGraph", None)
+                    record["unavailableReason"] = "post-sample-identity-unproven"
                 if record.get("sampleTimedOut"):
                     sampling_disabled = True
                     receipt["samplingDisabledReason"] = "first-sample-timeout"
@@ -401,6 +599,14 @@ def main():
         # a failure; keep only the exception type, without tool output/paths.
         receipt["watcherErrorType"] = type(error).__name__
     finally:
+        for sample in receipt["samples"]:
+            phase_record = receipt["phases"][sample["phaseIndex"] - 1]
+            end_uptime = phase_record.get("endMarkerUptime")
+            sample["markerCaptureBoundingIntersectionSeconds"] = (
+                max(0.0, min(sample["captureReturnUptimeSeconds"], end_uptime)
+                    - max(sample["captureLaunchUptimeSeconds"], phase_record["markerUptime"]))
+                if end_uptime is not None else None)
+            sample["markerEndObserved"] = end_uptime is not None
         if not receipt["containersResolved"]:
             receipt["unavailableReason"] = "owned-app-containers-not-resolved"
         elif not receipt["markersSeen"]:

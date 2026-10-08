@@ -61,15 +61,16 @@ enum ChatComposerAttachPolicy {
 /// Repositions one persistent editor; changing between the capsule and expanded
 /// arrangement never replaces its UITextView or its first-responder ownership.
 private struct MuseComposerEntryLayout: Layout {
-    // Plus, voice and Send always retain their slots, including an empty draft.
-    static let controlCount = 3
     let isExpanded: Bool
+    let showsSendButton: Bool
     let controlSlotSize: CGFloat
     let layoutDirection: LayoutDirection
 
+    private var controlCount: Int { showsSendButton ? 3 : 2 }
+
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        guard subviews.count == Self.controlCount + 1 else { return .zero }
-        let controlsWidth = CGFloat(Self.controlCount) * controlSlotSize
+        guard subviews.count == controlCount + 1 else { return .zero }
+        let controlsWidth = CGFloat(controlCount) * controlSlotSize
         let width = max(0, proposal.width ?? (subviews[1].sizeThatFits(.unspecified).width + controlsWidth))
         let editorWidth = isExpanded ? width : max(0, width - controlsWidth)
         let editorHeight = subviews[1].sizeThatFits(ProposedViewSize(width: editorWidth, height: nil)).height
@@ -79,8 +80,8 @@ private struct MuseComposerEntryLayout: Layout {
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        guard subviews.count == Self.controlCount + 1 else { return }
-        let controlsWidth = CGFloat(Self.controlCount) * controlSlotSize
+        guard subviews.count == controlCount + 1 else { return }
+        let controlsWidth = CGFloat(controlCount) * controlSlotSize
         let editorWidth = isExpanded ? bounds.width : max(0, bounds.width - controlsWidth)
         let editorProposal = ProposedViewSize(width: editorWidth, height: nil)
         let editorHeight = subviews[1].sizeThatFits(editorProposal).height
@@ -702,6 +703,7 @@ struct MessageComposerView: View {
             VStack(spacing: 0) {
                 composerAttachments
                 MuseComposerEntryLayout(isExpanded: isComposerExpanded,
+                                        showsSendButton: showsComposerSendButton,
                                         controlSlotSize: museControlSlotSize,
                                         layoutDirection: layoutDirection) {
                     composerPlusMenu
@@ -709,8 +711,10 @@ struct MessageComposerView: View {
                     composerTextInput
                     composerVoiceButton
                         .frame(width: museControlSlotSize, height: museControlSlotSize)
-                    composerSendButton
-                        .frame(width: museControlSlotSize, height: museControlSlotSize)
+                    if showsComposerSendButton {
+                        composerSendButton
+                            .frame(width: museControlSlotSize, height: museControlSlotSize)
+                    }
                 }
                 .onGeometryChange(for: CGFloat.self) { $0.size.width } action: {
                     museComposerAvailableWidth = $0
@@ -840,10 +844,8 @@ struct MessageComposerView: View {
 
     @ViewBuilder
     private var composerSendButton: some View {
-        // Muse reserves this slot even when empty; changing Send/Stop visibility
-        // must not move the microphone or rewrap the persistent editor. An empty
-        // slot has no button: UIKit can expose an opacity-zero disabled action
-        // to accessibility even when SwiftUI marks it hidden.
+        // The persistent editor keeps focus as this adjacent action appears.
+        // An empty composer has no Send slot, so voice sits at the trailing edge.
         if showsComposerSendButton {
             Button(action: actionButtonTapped) {
                 actionButtonLabel
@@ -859,11 +861,6 @@ struct MessageComposerView: View {
             .buttonStyle(.chatTactile(.icon))
             .disabled(isActionButtonDisabled)
             .accessibilityLabel(showsStopButton ? "Stop response" : "Send")
-        } else if usesMuseChatSurface {
-            Color.clear
-                .frame(width: museControlSlotSize, height: museControlSlotSize)
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
         }
     }
 
@@ -1443,7 +1440,7 @@ struct MessageComposerView: View {
             if measuredDraft.count > 1_024 || measuredDraft.contains(where: \.isNewline) { return true }
             guard museComposerAvailableWidth > 0 else { return false }
             let collapsedWidth = max(1, museComposerAvailableWidth
-                - CGFloat(MuseComposerEntryLayout.controlCount) * museControlSlotSize)
+                - CGFloat(showsComposerSendButton ? 3 : 2) * museControlSlotSize)
             let font = UIFont.preferredFont(forTextStyle: .body)
             return (String(measuredDraft) as NSString).size(withAttributes: [.font: font]).width > collapsedWidth
         }
@@ -1477,7 +1474,7 @@ struct MessageComposerView: View {
             return isCancellingStream
         }
 
-        return trimmedDraftMessage.isEmpty
+        return (trimmedDraftMessage.isEmpty && attachmentDisplayItems.isEmpty)
             || isSending
             || isCompressingSession
             || isUploadingAttachment

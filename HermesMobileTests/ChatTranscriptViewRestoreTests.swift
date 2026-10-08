@@ -5371,6 +5371,27 @@ private struct MountedSteerRoot: View {
 }
 
 @MainActor
+private final class MountedStartupBoundaryDiagnostics {
+    var initialKeyboardSendBeganAtUptime: Double?
+    var initialKeyboardSendReturnedAtUptime: Double?
+    var runtimeProviderEnteredAtUptime: Double?
+    var initialPromptPollBeganAtUptime: Double?
+    var navigationTransitionActiveAtKeyboardSend: Bool?
+    var editorFirstResponderAtKeyboardSend: Bool?
+    var editorAttachedToOwnedWindowAtKeyboardSend: Bool?
+
+    var snapshot: [String: Any] {
+        ["initialKeyboardSendBeganAtUptime": initialKeyboardSendBeganAtUptime.map { $0 as Any } ?? NSNull(),
+         "initialKeyboardSendReturnedAtUptime": initialKeyboardSendReturnedAtUptime.map { $0 as Any } ?? NSNull(),
+         "runtimeProviderEnteredAtUptime": runtimeProviderEnteredAtUptime.map { $0 as Any } ?? NSNull(),
+         "initialPromptPollBeganAtUptime": initialPromptPollBeganAtUptime.map { $0 as Any } ?? NSNull(),
+         "navigationTransitionActiveAtKeyboardSend": navigationTransitionActiveAtKeyboardSend.map { $0 as Any } ?? NSNull(),
+         "editorFirstResponderAtKeyboardSend": editorFirstResponderAtKeyboardSend.map { $0 as Any } ?? NSNull(),
+         "editorAttachedToOwnedWindowAtKeyboardSend": editorAttachedToOwnedWindowAtKeyboardSend.map { $0 as Any } ?? NSNull()]
+    }
+}
+
+@MainActor
 private final class MountedSteerFixture {
     let scope: String
     let server: URL
@@ -5381,6 +5402,7 @@ private final class MountedSteerFixture {
     let defaults: UserDefaults
     let urlSession: URLSession
     let markerRoot: URL
+    private let startupBoundaries: MountedStartupBoundaryDiagnostics
     let route = MountedSteerRoute()
     let window: UIWindow
     let previousKeyWindow: UIWindow?
@@ -5401,10 +5423,16 @@ private final class MountedSteerFixture {
         let controlledTransport = transport
         runtime = try HermesServerRuntime(origin: server) { _ in controlledTransport }
         let controlledRuntime = runtime
+        let boundaries = MountedStartupBoundaryDiagnostics()
+        startupBoundaries = boundaries
         markerRoot = FileManager.default.temporaryDirectory.appendingPathComponent(scope, isDirectory: true)
         model = ChatViewModel(session: session, server: server, client: client,
             liveActivityManager: MountedSteerNoopActivity(), userDefaults: defaults,
-            gatewayRuntimeProvider: { _ in controlledRuntime },
+            gatewayRuntimeProvider: { _ in
+                // Actual queued MainActor provider entry; scalar diagnostic only.
+                boundaries.runtimeProviderEnteredAtUptime = ProcessInfo.processInfo.systemUptime
+                return controlledRuntime
+            },
             directAttachmentRecoveryMarkerStore: DirectGatewayAttachmentRecoveryMarkerStore(rootURL: markerRoot),
             promptUncertaintyStore: InMemoryDirectPromptDeliveryUncertaintyStore())
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
@@ -5466,7 +5494,24 @@ private final class MountedSteerFixture {
         XCTAssertTrue(input.becomeFirstResponder())
         // Invoke the actual registered UIKit key command, which calls the
         // production actionButtonTapped -> onSend -> ChatView.sendDraftMessage.
+        let recordsInitialSend = startupBoundaries.initialKeyboardSendBeganAtUptime == nil
+        if recordsInitialSend {
+            startupBoundaries.initialKeyboardSendBeganAtUptime = ProcessInfo.processInfo.systemUptime
+            startupBoundaries.navigationTransitionActiveAtKeyboardSend = navigationTransitionActive(in: window.rootViewController)
+            startupBoundaries.editorFirstResponderAtKeyboardSend = input.isFirstResponder
+            startupBoundaries.editorAttachedToOwnedWindowAtKeyboardSend = input.window === window
+        }
         input.perform(command.action, with: command)
+        if recordsInitialSend {
+            startupBoundaries.initialKeyboardSendReturnedAtUptime = ProcessInfo.processInfo.systemUptime
+        }
+    }
+
+    private func navigationTransitionActive(in controller: UIViewController?) -> Bool {
+        guard let controller else { return false }
+        if controller is UINavigationController, controller.transitionCoordinator != nil { return true }
+        return controller.children.contains { navigationTransitionActive(in: $0) }
+            || navigationTransitionActive(in: controller.presentedViewController)
     }
 
     func submit(_ text: String) async throws {
@@ -5536,6 +5581,9 @@ private final class MountedSteerFixture {
     private func wait(_ condition: () -> Bool, phase: String = "mounted composer") async throws {
         let waitStartedAtUptime = ProcessInfo.processInfo.systemUptime
         let tracesStartup = phase == "startup: initial prompt running"
+        if tracesStartup, startupBoundaries.initialPromptPollBeganAtUptime == nil {
+            startupBoundaries.initialPromptPollBeganAtUptime = waitStartedAtUptime
+        }
         let token = UUID().uuidString
         let markerBeginWritten = tracesStartup && writeStartupMarker(token: token, active: true)
         var markerEnded = false
@@ -5654,6 +5702,9 @@ private final class MountedSteerFixture {
             "runtime": ["state": runtimeState, "connectionGeneration": runtime.connectionGeneration]
         ]
         receipt["readinessProgress"] = readinessProgress ?? [:]
+        var boundaries = startupBoundaries.snapshot
+        boundaries["navigationTransitionActiveAtFailure"] = navigationTransitionActive(in: window.rootViewController)
+        receipt["startupBoundaries"] = boundaries
         let allowedMethods = ["session.resume", "session.info", "prompt.submit", "session.steer",
                               "session.status", "session.usage", "approval.pending"]
         let calls = await transport.calls()

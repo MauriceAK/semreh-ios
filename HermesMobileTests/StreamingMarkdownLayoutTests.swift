@@ -210,6 +210,9 @@ private final class StreamingGeometryFixture {
         previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
         window = UIWindow(windowScene: scene)
         window.frame = scene.coordinateSpace.bounds
+        // Match UIKit's hosting background to this fixture's SwiftUI light
+        // appearance rather than inheriting the simulator's global setting.
+        window.overrideUserInterfaceStyle = .light
         window.rootViewController = host
         window.makeKeyAndVisible()
     }

@@ -206,6 +206,7 @@ struct StreamingMarkdownBlockAccumulator {
     private var pendingLineStartUTF16Offset = 0
     private var newlineSearchUTF8Offset = 0
     private var isInsideFenceBeforePendingLine = false
+    private var rawFenceBeforePendingLine: StreamingFencedCodeProjection.Fence?
     private var lastTextUTF16Length = 0
     private var isInitialized = false
 
@@ -241,6 +242,7 @@ struct StreamingMarkdownBlockAccumulator {
         pendingLineStartUTF16Offset = 0
         newlineSearchUTF8Offset = 0
         isInsideFenceBeforePendingLine = false
+        rawFenceBeforePendingLine = nil
         lastTextUTF16Length = 0
         isInitialized = false
     }
@@ -249,6 +251,7 @@ struct StreamingMarkdownBlockAccumulator {
         let endOffset = text.utf16.count
         var lineStartOffset = pendingLineStartUTF16Offset
         var isInsideFence = isInsideFenceBeforePendingLine
+        var rawFence = rawFenceBeforePendingLine
 
         guard lineStartOffset <= endOffset else {
             reset()
@@ -257,20 +260,22 @@ struct StreamingMarkdownBlockAccumulator {
 
         let bytes = text.utf8
         var searchStart = bytes.index(bytes.startIndex, offsetBy: newlineSearchUTF8Offset)
-        while let lf = bytes[searchStart...].firstIndex(of: 0x0A) {
+        while let lf = bytes[searchStart...].firstIndex(where: { $0 == 0x0A || (preservesRawMath && $0 == 0x0D) }) {
             newlineSearchUTF8Offset += bytes.distance(from: searchStart, to: lf)
-            searchStart = bytes.index(after: lf)
+            let separatorLength = preservesRawMath && bytes[lf] == 0x0D
+                && bytes.index(after: lf) < bytes.endIndex && bytes[bytes.index(after: lf)] == 0x0A ? 2 : 1
+            searchStart = bytes.index(lf, offsetBy: separatorLength)
 
             // Character-based firstIndex(of: "\n") skips CRLF, which is one
             // Character. Look behind even when CR arrived in the prior append.
-            if lf > bytes.startIndex, bytes[bytes.index(before: lf)] == 0x0D {
+            if !preservesRawMath, lf > bytes.startIndex, bytes[bytes.index(before: lf)] == 0x0D {
                 newlineSearchUTF8Offset += 1
                 continue
             }
 
-            // A standalone LF is a complete Character regardless of adjacent
-            // combining/ZWJ scalars. Convert only here, never at an old string's
-            // end offset, which may now lie inside an extended grapheme.
+            // Raw scanning recognizes CR, CRLF and LF at their Character start.
+            // Legacy scanning retains its reference LF-only grouping. Convert
+            // only here, never at an old append boundary inside a grapheme.
             let lineEnd = String.Index(lf, within: text)!
             let nextLineStart = text.index(after: lineEnd)
             let nextLineOffset = nextLineStart.utf16Offset(in: text)
@@ -282,19 +287,35 @@ struct StreamingMarkdownBlockAccumulator {
                 // searching the pending line that precedes it again.
                 pendingLineStartUTF16Offset = lineStartOffset
                 isInsideFenceBeforePendingLine = isInsideFence
+                rawFenceBeforePendingLine = rawFence
                 return
             }
 
             let lineStart = String.Index(utf16Offset: lineStartOffset, in: text)
             let line = text[lineStart..<lineEnd]
             let trimmedLine = String(line).trimmingCharacters(in: .whitespacesAndNewlines)
-            if preservesRawMath,
+            let rawOpening = preservesRawMath && rawFence == nil
+                ? StreamingFencedCodeProjection.Fence.opening(String(line)) : nil
+            if preservesRawMath, rawFence == nil, rawOpening == nil,
                trimmedLine.contains("$") || trimmedLine.contains(#"\("#) || trimmedLine.contains(#"\["#) {
                 rawMathObserved = true
             }
             var stableBoundaryOffset: Int?
 
-            if StreamingMarkdownBlockSplitter.isFenceDelimiter(trimmedLine) {
+            if preservesRawMath {
+                if let fence = rawFence {
+                    if fence.closes(String(line)) {
+                        rawFence = nil
+                        isInsideFence = false
+                        stableBoundaryOffset = nextLineOffset
+                    }
+                } else if let fence = rawOpening {
+                    rawFence = fence
+                    isInsideFence = true
+                } else if trimmedLine.isEmpty || StreamingMarkdownBlockSplitter.isStableSingleLineBlock(trimmedLine) {
+                    stableBoundaryOffset = nextLineOffset
+                }
+            } else if StreamingMarkdownBlockSplitter.isFenceDelimiter(trimmedLine) {
                 isInsideFence.toggle()
                 if !isInsideFence {
                     stableBoundaryOffset = nextLineOffset
@@ -319,12 +340,13 @@ struct StreamingMarkdownBlockAccumulator {
             }
 
             lineStartOffset = nextLineOffset
-            newlineSearchUTF8Offset += 1
+            newlineSearchUTF8Offset += separatorLength
         }
 
         newlineSearchUTF8Offset += bytes.distance(from: searchStart, to: bytes.endIndex)
         pendingLineStartUTF16Offset = lineStartOffset
         isInsideFenceBeforePendingLine = isInsideFence
+        rawFenceBeforePendingLine = rawFence
     }
 
     private func shouldSealChunk(
@@ -371,6 +393,134 @@ struct StreamingMarkdownBlockAccumulator {
             stableChunks: stableChunks,
             activeMarkdown: String(text[activeStart...])
         )
+    }
+}
+
+/// A single raw fenced block can keep the production code shell without reparsing
+/// its growing body as Markdown. Mixed documents and math keep the bounded lane.
+/// Source bytes remain untouched; code content follows CommonMark indentation and
+/// line endings, including MarkdownUI's removal of one final code newline.
+struct StreamingFencedCodeProjection: Equatable {
+    // Reuse the native code body's existing byte-work ceiling for this direct
+    // streaming lane, including unusual graphemes with many UTF-8 bytes.
+    static let maximumSourceUTF8Bytes = 64 * 1_024
+
+    let source: String
+    let language: String?
+    let content: String
+    let isClosed: Bool
+
+    struct Fence: Equatable {
+        let marker: UInt8
+        let count: Int
+        let indentation: Int
+        let info: String
+
+        static func opening(_ line: String) -> Self? {
+            opening(Array(line.utf8)[...])
+        }
+
+        static func opening(_ bytes: ArraySlice<UInt8>) -> Self? {
+            var index = bytes.startIndex
+            var indentation = 0
+            while index < bytes.endIndex, bytes[index] == 0x20 {
+                indentation += 1
+                guard indentation <= 3 else { return nil }
+                index += 1
+            }
+            guard index < bytes.endIndex, bytes[index] == 0x60 || bytes[index] == 0x7E else { return nil }
+            let marker = bytes[index]
+            let start = index
+            while index < bytes.endIndex, bytes[index] == marker { index += 1 }
+            let count = index - start
+            guard count >= 3 else { return nil }
+            let infoBytes = bytes[index...].drop(while: { $0 == 0x20 || $0 == 0x09 })
+            guard marker != 0x60 || !infoBytes.contains(0x60) else { return nil }
+            var info = Array(infoBytes)
+            while let last = info.last, last == 0x20 || last == 0x09 { info.removeLast() }
+            return Self(marker: marker, count: count, indentation: indentation,
+                        info: String(decoding: info, as: UTF8.self))
+        }
+
+        func closes(_ line: String) -> Bool {
+            closes(Array(line.utf8)[...])
+        }
+
+        func closes(_ bytes: ArraySlice<UInt8>) -> Bool {
+            var index = bytes.startIndex
+            var indentation = 0
+            while index < bytes.endIndex, bytes[index] == 0x20 {
+                indentation += 1
+                guard indentation <= 3 else { return false }
+                index += 1
+            }
+            let start = index
+            while index < bytes.endIndex, bytes[index] == marker { index += 1 }
+            return index - start >= count && bytes[index...].allSatisfy { $0 == 0x20 || $0 == 0x09 }
+        }
+    }
+
+    static func prepare(_ source: String) -> Self? {
+        let prefix = source.utf8.prefix(4)
+        guard let marker = prefix.first(where: { $0 != 0x20 }), marker == 0x60 || marker == 0x7E else { return nil }
+        // Keep the same whole-source bounds as the canonical renderer before
+        // allocating body bytes or mounting the segmented code fallback.
+        guard source.utf8.count <= maximumSourceUTF8Bytes,
+              MarkdownContentRenderingPolicy.fallbackReason(for: source) == nil else { return nil }
+        let bytes = Array(source.utf8)
+        guard !bytes.contains(0), !bytes.isEmpty else { return nil }
+        let openingLine = line(in: bytes, from: 0)
+        guard let fence = Fence.opening(bytes[openingLine.range]),
+              // Escapes/entities in info need the compatibility parser's decoding.
+              // Do not guess that normalization or route math fences into code.
+              !fence.info.contains("\\"), !fence.info.contains("&"),
+              !MathFenceLanguage.matches(fence.info) else { return nil }
+        var cursor = openingLine.next
+        var body: [UInt8] = []
+        var closed = false
+        while cursor < bytes.count {
+            let current = line(in: bytes, from: cursor)
+            if fence.closes(bytes[current.range]) {
+                guard bytes[current.next...].allSatisfy({ [0x20, 0x09, 0x0A, 0x0D].contains($0) }) else { return nil }
+                closed = true
+                break
+            }
+            body.append(contentsOf: unindent(bytes[current.range], by: fence.indentation))
+            if current.hasEnding { body.append(0x0A) }
+            cursor = current.next
+        }
+        if body.last == 0x0A { body.removeLast() }
+        return Self(source: source, language: fence.info.isEmpty ? nil : fence.info,
+                    content: String(decoding: body, as: UTF8.self), isClosed: closed)
+    }
+
+    private static func line(in bytes: [UInt8], from start: Int)
+        -> (range: Range<Int>, next: Int, hasEnding: Bool) {
+        var end = start
+        while end < bytes.count, bytes[end] != 0x0A, bytes[end] != 0x0D { end += 1 }
+        var next = end
+        if next < bytes.count {
+            next += 1
+            if bytes[end] == 0x0D, next < bytes.count, bytes[next] == 0x0A { next += 1 }
+        }
+        return (start..<end, next, next != end)
+    }
+
+    private static func unindent(_ bytes: ArraySlice<UInt8>, by indentation: Int) -> [UInt8] {
+        var index = bytes.startIndex
+        var column = 0
+        while index < bytes.endIndex, column < indentation {
+            if bytes[index] == 0x20 { column += 1; index += 1 }
+            else if bytes[index] == 0x09 {
+                let nextColumn = column + 4 - column % 4
+                index += 1
+                if nextColumn > indentation {
+                    return Array(repeating: 0x20, count: nextColumn - indentation) + Array(bytes[index...])
+                }
+                column = nextColumn
+            } else { break }
+        }
+        return Array(bytes[index...])
     }
 }
 

@@ -1,6 +1,9 @@
 import XCTest
 import SwiftUI
 import UIKit
+#if DEBUG
+import cmark_gfm
+#endif
 @testable import HermesMobile
 
 final class ReasoningDisplayTextTests: XCTestCase {
@@ -871,3 +874,228 @@ extension StreamingRawWhitespaceLayoutTests {
                        "A leaf separator already supplies the source CRLF; it must not insert a second blank line")
     }
 }
+
+#if DEBUG
+@MainActor
+final class StreamingFencedCodeProjectionTests: XCTestCase {
+    func testSupportedDelimiterAndIndentationContentMatchesCMark() throws {
+        let cases = [
+            "```swift\nlet value = 1\n```",
+            "~~~~ swift title\nlet value = 1\n~~~~~ \t\n",
+            "````swift\n```\n~~~\n``` not a closer\nlet value = 2\n````",
+            "```\nno final body newline",
+            "```swift",
+            "  ```swift\n    first\n second\n\tthird\n  ```\n",
+            "   ~~~swift\r\n\tfirst\r\n  second\r\n~~~\r\n",
+            "~~~swift\rfirst\r\rsecond\r~~~",
+            "~~~swift\n café cafe\u{301} 👩🏽‍💻 العربية ` $ \\n\n~~~\n",
+        ]
+        for source in cases {
+            let projection = try XCTUnwrap(StreamingFencedCodeProjection.prepare(source))
+            let expected = try cmarkCode(source)
+            XCTAssertEqual(projection.language, expected.language)
+            XCTAssertEqual(Array(projection.content.utf8), Array(expected.content.utf8))
+            XCTAssertEqual(Array(projection.source.utf8), Array(source.utf8))
+        }
+    }
+
+    func testFourKiBBoundaryUnicodeAndClosingFenceKeepExactCode() throws {
+        let line = "let value = \"café cafe\u{301} 👩🏽‍💻 العربية\"\n"
+        let body = String(repeating: line, count: 180)
+        let opening = "```swift\n"
+        let unicode = "café cafe\u{301} 👩🏽‍💻 العربية"
+        let atBoundary = opening + String(repeating: "x", count: 4_096 - opening.utf8.count - unicode.utf8.count) + unicode
+        XCTAssertEqual(atBoundary.utf8.count, 4_096)
+        let aboveBoundary = atBoundary + "x"
+        XCTAssertEqual(aboveBoundary.utf8.count, 4_097)
+        for source in [opening + String(body.prefix(700)), atBoundary,
+                       aboveBoundary, opening + body, opening + body + "```\n"] {
+            let projection = try XCTUnwrap(StreamingFencedCodeProjection.prepare(source))
+            XCTAssertEqual(Array(projection.content.utf8), Array(try cmarkCode(source).content.utf8))
+            XCTAssertEqual(Array(projection.source.utf8), Array(source.utf8))
+        }
+        XCTAssertGreaterThan(body.utf8.count, StreamingMarkdownRenderBudget.maximumRichTailUTF8Bytes)
+        XCTAssertTrue(try XCTUnwrap(StreamingFencedCodeProjection.prepare("```swift\n" + body + "```\n")).isClosed)
+    }
+
+    func testRawAccumulatorKeepsOnlyMatchingFenceAndIgnoresMathInsideCode() throws {
+        for ending in ["\n", "\r\n", "\r"] {
+            let fence = "````swift" + ending
+                + "let value = \"$HOME café cafe\u{301} 👩🏽‍💻\"" + ending
+                + "```" + ending + "~~~" + ending + "``` trailing" + ending
+                + "````" + ending
+            let source = fence + "Final paragraph"
+            // Scalar appends split CR then LF and can extend a Unicode grapheme;
+            // both that path and Character appends retain exact raw bytes.
+            for pieces in [source.map { String($0) }, source.unicodeScalars.map { String($0) }] {
+                var state = StreamingMarkdownBlockAccumulator(preservesRawMath: true)
+                var prefix = ""
+                for piece in pieces {
+                    prefix.append(piece)
+                    let result = state.update(prefix, appendOnly: true)
+                    XCTAssertEqual(Array((result.stableChunks.map(\.text).joined() + result.activeMarkdown).utf8), Array(prefix.utf8))
+                    XCTAssertLessThanOrEqual(result.stableChunks.count, 1)
+                }
+                let result = state.update(source, appendOnly: true)
+                XCTAssertEqual(result.stableChunks.map(\.text), [fence])
+                XCTAssertEqual(result.activeMarkdown, "Final paragraph")
+                XCTAssertEqual(Array(try XCTUnwrap(StreamingFencedCodeProjection.prepare(fence)).content.utf8),
+                               Array(try cmarkCode(fence).content.utf8))
+            }
+        }
+    }
+
+    func testUnsupportedAndMixedSourcesRetainExistingBoundedFallback() {
+        let rejected = ["Paragraph\n```swift\ncode", "```swift\ncode\n```\nAfter",
+                        "    ```swift\ncode", "\t```swift\ncode", "```swift`bad\ncode",
+                        "```sw\\ift\ncode", "```sw&#x69;ft\ncode", "```math\nx+y",
+                        "~~~latex\nx+y", "```swift\ncode\u{0}"]
+        for source in rejected { XCTAssertNil(StreamingFencedCodeProjection.prepare(source)) }
+        for source in [String(repeating: "plain **paragraph** ", count: 1_000),
+                       "$$\n" + String(repeating: "x+y\n", count: 2_000)] {
+            XCTAssertNil(StreamingFencedCodeProjection.prepare(source))
+            XCTAssertTrue(StreamingMarkdownRenderBudget.usesLiteralTail(source))
+        }
+        XCTAssertEqual(StreamingMarkdownRenderBudget.maximumRichTailUTF8Bytes, 4_096)
+
+        // Exercise the specialization itself at the existing whole-source
+        // limits; a rejected code block must return to the bounded raw lane.
+        let opening = "```swift\n"
+        let atCharacterLimit = opening + String(repeating: "x", count:
+            MarkdownContentRenderingPolicy.maxMarkdownCharacterCount - opening.count)
+        // The direct code byte ceiling is deliberately stricter for this case.
+        XCTAssertNil(StreamingFencedCodeProjection.prepare(atCharacterLimit))
+        let overCharacterLimit = atCharacterLimit + "x"
+        XCTAssertNil(StreamingFencedCodeProjection.prepare(overCharacterLimit))
+        XCTAssertTrue(StreamingMarkdownRenderBudget.usesLiteralTail(overCharacterLimit))
+        let atByteLimit = opening + String(repeating: "x", count:
+            StreamingFencedCodeProjection.maximumSourceUTF8Bytes - opening.utf8.count)
+        XCTAssertEqual(atByteLimit.utf8.count, 65_536)
+        XCTAssertEqual(StreamingFencedCodeProjection.prepare(atByteLimit)?.content,
+                       String(atByteLimit.dropFirst(opening.count)))
+        let overByteLimit = atByteLimit + "x"
+        XCTAssertNil(StreamingFencedCodeProjection.prepare(overByteLimit))
+        XCTAssertTrue(StreamingMarkdownRenderBudget.usesLiteralTail(overByteLimit))
+        let oversizedGrapheme = opening + "e" + String(repeating: "\u{301}", count: 32_768)
+        XCTAssertLessThan(oversizedGrapheme.count, MarkdownContentRenderingPolicy.maxMarkdownCharacterCount)
+        XCTAssertGreaterThan(oversizedGrapheme.utf8.count, StreamingFencedCodeProjection.maximumSourceUTF8Bytes)
+        XCTAssertNil(StreamingFencedCodeProjection.prepare(oversizedGrapheme))
+        XCTAssertTrue(StreamingMarkdownRenderBudget.usesLiteralTail(oversizedGrapheme))
+        for ending in ["\n", "\r\n", "\r"] {
+            let opening = "```swift" + ending
+            let atLineLimit = opening + Array(repeating: "value", count:
+                MarkdownContentRenderingPolicy.maxMarkdownLineCount - 1).joined(separator: ending)
+            XCTAssertNotNil(StreamingFencedCodeProjection.prepare(atLineLimit))
+            let overLineLimit = atLineLimit + ending + "value"
+            XCTAssertNil(StreamingFencedCodeProjection.prepare(overLineLimit))
+            XCTAssertTrue(StreamingMarkdownRenderBudget.usesLiteralTail(overLineLimit))
+        }
+        // A representative long response stays below both existing limits,
+        // including the 61,957-byte source size used by the Release fixture.
+        let fixtureLine = String(repeating: "x", count: 319) + "\n"
+        let fixturePrefix = opening + String(repeating: fixtureLine, count: 193)
+        let fixtureSized = fixturePrefix + String(repeating: "x", count: 61_957 - fixturePrefix.utf8.count)
+        XCTAssertEqual(fixtureSized.utf8.count, 61_957)
+        XCTAssertNotNil(StreamingFencedCodeProjection.prepare(fixtureSized))
+    }
+
+    private func cmarkCode(_ source: String) throws -> (language: String?, content: String) {
+        let document = try XCTUnwrap(source.withCString { cmark_parse_document($0, source.utf8.count, CMARK_OPT_DEFAULT) })
+        defer { cmark_node_free(document) }
+        let node = try XCTUnwrap(cmark_node_first_child(document))
+        XCTAssertEqual(String(cString: cmark_node_get_type_string(node)), "code_block")
+        XCTAssertNil(cmark_node_next(node), "Accepted projection must be exactly one CommonMark code block")
+        let info = cmark_node_get_fence_info(node).map { String(cString: $0) } ?? ""
+        var literal = cmark_node_get_literal(node).map { String(cString: $0) } ?? ""
+        // Pinned MarkdownUI CodeBlockView removes exactly one final newline.
+        if literal.hasSuffix("\n") { literal.removeLast() }
+        return (info.isEmpty ? nil : info, literal)
+    }
+}
+
+@MainActor
+private final class StreamingFenceMountModel: ObservableObject {
+    @Published var source: String
+    init(_ source: String) { self.source = source }
+}
+
+private struct StreamingFenceMountRoot: View {
+    @ObservedObject var model: StreamingFenceMountModel
+    var body: some View {
+        StreamingMarkdownRenderer(content: model.source)
+            .environment(\.internalChatRendererEnabled, true)
+            .frame(width: 320, alignment: .leading)
+    }
+}
+
+@MainActor
+final class StreamingFencedCodeMountTests: XCTestCase {
+    func testGrowingCodeKeepsNativeLeafAndNoWrapAcrossBudgetAndSealing() async throws {
+        try await exercise(wraps: false)
+    }
+
+    func testWrappedCodeReplacementKeepsExactUnicodeAndCurrentBody() async throws {
+        try await exercise(wraps: true)
+    }
+
+    private func exercise(wraps: Bool) async throws {
+        let key = ChatTranscriptDisplaySettings.wrapsCodeBlockLinesKey
+        let saved = UserDefaults.standard.object(forKey: key)
+        UserDefaults.standard.set(wraps, forKey: key)
+        defer {
+            if let saved { UserDefaults.standard.set(saved, forKey: key) }
+            else { UserDefaults.standard.removeObject(forKey: key) }
+        }
+        let line = "let value = \"café cafe\u{301} 👩🏽‍💻 العربية " + String(repeating: "source ", count: 18) + "\"\n"
+        let initial = "```swift\n" + String(repeating: line, count: 3)
+        let model = StreamingFenceMountModel(initial)
+        let host = UIHostingController(rootView: StreamingFenceMountRoot(model: model))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            .first(where: { $0.activationState == .foregroundActive }))
+        let previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previousKeyWindow?.makeKey()
+        }
+        func codeLeaves(_ view: UIView) -> [UITextView] {
+            (view as? UITextView).map { [$0] } ?? view.subviews.flatMap(codeLeaves)
+        }
+        func settledLeaf(for source: String) async throws -> UITextView {
+            model.source = source
+            let expected = try XCTUnwrap(StreamingFencedCodeProjection.prepare(
+                source.hasSuffix("Following paragraph") ? String(source.dropLast("Following paragraph".count)) : source)).content
+            for _ in 0..<50 {
+                host.view.setNeedsLayout()
+                host.view.layoutIfNeeded()
+                if let leaf = codeLeaves(host.view).first(where: { $0.text.utf8.elementsEqual(expected.utf8) }) { return leaf }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            XCTFail("Fenced code must remain a selectable monospaced native leaf, not literal prose")
+            throw NSError(domain: "StreamingFenceMount", code: 1)
+        }
+        let first = try await settledLeaf(for: initial)
+        let body = String(repeating: line, count: 52)
+        XCTAssertGreaterThan(body.utf8.count, 4_096)
+        let sources = ["```swift\n" + String(repeating: line, count: 20),
+                       "```swift\n" + body,
+                       "```swift\n" + body + "```\nFollowing paragraph",
+                       "~~~swift\nlet replacement = \"cafe\u{301} 👩🏽‍💻 " + String(repeating: "new source ", count: 18) + "\"\n~~~\nFollowing paragraph"]
+        for source in sources {
+            let leaf = try await settledLeaf(for: source)
+            XCTAssertTrue(leaf === first, "Budget/sealing/replacement must not remount the native code leaf")
+            XCTAssertFalse(leaf.isEditable)
+            XCTAssertTrue(leaf.isSelectable)
+            let font = try XCTUnwrap(leaf.attributedText.attribute(.font, at: 0, effectiveRange: nil) as? UIFont)
+            XCTAssertTrue(font.fontDescriptor.symbolicTraits.contains(.traitMonoSpace))
+            if !wraps { XCTAssertGreaterThan(leaf.bounds.width, 320, "Long source lines remain horizontally scrollable") }
+            else { XCTAssertLessThanOrEqual(leaf.bounds.width, 320, "The chosen wrapping policy remains active") }
+        }
+
+    }
+}
+#endif
