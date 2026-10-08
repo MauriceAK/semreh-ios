@@ -6101,10 +6101,27 @@ final class DirectSkillUITests: XCTestCase {
         XCTAssertTrue(storedRow.waitForExistence(timeout: 20) && storedRow.isHittable)
         storedRow.tap()
         XCTAssertTrue(detail.waitForExistence(timeout: 30))
-        let imageElement = app.descendants(matching: .any).matching(
-            NSPredicate(format: "label BEGINSWITH %@", "Image attachment ")).firstMatch
+        // Canonical attachments expose the actionable parent Button. Its label
+        // intentionally overrides the decorative image child's label.
+        let canonicalImageName = URL(fileURLWithPath:
+            String(imageText.dropFirst("@image:".count))).lastPathComponent
+        XCTAssertFalse(canonicalImageName.isEmpty)
+        let imageButtons = app.buttons.matching(NSPredicate(format: "label == %@",
+            "Open attachment \(canonicalImageName)"))
+        let imageElement = imageButtons.firstMatch
         XCTAssertTrue(imageElement.waitForExistence(timeout: 15) && imageElement.isHittable,
-                      "Cold reopen must render the canonical image without an optimistic preview map.")
+                      "Cold reopen must expose the canonical image's actual preview action.")
+        XCTAssertEqual(imageButtons.count, 1)
+        imageElement.tap()
+        let previewImage = app.images[canonicalImageName]
+        XCTAssertTrue(previewImage.waitForExistence(timeout: 15),
+                      "The canonical attachment must decode in its full preview after restart.")
+        XCTAssertFalse(previewImage.frame.intersection(app.windows.firstMatch.frame).isEmpty)
+        retainPreviewScreenshot("composer-regression 07a canonical image full preview", app: app)
+        let done = app.buttons["Done"]
+        XCTAssertTrue(done.waitForExistence(timeout: 5) && done.isHittable)
+        done.tap()
+        XCTAssertTrue(done.waitForNonExistence(timeout: 5))
         _ = try await waitForCanonical(observer: observer, storedID: storedID) {
             $0.count == canonical.count && self.hasStableBaseline($0, baseline: canonical)
         }
