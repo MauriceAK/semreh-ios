@@ -479,6 +479,73 @@ final class GatewayConversationAttachmentTests: XCTestCase {
         await runtime.stop()
     }
 
+    func testSubmitRejectsEmptyCaptionWithoutStagesBeforeCreatingSession() async throws {
+        let fake = AttachmentFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime)
+        for text in ["", " \n\t"] {
+            do {
+                try await controller.submit(text)
+                XCTFail("An empty prompt without confirmed attachments must not submit")
+            } catch DirectSessionError.invalidResponse { }
+        }
+        XCTAssertTrue(fake.calls().isEmpty)
+        await runtime.stop()
+    }
+
+    func testSubmitConfirmedImageOnlyUsesEmptyCaption() async throws {
+        let fake = AttachmentFakeTransport()
+        fake.setResponse("image.attach_bytes", .object([
+            "attached": .bool(true), "path": .string("/profile/images/photo.png")
+        ]))
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime)
+        var image = DirectPendingAttachment(source: try .image(data: pngData, filename: "photo.png"))
+        let result = try await controller.stageAttachment(image)
+        XCTAssertTrue(image.confirm(scope: result.scope, serverDetachPaths: result.receipt.detachPaths))
+        try await controller.submit(" \n\t", stagedAttachments: [image])
+        let prompt = try XCTUnwrap(fake.calls().first { $0.method == "prompt.submit" })
+        XCTAssertEqual(objectFields(prompt.params)?["text"], .string(""))
+        XCTAssertEqual(fake.calls().map(\.method), ["session.create", "image.attach_bytes", "prompt.submit"])
+        XCTAssertFalse(controller.hasAmbiguousPromptDelivery)
+        await runtime.stop()
+    }
+
+    func testSubmitFileOnlyUsesExactConfirmedReferenceWithoutLeadingNewline() async throws {
+        let fake = AttachmentFakeTransport()
+        fake.setResponse("file.attach", .object([
+            "attached": .bool(true), "ref_text": .string("@file:`/profile/attachments/only notes.txt`")
+        ]))
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime)
+        var file = DirectPendingAttachment(source: try .file(data: Data("notes".utf8), filename: "only notes.txt"))
+        let result = try await controller.stageAttachment(file)
+        XCTAssertTrue(file.confirm(scope: result.scope, referenceText: result.receipt.referenceText))
+        try await controller.submit("", stagedAttachments: [file])
+        let prompt = try XCTUnwrap(fake.calls().first { $0.method == "prompt.submit" })
+        XCTAssertEqual(objectFields(prompt.params)?["text"], .string("@file:`/profile/attachments/only notes.txt`"))
+        await runtime.stop()
+    }
+
+    func testSubmitFileOnlyWithoutReferenceRejectsBeforePrompt() async throws {
+        let fake = AttachmentFakeTransport()
+        fake.setResponse("file.attach", .object([
+            "attached": .bool(true), "ref_text": .string("@file:/profile/attachments/notes.txt")
+        ]))
+        let runtime = try makeRuntime(fake)
+        let controller = makeController(runtime: runtime)
+        var file = DirectPendingAttachment(source: try .file(data: Data("notes".utf8), filename: "notes.txt"))
+        let result = try await controller.stageAttachment(file)
+        XCTAssertTrue(file.confirm(scope: result.scope))
+        do {
+            try await controller.submit("", stagedAttachments: [file])
+            XCTFail("A file without its confirmed reference cannot make an empty prompt meaningful")
+        } catch DirectSessionError.invalidResponse { }
+        XCTAssertFalse(fake.calls().contains { $0.method == "prompt.submit" })
+        XCTAssertEqual(controller.runState, .idle)
+        await runtime.stop()
+    }
+
     func testSubmitUsesExactConfirmedFileReference() async throws {
         let fake = AttachmentFakeTransport()
         fake.setResponse("file.attach", .object([
@@ -516,6 +583,11 @@ final class GatewayConversationAttachmentTests: XCTestCase {
         do {
             try await controller.submit("pending", stagedAttachments: [pending])
             XCTFail("Pending attachments must not submit")
+        } catch DirectSessionError.invalidResponse { }
+
+        do {
+            try await controller.submit("", stagedAttachments: [pending])
+            XCTFail("An empty caption does not make an unconfirmed stage safe")
         } catch DirectSessionError.invalidResponse { }
 
         var unknown = pending

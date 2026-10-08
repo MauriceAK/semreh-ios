@@ -928,38 +928,40 @@ struct ChatView: View {
     }
 
     private var chatBotHeader: some View {
-        Group {
-            if session.sessionId == nil, viewModel.messages.isEmpty,
-               viewModel.activeStreamID == nil, !viewModel.isStartingChat,
-               !viewModel.isSingleProfileMode, !viewModel.profileOptions.isEmpty {
-                Menu {
-                    ForEach(viewModel.profileOptions, id: \.self) { profile in
-                        Button {
-                            handleProfileSelection(profile)
-                        } label: {
-                            if viewModel.isSelectedProfile(profile) {
-                                Label(profile.displayName, systemImage: "checkmark")
-                            } else {
-                                Text(profile.displayName)
+        ChatBotActivityHeader(viewModel: viewModel, showsActivity: internalChatRendererEnabled) {
+            Group {
+                if session.sessionId == nil, viewModel.messages.isEmpty,
+                   viewModel.activeStreamID == nil, !viewModel.isStartingChat,
+                   !viewModel.isSingleProfileMode, !viewModel.profileOptions.isEmpty {
+                    Menu {
+                        ForEach(viewModel.profileOptions, id: \.self) { profile in
+                            Button {
+                                handleProfileSelection(profile)
+                            } label: {
+                                if viewModel.isSelectedProfile(profile) {
+                                    Label(profile.displayName, systemImage: "checkmark")
+                                } else {
+                                    Text(profile.displayName)
+                                }
                             }
                         }
-                    }
-                    Divider()
-                    Button("Chat controls", systemImage: "slider.horizontal.3") {
-                        showsChatControls = true
-                    }
-                } label: { chatBotHeaderLabel }
-            } else {
-                Button { showsChatControls = true } label: { chatBotHeaderLabel }
+                        Divider()
+                        Button("Chat controls", systemImage: "slider.horizontal.3") {
+                            showsChatControls = true
+                        }
+                    } label: { chatBotHeaderLabel }
+                } else {
+                    Button { showsChatControls = true } label: { chatBotHeaderLabel }
+                }
             }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Configure \(viewModel.selectedProfileTitle)")
+            .accessibilityValue([headerSubtitle ?? viewModel.selectedProfileTitle,
+                                 internalChatRendererEnabled ? viewModel.displayedHeaderActivityPhase?.label : nil]
+                .compactMap { $0 }.joined(separator: ", "))
+            .accessibilityHint("Choose a profile and configure this chat.")
+            .accessibilityIdentifier("chatProfileConfiguration")
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Configure \(viewModel.selectedProfileTitle)")
-        .accessibilityValue([headerSubtitle ?? viewModel.selectedProfileTitle,
-                             internalChatRendererEnabled ? viewModel.displayedHeaderActivityPhase?.label : nil]
-            .compactMap { $0 }.joined(separator: ", "))
-        .accessibilityHint("Choose a profile and configure this chat.")
-        .accessibilityIdentifier("chatProfileConfiguration")
     }
 
     private var chatBotHeaderLabel: some View {
@@ -970,21 +972,7 @@ struct ChatView: View {
                     .offset(y: 2)
             }
 
-            VStack(spacing: 0) {
-                Text(viewModel.selectedProfileTitle)
-                    .font(.system(.body, design: .rounded).weight(.medium))
-                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
-                    .truncationMode(.middle)
-                    .minimumScaleFactor(0.75)
-                    .frame(minHeight: internalChatRendererEnabled ? 22 : 32)
-
-                if internalChatRendererEnabled {
-                    ChatBotActivitySubtitle(viewModel: viewModel)
-                }
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, internalChatRendererEnabled ? 2 : 0)
-            .adaptiveGlass(.regular, isInteractive: true, fallbackMaterial: .thinMaterial, in: Capsule())
+            ChatBotNameCapsule(title: viewModel.selectedProfileTitle)
         }
     }
 
@@ -2575,7 +2563,8 @@ struct ChatView: View {
     }
 
     private func sendStandardMessage(_ submittedDraft: String) async -> Bool {
-        guard !submittedDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        guard !submittedDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || !viewModel.directPendingAttachments.isEmpty else {
             return false
         }
 
@@ -4432,12 +4421,52 @@ enum PastedFileLoader {
     }
 }
 
-/// Keep idle and active headers the same size. This child reads only coarse
-/// activity, never token/reasoning text or transcript revisions.
+/// The name owns the glass; activity never enlarges the visible capsule.
+struct ChatBotNameCapsule: View {
+    let title: String
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    var body: some View {
+        Text(title)
+            .font(.system(.body, design: .rounded).weight(.medium))
+            .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
+            .truncationMode(.middle)
+            .minimumScaleFactor(0.75)
+            .frame(minHeight: 32)
+            .padding(.horizontal, 12)
+            .adaptiveGlass(.regular, isInteractive: true, fallbackMaterial: .thinMaterial, in: Capsule())
+    }
+}
+
+/// Reserve activity beneath the button, outside its glass and hit target. This
+/// keeps the header footprint stable when activity appears or changes phase.
+struct ChatBotActivityHeader<Header: View>: View {
+    let viewModel: ChatViewModel
+    let showsActivity: Bool
+    @ViewBuilder let header: Header
+    @ScaledMetric(relativeTo: .caption2) private var activityHeight = 16.0
+
+    var body: some View {
+        if showsActivity {
+            header
+                .overlay(alignment: .bottom) {
+                    ChatBotActivitySubtitle(viewModel: viewModel)
+                        .frame(height: activityHeight)
+                        .alignmentGuide(.bottom) { $0[.top] }
+                        .allowsHitTesting(false)
+                }
+                .padding(.bottom, activityHeight)
+        } else {
+            header
+        }
+    }
+}
+
+/// Only this child observes coarse activity, never token/reasoning text or
+/// transcript revisions. Its parent reserves space outside the name capsule.
 private struct ChatBotActivitySubtitle: View {
     let viewModel: ChatViewModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @ScaledMetric(relativeTo: .caption2) private var reservedHeight = 16.0
 
     var body: some View {
         let phase = viewModel.displayedHeaderActivityPhase
@@ -4448,7 +4477,6 @@ private struct ChatBotActivitySubtitle: View {
             .minimumScaleFactor(0.8)
             .contentTransition(.opacity)
             .opacity(phase == nil ? 0 : 1)
-            .frame(height: reservedHeight)
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.16), value: phase)
             // The encompassing configuration button exposes the phase once.
             .accessibilityHidden(true)

@@ -1069,11 +1069,16 @@ final class DirectSkillUITests: XCTestCase {
             XCTAssertGreaterThan(emptyVoiceFrame.width, 0)
             XCTAssertEqual(firstCharacterEditorFrame.minX, emptyEditorFrame.minX, accuracy: 2,
                            "Typing the first character must not move the editor sideways.")
-            XCTAssertEqual(firstCharacterEditorFrame.width, emptyEditorFrame.width, accuracy: 2,
-                           "The reserved Send slot must keep the input width stable.")
-            XCTAssertEqual(firstCharacterVoiceFrame.midX, emptyVoiceFrame.midX, accuracy: 2,
-                           "The microphone must not move when the first character enables Send.")
-            retainPreviewScreenshot("\(style) first character keeps composer and mic geometry", app: app)
+            let sendSlotWidth = enabledSend.firstMatch.frame.width
+            XCTAssertEqual(emptyEditorFrame.width - firstCharacterEditorFrame.width, sendSlotWidth, accuracy: 2,
+                           "The empty composer must give the unused Send slot back to the editor.")
+            XCTAssertEqual(emptyVoiceFrame.midX - firstCharacterVoiceFrame.midX, sendSlotWidth, accuracy: 2,
+                           "Voice moves by one adjacent action slot when Send appears.")
+            XCTAssertLessThanOrEqual(app.windows.firstMatch.frame.maxX - emptyVoiceFrame.maxX, 32,
+                                     "Empty voice control must sit at the trailing edge, without a ghost slot.")
+            XCTAssertEqual(enabledSend.firstMatch.frame.minX, firstCharacterVoiceFrame.maxX, accuracy: 2,
+                           "Send and voice hit targets must be adjacent.")
+            retainPreviewScreenshot("\(style) first character exposes adjacent composer actions", app: app)
             composer.typeText(String(postSendDraft.dropFirst()))
             XCTAssertEqual(composer.value as? String, postSendDraft)
             XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
@@ -5728,6 +5733,171 @@ final class DirectSkillUITests: XCTestCase {
         let afterDraft = try await observer.transcript(storedID: storedID)
         XCTAssertTrue(NSArray(array: afterDraft).isEqual(to: canonical),
             "Typing and removing the owned draft must not resend or mutate canonical history.")
+    }
+
+    /// Exact reported regressions through the signed production entry point.
+    @MainActor
+    func testOptInProductionComposerImageOnlyAndCompactIdleHeader() async throws {
+        continueAfterFailure = false
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("Contained composer verification is simulator-only.")
+        #endif
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SEMREH_PRODUCTION_COMPOSER_UI"] == "1" else {
+            throw XCTSkip("Composer regression verification requires explicit opt-in.")
+        }
+        guard environment["SEMREH_SLICE2_UI_LIVE"] == "1",
+              environment["SEMREH_SLICE1_HTTPS"] == "1",
+              environment["SEMREH_SLICE2_UI_BACKEND_MODE"] == "stock",
+              environment["SEMREH_SLICE2_UI_BACKEND_SHA"] == backendSHA,
+              environment["SEMREH_SLICE1_CREDENTIALS_FILE"] == credentialsPath,
+              environment["SEMREH_SLICE2_TOOL_CWD"] == "/Users/maurice/workspace/semreh-slice1-runtime/tools" else {
+            return XCTFail("Composer verification requires the contained pinned stock fixture.")
+        }
+        let observer = try await LifecycleCanonicalObserver(
+            origin: try XCTUnwrap(URL(string: origin)), credentials: try readCredentials())
+        let app = XCUIApplication()
+        defer { app.terminate(); observer.invalidate(); UIPasteboard.general.items = [] }
+        app.terminate()
+        app.launchArguments = ["-appTheme", "semrehDark", "-AppleInterfaceStyle", "Dark"]
+        app.launch()
+        let composer = try openContainedNewChat(app: app)
+        assertContainedSurfaceSelection(app: app, muse: true, needsTranscript: false)
+        let profile = app.buttons["chatProfileConfiguration"]
+        let voice = app.buttons["Voice input"]
+        let sends = app.buttons.matching(NSPredicate(format: "label == %@", "Send"))
+        let removals = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Remove attachment "))
+        func assertEmptyEditor() {
+            let value = composer.value as? String ?? ""
+            XCTAssertTrue(value.isEmpty || value == composer.placeholderValue)
+        }
+        func assertTrailingVoice() {
+            XCTAssertTrue(voice.exists && voice.isHittable && voice.isEnabled)
+            XCTAssertEqual(sends.count, 0)
+            XCTAssertLessThanOrEqual(app.windows.firstMatch.frame.maxX - voice.frame.maxX, 32,
+                                     "No empty Send slot may remain after the microphone.")
+        }
+        func assertAdjacentActions() {
+            XCTAssertEqual(sends.count, 1)
+            XCTAssertTrue(sends.firstMatch.isEnabled && sends.firstMatch.isHittable)
+            XCTAssertEqual(sends.firstMatch.frame.minX, voice.frame.maxX, accuracy: 2,
+                           "Voice and Send must have adjacent hit targets.")
+        }
+        let idleProfileHeight = profile.frame.height
+        // AX exposes the whole avatar/name button, not the visible glass bounds.
+        // Hosted native tests measure the capsule; real PNG review must establish
+        // compact idle appearance. This journey scores reachability and stability.
+        XCTAssertGreaterThan(idleProfileHeight, 0)
+        XCTAssertTrue(profile.isHittable)
+        XCTAssertTrue(app.windows.firstMatch.frame.contains(profile.frame))
+        composer.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        assertEmptyEditor()
+        assertTrailingVoice()
+        retainPreviewScreenshot("composer-regression 01 empty focused compact header", app: app)
+        let emptyVoiceFrame = voice.frame
+        composer.typeText("a")
+        XCTAssertEqual(composer.value as? String, "a")
+        assertAdjacentActions()
+        retainPreviewScreenshot("composer-regression 02 first character adjacent actions", app: app)
+        try clearDailyDriverDraft(composer, expectedText: "a", style: "composer-regression", app: app)
+        assertEmptyEditor()
+        assertTrailingVoice()
+        XCTAssertEqual(voice.frame.midX, emptyVoiceFrame.midX, accuracy: 2)
+        retainPreviewScreenshot("composer-regression 03 cleared returns voice to edge", app: app)
+
+        func pasteOwnedImage() throws {
+            let image = UIGraphicsImageRenderer(size: CGSize(width: 96, height: 96)).image { context in
+                UIColor.systemTeal.setFill()
+                context.fill(CGRect(x: 0, y: 0, width: 96, height: 96))
+                UIColor.systemYellow.setFill()
+                context.fill(CGRect(x: 24, y: 24, width: 48, height: 48))
+            }
+            UIPasteboard.general.image = image
+            composer.press(forDuration: 1.1)
+            let pasteMenu = app.menuItems["Paste"]
+            let pasteButton = app.buttons["Paste"].firstMatch
+            XCTAssertTrue(pasteMenu.waitForExistence(timeout: 3) || pasteButton.waitForExistence(timeout: 3))
+            if pasteMenu.exists { pasteMenu.tap() } else { pasteButton.tap() }
+            let allowPaste = app.alerts.buttons["Allow Paste"]
+            if allowPaste.waitForExistence(timeout: 1) { allowPaste.tap() }
+            XCTAssertTrue(removals.firstMatch.waitForExistence(timeout: 10))
+            XCTAssertEqual(removals.count, 1, "Exactly one locally prepared image must be present.")
+            assertEmptyEditor()
+            assertAdjacentActions()
+        }
+        // Exercise image-only readiness on the completely empty New Chat first.
+        try pasteOwnedImage()
+        retainPreviewScreenshot("composer-regression 04 image-only new chat enabled Send", app: app)
+        removals.firstMatch.tap()
+        XCTAssertTrue(removals.firstMatch.waitForNonExistence(timeout: 5))
+        assertTrailingVoice()
+        let warmup = "SEMREH_COMPOSER_IMAGE_\(UUID().uuidString)"
+        send(warmup, through: composer, app: app)
+        waitForIdle(app: app)
+        let storedID = try await observer.discoverStoredID(uniquePrompt: warmup)
+        let baseline = try await waitForCanonical(observer: observer, storedID: storedID) {
+            self.exactCanonicalPairs($0, users: [warmup])
+        }
+        composer.tap()
+        try pasteOwnedImage()
+        retainPreviewScreenshot("composer-regression 05 image-only canonical chat before send", app: app)
+        sends.firstMatch.tap() // One actual image-only send, with no caption or synthetic text.
+        XCTAssertTrue(removals.firstMatch.waitForNonExistence(timeout: 10))
+        assertEmptyEditor()
+        waitForIdle(app: app)
+        let canonical = try await waitForCanonical(observer: observer, storedID: storedID) { rows in
+            self.hasStableBaseline(rows, baseline: baseline) && rows.count == 4
+                && rows[2]["role"] as? String == "user"
+                && rows[3]["role"] as? String == "assistant"
+                && self.canonicalText(rows[3]) == "SEMREH_SLICE1_ACK"
+        }
+        // Exact attachment/caption assertions follow the pinned storage contract below.
+        let imageText = try XCTUnwrap(canonicalText(canonical[2]))
+        XCTAssertTrue(imageText.hasPrefix("@image:"), "Canonical user row must retain the real image directive.")
+        XCTAssertEqual(imageText.components(separatedBy: "\n").count, 1,
+                       "An image-only prompt must persist exactly its image directive, without a caption.")
+        XCTAssertGreaterThan(imageText.count, "@image:".count)
+        assertTrailingVoice()
+        XCTAssertEqual(profile.frame.height, idleProfileHeight, accuracy: 2)
+        retainPreviewScreenshot("composer-regression 06 image-only delivered compact idle header", app: app)
+        let back = chatBackButton(app: app)
+        XCTAssertTrue(back.isHittable)
+        back.tap()
+        let storedRow = app.buttons["session-row:\(storedID)"]
+        XCTAssertTrue(storedRow.waitForExistence(timeout: 20) && storedRow.isHittable)
+        app.terminate()
+        app.launch()
+        dismissKnownPasswordSavePrompt(app, timeout: 3)
+        let sessions = app.buttons["Chats"]
+        let detail = app.otherElements.matching(NSPredicate(format: "identifier BEGINSWITH 'chat-detail:'")).firstMatch
+        let destinationDeadline = Date().addingTimeInterval(30)
+        while !sessions.exists && !detail.exists && Date() < destinationDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        }
+        if detail.exists {
+            let restoredBack = chatBackButton(app: app)
+            XCTAssertTrue(restoredBack.waitForExistence(timeout: 5) && restoredBack.isHittable)
+            restoredBack.tap()
+        }
+        XCTAssertTrue(sessions.waitForExistence(timeout: 15) && sessions.isHittable)
+        sessions.tap()
+        XCTAssertTrue(storedRow.waitForExistence(timeout: 20) && storedRow.isHittable)
+        storedRow.tap()
+        XCTAssertTrue(detail.waitForExistence(timeout: 30))
+        let imageElement = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Image attachment ")).firstMatch
+        XCTAssertTrue(imageElement.waitForExistence(timeout: 15) && imageElement.isHittable,
+                      "Cold reopen must render the canonical image without an optimistic preview map.")
+        _ = try await waitForCanonical(observer: observer, storedID: storedID) {
+            $0.count == canonical.count && self.hasStableBaseline($0, baseline: canonical)
+        }
+        assertTrailingVoice()
+        retainPreviewScreenshot("composer-regression 07 canonical image after cold reopen", app: app)
+        let receipt = XCTAttachment(string: "Production entry point; new-chat image-only Send enabled; existing-chat image-only submitted once; canonicalRows=4; uniqueIDs=true; baselinePreserved=true; realImageDirective=true; noCaption=true; exactCanonicalColdReopen=true. No raw payload retained.")
+        receipt.name = "Composer image-only canonical verification"
+        receipt.lifetime = .keepAlways
+        add(receipt)
     }
 
     @MainActor

@@ -515,6 +515,9 @@ final class ChatViewModel {
     /// A send being prepared belongs to presentation, not canonical history:
     /// resume can replace that history before the prompt is submitted.
     @ObservationIgnored private var pendingLocalSendMessage: ChatMessage?
+    /// Memory-only previews for attachment-only optimistic rows. Their local
+    /// filenames are presentation metadata, never gateway paths or RPC input.
+    private var directLocalAttachmentPreviews: [String: [String: Data]] = [:]
     private struct LocalSendPresentationScope: Equatable {
         let sessionID: String?
         let profile: String
@@ -874,6 +877,7 @@ final class ChatViewModel {
             }
             localSendDelivery = localSendDelivery.filter { retainedIDs.contains($0.key) }
         }
+        if !isStartingChat { pruneDirectLocalAttachmentPreviews() }
         recomputeCompressionReferenceCard()
         recomputeDisplayedReasoningGroups()
     }
@@ -882,6 +886,13 @@ final class ChatViewModel {
         // This key comes only from our nonempty generated local ID, unlike
         // the optional IDs admitted by canonical transcript decoding.
         TranscriptRenderIdentity.directPrefix + localID
+    }
+
+    private func pruneDirectLocalAttachmentPreviews() {
+        guard !directLocalAttachmentPreviews.isEmpty else { return }
+        let visibleMessageIDs = Set(displayedTranscriptMessages.map { $0.message.id })
+        let retained = directLocalAttachmentPreviews.filter { visibleMessageIDs.contains($0.key) }
+        if retained.count != directLocalAttachmentPreviews.count { directLocalAttachmentPreviews = retained }
     }
 
     private func localSendTranscriptMessage(_ message: ChatMessage, localID: String) -> TranscriptMessage {
@@ -1411,7 +1422,9 @@ final class ChatViewModel {
             markerToken: markerToken
         )
     }
-    var localAttachmentPreviews: [String: [String: Data]] { attachmentCoordinator.localAttachmentPreviews }
+    var localAttachmentPreviews: [String: [String: Data]] {
+        attachmentCoordinator.localAttachmentPreviews.merging(directLocalAttachmentPreviews) { _, direct in direct }
+    }
     private(set) var pinnedLocalNotices: [String] = []
     /// Direct Hermes blocking prompts are projections of the live controller;
     /// do not copy them into a second VM-owned queue that can outlive a rebind.
@@ -2605,7 +2618,12 @@ final class ChatViewModel {
         requiredConnectionGeneration: Int? = nil
     ) async -> Bool {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !directInvalidated, !isStartingChat,
+        let pendingAttachmentIDs = Set(directPendingAttachments.map(\.id))
+        let attachmentIDs = selectedAttachmentIDs ?? pendingAttachmentIDs
+        guard !text.isEmpty || (!attachmentIDs.isEmpty && attachmentIDs.isSubset(of: pendingAttachmentIDs)) else {
+            return false
+        }
+        guard !directInvalidated, !isStartingChat,
               !isUpdatingComposerConfiguration else { return false }
         guard !attachmentRecoveryIsBusy else {
             sendErrorMessage = "Resetting unresolved attachment delivery. Your draft was kept."
@@ -2634,17 +2652,30 @@ final class ChatViewModel {
         cancelContextUsageSnapshotTask()
         sendErrorMessage = nil
         lastError = nil
-        let attachmentIDs = selectedAttachmentIDs ?? Set(directPendingAttachments.map(\.id))
         let reusableAttempt = reusableLocalSend(draft: draft, attachmentIDs: attachmentIDs)
         let localID = reusableAttempt?.localID ?? "local-\(UUID().uuidString)"
+        let localAttachments = text.isEmpty
+            ? directPendingAttachments.filter { attachmentIDs.contains($0.id) } : []
+        if !localAttachments.isEmpty {
+            var previews: [String: Data] = [:]
+            for attachment in localAttachments {
+                previews[attachment.displayFilename] = attachment.thumbnailData ?? attachment.originalBytes
+            }
+            directLocalAttachmentPreviews[localID] = previews
+        }
         let localMessage = reusableAttempt?.message ?? ChatMessage(
             role: "user", content: text,
-            timestamp: Date().timeIntervalSince1970, messageId: localID
+            timestamp: Date().timeIntervalSince1970, messageId: localID,
+            attachments: localAttachments.isEmpty ? nil : localAttachments.map {
+                MessageAttachment(name: $0.displayFilename, mime: $0.mimeType,
+                                  size: $0.byteCount, isImage: $0.isImage)
+            }
         )
         defer {
             clearUnpromotedLocalSend(id: localID)
             sendTranscriptSessionID = nil
             isStartingChat = false
+            pruneDirectLocalAttachmentPreviews()
             OpenChatSessionStore.shared.noteStreamingStateChanged()
         }
         let wasDraft = canonicalSessionID == nil

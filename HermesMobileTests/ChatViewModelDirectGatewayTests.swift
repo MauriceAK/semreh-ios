@@ -3492,6 +3492,142 @@ final class ChatViewModelDirectGatewayTests: APIClientTestCase {
         await runtime.stop()
     }
 
+    func testDirectSendRejectsEmptyCaptionWithoutAttachments() async throws {
+        let fake = ChatDirectFakeTransport()
+        let runtime = try makeRuntime(fake)
+        let viewModel = makeViewModel(client: makeClient { _ in throw URLError(.badURL) }, runtime: runtime, sessionID: nil)
+        for draft in ["", " \n\t"] {
+            let didSend = await viewModel.sendMessage(draft)
+            XCTAssertFalse(didSend)
+        }
+        XCTAssertTrue(fake.calls().isEmpty, "A naked empty draft must not create a session or dispatch a prompt")
+        XCTAssertTrue(viewModel.messages.isEmpty)
+        viewModel.invalidateDirectConversation()
+        await runtime.stop()
+    }
+
+    func testDirectImageOnlySendStagesImageAndSubmitsExactEmptyCaption() async throws {
+        for draft in ["", " \n\t"] {
+            let fake = ChatDirectFakeTransport()
+            let runtime = try makeRuntime(fake)
+            let viewModel = makeViewModel(client: makeClient { _ in throw URLError(.badURL) }, runtime: runtime, sessionID: nil)
+            await viewModel.uploadAttachment(data: directPNGData, filename: "photo.png")
+            let didSend = await viewModel.sendMessage(draft)
+            XCTAssertTrue(didSend)
+            XCTAssertEqual(fake.calls().map(\.method), ["session.create", "image.attach_bytes", "prompt.submit"])
+            let submit = try XCTUnwrap(fake.calls().first { $0.method == "prompt.submit" })
+            XCTAssertEqual(fields(submit.params)?["text"], .string(""))
+            XCTAssertTrue(viewModel.directPendingAttachments.isEmpty)
+            viewModel.invalidateDirectConversation()
+            await runtime.stop()
+        }
+    }
+
+    func testDirectImageOnlyStageFailurePreservesBytesAndUnknownCannotRetry() async throws {
+        let failures: [HermesGatewayError] = [
+            .server(code: 4016, message: "unsupported image extension", data: nil,
+                    method: "image.attach_bytes", requestID: "image-rejected", server: "fixture"),
+            .timeout(method: "image.attach_bytes", requestID: "image-unknown")
+        ]
+        for (index, failure) in failures.enumerated() {
+            let fake = ChatDirectFakeTransport()
+            fake.setAttachmentError("image.attach_bytes", failure)
+            let runtime = try makeRuntime(fake)
+            let viewModel = makeViewModel(client: makeClient { _ in throw URLError(.badURL) }, runtime: runtime, sessionID: nil)
+            await viewModel.uploadAttachment(data: directPNGData, filename: "photo.png")
+            let attachment = try XCTUnwrap(viewModel.directPendingAttachments.first)
+            let didSend = await viewModel.sendMessage("")
+            XCTAssertFalse(didSend)
+            XCTAssertFalse(fake.calls().contains { $0.method == "prompt.submit" })
+            XCTAssertEqual(viewModel.directPendingAttachments.first?.id, attachment.id)
+            XCTAssertEqual(viewModel.directPendingAttachments.first?.originalBytes, directPNGData)
+            if index == 0 {
+                XCTAssertEqual(viewModel.directPendingAttachments.first?.stageState, .pending)
+            } else {
+                XCTAssertTrue(viewModel.directPendingAttachments.first?.stageState.isUnknown == true)
+                let stageCount = fake.calls().filter { $0.method == "image.attach_bytes" }.count
+                fake.setAttachmentError("image.attach_bytes", nil)
+                let didRetry = await viewModel.sendMessage("")
+                XCTAssertFalse(didRetry)
+                XCTAssertEqual(fake.calls().filter { $0.method == "image.attach_bytes" }.count, stageCount)
+                XCTAssertFalse(fake.calls().contains { $0.method == "prompt.submit" })
+            }
+            viewModel.invalidateDirectConversation()
+            await runtime.stop()
+        }
+    }
+
+    func testDirectImageOnlyPreviewSurvivesStagingAndCanonicalReplacesItOnce() async throws {
+        let fake = ChatDirectFakeTransport()
+        let stageGate = ChatDirectAsyncGate()
+        fake.setAttachmentGate("image.attach_bytes", stageGate)
+        fake.setEmitsPromptEvents(false)
+        let runtime = try makeRuntime(fake)
+        let viewModel = makeViewModel(client: makeClient { request in
+            XCTAssertEqual(request.httpMethod, "GET")
+            XCTAssertEqual(request.url?.path, "/api/sessions/durable-1/messages")
+            return apiTestJSONResponse(
+                #"{"session_id":"durable-1","messages":[{"id":1,"role":"user","content":"@image:/profile/images/photo.png"},{"id":2,"role":"assistant","content":"canonical answer"}],"pagination":{"limit":120,"offset":0,"order":"latest","returned":2}}"#,
+                for: request
+            )
+        }, runtime: runtime, sessionID: nil)
+        viewModel.setLocalSendPresentationEnabled(true)
+        await viewModel.uploadAttachment(data: directPNGData, filename: "photo.png")
+        let pendingPreview = try XCTUnwrap(viewModel.directPendingAttachments.first?.thumbnailData)
+        let send = Task { await viewModel.sendMessage("") }
+        await waitUntil { fake.calls().contains { $0.method == "image.attach_bytes" } }
+
+        let pendingRow = try XCTUnwrap(viewModel.displayedTranscriptMessages.last)
+        XCTAssertEqual(pendingRow.localDelivery, .sending)
+        XCTAssertEqual(pendingRow.message.content, "")
+        XCTAssertEqual(pendingRow.message.attachments?.first?.name, "photo.png")
+        XCTAssertNil(pendingRow.message.attachments?.first?.path, "A local preview must not invent a gateway path")
+        XCTAssertEqual(viewModel.localAttachmentPreviews[pendingRow.message.id]?["photo.png"], pendingPreview)
+
+        await stageGate.release()
+        let didSend = await send.value
+        XCTAssertTrue(didSend)
+        XCTAssertEqual(viewModel.displayedTranscriptMessages.filter { $0.message.role == "user" }.count, 1)
+        XCTAssertEqual(viewModel.localAttachmentPreviews[pendingRow.message.id]?["photo.png"], pendingPreview)
+
+        fake.emit(ChatDirectEventFactory.event(
+            sessionID: "runtime-1", type: "message.complete", sequence: 3,
+            payload: ["text": .string("canonical answer")]
+        ))
+        await waitUntil { viewModel.messages.last?.messageId == "2" }
+        let canonicalRows = viewModel.displayedTranscriptMessages.filter { $0.message.role == "user" }
+        XCTAssertEqual(canonicalRows.count, 1)
+        XCTAssertEqual(canonicalRows.first?.message.messageId, "1")
+        XCTAssertEqual(canonicalRows.first?.message.attachments?.first?.path, "/profile/images/photo.png")
+        XCTAssertEqual(canonicalRows.first?.attachmentDisplayContent, "")
+        XCTAssertNil(viewModel.localAttachmentPreviews[pendingRow.message.id], "Canonical history owns the image after replacement")
+        XCTAssertEqual(fake.calls().filter { $0.method == "prompt.submit" }.count, 1)
+        viewModel.invalidateDirectConversation()
+        await runtime.stop()
+    }
+
+    func testDirectImageOnlyInvalidAcknowledgementKeepsDeliveryBarrier() async throws {
+        let fake = ChatDirectFakeTransport()
+        fake.setPromptSubmitResponse(.object([:]))
+        let runtime = try makeRuntime(fake)
+        let viewModel = makeViewModel(client: makeClient { _ in throw URLError(.badURL) }, runtime: runtime, sessionID: nil)
+        await viewModel.uploadAttachment(data: directPNGData, filename: "photo.png")
+        let didSend = await viewModel.sendMessage("")
+        XCTAssertTrue(didSend, "An unknown dispatched outcome consumes this intent without offering a duplicate send")
+        XCTAssertTrue(viewModel.directConversationHasPromptDeliveryUncertainty)
+        XCTAssertTrue(viewModel.directPendingAttachments.isEmpty)
+        await viewModel.uploadAttachment(data: directPNGData, filename: "next.png")
+        let callsBeforeRetry = fake.calls().count
+        let didRetry = await viewModel.sendMessage("")
+        XCTAssertFalse(didRetry)
+        let didSendNextCaption = await viewModel.sendMessage("Do not duplicate the uncertain image")
+        XCTAssertFalse(didSendNextCaption)
+        XCTAssertEqual(fake.calls().count, callsBeforeRetry)
+        XCTAssertEqual(fake.calls().filter { $0.method == "prompt.submit" }.count, 1)
+        viewModel.invalidateDirectConversation()
+        await runtime.stop()
+    }
+
     func testDirectSendStagesSelectionAndClearsConsumedBytes() async throws {
         let fake = ChatDirectFakeTransport()
         let runtime = try makeRuntime(fake)
