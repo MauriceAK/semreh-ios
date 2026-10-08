@@ -1113,6 +1113,13 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             if old.typeKey != next.typeKey || old.horizontalPadding != next.horizontalPadding
                 || old.spacing != next.spacing || old.bottomInset != next.bottomInset
                 || old.topInset != next.topInset || old.bottomAlignsShortContent != next.bottomAlignsShortContent {
+                // Explicit geometry can be masked by the larger short-content
+                // inset. Its later self-sizing still belongs to this immediate
+                // revision, even if the short tail settles in the meantime.
+                if initialized, (old.bottomAlignsShortContent || next.bottomAlignsShortContent),
+                   (old.environment.usesMuseChatSurface || next.environment.usesMuseChatSurface) {
+                    immediateFollowRevision = next.revision
+                }
                 cancelFollow()
             }
             if followLink != nil && (old.revision != next.revision || old.isStreaming != next.isStreaming) {
@@ -1422,12 +1429,35 @@ struct ChatNativeTranscriptViewport: UIViewControllerRepresentable {
             // Only descendants owned by this transcript are ineligible. Hosted
             // selectable text and horizontal code scroll views must not compete.
             disableNestedScrollToTop(in: collection)
-            if viewportSize != collection.bounds.size || viewportInsets != collection.adjustedContentInset {
-                if viewportSize != .zero { immediateFollowRevision = input.revision }
-                if latestViewportSnapshot != nil { cancelMotion(reason: "viewport-change") }
-                cancelFollow()
+            let adjustedInsets = collection.adjustedContentInset
+            if viewportSize != collection.bounds.size || viewportInsets != adjustedInsets {
+                // A growing short transcript consumes derived top padding; it
+                // has not resized the viewport. Preserve only an already-owned
+                // streaming glide through that top-only change. Explicit chrome
+                // changes were marked immediate in update(_:).
+                let preservesGrowingContentFollow = input.bottomAlignsShortContent
+                    && input.environment.usesMuseChatSurface && canGlideFollow
+                    && viewportSize == collection.bounds.size
+                    && adjustedInsets.top < viewportInsets.top
+                    && adjustedInsets.left == viewportInsets.left
+                    && adjustedInsets.right == viewportInsets.right
+                    && adjustedInsets.bottom == viewportInsets.bottom
+                if preservesGrowingContentFollow {
+                    // Shrinking the inset can make the old negative offset
+                    // illegal. Clamp once, then glide only the remaining legal
+                    // distance; never animate an out-of-range scroll position.
+                    let current = collection.contentOffset.y
+                    let legal = min(bottomOffset, max(-adjustedInsets.top, current))
+                    if abs(current - legal) > 0.5 {
+                        collection.setContentOffset(CGPoint(x: collection.contentOffset.x, y: legal), animated: false)
+                    }
+                } else {
+                    if viewportSize != .zero { immediateFollowRevision = input.revision }
+                    if latestViewportSnapshot != nil { cancelMotion(reason: "viewport-change") }
+                    cancelFollow()
+                }
                 viewportSize = collection.bounds.size
-                viewportInsets = collection.adjustedContentInset
+                viewportInsets = adjustedInsets
             }
             let widthChanged = width != collection.bounds.width
             if widthChanged {

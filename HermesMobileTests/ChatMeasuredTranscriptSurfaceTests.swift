@@ -825,6 +825,126 @@ final class ChatMeasuredTranscriptSurfaceTests: XCTestCase {
         }
     }
 
+    func testMuseShortSelfSizingGrowthPreservesNativeFollowAcrossLongThreshold() async throws {
+        let height = ShortFollowHeight()
+        let fixture = try await mountStreaming(viewport: shortFollowViewport(
+            scope: UUID().uuidString, height: height), reduceMotionEnabled: { false })
+        defer { unmountStreaming(fixture) }
+        try await settleShortConversation(fixture)
+        XCTAssertTrue(fixture.owner.realizedTailArrival)
+        XCTAssertGreaterThan(fixture.collection.adjustedContentInset.top, fixture.owner.input.topInset)
+
+        // Still-short self-sizing has exactly one legal offset. It must keep
+        // established follow eligibility for the later overflow in this revision.
+        height.value = 140
+        try await settleShortConversation(fixture)
+        XCTAssertTrue(fixture.owner.realizedTailArrival)
+        XCTAssertGreaterThan(fixture.collection.adjustedContentInset.top, fixture.owner.input.topInset)
+        let ticksBefore = fixture.owner.followTicks
+        height.value = fixture.collection.bounds.height + 800
+        var sawIntermediate = false
+        var sawNativeLink = false
+        var samples: [String] = []
+        defer {
+            let attachment = XCTAttachment(string: samples.joined(separator: "\n"))
+            attachment.name = "short-to-long mounted native offsets; synthetic self-sizing; not FPS"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+        for sample in 0..<24 {
+            try await Task.sleep(for: .milliseconds(15))
+            fixture.owner.view.layoutIfNeeded()
+            fixture.collection.layoutIfNeeded()
+            let offset = fixture.collection.contentOffset.y
+            let minimum = -fixture.collection.adjustedContentInset.top
+            let target = fixture.owner.bottomOffset
+            samples.append("sample=\(sample) offset=\(offset) minimum=\(minimum) target=\(target) ticks=\(fixture.owner.followTicks)")
+            XCTAssertTrue(offset.isFinite)
+            XCTAssertGreaterThanOrEqual(offset, minimum - 0.5)
+            XCTAssertLessThanOrEqual(offset, target + 0.5)
+            sawNativeLink = sawNativeLink || fixture.owner.followLink != nil
+            sawIntermediate = sawIntermediate || (target - minimum > 400
+                && offset > minimum + 0.5 && offset < target - 0.5)
+        }
+        XCTAssertTrue(sawNativeLink, "Normal-motion growth must use the existing native follow owner")
+        XCTAssertTrue(sawIntermediate, "Observe movement within the new legal range before tail arrival")
+        XCTAssertGreaterThan(fixture.owner.followTicks, ticksBefore)
+        try await Task.sleep(for: .milliseconds(300))
+        try await settleShortConversation(fixture)
+        XCTAssertNil(fixture.owner.followLink)
+        XCTAssertNil(fixture.owner.motionLink)
+        XCTAssertTrue(fixture.owner.follows)
+        XCTAssertEqual(fixture.collection.adjustedContentInset.top, fixture.owner.input.topInset, accuracy: 0.5)
+        try assertTailAboveDock(fixture)
+    }
+
+    func testMuseShortExplicitGeometryStillKeepsLateSelfSizingImmediateWithNormalMotion() async throws {
+        for change in ["header", "dock", "bounds", "UIKit-bottom"] {
+            let scope = UUID().uuidString
+            let height = ShortFollowHeight()
+            let fixture = try await mountStreaming(viewport: shortFollowViewport(scope: scope, height: height),
+                reduceMotionEnabled: { false })
+            defer { unmountStreaming(fixture) }
+            try await settleShortConversation(fixture)
+            let originalDerivedTop = fixture.collection.adjustedContentInset.top
+            let next = shortFollowViewport(scope: scope, height: height, revision: 1,
+                top: change == "header" ? 120 : 96, bottom: change == "dock" ? 152 : 112)
+            fixture.owner.update(next)
+            if change == "bounds" {
+                fixture.owner.view.frame.size.height -= 64
+                fixture.owner.view.setNeedsLayout()
+            } else if change == "UIKit-bottom" {
+                fixture.collection.contentInset.bottom = 24
+            }
+            try await settleShortConversation(fixture)
+            XCTAssertTrue(fixture.owner.realizedTailArrival, change)
+            XCTAssertNil(fixture.owner.followLink, change)
+            if change == "header" {
+                XCTAssertGreaterThan(originalDerivedTop, next.topInset)
+                XCTAssertEqual(fixture.collection.adjustedContentInset.top, originalDerivedTop, accuracy: 0.5,
+                    "The derived inset intentionally masks this explicit header change")
+            }
+
+            // No new input/revision: the hosted row reports a late intrinsic fit.
+            let ticksBefore = fixture.owner.followTicks
+            height.value = fixture.collection.bounds.height + 800
+            for _ in 0..<20 {
+                try await Task.sleep(for: .milliseconds(15))
+                fixture.owner.view.layoutIfNeeded()
+                fixture.collection.layoutIfNeeded()
+                XCTAssertNil(fixture.owner.followLink, "\(change): late sizing must keep the resize revision immediate")
+            }
+            XCTAssertEqual(fixture.owner.followTicks, ticksBefore, change)
+            XCTAssertNil(fixture.owner.motionLink, change)
+            try assertTailAboveDock(fixture)
+        }
+    }
+
+    private final class ShortFollowHeight: ObservableObject {
+        @Published var value: CGFloat = 80
+    }
+
+    private struct ShortFollowSizingRow: View {
+        @ObservedObject var height: ShortFollowHeight
+        var body: some View {
+            Text("A controlled self-sizing reply")
+                .frame(height: height.value, alignment: .top)
+        }
+    }
+
+    private func shortFollowViewport(scope: String, height: ShortFollowHeight, revision: Int = 0,
+                                     top: CGFloat = 96, bottom: CGFloat = 112) -> ChatNativeTranscriptViewport {
+        var environment = EnvironmentValues()
+        environment.usesMuseChatSurface = true
+        XCTAssertFalse(environment.accessibilityReduceMotion, "Require a normal-motion environment for this fixture")
+        var input = viewport(ids: ["row-0"], scope: scope, top: top, bottom: bottom, environment: environment,
+            makeRow: { _ in AnyView(ShortFollowSizingRow(height: height)) }, revision: revision, isStreaming: true)
+        input.bottomAlignsShortContent = true
+        input.headerRevision = .spacer(height: 1)
+        input.footerRevision = .spacer(height: 1)
+        return input
+    }
+
     func testMuseShortTailTracksBoundsAndMeasuredDockWhileNaturalRowsRemainUnchanged() async throws {
         let input = try shortConversationViewport(scope: UUID().uuidString, imageOnly: false)
         let fixture = try await mountStreaming(viewport: input, reduceMotionEnabled: { true })
