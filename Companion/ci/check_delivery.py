@@ -44,6 +44,39 @@ def check_source():
     print("Delivery source metadata and opaque app icon passed")
 
 
+def prepare_archive(path, version, number):
+    assert path.is_dir() and path.suffix == ".xcarchive", "Expected an existing Xcode archive"
+    properties = plistlib.loads((path / "Info.plist").read_bytes())["ApplicationProperties"]
+    relative = Path(properties["ApplicationPath"])
+    assert not relative.is_absolute() and ".." not in relative.parts
+    assert relative.parts == ("Applications", "HermesCompanion.app"), "Unexpected archived application"
+    products = (path / "Products").resolve()
+    app = products / relative
+    assert app.resolve().is_relative_to(products) and not app.is_symlink()
+    info = plistlib.loads((app / "Info.plist").read_bytes())
+    assert info["CFBundleIdentifier"] == BUNDLE_ID, "Archive has the wrong app identity"
+    assert info["CFBundleShortVersionString"] == version and info["CFBundleVersion"] == number
+    assert "iPhoneOS" in info["CFBundleSupportedPlatforms"], "Archive is not a physical-device build"
+    assert not list(app.rglob("*.appex")) and not list(app.rglob("*.framework")), "Nested code requires a reviewed signing plan"
+    source = plistlib.loads((ROOT / "ios/HermesCompanion/HermesCompanion.entitlements").read_bytes())
+    assert source == {"aps-environment": "$(APNS_ENVIRONMENT)"}, "Review changed archive entitlements before signing"
+    entitlements = {
+        "aps-environment": "production",
+        "application-identifier": f"{TEAM_ID}.{BUNDLE_ID}",
+        "com.apple.developer.team-identifier": TEAM_ID,
+        "get-task-allow": False,
+    }
+    with tempfile.TemporaryDirectory(prefix="companion-archive-entitlements-") as directory:
+        entitlement_path = Path(directory) / "archive.plist"
+        entitlement_path.write_bytes(plistlib.dumps(entitlements))
+        subprocess.run(["codesign", "--force", "--sign", "-", "--generate-entitlement-der",
+                        "--entitlements", str(entitlement_path), str(app)], check=True, capture_output=True)
+    subprocess.run(["codesign", "--verify", "--strict", str(app)], check=True, capture_output=True)
+    signed = subprocess.run(["codesign", "-d", "--entitlements", ":-", str(app)], check=True, capture_output=True)
+    assert plistlib.loads(signed.stdout) == entitlements, "Archive signature did not preserve the reviewed entitlements"
+    return {"archive_entitlements_verified": True, "archive_signature": "ad_hoc_intermediate"}
+
+
 def check_ipa(path, version, number):
     assert path.is_file() and path.stat().st_size > 0, "The archive did not produce an IPA"
     with zipfile.ZipFile(path) as archive:
@@ -64,7 +97,9 @@ def check_ipa(path, version, number):
     with tempfile.TemporaryDirectory(prefix="companion-ipa-") as directory:
         subprocess.run(["ditto", "-xk", str(path), directory], check=True, capture_output=True)
         app = Path(directory) / Path(infos[0]).parent
-        subprocess.run(["codesign", "--verify", "--strict", str(app)], check=True, capture_output=True)
+        requirement = f'anchor apple generic and certificate leaf[subject.OU] = "{TEAM_ID}"'
+        subprocess.run(["codesign", "--verify", "--strict", "--test-requirement", requirement, str(app)],
+                       check=True, capture_output=True)
         signed = subprocess.run(["codesign", "-d", "--entitlements", ":-", str(app)], check=True, capture_output=True)
         entitlements = plistlib.loads(signed.stdout)
         assert entitlements["application-identifier"] == f"{TEAM_ID}.{BUNDLE_ID}"
@@ -75,6 +110,15 @@ def check_ipa(path, version, number):
         provisioning = plistlib.loads(profile.stdout)
         assert TEAM_ID in provisioning["TeamIdentifier"]
         assert "ProvisionedDevices" not in provisioning and not provisioning.get("ProvisionsAllDevices", False)
+        assert provisioning["Entitlements"]["application-identifier"] == f"{TEAM_ID}.{BUNDLE_ID}"
+        assert provisioning["Entitlements"]["com.apple.developer.team-identifier"] == TEAM_ID
+        assert provisioning["Entitlements"]["aps-environment"] == "production"
+        assert provisioning["Entitlements"].get("get-task-allow", False) is False
+        certificate_prefix = Path(directory) / "signing-certificate"
+        subprocess.run(["codesign", "-d", f"--extract-certificates={certificate_prefix}", str(app)],
+                       check=True, capture_output=True)
+        certificate = Path(str(certificate_prefix) + "0").read_bytes()
+        assert certificate in provisioning["DeveloperCertificates"], "App signature is not authorized by its distribution profile"
     return {"bundle_id": BUNDLE_ID, "version": version, "build_number": number,
             "ipa_sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "signed_ipa_verified": True,
             "privacy_manifest_verified": True}
@@ -82,13 +126,17 @@ def check_ipa(path, version, number):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--ipa", type=Path)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--ipa", type=Path)
+    mode.add_argument("--archive", type=Path)
     parser.add_argument("--version")
     parser.add_argument("--build-number")
     args = parser.parse_args()
-    if args.ipa:
+    if args.ipa or args.archive:
         if not args.version or not args.build_number:
             parser.error("--version and --build-number are required")
-        print(json.dumps(check_ipa(args.ipa, args.version, args.build_number)))
+        result = (prepare_archive(args.archive, args.version, args.build_number) if args.archive
+                  else check_ipa(args.ipa, args.version, args.build_number))
+        print(json.dumps(result))
     else:
         check_source()

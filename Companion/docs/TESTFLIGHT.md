@@ -69,6 +69,19 @@ Hermes and physical-device tests remain separate gates. The archive check verifi
 the IPA's app identity, version, build, signature, distribution profile, production
 APNs entitlement, and compiled icon metadata.
 
+The lane archives without a local signing identity, then applies an ad-hoc
+signature to that intermediate archive to preserve the reviewed push entitlement.
+This intermediate is never uploaded. Xcode cloud signing exports the distribution
+IPA afterward. Keeping an entitlements path while disabling signing does not
+preserve those entitlements in the archive; a real local archive reproduced this.
+
+Before upload, the verifier requires an Apple-anchored signature for the selected
+team, matching production push and app identity in both the app and provisioning
+profile, and a signing certificate authorized by that profile. An ad-hoc final IPA
+fails. Local archive preparation proves only that the intermediate metadata is
+preserved; successful cloud export, Apple processing, and group availability
+still require a real workflow result.
+
 The native command excludes named tests that require a paired host, a seeded
 photo library, notification injection, or a real history session. It also excludes
 `PerformanceFlowUITests`, whose workloads require a configured real host. Every

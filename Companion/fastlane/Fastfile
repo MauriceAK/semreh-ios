@@ -50,16 +50,27 @@ platform :ios do
       '-authenticationKeyIssuerID', ENV.fetch('APP_STORE_CONNECT_ISSUER_ID'),
       "DEVELOPMENT_TEAM=#{CompanionTestFlight::TEAM_ID}", 'CODE_SIGN_IDENTITY=Apple Distribution'
     ].shelljoin
-    ipa = build_app(
+    archive_path = File.join(ENV.fetch('RUNNER_TEMP'), 'CompanionExport', 'HermesCompanion.xcarchive')
+    build_app(
       project: project, scheme: 'HermesCompanion', configuration: 'Release',
       destination: 'generic/platform=iOS',
       derived_data_path: File.join(ENV.fetch('RUNNER_TEMP'), 'CompanionDerivedData'),
-      archive_path: File.join(ENV.fetch('RUNNER_TEMP'), 'CompanionExport', 'HermesCompanion.xcarchive'),
+      archive_path: archive_path,
+      xcargs: xcargs, skip_codesigning: true, skip_package_ipa: true, skip_package_pkg: true
+    )
+    archive_metadata, prepared = Open3.capture2e('python3', File.join(root, 'ci/check_delivery.py'),
+      '--archive', archive_path, '--version', version, '--build-number', build_number)
+    UI.user_error!("Archive entitlement preparation failed: #{archive_metadata}") unless prepared.success?
+    receipt.merge!(JSON.parse(archive_metadata, symbolize_names: true)).merge!(status: 'archive_entitlements_prepared')
+    CompanionTestFlight.write_receipt(receipt_path, receipt)
+    ipa = build_app(
+      project: project, scheme: 'HermesCompanion', configuration: 'Release',
+      archive_path: archive_path, skip_build_archive: true, skip_package_ipa: false, skip_codesigning: false,
       output_directory: File.join(ENV.fetch('RUNNER_TEMP'), 'CompanionExport'),
       output_name: 'HermesCompanion', export_method: 'app-store',
       export_options: File.join(root, 'ci/CompanionInternalExport.plist'),
       xcargs: xcargs, export_xcargs: export_xcargs,
-      skip_codesigning: true, skip_package_pkg: true, include_bitcode: false
+      skip_package_pkg: true, include_bitcode: false
     )
     UI.user_error!('Archive did not return an IPA') if ipa.to_s.empty?
     metadata, validation = Open3.capture2e('python3', File.join(root, 'ci/check_delivery.py'),

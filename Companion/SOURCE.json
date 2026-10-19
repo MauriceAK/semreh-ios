@@ -1,5 +1,5 @@
 {
-  "source_revision": "a6d3f9cbc6490569697874a539730c368bd4b127",
+  "source_revision": "8f12e4bec703013224f3419c3f57b6a97ab1605f",
   "files": [
     {
       "path": "ci/CompanionInternalExport.plist",
@@ -7,7 +7,7 @@
     },
     {
       "path": "ci/check_delivery.py",
-      "sha256": "465c350ad28a8b5ca72c7fd712c2cc3778a26f701cf8d30398cd8912b4230c57"
+      "sha256": "166b11487e158b704ff6ec190d888777168e7c7a3c0bc319ca27eb0e6d889bda"
     },
     {
       "path": "ci/generate_app_icon.swift",
@@ -15,7 +15,7 @@
     },
     {
       "path": "ci/test_check_delivery.py",
-      "sha256": "ad8b709c1c1e9e3a16d650e7af9ec3f577c9bea6525475ae618ee0c28b202ee6"
+      "sha256": "e789c67fdf14e3f5baa52f053d612129d9cf12873dd819301e17e26a8cf41641"
     },
     {
       "path": "ci/test_native.sh",
@@ -31,11 +31,11 @@
     },
     {
       "path": "docs/TESTFLIGHT.md",
-      "sha256": "1073f183428e922732c59f223b2fd716755a6c00cf052908f217c9944cc411cb"
+      "sha256": "fadf1dba07e828939a8de039d20e77514e23bbc36d1db49c53b5624ec7d57aff"
     },
     {
       "path": "fastlane/Fastfile",
-      "sha256": "2ae70d8c29b747313505f18d4eab38d985a545ecd23fdfb3e38ce71481588117"
+      "sha256": "526a7f11982747653e7d49a67eac57cd16b5efa8f3f7a14b78b6ab4fb57b3be5"
     },
     {
       "path": "host/companion/__init__.py",
