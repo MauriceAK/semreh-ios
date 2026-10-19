@@ -26,6 +26,7 @@ final class TranscriptController: UIViewController, UITableViewDataSource, UITab
     private var applying = false
     private var followingLatest = true
     private var latestRevision: UUID?
+    private var viewportIntent = UUID()
     private var scrollSpan: ChatPerformance.Token?
     private var sizingTask: Task<Void, Never>?
     var onOlder: (() -> Void)?
@@ -74,7 +75,7 @@ final class TranscriptController: UIViewController, UITableViewDataSource, UITab
         if hasMore { table.tableHeaderView = older } else { table.tableHeaderView = nil }
         let requestedLatest = self.latestRevision != nil && self.latestRevision != latestRevision
         self.latestRevision = latestRevision
-        if requestedLatest { followingLatest = true }
+        if requestedLatest { followingLatest = true; viewportIntent = UUID() }
         guard messages != newMessages else {
             if requestedLatest {
                 scrollToBottom()
@@ -97,7 +98,18 @@ final class TranscriptController: UIViewController, UITableViewDataSource, UITab
         if oldMessages.map(\.id) == messages.map(\.id) {
             let changed = messages.indices.filter { oldMessages[$0] != messages[$0] }.map { IndexPath(row: $0, section: 0) }
             if !changed.isEmpty {
-                UIView.performWithoutAnimation { table.reloadRows(at: changed, with: .none); table.layoutIfNeeded() }
+                let appending = changed.allSatisfy { BubbleCell.provisionalSuffix(from: oldMessages[$0.row], to: messages[$0.row]) != nil }
+                UIView.performWithoutAnimation {
+                    if appending {
+                        for path in changed {
+                            (table.cellForRow(at: path) as? BubbleCell)?.appendProvisional(messages[path.row])
+                        }
+                        table.performBatchUpdates(nil)
+                    } else {
+                        table.reloadRows(at: changed, with: .none)
+                    }
+                    table.layoutIfNeeded()
+                }
             }
         } else {
             UIView.performWithoutAnimation { table.reloadData(); table.layoutIfNeeded() }
@@ -129,6 +141,7 @@ final class TranscriptController: UIViewController, UITableViewDataSource, UITab
         table.setContentOffset(CGPoint(x: 0, y: offset), animated: false)
     }
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+        viewportIntent = UUID()
         ChatPerformance.shared.end(scrollSpan)
         scrollSpan = ChatPerformance.shared.begin(.scroll)
     }
@@ -145,20 +158,24 @@ final class TranscriptController: UIViewController, UITableViewDataSource, UITab
     }
     private func scheduleSizing() {
         guard sizingTask == nil else { return }
+        // Preserve the geometry before formatted text changes any row heights.
+        // Later formatting callbacks share this first anchor until layout settles.
+        let anchor = visibleAnchor()
+        let intent = viewportIntent
         sizingTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(30))
             guard let self else { return }
-            let anchor = self.visibleAnchor()
-            let atBottom = self.followingLatest
             let layoutSpan = ChatPerformance.shared.begin(.markdownLayout, count: self.messages.count)
             self.applying = true
             UIView.performWithoutAnimation {
                 self.table.performBatchUpdates(nil) { [weak self] _ in
                     guard let self else { return }
                     self.table.layoutIfNeeded()
-                    if atBottom && self.followingLatest { self.scrollToBottom() }
-                    else if let anchor, let index = self.messages.firstIndex(where: { $0.id == anchor.id }) {
-                        self.restoreAnchor(anchor, at: index)
+                    if !self.table.isDragging && !self.table.isDecelerating {
+                        if self.followingLatest { self.scrollToBottom() }
+                        else if intent == self.viewportIntent, let anchor, let index = self.messages.firstIndex(where: { $0.id == anchor.id }) {
+                            self.restoreAnchor(anchor, at: index)
+                        }
                     }
                     self.applying = false
                     self.sizingTask = nil
@@ -176,7 +193,7 @@ final class TranscriptController: UIViewController, UITableViewDataSource, UITab
     func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { messages.count }
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let cell = tableView.dequeueReusableCell(withIdentifier: "bubble", for: indexPath) as! BubbleCell
-        cell.onFormattingChanged = { [weak self] in self?.scheduleSizing() }
+        cell.onFormattingWillChange = { [weak self] in self?.scheduleSizing() }
         cell.configure(messages[indexPath.row])
         return cell
     }
@@ -190,7 +207,8 @@ final class BubbleCell: UITableViewCell {
     private var right: NSLayoutConstraint!
     private var formatTask: Task<Void, Never>?
     private var messageID: String?
-    var onFormattingChanged: (() -> Void)?
+    private var configuredMessage: ChatMessage?
+    var onFormattingWillChange: (() -> Void)?
     private static let formatting = MarkdownCache()
     private static let renderedCache: NSCache<NSString, NSAttributedString> = {
         let cache = NSCache<NSString, NSAttributedString>()
@@ -206,6 +224,26 @@ final class BubbleCell: UITableViewCell {
         return cache
     }()
     private static let measuringText = UITextView()
+    private static var measuringMessage: ChatMessage?
+    private static var measuringWidth: CGFloat = 0
+    private static var measuringFont: UIFont?
+
+    static func provisionalSuffix(from old: ChatMessage, to new: ChatMessage) -> String? {
+        guard old.provisional, new.provisional, old.id == new.id, old.role == new.role,
+              old.attachments == new.attachments else { return nil }
+        let previous = old.displayText
+        let next = new.displayText
+        // Use exact UTF-16 units rather than grapheme counts: an incoming chunk
+        // may extend the previous grapheme with a combining mark or ZWJ sequence.
+        guard next.utf16.starts(with: previous.utf16) else { return nil }
+        return (next as NSString).substring(from: previous.utf16.count)
+    }
+    private static func append(_ suffix: String, to view: UITextView, font: UIFont) {
+        guard !suffix.isEmpty else { return }
+        view.textStorage.append(NSAttributedString(string: suffix, attributes: [
+            .font: font, .foregroundColor: view.textColor ?? UIColor.label
+        ]))
+    }
     private static func cacheKey(_ message: ChatMessage, font: UIFont) -> NSString {
         (font.fontName + "|" + String(describing: font.pointSize) + "|" + message.displayText) as NSString
     }
@@ -218,9 +256,18 @@ final class BubbleCell: UITableViewCell {
         measuringText.isScrollEnabled = false
         measuringText.textContainerInset = UIEdgeInsets(top: 11, left: 10, bottom: 11, right: 10)
         measuringText.textContainer.lineFragmentPadding = 0
-        measuringText.font = font
-        if let formatted { measuringText.attributedText = formatted }
-        else { measuringText.text = message.displayText }
+        let suffix = measuringWidth == width && measuringFont == font
+            ? measuringMessage.flatMap { provisionalSuffix(from: $0, to: message) } : nil
+        if let suffix {
+            append(suffix, to: measuringText, font: font)
+        } else {
+            measuringText.font = font
+            if let formatted { measuringText.attributedText = formatted }
+            else { measuringText.text = message.displayText }
+        }
+        measuringMessage = message
+        measuringWidth = width
+        measuringFont = font
         let height = ceil(measuringText.sizeThatFits(CGSize(width: width * 0.91, height: .greatestFiniteMagnitude)).height) + 10
         heightCache.setObject(NSNumber(value: Double(height)), forKey: sizeKey, cost: message.displayText.utf8.count)
         return height
@@ -258,8 +305,16 @@ final class BubbleCell: UITableViewCell {
         ])
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    override func prepareForReuse() { super.prepareForReuse(); formatTask?.cancel(); messageID = nil }
+    override func prepareForReuse() { super.prepareForReuse(); formatTask?.cancel(); messageID = nil; configuredMessage = nil }
+    func appendProvisional(_ message: ChatMessage) {
+        guard let configuredMessage, let suffix = Self.provisionalSuffix(from: configuredMessage, to: message),
+              let font = textView.font else { configure(message); return }
+        Self.append(suffix, to: textView, font: font)
+        self.configuredMessage = message
+        textView.accessibilityLabel = (message.role == "user" ? "You. " : "Hermes. ") + message.displayText
+    }
     func configure(_ message: ChatMessage) {
+        configuredMessage = message
         formatTask?.cancel()
         messageID = message.id
         let user = message.role == "user"
@@ -295,9 +350,9 @@ final class BubbleCell: UITableViewCell {
                 else if intent.contains(.emphasized), let descriptor = font.fontDescriptor.withSymbolicTraits(.traitItalic) { runFont = UIFont(descriptor: descriptor, size: font.pointSize) }
                 attributed.addAttribute(.font, value: runFont, range: NSRange(location: location, length: length))
             }
+            self.onFormattingWillChange?()
             Self.renderedCache.setObject(attributed, forKey: cacheKey, cost: message.displayText.utf8.count)
             self.textView.attributedText = attributed
-            self.onFormattingChanged?()
         }
     }
 }

@@ -1,3 +1,4 @@
+import CoreFoundation
 import XCTest
 import Vision
 
@@ -12,7 +13,9 @@ final class CompanionUITests: XCTestCase {
         return app
     }
     func testLongHistoryTypingAndStreaming() {
-        let app = launch()
+        let control = UUID().uuidString
+        let app = launch(["--fixture-control", control])
+        signalFixture("hold-work", control: control)
         let transcript = app.tables["transcript"]
         XCTAssertTrue(transcript.waitForExistence(timeout: 5))
         let composer = app.descendants(matching: .any).matching(identifier: "composer").firstMatch
@@ -20,6 +23,7 @@ final class CompanionUITests: XCTestCase {
         composer.typeText("Explore a useful idea")
         app.buttons["sendMessage"].tap()
         XCTAssertTrue(app.buttons["stopAgent"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.textViews["message-fixture-stream"].waitForExistence(timeout: 5))
         composer.tap()
         composer.typeText("Keep the draft while I read")
         transcript.swipeDown(velocity: .fast)
@@ -28,6 +32,20 @@ final class CompanionUITests: XCTestCase {
         app.buttons["stopAgent"].tap()
         XCTAssertTrue(app.buttons["sendMessage"].exists)
         attach(app, "long-history-keyboard")
+    }
+    private func signalFixture(_ action: String, control: String) {
+        let name = "org.hermescompanion.fixture." + control + "." + action
+        let acknowledgment = expectation(description: "Fixture applied " + action)
+        let observer = Unmanaged.passUnretained(acknowledgment).toOpaque()
+        let center = CFNotificationCenterGetDarwinNotifyCenter()
+        let ackName = name + ".ack"
+        CFNotificationCenterAddObserver(center, observer, { _, observer, _, _, _ in
+            guard let observer else { return }
+            Unmanaged<XCTestExpectation>.fromOpaque(observer).takeUnretainedValue().fulfill()
+        }, ackName as CFString, nil, .deliverImmediately)
+        defer { CFNotificationCenterRemoveObserver(center, observer, CFNotificationName(rawValue: ackName as CFString), nil) }
+        CFNotificationCenterPostNotification(center, CFNotificationName(rawValue: name as CFString), nil, nil, true)
+        wait(for: [acknowledgment], timeout: 10)
     }
     func testControlsReadBackAndQuietHours() {
         let app = launch()
@@ -112,15 +130,20 @@ final class CompanionUITests: XCTestCase {
         attach(app, "request-canceled")
     }
     func testReconnectPreservesDraftAndDoesNotRepeatSend() {
-        let app = launch(["--fixture-reconnect"])
+        let control = UUID().uuidString
+        let app = launch(["--fixture-control", control])
         let composer = app.descendants(matching: .any).matching(identifier: "composer").firstMatch
         composer.tap()
         composer.typeText("A draft survives")
+        signalFixture("offline", control: control)
         XCTAssertTrue(app.staticTexts["Reconnecting. Your draft stays here."].waitForExistence(timeout: 6))
         XCTAssertFalse(app.buttons["sendMessage"].isEnabled)
+        XCTAssertEqual(composer.value as? String, "A draft survives")
+        signalFixture("online", control: control)
         XCTAssertTrue(app.staticTexts["Fixture connection restored. No command was replayed."].waitForExistence(timeout: 10))
         XCTAssertEqual(composer.value as? String, "A draft survives")
         XCTAssertTrue(app.buttons["sendMessage"].isEnabled)
+        XCTAssertFalse(app.textViews["message-fixture-stream"].exists, "Reconnection must not replay an unsent draft.")
         attach(app, "recovered-draft")
     }
     func testFiveLongHistoryLaunchMeasurements() {

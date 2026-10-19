@@ -59,6 +59,9 @@ final class AppStore {
     private var notificationToken: String?
     private var fixtureOldest = 9880
     private var fixtureTimer: Task<Void, Never>?
+    #if DEBUG
+    var fixtureHoldWork = false
+    #endif
 
     var canCommand: Bool { connection == "Connected" }
     var currentUncertain: [PendingOperation] { uncertain.filter { $0.sessionID == selectedSession?.id } }
@@ -80,7 +83,13 @@ final class AppStore {
         #if DEBUG
         fixture = ProcessInfo.processInfo.arguments.contains("--fixture")
         #endif
-        if fixture { loadFixture(); return }
+        if fixture {
+            loadFixture()
+            #if DEBUG
+            FixtureControl.shared.connect(self)
+            #endif
+            return
+        }
         grant = GrantVault.load()
         uncertain = journal.pending
         if let grant, let client = try? CompanionAPI(baseURL: validatedBaseURL(grant.baseURL), token: grant.token) {
@@ -807,8 +816,12 @@ extension AppStore {
                 for index in 0..<80 {
                     guard !Task.isCancelled else { return }
                     try? await Task.sleep(for: .milliseconds(80))
+                    guard !Task.isCancelled else { return }
                     try? self?.transcript.apply(.init(id: "fixture-stream", text: index == 0 ? "Controlled streaming fixture. " : "A new thought arrives. ", replace: index == 0))
                 }
+                #if DEBUG
+                if self?.fixtureHoldWork == true { return }
+                #endif
                 self?.runState = .idle
             }
         }

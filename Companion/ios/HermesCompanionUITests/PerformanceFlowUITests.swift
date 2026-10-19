@@ -19,6 +19,7 @@ final class PerformanceFlowUITests: XCTestCase {
         XCTAssertLessThanOrEqual(rowCount, 500)
         let newest = table.cells.element(boundBy: rowCount - 1).textViews.firstMatch.identifier
         XCTAssertTrue(newest.hasPrefix("message-"))
+        XCTAssertLessThanOrEqual(app.textViews[newest].frame.maxY, table.frame.maxY, "Initial layout must expose the true canonical tail.")
         replaceDraft(app, with: "Typing a real draft while reading older messages")
         table.swipeDown(velocity: .slow)
         table.swipeDown(velocity: .fast)
@@ -31,6 +32,7 @@ final class PerformanceFlowUITests: XCTestCase {
         expectation(for: returned, evaluatedWith: latest)
         waitForExpectations(timeout: 20)
         XCTAssertTrue(app.textViews[newest].isHittable, "Latest must return to the actual newest canonical row.")
+        XCTAssertLessThanOrEqual(app.textViews[newest].frame.maxY, table.frame.maxY, "Latest must expose the complete canonical tail.")
         editor(app).tap()
         editor(app).typeText(" and returning to the latest")
         XCTAssertEqual(editor(app).value as? String, "Typing a real draft while reading older messages and returning to the latest")
@@ -53,6 +55,9 @@ final class PerformanceFlowUITests: XCTestCase {
         replaceDraft(app, with: prompt)
         app.buttons["sendMessage"].tap()
         XCTAssertTrue(app.staticTexts["workingIndicator"].waitForExistence(timeout: 10))
+        let partial = app.textViews.matching(NSPredicate(format: "label BEGINSWITH %@", "Hermes. ")).firstMatch
+        XCTAssertTrue(partial.waitForExistence(timeout: 120), "Wait for actual streamed content before concurrent typing.")
+        XCTAssertTrue(app.staticTexts["workingIndicator"].exists)
         let draft = "Keep this unsent draft responsive while the assistant streams its answer."
         editor(app).tap()
         editor(app).typeText(draft)
@@ -92,7 +97,11 @@ final class PerformanceFlowUITests: XCTestCase {
         let field = editor(app)
         field.tap()
         if let existing = field.value as? String, existing != field.placeholderValue, !existing.isEmpty {
-            field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: existing.count))
+            field.press(forDuration: 1.1)
+            let selectAll = app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "Select All")).firstMatch
+            XCTAssertTrue(selectAll.waitForExistence(timeout: 3), "Use the native editing menu to replace the complete saved draft.")
+            selectAll.tap()
+            field.typeText(XCUIKeyboardKey.delete.rawValue)
         }
         field.typeText(text)
         XCTAssertEqual(field.value as? String, text)
