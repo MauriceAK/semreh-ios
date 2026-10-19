@@ -1,0 +1,66 @@
+name: HermesCompanion
+options:
+  bundleIdPrefix: org.hermescompanion
+  deploymentTarget:
+    iOS: '18.0'
+settings:
+  base:
+    SWIFT_VERSION: '6.0'
+    SWIFT_STRICT_CONCURRENCY: complete
+    DEVELOPMENT_TEAM: ''
+    MARKETING_VERSION: '0.1.0'
+    CURRENT_PROJECT_VERSION: '1'
+    CODE_SIGN_STYLE: Automatic
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+  configs:
+    Debug:
+      APNS_ENVIRONMENT: development
+    Release:
+      APNS_ENVIRONMENT: production
+      DEVELOPMENT_TEAM: 6D65NQ2V3Q
+targets:
+  HermesCompanion:
+    type: application
+    platform: iOS
+    sources: [HermesCompanion]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.hermescompanion.beta
+        INFOPLIST_FILE: HermesCompanion/Info.plist
+        CODE_SIGN_ENTITLEMENTS: HermesCompanion/HermesCompanion.entitlements
+        TARGETED_DEVICE_FAMILY: '1'
+        ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+  HermesCompanionTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [HermesCompanionTests]
+    dependencies:
+      - target: HermesCompanion
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+  HermesCompanionUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [HermesCompanionUITests]
+    dependencies:
+      - target: HermesCompanion
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  HermesCompanion:
+    build:
+      targets:
+        HermesCompanion: all
+    test:
+      targets: [HermesCompanionTests, HermesCompanionUITests]
+      gatherCoverageData: true
+  HermesCompanionPerformance:
+    build:
+      targets:
+        HermesCompanion: all
+    test:
+      targets: [HermesCompanionUITests]
+      gatherCoverageData: false

@@ -1,0 +1,124 @@
+name: Companion TestFlight
+run-name: Companion beta from ${{ github.sha }}
+
+on:
+  push:
+    branches: [companion/chat-beta-testflight]
+    paths: ['Companion/**', '.github/workflows/companion-testflight.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: internal-testflight
+  cancel-in-progress: false
+
+defaults:
+  run:
+    working-directory: Companion
+
+jobs:
+  upload:
+    runs-on: macos-26
+    environment: internal-testflight
+    timeout-minutes: 90
+    env:
+      BUNDLE_GEMFILE: ${{ github.workspace }}/Gemfile
+    steps:
+      - uses: actions/checkout@v7
+      - name: Verify the Companion branch and source manifest
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REF}" = refs/heads/companion/chat-beta-testflight
+          test "${GITHUB_REPOSITORY}" = MauriceAK/semreh-ios
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          mkdir -p "${RUNNER_TEMP}/CompanionReceipt"
+          python3 ci/check_delivery.py
+          python3 - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          manifest = json.loads(Path('SOURCE.json').read_text())
+          assert len(manifest['source_revision']) == 40
+          for entry in manifest['files']:
+              path = Path(entry['path'])
+              assert not path.is_absolute() and '..' not in path.parts
+              assert hashlib.sha256(path.read_bytes()).hexdigest() == entry['sha256'], path
+          print(f"Verified {len(manifest['files'])} files from Companion {manifest['source_revision']}")
+          PY
+          xcodebuild -version > "${RUNNER_TEMP}/CompanionReceipt/xcode.txt"
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3.8'
+          bundler-cache: true
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: Companion/host/requirements.txt
+      - name: Verify delivery contract and host behavior
+        run: |
+          set -euo pipefail
+          ruby ci/test_testflight_contract.rb
+          python3 -m unittest discover -s ci -p 'test_*.py' -v
+          python3 -m pip install -r host/requirements.txt
+          PYTHONPATH=host:. python3 -m unittest discover -s host/tests -v
+      - name: Verify native unit and fixture UI behavior
+        run: bash ci/test_native.sh
+      - name: Archive and distribute through Semreh TestFlight
+        env:
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+          FASTLANE_SKIP_UPDATE_CHECK: '1'
+          FASTLANE_HIDE_CHANGELOG: '1'
+        run: |
+          set -euo pipefail
+          for name in APP_STORE_CONNECT_KEY_ID APP_STORE_CONNECT_ISSUER_ID APP_STORE_CONNECT_PRIVATE_KEY; do
+            test -n "${!name}" || { echo "Missing configuration: ${name}" >&2; exit 1; }
+          done
+          key_path="${RUNNER_TEMP}/companion-asc.p8"
+          trap 'rm -f "${key_path}"' EXIT
+          export APP_STORE_CONNECT_KEY_PATH="${key_path}"
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          key = Path(os.environ['APP_STORE_CONNECT_KEY_PATH'])
+          key.touch(mode=0o600, exist_ok=False)
+          key.write_text(os.environ['APP_STORE_CONNECT_PRIVATE_KEY'].replace('\\n', '\n'))
+          PY
+          unset APP_STORE_CONNECT_PRIVATE_KEY
+          bundle exec fastlane ios companion_internal_testflight
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          receipt = json.loads((Path(os.environ['RUNNER_TEMP']) / 'CompanionReceipt/testflight.json').read_text())
+          assert receipt['source_sha'] == os.environ['GITHUB_SHA']
+          assert receipt['bundle_id'] == 'com.maurice.semreh' and receipt['version'] == '1.0'
+          assert receipt['status'] == 'available_to_internal_group'
+          assert receipt['signed_ipa_verified'] is True and receipt['processing_state'] == 'VALID'
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write(f"Companion is available in Semreh TestFlight as {receipt['version']} ({receipt['build_number']}).\n\n")
+              summary.write(f"Delivery source: `{receipt['source_sha']}`\n\nCompanion source: `{receipt['companion_source_sha']}`\n\n")
+              summary.write(f"IPA SHA-256: `{receipt['ipa_sha256']}`\n")
+          PY
+      - name: Preserve delivery evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: companion-delivery-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/CompanionReceipt/
+            ${{ runner.temp }}/CompanionTests.xcresult/
+          retention-days: 14
+          if-no-files-found: error
+      - name: Preserve the verified IPA
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: companion-ipa-${{ github.sha }}
+          path: ${{ runner.temp }}/CompanionExport/HermesCompanion.ipa
+          retention-days: 7
+          if-no-files-found: error

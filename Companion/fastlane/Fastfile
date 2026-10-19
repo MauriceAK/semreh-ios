@@ -1,0 +1,99 @@
+require 'shellwords'
+require 'open3'
+require 'time'
+require_relative '../ci/testflight_contract'
+
+default_platform(:ios)
+
+platform :ios do
+  lane :companion_internal_testflight do
+    UI.user_error!('Upload requires the Companion beta branch') unless ENV['GITHUB_REF_NAME'] == 'companion/chat-beta-testflight'
+    root = File.expand_path('..', FastlaneCore::FastlaneFolder.path)
+    project = File.join(root, 'ios/HermesCompanion.xcodeproj')
+    source_sha, status = Open3.capture2('git', '-C', root, 'rev-parse', 'HEAD')
+    UI.user_error!('Checkout does not match the requested source SHA') unless status.success? && source_sha.strip == ENV.fetch('GITHUB_SHA')
+    source_manifest = JSON.parse(File.read(File.join(root, 'SOURCE.json')))
+    UI.user_error!('Missing verified Companion source revision') unless source_manifest.fetch('source_revision').match?(/\A[0-9a-f]{40}\z/)
+    version = '1.0'
+    api_key = app_store_connect_api_key(
+      key_id: ENV.fetch('APP_STORE_CONNECT_KEY_ID'),
+      issuer_id: ENV.fetch('APP_STORE_CONNECT_ISSUER_ID'),
+      key_filepath: ENV.fetch('APP_STORE_CONNECT_KEY_PATH'),
+      duration: 1200, in_house: false
+    )
+    app = Spaceship::ConnectAPI::App.find(CompanionTestFlight::BUNDLE_ID)
+    UI.user_error!('The existing Semreh App Store Connect record is unavailable') if app.nil?
+    groups = CompanionTestFlight.internal_groups(app.get_beta_groups(includes: 'betaTesters'))
+    latest = latest_testflight_build_number(
+      api_key: api_key, app_identifier: CompanionTestFlight::BUNDLE_ID, version: version,
+      initial_build_number: 0
+    )
+    UI.user_error!('Semreh version 1.0 previously had build 34; reconcile the unexpected build history') if latest.to_i < 34
+    build_number = CompanionTestFlight.next_build_number(latest)
+    receipt_path = File.join(ENV.fetch('RUNNER_TEMP'), 'CompanionReceipt', 'testflight.json')
+    receipt = {
+      source_sha: source_sha.strip, run_url: "#{ENV.fetch('GITHUB_SERVER_URL')}/#{ENV.fetch('GITHUB_REPOSITORY')}/actions/runs/#{ENV.fetch('GITHUB_RUN_ID')}",
+      companion_source_sha: source_manifest.fetch('source_revision'),
+      bundle_id: CompanionTestFlight::BUNDLE_ID, version: version, build_number: build_number,
+      status: 'allocated', app_store_connect_app_id: app.id
+    }
+    CompanionTestFlight.write_receipt(receipt_path, receipt)
+    xcargs = [
+      "DEVELOPMENT_TEAM=#{CompanionTestFlight::TEAM_ID}",
+      "PRODUCT_BUNDLE_IDENTIFIER=#{CompanionTestFlight::BUNDLE_ID}",
+      "MARKETING_VERSION=#{version}", "CURRENT_PROJECT_VERSION=#{build_number}"
+    ].shelljoin
+    export_xcargs = [
+      '-allowProvisioningUpdates',
+      '-authenticationKeyPath', ENV.fetch('APP_STORE_CONNECT_KEY_PATH'),
+      '-authenticationKeyID', ENV.fetch('APP_STORE_CONNECT_KEY_ID'),
+      '-authenticationKeyIssuerID', ENV.fetch('APP_STORE_CONNECT_ISSUER_ID'),
+      "DEVELOPMENT_TEAM=#{CompanionTestFlight::TEAM_ID}", 'CODE_SIGN_IDENTITY=Apple Distribution'
+    ].shelljoin
+    ipa = build_app(
+      project: project, scheme: 'HermesCompanion', configuration: 'Release',
+      destination: 'generic/platform=iOS',
+      derived_data_path: File.join(ENV.fetch('RUNNER_TEMP'), 'CompanionDerivedData'),
+      archive_path: File.join(ENV.fetch('RUNNER_TEMP'), 'CompanionExport', 'HermesCompanion.xcarchive'),
+      output_directory: File.join(ENV.fetch('RUNNER_TEMP'), 'CompanionExport'),
+      output_name: 'HermesCompanion', export_method: 'app-store',
+      export_options: File.join(root, 'ci/CompanionInternalExport.plist'),
+      xcargs: xcargs, export_xcargs: export_xcargs,
+      skip_codesigning: true, skip_package_pkg: true, include_bitcode: false
+    )
+    UI.user_error!('Archive did not return an IPA') if ipa.to_s.empty?
+    metadata, validation = Open3.capture2e('python3', File.join(root, 'ci/check_delivery.py'),
+      '--ipa', ipa, '--version', version, '--build-number', build_number)
+    UI.user_error!("IPA verification failed: #{metadata}") unless validation.success?
+    receipt.merge!(JSON.parse(metadata, symbolize_names: true)).merge!(status: 'signed_ipa_verified')
+    CompanionTestFlight.write_receipt(receipt_path, receipt)
+    upload_to_testflight(
+      api_key: api_key, ipa: ipa, app_identifier: CompanionTestFlight::BUNDLE_ID,
+      app_version: version, build_number: build_number, groups: groups.map(&:id),
+      changelog: "Hermes Companion chat beta. This build replaces Semreh in its TestFlight app slot. Companion source #{source_manifest.fetch('source_revision')}.",
+      skip_waiting_for_build_processing: false, wait_processing_timeout_duration: 1200,
+      distribute_external: false, notify_external_testers: false, submit_beta_review: false
+    )
+    receipt[:status] = 'uploaded_awaiting_independent_readback'
+    CompanionTestFlight.write_receipt(receipt_path, receipt)
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 180
+    loop do
+      begin
+        builds = Spaceship::ConnectAPI::Build.all(app_id: app.id, version: version, build_number: build_number, platform: 'IOS')
+        build = nil
+        groups.each do |group|
+          build = CompanionTestFlight.available_build(builds, version, build_number, group.fetch_builds.map(&:id))
+        end
+        receipt.merge!(status: 'available_to_internal_group', app_store_connect_build_id: build.id,
+          internal_group_ids: groups.map(&:id), processing_state: build.processing_state,
+          internal_build_state: build.build_beta_detail.internal_build_state, verified_at: Time.now.utc.iso8601)
+        CompanionTestFlight.write_receipt(receipt_path, receipt)
+        break
+      rescue RuntimeError => error
+        UI.user_error!("Upload may exist; reconcile before retrying. #{error.message}") if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+        sleep(10)
+      end
+    end
+    UI.success("Companion #{version} (#{build_number}) is processed and assigned to its internal tester group")
+  end
+end
