@@ -1,5 +1,5 @@
 {
-  "source_revision": "8f12e4bec703013224f3419c3f57b6a97ab1605f",
+  "source_revision": "8b3216b1648edf48007d809fe688705f1d66b78f",
   "files": [
     {
       "path": "ci/CompanionInternalExport.plist",
@@ -7,7 +7,7 @@
     },
     {
       "path": "ci/check_delivery.py",
-      "sha256": "166b11487e158b704ff6ec190d888777168e7c7a3c0bc319ca27eb0e6d889bda"
+      "sha256": "e6cd1c60274bc1e1a71d2b70c2f80174fc93c42045f1ab5007a4a6376a8ae42c"
     },
     {
       "path": "ci/generate_app_icon.swift",
@@ -15,7 +15,7 @@
     },
     {
       "path": "ci/test_check_delivery.py",
-      "sha256": "e789c67fdf14e3f5baa52f053d612129d9cf12873dd819301e17e26a8cf41641"
+      "sha256": "b3dd9e2cb83659f1a52ee967abfdd84edf789583431de125e559a8843cfa83b4"
     },
     {
       "path": "ci/test_native.sh",
@@ -31,11 +31,11 @@
     },
     {
       "path": "docs/TESTFLIGHT.md",
-      "sha256": "fadf1dba07e828939a8de039d20e77514e23bbc36d1db49c53b5624ec7d57aff"
+      "sha256": "51e7264b73e4fee62ae978fa9e8d8bb6551422c20a8092100e2176aa0375596a"
     },
     {
       "path": "fastlane/Fastfile",
-      "sha256": "526a7f11982747653e7d49a67eac57cd16b5efa8f3f7a14b78b6ab4fb57b3be5"
+      "sha256": "d7ecd26c10ddf91bf5097ee1d02e8960315bbf24ae335f719290aa7db49caf66"
     },
     {
       "path": "host/companion/__init__.py",
@@ -163,7 +163,7 @@
     },
     {
       "path": "ios/HermesCompanion/Info.plist",
-      "sha256": "df8938c083efff6bfe07d2cd3b7705084b0564cade881b3c30799701391c3c4b"
+      "sha256": "459026d9d6f4adcfaa289b0f7e5a863b9acb0b21c8622b280766a5d922de890d"
     },
     {
       "path": "ios/HermesCompanion/PrivacyInfo.xcprivacy",

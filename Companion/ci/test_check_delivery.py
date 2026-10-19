@@ -21,6 +21,22 @@ PRIVACY = {
 }
 
 
+class SourceContractTests(unittest.TestCase):
+    def test_missing_or_true_encryption_declaration_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            privacy = root / check_delivery.PRIVACY_PATH
+            privacy.parent.mkdir(parents=True)
+            privacy.write_bytes(plistlib.dumps(PRIVACY))
+            for declaration in [{}, {"ITSAppUsesNonExemptEncryption": True}]:
+                info = {"CFBundleVersion": "$(CURRENT_PROJECT_VERSION)",
+                        "CFBundleShortVersionString": "$(MARKETING_VERSION)", **declaration}
+                (privacy.parent / "Info.plist").write_bytes(plistlib.dumps(info))
+                with patch("check_delivery.ROOT", root):
+                    with self.assertRaisesRegex(AssertionError, "reviewed exempt encryption"):
+                        check_delivery.check_source()
+
+
 class IPAContractTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -33,18 +49,28 @@ class IPAContractTests(unittest.TestCase):
         root.start()
         self.addCleanup(root.stop)
 
-    def write_ipa(self, privacy=PRIVACY, **overrides):
+    def write_ipa(self, privacy=PRIVACY, encryption=False, **overrides):
         info = {
             "CFBundleIdentifier": "com.maurice.semreh", "CFBundleShortVersionString": "1.0",
             "CFBundleVersion": "35", "CFBundleSupportedPlatforms": ["iPhoneOS"],
             "CFBundleIcons": {"CFBundlePrimaryIcon": {"CFBundleIconName": "AppIcon"}},
         }
         info.update(overrides)
+        if encryption is not None:
+            info["ITSAppUsesNonExemptEncryption"] = encryption
         with zipfile.ZipFile(self.ipa, "w") as archive:
             archive.writestr("Payload/HermesCompanion.app/Info.plist", plistlib.dumps(info))
             if privacy is not None:
                 contents = privacy if isinstance(privacy, bytes) else plistlib.dumps(privacy)
                 archive.writestr("Payload/HermesCompanion.app/PrivacyInfo.xcprivacy", contents)
+
+    def test_missing_or_true_encryption_declaration_fails_before_signing(self):
+        for encryption in [None, True]:
+            self.write_ipa(encryption=encryption)
+            with patch("check_delivery.subprocess.run") as command:
+                with self.assertRaisesRegex(AssertionError, "reviewed exempt encryption"):
+                    check_delivery.check_ipa(self.ipa, "1.0", "35")
+                command.assert_not_called()
 
     def test_missing_malformed_or_incorrect_privacy_manifest_fails_before_signing(self):
         cases = [None, b"invalid plist", {}, {"NSPrivacyAccessedAPITypes": []},
@@ -116,6 +142,7 @@ class IPAContractTests(unittest.TestCase):
             receipt = check_delivery.check_ipa(self.ipa, "1.0", "35")
             self.assertTrue(receipt["signed_ipa_verified"])
             self.assertTrue(receipt["privacy_manifest_verified"])
+            self.assertTrue(receipt["exempt_encryption_declaration_verified"])
             self.assertEqual(len(receipt["ipa_sha256"]), 64)
             self.assertTrue(any("--verify" in call.args[0] for call in command.call_args_list))
             self.assertTrue(any("--test-requirement" in call.args[0] for call in command.call_args_list))
@@ -140,7 +167,7 @@ class IPAContractTests(unittest.TestCase):
         self.write_ipa()
         def reject_ad_hoc(command, **kwargs):
             if "--test-requirement" in command:
-                self.assertIn('anchor apple generic and certificate leaf[subject.OU] = "6D65NQ2V3Q"', command)
+                self.assertIn('=anchor apple generic and certificate leaf[subject.OU] = "6D65NQ2V3Q"', command)
                 raise subprocess.CalledProcessError(1, command)
             return self.command_result()(command, **kwargs)
         with patch("check_delivery.subprocess.run", side_effect=reject_ad_hoc):

@@ -133,3 +133,12 @@ The app bundles `PrivacyInfo.xcprivacy` for app-only preferences (`CA92.1`) and
 app-local elapsed diagnostics (`35F9.1`). Packaging explicitly includes this
 resource. Before upload, the IPA verifier requires its parsed contents to match
 the reviewed source manifest; missing, malformed, or changed resources fail.
+
+The app declares `ITSAppUsesNonExemptEncryption=false` in its bundled Info.plist,
+and the upload lane supplies the same value. This follows the inspected mobile
+implementation: Apple URLSession TLS and Keychain, plus CryptoKit SHA-256 for a
+local host-identifier filename. There is no bundled custom or third-party
+cryptography. [Apple's encryption guidance](https://developer.apple.com/documentation/Security/complying-with-encryption-export-regulations)
+identifies operating-system encryption such as URLSession HTTPS as exempt from
+documentation upload. Reassess this declaration if that implementation changes.
+The source and exported-IPA checks reject a missing or different declaration.

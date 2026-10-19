@@ -83,6 +83,7 @@ platform :ios do
       app_version: version, build_number: build_number, groups: groups.map(&:id),
       changelog: "Hermes Companion chat beta. This build replaces Semreh in its TestFlight app slot. Companion source #{source_manifest.fetch('source_revision')}.",
       skip_waiting_for_build_processing: false, wait_processing_timeout_duration: 1200,
+      uses_non_exempt_encryption: false,
       distribute_external: false, notify_external_testers: false, submit_beta_review: false
     )
     receipt[:status] = 'uploaded_awaiting_independent_readback'

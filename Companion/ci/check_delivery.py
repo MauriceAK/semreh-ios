@@ -33,6 +33,7 @@ def check_source():
     info = plistlib.loads((ROOT / "ios/HermesCompanion/Info.plist").read_bytes())
     assert info["CFBundleVersion"] == "$(CURRENT_PROJECT_VERSION)", "Build number must use build settings"
     assert info["CFBundleShortVersionString"] == "$(MARKETING_VERSION)", "Version must use build settings"
+    assert info.get("ITSAppUsesNonExemptEncryption") is False, "Source must declare the reviewed exempt encryption use"
     icon = ROOT / "ios/HermesCompanion/Assets.xcassets/AppIcon.appiconset/AppIcon.png"
     data = icon.read_bytes()
     assert data[:8] == b"\x89PNG\r\n\x1a\n", "App icon must be a PNG"
@@ -87,6 +88,7 @@ def check_ipa(path, version, number):
         assert info["CFBundleIdentifier"] == BUNDLE_ID, "IPA has the wrong app identity"
         assert info["CFBundleShortVersionString"] == version, "IPA has the wrong marketing version"
         assert info["CFBundleVersion"] == number, "IPA has the wrong build number"
+        assert info.get("ITSAppUsesNonExemptEncryption") is False, "IPA must declare the reviewed exempt encryption use"
         assert "iPhoneOS" in info["CFBundleSupportedPlatforms"], "IPA is not a physical-device build"
         assert info["CFBundleIcons"]["CFBundlePrimaryIcon"]["CFBundleIconName"] == "AppIcon"
         privacy_path = str(Path(infos[0]).parent / "PrivacyInfo.xcprivacy")
@@ -97,7 +99,7 @@ def check_ipa(path, version, number):
     with tempfile.TemporaryDirectory(prefix="companion-ipa-") as directory:
         subprocess.run(["ditto", "-xk", str(path), directory], check=True, capture_output=True)
         app = Path(directory) / Path(infos[0]).parent
-        requirement = f'anchor apple generic and certificate leaf[subject.OU] = "{TEAM_ID}"'
+        requirement = f'=anchor apple generic and certificate leaf[subject.OU] = "{TEAM_ID}"'
         subprocess.run(["codesign", "--verify", "--strict", "--test-requirement", requirement, str(app)],
                        check=True, capture_output=True)
         signed = subprocess.run(["codesign", "-d", "--entitlements", ":-", str(app)], check=True, capture_output=True)
@@ -121,7 +123,7 @@ def check_ipa(path, version, number):
         assert certificate in provisioning["DeveloperCertificates"], "App signature is not authorized by its distribution profile"
     return {"bundle_id": BUNDLE_ID, "version": version, "build_number": number,
             "ipa_sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "signed_ipa_verified": True,
-            "privacy_manifest_verified": True}
+            "privacy_manifest_verified": True, "exempt_encryption_declaration_verified": True}
 
 
 if __name__ == "__main__":
