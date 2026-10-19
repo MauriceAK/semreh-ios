@@ -80,7 +80,7 @@ platform :ios do
     CompanionTestFlight.write_receipt(receipt_path, receipt)
     upload_to_testflight(
       api_key: api_key, ipa: ipa, app_identifier: CompanionTestFlight::BUNDLE_ID,
-      app_version: version, build_number: build_number, groups: groups.map(&:id),
+      app_version: version, build_number: build_number,
       changelog: "Hermes Companion chat beta. This build replaces Semreh in its TestFlight app slot. Companion source #{source_manifest.fetch('source_revision')}.",
       skip_waiting_for_build_processing: false, wait_processing_timeout_duration: 1200,
       uses_non_exempt_encryption: false,

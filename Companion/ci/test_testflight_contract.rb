@@ -38,4 +38,23 @@ class TestFlightContractTest < Minitest::Test
     end
     assert_raises(RuntimeError) { CompanionTestFlight.available_build([build], '0.1.0', '35', []) }
   end
+
+  def upload_to_testflight(**options)
+    options
+  end
+
+  def test_upload_waits_for_processing_without_reassigning_internal_groups
+    path = File.expand_path('../fastlane/Fastfile', __dir__)
+    call = File.read(path)[/^    upload_to_testflight\(\n.*?^    \)/m]
+    refute_nil call, 'The upload action must remain covered by this contract'
+    api_key, ipa, version, build_number = :fixture_key, '/fixture/Companion.ipa', '1.0', '35'
+    source_manifest = { 'source_revision' => 'a' * 40 }
+    groups = [group]
+    options = eval(call, binding, path)
+    refute options.key?(:groups), 'Apple automatically includes this internal group; explicit assignment is rejected'
+    assert_equal false, options.fetch(:skip_waiting_for_build_processing)
+    assert_equal false, options.fetch(:distribute_external)
+    assert_equal false, options.fetch(:notify_external_testers)
+    assert_equal false, options.fetch(:submit_beta_review)
+  end
 end

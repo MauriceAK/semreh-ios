@@ -1,5 +1,5 @@
 {
-  "source_revision": "8b3216b1648edf48007d809fe688705f1d66b78f",
+  "source_revision": "e9424ef64a4cd2b250fb7928b005eb3db12df750",
   "files": [
     {
       "path": "ci/CompanionInternalExport.plist",
@@ -23,7 +23,7 @@
     },
     {
       "path": "ci/test_testflight_contract.rb",
-      "sha256": "5c827d32ea73723a24024d52d48328cd41bdece3880eb251a9788f3a8c8c261e"
+      "sha256": "309bb74b2b0411f8db32e870c4376bb15e4192ed6cfc0b20dd058501a5faa86d"
     },
     {
       "path": "ci/testflight_contract.rb",
@@ -31,11 +31,11 @@
     },
     {
       "path": "docs/TESTFLIGHT.md",
-      "sha256": "51e7264b73e4fee62ae978fa9e8d8bb6551422c20a8092100e2176aa0375596a"
+      "sha256": "19d3023490a5a0ee47e842881a4e7add6fc10f5dff5bd9b182680cd2c58442e3"
     },
     {
       "path": "fastlane/Fastfile",
-      "sha256": "d7ecd26c10ddf91bf5097ee1d02e8960315bbf24ae335f719290aa7db49caf66"
+      "sha256": "9fd9b5a60bb2d7ef7bb63f25ad6f42d3890ccee45955c736afd9144d95af814f"
     },
     {
       "path": "host/companion/__init__.py",

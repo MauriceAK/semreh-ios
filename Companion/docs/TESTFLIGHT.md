@@ -61,6 +61,9 @@ The key stays in the runner's temporary directory with mode `0600` and is remove
 after the upload step. No credential value belongs in source, logs, or receipts.
 The lane finds Semreh's existing populated internal groups. It does not create
 testers, invite people, enable a public link, or submit Beta App Review.
+It omits Fastlane's `groups` upload option: Apple's existing internal group has
+automatic access to all builds, and attempting to assign that group explicitly
+is rejected. The independent group-membership readback remains mandatory.
 
 ## Check the delivery result
 
@@ -99,6 +102,16 @@ revisions, native test results, and the verified IPA as GitHub artifacts.
 If the job fails after upload, inspect App Store Connect for the recorded version
 and build before retrying. The previous upload may still be processing. Do not
 reset the build number or assume that a timeout means no upload occurred.
+
+Companion `1.0 (35)` was uploaded from Companion revision
+`8b3216b1648edf48007d809fe688705f1d66b78f` and delivery revision
+`a6d45ca2bec529595ad4201ee9480dcee92700e4`. Its upload job passed all 65 native
+checks and Apple processing, then failed on the redundant internal-group write.
+[Read-only reconciliation](https://github.com/MauriceAK/semreh-ios/actions/runs/39340694032)
+confirmed the exact build was `VALID`, nonexpired, `IN_BETA_TESTING`, and already
+present in the populated internal group. No second upload or group write was
+needed. The delivery-only correction was pushed with `[skip ci]` to avoid
+producing build 36; that correction does not change the source of build 35.
 
 Open Semreh in TestFlight on the phone and install that exact build. Confirm the
 Companion interface, pair with the host, and verify off-network access and push
