@@ -25,6 +25,7 @@
 		AD77A01EDEF59FBD74DA1763 /* Domain.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5BB4BD6B157ED9FC2562D85 /* Domain.swift */; };
 		B4747606C1F213C5B7F58444 /* AppStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 54C80ED2C465F451F079B7DF /* AppStore.swift */; };
 		BD44991101AE230324402894 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 184FA55EA23560B4DEE54B3A /* Assets.xcassets */; };
+		DA99CA01BF9DF3E1B637F11C /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 6F59012DB702F2ABBCBD7BF5 /* PrivacyInfo.xcprivacy */; };
 		DDBFEE5CF886C45D9FC54704 /* TranscriptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9156F740783C6A0C2792AEC7 /* TranscriptView.swift */; };
 		E5718ECB5C255D0B60AE244F /* ConversationMemory.swift in Sources */ = {isa = PBXBuildFile; fileRef = C290272D4CE96224D1F8D36F /* ConversationMemory.swift */; };
 		F0083866F0BC910BF24FD3D2 /* Transport.swift in Sources */ = {isa = PBXBuildFile; fileRef = F4B8E70EA6649BE5D1B4869D /* Transport.swift */; };
@@ -59,6 +60,7 @@
 		632A01CA4FA04AFD98DC71A6 /* FixtureControl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FixtureControl.swift; sourceTree = "<group>"; };
 		6A833A48A2ABB5AF7E08B2B5 /* PerformanceFlowUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerformanceFlowUITests.swift; sourceTree = "<group>"; };
 		6D70F3592312DD3A6A2B3BAD /* LiveFlowUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveFlowUITests.swift; sourceTree = "<group>"; };
+		6F59012DB702F2ABBCBD7BF5 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		6FC01B5B2C2BB481BA903978 /* CompanionUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompanionUITests.swift; sourceTree = "<group>"; };
 		9156F740783C6A0C2792AEC7 /* TranscriptView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptView.swift; sourceTree = "<group>"; };
 		9FA3854E6D5E18AD437FB26B /* HermesCompanionApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HermesCompanionApp.swift; sourceTree = "<group>"; };
@@ -127,6 +129,7 @@
 				C07676F31B36C41BA4975E5F /* HermesCompanion.entitlements */,
 				9FA3854E6D5E18AD437FB26B /* HermesCompanionApp.swift */,
 				1DFEEC13D07E5107C1D6199D /* Info.plist */,
+				6F59012DB702F2ABBCBD7BF5 /* PrivacyInfo.xcprivacy */,
 				9156F740783C6A0C2792AEC7 /* TranscriptView.swift */,
 				F4B8E70EA6649BE5D1B4869D /* Transport.swift */,
 			);
@@ -252,6 +255,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				BD44991101AE230324402894 /* Assets.xcassets in Resources */,
+				DA99CA01BF9DF3E1B637F11C /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

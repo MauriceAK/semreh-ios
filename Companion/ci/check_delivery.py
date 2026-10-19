@@ -12,9 +12,24 @@ from pathlib import Path
 BUNDLE_ID = "com.maurice.semreh"
 TEAM_ID = "6D65NQ2V3Q"
 ROOT = Path(__file__).resolve().parent.parent
+PRIVACY_PATH = Path("ios/HermesCompanion/PrivacyInfo.xcprivacy")
+
+
+def check_privacy(data):
+    manifest = plistlib.loads(data)
+    accessed = manifest["NSPrivacyAccessedAPITypes"]
+    defaults = [entry for entry in accessed
+                if entry["NSPrivacyAccessedAPIType"] == "NSPrivacyAccessedAPICategoryUserDefaults"]
+    assert len(defaults) == 1, "Privacy manifest must declare the app's UserDefaults access"
+    assert "CA92.1" in defaults[0]["NSPrivacyAccessedAPITypeReasons"], "Privacy manifest must declare app-only UserDefaults use"
+    clocks = [entry for entry in accessed
+              if entry["NSPrivacyAccessedAPIType"] == "NSPrivacyAccessedAPICategorySystemBootTime"]
+    assert len(clocks) == 1 and "35F9.1" in clocks[0]["NSPrivacyAccessedAPITypeReasons"], "Privacy manifest must declare app-local elapsed diagnostics"
+    return manifest
 
 
 def check_source():
+    check_privacy((ROOT / PRIVACY_PATH).read_bytes())
     info = plistlib.loads((ROOT / "ios/HermesCompanion/Info.plist").read_bytes())
     assert info["CFBundleVersion"] == "$(CURRENT_PROJECT_VERSION)", "Build number must use build settings"
     assert info["CFBundleShortVersionString"] == "$(MARKETING_VERSION)", "Version must use build settings"
@@ -41,6 +56,10 @@ def check_ipa(path, version, number):
         assert info["CFBundleVersion"] == number, "IPA has the wrong build number"
         assert "iPhoneOS" in info["CFBundleSupportedPlatforms"], "IPA is not a physical-device build"
         assert info["CFBundleIcons"]["CFBundlePrimaryIcon"]["CFBundleIconName"] == "AppIcon"
+        privacy_path = str(Path(infos[0]).parent / "PrivacyInfo.xcprivacy")
+        assert privacy_path in archive.namelist(), "IPA is missing its privacy manifest resource"
+        privacy = check_privacy(archive.read(privacy_path))
+        assert privacy == check_privacy((ROOT / PRIVACY_PATH).read_bytes()), "IPA privacy manifest differs from the reviewed source"
         assert all(not name.startswith("/") and ".." not in Path(name).parts for name in archive.namelist())
     with tempfile.TemporaryDirectory(prefix="companion-ipa-") as directory:
         subprocess.run(["ditto", "-xk", str(path), directory], check=True, capture_output=True)
@@ -57,7 +76,8 @@ def check_ipa(path, version, number):
         assert TEAM_ID in provisioning["TeamIdentifier"]
         assert "ProvisionedDevices" not in provisioning and not provisioning.get("ProvisionsAllDevices", False)
     return {"bundle_id": BUNDLE_ID, "version": version, "build_number": number,
-            "ipa_sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "signed_ipa_verified": True}
+            "ipa_sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "signed_ipa_verified": True,
+            "privacy_manifest_verified": True}
 
 
 if __name__ == "__main__":

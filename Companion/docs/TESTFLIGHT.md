@@ -115,3 +115,8 @@ and its
 [build API model](https://github.com/fastlane/fastlane/blob/2.238.0/spaceship/lib/spaceship/connect_api/models/build.rb).
 Apple associates an uploaded binary with its app record using the bundle ID and
 version metadata. See [Apple's upload guidance](https://developer.apple.com/help/app-store-connect/manage-builds/upload-builds/).
+
+The app bundles `PrivacyInfo.xcprivacy` for app-only preferences (`CA92.1`) and
+app-local elapsed diagnostics (`35F9.1`). Packaging explicitly includes this
+resource. Before upload, the IPA verifier requires its parsed contents to match
+the reviewed source manifest; missing, malformed, or changed resources fail.

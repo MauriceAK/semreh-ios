@@ -1,5 +1,5 @@
 {
-  "source_revision": "b15a40c00b781162ec2d4c723522a71b93efe2cd",
+  "source_revision": "a6d3f9cbc6490569697874a539730c368bd4b127",
   "files": [
     {
       "path": "ci/CompanionInternalExport.plist",
@@ -7,7 +7,7 @@
     },
     {
       "path": "ci/check_delivery.py",
-      "sha256": "16dad830d18f9d66daf27d0a6c3964f06690bbbc7cfb2ec84ea0cc5a05ed7fef"
+      "sha256": "465c350ad28a8b5ca72c7fd712c2cc3778a26f701cf8d30398cd8912b4230c57"
     },
     {
       "path": "ci/generate_app_icon.swift",
@@ -15,7 +15,7 @@
     },
     {
       "path": "ci/test_check_delivery.py",
-      "sha256": "dc678988bdf7139af74a06c9790efe1da910fd9a22dba843d01884367d16e9e1"
+      "sha256": "ad8b709c1c1e9e3a16d650e7af9ec3f577c9bea6525475ae618ee0c28b202ee6"
     },
     {
       "path": "ci/test_native.sh",
@@ -31,7 +31,7 @@
     },
     {
       "path": "docs/TESTFLIGHT.md",
-      "sha256": "e85574c4165120e3d3dcf44d0f0703c76367c97674f33d1db59967d0155dbcd7"
+      "sha256": "1073f183428e922732c59f223b2fd716755a6c00cf052908f217c9944cc411cb"
     },
     {
       "path": "fastlane/Fastfile",
@@ -99,7 +99,7 @@
     },
     {
       "path": "ios/HermesCompanion.xcodeproj/project.pbxproj",
-      "sha256": "a2676040b57d1ea97889403d63f9df94ba4b6944c091267bcf8f8f3762303e09"
+      "sha256": "0ae86bd010ce2b71f72514c9469aa9a13cfa2c0f5f14166783123f105a656eb3"
     },
     {
       "path": "ios/HermesCompanion.xcodeproj/xcshareddata/xcschemes/HermesCompanion.xcscheme",
@@ -164,6 +164,10 @@
     {
       "path": "ios/HermesCompanion/Info.plist",
       "sha256": "df8938c083efff6bfe07d2cd3b7705084b0564cade881b3c30799701391c3c4b"
+    },
+    {
+      "path": "ios/HermesCompanion/PrivacyInfo.xcprivacy",
+      "sha256": "f9e21baa2ade53f025f455dd07237c2ae59bcd0af2e1aeb6d7944cd431c0c342"
     },
     {
       "path": "ios/HermesCompanion/TranscriptView.swift",
