@@ -1,0 +1,141 @@
+name: Reconcile uploaded Companion build 35
+run-name: Read back Companion 1.0 (35) without uploading
+
+on:
+  push:
+    branches: [companion/chat-beta-testflight]
+    paths: ['.github/workflows/companion-reconcile.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: internal-testflight
+  cancel-in-progress: false
+
+defaults:
+  run:
+    working-directory: Companion
+
+jobs:
+  reconcile:
+    runs-on: macos-26
+    environment: internal-testflight
+    timeout-minutes: 10
+    env:
+      BUNDLE_GEMFILE: ${{ github.workspace }}/Gemfile
+    steps:
+      - uses: actions/checkout@v7
+      - name: Verify the exact uploaded source
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REF}" = refs/heads/companion/chat-beta-testflight
+          test "${GITHUB_REPOSITORY}" = MauriceAK/semreh-ios
+          python3 - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          manifest = json.loads(Path('SOURCE.json').read_text())
+          assert manifest['source_revision'] == '8b3216b1648edf48007d809fe688705f1d66b78f'
+          assert len(manifest['files']) == 58
+          for entry in manifest['files']:
+              path = Path(entry['path'])
+              assert not path.is_absolute() and '..' not in path.parts
+              assert hashlib.sha256(path.read_bytes()).hexdigest() == entry['sha256'], path
+          PY
+      - name: Retrieve the uploaded build receipt
+        uses: actions/download-artifact@v4
+        with:
+          name: companion-delivery-a6d45ca2bec529595ad4201ee9480dcee92700e4
+          run-id: 39336685961
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: ${{ runner.temp }}/CompanionUploadedEvidence
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3.8'
+          bundler-cache: true
+      - name: Read back build 35 and existing internal groups
+        env:
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          key_path="${RUNNER_TEMP}/companion-reconcile-asc.p8"
+          trap 'rm -f "${key_path}"' EXIT
+          export APP_STORE_CONNECT_KEY_PATH="${key_path}"
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          key = Path(os.environ['APP_STORE_CONNECT_KEY_PATH'])
+          key.touch(mode=0o600, exist_ok=False)
+          key.write_text(os.environ['APP_STORE_CONNECT_PRIVATE_KEY'].replace('\\n', '\n'))
+          PY
+          unset APP_STORE_CONNECT_PRIVATE_KEY
+          bundle exec ruby <<'RUBY'
+          require 'json'
+          require 'spaceship'
+          require 'time'
+          require_relative 'ci/testflight_contract'
+          paths = Dir.glob(File.join(ENV.fetch('RUNNER_TEMP'), 'CompanionUploadedEvidence', '**', 'testflight.json'))
+          raise 'Expected one prior upload receipt' unless paths.length == 1
+          receipt = JSON.parse(File.read(paths.first))
+          expected = {
+            'source_sha' => 'a6d45ca2bec529595ad4201ee9480dcee92700e4',
+            'companion_source_sha' => '8b3216b1648edf48007d809fe688705f1d66b78f',
+            'bundle_id' => 'com.maurice.semreh', 'version' => '1.0', 'build_number' => '35',
+            'app_store_connect_app_id' => '6813761017',
+            'ipa_sha256' => '644d3d0a24e7844e1aa6eef508945747cfcd07f75c5d800dc1c94c6b4400d883',
+            'signed_ipa_verified' => true, 'privacy_manifest_verified' => true,
+            'exempt_encryption_declaration_verified' => true
+          }
+          expected.each { |key, value| raise "Prior receipt mismatch: #{key}" unless receipt.fetch(key) == value }
+          Spaceship::ConnectAPI.token = Spaceship::ConnectAPI::Token.create(
+            key_id: ENV.fetch('APP_STORE_CONNECT_KEY_ID'), issuer_id: ENV.fetch('APP_STORE_CONNECT_ISSUER_ID'),
+            filepath: ENV.fetch('APP_STORE_CONNECT_KEY_PATH'), duration: 1200, in_house: false
+          )
+          app = Spaceship::ConnectAPI::App.find('com.maurice.semreh')
+          raise 'Unexpected App Store Connect app' unless app && app.id == '6813761017'
+          builds = Spaceship::ConnectAPI::Build.all(app_id: app.id, version: '1.0', build_number: '35', platform: 'IOS')
+          matches = builds.select { |build| build.bundle_id == 'com.maurice.semreh' && build.app_version == '1.0' && build.version == '35' && build.platform == 'IOS' }
+          raise 'Expected exactly one existing build 1.0 (35)' unless matches.length == 1
+          build = matches.first
+          groups = CompanionTestFlight.internal_groups(app.get_beta_groups(includes: 'betaTesters'))
+          group_states = groups.map do |group|
+            contains_build = group.fetch_builds.any? { |candidate| candidate.id == build.id }
+            { id: group.id, is_internal_group: group.is_internal_group,
+              has_access_to_all_builds: group.has_access_to_all_builds,
+              tester_count: group.beta_testers.length, contains_exact_build: contains_build }
+          end
+          available = build.processing_state == 'VALID' && build.expired == false &&
+            %w[READY_FOR_BETA_TESTING IN_BETA_TESTING].include?(build.build_beta_detail&.internal_build_state) &&
+            group_states.all? { |group| group[:contains_exact_build] }
+          receipt.merge!(
+            'status' => available ? 'available_to_internal_group' : 'internal_availability_not_confirmed',
+            'reconciliation_source_sha' => ENV.fetch('GITHUB_SHA'),
+            'reconciliation_run_url' => "#{ENV.fetch('GITHUB_SERVER_URL')}/#{ENV.fetch('GITHUB_REPOSITORY')}/actions/runs/#{ENV.fetch('GITHUB_RUN_ID')}",
+            'app_store_connect_build_id' => build.id, 'processing_state' => build.processing_state,
+            'expired' => build.expired, 'internal_build_state' => build.build_beta_detail&.internal_build_state,
+            'uses_non_exempt_encryption' => build.uses_non_exempt_encryption,
+            'internal_groups' => group_states, 'verified_at' => Time.now.utc.iso8601,
+            'reconciliation_operations' => 'read_only'
+          )
+          path = File.join(ENV.fetch('RUNNER_TEMP'), 'CompanionReconciliation', 'testflight.json')
+          CompanionTestFlight.write_receipt(path, receipt)
+          raise 'Exact build exists; internal availability is not yet confirmed. Do not reupload.' unless available
+          raise 'Unexpected encryption declaration in Apple readback' unless build.uses_non_exempt_encryption == false
+          File.open(ENV.fetch('GITHUB_STEP_SUMMARY'), 'a') do |summary|
+            summary.puts('Existing Companion 1.0 (35) is processed and present in its populated internal group(s). No upload or group mutation was performed.')
+            summary.puts("\nUploaded delivery: `#{receipt.fetch('source_sha')}`\n\nCompanion source: `#{receipt.fetch('companion_source_sha')}`")
+          end
+          RUBY
+      - name: Preserve exact build reconciliation
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: companion-build-35-reconciliation-${{ github.sha }}
+          path: ${{ runner.temp }}/CompanionReconciliation/
+          retention-days: 14
+          if-no-files-found: error
