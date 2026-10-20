@@ -233,6 +233,46 @@ final class CompanionUITests: XCTestCase {
         XCTAssertTrue(answer.waitForExistence(timeout: 90))
         attach(app, "real-host-response")
     }
+    func testRealProjectedMarkdownWhenConfigured() throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard let session = environment["COMPANION_TEST_PROJECTION_SESSION"] else {
+            throw XCTSkip("Requires a controlled real tool-and-Markdown conversation; this check sends no model turn.")
+        }
+        let app = XCUIApplication()
+        app.launchArguments = ["--session", session]
+        if let invitation = environment["COMPANION_TEST_INVITATION"] {
+            app.launchArguments += ["--invitation", invitation]
+        }
+        app.launch()
+        XCTAssertTrue(app.staticTexts["agentStatus"].waitForExistence(timeout: 30))
+        expectation(for: NSPredicate(format: "label == %@", "Ready"), evaluatedWith: app.staticTexts["agentStatus"])
+        waitForExpectations(timeout: 30)
+        XCTAssertFalse(app.staticTexts["fixtureBanner"].exists)
+        let table = app.tables["transcript"]
+        XCTAssertEqual(table.cells.count, 2, "Canonical tool and empty tool-call rows must not appear as chat.")
+        let answer = app.textViews.matching(NSPredicate(format: "label BEGINSWITH %@", "Hermes. ")).firstMatch
+        XCTAssertTrue(answer.waitForExistence(timeout: 10))
+        expectation(for: NSPredicate(format: "value CONTAINS %@ AND NOT value CONTAINS %@", "Ready for chat.", "**"), evaluatedWith: answer)
+        waitForExpectations(timeout: 10)
+        let rendered = try XCTUnwrap(answer.value as? String)
+        XCTAssertTrue(rendered.contains("Rendering check"))
+        XCTAssertTrue(rendered.contains("•\tReady for chat."))
+        XCTAssertTrue(rendered.contains("{\"ok\":true"))
+        XCTAssertTrue(rendered.contains("<untrusted_tool_result>literal</untrusted_tool_result>"))
+        XCTAssertFalse(rendered.contains("PROJECTION_TOOL_"))
+        XCTAssertFalse(rendered.contains("```"))
+        attach(app, "real-projected-markdown")
+        app.terminate()
+        app.launchArguments = ["--session", session]
+        app.launch()
+        XCTAssertTrue(app.staticTexts["agentStatus"].waitForExistence(timeout: 30))
+        XCTAssertTrue(answer.waitForExistence(timeout: 15))
+        expectation(for: NSPredicate(format: "value == %@", rendered), evaluatedWith: answer)
+        waitForExpectations(timeout: 10)
+        XCTAssertEqual(table.cells.count, 2)
+        attach(app, "real-projected-markdown-reloaded")
+    }
+
     private func visibleText(_ app: XCUIApplication) throws -> String {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate

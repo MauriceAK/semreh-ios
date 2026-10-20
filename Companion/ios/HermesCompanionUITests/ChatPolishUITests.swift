@@ -1,4 +1,5 @@
 import XCTest
+import Vision
 
 @MainActor
 final class ChatPolishUITests: XCTestCase {
@@ -67,6 +68,11 @@ final class ChatPolishUITests: XCTestCase {
         let app = launch(["--fixture-working"])
         XCTAssertTrue(app.buttons["stopAgent"].isHittable)
         checkComposer(app, action: "stopAgent")
+        let working = app.staticTexts["workingIndicator"]
+        XCTAssertTrue(working.exists)
+        XCTAssertLessThan(working.frame.midX, app.frame.midX)
+        XCTAssertLessThanOrEqual(working.frame.maxY, editor(app).frame.minY)
+        XCTAssertFalse(app.staticTexts["Working…"].exists)
         capture(app, "polish-working-empty")
         editor(app).tap()
         editor(app).typeText("Keep going with this direction")
@@ -96,7 +102,7 @@ final class ChatPolishUITests: XCTestCase {
         capture(app, "polish-multiline-draft")
     }
 
-    func testReadingLatestAndTopFade() {
+    func testReadingLatestAndFloatingChrome() {
         let app = launch()
         editor(app).tap()
         editor(app).typeText("A draft stays while reading")
@@ -106,13 +112,75 @@ final class ChatPolishUITests: XCTestCase {
         let latest = app.buttons["latestMessages"]
         XCTAssertTrue(latest.isHittable)
         XCTAssertGreaterThanOrEqual(latest.frame.height, 44)
-        XCTAssertLessThanOrEqual(table.frame.maxY, latest.frame.minY + 1)
+        XCTAssertEqual(latest.frame.midX, app.frame.midX, accuracy: 1)
+        XCTAssertFalse(latest.staticTexts["Latest"].exists)
+        XCTAssertGreaterThan(table.frame.maxY, latest.frame.maxY, "The transcript extends underneath floating controls.")
+        XCTAssertLessThan(table.frame.minY, app.buttons["sessions"].frame.maxY)
+        XCTAssertLessThanOrEqual(latest.frame.maxY, editor(app).frame.minY)
         capture(app, "polish-reading-history")
         latest.tap()
         XCTAssertTrue(app.textViews["message-fixture-9999"].isHittable)
+        XCTAssertLessThanOrEqual(app.textViews["message-fixture-9999"].frame.maxY, editor(app).frame.minY)
+        XCTAssertLessThanOrEqual(editor(app).frame.minY - app.textViews["message-fixture-9999"].frame.maxY, 32, "Latest must place the tail beside the composer, without a keyboard-sized gap.")
         XCTAssertEqual(editor(app).value as? String, "A draft stays while reading")
         XCTAssertFalse(latest.exists)
         capture(app, "polish-latest-restored")
+    }
+
+    func testMuseConversationMarkdownGlassUnderlapAndWorkingBubble() {
+        let app = launch(["--fixture-muse", "--fixture-working", "--fixture-geometry"])
+        let table = app.tables["transcript"]
+        let working = app.staticTexts["workingIndicator"]
+        XCTAssertTrue(working.waitForExistence(timeout: 5))
+        XCTAssertLessThan(working.frame.midX, app.frame.midX / 2)
+        XCTAssertLessThanOrEqual(working.frame.width, 80)
+        XCTAssertLessThanOrEqual(working.frame.height, 48)
+        XCTAssertLessThanOrEqual(working.frame.maxY, editor(app).frame.minY)
+        XCTAssertEqual(working.label, "Hermes is working")
+        checkComposer(app, action: "stopAgent")
+        capture(app, "muse-working-floating-composer")
+
+        editor(app).tap()
+        editor(app).typeText("Keep my direction while I review the answer")
+        checkComposer(app, action: "sendMessage")
+        XCTAssertTrue(app.buttons["stopAgent"].isHittable)
+        XCTAssertLessThanOrEqual(working.frame.maxY, editor(app).frame.minY)
+        capture(app, "muse-working-keyboard-direction")
+        app.buttons["stopAgent"].tap()
+        XCTAssertTrue(working.waitForNonExistence(timeout: 5))
+        XCTAssertEqual(editor(app).value as? String, "Keep my direction while I review the answer")
+
+        table.swipeDown(velocity: .slow)
+        let latest = app.buttons["latestMessages"]
+        XCTAssertTrue(latest.waitForExistence(timeout: 5))
+        XCTAssertEqual(latest.frame.midX, app.frame.midX, accuracy: 1)
+        XCTAssertGreaterThanOrEqual(latest.frame.width, 44)
+        XCTAssertGreaterThanOrEqual(latest.frame.height, 44)
+        XCTAssertFalse(latest.staticTexts["Latest"].exists)
+        XCTAssertLessThan(table.frame.minY, app.buttons["sessions"].frame.minY)
+        XCTAssertGreaterThan(table.frame.maxY, editor(app).frame.maxY)
+        let markdown = app.textViews["message-muse-4"]
+        XCTAssertTrue(markdown.waitForExistence(timeout: 5))
+        let rendered = markdown.value as? String ?? ""
+        XCTAssertTrue(rendered.contains("A useful first pass"))
+        XCTAssertTrue(rendered.contains("•\tRead comfortably:"))
+        XCTAssertTrue(rendered.contains("1.\tTry a long conversation."))
+        XCTAssertTrue(rendered.contains("let message ="))
+        XCTAssertTrue(rendered.contains("<untrusted_tool_result>"))
+        XCTAssertTrue(rendered.contains("{\"ok\": true}"))
+        XCTAssertFalse(rendered.contains("**"))
+        XCTAssertFalse(rendered.contains("```"))
+        capture(app, "muse-markdown-under-floating-chrome")
+        table.swipeDown(velocity: .slow)
+        capture(app, "muse-reading-under-glass-header")
+        latest.tap()
+        XCTAssertTrue(latest.waitForNonExistence(timeout: 5))
+        let tail = app.textViews["message-muse-6"]
+        XCTAssertTrue(tail.isHittable)
+        XCTAssertLessThanOrEqual(tail.frame.maxY, editor(app).frame.minY)
+        XCTAssertLessThanOrEqual(editor(app).frame.minY - tail.frame.maxY, 32)
+        XCTAssertEqual(editor(app).value as? String, "Keep my direction while I review the answer")
+        capture(app, "muse-latest-tail-above-composer")
     }
 
     func testLargeTextWorkingComposer() {
@@ -124,12 +192,23 @@ final class ChatPolishUITests: XCTestCase {
         capture(app, "polish-accessibility-working")
     }
 
-    func testLargeTextAttachmentFailure() {
+    func testLargeTextAttachmentFailure() throws {
         let app = launch(["--fixture-attachment-failed", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"])
         capture(app, "polish-accessibility-attachment-before-keyboard")
         editor(app).tap()
         editor(app).typeText("Keep my file draft")
         checkComposer(app, action: "sendMessage")
+        capture(app, "polish-accessibility-two-line-draft")
+        let visibleDraft = VNRecognizeTextRequest()
+        visibleDraft.recognitionLevel = .accurate
+        visibleDraft.usesLanguageCorrection = false
+        try VNImageRequestHandler(cgImage: XCTUnwrap(editor(app).screenshot().image.cgImage)).perform([visibleDraft])
+        let visibleLines = (visibleDraft.results ?? []).compactMap { $0.topCandidates(1).first?.string }
+        XCTAssertTrue(visibleLines.contains("Keep my"), "The first draft line must be visibly rendered, without clipping.")
+        XCTAssertTrue(visibleLines.contains("file draft"), "The second draft line must remain visibly rendered above the keyboard.")
+        let details = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "attachmentDetails-")).firstMatch
+        XCTAssertLessThanOrEqual(details.frame.maxY, editor(app).frame.minY)
+        XCTAssertLessThanOrEqual(app.staticTexts["agentStatus"].frame.maxY, editor(app).frame.minY)
         let remove = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Remove ")).firstMatch
         XCTAssertTrue(remove.isHittable)
         XCTAssertFalse(app.buttons["sendMessage"].isEnabled)
@@ -146,6 +225,24 @@ final class ChatPolishUITests: XCTestCase {
         app.alerts.buttons["Remove file"].tap()
         XCTAssertEqual(editor(app).value as? String, "Keep my file draft")
         XCTAssertTrue(app.buttons["sendMessage"].isEnabled)
+    }
+
+    func testAccessibilityLongDraftAndAttachmentStayInsideKeyboardViewport() {
+        let app = launch(["--fixture-attachment-failed", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"])
+        let draft = "Keep this complete draft while I review the attachment. Include the important context, preserve every detail, and leave this message unsent until I finish checking the conversation."
+        editor(app).tap()
+        editor(app).typeText(draft)
+        capture(app, "muse-accessibility-long-draft-attachment-keyboard")
+        XCTAssertEqual(editor(app).value as? String, draft)
+        checkComposer(app, action: "sendMessage")
+        let details = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "attachmentDetails-")).firstMatch
+        let status = app.staticTexts["agentStatus"]
+        XCTAssertGreaterThanOrEqual(details.frame.minY, status.frame.maxY)
+        XCTAssertLessThanOrEqual(details.frame.maxY, editor(app).frame.minY)
+        XCTAssertGreaterThanOrEqual(editor(app).frame.minY, status.frame.maxY)
+        XCTAssertLessThanOrEqual(editor(app).frame.maxY, app.keyboards.firstMatch.frame.minY)
+        XCTAssertGreaterThanOrEqual(app.buttons["addAttachment"].frame.minY, app.frame.minY)
+        XCTAssertGreaterThanOrEqual(app.buttons["sendMessage"].frame.minY, app.frame.minY)
     }
 
     func testApprovalWithKeyboard() {

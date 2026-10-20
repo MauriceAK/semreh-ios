@@ -106,4 +106,88 @@ final class TranscriptAnchorTests: XCTestCase {
         XCTAssertEqual(before, raw)
         XCTAssertEqual(text.text, String(raw.dropFirst(2).dropLast(2)))
     }
+    func testOverlayInsetsPreserveReaderAndLatestExposesTailAboveDock() throws {
+        let harness = try readingHarness()
+        let before = harness.table.contentOffset.y
+        let bounds = harness.table.bounds.size
+        harness.controller.updateChrome(viewportInsets: .init(top: 132, left: 0, bottom: 180, right: 0), activity: .working)
+        XCTAssertEqual(harness.table.bounds.size, bounds, "Floating controls must not shrink the transcript surface.")
+        XCTAssertEqual(harness.table.contentOffset.y, before, accuracy: 1)
+        XCTAssertEqual(harness.table.contentInset.bottom, 180)
+        XCTAssertNotNil(harness.table.tableFooterView)
+        harness.controller.update(messages: harness.messages, hasMore: true, loading: false, latestRevision: UUID())
+        let readableBottom = harness.table.contentOffset.y + harness.table.bounds.height - harness.table.contentInset.bottom
+        XCTAssertEqual(readableBottom, harness.table.contentSize.height, accuracy: 1)
+        let footer = try XCTUnwrap(harness.table.tableFooterView)
+        let activity = try XCTUnwrap(footer.subviews.first(where: { $0.accessibilityIdentifier == "workingIndicator" }))
+        XCTAssertEqual(activity.accessibilityLabel, "Hermes is working")
+        XCTAssertLessThan(activity.frame.midX, footer.bounds.midX)
+        XCTAssertFalse(footer.isAccessibilityElement)
+        XCTAssertTrue(activity.isAccessibilityElement)
+        XCTAssertLessThanOrEqual(footer.frame.maxY, readableBottom + 1)
+        harness.controller.updateChrome(viewportInsets: .init(top: 132, left: 0, bottom: 80, right: 0), activity: .idle)
+        XCTAssertNil(harness.table.tableFooterView)
+        XCTAssertEqual(harness.table.contentOffset.y + harness.table.bounds.height - 80, harness.table.contentSize.height, accuracy: 1)
+    }
+
+    func testWorkingBubbleAnimationsRespectSystemReduceMotion() throws {
+        let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+        let previousKeyWindow = scene?.windows.first(where: \.isKeyWindow)
+        let window = scene.map { UIWindow(windowScene: $0) } ?? UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        let controller = TranscriptController()
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previousKeyWindow?.makeKey()
+        }
+        controller.updateChrome(viewportInsets: .init(top: 80, left: 0, bottom: 80, right: 0), activity: .working)
+        controller.update(messages: [.init(id: "motion-check", role: "user", text: "Check the working indicator.", provisional: false)], hasMore: false, loading: false, latestRevision: UUID())
+        window.layoutIfNeeded()
+        controller.view.layoutIfNeeded()
+        CATransaction.flush()
+        let table = try XCTUnwrap(controller.view.subviews.compactMap { $0 as? UITableView }.first)
+        let footer = try XCTUnwrap(table.tableFooterView)
+        let bubble = try XCTUnwrap(footer.subviews.first(where: { $0.accessibilityIdentifier == "workingIndicator" }))
+        let dots = bubble.subviews
+        let animationKeys = dots.map { $0.layer.animationKeys() ?? [] }
+        let animationProperties = dots.map { dot in
+            (dot.layer.animationKeys() ?? []).compactMap { (dot.layer.animation(forKey: $0) as? CAPropertyAnimation)?.keyPath }
+        }
+        let reducedMotion = UIAccessibility.isReduceMotionEnabled
+        let reducedTransparency = UIAccessibility.isReduceTransparencyEnabled
+        let expectedFlag = ProcessInfo.processInfo.environment["COMPANION_TEST_EXPECT_REDUCED_MOTION"]
+        let expectedTransparency = ProcessInfo.processInfo.environment["COMPANION_TEST_EXPECT_REDUCED_TRANSPARENCY"]
+        let animatedDots = animationKeys.filter { !$0.isEmpty }.count
+        let attachedToWindow = dots.allSatisfy { $0.window === window }
+        let evidence: [String: Any] = [
+            "systemReduceMotion": reducedMotion,
+            "requestedReduceMotion": expectedFlag ?? "unspecified",
+            "systemReduceTransparency": reducedTransparency,
+            "requestedReduceTransparency": expectedTransparency ?? "unspecified",
+            "dotCount": dots.count,
+            "animatedDotCount": animatedDots,
+            "animationCounts": animationKeys.map(\.count),
+            "animationProperties": animationProperties,
+            "attachedToWindow": attachedToWindow
+        ]
+        let attachment = XCTAttachment(data: try JSONSerialization.data(withJSONObject: evidence, options: [.prettyPrinted, .sortedKeys]), uniformTypeIdentifier: "public.json")
+        attachment.name = "working-bubble-system-motion.json"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        for (name, requested, actual) in [("Reduce Motion", expectedFlag, reducedMotion), ("Reduce Transparency", expectedTransparency, reducedTransparency)] {
+            if let requested {
+                let expected = try XCTUnwrap(["1": true, "true": true, "0": false, "false": false][requested.lowercased()], "Expected \(name) must be 1, 0, true, or false.")
+                XCTAssertEqual(actual, expected, "The simulator's actual \(name) preference must match the requested verification mode.")
+            }
+        }
+        XCTAssertEqual(dots.count, 3)
+        XCTAssertTrue(attachedToWindow)
+        XCTAssertEqual(animatedDots, reducedMotion ? 0 : 3)
+        for properties in animationProperties {
+            XCTAssertEqual(Set(properties), reducedMotion ? Set<String>() : Set(["opacity", "transform.translation.y"]))
+        }
+    }
+
 }

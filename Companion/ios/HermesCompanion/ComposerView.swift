@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 struct ComposerView: View {
     @Bindable var store: AppStore
     @FocusState private var focused: Bool
+    @Environment(\.dynamicTypeSize) private var typeSize
     @State private var showPhotos = false
     @State private var showFiles = false
     @State private var photos: [PhotosPickerItem] = []
@@ -12,20 +13,6 @@ struct ComposerView: View {
     private var primaryStops: Bool { store.isWorking && !store.hasDraftContent }
     var body: some View {
         VStack(spacing: 0) {
-            if store.isWorking {
-                HStack(spacing: 10) {
-                    WorkingDots(animated: store.runState == .working && !store.isStopping)
-                    Text(store.isStopping ? "Stopping…" : store.runState == .waiting ? "Needs you" : "Working…")
-                        .font(.footnote).foregroundStyle(.secondary).accessibilityIdentifier("workingIndicator")
-                    Spacer()
-                    if !primaryStops {
-                        Button { Task { await store.execute(.init(kind: "interrupt")) } } label: {
-                            Group { if store.isStopping { ProgressView() } else { Text("Stop").font(.footnote.weight(.semibold)) } }
-                                .frame(minWidth: 44, minHeight: 44)
-                        }.disabled(!store.canCommand || store.isStopping).accessibilityLabel("Stop agent").accessibilityIdentifier("stopAgent")
-                    }
-                }.frame(height: 44).padding(.horizontal, 20)
-            }
             VStack(spacing: 8) {
                 if !store.attachments.isEmpty {
                     if let issue = store.attachmentDrafts.persistenceIssue {
@@ -50,8 +37,16 @@ struct ComposerView: View {
                     }.disabled(store.isSending || store.attachments.count >= AttachmentDrafts.maxCount)
                         .accessibilityLabel("Add attachment").accessibilityIdentifier("addAttachment")
                     TextField(store.isWorking ? "Add direction…" : "Message Hermes…", text: Binding(get: { store.draft }, set: { ChatPerformance.shared.mark(.draftChanged); store.draft = $0 }), axis: .vertical)
-                        .lineLimit(1...6).font(.body).focused($focused).padding(.vertical, 10).frame(minHeight: 44)
+                        .lineLimit(1...(typeSize.isAccessibilitySize ? 2 : 6)).font(.body).focused($focused).padding(.vertical, 10).frame(minHeight: 44)
+                        .fixedSize(horizontal: false, vertical: true).layoutPriority(1)
                         .accessibilityIdentifier("composer")
+                    if store.isWorking && !primaryStops {
+                        Button { Task { await store.execute(.init(kind: "interrupt")) } } label: {
+                            Image(systemName: "stop.fill").font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.primary).frame(width: 44, height: 44)
+                        }.disabled(!store.canCommand || store.isStopping)
+                            .accessibilityLabel("Stop agent").accessibilityIdentifier("stopAgent")
+                    }
                     Button {
                         Task { if primaryStops { await store.execute(.init(kind: "interrupt")) } else { await store.send() } }
                     } label: {
@@ -67,10 +62,9 @@ struct ComposerView: View {
                         .accessibilityIdentifier(primaryStops ? "stopAgent" : "sendMessage")
                 }
             }.padding(6).frame(minHeight: 56)
-                .background(Color(white: 0.115), in: RoundedRectangle(cornerRadius: 28))
-                .overlay(RoundedRectangle(cornerRadius: 28).stroke(.white.opacity(0.07), lineWidth: 1))
+                .modifier(ChatGlass(cornerRadius: 28))
                 .padding(.horizontal, 12).padding(.top, 8).padding(.bottom, 8)
-        }.background(Color(white: 0.055))
+        }
         .photosPicker(isPresented: $showPhotos, selection: $photos, maxSelectionCount: max(1, AttachmentDrafts.maxCount - store.attachments.count), matching: .images)
         .onChange(of: photos) { _, selected in
             let imports = selected.compactMap { item in store.beginAttachmentImport(name: "Photo").map { (item, $0) } }
@@ -95,19 +89,22 @@ struct ComposerView: View {
     }
 }
 
-private struct WorkingDots: View {
-    let animated: Bool
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    var body: some View {
-        TimelineView(.animation(minimumInterval: 0.25, paused: !animated || reduceMotion)) { context in
-            let phase = Int(context.date.timeIntervalSinceReferenceDate * 4) % 3
-            HStack(spacing: 4) {
-                ForEach(0..<3) { index in
-                    Circle().fill(.secondary).frame(width: 5, height: 5)
-                        .opacity(!animated || reduceMotion || index == phase ? 0.85 : 0.3)
-                }
-            }.frame(width: 31, height: 24)
-        }.accessibilityHidden(true)
+struct ChatGlass: ViewModifier {
+    let cornerRadius: CGFloat
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        if reduceTransparency {
+            content.background(Color(white: 0.16), in: shape)
+                .overlay(shape.stroke(.white.opacity(0.18), lineWidth: 1))
+        } else if #available(iOS 26.0, *) {
+            content.glassEffect(.regular, in: shape)
+        } else {
+            content.background(.ultraThinMaterial, in: shape)
+                .overlay(shape.stroke(.white.opacity(0.12), lineWidth: 1))
+        }
     }
 }
 

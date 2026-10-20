@@ -13,7 +13,7 @@ from urllib.parse import quote, urlsplit
 
 import aiohttp
 
-from .domain import APIError, MAX_RESPONSE, PAGE_SIZE, SAFE_SLASH, encoded, identifier, message, text, utc
+from .domain import APIError, MAX_RESPONSE, PAGE_SIZE, SAFE_SLASH, encoded, identifier, message, message_id, text, utc
 
 
 class UpstreamError(APIError):
@@ -334,20 +334,8 @@ class Gateway:
         except (ValueError, TypeError, KeyError):
             raise APIError("invalid_cursor", "This history cursor is invalid. Refresh the conversation.") from None
 
-    async def history(self, stored: str, before: str | None = None):
+    async def history(self, stored: str, before: str | None = None, *, page_size=PAGE_SIZE):
         identifier(stored)
-        def bounded(rows):
-            size, count = 0, 0
-            for row in reversed(rows[-PAGE_SIZE:]):
-                row_size = len(encoded(row).encode())
-                if size + row_size > MAX_RESPONSE - 65536:
-                    break
-                size += row_size
-                count += 1
-            if rows and not count:
-                raise APIError("payload_too_large", "This individual Hermes message exceeds the safe response size.", 413)
-            return rows[-count:] if count else [], len(rows) - count
-
         async def page(offset):
             limit = PAGE_SIZE
             while True:
@@ -361,43 +349,51 @@ class Gateway:
                         limit = max(1, limit // 2)
                         continue
                     raise
-            return [self.project_message(stored, message(row)) for row in result["messages"]], len(result["messages"]) < limit
-        if before is None:
-            rows, ended = await page(0)
-            distance = len(rows)
-            rows, trimmed = await asyncio.to_thread(bounded, rows)
-            distance -= trimmed
-            has_more = not ended or trimmed > 0
-        else:
-            cursor = self._decode_cursor(text(before, "history cursor", 1200), stored)
-            offset = max(0, cursor["offset"] - PAGE_SIZE)
-            rows, found, ended, distance = [], False, False, offset
-            for _ in range(32):
-                batch, ended = await page(offset)
-                if not found:
-                    at = next((i for i, row in enumerate(batch) if row["id"] == cursor["anchor"]), None)
-                    if at is not None:
-                        found = True
-                        rows = batch[:at]
-                        distance = offset + len(batch)
-                else:
-                    rows = batch + rows
-                    distance = offset + len(batch)
-                if found:
-                    limited, trimmed = await asyncio.to_thread(bounded, rows)
-                    if len(rows) >= PAGE_SIZE or ended or trimmed:
-                        distance -= trimmed
-                        rows = limited
-                        break
-                if ended:
-                    break
-                offset += len(batch)
-            else:
-                raise APIError("history_changed", "History changed while paging. Refresh this conversation.", 409)
+            return result["messages"], len(result["messages"]) < limit
+
+        cursor = self._decode_cursor(text(before, "history cursor", 1200), stored) if before else None
+        offset = max(0, cursor["offset"] - PAGE_SIZE) if cursor else 0
+        found, finished = cursor is None, False
+        rows, size = [], 0
+        anchor, distance = None, offset
+        has_more = True
+        for _ in range(32):
+            batch, ended = await page(offset)
+            start = len(batch)
             if not found:
-                raise APIError("history_changed", "The history anchor changed in Hermes. Refresh this conversation.", 409)
-            has_more = not ended or len(rows) == PAGE_SIZE or trimmed > 0
-        return {"messages": rows, "before": self._cursor(stored, rows[0]["id"], distance) if rows and has_more else None, "has_more": has_more}
+                at = next((i for i, row in enumerate(batch) if message_id(row) == cursor["anchor"]), None)
+                if at is not None:
+                    found, start = True, at
+                    anchor, distance = cursor["anchor"], offset + len(batch) - at
+            if found:
+                projected_rows = [message(row) for row in batch[:start]]
+                projected_rows = [self.project_message(stored, row) if row is not None else None for row in projected_rows]
+                sizes = await asyncio.to_thread(lambda rows: [len(encoded(row).encode()) if row is not None else 0 for row in rows], projected_rows)
+                for index in range(start - 1, -1, -1):
+                    canonical, projected, row_size = batch[index], projected_rows[index], sizes[index]
+                    if projected is not None:
+                        if size + row_size > MAX_RESPONSE - 65536:
+                            if not rows:
+                                raise APIError("payload_too_large", "This individual Hermes message exceeds the safe response size.", 413)
+                            finished = True
+                            break
+                        rows.append(projected)
+                        size += row_size
+                    anchor, distance = message_id(canonical), offset + len(batch) - index
+                    if len(rows) == page_size:
+                        has_more = index > 0 or not ended
+                        finished = True
+                        break
+            if finished:
+                break
+            if ended:
+                has_more = False
+                break
+            offset += len(batch)
+        if not found:
+            raise APIError("history_changed", "The history anchor changed in Hermes. Refresh this conversation.", 409)
+        rows.reverse()
+        return {"messages": rows, "before": self._cursor(stored, anchor, distance) if anchor is not None and has_more else None, "has_more": has_more}
 
     async def upload_attachment(self, stored, prepared, authorize):
         live = await self.attach(stored)
@@ -418,13 +414,10 @@ class Gateway:
         live = await self.attach(stored)
         result = await self.rpc("session.activate", {"session_id": live.runtime, "omit_messages": True})
         self._apply(live, result)
-        page, controls = await asyncio.gather(self.history(stored), self.controls(stored))
         inflight = result.get("inflight") or {}
-        if inflight.get("assistant") and live.state in {"working", "waiting"}:
-            if len(page["messages"]) == PAGE_SIZE:
-                page["messages"].pop(0)
-                page["before"] = self._cursor(stored, page["messages"][0]["id"], PAGE_SIZE - 1)
-                page["has_more"] = True
+        has_inflight = bool(inflight.get("assistant")) and live.state in {"working", "waiting"}
+        page, controls = await asyncio.gather(self.history(stored, page_size=PAGE_SIZE - int(has_inflight)), self.controls(stored))
+        if has_inflight:
             page["messages"].append({"id": live.segment, "role": "assistant", "text": inflight["assistant"], "provisional": True})
         return {"session": self.session(live), "page": page, "state": live.state, "requests": self.requests(live), "controls": controls, "status_text": live.status_text}
 

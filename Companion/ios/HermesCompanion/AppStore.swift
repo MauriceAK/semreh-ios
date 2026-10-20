@@ -796,7 +796,21 @@ extension AppStore {
     }
     private func loadFixtureTranscript() {
         fixtureOldest = 9880
-        if ProcessInfo.processInfo.arguments.contains("--fixture-long-code") {
+        if ProcessInfo.processInfo.arguments.contains("--fixture-muse") {
+            let conversation: [(String, String)] = [
+                ("assistant", "The project is ready for a focused review. I’ve kept your decisions together so we can pick up where we left off.\n\nThe next step is to check the experience on a real conversation, including the small details that make it comfortable to use."),
+                ("user", "What should we look at first?"),
+                ("assistant", "Start with the conversation itself. The message you’re reading should stay in place while new text arrives, and your draft should stay intact when you switch tasks.\n\nThen check the controls. You should be able to send a message, add a picture, or stop the agent without hunting for the right button."),
+                ("user", "Can you make a short checklist?"),
+                ("assistant", "## A useful first pass\n\n- **Read comfortably:** keep the conversation visible behind the controls.\n- **Stay in control:** preserve a draft while the agent works.\n- **Show the result:** present the actual answer with clear formatting.\n\n### Before sharing\n\n1. Try a long conversation.\n2. Scroll back while a reply streams.\n3. Return to the newest message.\n\nA small example:\n\n```swift\nlet message = \"A useful next step\"\nprint(message)\n```\n\nKeep **bold**, *emphasis*, and [links](https://example.com) readable. Literal code such as `<untrusted_tool_result>` and `{\"ok\": true}` remains visible when it is part of the answer."),
+                ("user", "That sounds right. Keep going."),
+                ("assistant", "I’ll work through those checks and keep the results in this conversation.\n\nYou can keep writing while I work. If something needs your decision, the question will appear here with the relevant details.")
+            ]
+            let messages = conversation.enumerated().map { index, row in
+                ChatMessage(id: "muse-\(index)", role: row.0, text: row.1, provisional: false)
+            }
+            try? transcript.replace(.init(messages: messages, before: nil, hasMore: false))
+        } else if ProcessInfo.processInfo.arguments.contains("--fixture-long-code") {
             let code = (1...200).map { "let line\($0) = \($0) // a readable source line" }.joined(separator: "\n")
             try? transcript.replace(.init(messages: [.init(id: "fixture-code", role: "assistant", text: "A code example.\n\n```swift\n" + code + "\n```\nCode ends here.", provisional: false)], before: nil, hasMore: false))
         } else { try? transcript.replace(fixturePage(9880..<10000)) }

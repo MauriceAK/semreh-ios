@@ -122,57 +122,61 @@ struct PairingView: View {
 struct ChatView: View {
     @Bindable var store: AppStore
     @State private var sheet: ChatSheet?
+    @State private var transcriptFrame = CGRect.zero
+    @State private var headerFrame = CGRect.zero
+    @State private var dockFrame = CGRect.zero
+    private var dockHeight: CGFloat { dockFrame.isEmpty ? 80 : dockFrame.height }
+    private var viewportInsets: UIEdgeInsets {
+        guard !transcriptFrame.isEmpty, !headerFrame.isEmpty, !dockFrame.isEmpty else {
+            return UIEdgeInsets(top: 80, left: 0, bottom: 80, right: 0)
+        }
+        return UIEdgeInsets(top: max(0, headerFrame.maxY - transcriptFrame.minY) + 8, left: 0,
+            bottom: max(0, transcriptFrame.maxY - dockFrame.minY), right: 0)
+    }
     enum ChatSheet: String, Identifiable { case sessions, controls, activity, settings; var id: String { rawValue } }
+
     var body: some View {
         NavigationStack {
-            VStack(spacing: 0) {
-                if store.fixture {
-                    Text("CONTROLLED UI FIXTURE · 10,000 messages").font(.caption2.monospaced()).foregroundStyle(.orange).padding(.vertical, 5).accessibilityIdentifier("fixtureBanner")
-                }
-                if store.connection != "Connected" {
-                    HStack(spacing: 8) { ProgressView().controlSize(.mini); Text(store.connection + ". Your draft stays here.").font(.caption); Spacer(); Button("Reconnect") { store.connect() } }.padding(12).background(.orange.opacity(0.12))
-                }
-                TranscriptContainer(store: store)
-                if !store.currentUncertain.isEmpty {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("An action has an uncertain outcome").font(.subheadline.bold())
-                        Text("Check the conversation before sending it again. It was not retried.").font(.caption).foregroundStyle(.secondary)
-                        HStack {
-                            Button("Refresh") { Task { await store.latest() } }
+            GeometryReader { geometry in
+                ZStack {
+                    TranscriptContainer(store: store, viewportInsets: viewportInsets)
+                        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { transcriptFrame = $0 }
+                        .ignoresSafeArea(.container)
+                    VStack {
+                        Rectangle().fill(.ultraThinMaterial)
+                            .mask(LinearGradient(stops: [.init(color: .black, location: 0), .init(color: .black.opacity(0.85), location: 0.4), .init(color: .clear, location: 1)], startPoint: .top, endPoint: .bottom))
+                            .frame(height: viewportInsets.top)
+                        Spacer(minLength: 0)
+                    }.ignoresSafeArea(.container).allowsHitTesting(false).accessibilityHidden(true)
+                    VStack(spacing: 0) {
+                        header
+                            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { headerFrame = $0 }
+                        Spacer(minLength: 0)
+                        dock
+                            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { dockFrame = $0 }
+                    }
+                    if store.newActivity || store.transcript.hasNewer || store.isReadingHistory {
+                        VStack {
                             Spacer()
-                            Button("I checked") { store.currentUncertain.forEach { store.acknowledgeUncertain($0) } }
-                        }.font(.caption)
-                    }.padding(12).background(.orange.opacity(0.12)).accessibilityIdentifier("uncertainAction")
+                            Button { Task { await store.latest() } } label: {
+                                Image(systemName: "arrow.down").font(.system(size: 17, weight: .semibold))
+                                    .foregroundStyle(.white).frame(width: 44, height: 44)
+                                    .background(Color.blue, in: Circle())
+                            }.accessibilityLabel("Latest messages").accessibilityIdentifier("latestMessages")
+                                .padding(.bottom, dockHeight + 8)
+                        }
+                    }
                 }
-                RequestTray(store: store).layoutPriority(2)
-                if let notice = store.notice, store.connection == "Connected" {
-                    HStack(alignment: .top) {
-                        Text(notice).font(.caption).textSelection(.enabled)
-                        Spacer()
-                        Button { store.notice = nil } label: { Image(systemName: "xmark") }.accessibilityLabel("Dismiss status")
-                    }.padding(.horizontal, 16).padding(.vertical, 10).background(.white.opacity(0.04))
+                .onChange(of: viewportInsets) { _, insets in
+                    #if DEBUG
+                    if ProcessInfo.processInfo.arguments.contains("--fixture-geometry") {
+                        print("CHAT_CHROME transcript=\(transcriptFrame) header=\(headerFrame) dock=\(dockFrame) insets=\(insets) legacyBottom=\(geometry.safeAreaInsets.bottom + dockHeight + 8)")
+                    }
+                    #endif
                 }
             }
             .background(Color(white: 0.055))
-            .safeAreaInset(edge: .bottom, spacing: 0) { ComposerView(store: store) }
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) { Button { sheet = .sessions } label: { Image(systemName: "line.3.horizontal") }.accessibilityLabel("Conversations").accessibilityIdentifier("sessions") }
-                ToolbarItem(placement: .principal) {
-                    VStack(spacing: 2) {
-                        HStack(spacing: 6) { Image(systemName: "sparkle").font(.caption).foregroundStyle(.blue); Text(store.grant?.host.profile ?? "Hermes").font(.subheadline.weight(.semibold)).lineLimit(1) }
-                        Text(store.statusLabel).font(.caption2).foregroundStyle(store.runState == .waiting ? .orange : .secondary).accessibilityIdentifier("agentStatus")
-                    }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Menu {
-                        Button("Model & reasoning", systemImage: "slider.horizontal.3") { sheet = .controls }
-                        Button("Follow-ups & updates", systemImage: "bell") { sheet = .activity }
-                        Button("Settings", systemImage: "gearshape") { sheet = .settings }
-                    } label: { Image(systemName: "ellipsis.circle") }.accessibilityIdentifier("chatMenu").accessibilityLabel("Chat options")
-                }
-            }
-            .toolbarBackground(.hidden, for: .navigationBar)
-            .navigationBarTitleDisplayMode(.inline)
+            .toolbar(.hidden, for: .navigationBar)
             .sheet(item: $sheet) { item in
                 Group {
                     switch item {
@@ -187,42 +191,99 @@ struct ChatView: View {
             .modifier(AppAlerts(store: store, enabled: sheet == nil))
         }
     }
+
+    private var header: some View {
+        VStack(spacing: 8) {
+            HStack(alignment: .top) {
+                Button { sheet = .sessions } label: {
+                    Image(systemName: "line.3.horizontal").font(.system(size: 20)).frame(width: 44, height: 44)
+                }.modifier(ChatGlass(cornerRadius: 22))
+                    .accessibilityLabel("Conversations").accessibilityIdentifier("sessions")
+                Spacer(minLength: 12)
+                VStack(spacing: 3) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "sparkle").font(.caption).foregroundStyle(.blue)
+                        Text(store.grant?.host.profile ?? "Hermes").font(.subheadline.weight(.semibold)).lineLimit(1)
+                    }
+                    Text(store.statusLabel).font(.caption2).foregroundStyle(store.runState == .waiting ? .orange : .secondary)
+                        .accessibilityIdentifier("agentStatus")
+                }.padding(.horizontal, 14).padding(.vertical, 9).modifier(ChatGlass(cornerRadius: 20))
+                Spacer(minLength: 12)
+                Menu {
+                    Button("Model & reasoning", systemImage: "slider.horizontal.3") { sheet = .controls }
+                    Button("Follow-ups & updates", systemImage: "bell") { sheet = .activity }
+                    Button("Settings", systemImage: "gearshape") { sheet = .settings }
+                } label: {
+                    Image(systemName: "ellipsis").font(.system(size: 20)).frame(width: 44, height: 44)
+                }.modifier(ChatGlass(cornerRadius: 22))
+                    .accessibilityIdentifier("chatMenu").accessibilityLabel("Chat options")
+            }.dynamicTypeSize(...DynamicTypeSize.xxxLarge)
+            if store.fixture {
+                Text("CONTROLLED UI FIXTURE").font(.caption2.monospaced()).foregroundStyle(.orange)
+                    .padding(5).modifier(ChatGlass(cornerRadius: 10)).dynamicTypeSize(...DynamicTypeSize.xxxLarge)
+                    .accessibilityIdentifier("fixtureBanner")
+            }
+            if store.connection != "Connected" {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.mini)
+                    Text(store.connection + ". Your draft stays here.").font(.caption)
+                    Spacer()
+                    Button("Reconnect") { store.connect() }.frame(minHeight: 44)
+                }.padding(.horizontal, 12).modifier(ChatGlass(cornerRadius: 16))
+            }
+        }.padding(.horizontal, 16).padding(.top, 6).padding(.bottom, 8)
+    }
+
+    private var dock: some View {
+        VStack(spacing: 0) {
+            if !store.currentUncertain.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("An action has an uncertain outcome").font(.subheadline.bold())
+                    Text("Check the conversation before sending it again. It was not retried.").font(.caption).foregroundStyle(.secondary)
+                    HStack {
+                        Button("Refresh") { Task { await store.latest() } }.frame(minHeight: 44)
+                        Spacer()
+                        Button("I checked") { store.currentUncertain.forEach { store.acknowledgeUncertain($0) } }.frame(minHeight: 44)
+                    }.font(.caption)
+                }.padding(12).modifier(ChatGlass(cornerRadius: 18)).padding(.horizontal, 12).accessibilityIdentifier("uncertainAction")
+            }
+            RequestTray(store: store).layoutPriority(2)
+            if let notice = store.notice, store.connection == "Connected" {
+                HStack(alignment: .center) {
+                    Text(notice).font(.caption).textSelection(.enabled)
+                    Spacer()
+                    Button { store.notice = nil } label: { Image(systemName: "xmark").frame(width: 44, height: 44) }
+                        .accessibilityLabel("Dismiss status")
+                }.padding(.leading, 16).modifier(ChatGlass(cornerRadius: 18)).padding(.horizontal, 12)
+            }
+            ComposerView(store: store)
+        }
+    }
 }
 
 struct TranscriptContainer: View {
     var store: AppStore
+    var viewportInsets: UIEdgeInsets = .zero
+    private var activity: TranscriptActivity {
+        if store.isStopping { return .stopping }
+        if store.runState == .waiting { return .waiting }
+        return store.isWorking ? .working : .idle
+    }
     var body: some View {
-        ZStack(alignment: .top) {
-            if store.transcript.messages.isEmpty {
+        ZStack {
+            if store.transcript.messages.isEmpty && !store.isWorking && !store.transcript.hasMore {
                 VStack(spacing: 12) {
                     Image(systemName: "sparkle").font(.system(size: 36, weight: .light)).foregroundStyle(.blue)
                     Text(store.selectedSession == nil ? "What’s on your mind?" : "Start with a thought.").font(.title2.weight(.medium))
                     Text("Ask a question, work on an idea, or give your agent something to follow through on.").font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 290)
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                TranscriptView(messages: store.transcript.messages, hasMore: store.transcript.hasMore, loading: store.isLoadingHistory, latestRevision: store.latestRevision, onOlder: { Task { await store.loadOlder() } }, onReadingHistory: { store.isReadingHistory = $0 })
+                TranscriptView(messages: store.transcript.messages, hasMore: store.transcript.hasMore,
+                    loading: store.isLoadingHistory, latestRevision: store.latestRevision,
+                    viewportInsets: viewportInsets, activity: activity,
+                    onOlder: { Task { await store.loadOlder() } }, onReadingHistory: { store.isReadingHistory = $0 })
             }
-            LinearGradient(colors: [Color(white: 0.055), Color(white: 0.055).opacity(0)], startPoint: .top, endPoint: .bottom)
-                .frame(height: 36).allowsHitTesting(false).accessibilityHidden(true)
-        }
-        .overlay(alignment: .bottom) {
-            if store.newActivity || store.transcript.hasNewer || store.isReadingHistory {
-                LinearGradient(colors: [Color(white: 0.055).opacity(0), Color(white: 0.055)], startPoint: .top, endPoint: .bottom)
-                    .frame(height: 20).allowsHitTesting(false).accessibilityHidden(true)
-            }
-        }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            if store.newActivity || store.transcript.hasNewer || store.isReadingHistory {
-                HStack {
-                    Spacer()
-                    Button { Task { await store.latest() } } label: {
-                        Label("Latest", systemImage: "arrow.down").font(.footnote.weight(.semibold)).padding(.horizontal, 14).frame(height: 36).background(.regularMaterial, in: Capsule())
-                            .frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
-                    }.accessibilityLabel("Latest messages").accessibilityIdentifier("latestMessages")
-                }.padding(.horizontal, 12).background(Color(white: 0.055))
-            }
-        }
-        .accessibilityValue("\(store.transcript.messages.count) loaded messages")
+        }.accessibilityValue("\(store.transcript.messages.count) loaded messages")
     }
 }
 
@@ -269,7 +330,7 @@ struct RequestCard: View {
             }
         }.disabled(!store.canCommand || store.isSending || store.isStopping)
             .padding(16).frame(maxWidth: .infinity, alignment: .leading)
-            .background(.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 18))
+            .modifier(ChatGlass(cornerRadius: 18))
             .overlay(RoundedRectangle(cornerRadius: 18).stroke(.orange.opacity(0.25)))
             .padding(.horizontal, 12).padding(.vertical, 6)
     }

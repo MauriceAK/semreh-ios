@@ -26,6 +26,7 @@ xcodebuild test \
   -skip-testing:HermesCompanionUITests/LiveFlowUITests/testRealChatClearsAcceptedDraft \
   -skip-testing:HermesCompanionUITests/LiveFlowUITests/testInjectedNotificationOpensCanonicalResult \
   -skip-testing:HermesCompanionUITests/CompanionUITests/testRealHistoryWorkloadWhenSessionProvided \
+  -skip-testing:HermesCompanionUITests/CompanionUITests/testRealProjectedMarkdownWhenConfigured \
   -skip-testing:HermesCompanionUITests/CompanionUITests/testPairingAndRealHostWhenInvitationProvided \
   -skip-testing:HermesCompanionUITests/ChatPolishUITests/testNativePhotoPickerWhenSeeded \
   -skip-testing:HermesCompanionUITests/ChatPolishUITests/testRealFileSendWhenConfigured \

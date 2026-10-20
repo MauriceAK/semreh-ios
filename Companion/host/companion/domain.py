@@ -97,21 +97,32 @@ def silent_result(value: str) -> bool:
     return False
 
 
-def message(row: dict) -> dict:
-    content = row.get("content", row.get("text", ""))
-    if isinstance(content, list):
-        content = "\n".join(p if isinstance(p, str) else str(p.get("text", "[Attachment]")) for p in content if isinstance(p, (str, dict)))
-    if content is None:
-        content = ""
-    if not isinstance(content, str):
-        content = encoded(content)
-    role = row.get("role", "system")
-    if role not in {"user", "assistant", "tool", "system"}:
-        role = "system"
+def message_id(row: dict) -> str:
     key = row.get("id", row.get("_row_id", row.get("row_id")))
     if key is None:
         raise APIError("upstream_contract", "Hermes returned a message without a canonical row ID.", 502)
-    result = {"id": str(key), "role": role, "text": content, "provisional": False}
+    return str(key)
+
+
+def message(row: dict) -> dict | None:
+    role = row.get("role")
+    if role not in {"user", "assistant"} or row.get("display_kind") not in {None, "", "steer"}:
+        return None
+    content = row.get("display_content", row.get("content", row.get("text", "")))
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict):
+                if part.get("type") in {"text", "input_text", "output_text"} and isinstance(part.get("text"), str):
+                    parts.append(part["text"])
+                elif role == "user" and part.get("type") in {"image", "image_url", "input_image", "input_audio", "file"}:
+                    parts.append("[Attachment]")
+        content = "\n".join(parts)
+    if not isinstance(content, str) or not content.strip():
+        return None
+    result = {"id": message_id(row), "role": role, "text": content, "provisional": False}
     stamp = row.get("timestamp")
     if isinstance(stamp, (int, float)):
         result["created_at"] = utc(stamp)
