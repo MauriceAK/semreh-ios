@@ -234,6 +234,7 @@ final class ChatPolishUITests: XCTestCase {
         editor(app).typeText(draft)
         capture(app, "muse-accessibility-long-draft-attachment-keyboard")
         XCTAssertEqual(editor(app).value as? String, draft)
+        XCTAssertTrue(app.keyboards.firstMatch.exists, "The software keyboard must remain visible after typing the complete draft.")
         checkComposer(app, action: "sendMessage")
         let details = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "attachmentDetails-")).firstMatch
         let status = app.staticTexts["agentStatus"]

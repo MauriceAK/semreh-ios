@@ -48,6 +48,7 @@ final class AppStore {
     private var connectionTask: Task<Void, Never>?
     private var deltaTask: Task<Void, Never>?
     private var refreshTask: Task<Void, Never>?
+    private var refreshTasks: [UUID: Task<Void, Never>] = [:]
     private var pendingDeltas: [Delta] = []
     private var pendingDeltaBytes = 0
     private var journal = OperationJournal()
@@ -97,7 +98,7 @@ final class AppStore {
         }
     }
     isolated deinit {
-        refreshTask?.cancel()
+        for task in refreshTasks.values { task.cancel() }
         connectionTask?.cancel()
         deltaTask?.cancel()
         fixtureTimer?.cancel()
@@ -224,7 +225,7 @@ final class AppStore {
         }
     }
     func background() {
-        refreshTask?.cancel()
+        for task in refreshTasks.values { task.cancel() }
         refreshTask = nil
         if fixture { return }
         connectionTask?.cancel()
@@ -232,6 +233,12 @@ final class AppStore {
         flushDeltas()
         connection = "Paused"
         requests = []
+    }
+    func waitForScheduledRefreshes() -> Task<Void, Never> {
+        let tasks = Array(refreshTasks.values)
+        return Task {
+            for task in tasks { await task.value }
+        }
     }
     func foreground() {
         attachmentDrafts.refreshExpiredTickets()
@@ -304,7 +311,9 @@ final class AppStore {
         refreshTask?.cancel()
         guard let api, let context = commandContext else { return }
         let intent = historyIntent
-        refreshTask = Task { [weak self] in
+        let id = UUID()
+        let task = Task { [weak self] in
+            defer { self?.refreshTasks.removeValue(forKey: id) }
             do {
                 try Task.checkCancellation()
                 let snapshot: SessionSnapshot = try await api.get("v1/sessions/\(context.sessionID)/snapshot")
@@ -313,6 +322,8 @@ final class AppStore {
                 try self.apply(snapshot, forceHistory: forceHistory)
             } catch {}
         }
+        refreshTasks[id] = task
+        refreshTask = task
     }
     func refreshCurrent(forceHistory: Bool = false) async throws {
         guard let api, let id = selectedSession?.id else { return }

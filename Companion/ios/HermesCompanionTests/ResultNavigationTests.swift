@@ -6,7 +6,7 @@ import XCTest
 final class ResultNavigationTests: XCTestCase {
     func testResultMissingFromCachedSessionsOpensCanonicalConversation() async throws {
         let fixture = try NavigationFixture()
-        defer { fixture.close() }
+        addTeardownBlock { @MainActor in await fixture.close() }
         await fixture.selectCurrent()
         XCTAssertFalse(fixture.store.sessions.contains { $0.id == "result" })
 
@@ -24,7 +24,7 @@ final class ResultNavigationTests: XCTestCase {
 
     func testFailedResultSnapshotPreservesCurrentConversationAndDraft() async throws {
         let fixture = try NavigationFixture()
-        defer { fixture.close() }
+        addTeardownBlock { @MainActor in await fixture.close() }
         await fixture.selectCurrent()
 
         do {
@@ -44,10 +44,10 @@ final class ResultNavigationTests: XCTestCase {
     func testHeldResultSnapshotCannotReplaceNewHostConversation() async throws {
         let started = expectation(description: "The old host result snapshot is pending")
         let fixture = try NavigationFixture(heldRoute: "GET /v1/sessions/result/snapshot", started: started)
-        defer { fixture.close() }
+        addTeardownBlock { @MainActor in await fixture.close() }
         await fixture.selectCurrent()
         let navigation = Task { try await fixture.store.openResultConversation("result") }
-        defer { navigation.cancel() }
+        addTeardownBlock { navigation.cancel(); _ = try? await navigation.value }
         let handoff = await XCTWaiter.fulfillment(of: [started], timeout: 3)
         XCTAssertEqual(handoff, .completed)
         guard handoff == .completed else { return }
@@ -63,10 +63,10 @@ final class ResultNavigationTests: XCTestCase {
     func testHeldNewSessionResponseCannotReplaceNewHostConversation() async throws {
         let started = expectation(description: "The old host new conversation request is pending")
         let fixture = try NavigationFixture(heldRoute: "POST /v1/sessions", started: started)
-        defer { fixture.close() }
+        addTeardownBlock { @MainActor in await fixture.close() }
         await fixture.selectCurrent()
         let creation = Task { await fixture.store.newSession() }
-        defer { creation.cancel() }
+        addTeardownBlock { creation.cancel(); _ = await creation.value }
         let handoff = await XCTWaiter.fulfillment(of: [started], timeout: 3)
         XCTAssertEqual(handoff, .completed)
         guard handoff == .completed else { return }
@@ -141,7 +141,9 @@ private final class NavigationFixture {
         store.draft = "Unsent other host draft"
     }
 
-    func close() {
+    func close() async {
+        store.background()
+        await store.waitForScheduledRefreshes().value
         session.invalidateAndCancel()
         NavigationProtocol.unregister(baseURL)
         NavigationProtocol.unregister(otherURL)

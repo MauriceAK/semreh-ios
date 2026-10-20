@@ -24,7 +24,10 @@ final class ChatPolishRaceTests: XCTestCase {
         store.runState = .idle
     }
     override func tearDown() async throws {
-        store?.background()
+        if let store {
+            store.background()
+            await store.waitForScheduledRefreshes().value
+        }
         session.invalidateAndCancel()
         defaults.removePersistentDomain(forName: suite)
         try? FileManager.default.removeItem(at: attachments.directory)
@@ -33,6 +36,7 @@ final class ChatPolishRaceTests: XCTestCase {
     func testAcceptedSendClearsDraftAndUnlocksStopBeforeSlowReadCompletes() async throws {
         store.draft = "Accepted message"
         let send = Task { await store.send() }
+        addTeardownBlock { send.cancel(); _ = await send.value }
         let command = try await request("/commands")
         command.respond(["operation_id": command.json["operation_id"]!, "status": "accepted"])
         let snapshot = try await request("/snapshot")
@@ -40,6 +44,7 @@ final class ChatPolishRaceTests: XCTestCase {
         XCTAssertEqual(store.draft, "")
         XCTAssertEqual(store.runState, .working)
         let stop = Task { await store.execute(.init(kind: "interrupt")) }
+        addTeardownBlock { stop.cancel(); _ = await stop.value }
         let interrupt = try await request("/commands", index: 1)
         XCTAssertEqual(interrupt.json["kind"] as? String, "interrupt")
         interrupt.respond(["operation_id": interrupt.json["operation_id"]!, "status": "accepted"])
@@ -51,18 +56,28 @@ final class ChatPolishRaceTests: XCTestCase {
     func testAcceptedRefreshDoesNotRetainStoreAfterOwnerReleasesIt() async throws {
         store.draft = "Accepted message"
         let send = Task { await store.send() }
+        addTeardownBlock { send.cancel(); _ = await send.value }
         let command = try await request("/commands")
         command.respond(["operation_id": command.json["operation_id"]!, "status": "accepted"])
         await send.value
-        _ = try await request("/snapshot")
+        let snapshot = try await request("/snapshot")
+        let completion = store.waitForScheduledRefreshes()
+        addTeardownBlock { @MainActor [weak owner = store] in
+            owner?.background()
+            await completion.value
+        }
         weak var released = store
         store = nil
         for _ in 0..<100 where released != nil { try await Task.sleep(for: .milliseconds(10)) }
         XCTAssertNil(released, "An unfinished read must not retain the conversation owner.")
+        released?.background()
+        await completion.value
+        XCTAssertTrue(snapshot.wasStopped)
     }
     func testBackgroundCancelsHeldRefreshWithoutApplyingItsResponse() async throws {
         store.draft = "Accepted message"
         let send = Task { await store.send() }
+        addTeardownBlock { send.cancel(); _ = await send.value }
         let command = try await request("/commands")
         command.respond(["operation_id": command.json["operation_id"]!, "status": "accepted"])
         await send.value
@@ -74,6 +89,35 @@ final class ChatPolishRaceTests: XCTestCase {
         XCTAssertEqual(store.connection, "Paused")
         XCTAssertTrue(store.transcript.messages.isEmpty)
     }
+    func testBackgroundDrainsSupersededAndCurrentRefreshesBeforeSessionInvalidation() async throws {
+        store.draft = "Accepted message"
+        let send = Task { await store.send() }
+        addTeardownBlock { send.cancel(); await send.value }
+        let command = try await request("/commands")
+        command.respond(["operation_id": command.json["operation_id"]!, "status": "accepted"])
+        await send.value
+        let superseded = try await request("/snapshot")
+
+        let stop = Task { await store.execute(.init(kind: "interrupt")) }
+        addTeardownBlock { stop.cancel(); _ = await stop.value }
+        let interrupt = try await request("/commands", index: 1)
+        interrupt.respond(["operation_id": interrupt.json["operation_id"]!, "status": "accepted"])
+        let accepted = await stop.value
+        XCTAssertTrue(accepted)
+        let current = try await request("/snapshot", index: 1)
+
+        let completion = store.waitForScheduledRefreshes()
+        store.background()
+        await completion.value
+
+        XCTAssertTrue(superseded.wasStopped)
+        XCTAssertTrue(current.wasStopped)
+        let remaining = await session.allTasks
+        XCTAssertTrue(remaining.isEmpty)
+        XCTAssertEqual(store.connection, "Paused")
+        XCTAssertTrue(store.transcript.messages.isEmpty)
+        session.invalidateAndCancel()
+    }
     func testRequestLookupIgnoresLateSnapshotFromPreviousSession() async throws {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [PolishHeldProtocol.self]
@@ -82,13 +126,15 @@ final class ChatPolishRaceTests: XCTestCase {
         let previousURL = URL(string: "http://127.0.0.1/\(previousOwner)/v1/sessions/first/snapshot")!
         PolishHeldProtocol.reset()
         let previousRead = Task { try? await previousSession.data(from: previousURL) }
-        defer {
+        addTeardownBlock {
             previousRead.cancel()
+            _ = await previousRead.value
             previousSession.invalidateAndCancel()
         }
         let previousSnapshot = try await request("/snapshot", owner: previousOwner)
         store.draft = "Accepted message"
         let send = Task { await store.send() }
+        addTeardownBlock { send.cancel(); _ = await send.value }
         let command = try await request("/commands")
         command.respond(["operation_id": command.json["operation_id"]!, "status": "accepted"])
         await send.value
@@ -112,8 +158,10 @@ final class ChatPolishRaceTests: XCTestCase {
         try store.transcript.replace(.init(messages: [.init(id: "old", role: "assistant", text: "Old", provisional: false)], before: "cursor", hasMore: true))
         let originalRevision = store.latestRevision
         let older = Task { await store.loadOlder() }
+        addTeardownBlock { older.cancel(); _ = await older.value }
         let oldRequest = try await request("/history")
         let latest = Task { await store.latest() }
+        addTeardownBlock { latest.cancel(); _ = await latest.value }
         let latestRequest = try await request("/snapshot")
         XCTAssertEqual(store.latestRevision, originalRevision)
         XCTAssertEqual(store.transcript.messages.first?.id, "old")
@@ -129,8 +177,10 @@ final class ChatPolishRaceTests: XCTestCase {
         try store.transcript.replace(.init(messages: [.init(id: "old", role: "assistant", text: "Old", provisional: false)], before: "cursor", hasMore: true))
         let revision = store.latestRevision
         let latest = Task { await store.latest() }
+        addTeardownBlock { latest.cancel(); _ = await latest.value }
         let latestRequest = try await request("/snapshot")
         let older = Task { await store.loadOlder() }
+        addTeardownBlock { older.cancel(); _ = await older.value }
         let oldRequest = try await request("/history")
         oldRequest.respond(["messages": [["id": "earlier", "role": "assistant", "text": "Earlier", "provisional": false]], "before": NSNull(), "has_more": false])
         await older.value
@@ -154,6 +204,7 @@ final class ChatPolishRaceTests: XCTestCase {
         attachments.set([item], for: "first")
         store.draft = "Read this"
         let send = Task { await store.send() }
+        addTeardownBlock { send.cancel(); _ = await send.value }
         let upload = try await request("/attachments")
         store.selectedSession = .init(id: "second", title: "Second", updatedAt: "", profile: "test")
         upload.respond(["id": "ticket", "name": "note.txt", "media_type": "text/plain", "byte_count": 5, "status": "ready"])
@@ -168,8 +219,10 @@ final class ChatPolishRaceTests: XCTestCase {
         store.draft = "A direction"
         store.runState = .working
         let send = Task { await store.send() }
+        addTeardownBlock { send.cancel(); _ = await send.value }
         let upload = try await request("/attachments")
         let stop = Task { await store.execute(.init(kind: "interrupt")) }
+        addTeardownBlock { stop.cancel(); _ = await stop.value }
         let interrupt = try await request("/commands")
         XCTAssertEqual(interrupt.json["kind"] as? String, "interrupt")
         interrupt.respond(["operation_id": interrupt.json["operation_id"]!, "status": "accepted"])
@@ -206,6 +259,7 @@ final class ChatPolishRaceTests: XCTestCase {
         store.draft = "Read after this task"
         store.runState = .working
         let send = Task { await store.send() }
+        addTeardownBlock { send.cancel(); _ = await send.value }
         let upload = try await request("/attachments")
         upload.respond(["id": "ticket", "name": "note.txt", "media_type": "text/plain", "byte_count": 5, "status": "ready"])
         let command = try await request("/commands")
@@ -224,6 +278,7 @@ final class ChatPolishRaceTests: XCTestCase {
         attachments.set([item], for: "first")
         store.draft = "Read this"
         let send = Task { await store.send() }
+        addTeardownBlock { send.cancel(); _ = await send.value }
         let upload = try await request("/attachments")
         upload.respond(["error": ["code": "unsupported_attachment", "message": "Unsupported file"]], status: 400)
         await send.value

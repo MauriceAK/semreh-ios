@@ -1,5 +1,5 @@
 {
-  "source_revision": "1234458d8b5bcb3a31689ed6f3eb7b18e1d18a45",
+  "source_revision": "db70bed4e2f2c61b53d98a88ae8545121eeb507a",
   "files": [
     {
       "path": "ci/CompanionInternalExport.plist",
@@ -115,7 +115,7 @@
     },
     {
       "path": "ios/HermesCompanion/AppStore.swift",
-      "sha256": "7af5f4203ee933df593b92b6abadde3b406c70e19dcca6c512d6ebbd8dfd139a"
+      "sha256": "e18d5478b8111531c96a587015748c87753f828759167de1f3538abb40a56fbe"
     },
     {
       "path": "ios/HermesCompanion/Assets.xcassets/AppIcon.appiconset/AppIcon.png",
@@ -187,19 +187,19 @@
     },
     {
       "path": "ios/HermesCompanionTests/ChatPolishRaceTests.swift",
-      "sha256": "7a9edb799a7d0b2911bedab4d240f6b3742117b8eea55ed083a04d4b1df6e28f"
+      "sha256": "61a6c554fe9a695445329dc18ecf9243be0480f6df2bd616ac8605c2007339de"
     },
     {
       "path": "ios/HermesCompanionTests/DomainTests.swift",
-      "sha256": "5e81b5a8b8dfbd7e54325417dff6aa8192a6b44023850d14ebb3fb4217edabe0"
+      "sha256": "86133e2b45caf1e78c36ae3827988078a73e1ff83096db9af22ec64e8f16dde8"
     },
     {
       "path": "ios/HermesCompanionTests/DraftRaceTests.swift",
-      "sha256": "4ca4438b011bc9bb4f2d492336aa541d6f04fe613329de0d30db7b2994195fbf"
+      "sha256": "a23ff4cd226c060bd74fdff1b3a01bd05141ea63fcc29ef6df558753433d6412"
     },
     {
       "path": "ios/HermesCompanionTests/ResultNavigationTests.swift",
-      "sha256": "ede12f3176b3c3f7ca6e4fc42f9c5f91ce7c8a66f2503128c2f3ed79ceeb8266"
+      "sha256": "c0a5f11e7a84984b50a0c62c113f4edbc3639c434bf8be680906d8dc92693494"
     },
     {
       "path": "ios/HermesCompanionTests/TranscriptAnchorTests.swift",
@@ -211,7 +211,7 @@
     },
     {
       "path": "ios/HermesCompanionUITests/ChatPolishUITests.swift",
-      "sha256": "459b8f3c9070ad6822a5976af3af3144b5d12f7099af67b650c5e3bf8f03978d"
+      "sha256": "be857aaddc3eda66320c8a55054bb3202fe991b6100f0a807c7db62640a3793d"
     },
     {
       "path": "ios/HermesCompanionUITests/CompanionUITests.swift",

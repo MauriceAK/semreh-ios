@@ -19,18 +19,24 @@ final class DraftRaceTests: XCTestCase {
     func testModelConfirmationCannotRetargetAndValidConfirmationStillWorks() async throws {
         let suite = "model-origin-" + UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [DraftHeldProtocol.self]
         let session = URLSession(configuration: config)
-        defer { session.invalidateAndCancel() }
         let store = AppStore(api: .init(baseURL: URL(string: "http://127.0.0.1")!, token: nil, session: session), journal: OperationJournal(defaults: defaults), memory: ConversationMemory(hostID: "model-host", defaults: defaults))
+        addTeardownBlock { @MainActor in
+            store.background()
+            await store.waitForScheduledRefreshes().value
+            session.invalidateAndCancel()
+            DraftHeldProtocol.held = nil
+            defaults.removePersistentDomain(forName: suite)
+        }
         store.connection = "Connected"
         let first = ChatSession(id: "first", title: "First", updatedAt: "", profile: "test")
         let second = ChatSession(id: "second", title: "Second", updatedAt: "", profile: "test")
         await store.select(first)
         DraftHeldProtocol.held = nil
         let late = Task { await store.execute(.init(kind: "model", value: "expensive")) }
+        addTeardownBlock { late.cancel(); _ = await late.value }
         let lateRequest = try await heldRequest()
         await store.select(second)
         lateRequest.completeConfirmation()
@@ -38,6 +44,7 @@ final class DraftRaceTests: XCTestCase {
         XCTAssertFalse(lateAccepted)
         XCTAssertNil(store.confirmation)
         let selected = Task { await store.execute(.init(kind: "model", value: "expensive")) }
+        addTeardownBlock { selected.cancel(); _ = await selected.value }
         try await heldRequest().completeConfirmation()
         _ = await selected.value
         let stale = try XCTUnwrap(store.confirmation)
@@ -47,10 +54,12 @@ final class DraftRaceTests: XCTestCase {
         XCTAssertFalse(staleAccepted)
         XCTAssertNil(DraftHeldProtocol.held)
         let valid = Task { await store.execute(.init(kind: "model", value: "expensive")) }
+        addTeardownBlock { valid.cancel(); _ = await valid.value }
         try await heldRequest().completeConfirmation()
         _ = await valid.value
         let pending = try XCTUnwrap(store.confirmation)
         let confirmed = Task { await store.confirmModelChange(pending) }
+        addTeardownBlock { confirmed.cancel(); _ = await confirmed.value }
         let confirmedRequest = try await heldRequest()
         XCTAssertEqual(confirmedRequest.request.url?.path, "/v1/sessions/first/commands")
         XCTAssertEqual(confirmedRequest.command["confirmed"] as? Bool, true)
@@ -67,13 +76,18 @@ final class DraftRaceTests: XCTestCase {
     private func exercise(switchConversation: Bool, switchHost: Bool = false) async throws {
         let suite = "draft-race-" + UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [DraftHeldProtocol.self]
         let session = URLSession(configuration: config)
-        defer { session.invalidateAndCancel() }
         let memory = ConversationMemory(hostID: "controlled-host", defaults: defaults)
         let store = AppStore(api: .init(baseURL: URL(string: "http://127.0.0.1")!, token: nil, session: session), journal: OperationJournal(defaults: defaults), memory: memory)
+        addTeardownBlock { @MainActor in
+            store.background()
+            await store.waitForScheduledRefreshes().value
+            session.invalidateAndCancel()
+            DraftHeldProtocol.held = nil
+            defaults.removePersistentDomain(forName: suite)
+        }
         store.connection = "Connected"
         let first = ChatSession(id: "first", title: "First", updatedAt: "", profile: "test")
         let second = ChatSession(id: "second", title: "Second", updatedAt: "", profile: "test")
@@ -83,6 +97,7 @@ final class DraftRaceTests: XCTestCase {
         store.draft = "The submitted first conversation draft"
         DraftHeldProtocol.held = nil
         let send = Task { await store.send() }
+        addTeardownBlock { send.cancel(); await send.value }
         for _ in 0..<100 where DraftHeldProtocol.held == nil { try await Task.sleep(for: .milliseconds(10)) }
         let held = try XCTUnwrap(DraftHeldProtocol.held)
         XCTAssertTrue(store.isSending)

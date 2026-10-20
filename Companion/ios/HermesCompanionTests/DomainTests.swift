@@ -123,13 +123,17 @@ final class DomainTests: XCTestCase {
     @MainActor func testExecuteRetainsUnknownOutcomesAcrossRelaunchWithoutReplay() async throws {
         let suite = "hermes-execute-" + UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [CommandResponseProtocol.self]
         let session = URLSession(configuration: configuration)
-        defer { session.invalidateAndCancel() }
         let api = CompanionAPI(baseURL: URL(string: "http://127.0.0.1")!, token: nil, session: session)
         let store = AppStore(api: api, journal: OperationJournal(defaults: defaults))
+        addTeardownBlock { @MainActor in
+            store.background()
+            await store.waitForScheduledRefreshes().value
+            session.invalidateAndCancel()
+            defaults.removePersistentDomain(forName: suite)
+        }
         store.connection = "Connected"
         store.selectedSession = AppStore.fixtureSession
         CommandResponseProtocol.posts = 0
@@ -148,6 +152,10 @@ final class DomainTests: XCTestCase {
         XCTAssertEqual(Set(store.currentUncertain.map(\.operationID)), [first.operationId, second.operationId])
         XCTAssertEqual(CommandResponseProtocol.posts, 2)
         let restored = AppStore(api: api, journal: OperationJournal(defaults: defaults))
+        addTeardownBlock { @MainActor in
+            restored.background()
+            await restored.waitForScheduledRefreshes().value
+        }
         XCTAssertEqual(Set(restored.uncertain.map(\.operationID)), [first.operationId, second.operationId])
         XCTAssertEqual(CommandResponseProtocol.posts, 2)
         CommandResponseProtocol.status = 409
@@ -162,14 +170,18 @@ final class DomainTests: XCTestCase {
     @MainActor func testConversationAndDraftsRestoreWithoutCrossingSessionsOrHosts() async throws {
         let suite = "hermes-conversation-" + UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [CommandResponseProtocol.self]
         let session = URLSession(configuration: configuration)
-        defer { session.invalidateAndCancel() }
         let api = CompanionAPI(baseURL: URL(string: "http://127.0.0.1")!, token: nil, session: session)
         let memory = ConversationMemory(hostID: "isolated-one", defaults: defaults)
         let store = AppStore(api: api, memory: memory)
+        addTeardownBlock { @MainActor in
+            store.background()
+            await store.waitForScheduledRefreshes().value
+            session.invalidateAndCancel()
+            defaults.removePersistentDomain(forName: suite)
+        }
         let first = ChatSession(id: "first", title: "First", updatedAt: "", profile: "test")
         let second = ChatSession(id: "second", title: "Second", updatedAt: "", profile: "test")
         await store.select(first)
@@ -178,6 +190,10 @@ final class DomainTests: XCTestCase {
         XCTAssertEqual(store.draft, "")
         store.draft = "Draft for the second conversation"
         let restored = AppStore(api: api, memory: ConversationMemory(hostID: "isolated-one", defaults: defaults))
+        addTeardownBlock { @MainActor in
+            restored.background()
+            await restored.waitForScheduledRefreshes().value
+        }
         XCTAssertEqual(restored.selectedSession?.id, "second")
         XCTAssertEqual(restored.draft, "Draft for the second conversation")
         await restored.select(first)
