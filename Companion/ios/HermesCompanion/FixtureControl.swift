@@ -21,7 +21,7 @@ final class FixtureControl {
               let token = UUID(uuidString: args[index + 1])?.uuidString else { return }
         self.store = store
         store.fixtureHoldWork = false
-        for action in ["hold-work", "offline", "online"] {
+        for action in ["hold-work", "offline", "online", "cancel-request"] {
             let name = "org.hermescompanion.fixture." + token + "." + action
             commands[name] = action
             CFNotificationCenterAddObserver(center, nil, { _, _, name, _, _ in
@@ -38,6 +38,10 @@ final class FixtureControl {
         case "online":
             store.connection = "Connected"
             store.notice = "Fixture connection restored. No command was replayed."
+        case "cancel-request":
+            store.requests = []
+            store.runState = .idle
+            store.notice = "Fixture request canceled on the host."
         default: return
         }
         CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),

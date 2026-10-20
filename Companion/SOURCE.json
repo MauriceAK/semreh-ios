@@ -1,5 +1,5 @@
 {
-  "source_revision": "25b37aed321ffbc257fc598e0b6afa89c3ab44ef",
+  "source_revision": "653372656935734a35800ff69ccc489a43874e8a",
   "files": [
     {
       "path": "ci/CompanionInternalExport.plist",
@@ -115,7 +115,7 @@
     },
     {
       "path": "ios/HermesCompanion/AppStore.swift",
-      "sha256": "e18d5478b8111531c96a587015748c87753f828759167de1f3538abb40a56fbe"
+      "sha256": "aabb5cad94c6ab94bfd43b7c01617bd8e9b6e34056d493831eed7c875c29a8c2"
     },
     {
       "path": "ios/HermesCompanion/Assets.xcassets/AppIcon.appiconset/AppIcon.png",
@@ -155,7 +155,7 @@
     },
     {
       "path": "ios/HermesCompanion/FixtureControl.swift",
-      "sha256": "7e09dba98413b91184994b63499e2f60afd9a9ac214dde66f244388fb5afe24a"
+      "sha256": "534d504be3b0be454122b2ff7c7b3ecb6e894d462ca4e918a815ad53711146d7"
     },
     {
       "path": "ios/HermesCompanion/HermesCompanion.entitlements",
@@ -215,7 +215,7 @@
     },
     {
       "path": "ios/HermesCompanionUITests/CompanionUITests.swift",
-      "sha256": "82e283f5aaa51d758ad66c3632dc9315d53a42a2722759471e158b64ce8250bc"
+      "sha256": "579e93876e8624537ec84953ca07be8b220c941b0c9cf899ea1e2d4ce13288ff"
     },
     {
       "path": "ios/HermesCompanionUITests/LiveFlowUITests.swift",

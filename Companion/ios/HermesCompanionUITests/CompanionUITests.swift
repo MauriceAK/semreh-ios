@@ -121,8 +121,10 @@ final class CompanionUITests: XCTestCase {
         XCTAssertEqual(composer.value as? String, "Keep this draft while reading")
     }
     func testRemoteCancellationRemovesActionableRequest() {
-        let app = launch(["--fixture-approval", "--fixture-cancel-request"])
+        let control = UUID().uuidString
+        let app = launch(["--fixture-approval", "--fixture-control", control])
         XCTAssertTrue(app.buttons["answer-deny"].waitForExistence(timeout: 3))
+        signalFixture("cancel-request", control: control)
         let absent = NSPredicate(format: "exists == false")
         expectation(for: absent, evaluatedWith: app.buttons["answer-deny"])
         waitForExpectations(timeout: 10)

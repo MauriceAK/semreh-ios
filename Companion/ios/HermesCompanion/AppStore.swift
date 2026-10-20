@@ -775,14 +775,6 @@ extension AppStore {
             requests = [.init(id: "approval-1", generation: "generation-1", kind: "approval", title: "Review this action", description: "The fixture agent wants to publish a draft. This controlled fixture performs no external action.", choices: [.init(id: "allow", label: "Approve once"), .init(id: "deny", label: "Decline")], allowsText: false)]
             runState = .waiting
         }
-        if ProcessInfo.processInfo.arguments.contains("--fixture-cancel-request") {
-            fixtureTimer = Task { [weak self] in
-                try? await Task.sleep(for: .seconds(9))
-                self?.requests = []
-                self?.runState = .idle
-                self?.notice = "Fixture request canceled on the host."
-            }
-        }
         if ProcessInfo.processInfo.arguments.contains("--fixture-reconnect") {
             fixtureTimer = Task { [weak self] in
                 try? await Task.sleep(for: .seconds(3))
