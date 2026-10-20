@@ -1,5 +1,5 @@
 {
-  "source_revision": "db70bed4e2f2c61b53d98a88ae8545121eeb507a",
+  "source_revision": "25b37aed321ffbc257fc598e0b6afa89c3ab44ef",
   "files": [
     {
       "path": "ci/CompanionInternalExport.plist",
@@ -187,7 +187,7 @@
     },
     {
       "path": "ios/HermesCompanionTests/ChatPolishRaceTests.swift",
-      "sha256": "61a6c554fe9a695445329dc18ecf9243be0480f6df2bd616ac8605c2007339de"
+      "sha256": "9ed2cd6ce0fa3850f5c7f66c288e7cda8bb512e1487bf5f5f4b1a6bdd0d18d58"
     },
     {
       "path": "ios/HermesCompanionTests/DomainTests.swift",

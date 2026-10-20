@@ -72,6 +72,8 @@ final class ChatPolishRaceTests: XCTestCase {
         XCTAssertNil(released, "An unfinished read must not retain the conversation owner.")
         released?.background()
         await completion.value
+        for _ in 0..<100 where !snapshot.wasStopped { try await Task.sleep(for: .milliseconds(10)) }
+        if !snapshot.wasStopped { await logRefreshTasks("after-owner-release", selected: snapshot) }
         XCTAssertTrue(snapshot.wasStopped)
     }
     func testBackgroundCancelsHeldRefreshWithoutApplyingItsResponse() async throws {
@@ -110,10 +112,13 @@ final class ChatPolishRaceTests: XCTestCase {
         store.background()
         await completion.value
 
-        XCTAssertTrue(superseded.wasStopped)
-        XCTAssertTrue(current.wasStopped)
         let remaining = await session.allTasks
         XCTAssertTrue(remaining.isEmpty)
+        for _ in 0..<100 where !superseded.wasStopped || !current.wasStopped { try await Task.sleep(for: .milliseconds(10)) }
+        if !superseded.wasStopped { await logRefreshTasks("after-drain-superseded", selected: superseded) }
+        if !current.wasStopped { await logRefreshTasks("after-drain-current", selected: current) }
+        XCTAssertTrue(superseded.wasStopped)
+        XCTAssertTrue(current.wasStopped)
         XCTAssertEqual(store.connection, "Paused")
         XCTAssertTrue(store.transcript.messages.isEmpty)
         session.invalidateAndCancel()
