@@ -16,7 +16,7 @@ final class ChatPolishRaceTests: XCTestCase {
         configuration.protocolClasses = [PolishHeldProtocol.self]
         session = URLSession(configuration: configuration)
         PolishHeldProtocol.reset()
-        store = AppStore(api: .init(baseURL: URL(string: "http://127.0.0.1")!, token: nil, session: session), journal: OperationJournal(defaults: defaults), memory: ConversationMemory(hostID: suite, defaults: defaults))
+        store = AppStore(api: .init(baseURL: URL(string: "http://127.0.0.1/\(suite!)")!, token: nil, session: session), journal: OperationJournal(defaults: defaults), memory: ConversationMemory(hostID: suite, defaults: defaults))
         attachments = AttachmentDrafts(hostID: suite)
         store.attachmentDrafts = attachments
         store.connection = "Connected"
@@ -69,9 +69,44 @@ final class ChatPolishRaceTests: XCTestCase {
         let snapshot = try await request("/snapshot")
         store.background()
         for _ in 0..<100 where !snapshot.wasStopped { try await Task.sleep(for: .milliseconds(10)) }
+        if !snapshot.wasStopped { await logRefreshTasks("after-background", selected: snapshot) }
         XCTAssertTrue(snapshot.wasStopped)
         XCTAssertEqual(store.connection, "Paused")
         XCTAssertTrue(store.transcript.messages.isEmpty)
+    }
+    func testRequestLookupIgnoresLateSnapshotFromPreviousSession() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [PolishHeldProtocol.self]
+        let previousSession = URLSession(configuration: configuration)
+        let previousOwner = "previous-" + UUID().uuidString
+        let previousURL = URL(string: "http://127.0.0.1/\(previousOwner)/v1/sessions/first/snapshot")!
+        PolishHeldProtocol.reset()
+        let previousRead = Task { try? await previousSession.data(from: previousURL) }
+        defer {
+            previousRead.cancel()
+            previousSession.invalidateAndCancel()
+        }
+        let previousSnapshot = try await request("/snapshot", owner: previousOwner)
+        store.draft = "Accepted message"
+        let send = Task { await store.send() }
+        let command = try await request("/commands")
+        command.respond(["operation_id": command.json["operation_id"]!, "status": "accepted"])
+        await send.value
+        let snapshot = try await request("/snapshot")
+        if snapshot.request.url?.path.hasPrefix("/\(suite!)/") != true {
+            await logRefreshTasks("late-previous-session", selected: snapshot)
+        }
+        XCTAssertTrue(snapshot.request.url?.path.hasPrefix("/\(suite!)/") == true,
+                      "Request lookup must select the current test's snapshot.")
+        store.background()
+        for _ in 0..<100 where !snapshot.wasStopped { try await Task.sleep(for: .milliseconds(10)) }
+        if !snapshot.wasStopped { await logRefreshTasks("isolated-background", selected: snapshot) }
+        XCTAssertTrue(snapshot.wasStopped)
+        XCTAssertFalse(previousSnapshot.wasStopped)
+        XCTAssertEqual(store.connection, "Paused")
+        XCTAssertTrue(store.transcript.messages.isEmpty)
+        previousRead.cancel()
+        _ = await previousRead.value
     }
     func testLatestWaitsForNewWindowAndDiscardsOlderResponse() async throws {
         try store.transcript.replace(.init(messages: [.init(id: "old", role: "assistant", text: "Old", provisional: false)], before: "cursor", hasMore: true))
@@ -123,7 +158,7 @@ final class ChatPolishRaceTests: XCTestCase {
         store.selectedSession = .init(id: "second", title: "Second", updatedAt: "", profile: "test")
         upload.respond(["id": "ticket", "name": "note.txt", "media_type": "text/plain", "byte_count": 5, "status": "ready"])
         await send.value
-        XCTAssertTrue(PolishHeldProtocol.requests.filter { $0.request.url?.path.hasSuffix("/commands") == true }.isEmpty)
+        XCTAssertTrue(heldRequests().filter { $0.request.url?.path.hasSuffix("/commands") == true }.isEmpty)
         XCTAssertTrue(store.attachments.isEmpty)
         XCTAssertEqual(attachments.items(for: "first").first?.ticket?.id, "ticket")
     }
@@ -146,7 +181,7 @@ final class ChatPolishRaceTests: XCTestCase {
         XCTAssertFalse(store.isSending)
         XCTAssertEqual(store.draft, "A direction")
         XCTAssertEqual(store.attachments.first?.ticket?.id, "ticket")
-        XCTAssertEqual(PolishHeldProtocol.requests.filter { $0.request.url?.path.hasSuffix("/commands") == true }.count, 1)
+        XCTAssertEqual(heldRequests().filter { $0.request.url?.path.hasSuffix("/commands") == true }.count, 1)
     }
     func testExplicitRetryUsesNewUploadOperationAndUncertainCannotRetry() async throws {
         var item = DraftAttachment(id: UUID(), name: "note.txt", state: .ready(try payload()))
@@ -202,14 +237,24 @@ final class ChatPolishRaceTests: XCTestCase {
         try Data("hello".utf8).write(to: url)
         return .init(fileURL: url, name: "note.txt", mediaType: "text/plain", byteCount: 5, previewURL: nil)
     }
-    private func request(_ suffix: String, index: Int = 0) async throws -> PolishHeldProtocol {
+    private func heldRequests(owner: String? = nil) -> [PolishHeldProtocol] {
+        let prefix = "/\(owner ?? suite!)/"
+        return PolishHeldProtocol.requests.filter { $0.request.url?.path.hasPrefix(prefix) == true }
+    }
+    private func request(_ suffix: String, index: Int = 0, owner: String? = nil) async throws -> PolishHeldProtocol {
         for _ in 0..<200 {
-            let found = PolishHeldProtocol.requests.filter { $0.request.url?.path.hasSuffix(suffix) == true }
+            let found = heldRequests(owner: owner).filter { $0.request.url?.path.hasSuffix(suffix) == true }
             if found.count > index { return found[index] }
             try await Task.sleep(for: .milliseconds(10))
         }
         XCTFail("Missing held request " + suffix)
         throw ClientError.invalidResponse
+    }
+    private func logRefreshTasks(_ phase: String, selected: PolishHeldProtocol) async {
+        let tasks = await session.allTasks
+        print("[PolishHeld] \(phase) suite=\(suite!) selected=\(selected.identity) url=\(selected.request.url!.absoluteString) stopped=\(selected.wasStopped)")
+        print("[PolishHeld] tasks=\(tasks.map { "\($0.taskIdentifier):\($0.state.rawValue):\($0.originalRequest?.url?.absoluteString ?? "nil")" })")
+        print("[PolishHeld] lifecycle=\(PolishHeldProtocol.lifecycle)")
     }
     private func snapshotBody(text: String) -> [String: Any] {
         ["session": ["id": "first", "title": "First", "updated_at": "", "profile": "test"],
@@ -222,8 +267,11 @@ final class ChatPolishRaceTests: XCTestCase {
 private final class PolishHeldProtocol: URLProtocol, @unchecked Sendable {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var held: [PolishHeldProtocol] = []
+    nonisolated(unsafe) private static var events: [String] = []
     static var requests: [PolishHeldProtocol] { lock.withLock { held } }
-    static func reset() { lock.withLock { held = [] } }
+    static var lifecycle: [String] { lock.withLock { events } }
+    static func reset() { lock.withLock { held = []; events = ["reset \(Date.timeIntervalSinceReferenceDate)"] } }
+    let identity = UUID().uuidString
     private(set) var json: [String: Any] = [:]
     private var stopped = false
     var wasStopped: Bool { Self.lock.withLock { stopped } }
@@ -242,13 +290,22 @@ private final class PolishHeldProtocol: URLProtocol, @unchecked Sendable {
             }
         }
         json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
-        Self.lock.withLock { Self.held.append(self) }
+        Self.lock.withLock {
+            Self.held.append(self)
+            Self.events.append("start \(identity) \(Date.timeIntervalSinceReferenceDate) \(request.url!.absoluteString)")
+        }
     }
     func respond(_ object: [String: Any], status: Int = 200) {
+        Self.lock.withLock { Self.events.append("respond \(identity) \(Date.timeIntervalSinceReferenceDate)") }
         let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: try! JSONSerialization.data(withJSONObject: object))
         client?.urlProtocolDidFinishLoading(self)
     }
-    override func stopLoading() { Self.lock.withLock { stopped = true } }
+    override func stopLoading() {
+        Self.lock.withLock {
+            stopped = true
+            Self.events.append("stop \(identity) \(Date.timeIntervalSinceReferenceDate)")
+        }
+    }
 }
