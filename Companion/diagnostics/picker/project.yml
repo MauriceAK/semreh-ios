@@ -1,0 +1,38 @@
+name: PickerControl
+options:
+  deploymentTarget:
+    iOS: '18.0'
+settings:
+  base:
+    SWIFT_VERSION: '6.0'
+    DEVELOPMENT_TEAM: ''
+    CODE_SIGN_STYLE: Automatic
+    TARGETED_DEVICE_FAMILY: '1'
+targets:
+  PickerControl:
+    type: application
+    platform: iOS
+    sources: [PickerControl]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.hermescompanion.diagnostics.picker
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+  PickerControlUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [PickerControlUITests]
+    dependencies:
+      - target: PickerControl
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  PickerControl:
+    build:
+      targets:
+        PickerControl: all
+    test:
+      targets: [PickerControlUITests]
+      gatherCoverageData: false
