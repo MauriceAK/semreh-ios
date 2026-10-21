@@ -81,7 +81,7 @@ platform :ios do
     upload_to_testflight(
       api_key: api_key, ipa: ipa, app_identifier: CompanionTestFlight::BUNDLE_ID,
       app_version: version, build_number: build_number,
-      changelog: "Hermes Companion: glass chat, working dots, centered Latest, and streamed Markdown. Timing budgets remain unmet; physical-device performance and 120 fps are unverified. This build replaces Semreh in its TestFlight app slot. Companion source #{source_manifest.fetch('source_revision')}.",
+      changelog: "Hermes Companion: conversation drawer, cancelable Latest motion, balanced short bubbles, ordered sending, and quieter reconnects. Timing budgets remain unmet; physical-device performance and 120 fps are unverified. This build replaces Semreh in its TestFlight app slot. Companion source #{source_manifest.fetch('source_revision')}.",
       skip_waiting_for_build_processing: false, wait_processing_timeout_duration: 1200,
       uses_non_exempt_encryption: false,
       distribute_external: false, notify_external_testers: false, submit_beta_review: false

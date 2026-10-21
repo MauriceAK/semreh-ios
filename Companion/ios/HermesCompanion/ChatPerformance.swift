@@ -10,7 +10,7 @@ final class ChatPerformance: NSObject {
 
     enum Work: String, Codable, Sendable {
         case draftPersistence, socketDecode, deltaFlush, transcriptUpdate, markdownLayout
-        case sendReceipt, historyFetch, scroll, draftChangeToNextDisplayCallback, deltaQueuedToLayout, latestRequestToLayout
+        case sendReceipt, historyFetch, latestFetch, latestJump, scroll, draftChangeToNextDisplayCallback, deltaQueuedToLayout, latestRequestToLayout
 
         fileprivate var signpostName: StaticString {
             switch self {
@@ -21,6 +21,8 @@ final class ChatPerformance: NSObject {
             case .markdownLayout: "Markdown layout"
             case .sendReceipt: "Send receipt"
             case .historyFetch: "History fetch"
+            case .latestFetch: "Latest fetch"
+            case .latestJump: "Latest jump"
             case .scroll: "Chat scroll"
             case .draftChangeToNextDisplayCallback: "Draft to callback"
             case .deltaQueuedToLayout: "Delta to layout"
@@ -31,6 +33,7 @@ final class ChatPerformance: NSObject {
 
     enum Milestone: String, Codable, Sendable {
         case draftChanged, deltaQueued, transcriptLaidOut, latestRequested
+        case latestWindowReady, latestViewportMoved, latestJumpCompleted, latestCancelled, latestJumpCancelled
     }
 
     enum Outcome: String, Codable, Sendable { case completed, failed, cancelled }
@@ -117,6 +120,7 @@ final class ChatPerformance: NSObject {
     private var draftTokens: [Token] = []
     private var deltaToken: Token?
     private var latestToken: Token?
+    private var latestAwaitingWindow = false
     private var droppedRecords = 0
     private var invalidOperations = 0
 
@@ -190,11 +194,22 @@ final class ChatPerformance: NSObject {
         case .latestRequested:
             end(latestToken, outcome: .cancelled)
             latestToken = begin(.latestRequestToLayout, count: count)
+            latestAwaitingWindow = true
+        case .latestWindowReady:
+            latestAwaitingWindow = false
+        case .latestCancelled:
+            end(latestToken, outcome: .cancelled)
+            latestToken = nil
+            latestAwaitingWindow = false
+        case .latestViewportMoved, .latestJumpCompleted, .latestJumpCancelled:
+            break
         case .transcriptLaidOut:
             end(deltaToken)
             deltaToken = nil
-            end(latestToken)
-            latestToken = nil
+            if !latestAwaitingWindow {
+                end(latestToken)
+                latestToken = nil
+            }
         }
     }
 
@@ -269,7 +284,7 @@ final class ChatPerformance: NSObject {
     }
 
     private func observesFrames(_ work: Work) -> Bool {
-        [.scroll, .draftChangeToNextDisplayCallback, .deltaQueuedToLayout, .latestRequestToLayout].contains(work)
+        [.scroll, .latestJump, .draftChangeToNextDisplayCallback, .deltaQueuedToLayout, .latestRequestToLayout].contains(work)
     }
 
     @objc private func tick(_ sender: CADisplayLink) {

@@ -1,9 +1,63 @@
 import CoreFoundation
+import Vision
 import XCTest
 
 @MainActor
 final class PerformanceFlowUITests: XCTestCase {
     override func setUpWithError() throws { continueAfterFailure = false }
+
+    func testExistingCanonicalReplyIsVisibleWhileDraftingWhenConfigured() throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard let session = environment["COMPANION_TEST_RENDER_SESSION"],
+              let marker = environment["COMPANION_TEST_RENDER_MARKER"] else {
+            throw XCTSkip("Requires an isolated existing canonical reply and terminal marker. This test sends no messages.")
+        }
+        let app = XCUIApplication()
+        app.launchArguments = ["--session", session]
+        if let invitation = environment["COMPANION_TEST_INVITATION"] {
+            app.launchArguments += ["--invitation", invitation]
+        }
+        app.launch()
+        XCTAssertTrue(editor(app).waitForExistence(timeout: 30))
+        XCTAssertFalse(app.staticTexts["fixtureBanner"].exists)
+        waitUntilReady(app, timeout: 30)
+        let answer = app.textViews.matching(NSPredicate(format: "label BEGINSWITH %@ AND label CONTAINS %@", "Hermes. ", marker)).firstMatch
+        XCTAssertTrue(answer.waitForExistence(timeout: 30))
+        let draft = "Keep this unsent draft responsive while the assistant streams its answer."
+        replaceDraft(app, with: draft)
+        XCTAssertTrue(app.keyboards.firstMatch.exists)
+        let latest = app.buttons["latestMessages"]
+        if latest.exists {
+            latest.tap()
+            expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: latest)
+            waitForExpectations(timeout: 10)
+        }
+        XCTAssertEqual(editor(app).value as? String, draft)
+        XCTAssertFalse(app.staticTexts["workingIndicator"].exists)
+        XCTAssertFalse(app.alerts.firstMatch.exists)
+
+        let screenshot = app.screenshot()
+        let attachment = XCTAttachment(screenshot: screenshot)
+        attachment.name = "existing-canonical-reply-with-keyboard"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = false
+        try VNImageRequestHandler(cgImage: XCTUnwrap(screenshot.image.cgImage)).perform([request])
+        func normalized(_ value: String) -> String {
+            value.uppercased().filter { $0.isLetter || $0.isNumber }
+        }
+        let observations = request.results ?? []
+        let terminal = try XCTUnwrap(observations.first {
+            normalized($0.topCandidates(1).first?.string ?? "").contains(normalized(marker))
+        }, "The existing canonical terminal marker must be visible in screenshot pixels above the draft.")
+        let markerBottom = app.frame.minY + (1 - terminal.boundingBox.minY) * app.frame.height
+        let gap = editor(app).frame.minY - markerBottom
+        XCTAssertGreaterThanOrEqual(gap, 0, "The canonical final line must remain above the composer.")
+        XCTAssertLessThan(gap, 80, "Latest must not leave a large empty assistant tail above the composer.")
+        attachScope("Read-only existing canonical reply. No send or stop action. Terminal marker was recognized in rendered pixels with an unsent draft and keyboard present. This check does not measure frame rate or typing latency.")
+    }
 
     func testRealHistoryDiagnosticWhenConfigured() throws {
         let environment = ProcessInfo.processInfo.environment

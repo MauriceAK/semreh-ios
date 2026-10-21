@@ -122,6 +122,9 @@ struct PairingView: View {
 struct ChatView: View {
     @Bindable var store: AppStore
     @State private var sheet: ChatSheet?
+    @State private var isDrawerOpen = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @AccessibilityFocusState private var conversationsFocused: Bool
     @State private var transcriptFrame = CGRect.zero
     @State private var headerFrame = CGRect.zero
     @State private var dockFrame = CGRect.zero
@@ -133,39 +136,70 @@ struct ChatView: View {
         return UIEdgeInsets(top: max(0, headerFrame.maxY - transcriptFrame.minY) + 8, left: 0,
             bottom: max(0, transcriptFrame.maxY - dockFrame.minY), right: 0)
     }
-    enum ChatSheet: String, Identifiable { case sessions, controls, activity, settings; var id: String { rawValue } }
+    enum ChatSheet: String, Identifiable { case controls, activity, settings; var id: String { rawValue } }
 
     var body: some View {
         NavigationStack {
             GeometryReader { geometry in
-                ZStack {
-                    TranscriptContainer(store: store, viewportInsets: viewportInsets)
-                        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { transcriptFrame = $0 }
-                        .ignoresSafeArea(.container)
-                    VStack {
-                        Rectangle().fill(.ultraThinMaterial)
-                            .mask(LinearGradient(stops: [.init(color: .black, location: 0), .init(color: .black.opacity(0.85), location: 0.4), .init(color: .clear, location: 1)], startPoint: .top, endPoint: .bottom))
-                            .frame(height: viewportInsets.top)
-                        Spacer(minLength: 0)
-                    }.ignoresSafeArea(.container).allowsHitTesting(false).accessibilityHidden(true)
-                    VStack(spacing: 0) {
-                        header
-                            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { headerFrame = $0 }
-                        Spacer(minLength: 0)
-                        dock
-                            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { dockFrame = $0 }
+                let drawerWidth = min(geometry.size.width * 0.8, max(0, geometry.size.width - 56))
+                ZStack(alignment: .leading) {
+                    if isDrawerOpen {
+                        ConversationDrawer(store: store, onClose: { closeDrawer() }, onDestination: { closeDrawer(destination: $0) }, onSelect: { session in
+                            closeDrawer()
+                            if session.id != store.selectedSession?.id { Task { await store.select(session) } }
+                        })
+                        .frame(width: drawerWidth)
+                        .transition(.opacity)
                     }
-                    if store.newActivity || store.transcript.hasNewer || store.isReadingHistory {
+                    ZStack {
+                        TranscriptContainer(store: store, viewportInsets: viewportInsets)
+                            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { transcriptFrame = $0 }
+                            .ignoresSafeArea(.container)
                         VStack {
-                            Spacer()
-                            Button { Task { await store.latest() } } label: {
-                                Image(systemName: "arrow.down").font(.system(size: 17, weight: .semibold))
-                                    .foregroundStyle(.white).frame(width: 44, height: 44)
-                                    .background(Color.blue, in: Circle())
-                            }.accessibilityLabel("Latest messages").accessibilityIdentifier("latestMessages")
-                                .padding(.bottom, dockHeight + 8)
+                            Rectangle().fill(.ultraThinMaterial)
+                                .mask(LinearGradient(stops: [.init(color: .black, location: 0), .init(color: .black.opacity(0.85), location: 0.4), .init(color: .clear, location: 1)], startPoint: .top, endPoint: .bottom))
+                                .frame(height: viewportInsets.top)
+                            Spacer(minLength: 0)
+                        }.ignoresSafeArea(.container).allowsHitTesting(false).accessibilityHidden(true)
+                        VStack(spacing: 0) {
+                            header
+                                .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { headerFrame = $0 }
+                            Spacer(minLength: 0)
+                            dock
+                                .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { dockFrame = $0 }
+                        }
+                        if store.newActivity || store.transcript.hasNewer || store.isReadingHistory || store.isFetchingLatest {
+                            VStack {
+                                Spacer()
+                                Button { Task { await store.latest() } } label: {
+                                    Group {
+                                        if store.isFetchingLatest { ProgressView().tint(.white) }
+                                        else { Image(systemName: "arrow.down").font(.system(size: 17, weight: .semibold)) }
+                                    }.foregroundStyle(.white).frame(width: 44, height: 44)
+                                        .background(Color.blue, in: Circle())
+                                }.disabled(store.isFetchingLatest)
+                                    .accessibilityLabel(store.isFetchingLatest ? "Loading latest messages" : "Latest messages").accessibilityIdentifier("latestMessages")
+                                    .padding(.bottom, dockHeight + 8)
+                            }
                         }
                     }
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+                    .background(Color(white: 0.055).ignoresSafeArea(.container))
+                    .disabled(isDrawerOpen)
+                    .allowsHitTesting(!isDrawerOpen)
+                    .accessibilityHidden(isDrawerOpen)
+                    .overlay {
+                        if isDrawerOpen {
+                            Button { closeDrawer() } label: {
+                                Color.black.opacity(0.12).contentShape(Rectangle())
+                            }.buttonStyle(.plain)
+                                .accessibilityLabel("Close conversations")
+                                .accessibilityIdentifier("dismissConversations")
+                                .keyboardShortcut(.cancelAction)
+                        }
+                    }
+                    .clipShape(ChatPanelShape(cornerRadius: isDrawerOpen ? 28 : 0, topInset: geometry.safeAreaInsets.top, bottomInset: geometry.safeAreaInsets.bottom))
+                    .offset(x: isDrawerOpen ? drawerWidth : 0)
                 }
                 .onChange(of: viewportInsets) { _, insets in
                     #if DEBUG
@@ -180,25 +214,40 @@ struct ChatView: View {
             .sheet(item: $sheet) { item in
                 Group {
                     switch item {
-                    case .sessions: SessionsView(store: store)
                     case .controls: ControlsView(store: store)
                     case .activity: ActivityView(store: store)
                     case .settings: SettingsView(store: store)
                     }
                 }.modifier(AppAlerts(store: store))
             }
-            .onChange(of: store.routedUpdateID) { _, id in if id != nil { sheet = .activity } }
+            .onChange(of: store.routedUpdateID) { _, id in if id != nil { closeDrawer(destination: .activity) } }
             .modifier(AppAlerts(store: store, enabled: sheet == nil))
+        }
+    }
+
+    private func closeDrawer(destination: ChatSheet? = nil) {
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        guard isDrawerOpen else { if let destination { sheet = destination }; return }
+        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.24)) {
+            isDrawerOpen = false
+        } completion: {
+            if let destination { sheet = destination }
+            else { conversationsFocused = true }
         }
     }
 
     private var header: some View {
         VStack(spacing: 8) {
             HStack(alignment: .top) {
-                Button { sheet = .sessions } label: {
+                Button {
+                    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                    conversationsFocused = false
+                    withAnimation(reduceMotion ? nil : .easeOut(duration: 0.24)) { isDrawerOpen = true }
+                } label: {
                     Image(systemName: "line.3.horizontal").font(.system(size: 20)).frame(width: 44, height: 44)
                 }.modifier(ChatGlass(cornerRadius: 22))
                     .accessibilityLabel("Conversations").accessibilityIdentifier("sessions")
+                    .accessibilityFocused($conversationsFocused)
                 Spacer(minLength: 12)
                 VStack(spacing: 3) {
                     HStack(spacing: 6) {
@@ -223,13 +272,13 @@ struct ChatView: View {
                     .padding(5).modifier(ChatGlass(cornerRadius: 10)).dynamicTypeSize(...DynamicTypeSize.xxxLarge)
                     .accessibilityIdentifier("fixtureBanner")
             }
-            if store.connection != "Connected" {
+            if let connectionError = store.connectionError {
                 HStack(spacing: 8) {
-                    ProgressView().controlSize(.mini)
-                    Text(store.connection + ". Your draft stays here.").font(.caption)
+                    Image(systemName: "exclamationmark.circle").foregroundStyle(.orange)
+                    Text(connectionError).font(.caption)
                     Spacer()
                     Button("Reconnect") { store.connect() }.frame(minHeight: 44)
-                }.padding(.horizontal, 12).modifier(ChatGlass(cornerRadius: 16))
+                }.padding(.horizontal, 12).modifier(ChatGlass(cornerRadius: 16)).accessibilityIdentifier("connectionError")
             }
         }.padding(.horizontal, 16).padding(.top, 6).padding(.bottom, 8)
     }
@@ -241,7 +290,7 @@ struct ChatView: View {
                     Text("An action has an uncertain outcome").font(.subheadline.bold())
                     Text("Check the conversation before sending it again. It was not retried.").font(.caption).foregroundStyle(.secondary)
                     HStack {
-                        Button("Refresh") { Task { await store.latest() } }.frame(minHeight: 44)
+                        Button("Refresh") { Task { await store.latest(forceRefresh: true) } }.frame(minHeight: 44)
                         Spacer()
                         Button("I checked") { store.currentUncertain.forEach { store.acknowledgeUncertain($0) } }.frame(minHeight: 44)
                     }.font(.caption)
@@ -264,26 +313,22 @@ struct ChatView: View {
 struct TranscriptContainer: View {
     var store: AppStore
     var viewportInsets: UIEdgeInsets = .zero
-    private var activity: TranscriptActivity {
-        if store.isStopping { return .stopping }
-        if store.runState == .waiting { return .waiting }
-        return store.isWorking ? .working : .idle
-    }
     var body: some View {
         ZStack {
-            if store.transcript.messages.isEmpty && !store.isWorking && !store.transcript.hasMore {
+            if store.displayMessages.isEmpty && store.transcriptActivity == .idle && !store.transcript.hasMore {
                 VStack(spacing: 12) {
                     Image(systemName: "sparkle").font(.system(size: 36, weight: .light)).foregroundStyle(.blue)
                     Text(store.selectedSession == nil ? "What’s on your mind?" : "Start with a thought.").font(.title2.weight(.medium))
                     Text("Ask a question, work on an idea, or give your agent something to follow through on.").font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 290)
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                TranscriptView(messages: store.transcript.messages, hasMore: store.transcript.hasMore,
+                TranscriptView(messages: store.displayMessages, hasMore: store.transcript.hasMore,
                     loading: store.isLoadingHistory, latestRevision: store.latestRevision,
-                    viewportInsets: viewportInsets, activity: activity,
+                    viewportInsets: viewportInsets, activity: store.transcriptActivity, sessionID: store.selectedSession?.id,
+                    onUserScrollBegan: { store.userScrollBegan() },
                     onOlder: { Task { await store.loadOlder() } }, onReadingHistory: { store.isReadingHistory = $0 })
             }
-        }.accessibilityValue("\(store.transcript.messages.count) loaded messages")
+        }.accessibilityValue("\(store.displayMessages.count) loaded messages")
     }
 }
 

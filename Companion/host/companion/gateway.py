@@ -587,6 +587,7 @@ class Gateway:
                     live.info.update(payload)
                     live.controls_at = 0
                     await self.publish({"type": "controls", "session_id": live.stored, "payload": await self.controls(live.stored, refresh=True)})
+                    await self.publish({"type": "connection", "session_id": live.stored, "payload": {"state": live.state}})
                 elif kind in {"status.update", "tool.start", "tool.complete", "error"}:
                     live.status_text = str(payload.get("text") or payload.get("message") or payload.get("name") or "Working")[:300]
                     await self.publish({"type": "connection", "session_id": live.stored, "payload": {"state": "failed" if kind == "error" else live.state, "message": live.status_text}})

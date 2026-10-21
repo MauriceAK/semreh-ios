@@ -8,6 +8,8 @@ struct TranscriptView: UIViewControllerRepresentable {
     let latestRevision: UUID
     var viewportInsets = UIEdgeInsets(top: 36, left: 0, bottom: 18, right: 0)
     var activity: TranscriptActivity = .idle
+    var sessionID: String?
+    var onUserScrollBegan: (() -> Void)?
     let onOlder: () -> Void
     let onReadingHistory: (Bool) -> Void
 
@@ -16,7 +18,8 @@ struct TranscriptView: UIViewControllerRepresentable {
         controller.updateChrome(viewportInsets: viewportInsets, activity: activity)
         controller.onOlder = onOlder
         controller.onReadingHistory = onReadingHistory
-        controller.update(messages: messages, hasMore: hasMore, loading: loading, latestRevision: latestRevision)
+        controller.onUserScrollBegan = onUserScrollBegan
+        controller.update(messages: messages, hasMore: hasMore, loading: loading, latestRevision: latestRevision, sessionID: sessionID)
     }
 }
 
@@ -45,10 +48,22 @@ final class TranscriptController: UIViewController, UITableViewDataSource, UITab
     private var followingLatest = true
     private var latestRevision: UUID?
     private var viewportIntent = UUID()
+    private var sessionID: String?
+    private struct LatestJump {
+        var startOffset: CGFloat
+        var started: CFTimeInterval?
+        var moved = false
+        let span: ChatPerformance.Token?
+    }
+    private var latestJump: LatestJump?
+    private var jumpLink: CADisplayLink?
+    private lazy var jumpTicker = TranscriptJumpTicker(controller: self)
+    var isJumpingToLatest: Bool { latestJump != nil }
     private var scrollSpan: ChatPerformance.Token?
     private var sizingTask: Task<Void, Never>?
     var onOlder: (() -> Void)?
     var onReadingHistory: ((Bool) -> Void)?
+    var onUserScrollBegan: (() -> Void)?
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -71,6 +86,7 @@ final class TranscriptController: UIViewController, UITableViewDataSource, UITab
         older.titleLabel?.font = .preferredFont(forTextStyle: .footnote)
         older.accessibilityIdentifier = "loadOlder"
         older.addTarget(self, action: #selector(loadEarlier), for: .touchUpInside)
+        NotificationCenter.default.addObserver(self, selector: #selector(reduceMotionChanged), name: UIAccessibility.reduceMotionStatusDidChangeNotification, object: nil)
     }
     func updateChrome(viewportInsets: UIEdgeInsets, activity: TranscriptActivity) {
         loadViewIfNeeded()
@@ -91,7 +107,12 @@ final class TranscriptController: UIViewController, UITableViewDataSource, UITab
         applying = false
         logGeometry("chrome")
     }
-    @objc private func loadEarlier() { onOlder?() }
+    @objc private func loadEarlier() {
+        cancelLatestJump()
+        followingLatest = false
+        viewportIntent = UUID()
+        onOlder?()
+    }
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         if firstLayout && !messages.isEmpty && table.bounds.height > 0 {
@@ -113,19 +134,32 @@ final class TranscriptController: UIViewController, UITableViewDataSource, UITab
         }
         #endif
     }
-    func update(messages newMessages: [ChatMessage], hasMore: Bool, loading: Bool, latestRevision: UUID) {
+    func update(messages newMessages: [ChatMessage], hasMore: Bool, loading: Bool, latestRevision: UUID, sessionID: String? = nil) {
         loadViewIfNeeded()
+        let changedSession = self.sessionID != sessionID
+        if changedSession {
+            cancelLatestJump()
+            viewportIntent = UUID()
+            followingLatest = true
+            firstLayout = true
+            self.sessionID = sessionID
+        }
         older.frame = CGRect(x: 0, y: 0, width: table.bounds.width, height: hasMore ? 48 : 0)
         older.setTitle(loading ? "Loading earlier messages…" : "Load earlier messages", for: .normal)
         older.isEnabled = !loading
         if hasMore { table.tableHeaderView = older } else { table.tableHeaderView = nil }
-        let requestedLatest = self.latestRevision != nil && self.latestRevision != latestRevision
+        let requestedLatest = !changedSession && self.latestRevision != nil && self.latestRevision != latestRevision
         self.latestRevision = latestRevision
-        if requestedLatest { followingLatest = true; viewportIntent = UUID() }
+        if requestedLatest {
+            cancelLatestJump()
+            followingLatest = true
+            viewportIntent = UUID()
+            latestJump = LatestJump(startOffset: table.contentOffset.y, span: ChatPerformance.shared.begin(.latestJump))
+        }
         guard messages != newMessages else {
             if requestedLatest {
-                scrollToBottom()
                 table.layoutIfNeeded()
+                beginLatestJump()
                 ChatPerformance.shared.mark(.transcriptLaidOut, count: messages.count)
             }
             return
@@ -161,8 +195,15 @@ final class TranscriptController: UIViewController, UITableViewDataSource, UITab
             UIView.performWithoutAnimation { table.reloadData(); table.layoutIfNeeded() }
         }
         let prepended = messages.first?.id != oldMessages.first?.id && messages.last?.id == oldMessages.last?.id
-        if prepended && !oldMessages.isEmpty && !requestedLatest { followingLatest = false; onReadingHistory?(true) }
-        if requestedLatest || (wasAtBottom && !prepended) {
+        if prepended && !oldMessages.isEmpty && !requestedLatest {
+            cancelLatestJump()
+            followingLatest = false
+            viewportIntent = UUID()
+            onReadingHistory?(true)
+        }
+        if requestedLatest {
+            beginLatestJump()
+        } else if wasAtBottom && !prepended {
             scrollToBottom()
         } else if let anchor, let index = messages.firstIndex(where: { $0.id == anchor.id }) {
             restoreAnchor(anchor, at: index)
@@ -181,13 +222,72 @@ final class TranscriptController: UIViewController, UITableViewDataSource, UITab
         guard let index = table.indexPathsForVisibleRows?.first, messages.indices.contains(index.row) else { return nil }
         return (messages[index.row].id, table.rectForRow(at: index).minY - table.contentOffset.y)
     }
-    private func scrollToBottom() {
-        followingLatest = true
-        let offset = max(-table.adjustedContentInset.top, table.contentSize.height - table.bounds.height + table.adjustedContentInset.bottom)
-        table.setContentOffset(CGPoint(x: 0, y: offset), animated: false)
+    private var bottomOffset: CGFloat {
+        max(-table.adjustedContentInset.top, table.contentSize.height - table.bounds.height + table.adjustedContentInset.bottom)
     }
+    private func scrollToBottom() {
+        guard latestJump == nil else { return }
+        followingLatest = true
+        table.setContentOffset(CGPoint(x: 0, y: bottomOffset), animated: false)
+    }
+    private func beginLatestJump() {
+        guard var jump = latestJump else { return }
+        jump.startOffset = table.contentOffset.y
+        jump.started = CACurrentMediaTime()
+        latestJump = jump
+        if UIAccessibility.isReduceMotionEnabled || abs(bottomOffset - jump.startOffset) < 1 {
+            finishLatestJump()
+            return
+        }
+        let link = CADisplayLink(target: jumpTicker, selector: #selector(TranscriptJumpTicker.tick(_:)))
+        jumpLink = link
+        link.add(to: .main, forMode: .common)
+    }
+    fileprivate func advanceLatestJump(_ link: CADisplayLink) {
+        guard var jump = latestJump, let started = jump.started else { return }
+        let fraction = min(1, max(0, (link.timestamp - started) / 0.28))
+        let eased = 1 - pow(1 - fraction, 3)
+        let offset = jump.startOffset + (bottomOffset - jump.startOffset) * eased
+        if !jump.moved && abs(offset - table.contentOffset.y) > 0.1 {
+            jump.moved = true
+            latestJump = jump
+            ChatPerformance.shared.mark(.latestViewportMoved)
+        }
+        table.setContentOffset(CGPoint(x: 0, y: offset), animated: false)
+        if fraction >= 1 { finishLatestJump() }
+    }
+    private func finishLatestJump() {
+        guard let jump = latestJump else { return }
+        if !jump.moved && abs(bottomOffset - table.contentOffset.y) > 0.1 { ChatPerformance.shared.mark(.latestViewportMoved) }
+        jumpLink?.invalidate()
+        jumpLink = nil
+        latestJump = nil
+        scrollToBottom()
+        ChatPerformance.shared.end(jump.span)
+        ChatPerformance.shared.mark(.latestJumpCompleted)
+        onReadingHistory?(false)
+    }
+    private func cancelLatestJump() {
+        jumpLink?.invalidate()
+        jumpLink = nil
+        guard let jump = latestJump else { return }
+        latestJump = nil
+        ChatPerformance.shared.end(jump.span, outcome: .cancelled)
+        ChatPerformance.shared.mark(.latestJumpCancelled)
+    }
+    @objc private func reduceMotionChanged() {
+        if UIAccessibility.isReduceMotionEnabled { finishLatestJump() }
+    }
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        cancelLatestJump()
+    }
+    isolated deinit { jumpLink?.invalidate() }
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+        cancelLatestJump()
+        followingLatest = false
         viewportIntent = UUID()
+        onUserScrollBegan?()
         ChatPerformance.shared.end(scrollSpan)
         scrollSpan = ChatPerformance.shared.begin(.scroll)
     }
@@ -242,6 +342,16 @@ final class TranscriptController: UIViewController, UITableViewDataSource, UITab
         cell.onFormattingWillChange = { [weak self] in self?.scheduleSizing() }
         cell.configure(messages[indexPath.row])
         return cell
+    }
+}
+
+@MainActor
+private final class TranscriptJumpTicker: NSObject {
+    weak var controller: TranscriptController?
+    init(controller: TranscriptController) { self.controller = controller }
+    @objc func tick(_ link: CADisplayLink) {
+        guard let controller else { link.invalidate(); return }
+        controller.advanceLatestJump(link)
     }
 }
 
@@ -305,7 +415,7 @@ private final class TranscriptActivityBubble: UIView {
 @MainActor
 final class BubbleCell: UITableViewCell {
     private let bubble = UIView()
-    private let textView = UITextView()
+    private let textView = UITextView(usingTextLayoutManager: false)
     private var left: NSLayoutConstraint!
     private var right: NSLayoutConstraint!
     private var formatTask: Task<Void, Never>?
@@ -336,7 +446,7 @@ final class BubbleCell: UITableViewCell {
         cache.totalCostLimit = 2 * TranscriptWindow.maxBytes
         return cache
     }()
-    private static let measuringText = UITextView()
+    private static let measuringText = UITextView(usingTextLayoutManager: false)
     private static var measuringMessage: ChatMessage?
     private static var measuringWidth: CGFloat = 0
     private static var measuringFont: UIFont?
@@ -368,7 +478,7 @@ final class BubbleCell: UITableViewCell {
         let sizeKey = (String(describing: width) + "|" + (formatted?.revision.uuidString ?? "plain") + "|" + (key as String)) as NSString
         if let height = heightCache.object(forKey: sizeKey) { return CGFloat(height.doubleValue) }
         measuringText.isScrollEnabled = false
-        measuringText.textContainerInset = UIEdgeInsets(top: 11, left: 10, bottom: 11, right: 10)
+        measuringText.textContainerInset = UIEdgeInsets(top: 11, left: 16, bottom: 11, right: 16)
         measuringText.textContainer.lineFragmentPadding = 0
         let suffix = formatted == nil && !measuringWasFormatted && measuringWidth == width && measuringFont == font
             ? measuringMessage.flatMap { provisionalSuffix(from: $0, to: message) } : nil
@@ -399,7 +509,7 @@ final class BubbleCell: UITableViewCell {
         textView.isEditable = false
         textView.isSelectable = true
         textView.isScrollEnabled = false
-        textView.textContainerInset = UIEdgeInsets(top: 11, left: 10, bottom: 11, right: 10)
+        textView.textContainerInset = UIEdgeInsets(top: 11, left: 16, bottom: 11, right: 16)
         textView.textContainer.lineFragmentPadding = 0
         textView.adjustsFontForContentSizeCategory = true
         textView.dataDetectorTypes = .link
@@ -413,6 +523,7 @@ final class BubbleCell: UITableViewCell {
         NSLayoutConstraint.activate([
             bubble.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 5), bubble.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -5),
             bubble.widthAnchor.constraint(lessThanOrEqualTo: contentView.widthAnchor, multiplier: 0.91),
+            bubble.widthAnchor.constraint(greaterThanOrEqualToConstant: 48),
             bubble.leadingAnchor.constraint(greaterThanOrEqualTo: contentView.leadingAnchor, constant: 16),
             bubble.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -16),
             textView.topAnchor.constraint(equalTo: bubble.topAnchor), textView.bottomAnchor.constraint(equalTo: bubble.bottomAnchor),
@@ -487,6 +598,21 @@ final class BubbleCell: UITableViewCell {
     private static func render(_ formatted: AttributedString, font: UIFont) -> NSAttributedString {
         let attributed = NSMutableAttributedString(formatted)
         attributed.addAttributes([.font: font, .foregroundColor: UIColor.white], range: NSRange(location: 0, length: attributed.length))
+        var listIndents: [Int: CGFloat] = [:]
+        for run in formatted.runs {
+            var ordinal: Int?
+            for component in run.presentationIntent?.components ?? [] {
+                let marker: String
+                switch component.kind {
+                case .listItem(let value): ordinal = value; continue
+                case .orderedList: marker = "\(ordinal ?? 1). "
+                case .unorderedList: marker = "• "
+                default: continue
+                }
+                let width = ceil((marker as NSString).size(withAttributes: [.font: font]).width)
+                listIndents[component.identity] = max(listIndents[component.identity] ?? 20, width)
+            }
+        }
         var location = 0
         for run in formatted.runs {
             let length = String(formatted[run.range].characters).utf16.count
@@ -500,7 +626,8 @@ final class BubbleCell: UITableViewCell {
             let paragraph = NSMutableParagraphStyle()
             paragraph.paragraphSpacing = 8
             paragraph.lineSpacing = 2
-            var listDepth = 0
+            var listIndent: CGFloat = 0
+            var markerIndent: CGFloat?
             for component in components {
                 switch component.kind {
                 case .header(let level):
@@ -510,16 +637,19 @@ final class BubbleCell: UITableViewCell {
                 case .codeBlock:
                     code = true
                     paragraph.paragraphSpacing = 0
-                case .orderedList, .unorderedList: listDepth += 1
+                case .orderedList, .unorderedList:
+                    let indent = listIndents[component.identity] ?? 20
+                    if markerIndent == nil { markerIndent = indent }
+                    listIndent += indent
                 case .blockQuote:
                     paragraph.headIndent += 12
                     paragraph.firstLineHeadIndent += 12
                 default: break
                 }
             }
-            if listDepth > 0 {
-                paragraph.headIndent += CGFloat(listDepth) * 20
-                paragraph.firstLineHeadIndent += CGFloat(listDepth - 1) * 20
+            if let markerIndent {
+                paragraph.headIndent += listIndent
+                paragraph.firstLineHeadIndent += listIndent - markerIndent
                 paragraph.tabStops = [NSTextTab(textAlignment: .left, location: paragraph.headIndent)]
                 paragraph.paragraphSpacing = 4
             }

@@ -21,7 +21,7 @@ final class FixtureControl {
               let token = UUID(uuidString: args[index + 1])?.uuidString else { return }
         self.store = store
         store.fixtureHoldWork = false
-        for action in ["hold-work", "offline", "online", "cancel-request"] {
+        for action in ["hold-work", "offline", "online", "cancel-request", "synchronizing", "short-message", "tool-status"] {
             let name = "org.hermescompanion.fixture." + token + "." + action
             commands[name] = action
             CFNotificationCenterAddObserver(center, nil, { _, _, name, _, _ in
@@ -34,10 +34,24 @@ final class FixtureControl {
         guard let action = commands[name], let store, store.fixture else { return }
         switch action {
         case "hold-work": store.fixtureHoldWork = true
-        case "offline": store.connection = "Reconnecting"; store.requests = []
+        case "synchronizing": store.connection = "Synchronizing"
+        case "short-message":
+            try? store.transcript.replace(.init(messages: [.init(id: "fixture-short-hi", role: "user", text: "hi", provisional: false)], before: nil, hasMore: false))
+            store.runState = .idle
+            store.latestRevision = UUID()
+        case "tool-status":
+            guard let sessionID = store.selectedSession?.id,
+                  let data = try? JSONSerialization.data(withJSONObject: ["type": "connection", "session_id": sessionID, "payload": ["state": "working", "message": "mcp__gbrain__recall"]]),
+                  let event = try? CompanionAPI.decoder.decode(WireEvent.self, from: data) else { return }
+            try? store.receive(event)
+        case "offline":
+            store.connection = "Reconnecting"
+            store.connectionError = "The connection to Hermes was lost."
+            store.requests = []
         case "online":
             store.connection = "Connected"
-            store.notice = "Fixture connection restored. No command was replayed."
+            store.connectionError = nil
+            store.notice = nil
         case "cancel-request":
             store.requests = []
             store.runState = .idle

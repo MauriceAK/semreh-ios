@@ -114,6 +114,12 @@ final class DraftRaceTests: XCTestCase {
         await send.value
         XCTAssertEqual(store.draft, expected)
         XCTAssertTrue(store.uncertain.isEmpty)
+        if switchConversation || switchHost {
+            XCTAssertFalse(store.displayMessages.contains { $0.id == "accepted-user" }, "An old submission must not appear in the new conversation or host.")
+        } else {
+            XCTAssertEqual(store.displayMessages.first?.id, "accepted-user")
+            XCTAssertEqual(store.displayMessages.first?.text, "The submitted first conversation draft")
+        }
         let restored = ConversationMemory(hostID: switchHost ? "another-host" : "controlled-host", defaults: defaults)
         XCTAssertEqual(restored.draft(for: switchConversation ? "second" : "first"), expected)
         if switchConversation { XCTAssertEqual(restored.draft(for: "first"), "") }
@@ -154,7 +160,7 @@ private final class DraftHeldProtocol: URLProtocol, @unchecked Sendable {
         Self.held = self
     }
     func completeAccepted() {
-        respond(status: 200, object: ["operation_id": operationID.uppercased(), "status": "accepted"])
+        respond(status: 200, object: ["operation_id": operationID.uppercased(), "status": "accepted", "user_row_id": "accepted-user"])
         Self.held = nil
     }
     func completeConfirmation() {

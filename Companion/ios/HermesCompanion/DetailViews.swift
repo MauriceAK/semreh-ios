@@ -1,28 +1,5 @@
 import SwiftUI
 
-struct SessionsView: View {
-    var store: AppStore
-    @Environment(\.dismiss) private var dismiss
-    @State private var search = ""
-    var body: some View {
-        NavigationStack {
-            List {
-                Button { Task { await store.newSession(); dismiss() } } label: { Label("New conversation", systemImage: "square.and.pencil") }.disabled(!store.canCommand).accessibilityIdentifier("newConversation")
-                ForEach(store.sessions.filter { search.isEmpty || $0.title.localizedCaseInsensitiveContains(search) }) { session in
-                    Button { Task { await store.select(session); dismiss() } } label: {
-                        HStack {
-                            VStack(alignment: .leading, spacing: 5) { Text(session.title.isEmpty ? "Untitled conversation" : session.title).foregroundStyle(.primary); Text(session.profile).font(.caption).foregroundStyle(.secondary) }
-                            Spacer()
-                            if session.id == store.selectedSession?.id { Image(systemName: "checkmark").font(.caption) }
-                        }.padding(.vertical, 5)
-                    }
-                }
-            }.searchable(text: $search, prompt: "Find a conversation")
-                .navigationTitle("Conversations").toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
-        }
-    }
-}
-
 struct ControlsView: View {
     var store: AppStore
     @Environment(\.dismiss) private var dismiss

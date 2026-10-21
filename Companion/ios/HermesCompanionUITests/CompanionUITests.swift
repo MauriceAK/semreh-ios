@@ -74,6 +74,33 @@ final class CompanionUITests: XCTestCase {
         if !app.datePickers["quietEnd"].exists { app.swipeUp() }
         XCTAssertTrue(app.datePickers["quietEnd"].exists)
     }
+    func testShortMessageHasHorizontalBubble() {
+        let control = UUID().uuidString
+        let app = launch(["--fixture-control", control])
+        signalFixture("short-message", control: control)
+        let message = app.textViews["message-fixture-short-hi"]
+        XCTAssertTrue(message.waitForExistence(timeout: 5))
+        XCTAssertGreaterThanOrEqual(message.frame.width, message.frame.height)
+        attach(app, "short-message-bubble")
+    }
+    func testRoutineSynchronizationAndToolProgressStayQuiet() {
+        let control = UUID().uuidString
+        let app = launch(["--fixture-control", control])
+        let composer = app.descendants(matching: .any).matching(identifier: "composer").firstMatch
+        composer.tap()
+        composer.typeText("A draft stays here")
+        signalFixture("synchronizing", control: control)
+        XCTAssertFalse(app.buttons["Reconnect"].exists)
+        XCTAssertFalse(app.staticTexts["Synchronizing. Your draft stays here."].exists)
+        XCTAssertEqual(composer.value as? String, "A draft stays here")
+        attach(app, "quiet-synchronization")
+        signalFixture("online", control: control)
+        signalFixture("tool-status", control: control)
+        XCTAssertFalse(app.staticTexts["mcp__gbrain__recall"].exists)
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "workingIndicator").firstMatch.exists)
+        XCTAssertEqual(composer.value as? String, "A draft stays here")
+        attach(app, "quiet-tool-progress")
+    }
     func testApprovalResolvesAndCannotBeAnsweredTwice() {
         let app = launch(["--fixture-approval"])
         XCTAssertTrue(app.buttons["answer-deny"].waitForExistence(timeout: 5))
@@ -138,11 +165,13 @@ final class CompanionUITests: XCTestCase {
         composer.tap()
         composer.typeText("A draft survives")
         signalFixture("offline", control: control)
-        XCTAssertTrue(app.staticTexts["Reconnecting. Your draft stays here."].waitForExistence(timeout: 6))
+        XCTAssertTrue(app.staticTexts["The connection to Hermes was lost."].waitForExistence(timeout: 6))
+        XCTAssertTrue(app.buttons["Reconnect"].exists)
         XCTAssertFalse(app.buttons["sendMessage"].isEnabled)
         XCTAssertEqual(composer.value as? String, "A draft survives")
         signalFixture("online", control: control)
-        XCTAssertTrue(app.staticTexts["Fixture connection restored. No command was replayed."].waitForExistence(timeout: 10))
+        expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: app.buttons["Reconnect"])
+        waitForExpectations(timeout: 10)
         XCTAssertEqual(composer.value as? String, "A draft survives")
         XCTAssertTrue(app.buttons["sendMessage"].isEnabled)
         XCTAssertFalse(app.textViews["message-fixture-stream"].exists, "Reconnection must not replay an unsent draft.")

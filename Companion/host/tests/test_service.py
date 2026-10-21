@@ -104,6 +104,85 @@ class HostContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(duplicate, receipt)
         self.assertEqual(self.upstream.submissions, 1)
 
+    async def next_event(self, ws, kind):
+        for _ in range(12):
+            try:
+                event = await ws.receive_json(timeout=3)
+            except TimeoutError:
+                self.fail("Timed out waiting for event: " + kind)
+            if event["type"] == kind:
+                return event
+        self.fail("Expected event: " + kind)
+
+    async def test_settled_session_info_publishes_idle_after_completion_while_running(self):
+        answer = "Canonical completed answer"
+        self.upstream.inflight = {"assistant": answer, "streaming": True}
+        initial = await self.request("GET", "/v1/sessions/long-session/snapshot")
+        self.assertEqual(initial["state"], "working")
+        ws = await self.client.ws_connect(self.server.make_url("/v1/events"), headers=self.headers)
+        self.addAsyncCleanup(ws.close)
+        await ws.receive_json()
+        self.upstream.histories["long-session"].append({"id": 10001, "role": "assistant", "content": answer})
+        await self.upstream.event("message.complete", {"text": answer, "status": "complete", "persisted_turn": {"final_assistant_row_id": 10001}})
+        completion = (await self.next_event(ws, "snapshot"))["payload"]
+        self.assertEqual(completion["state"], "working")
+        self.assertTrue(any(row["id"] == "10001" and row["text"] == answer and not row["provisional"] for row in completion["page"]["messages"]))
+        self.upstream.inflight = None
+        await self.upstream.event("session.info", {"running": False})
+        settled = await self.next_event(ws, "connection")
+        self.assertEqual(settled["session_id"], "long-session")
+        self.assertEqual(settled["payload"]["state"], "idle")
+        await ws.close()
+
+    async def test_session_info_publishes_current_turn_and_request_state(self):
+        for expected in ["working", "waiting"]:
+            with self.subTest(state=expected):
+                self.upstream.inflight = None
+                self.upstream.requests = []
+                await self.request("GET", "/v1/sessions/long-session/snapshot")
+                ws = await self.client.ws_connect(self.server.make_url("/v1/events"), headers=self.headers)
+                self.addAsyncCleanup(ws.close)
+                await ws.receive_json()
+                self.upstream.inflight = {"assistant": "A newer turn", "streaming": True}
+                if expected == "waiting":
+                    self.upstream.requests = [{"id": "approval-new-turn", "method": "approval", "params": {"command": "Controlled approval"}}]
+                await self.upstream.event("session.info", {"running": False})
+                current = await self.next_event(ws, "connection")
+                self.assertEqual(current["session_id"], "long-session")
+                self.assertEqual(current["payload"]["state"], expected)
+                await ws.close()
+
+    async def test_settled_session_info_reaches_subscriber_after_another_snapshot_read(self):
+        self.upstream.inflight = {"assistant": "Completed answer", "streaming": True}
+        initial = await self.request("GET", "/v1/sessions/long-session/snapshot")
+        self.assertEqual(initial["state"], "working")
+        ws = await self.client.ws_connect(self.server.make_url("/v1/events"), headers=self.headers)
+        self.addAsyncCleanup(ws.close)
+        await ws.receive_json()
+        self.upstream.inflight = None
+        other_reader = await self.request("GET", "/v1/sessions/long-session/snapshot")
+        self.assertEqual(other_reader["state"], "idle")
+        await self.upstream.event("session.info", {"running": False})
+        settled = await self.next_event(ws, "connection")
+        self.assertEqual(settled["session_id"], "long-session")
+        self.assertEqual(settled["payload"]["state"], "idle")
+        await ws.close()
+
+    async def test_unchanged_session_info_refreshes_controls_and_current_state(self):
+        self.upstream.inflight = {"assistant": "Still working", "streaming": True}
+        await self.request("GET", "/v1/sessions/long-session/snapshot")
+        ws = await self.client.ws_connect(self.server.make_url("/v1/events"), headers=self.headers)
+        self.addAsyncCleanup(ws.close)
+        await ws.receive_json()
+        await self.upstream.event("session.info", {"running": True})
+        controls = await ws.receive_json(timeout=3)
+        self.assertEqual(controls["type"], "controls")
+        current = await ws.receive_json(timeout=3)
+        self.assertEqual(current["type"], "connection")
+        self.assertEqual(current["session_id"], "long-session")
+        self.assertEqual(current["payload"]["state"], "working")
+        await ws.close()
+
     async def test_controls_read_back_and_require_model_confirmation(self):
         self.upstream.lazy_model_options = True
         controls = await self.request("GET", "/v1/sessions/long-session/controls")
