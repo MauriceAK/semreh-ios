@@ -29,9 +29,10 @@ final class ConversationDrawerUITests: XCTestCase {
         let viewport = app.windows.firstMatch.frame
         let expectedLeadingEdge = viewport.minX + min(viewport.width * 0.8, viewport.width - 56)
         let settled = NSPredicate { _, _ in
-            dismiss.exists && abs(dismiss.frame.minX - expectedLeadingEdge) <= 1 && search.isHittable
+            dismiss.exists && abs(dismiss.frame.minX - expectedLeadingEdge) <= 1
         }
         XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: settled, object: nil)], timeout: 3), .completed)
+        XCTAssertTrue(search.isHittable)
         XCTAssertFalse(editor(app).isHittable, "The covered chat input must not accept touches.")
         XCTAssertFalse(app.tables["transcript"].isHittable, "The covered transcript must not accept touches.")
         XCTAssertFalse(app.buttons["sessions"].isHittable, "The covered chat header must not accept touches.")

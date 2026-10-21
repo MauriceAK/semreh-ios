@@ -1,5 +1,5 @@
 {
-  "source_revision": "7337d20ec768a5cbdc9888dd9c12f3271697b71e",
+  "source_revision": "4c8ed16569c626e2850eea919a98267aaa9af489",
   "files": [
     {
       "path": "ci/CompanionInternalExport.plist",
@@ -223,7 +223,7 @@
     },
     {
       "path": "ios/HermesCompanionUITests/ConversationDrawerUITests.swift",
-      "sha256": "37b5c6ed44066675d8667528db8e37370df2d9c1e6d55cbd9547fa669ce97b5c"
+      "sha256": "f455f79b1a1f17e5e63da8cbfe49e345d7c49bdd19726fe0554748fe8b7bf5e1"
     },
     {
       "path": "ios/HermesCompanionUITests/LiveFlowUITests.swift",
