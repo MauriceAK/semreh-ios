@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 import XCTest
 @testable import HermesCompanion
 
@@ -32,6 +33,250 @@ final class ChatPolishRaceTests: XCTestCase {
         defaults.removePersistentDomain(forName: suite)
         try? FileManager.default.removeItem(at: attachments.directory)
         PolishHeldProtocol.reset()
+    }
+    func testSubmittingIdleSendImmediatelyDisplaysOutgoingBeforeReceipt() async throws {
+        store.draft = "hi"
+        let send = Task { await store.send() }
+        addTeardownBlock { send.cancel(); await send.value }
+        let command = try await request("/commands")
+        XCTAssertEqual(store.displayMessages.map(\.text), ["hi"], "Submitting must display the outgoing row before an HTTP receipt arrives.")
+        XCTAssertEqual(store.displayMessages.first?.role, "user")
+        XCTAssertTrue(store.transcript.messages.isEmpty, "The visible local row is not yet canonical Hermes history.")
+        XCTAssertEqual(store.transcriptActivity, .idle)
+        command.respond(["operation_id": command.json["operation_id"]!, "status": "rejected"])
+        await send.value
+    }
+    func testSubmittingDuringExistingWorkImmediatelyDisplaysOutgoingAfterEarlierReply() async throws {
+        try receiveSnapshot(messages: [["id": "existing-answer", "role": "assistant", "text": "Earlier public progress", "provisional": true]], state: "working")
+        store.draft = "Use the other file"
+        let send = Task { await store.send() }
+        addTeardownBlock { send.cancel(); await send.value }
+        let command = try await request("/commands")
+        XCTAssertEqual(store.displayMessages.map(\.text), ["Earlier public progress", "Use the other file"], "The existing working dots must stay below the immediately visible submitted message.")
+        XCTAssertEqual(store.displayMessages.last?.role, "user")
+        XCTAssertEqual(store.transcriptActivity, .working)
+        command.respond(["operation_id": command.json["operation_id"]!, "status": "rejected"])
+        await send.value
+    }
+    func testRenderedOutgoingRowPrecedesDotsWhileReceiptIsHeld() async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 390, height: 700)
+        let controller = TranscriptController()
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil; previousKeyWindow?.makeKey() }
+        controller.view.layoutIfNeeded()
+        let revision = UUID()
+        func render() {
+            controller.render(messages: store.displayMessages, hasMore: false, loading: false,
+                latestRevision: revision, sessionID: "first",
+                viewportInsets: .init(top: 80, left: 0, bottom: 100, right: 0), activity: store.transcriptActivity)
+            controller.view.layoutIfNeeded()
+        }
+        store.runState = .working
+        render()
+        store.draft = "hi"
+        let send = Task { await store.send() }
+        addTeardownBlock { send.cancel(); await send.value }
+        let command = try await request("/commands")
+        render()
+        let table = try XCTUnwrap(controller.view.subviews.compactMap { $0 as? UITableView }.first)
+        XCTAssertEqual(table.numberOfRows(inSection: 0), 1)
+        let cell = try XCTUnwrap(table.cellForRow(at: IndexPath(row: 0, section: 0)))
+        let text = try XCTUnwrap(cell.contentView.subviews.flatMap(\.subviews).compactMap { $0 as? UITextView }.first)
+        XCTAssertEqual(text.text, "hi")
+        let footer = try XCTUnwrap(table.tableFooterView)
+        XCTAssertLessThanOrEqual(cell.convert(cell.bounds, to: window).maxY, footer.convert(footer.bounds, to: window).minY + 1)
+        XCTAssertTrue(window.bounds.intersects(text.convert(text.bounds, to: window)))
+        try await Task.sleep(for: .milliseconds(100))
+        window.layoutIfNeeded()
+        var rendered = false
+        let capture = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+            rendered = window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+        }
+        XCTAssertTrue(rendered, "The attached window must actually render its hierarchy.")
+        let raster = try XCTUnwrap(capture.cgImage)
+        var pixels = [UInt8](repeating: 0, count: raster.width * raster.height * 4)
+        let context = try XCTUnwrap(CGContext(data: &pixels, width: raster.width, height: raster.height,
+            bitsPerComponent: 8, bytesPerRow: raster.width * 4, space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue))
+        context.draw(raster, in: CGRect(x: 0, y: 0, width: raster.width, height: raster.height))
+        var outgoingPixels = 0
+        for index in stride(from: 0, to: pixels.count, by: 4) {
+            let red = Int(pixels[index])
+            let green = Int(pixels[index + 1])
+            let blue = Int(pixels[index + 2])
+            if blue > red + 60 && blue > green + 30 { outgoingPixels += 1 }
+        }
+        XCTAssertGreaterThan(outgoingPixels, 100, "A blank image cannot prove that the blue outgoing bubble rendered.")
+        let screenshot = XCTAttachment(image: capture)
+        screenshot.name = "pending-user-before-working-dots"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        command.respond(["operation_id": command.json["operation_id"]!, "status": "accepted", "user_row_id": "official-user"])
+        await send.value
+        render()
+        XCTAssertEqual(table.numberOfRows(inSection: 0), 1)
+        XCTAssertEqual(store.displayMessages.first?.renderID, "outbound:" + (command.json["operation_id"] as! String).lowercased())
+    }
+    func testCorrelatedSnapshotAcceptsExactOperationWhileUnrelatedUserDoesNot() async throws {
+        store.draft = "hi"
+        let send = Task { await store.send() }
+        addTeardownBlock { send.cancel(); await send.value }
+        let command = try await request("/commands")
+        let operation = command.json["operation_id"] as! String
+        try receiveSnapshot(messages: [["id": "external-user", "role": "user", "text": "hi", "provisional": false]], state: "working")
+        XCTAssertEqual(store.displayMessages.count, 1)
+        XCTAssertEqual(store.displayMessages.first?.delivery, .sending)
+        try receiveSnapshot(messages: [
+            ["id": "external-user", "role": "user", "text": "hi", "provisional": false],
+            ["id": "our-user", "role": "user", "text": "hi", "provisional": false, "operation_id": operation]
+        ], state: "working")
+        XCTAssertEqual(store.displayMessages.map(\.id), ["external-user", "our-user"])
+        XCTAssertEqual(store.displayMessages.last?.renderID, "outbound:" + operation.lowercased())
+        command.fail(URLError(.networkConnectionLost))
+        await send.value
+        XCTAssertEqual(store.draft, "")
+        XCTAssertTrue(OperationJournal(defaults: defaults).pending.isEmpty)
+        XCTAssertTrue(store.currentUncertain.isEmpty)
+        XCTAssertEqual(store.displayMessages.map(\.id), ["external-user", "our-user"])
+    }
+    func testEarlySocketAcceptanceClearsOnlySubmittedDraftBeforeHTTPReturns() async throws {
+        store.draft = "hi"
+        let send = Task { await store.send() }
+        addTeardownBlock { send.cancel(); await send.value }
+        let command = try await request("/commands")
+        let data = try JSONSerialization.data(withJSONObject: ["type": "receipt", "session_id": "first", "payload": [
+            "operation_id": command.json["operation_id"]!, "status": "accepted", "user_row_id": "user-41"
+        ]])
+        let receipt = try CompanionAPI.decoder.decode(WireEvent.self, from: data)
+        try store.receive(receipt)
+        XCTAssertEqual(store.draft, "", "Exact socket acceptance must remove the submitted text before slow HTTP returns.")
+        XCTAssertEqual(store.displayMessages.map(\.text), ["hi"])
+        store.draft = "hi"
+        try store.receive(receipt)
+        XCTAssertEqual(store.draft, "hi", "A duplicate receipt must not clear a later identical draft.")
+        command.respond(["operation_id": command.json["operation_id"]!, "status": "accepted", "user_row_id": "user-41"])
+        await send.value
+        XCTAssertEqual(store.draft, "hi", "HTTP confirmation must not clear a later draft identical to the original submission.")
+    }
+    func testLateAcceptancePreservesIdenticalReplacementDraftAfterSwitchingChats() async throws {
+        store.draft = "Same message"
+        let send = Task { await store.send() }
+        addTeardownBlock { send.cancel(); await send.value }
+        let command = try await request("/commands")
+        store.draft = "A replacement draft"
+        store.draft = "Same message"
+        store.selectedSession = .init(id: "second", title: "Second", updatedAt: "", profile: "test")
+        store.draft = "Other conversation draft"
+        command.respond(["operation_id": command.json["operation_id"]!, "status": "accepted", "user_row_id": "accepted-first"])
+        await send.value
+        XCTAssertEqual(store.draft, "Other conversation draft")
+        let saved = ConversationMemory(hostID: suite, defaults: defaults)
+        XCTAssertEqual(saved.draft(for: "first"), "Same message", "An old acceptance cannot clear a later identical draft in an inactive conversation.")
+        XCTAssertEqual(saved.draft(for: "second"), "Other conversation draft")
+    }
+    func testOldReceiptCannotOverwriteSavedDraftsAfterSameHostRepairing() async throws {
+        store.draft = "Original submitted draft"
+        let send = Task { await store.send() }
+        addTeardownBlock { send.cancel(); await send.value }
+        let command = try await request("/commands")
+        let replacementMemory = ConversationMemory(hostID: suite, defaults: defaults)
+        replacementMemory.saveDraft("New draft after pairing", for: "first")
+        replacementMemory.saveDraft("Other saved draft after pairing", for: "second")
+        replacementMemory.select("first")
+        let url = URL(string: "http://127.0.0.1/\(suite!)")!
+        let grant = DeviceGrant(baseURL: url.absoluteString, deviceID: "synthetic-device", token: "synthetic-grant", host: .init(name: "Fixture", profile: "test"))
+        store.usePairedHost(grant, api: .init(baseURL: url, token: nil, session: session), memory: replacementMemory)
+        command.respond(["operation_id": command.json["operation_id"]!, "status": "accepted", "user_row_id": "accepted-old-host"])
+        await send.value
+        XCTAssertEqual(store.draft, "New draft after pairing")
+        let saved = ConversationMemory(hostID: suite, defaults: defaults)
+        XCTAssertEqual(saved.draft(for: "first"), "New draft after pairing")
+        XCTAssertEqual(saved.draft(for: "second"), "Other saved draft after pairing")
+    }
+    func testLateAcceptanceClearsUnchangedSubmittedDraftAfterSwitchingChats() async throws {
+        store.draft = "Original submitted draft"
+        let send = Task { await store.send() }
+        addTeardownBlock { send.cancel(); await send.value }
+        let command = try await request("/commands")
+        store.selectedSession = .init(id: "second", title: "Second", updatedAt: "", profile: "test")
+        store.draft = "Other conversation draft"
+        command.respond(["operation_id": command.json["operation_id"]!, "status": "accepted", "user_row_id": "accepted-first"])
+        await send.value
+        let saved = ConversationMemory(hostID: suite, defaults: defaults)
+        XCTAssertEqual(saved.draft(for: "first"), "")
+        XCTAssertEqual(saved.draft(for: "second"), "Other conversation draft")
+    }
+    func testFirstMessageClearsDraftAfterCreatingNewConversation() async throws {
+        store.selectedSession = nil
+        store.draft = "First message"
+        let send = Task { await store.send() }
+        addTeardownBlock { send.cancel(); await send.value }
+        let creation = try await request("/sessions")
+        creation.respond(["id": "new-session", "title": "New", "updated_at": "", "profile": "test"])
+        let command = try await request("/commands")
+        command.respond(["operation_id": command.json["operation_id"]!, "status": "accepted", "user_row_id": "new-user"])
+        await send.value
+        XCTAssertEqual(store.draft, "")
+        XCTAssertEqual(store.displayMessages.map(\.text), ["First message"])
+    }
+    func testBusyReceiptsRetirePreviewOnlyWhenFreshSnapshotArrives() async throws {
+        for (index, status) in ["queued", "steered", "redirected"].enumerated() {
+            store.draft = "Repeated direction"
+            let send = Task { await store.send() }
+            addTeardownBlock { send.cancel(); await send.value }
+            let command = try await request("/commands", index: index)
+            command.respond(["operation_id": command.json["operation_id"]!, "status": status])
+            await send.value
+            XCTAssertEqual(store.displayMessages.last?.delivery, .accepted, "Execute defer over stale history must not retire an acknowledged preview.")
+            let snapshot = try await request("/snapshot", index: index)
+            var body = snapshotBody(text: "")
+            let rows: [[String: Any]] = (0...index).map { ["id": "busy-user-\($0)", "role": "user", "text": "Repeated direction", "provisional": false] }
+            body["page"] = ["messages": rows, "before": NSNull(), "has_more": false]
+            snapshot.respond(body)
+            await store.waitForScheduledRefreshes().value
+            XCTAssertEqual(store.displayMessages.map(\.id), (0...index).map { "busy-user-\($0)" })
+            XCTAssertTrue(store.displayMessages.allSatisfy { $0.delivery == nil })
+        }
+    }
+    func testPreAcceptanceSnapshotAndUncorrelatedSocketCannotRetireBusyPreview() async throws {
+        let oldRefresh = Task { try await store.refreshCurrent() }
+        addTeardownBlock { oldRefresh.cancel(); _ = try? await oldRefresh.value }
+        let oldSnapshot = try await request("/snapshot")
+        store.draft = "Keep this accepted direction"
+        let send = Task { await store.send() }
+        addTeardownBlock { send.cancel(); await send.value }
+        let command = try await request("/commands")
+        command.respond(["operation_id": command.json["operation_id"]!, "status": "steered"])
+        await send.value
+        var emptySnapshot = snapshotBody(text: "")
+        emptySnapshot["page"] = ["messages": [], "before": NSNull(), "has_more": false]
+        oldSnapshot.respond(emptySnapshot)
+        try await oldRefresh.value
+        XCTAssertEqual(store.displayMessages.last?.delivery, .accepted)
+        try receiveSnapshot(messages: [], state: "working")
+        XCTAssertEqual(store.displayMessages.last?.delivery, .accepted, "An uncorrelated socket snapshot cannot prove it was requested after acceptance.")
+        let freshSnapshot = try await request("/snapshot", index: 1)
+        freshSnapshot.respond(emptySnapshot)
+        await store.waitForScheduledRefreshes().value
+        XCTAssertTrue(store.displayMessages.isEmpty)
+    }
+    func testExactSnapshotResolvesPriorUncertaintyWithoutResolvingOtherOperations() async throws {
+        store.draft = "Uncertain direction"
+        let send = Task { await store.send() }
+        addTeardownBlock { send.cancel(); await send.value }
+        let command = try await request("/commands")
+        command.fail(URLError(.networkConnectionLost))
+        await send.value
+        XCTAssertEqual(store.currentUncertain.count, 1)
+        try receiveSnapshot(messages: [["id": "our-user", "role": "user", "text": "Uncertain direction", "provisional": false,
+                                        "operation_id": command.json["operation_id"]!]], state: "working")
+        XCTAssertTrue(store.currentUncertain.isEmpty)
+        XCTAssertTrue(OperationJournal(defaults: defaults).pending.isEmpty)
+        XCTAssertEqual(store.draft, "")
     }
     func testAcceptedSendClearsDraftAndUnlocksStopBeforeSlowReadCompletes() async throws {
         store.draft = "Accepted message"
@@ -82,12 +327,14 @@ final class ChatPolishRaceTests: XCTestCase {
         addTeardownBlock { send.cancel(); await send.value }
         let command = try await request("/commands")
         try store.receive(connectionEvent(state: "working"))
-        XCTAssertEqual(store.transcriptActivity, .idle, "A new send must not show the working bubble before its user message.")
+        XCTAssertEqual(store.displayMessages.first?.text, "hi")
+        XCTAssertEqual(store.displayMessages.first?.delivery, .sending)
+        XCTAssertEqual(store.transcriptActivity, .working, "Working dots follow the already visible pending user row.")
         let delta = try CompanionAPI.decoder.decode(WireEvent.self, from: Data(#"{"type":"delta","session_id":"first","payload":{"id":"official-assistant-42","text":"Hello","replace":true}}"#.utf8))
         try store.receive(delta)
         for _ in 0..<100 where store.transcript.messages.isEmpty { try await Task.sleep(for: .milliseconds(10)) }
         XCTAssertEqual(store.transcript.messages.first?.text, "Hello")
-        XCTAssertTrue(store.displayMessages.isEmpty, "Keep an overtaking assistant response behind the unconfirmed submission.")
+        XCTAssertEqual(store.displayMessages.map(\.text), ["hi"], "Keep the uncorrelated new tail behind the visible pending submission.")
         command.respond(["operation_id": command.json["operation_id"]!, "status": "accepted", "user_row_id": "official-user-41"])
         await send.value
         XCTAssertEqual(store.displayMessages.map(\.id), ["official-user-41", "official-assistant-42"])
@@ -160,7 +407,7 @@ final class ChatPolishRaceTests: XCTestCase {
         XCTAssertTrue(store.transcript.messages.isEmpty)
         try receiveSnapshot(messages: [["id": "user-41", "role": "user", "text": "Canonical hi", "provisional": false]], state: "idle")
         XCTAssertEqual(store.displayMessages.map(\.text), ["Canonical hi"])
-        XCTAssertEqual(store.displayMessages, store.transcript.messages)
+        XCTAssertEqual(store.displayMessages.map(\.id), store.transcript.messages.map(\.id))
     }
     func testRepeatedTextReceiptsRemainDistinctAndOrdered() async throws {
         for index in 1...2 {
@@ -190,7 +437,7 @@ final class ChatPolishRaceTests: XCTestCase {
             ["id": "user-41", "role": "user", "text": "hi", "provisional": false],
             ["id": "assistant-42", "role": "assistant", "text": "Hello", "provisional": false]
         ], state: "idle")
-        XCTAssertEqual(store.displayMessages.map(\.id), ["user-41", "assistant-42"], "Canonical history must remain visible while its HTTP receipt is still held.")
+        XCTAssertEqual(store.displayMessages.map(\.text), ["hi"], "An unidentified tail waits for exact receipt correlation, rather than guessing which user submitted it.")
         XCTAssertEqual(store.transcriptActivity, .idle)
         command.respond(["operation_id": command.json["operation_id"]!, "status": "accepted", "user_row_id": "user-41"])
         await send.value
@@ -204,8 +451,9 @@ final class ChatPolishRaceTests: XCTestCase {
         let command = try await request("/commands")
         command.respond(["operation_id": command.json["operation_id"]!, "status": "accepted"])
         await send.value
-        XCTAssertTrue(store.displayMessages.isEmpty)
-        XCTAssertEqual(store.transcriptActivity, .idle)
+        XCTAssertEqual(store.displayMessages.map(\.text), ["hi"])
+        XCTAssertEqual(store.displayMessages.first?.delivery, .accepted)
+        XCTAssertEqual(store.transcriptActivity, .working)
         let snapshot = try await request("/snapshot")
         var body = snapshotBody(text: "Hello")
         body["page"] = ["messages": [["id": "official-user", "role": "user", "text": "hi", "provisional": false]], "before": NSNull(), "has_more": false]
@@ -248,7 +496,7 @@ final class ChatPolishRaceTests: XCTestCase {
         XCTAssertEqual(store.displayMessages.map(\.id), ["user-41"])
         XCTAssertEqual(store.transcriptActivity, .working)
     }
-    func testUnconfirmedSendKeepsDraftAndDoesNotInventUserRow() async throws {
+    func testUnconfirmedSendKeepsDraftAndLabelsLocalRowWithoutInventingHistory() async throws {
         store.draft = "hi"
         let send = Task { await store.send() }
         addTeardownBlock { send.cancel(); await send.value }
@@ -258,7 +506,8 @@ final class ChatPolishRaceTests: XCTestCase {
         XCTAssertEqual(store.draft, "hi")
         XCTAssertEqual(store.currentUncertain.count, 1)
         XCTAssertNotNil(store.error)
-        XCTAssertTrue(store.displayMessages.isEmpty)
+        XCTAssertEqual(store.displayMessages.map(\.text), ["hi"])
+        XCTAssertEqual(store.displayMessages.first?.delivery, .uncertain)
         XCTAssertTrue(store.transcript.messages.isEmpty)
     }
     func testAcknowledgedUncertainSendDoesNotHideSuccessfulRetry() async throws {

@@ -15,11 +15,10 @@ struct TranscriptView: UIViewControllerRepresentable {
 
     func makeUIViewController(context: Context) -> TranscriptController { TranscriptController() }
     func updateUIViewController(_ controller: TranscriptController, context: Context) {
-        controller.updateChrome(viewportInsets: viewportInsets, activity: activity)
         controller.onOlder = onOlder
         controller.onReadingHistory = onReadingHistory
         controller.onUserScrollBegan = onUserScrollBegan
-        controller.update(messages: messages, hasMore: hasMore, loading: loading, latestRevision: latestRevision, sessionID: sessionID)
+        controller.render(messages: messages, hasMore: hasMore, loading: loading, latestRevision: latestRevision, sessionID: sessionID, viewportInsets: viewportInsets, activity: activity)
     }
 }
 
@@ -87,6 +86,13 @@ final class TranscriptController: UIViewController, UITableViewDataSource, UITab
         older.accessibilityIdentifier = "loadOlder"
         older.addTarget(self, action: #selector(loadEarlier), for: .touchUpInside)
         NotificationCenter.default.addObserver(self, selector: #selector(reduceMotionChanged), name: UIAccessibility.reduceMotionStatusDidChangeNotification, object: nil)
+    }
+    func render(messages: [ChatMessage], hasMore: Bool, loading: Bool, latestRevision: UUID,
+                sessionID: String?, viewportInsets: UIEdgeInsets, activity: TranscriptActivity) {
+        UIView.performWithoutAnimation {
+            update(messages: messages, hasMore: hasMore, loading: loading, latestRevision: latestRevision, sessionID: sessionID)
+            updateChrome(viewportInsets: viewportInsets, activity: activity)
+        }
     }
     func updateChrome(viewportInsets: UIEdgeInsets, activity: TranscriptActivity) {
         loadViewIfNeeded()
@@ -175,7 +181,7 @@ final class TranscriptController: UIViewController, UITableViewDataSource, UITab
         let anchor = visibleAnchor()
         let oldMessages = messages
         messages = newMessages
-        if oldMessages.map(\.id) == messages.map(\.id) {
+        if oldMessages.map(\.renderID) == messages.map(\.renderID) {
             let changed = messages.indices.filter { oldMessages[$0] != messages[$0] }.map { IndexPath(row: $0, section: 0) }
             if !changed.isEmpty {
                 let appending = changed.allSatisfy { BubbleCell.provisionalSuffix(from: oldMessages[$0.row], to: messages[$0.row]) != nil }
@@ -416,6 +422,8 @@ private final class TranscriptActivityBubble: UIView {
 final class BubbleCell: UITableViewCell {
     private let bubble = UIView()
     private let textView = UITextView(usingTextLayoutManager: false)
+    private let deliveryLabel = UILabel()
+    private var bubbleBottom: NSLayoutConstraint!
     private var left: NSLayoutConstraint!
     private var right: NSLayoutConstraint!
     private var formatTask: Task<Void, Never>?
@@ -475,7 +483,8 @@ final class BubbleCell: UITableViewCell {
         let font = UIFont.preferredFont(forTextStyle: message.role == "tool" ? .footnote : .body, compatibleWith: traits)
         let key = cacheKey(message, font: font)
         let formatted = renderedCache.object(forKey: key)
-        let sizeKey = (String(describing: width) + "|" + (formatted?.revision.uuidString ?? "plain") + "|" + (key as String)) as NSString
+        let sizeComponents = [message.delivery?.rawValue ?? "", String(describing: width), formatted?.revision.uuidString ?? "plain", key as String]
+        let sizeKey = sizeComponents.joined(separator: "|") as NSString
         if let height = heightCache.object(forKey: sizeKey) { return CGFloat(height.doubleValue) }
         measuringText.isScrollEnabled = false
         measuringText.textContainerInset = UIEdgeInsets(top: 11, left: 16, bottom: 11, right: 16)
@@ -493,7 +502,10 @@ final class BubbleCell: UITableViewCell {
         measuringMessage = message
         measuringWidth = width
         measuringFont = font
-        let height = ceil(measuringText.sizeThatFits(CGSize(width: width * 0.91, height: .greatestFiniteMagnitude)).height) + 10
+        let baseHeight = ceil(measuringText.sizeThatFits(CGSize(width: width * 0.91, height: .greatestFiniteMagnitude)).height) + 10
+        let captionHeight = ceil(UIFont.preferredFont(forTextStyle: .caption2, compatibleWith: traits).lineHeight) + 4
+        let deliveryHeight: CGFloat = message.deliveryLabel == nil ? 0 : captionHeight
+        let height = baseHeight + deliveryHeight
         heightCache.setObject(NSNumber(value: Double(height)), forKey: sizeKey, cost: message.displayText.utf8.count)
         return height
     }
@@ -516,12 +528,22 @@ final class BubbleCell: UITableViewCell {
         textView.linkTextAttributes = [.foregroundColor: UIColor.systemCyan]
         contentView.addSubview(bubble)
         bubble.addSubview(textView)
+        deliveryLabel.translatesAutoresizingMaskIntoConstraints = false
+        deliveryLabel.font = .preferredFont(forTextStyle: .caption2)
+        deliveryLabel.textColor = .secondaryLabel
+        deliveryLabel.textAlignment = .right
+        deliveryLabel.adjustsFontForContentSizeCategory = true
+        contentView.addSubview(deliveryLabel)
+        bubbleBottom = bubble.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -5)
         left = bubble.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16)
         right = bubble.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16)
         left.priority = .defaultHigh
         right.priority = .defaultHigh
         NSLayoutConstraint.activate([
-            bubble.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 5), bubble.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -5),
+            bubble.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 5), bubbleBottom,
+            deliveryLabel.trailingAnchor.constraint(equalTo: bubble.trailingAnchor),
+            deliveryLabel.leadingAnchor.constraint(greaterThanOrEqualTo: contentView.leadingAnchor, constant: 16),
+            deliveryLabel.topAnchor.constraint(equalTo: bubble.bottomAnchor, constant: 2),
             bubble.widthAnchor.constraint(lessThanOrEqualTo: contentView.widthAnchor, multiplier: 0.91),
             bubble.widthAnchor.constraint(greaterThanOrEqualToConstant: 48),
             bubble.leadingAnchor.constraint(greaterThanOrEqualTo: contentView.leadingAnchor, constant: 16),
@@ -550,6 +572,9 @@ final class BubbleCell: UITableViewCell {
         formatTask = nil
         messageID = message.id
         let user = message.role == "user"
+        deliveryLabel.text = message.deliveryLabel
+        deliveryLabel.isHidden = message.deliveryLabel == nil
+        bubbleBottom.constant = message.deliveryLabel == nil ? -5 : -9 - ceil(deliveryLabel.font.lineHeight)
         left.isActive = !user
         right.isActive = user
         bubble.backgroundColor = user ? UIColor(red: 0.04, green: 0.36, blue: 0.82, alpha: 1) : UIColor(white: 0.13, alpha: 1)

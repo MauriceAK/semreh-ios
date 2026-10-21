@@ -5,6 +5,9 @@ import UniformTypeIdentifiers
 struct ComposerView: View {
     @Bindable var store: AppStore
     @FocusState private var focused: Bool
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.isEnabled) private var interactionEnabled
+    @State private var voice = VoiceDictationController()
     @Environment(\.dynamicTypeSize) private var typeSize
     @State private var showPhotos = false
     @State private var showFiles = false
@@ -14,6 +17,7 @@ struct ComposerView: View {
     var body: some View {
         VStack(spacing: 0) {
             VStack(spacing: 8) {
+                VoiceControls(voice: voice, download: { voice.begin(context: store.voiceContext, allowDownload: true) }, finish: finishDictation)
                 if !store.attachments.isEmpty {
                     if let issue = store.attachmentDrafts.persistenceIssue {
                         Text(issue).font(.caption2).foregroundStyle(.orange).padding(.horizontal, 8)
@@ -29,8 +33,8 @@ struct ComposerView: View {
                 }
                 HStack(alignment: .bottom, spacing: 4) {
                     Menu {
-                        Button("Photos", systemImage: "photo") { focused = false; showPhotos = true }
-                        Button("Files", systemImage: "doc") { focused = false; showFiles = true }
+                        Button("Photos", systemImage: "photo") { voice.cancel(); focused = false; showPhotos = true }
+                        Button("Files", systemImage: "doc") { voice.cancel(); focused = false; showFiles = true }
                         Text("4 files · 5 MB each · text 128 KB")
                     } label: {
                         Image(systemName: "plus").font(.system(size: 20)).foregroundStyle(Color.blue).frame(width: 44, height: 44).contentShape(Rectangle())
@@ -40,26 +44,33 @@ struct ComposerView: View {
                         .lineLimit(1...(typeSize.isAccessibilitySize ? 2 : 6)).font(.body).focused($focused).padding(.vertical, 10).frame(minHeight: 44)
                         .fixedSize(horizontal: false, vertical: true).layoutPriority(1)
                         .accessibilityIdentifier("composer")
-                    if store.isWorking && !primaryStops {
+                    if !voice.isActive {
+                        Button { voice.begin(context: store.voiceContext) } label: {
+                            Image(systemName: "mic").font(.system(size: 20)).frame(width: 44, height: 44).contentShape(Rectangle())
+                        }.disabled(store.isSending).accessibilityLabel("Dictate message").accessibilityIdentifier("dictateMessage")
+                    }
+                    if store.isWorking && (!primaryStops || voice.isActive) {
                         Button { Task { await store.execute(.init(kind: "interrupt")) } } label: {
                             Image(systemName: "stop.fill").font(.system(size: 12, weight: .semibold))
                                 .foregroundStyle(.primary).frame(width: 44, height: 44)
                         }.disabled(!store.canCommand || store.isStopping)
                             .accessibilityLabel("Stop agent").accessibilityIdentifier("stopAgent")
                     }
-                    Button {
-                        Task { if primaryStops { await store.execute(.init(kind: "interrupt")) } else { await store.send() } }
-                    } label: {
-                        Group {
-                            if primaryStops ? store.isStopping : store.isSending { ProgressView().tint(primaryStops ? .black : .white) }
-                            else { Image(systemName: primaryStops ? "stop.fill" : "arrow.up").font(.system(size: primaryStops ? 12 : 17, weight: .semibold)) }
-                        }.foregroundStyle(primaryStops ? Color.black : Color.white)
-                            .frame(width: 36, height: 36)
-                            .background(primaryStops ? Color.white.opacity(0.9) : store.canSendDraft ? Color.blue : Color.white.opacity(0.09), in: Circle())
-                            .frame(width: 44, height: 44).contentShape(Rectangle())
-                    }.disabled(!store.canCommand || (primaryStops ? store.isStopping : store.isSending) || (!primaryStops && (!store.canSendDraft || store.isStopping)))
-                        .accessibilityLabel(primaryStops ? "Stop agent" : queuesAttachments ? "Queue message" : store.isWorking ? "Send direction" : "Send message")
-                        .accessibilityIdentifier(primaryStops ? "stopAgent" : "sendMessage")
+                    if !voice.isActive {
+                        Button {
+                            Task { if primaryStops { await store.execute(.init(kind: "interrupt")) } else { await store.send() } }
+                        } label: {
+                            Group {
+                                if primaryStops ? store.isStopping : store.isSending { ProgressView().tint(primaryStops ? .black : .white) }
+                                else { Image(systemName: primaryStops ? "stop.fill" : "arrow.up").font(.system(size: primaryStops ? 12 : 17, weight: .semibold)) }
+                            }.foregroundStyle(primaryStops ? Color.black : Color.white)
+                                .frame(width: 36, height: 36)
+                                .background(primaryStops ? Color.white.opacity(0.9) : store.canSendDraft ? Color.blue : Color.white.opacity(0.09), in: Circle())
+                                .frame(width: 44, height: 44).contentShape(Rectangle())
+                        }.disabled(!store.canCommand || (primaryStops ? store.isStopping : store.isSending) || (!primaryStops && (!store.canSendDraft || store.isStopping)))
+                            .accessibilityLabel(primaryStops ? "Stop agent" : queuesAttachments ? "Queue message" : store.isWorking ? "Send direction" : "Send message")
+                            .accessibilityIdentifier(primaryStops ? "stopAgent" : "sendMessage")
+                    }
                 }
             }.padding(6).frame(minHeight: 56)
                 .modifier(ChatGlass(cornerRadius: 28))
@@ -85,7 +96,19 @@ struct ComposerView: View {
             } else if case .failure(let error) = result { store.error = error.localizedDescription }
             focused = true
         }
+        .modifier(VoiceRecoveryAlert(voice: voice, download: { voice.begin(context: store.voiceContext, allowDownload: true) }))
         .onChange(of: showPhotos) { _, showing in if !showing { focused = true } }
+        .onChange(of: store.voiceContext) { _, context in voice.contextChanged(context) }
+        .onChange(of: store.isSending) { _, sending in if sending { voice.cancel() } }
+        .onChange(of: interactionEnabled) { _, enabled in if !enabled { voice.cancel() } }
+        .onChange(of: scenePhase) { _, phase in if phase == .background { voice.cancel() } }
+        .onDisappear { voice.cancel() }
+    }
+    private func finishDictation() {
+        voice.finish(currentContext: { store.voiceContext }) { text in
+            store.draft = VoiceDictationController.appending(text, to: store.draft)
+            focused = true
+        }
     }
 }
 

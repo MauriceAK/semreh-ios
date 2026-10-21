@@ -123,7 +123,11 @@ final class DraftRaceTests: XCTestCase {
         let restored = ConversationMemory(hostID: switchHost ? "another-host" : "controlled-host", defaults: defaults)
         XCTAssertEqual(restored.draft(for: switchConversation ? "second" : "first"), expected)
         if switchConversation { XCTAssertEqual(restored.draft(for: "first"), "") }
-        if switchHost { XCTAssertEqual(ConversationMemory(hostID: "controlled-host", defaults: defaults).draft(for: "first"), "") }
+        if switchHost {
+            let previousHost = ConversationMemory(hostID: "controlled-host", defaults: defaults)
+            XCTAssertEqual(previousHost.draft(for: "first"), "The submitted first conversation draft", "A late receipt must preserve saved text after ownership moves to another host.")
+            XCTAssertEqual(previousHost.draft(for: "second"), "Unsent second conversation draft")
+        }
     }
 }
 

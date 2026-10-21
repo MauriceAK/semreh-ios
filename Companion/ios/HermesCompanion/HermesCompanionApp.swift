@@ -185,7 +185,7 @@ struct ChatView: View {
                     }
                     .frame(width: geometry.size.width, height: geometry.size.height)
                     .background(Color(white: 0.055).ignoresSafeArea(.container))
-                    .disabled(isDrawerOpen)
+                    .disabled(isDrawerOpen || sheet != nil)
                     .allowsHitTesting(!isDrawerOpen)
                     .accessibilityHidden(isDrawerOpen)
                     .overlay {
@@ -316,11 +316,20 @@ struct TranscriptContainer: View {
     var body: some View {
         ZStack {
             if store.displayMessages.isEmpty && store.transcriptActivity == .idle && !store.transcript.hasMore {
-                VStack(spacing: 12) {
-                    Image(systemName: "sparkle").font(.system(size: 36, weight: .light)).foregroundStyle(.blue)
-                    Text(store.selectedSession == nil ? "What’s on your mind?" : "Start with a thought.").font(.title2.weight(.medium))
-                    Text("Ask a question, work on an idea, or give your agent something to follow through on.").font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 290)
-                }.frame(maxWidth: .infinity, maxHeight: .infinity)
+                GeometryReader { geometry in
+                    let availableHeight = max(0, geometry.size.height - viewportInsets.top - viewportInsets.bottom)
+                    ScrollView {
+                        VStack(spacing: 12) {
+                            Image(systemName: "sparkle").font(.system(size: 36, weight: .light)).foregroundStyle(.blue)
+                            Text(store.selectedSession == nil ? "What’s on your mind?" : "Start with a thought.").font(.title2.weight(.medium))
+                            Text("Ask a question, work on an idea, or give your agent something to follow through on.").font(.subheadline).foregroundStyle(.secondary).frame(maxWidth: 290)
+                        }.multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+                            .padding(.horizontal, 20).padding(.vertical, 12)
+                            .frame(maxWidth: .infinity, minHeight: availableHeight)
+                    }.scrollIndicators(.hidden)
+                        .padding(.top, viewportInsets.top).padding(.bottom, viewportInsets.bottom)
+                        .accessibilityIdentifier("emptyConversation")
+                }
             } else {
                 TranscriptView(messages: store.displayMessages, hasMore: store.transcript.hasMore,
                     loading: store.isLoadingHistory, latestRevision: store.latestRevision,

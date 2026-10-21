@@ -19,7 +19,11 @@ final class AppStore {
     var connectionError: String?
     var error: String?
     var notice: String?
-    var draft = "" { didSet { persistDraft() } }
+    var draft = "" { didSet { if oldValue != draft { draftRevision = UUID() }; persistDraft() } }
+    private var draftRevision = UUID()
+    private struct DraftOrigin: Hashable { let host: UUID; let sessionID: String? }
+    private var savedDraftRevisions: [DraftOrigin: UUID] = [:]
+    private var snapshotRevision: UInt64 = 0
     var isPairing = false
     enum PendingAction { case creating, uploading, command(String) }
     var pendingAction: PendingAction?
@@ -35,7 +39,12 @@ final class AppStore {
         let text: String
         let attachments: [AttachmentTicket]
         let precedingIDs: Set<String>
-        let holdsNewActivity: Bool
+        let submittedDraft: String?
+        let submittedDraftRevision: UUID?
+        let submittedAttachmentIDs: Set<UUID>
+        var draftAcknowledged = false
+        var previewRetired = false
+        var acceptanceRevision: UInt64?
         var delivery = Delivery.awaitingReceipt
         var awaitingHTTPReceipt = true
         var userRowID: String? {
@@ -47,30 +56,39 @@ final class AppStore {
     private var currentSubmissions: [OutboundSubmission] {
         outboundSubmissions.filter { $0.context == commandContext }
     }
-    private var heldSubmission: OutboundSubmission? {
-        currentSubmissions.first { submission in
-            submission.holdsNewActivity && submission.userRowID == nil &&
-                !transcript.messages.contains { $0.role == "user" && !submission.precedingIDs.contains($0.id) }
-        }
-    }
     var displayMessages: [ChatMessage] {
         guard !isReadingHistory, !transcript.hasNewer else { return transcript.messages }
         var messages = transcript.messages
-        if let held = heldSubmission {
-            messages.removeAll { $0.role == "assistant" && $0.provisional && !held.precedingIDs.contains($0.id) }
-        }
         for submission in currentSubmissions {
-            guard let id = submission.userRowID, !messages.contains(where: { $0.id == id }) else { continue }
+            if submission.previewRetired { continue }
+            let canonicalIndex = messages.firstIndex {
+                $0.operationId?.caseInsensitiveCompare(submission.operationID) == .orderedSame ||
+                    (submission.userRowID != nil && $0.id == submission.userRowID)
+            }
+            if let canonicalIndex {
+                messages[canonicalIndex].operationId = submission.operationID
+                continue
+            }
+            if case .awaitingReceipt = submission.delivery {
+                messages.removeAll { !submission.precedingIDs.contains($0.id) && $0.operationId == nil }
+            }
+            let state: OutgoingDelivery
+            switch submission.delivery {
+            case .awaitingReceipt: state = .sending
+            case .accepted: state = .accepted
+            case .uncertain: state = .uncertain
+            }
             let index = messages.firstIndex { !submission.precedingIDs.contains($0.id) } ?? messages.endIndex
-            messages.insert(.init(id: id, role: "user", text: submission.text, provisional: false,
-                                  attachments: submission.attachments.isEmpty ? nil : submission.attachments), at: index)
+            messages.insert(.init(id: submission.userRowID ?? "outbound:" + submission.operationID.lowercased(),
+                role: "user", text: submission.text, provisional: false,
+                attachments: submission.attachments.isEmpty ? nil : submission.attachments,
+                operationId: submission.operationID, delivery: state), at: index)
         }
         return messages
     }
     var transcriptActivity: TranscriptActivity {
         if isStopping { return .stopping }
         if runState == .waiting { return .waiting }
-        if heldSubmission != nil { return .idle }
         return isWorking ? .working : .idle
     }
     var isLoadingHistory = false
@@ -112,6 +130,9 @@ final class AppStore {
     var fixtureHoldWork = false
     #endif
 
+    var voiceContext: VoiceDraftContext {
+        .init(sessionID: selectedSession?.id, hostGeneration: hostGeneration, selectionGeneration: selectionGeneration)
+    }
     var canCommand: Bool { connection == "Connected" }
     var currentUncertain: [PendingOperation] { uncertain.filter { $0.sessionID == selectedSession?.id } }
     var statusLabel: String {
@@ -197,6 +218,7 @@ final class AppStore {
         conversationMemory?.select(selectedSession?.id)
     }
     private func persistDraft() {
+        savedDraftRevisions[.init(host: hostGeneration, sessionID: selectedSession?.id)] = draftRevision
         guard !restoringConversation, let conversationMemory else { return }
         if !conversationMemory.saveDraft(draft, for: selectedSession?.id) {
             notice = "This large draft cannot be restored after closing the app. Copy it before closing."
@@ -366,6 +388,7 @@ final class AppStore {
         guard let api, let context = commandContext else { return }
         let intent = historyIntent
         let id = UUID()
+        let observationRevision = snapshotRevision
         let task = Task { [weak self] in
             defer { self?.refreshTasks.removeValue(forKey: id) }
             do {
@@ -373,7 +396,7 @@ final class AppStore {
                 let snapshot: SessionSnapshot = try await api.get("v1/sessions/\(context.sessionID)/snapshot")
                 try Task.checkCancellation()
                 guard let self, context == self.commandContext, intent == self.historyIntent else { return }
-                try self.apply(snapshot, forceHistory: forceHistory)
+                try self.apply(snapshot, forceHistory: forceHistory, observationRevision: observationRevision)
             } catch {}
         }
         refreshTasks[id] = task
@@ -383,11 +406,12 @@ final class AppStore {
         guard let api, let id = selectedSession?.id else { return }
         let generation = selectionGeneration
         let intent = historyIntent
+        let observationRevision = snapshotRevision
         let snapshot: SessionSnapshot = try await api.get("v1/sessions/\(id)/snapshot")
         guard generation == selectionGeneration, intent == historyIntent, selectedSession?.id == id else { return }
-        try apply(snapshot, forceHistory: forceHistory)
+        try apply(snapshot, forceHistory: forceHistory, observationRevision: observationRevision)
     }
-    private func apply(_ snapshot: SessionSnapshot, forceHistory: Bool = false) throws {
+    private func apply(_ snapshot: SessionSnapshot, forceHistory: Bool = false, observationRevision: UInt64? = nil) throws {
         selectedSession = snapshot.session
         controls = snapshot.controls
         requests = snapshot.requests
@@ -396,20 +420,28 @@ final class AppStore {
             try transcript.replace(snapshot.page)
             newActivity = false
         } else { newActivity = true }
-        reconcileSubmissions(messages: snapshot.page.messages, state: snapshot.state)
+        reconcileSubmissions(messages: snapshot.page.messages, observationRevision: observationRevision)
     }
-    private func reconcileSubmissions(messages: [ChatMessage], state: RunState) {
+    private func reconcileSubmissions(messages: [ChatMessage], observationRevision: UInt64? = nil) {
+        for index in outboundSubmissions.indices {
+            guard outboundSubmissions[index].context == commandContext else { continue }
+            if let observationRevision, let acceptanceRevision = outboundSubmissions[index].acceptanceRevision,
+               observationRevision >= acceptanceRevision, case .accepted(nil) = outboundSubmissions[index].delivery {
+                outboundSubmissions[index].previewRetired = true
+            }
+            guard let row = messages.first(where: {
+                      $0.role == "user" && $0.operationId?.caseInsensitiveCompare(outboundSubmissions[index].operationID) == .orderedSame
+                  }) else { continue }
+            outboundSubmissions[index].delivery = .accepted(row.id)
+            journal.resolve(outboundSubmissions[index].operationID)
+            uncertain = journal.pending
+            acknowledgeSubmittedDraft(at: index)
+        }
         outboundSubmissions.removeAll { submission in
             guard submission.context == commandContext, !submission.awaitingHTTPReceipt else { return false }
-            switch submission.delivery {
-            case .awaitingReceipt: return false
-            case .accepted(let id) where id != nil:
-                return messages.contains { $0.id == id }
-            case .accepted, .uncertain:
-                let newRows = messages.filter { !submission.precedingIDs.contains($0.id) }
-                return newRows.contains { $0.role == "user" } ||
-                    ([.idle, .failed].contains(state) && newRows.contains { $0.role == "assistant" && !$0.provisional })
-            }
+            if submission.previewRetired { return true }
+            guard let id = submission.userRowID else { return false }
+            return messages.contains { $0.id == id }
         }
     }
     func latest(forceRefresh: Bool = false) async {
@@ -438,6 +470,7 @@ final class AppStore {
         latestFetchIntent = intent
         let fetchSpan = ChatPerformance.shared.begin(.latestFetch)
         defer { if latestFetchIntent == intent { latestFetchIntent = nil } }
+        let observationRevision = snapshotRevision
         do {
             let snapshot: SessionSnapshot = try await api.get("v1/sessions/\(context.sessionID)/snapshot")
             try Task.checkCancellation()
@@ -446,7 +479,7 @@ final class AppStore {
                 return
             }
             guard snapshot.session.id == context.sessionID else { throw ClientError.invalidResponse }
-            try apply(snapshot, forceHistory: true)
+            try apply(snapshot, forceHistory: true, observationRevision: observationRevision)
             ChatPerformance.shared.end(fetchSpan)
             ChatPerformance.shared.mark(.latestWindowReady)
             isReadingHistory = false
@@ -571,6 +604,7 @@ final class AppStore {
     func send() async {
         attachmentDrafts.refreshExpiredTickets()
         let submittedDraft = draft
+        let submittedDraftRevision = draftRevision
         let originatingMemory = conversationMemory
         let originatingAttachments = attachmentDrafts
         let originatingHost = hostGeneration
@@ -633,17 +667,19 @@ final class AppStore {
                 command = AgentCommand(kind: "slash", name: String(name), arg: parts.count > 1 ? String(parts[1]) : "")
             }
         }
-        if await execute(command) {
+        if await execute(command, submittedDraft: submittedDraft, submittedDraftRevision: submittedDraftRevision, submittedAttachmentIDs: Set(submittedItems.map(\.id))) {
             originatingAttachments.remove(Set(submittedItems.map(\.id)), sessionID: submittedSessionID)
             if hostGeneration == originatingHost && selectedSession?.id == submittedSessionID {
-                if draft == submittedDraft { draft = "" }
-            } else if originatingMemory?.draft(for: submittedSessionID) == submittedDraft {
+                if draftRevision == submittedDraftRevision && draft == submittedDraft { draft = "" }
+            } else if hostGeneration == originatingHost,
+                      savedDraftRevisions[.init(host: originatingHost, sessionID: submittedSessionID)] == submittedDraftRevision,
+                      originatingMemory?.draft(for: submittedSessionID) == submittedDraft {
                 originatingMemory?.saveDraft("", for: submittedSessionID)
             }
         }
     }
     @discardableResult
-    func execute(_ command: AgentCommand) async -> Bool {
+    func execute(_ command: AgentCommand, submittedDraft: String? = nil, submittedDraftRevision: UUID? = nil, submittedAttachmentIDs: Set<UUID> = []) async -> Bool {
         guard canCommand, let id = selectedSession?.id else { return false }
         let interrupt = command.kind == "interrupt"
         guard interrupt ? !isStopping : (!isSending && !isStopping) else { return false }
@@ -654,7 +690,7 @@ final class AppStore {
             else { pendingAction = nil }
             if let index = outboundSubmissions.firstIndex(where: { $0.operationID == command.operationId }) {
                 outboundSubmissions[index].awaitingHTTPReceipt = false
-                reconcileSubmissions(messages: transcript.messages, state: runState)
+                reconcileSubmissions(messages: transcript.messages)
             }
         }
         if fixture { fixtureCommand(command); return true }
@@ -663,7 +699,8 @@ final class AppStore {
         if command.kind == "send", let origin {
             let tickets = attachments.compactMap(\.ticket).filter { command.attachmentIds?.contains($0.id) == true }
             outboundSubmissions.append(.init(operationID: command.operationId, context: origin,
-                text: command.text ?? "", attachments: tickets, precedingIDs: Set(displayMessages.map(\.id)), holdsNewActivity: !isWorking))
+                text: command.text ?? "", attachments: tickets, precedingIDs: Set(displayMessages.map(\.id)),
+                submittedDraft: submittedDraft, submittedDraftRevision: submittedDraftRevision, submittedAttachmentIDs: submittedAttachmentIDs))
         }
         journal.begin(command, sessionID: id)
         let receiptSpan = ChatPerformance.shared.begin(.sendReceipt)
@@ -714,12 +751,27 @@ final class AppStore {
             return false
         }
     }
+    private func acknowledgeSubmittedDraft(at index: Int) {
+        let submission = outboundSubmissions[index]
+        guard !submission.draftAcknowledged else { return }
+        outboundSubmissions[index].draftAcknowledged = true
+        guard submission.context == commandContext else { return }
+        if let submitted = submission.submittedDraft, draftRevision == submission.submittedDraftRevision, draft == submitted { draft = "" }
+        attachmentDrafts.remove(submission.submittedAttachmentIDs, sessionID: selectedSession?.id)
+    }
     private func receiveReceipt(_ receipt: CommandReceipt, origin: ConversationContext? = nil) {
         if let index = outboundSubmissions.firstIndex(where: { $0.operationID.caseInsensitiveCompare(receipt.operationId) == .orderedSame }) {
             switch receipt.status {
             case .accepted, .queued, .steered, .redirected:
                 let rowID = receipt.userRowId.flatMap { $0.isEmpty ? nil : $0 } ?? outboundSubmissions[index].userRowID
+                let firstAcceptance = outboundSubmissions[index].acceptanceRevision == nil
+                if firstAcceptance {
+                    snapshotRevision &+= 1
+                    outboundSubmissions[index].acceptanceRevision = snapshotRevision
+                }
                 outboundSubmissions[index].delivery = .accepted(rowID)
+                acknowledgeSubmittedDraft(at: index)
+                if firstAcceptance && rowID == nil && origin == nil && outboundSubmissions[index].context == commandContext { scheduleRefresh() }
             case .uncertain: outboundSubmissions[index].delivery = .uncertain
             case .rejected: outboundSubmissions.remove(at: index)
             }
@@ -915,6 +967,11 @@ extension AppStore {
         attachmentDrafts.set([], for: Self.fixtureSession.id)
         grant = .init(baseURL: "http://127.0.0.1", deviceID: "fixture", token: "fixture-not-a-credential", host: .init(name: "UI fixture", profile: "Isolated fixture"))
         sessions = [Self.fixtureSession]
+        if ProcessInfo.processInfo.arguments.contains("--fixture-drawer-sessions") {
+            sessions += (0..<24).map {
+                ChatSession(id: "fixture-drawer-\($0)", title: "Conversation \($0 + 1) about a useful next step", updatedAt: "", profile: "fixture")
+            }
+        }
         selectedSession = Self.fixtureSession
         connection = "Connected"
         loadFixtureTranscript()

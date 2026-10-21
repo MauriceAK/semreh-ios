@@ -43,6 +43,8 @@ struct ChatSession: Codable, Identifiable, Equatable, Sendable {
     let updatedAt: String
     let profile: String
 }
+enum OutgoingDelivery: String, Codable, Sendable { case sending, accepted, uncertain }
+
 struct ChatMessage: Codable, Identifiable, Equatable, Sendable {
     let id: String
     let role: String
@@ -50,6 +52,17 @@ struct ChatMessage: Codable, Identifiable, Equatable, Sendable {
     var createdAt: String?
     var provisional: Bool
     var attachments: [AttachmentTicket]? = nil
+    var operationId: String? = nil
+    var delivery: OutgoingDelivery? = nil
+    var renderID: String { operationId.map { "outbound:" + $0.lowercased() } ?? id }
+    var deliveryLabel: String? {
+        switch delivery {
+        case .sending: "Sending…"
+        case .accepted: "Sent"
+        case .uncertain: "Delivery uncertain"
+        case nil: nil
+        }
+    }
     var displayText: String {
         let files = (attachments ?? []).map { "📎 " + $0.name }.joined(separator: "\n")
         return files.isEmpty ? text : text.isEmpty ? files : text + "\n\n" + files

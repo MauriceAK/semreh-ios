@@ -32,7 +32,15 @@ final class ConversationDrawerUITests: XCTestCase {
             dismiss.exists && abs(dismiss.frame.minX - expectedLeadingEdge) <= 1
         }
         XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: settled, object: nil)], timeout: 3), .completed)
-        XCTAssertTrue(search.isHittable)
+        let searchIsHittable = search.isHittable
+        if !searchIsHittable {
+            let hierarchy = XCTAttachment(string: app.debugDescription)
+            hierarchy.name = "drawer-search-failure-accessibility"
+            hierarchy.lifetime = .keepAlways
+            add(hierarchy)
+            capture(app, name: "drawer-search-failure")
+        }
+        XCTAssertTrue(searchIsHittable)
         XCTAssertFalse(editor(app).isHittable, "The covered chat input must not accept touches.")
         XCTAssertFalse(app.tables["transcript"].isHittable, "The covered transcript must not accept touches.")
         XCTAssertFalse(app.buttons["sessions"].isHittable, "The covered chat header must not accept touches.")
@@ -94,6 +102,11 @@ final class ConversationDrawerUITests: XCTestCase {
         let app = launch()
         app.buttons["sessions"].tap()
         assertDrawerOpen(app)
+        XCTAssertEqual(app.staticTexts["drawerTabsHeading"].label, "TABS")
+        XCTAssertEqual(app.staticTexts["drawerSideChatsHeading"].label, "SIDE CHATS")
+        XCTAssertLessThan(app.staticTexts["drawerTabsHeading"].frame.maxY, app.buttons["drawerMainChat"].frame.minY)
+        XCTAssertLessThan(app.buttons["drawerControls"].frame.maxY, app.staticTexts["drawerSideChatsHeading"].frame.minY)
+        XCTAssertTrue(app.buttons["conversation-fixture-history"].isSelected)
         capture(app, name: "drawer-open")
         let search = app.textFields["conversationSearch"]
         search.tap()
@@ -123,6 +136,41 @@ final class ConversationDrawerUITests: XCTestCase {
         XCTAssertTrue(app.buttons["sessions"].waitForExistence(timeout: 3))
         XCTAssertTrue(editor(app).isHittable)
         capture(app, name: "drawer-search-restored-chat")
+    }
+
+    func testDrawerLongListScrollsBehindFixedFooterAndLastConversationRemainsReachable() {
+        let app = launch(["--fixture-drawer-sessions"])
+        app.buttons["sessions"].tap()
+        assertDrawerOpen(app)
+        let content = app.scrollViews["drawerContent"]
+        let search = app.textFields["conversationSearch"]
+        let settings = app.buttons["drawerSettings"]
+        let compose = app.buttons["newConversation"]
+        let footerFrame = search.frame
+        XCTAssertGreaterThan(content.frame.maxY, search.frame.maxY,
+                             "The scrolling list must continue underneath the floating footer.")
+        XCTAssertTrue(app.buttons["conversation-fixture-drawer-0"].exists)
+        capture(app, name: "drawer-long-list-floating-footer")
+        let last = app.buttons["conversation-fixture-drawer-23"]
+        for _ in 0..<12 {
+            if last.exists && last.frame.maxY <= search.frame.minY && last.isHittable { break }
+            content.swipeUp(velocity: .fast)
+        }
+        XCTAssertTrue(last.isHittable)
+        XCTAssertLessThanOrEqual(last.frame.maxY, search.frame.minY,
+                                 "The last conversation must scroll above the footer to remain selectable.")
+        XCTAssertEqual(search.frame.minY, footerFrame.minY, accuracy: 1)
+        XCTAssertEqual(search.frame.width, footerFrame.width, accuracy: 1)
+        XCTAssertTrue(settings.isHittable)
+        XCTAssertTrue(compose.isHittable)
+        capture(app, name: "drawer-last-conversation-above-footer")
+        search.tap()
+        search.typeText("No matching title")
+        XCTAssertTrue(app.staticTexts["drawerEmpty"].waitForExistence(timeout: 3))
+        XCTAssertLessThanOrEqual(search.frame.maxY, app.keyboards.firstMatch.frame.minY)
+        XCTAssertTrue(settings.isHittable)
+        XCTAssertTrue(compose.isHittable)
+        capture(app, name: "drawer-long-list-filtered-with-keyboard")
     }
 
     func testLargestTextDrawerControlsRemainReachableWithSearchKeyboard() {

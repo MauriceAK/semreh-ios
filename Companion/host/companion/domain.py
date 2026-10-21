@@ -129,3 +129,17 @@ def message(row: dict) -> dict | None:
     elif isinstance(stamp, str):
         result["created_at"] = stamp
     return result
+
+
+def public_messages(row: dict) -> list[dict]:
+    result = []
+    if row.get("role") == "assistant" and row.get("display_kind") in {None, "", "steer"}:
+        commentary = row.get("display_commentary")
+        if isinstance(commentary, list):
+            for index, part in enumerate(commentary):
+                if isinstance(part, str) and part.strip():
+                    result.append({"id": f"{message_id(row)}:commentary:{index}", "source_row_id": message_id(row),
+                                   "role": "assistant", "text": part, "provisional": False})
+    if (body := message(row)) is not None:
+        result.append(body)
+    return result

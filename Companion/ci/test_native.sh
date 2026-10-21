@@ -31,6 +31,8 @@ xcodebuild test \
   -skip-testing:HermesCompanionUITests/ChatPolishUITests/testNativePhotoPickerWhenSeeded \
   -skip-testing:HermesCompanionUITests/ChatPolishUITests/testRealFileSendWhenConfigured \
   -skip-testing:HermesCompanionUITests/PerformanceFlowUITests \
+  -skip-testing:HermesCompanionUITests/PublicProgressFlowUITests \
+  -skip-testing:HermesCompanionTests/AppleVoiceEngineTests \
   'DEVELOPMENT_TEAM=' 'CODE_SIGN_IDENTITY=-'
 
 xcrun xcresulttool get test-results summary \

@@ -13,13 +13,153 @@ from urllib.parse import quote, urlsplit
 
 import aiohttp
 
-from .domain import APIError, MAX_RESPONSE, PAGE_SIZE, SAFE_SLASH, encoded, identifier, message, message_id, text, utc
+from .domain import APIError, MAX_RESPONSE, PAGE_SIZE, SAFE_SLASH, encoded, identifier, public_messages, message_id, text, utc
 
 
 class UpstreamError(APIError):
     def __init__(self, code=None):
         super().__init__("hermes_rejected", "Hermes rejected this operation. Refresh the session and check its configuration.", 502)
         self.upstream_code = code
+
+
+@dataclass
+class PublicTurn:
+    preceding_ids: set[str]
+    interims: list[dict] = field(default_factory=list)
+    streamed_count: int = 0
+    sealed_count: int = 0
+    current_text: str = ""
+    persisted_ids: set[str] | None = None
+    final_row_id: str | None = None
+    resuming: bool = False
+    completed: bool = False
+    awaiting_start: bool = False
+    replay_prefix: str = ""
+    canonical_ids: dict[str, str] = field(default_factory=dict)
+    identity: str = field(default_factory=lambda: str(uuid.uuid4()))
+    started_at: float | None = None
+    segment_ranges: dict[str, tuple[int, int]] = field(default_factory=dict)
+    visible_segment_count: int = 0
+    correction_after_counts: dict[int, int] = field(default_factory=dict)
+
+    def seal(self, segment: str, value: str):
+        if value.strip():
+            if len(self.interims) >= PAGE_SIZE - 1 or sum(len(row["text"].encode()) for row in self.interims) + len(value.encode()) > MAX_RESPONSE // 2:
+                raise APIError("payload_too_large", "This active reply exceeds the safe response size.", 413)
+            self.interims.append({"id": segment, "role": "assistant", "text": value, "provisional": True})
+            self.segment_ranges[segment] = (self.sealed_count, self.streamed_count)
+        self.sealed_count = self.streamed_count
+        self.current_text = ""
+
+    def current(self, row):
+        source = row.get("source_row_id", row["id"])
+        return source in self.persisted_ids if self.persisted_ids is not None else source not in self.preceding_ids
+
+    def reconcile(self, rows: list[dict]):
+        cursor = 0
+        for interim in self.interims:
+            matched_id = self.canonical_ids.get(interim["id"])
+            match = next((i for i in range(cursor, len(rows)) if self.current(rows[i]) and
+                          rows[i]["role"] == "assistant" and rows[i]["id"] != self.final_row_id and
+                          (rows[i]["id"] == matched_id if matched_id else rows[i]["text"] == interim["text"])), None)
+            if match is not None:
+                self.canonical_ids[interim["id"]] = rows[match]["id"]
+                cursor = match + 1
+
+    def merge(self, rows: list[dict]) -> list[dict]:
+        self.reconcile(rows)
+        start = next((i for i, row in enumerate(rows) if self.current(row) and row["role"] == "assistant"), len(rows))
+        merged, cursor = rows[:start], start
+        for interim in self.interims:
+            matched_id = self.canonical_ids.get(interim["id"])
+            match = next((i for i in range(cursor, len(rows)) if rows[i]["id"] == matched_id), None)
+            if match is not None:
+                merged.extend(rows[cursor:match + 1])
+                cursor = match + 1
+            elif matched_id is None:
+                merged.append(interim)
+        return merged + rows[cursor:]
+
+
+    def project_corrections(self, rows, active_text, segment, corrections, offsets, metadata):
+        # Offsets belong to the cumulative public stream, including sealed interims.
+        ranges = {self.canonical_ids.get(key, key): value for key, value in self.segment_ranges.items()}
+        ranges[segment] = (self.sealed_count, self.streamed_count)
+        segment_indices = {self.canonical_ids.get(row["id"], row["id"]): index for index, row in enumerate(self.interims)}
+        for correction_index in range(len(corrections)):
+            self.correction_after_counts.setdefault(correction_index, self.visible_segment_count)
+        source = [*rows, {"id": segment, "role": "assistant", "text": active_text, "provisional": True}]
+        corrected, correction_ids, index = [], [], 0
+        generated_assistants = set()
+        for row in source:
+            bounds = ranges.get(row["id"])
+            if bounds is None:
+                corrected.append(row)
+                continue
+            start, end = bounds
+            cursor = 0
+            while index < len(corrections):
+                raw = offsets[index] if index < len(offsets) else end
+                boundary = raw if type(raw) is int else end
+                segment_index = segment_indices.get(row["id"], len(self.interims))
+                ordering_floor = self.correction_after_counts[index]
+                # A character boundary may span multiple streamed/nonstreamed
+                # segments. Their observed ordinal resolves that equal-offset
+                # position; an interior offset still locates exact stream text.
+                if boundary > end or (boundary == end and segment_index < ordering_floor):
+                    break
+                offset = max(cursor, min(len(row["text"]), boundary - start))
+                if offset > cursor:
+                    part = {**row, "id": row["id"] + f":before:{index}", "text": row["text"][cursor:offset]}
+                    corrected.append(part)
+                    if row["provisional"]:
+                        generated_assistants.add(part["id"])
+                key = f"{self.identity}:correction:{index}"
+                correction_ids.append(key)
+                if corrections[index].strip():
+                    corrected.append({"id": key, "role": "user", "text": corrections[index], "provisional": True})
+                index += 1
+                cursor = offset
+            if row["text"][cursor:]:
+                corrected.append({**row, "text": row["text"][cursor:]})
+                if row["provisional"]:
+                    generated_assistants.add(row["id"])
+        while index < len(corrections):
+            key = f"{self.identity}:correction:{index}"
+            correction_ids.append(key)
+            if corrections[index].strip():
+                corrected.append({"id": key, "role": "user", "text": corrections[index], "provisional": True})
+            index += 1
+
+        # A typed, current-turn canonical steer is authoritative. The agent may
+        # coalesce consecutive corrections into one newline-joined durable row.
+        consumed, suppressed = 0, set()
+        for canonical_index, row in enumerate(rows):
+            meta = metadata.get(row.get("source_row_id", row["id"]), {})
+            stamp = meta.get("timestamp")
+            in_turn = (isinstance(stamp, (int, float)) and stamp >= self.started_at
+                       if self.started_at is not None else self.current(row))
+            if not in_turn or row["role"] != "user" or meta.get("display_kind") != "steer":
+                continue
+            matched = next((end for end in range(consumed + 1, len(corrections) + 1)
+                            if "\n".join(corrections[consumed:end]) == row["text"]), None)
+            if matched is None:
+                continue
+            first_key = correction_ids[consumed]
+            position = next((i for i, value in enumerate(corrected) if value["id"] == first_key), None)
+            if position is not None and canonical_index > 0:
+                preceding = rows[canonical_index - 1]
+                parts = []
+                for value in reversed(corrected[:position]):
+                    if value["id"] not in generated_assistants:
+                        break
+                    parts.insert(0, value)
+                if preceding["role"] == "assistant" and "".join(value["text"] for value in parts) == preceding["text"]:
+                    suppressed.update(value["id"] for value in parts)
+            suppressed.update(correction_ids[consumed:matched])
+            consumed = matched
+        self.visible_segment_count = len(self.interims)
+        return [row for row in corrected if row["id"] not in suppressed]
 
 
 @dataclass
@@ -38,6 +178,10 @@ class Live:
     pending_model: str | None = None
     pending_provider: str | None = None
     status_text: str = ""
+    operation_rows: dict[str, str] = field(default_factory=dict)
+    history_ids: set[str] = field(default_factory=set)
+    history_metadata: dict[str, dict] = field(default_factory=dict)
+    turn: PublicTurn | None = None
 
 
 @dataclass
@@ -64,6 +208,8 @@ class Gateway:
         self.live: dict[str, Live] = {}
         self.session_lock = asyncio.Lock()
         self.events = asyncio.Queue(maxsize=1024)
+        self.event_lock = asyncio.Lock()
+        self.replaying = False
         self.deltas: dict[str, StreamBatch] = {}
         self.tasks = []
         self.closing = False
@@ -105,16 +251,28 @@ class Gateway:
                     if self.epoch != previous_epoch:
                         for live in self.live.values():
                             live.seq = 0
+                            live.turn = None
                     await self.rpc("client.capabilities", {"server_requests": True}, negotiate=True)
-                    self.ready.set()
-                    delay = 0.25
-                    await self.publish({"type": "connection", "payload": {"state": "connected"}})
-                    for stored in list(self.live):
-                        with contextlib.suppress(APIError, TimeoutError):
-                            live = await self.attach(stored, force=True)
-                            replay = await self.rpc("session.events.since", {"session_id": live.runtime, "last_seen": live.seq})
-                            live.seq = replay.get("latest_seq", 0)
-                            await self.emit_snapshot(stored)
+                    async with self.event_lock:
+                        self.ready.set()
+                        delay = 0.25
+                        await self.publish({"type": "connection", "payload": {"state": "connected"}})
+                        for stored in list(self.live):
+                            with contextlib.suppress(APIError, TimeoutError):
+                                live = await self.attach(stored, force=True)
+                                replay = await self.rpc("session.events.since", {"session_id": live.runtime, "last_seen": live.seq})
+                                if replay.get("truncated"):
+                                    if live.turn:
+                                        live.turn.resuming = True
+                                else:
+                                    self.replaying = True
+                                    try:
+                                        for event in replay.get("events", []):
+                                            await self._apply_event({**event, "connection_generation": self.generation})
+                                    finally:
+                                        self.replaying = False
+                                live.seq = max(live.seq, replay.get("latest_seq", 0))
+                                await self.emit_snapshot(stored)
                     await reader
             except asyncio.CancelledError:
                 raise
@@ -253,6 +411,8 @@ class Gateway:
             self.reserve_live()
             await self.rest("GET", "/api/sessions/" + quote(stored, safe=""))
         result = await self.rpc("session.resume", {"session_id": stored, "lazy": True, "omit_messages": True, "defer_history": True, "close_on_disconnect": False})
+        if live and live.runtime != result["session_id"]:
+            live.turn = None
         live = live or Live(stored=stored, runtime=result["session_id"])
         self.live[stored] = live
         self._apply(live, result)
@@ -317,8 +477,8 @@ class Gateway:
         live.controls_at = time.monotonic()
         return live.controls
 
-    def _cursor(self, stored, anchor, offset):
-        raw = encoded({"session": stored, "anchor": anchor, "offset": offset}).encode()
+    def _cursor(self, stored, anchor, offset, part=None):
+        raw = encoded({"session": stored, "anchor": anchor, "offset": offset, "part": part}).encode()
         return base64.urlsafe_b64encode(raw + hmac.digest(self.cursor_key, raw, "sha256")).decode().rstrip("=")
 
     def _decode_cursor(self, value: str, stored: str):
@@ -329,6 +489,8 @@ class Gateway:
                 raise ValueError()
             result = json.loads(data)
             if result["session"] != stored or type(result["offset"]) is not int or not 0 <= result["offset"] <= 10000000:
+                raise ValueError()
+            if result.get("part") is not None and (type(result["part"]) is not int or result["part"] < 1):
                 raise ValueError()
             return result
         except (ValueError, TypeError, KeyError):
@@ -355,35 +517,55 @@ class Gateway:
         offset = max(0, cursor["offset"] - PAGE_SIZE) if cursor else 0
         found, finished = cursor is None, False
         rows, size = [], 0
-        anchor, distance = None, offset
+        anchor, distance, remaining_part = None, offset, None
         has_more = True
         for _ in range(32):
             batch, ended = await page(offset)
             start = len(batch)
+            partial_index = None
             if not found:
                 at = next((i for i, row in enumerate(batch) if message_id(row) == cursor["anchor"]), None)
                 if at is not None:
                     found, start = True, at
+                    if cursor.get("part") is not None:
+                        start, partial_index = at + 1, at
                     anchor, distance = cursor["anchor"], offset + len(batch) - at
             if found:
-                projected_rows = [message(row) for row in batch[:start]]
-                projected_rows = [self.project_message(stored, row) if row is not None else None for row in projected_rows]
-                sizes = await asyncio.to_thread(lambda rows: [len(encoded(row).encode()) if row is not None else 0 for row in rows], projected_rows)
+                live = self.live.get(stored)
+                projected_rows = [[self.project_message(stored, row) for row in public_messages(canonical)] for canonical in batch[:start]]
+                if live:
+                    for canonical in batch[:start]:
+                        live.history_metadata[message_id(canonical)] = {"timestamp": canonical.get("timestamp"), "display_kind": canonical.get("display_kind")}
+                    while len(live.history_metadata) > 512:
+                        del live.history_metadata[next(iter(live.history_metadata))]
+                    projected_rows = [[{**row, "operation_id": live.operation_rows[row["id"]]} if row["id"] in live.operation_rows else row
+                                       for row in projected] for projected in projected_rows]
+                if live and live.turn:
+                    live.turn.reconcile([row for projected in projected_rows for row in projected])
+                sizes = await asyncio.to_thread(lambda: [[len(encoded(row).encode()) for row in projected] for projected in projected_rows])
                 for index in range(start - 1, -1, -1):
-                    canonical, projected, row_size = batch[index], projected_rows[index], sizes[index]
-                    if projected is not None:
+                    canonical, projected = batch[index], projected_rows[index]
+                    if partial_index == index:
+                        projected = projected[:cursor["part"]]
+                    for part_index in range(len(projected) - 1, -1, -1):
+                        row = projected[part_index]
+                        row_size = sizes[index][part_index]
                         if size + row_size > MAX_RESPONSE - 65536:
                             if not rows:
                                 raise APIError("payload_too_large", "This individual Hermes message exceeds the safe response size.", 413)
                             finished = True
                             break
-                        rows.append(projected)
+                        rows.append(row)
                         size += row_size
-                    anchor, distance = message_id(canonical), offset + len(batch) - index
-                    if len(rows) == page_size:
-                        has_more = index > 0 or not ended
-                        finished = True
+                        anchor, distance = message_id(canonical), offset + len(batch) - index
+                        remaining_part = part_index or None
+                        if len(rows) == page_size:
+                            has_more = part_index > 0 or index > 0 or not ended
+                            finished = True
+                            break
+                    if finished:
                         break
+                    anchor, distance, remaining_part = message_id(canonical), offset + len(batch) - index, None
             if finished:
                 break
             if ended:
@@ -393,7 +575,9 @@ class Gateway:
         if not found:
             raise APIError("history_changed", "The history anchor changed in Hermes. Refresh this conversation.", 409)
         rows.reverse()
-        return {"messages": rows, "before": self._cursor(stored, anchor, distance) if anchor is not None and has_more else None, "has_more": has_more}
+        if not before and stored in self.live:
+            self.live[stored].history_ids = {row.get("source_row_id", row["id"]) for row in rows}
+        return {"messages": rows, "before": self._cursor(stored, anchor, distance, remaining_part) if anchor is not None and has_more else None, "has_more": has_more}
 
     async def upload_attachment(self, stored, prepared, authorize):
         live = await self.attach(stored)
@@ -415,10 +599,42 @@ class Gateway:
         result = await self.rpc("session.activate", {"session_id": live.runtime, "omit_messages": True})
         self._apply(live, result)
         inflight = result.get("inflight") or {}
-        has_inflight = bool(inflight.get("assistant")) and live.state in {"working", "waiting"}
-        page, controls = await asyncio.gather(self.history(stored, page_size=PAGE_SIZE - int(has_inflight)), self.controls(stored))
-        if has_inflight:
-            page["messages"].append({"id": live.segment, "role": "assistant", "text": inflight["assistant"], "provisional": True})
+        turn = live.turn
+        inflight_text = inflight.get("assistant") or ""
+        working = live.state in {"working", "waiting"}
+        if turn and not turn.completed and turn.started_at is None:
+            stamp = result.get("turn_started_at")
+            turn.started_at = stamp if isinstance(stamp, (int, float)) else None
+        if turn and turn.resuming:
+            turn.current_text = inflight_text[turn.sealed_count:]
+            turn.streamed_count = len(inflight_text)
+            turn.resuming = False
+        next_turn = bool(turn and turn.completed and working and not self.replaying)
+        active_text = inflight_text if next_turn or turn is None else turn.current_text
+        if turn and turn.completed and self.replaying:
+            active_text = ""
+        corrections = inflight.get("corrections") or [] if working else []
+        if not isinstance(corrections, list) or any(not isinstance(value, str) for value in corrections):
+            raise ValueError("Invalid public corrections")
+        if len(corrections) >= PAGE_SIZE:
+            raise APIError("payload_too_large", "Too many active corrections to display safely.", 413)
+        reserve = sum(row["id"] not in turn.canonical_ids for row in turn.interims) if turn else 0
+        has_inflight = bool(active_text) and working
+        page, controls = await asyncio.gather(self.history(stored, page_size=max(1, PAGE_SIZE - reserve - len(corrections) * 2 - int(has_inflight))), self.controls(stored))
+        if turn:
+            page["messages"] = turn.merge(page["messages"])
+        if working and (turn is None or next_turn):
+            if next_turn:
+                live.segment = str(uuid.uuid4())
+            stamp = result.get("turn_started_at")
+            live.turn = turn = PublicTurn(set(live.history_ids), streamed_count=len(inflight_text), current_text=inflight_text,
+                                         awaiting_start=next_turn, replay_prefix=inflight_text if next_turn else "",
+                                         started_at=stamp if isinstance(stamp, (int, float)) else None)
+        if working and turn:
+            page["messages"] = turn.project_corrections(page["messages"], active_text, live.segment,
+                corrections, inflight.get("correction_offsets") or [], live.history_metadata)
+        if len(page["messages"]) > PAGE_SIZE or len(encoded(page).encode()) > MAX_RESPONSE - 65536:
+            raise APIError("payload_too_large", "This active reply exceeds the safe response size.", 413)
         return {"session": self.session(live), "page": page, "state": live.state, "requests": self.requests(live), "controls": controls, "status_text": live.status_text}
 
     async def emit_snapshot(self, stored):
@@ -453,6 +669,9 @@ class Gateway:
             receipt["status"] = {"streaming": "accepted"}.get(result.get("status"), result.get("status", "accepted"))
             if result.get("user_row_id"):
                 receipt["user_row_id"] = str(result["user_row_id"])
+                live.operation_rows[receipt["user_row_id"]] = body["operation_id"]
+                while len(live.operation_rows) > 512:
+                    del live.operation_rows[next(iter(live.operation_rows))]
         elif kind == "interrupt":
             await self.rpc("session.interrupt", {"session_id": live.runtime}, authorize=authorize)
         elif kind == "model":
@@ -538,58 +757,98 @@ class Gateway:
     async def _events(self):
         while True:
             event = await self.events.get()
-            try:
-                if event.get("connection_generation") != self.generation:
-                    continue
-                live = next((value for value in self.live.values() if value.runtime == event.get("session_id")), None)
-                if not live:
-                    continue
-                kind, payload = event.get("type"), event.get("payload") or {}
-                seq = event.get("seq")
-                if seq:
-                    if seq <= live.seq:
-                        continue
-                    live.seq = seq
-                if kind == "message.start":
-                    await self.flush_deltas(live.stored)
-                    live.state, live.segment = "working", str(uuid.uuid4())
-                    await self.publish({"type": "connection", "session_id": live.stored, "payload": {"state": "working"}})
-                elif kind == "message.delta":
-                    batch = self.deltas.setdefault(live.stored, StreamBatch(live.segment))
-                    delta = payload.get("text", "")
-                    batch.parts.append(delta)
-                    batch.characters += len(delta)
-                    if batch.characters >= 65536:
-                        await self.flush_deltas(live.stored)
-                        await asyncio.sleep(0)
-                elif kind == "message.interim":
-                    await self.flush_deltas(live.stored)
+            async with self.event_lock:
+                await self._apply_event(event)
+
+    async def _apply_event(self, event):
+        try:
+            if event.get("connection_generation") != self.generation:
+                return
+            live = next((value for value in self.live.values() if value.runtime == event.get("session_id")), None)
+            if not live:
+                return
+            kind, payload = event.get("type"), event.get("payload") or {}
+            seq = event.get("seq")
+            if seq:
+                if seq <= live.seq:
+                    return
+                live.seq = seq
+            if kind == "message.start":
+                await self.flush_deltas(live.stored)
+                live.state = "working"
+                if live.turn and live.turn.awaiting_start:
+                    live.turn.awaiting_start = False
+                else:
                     live.segment = str(uuid.uuid4())
-                    await self.emit_snapshot(live.stored)
-                elif kind == "message.complete":
+                    live.turn = PublicTurn(set(live.history_ids))
+                await self.publish({"type": "connection", "session_id": live.stored, "payload": {"state": "working"}})
+            elif kind == "message.delta":
+                batch = self.deltas.setdefault(live.stored, StreamBatch(live.segment))
+                delta = payload.get("text", "")
+                if not isinstance(delta, str):
+                    raise ValueError("Invalid public delta")
+                if live.turn:
+                    prefix = live.turn.replay_prefix
+                    covered = min(len(prefix), len(delta))
+                    if covered and prefix[:covered] == delta[:covered]:
+                        live.turn.replay_prefix = prefix[covered:]
+                        delta = delta[covered:]
+                    else:
+                        live.turn.replay_prefix = ""
+                    live.turn.current_text += delta
+                    live.turn.streamed_count += len(delta)
+                batch.parts.append(delta)
+                batch.characters += len(delta)
+                if batch.characters >= 65536:
                     await self.flush_deltas(live.stored)
-                    live.state = "failed" if payload.get("status") == "error" else "idle"
-                    snapshot = await self.emit_snapshot(live.stored)
-                    row_id = (payload.get("persisted_turn") or {}).get("final_assistant_row_id")
-                    if not row_id:
-                        row_id = next((row["id"] for row in reversed(snapshot["page"]["messages"]) if row["role"] == "assistant" and not row["provisional"] and row["text"] == payload.get("text")), None)
-                    source = {"session_id": live.stored, "row_id": str(row_id) if row_id else None}
-                    await self.on_update("turn:" + self.epoch + ":" + live.runtime + ":" + str(live.seq), {"kind": "error" if payload.get("status") == "error" else "result", "title": "Hermes finished" if payload.get("status") != "error" else "Hermes needs attention", "summary": str(payload.get("text") or "Open the conversation for details.")[:240], "session_id": live.stored}, source)
-                elif kind == "server.request":
-                    live.requests = [row for row in live.requests if row["id"] != payload["id"]] + [payload]
-                    live.state = "waiting"
-                    await self.publish({"type": "requests", "session_id": live.stored, "payload": {"requests": self.requests(live)}})
-                    await self.on_update("request:" + self.generation + ":" + payload["id"], {"kind": "needs_you", "title": "Hermes needs you", "summary": "Open the conversation to review a pending request.", "session_id": live.stored}, {"session_id": live.stored, "request_id": payload["id"], "generation": self.generation})
-                elif kind == "request.cancel":
-                    live.requests = [row for row in live.requests if row["id"] != payload.get("id")]
-                    await self.publish({"type": "requests", "session_id": live.stored, "payload": {"requests": self.requests(live)}})
-                elif kind == "session.info":
-                    live.info.update(payload)
-                    live.controls_at = 0
-                    await self.publish({"type": "controls", "session_id": live.stored, "payload": await self.controls(live.stored, refresh=True)})
-                    await self.publish({"type": "connection", "session_id": live.stored, "payload": {"state": live.state}})
-                elif kind in {"status.update", "tool.start", "tool.complete", "error"}:
-                    live.status_text = str(payload.get("text") or payload.get("message") or payload.get("name") or "Working")[:300]
-                    await self.publish({"type": "connection", "session_id": live.stored, "payload": {"state": "failed" if kind == "error" else live.state, "message": live.status_text}})
-            except (APIError, ConnectionError, TimeoutError, aiohttp.ClientError, KeyError, ValueError):
-                await self.publish({"type": "connection", "payload": {"state": "synchronizing", "message": "Refreshing Hermes state."}})
+                    await asyncio.sleep(0)
+            elif kind == "message.interim":
+                await self.flush_deltas(live.stored)
+                value = payload.get("text")
+                if not isinstance(value, str):
+                    raise ValueError("Invalid public interim")
+                if live.turn is None:
+                    live.turn = PublicTurn(set(live.history_ids))
+                if not payload.get("already_streamed") and live.turn.current_text:
+                    live.turn.seal(live.segment, live.turn.current_text)
+                    live.segment = str(uuid.uuid4())
+                await self.publish({"type": "delta", "session_id": live.stored,
+                                    "payload": {"id": live.segment, "text": value, "replace": True}})
+                live.turn.seal(live.segment, value)
+                live.segment = str(uuid.uuid4())
+                await self.emit_snapshot(live.stored)
+            elif kind == "message.complete":
+                await self.flush_deltas(live.stored)
+                live.state = "failed" if payload.get("status") == "error" else "idle"
+                if live.turn:
+                    live.turn.completed = True
+                    live.turn.current_text = ""
+                    persisted = payload.get("persisted_turn") or {}
+                    if persisted.get("row_ids"):
+                        live.turn.persisted_ids = {str(row_id) for row_id in persisted["row_ids"]}
+                    if persisted.get("final_assistant_row_id"):
+                        live.turn.final_row_id = str(persisted["final_assistant_row_id"])
+                snapshot = await self.emit_snapshot(live.stored)
+                row_id = (payload.get("persisted_turn") or {}).get("final_assistant_row_id")
+                if not row_id:
+                    row_id = next((row["id"] for row in reversed(snapshot["page"]["messages"]) if row["role"] == "assistant" and not row["provisional"] and row["text"] == payload.get("text")), None)
+                source = {"session_id": live.stored, "row_id": str(row_id) if row_id else None}
+                await self.on_update("turn:" + self.epoch + ":" + live.runtime + ":" + str(live.seq), {"kind": "error" if payload.get("status") == "error" else "result", "title": "Hermes finished" if payload.get("status") != "error" else "Hermes needs attention", "summary": str(payload.get("text") or "Open the conversation for details.")[:240], "session_id": live.stored}, source)
+            elif kind == "server.request":
+                live.requests = [row for row in live.requests if row["id"] != payload["id"]] + [payload]
+                live.state = "waiting"
+                await self.publish({"type": "requests", "session_id": live.stored, "payload": {"requests": self.requests(live)}})
+                await self.on_update("request:" + self.generation + ":" + payload["id"], {"kind": "needs_you", "title": "Hermes needs you", "summary": "Open the conversation to review a pending request.", "session_id": live.stored}, {"session_id": live.stored, "request_id": payload["id"], "generation": self.generation})
+            elif kind == "request.cancel":
+                live.requests = [row for row in live.requests if row["id"] != payload.get("id")]
+                await self.publish({"type": "requests", "session_id": live.stored, "payload": {"requests": self.requests(live)}})
+            elif kind == "session.info":
+                live.info.update(payload)
+                live.controls_at = 0
+                await self.publish({"type": "controls", "session_id": live.stored, "payload": await self.controls(live.stored, refresh=True)})
+                await self.publish({"type": "connection", "session_id": live.stored, "payload": {"state": live.state}})
+            elif kind in {"status.update", "tool.start", "tool.complete", "error"}:
+                live.status_text = str(payload.get("text") or payload.get("message") or payload.get("name") or "Working")[:300]
+                await self.publish({"type": "connection", "session_id": live.stored, "payload": {"state": "failed" if kind == "error" else live.state, "message": live.status_text}})
+        except (APIError, ConnectionError, TimeoutError, aiohttp.ClientError, KeyError, ValueError):
+            await self.publish({"type": "connection", "payload": {"state": "synchronizing", "message": "Refreshing Hermes state."}})

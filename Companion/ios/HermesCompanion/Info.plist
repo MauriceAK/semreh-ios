@@ -16,6 +16,7 @@
 <key>UIRequiredDeviceCapabilities</key><array><string>arm64</string></array>
 <key>UISupportedInterfaceOrientations</key><array><string>UIInterfaceOrientationPortrait</string></array>
 <key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/><key>NSExceptionDomains</key><dict><key>localhost</key><dict><key>NSExceptionAllowsInsecureHTTPLoads</key><true/></dict><key>127.0.0.1</key><dict><key>NSExceptionAllowsInsecureHTTPLoads</key><true/></dict></dict></dict>
+<key>NSMicrophoneUsageDescription</key><string>Turn your speech into an editable message on this iPhone. Recording starts only when you tap the microphone.</string>
 <key>NSLocalNetworkUsageDescription</key><string>Connect to your paired Hermes host on your local network.</string>
 <key>CFBundleURLTypes</key><array><dict><key>CFBundleURLSchemes</key><array><string>hermes-companion</string></array></dict></array>
 </dict></plist>
