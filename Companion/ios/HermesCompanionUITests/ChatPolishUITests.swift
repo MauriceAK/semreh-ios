@@ -60,8 +60,18 @@ final class ChatPolishUITests: XCTestCase {
         XCTAssertTrue(cancel.waitForExistence(timeout: 10))
         capture(app, "polish-system-files-picker")
         cancel.tap()
+        XCTAssertTrue(cancel.waitForNonExistence(timeout: 5))
+        let composerReady = NSPredicate { _, _ in
+            self.editor(app).isHittable
+                && app.buttons["addAttachment"].isHittable
+                && app.buttons["sendMessage"].isHittable
+                && app.buttons["sendMessage"].isEnabled
+        }
+        expectation(for: composerReady, evaluatedWith: app)
+        waitForExpectations(timeout: 5)
         XCTAssertEqual(editor(app).value as? String, "A thought to keep while I choose a file")
         checkComposer(app, action: "sendMessage")
+        capture(app, "polish-composer-after-picker-cancel")
     }
 
     func testWorkingSteeringAndStopRemainReachable() {
