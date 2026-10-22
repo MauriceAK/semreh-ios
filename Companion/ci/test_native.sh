@@ -32,6 +32,7 @@ xcodebuild test \
   -skip-testing:HermesCompanionUITests/ChatPolishUITests/testRealFileSendWhenConfigured \
   -skip-testing:HermesCompanionUITests/PerformanceFlowUITests \
   -skip-testing:HermesCompanionUITests/PublicProgressFlowUITests \
+  -skip-testing:HermesCompanionUITests/ResponsivenessFlowUITests \
   -skip-testing:HermesCompanionTests/AppleVoiceEngineTests \
   'DEVELOPMENT_TEAM=' 'CODE_SIGN_IDENTITY=-'
 

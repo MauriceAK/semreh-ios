@@ -10,19 +10,18 @@ archive, TestFlight upload, or release action.
 
 | Case | Selection | Required behavior |
 | --- | --- | --- |
-| A: real app | 112 existing native unit tests, then the three original `ChatPolishUITests` below | Every original assertion, including real Cancel within 10 seconds |
+| A: real app | 180 current native unit tests, then the three original `ChatPolishUITests` below | Every original assertion, including real Cancel within 10 seconds |
 | B: minimal importer | `testMinimalFileImporterCancellation` | Real Cancel, search, and list or empty content within one 10-second readiness budget; cancellation and actionable restored host |
 | C: built-in Files | `testBuiltInFilesBrowseAndSearch` | Actionable Browse, real list or empty content, then search resolving to an empty result |
 
 The selected original UI tests are
 `testAccessibilityLongDraftAndAttachmentStayInsideKeyboardViewport`,
 `testApprovalWithKeyboard`, and `testComposerGeometryAndPickerCancellation`.
-`expected-tests.json` contains the exact 115/1/1 selections. Its original IDs come
-from the committed delivery selection for source
-`646da9a9debddea281248b76a9421682c89997cb`, independently matched against cloud run
-39658130842. The runner verifies IDs from the new raw result and records actual
-UI start order. The original 112 unit tests must precede those three UI tests in
-their original order. A changed prefix sets `baseline_context_matches` to false
+`expected-tests.json` contains the exact 183/1/1 selections. Its A IDs come
+from the current delivery selection for source
+`e5e760bda47d1c0074e6d7c6e2ee10434e7d7a45`, independently matched against the first
+183 test starts in cloud run 39732992774. The runner verifies IDs from the new raw result and records actual
+UI start order. All 183 test starts must match the frozen observed order exactly. A changed prefix sets `baseline_context_matches` to false
 and makes comparison evidence incomplete, without rewriting the test result.
 
 B uses the production SwiftUI overload exactly:
@@ -74,26 +73,48 @@ observer cannot stop, the runner stops the comparison rather than overlap cases.
 - Per-case commands, start/end timestamps, raw exits, raw `Tests.xcresult`, test
   summaries, exact ID readback, actual test device IDs, and attachment/diagnostic
   exports. The original app's XCTest failure attachments remain unchanged.
-- Simulator state changes and observational `bootstatus` output. Observation
-  starts after the state becomes Booted and never gates test launch. Its recorded
-  completion time is the next observation, which can lag while inventories or
-  resource samples run.
-- A filtered live simulator log stream at debug level from observed Booted until
-  test exit or observed device shutdown. Each natural stream exit records its
-  observation time, raw exit, and device state. An exit observed while Booted
-  makes evidence incomplete even if the device later shuts down. The predicate
-  covers Files, DocumentManager, FileProvider, RunningBoard, FrontBoard,
-  SpringBoard, launchd, and picker remote views. Early entries before streaming
-  starts depend on retained logs when available. After testing, the runner reads
-  actual device state. It collects the retained 20-minute log slice and an extra
-  screenshot only while Booted. Shutdown makes those supplemental captures
-  explicitly unavailable; the runner never reboots for collection. The live
-  stream, raw xcresult, and exported session diagnostics remain required.
-  Missing log entries do not prove no service failure occurred.
-- Host process CPU/memory snapshots without command arguments, memory/load
-  counters, and simulator process names/PIDs at a target 10-second interval.
-  Commands can delay samples. These are pressure observations, not profiling or
-  an FPS/latency benchmark. No sysdiagnose or personal logs are collected.
+- Simulator state changes and observational `bootstatus` output. Bootstatus
+  starts after observed Booted, without `-b`, and never gates test launch.
+  Inventory, app discovery, and resource commands have separate timestamped
+  receipts. Failed inventory samples record Unknown. A command failure or
+  malformed inventory does not stop continuous logging. Sampling can delay the
+  observed boot completion timestamp.
+- Separate host and known-device simulator log streams start independently of
+  inventory polling. The host predicate covers CoreSimulator and accessibility.
+  The simulator predicate covers Files, DocumentManager, FileProvider,
+  RunningBoard, FrontBoard, SpringBoard, launchd, remote views, and accessibility.
+  These collectors only observe. They do not boot the device or launch Files.
+  A failed stream setup is retained and retried after ten seconds while the
+  original test command continues. Test commands and assertions are never retried.
+  `stream-segments.json` retains every start, exit, gap, and cleanup result.
+  Stream output and stderr remain separate. Each receipt has UTC and monotonic
+  timestamps. Cleanup signals the owned process group even when its leader has
+  exited. It waits two seconds after SIGTERM, then sends SIGKILL and verifies the
+  group is gone within another two seconds. A surviving group or failed leader
+  reap stays a cleanup failure. Sampler cleanup failures make evidence incomplete,
+  even if tests and continuous logs otherwise pass.
+- `stream-coverage.json` evaluates the target test from recording start through
+  its final attachment. Both host and simulator need one uninterrupted segment
+  with parseable events spanning that interval. Simulator events must identify
+  a Files, DocumentManager, or FileProvider process during the interval, or
+  correlate a remote PID from the target accessibility tree. If a remote PID is
+  available, the report requires a matching process ID or an explicit PID in a
+  lifecycle message. It preserves the process identities and correlation type
+  for inspection. Nonempty unrelated logs, missing recording timestamps,
+  missing target events, and a collector gap remain incomplete. A later Shutdown
+  does not repair an earlier gap. This is coverage evidence, not proof of cause
+  or proof that the system recorded every event.
+- After testing, the runner reads actual device state. It collects retained
+  logs for the last 20 minutes and an extra screenshot only while Booted. Shutdown
+  makes these supplemental captures explicitly unavailable. The runner never
+  reboots for collection. The live streams, raw xcresult, and exported session
+  diagnostics remain required. Missing log entries do not prove no service
+  failure occurred.
+- Host process CPU and memory snapshots without command arguments, memory and
+  load counters, and simulator process names and PIDs at a target ten-second
+  interval. Each sample is bounded and retained separately. Commands can delay
+  samples. These are pressure observations, not profiling or an FPS benchmark.
+  No sysdiagnose or personal logs are collected.
 - The latest exported PNG from the target test, verified against attachment
   metadata, device identity, and PNG signature. `final-screen-attachment.json`
   records its original name, timestamp, and exported filename. This is the final
@@ -106,7 +127,13 @@ Artifacts contain private fixture diagnostic data and have seven-day retention.
 No artifact is a public-sharing approval. Inspect raw evidence before publishing
 an excerpt. Raw XCTest diagnostics can contain runner paths and metadata.
 
-The lifecycle checks use mocked commands and do not launch a simulator:
+The offline checks execute the real observation loops with injected inventory,
+stream, discovery, and resource failures. Owned-process cancellation tests use
+short Python child processes, including an exited leader with a descendant that
+ignores SIGTERM. Exact-prefix checks reject swapped starts even when every test
+ID is present. Coverage cases include unrelated and malformed
+logs, missing timestamps, a missing remote PID, and stream gaps. The checks do
+not launch a simulator or collect local system logs:
 
 ```sh
 python3 -B -m unittest discover -s Companion/diagnostics/picker -p test_run.py -v
@@ -115,8 +142,8 @@ python3 -B -m unittest discover -s Companion/diagnostics/picker -p test_run.py -
 ## Interpretation limits
 
 The simulator devices are fresh, unlike the earlier cloud run's existing device.
-A selects the 112-unit and three-UI-test prefix, but it does not run
-the remainder of the 145-test suite. Raw UI order must be checked before calling
+A selects the 180-unit and three-UI-test prefix, but it does not run
+the remainder of the 214-test suite. Raw UI order must be checked before calling
 the preceding context identical. The control project is a separate app with a
 different lifecycle and less work before presentation. Logging and sampling add
 some load to all cases. B and C do not replace product acceptance.

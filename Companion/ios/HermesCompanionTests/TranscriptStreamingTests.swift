@@ -206,6 +206,115 @@ final class TranscriptStreamingTests: XCTestCase {
         XCTAssertGreaterThan(bodyRects[2].minX, bodyRects[0].minX)
     }
 
+    func testReusedFormattedCellDisplaysEveryLiteralUserLine() async throws {
+        try await assertLiteralUserLinesAfterFormatting([
+            (.large, "# A heading\n\nA paragraph with [a link](https://example.com).")
+        ], capturePixels: true)
+    }
+
+    func testLiteralUserLayoutSurvivesRepeatedMarkdownAndFontChanges() async throws {
+        try await assertLiteralUserLinesAfterFormatting([
+            (.extraSmall, "> Quoted paragraph\n\nAnother paragraph."),
+            (.accessibilityMedium, "# Larger heading\n\n- A list item"),
+            (.medium, "```swift\nlet value = 42\n```"),
+            (.large, "**Bold** and [linked](https://example.com) text.")
+        ], capturePixels: false)
+    }
+
+    private func assertLiteralUserLinesAfterFormatting(
+        _ states: [(UIContentSizeCategory, String)], capturePixels: Bool
+    ) async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        let controller = UIViewController()
+        window.rootViewController = controller
+        window.overrideUserInterfaceStyle = .dark
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previousKeyWindow?.makeKey()
+        }
+        let cell = BubbleCell(style: .default, reuseIdentifier: "literal-reuse")
+        controller.view.addSubview(cell)
+        let text = try XCTUnwrap(textView(in: cell))
+        let lines = ["First line", "Second line", "Third line", "Fourth line"]
+        let raw = lines.joined(separator: "\n")
+        for (index, state) in states.enumerated() {
+            cell.traitOverrides.preferredContentSizeCategory = state.0
+            cell.updateTraitsIfNeeded()
+            let width = CGFloat(375 + index)
+            cell.frame = CGRect(x: 0, y: 100, width: width, height: 400)
+            let user = ChatMessage(id: "literal-\(index)", role: "user", text: raw, provisional: false)
+            let cachedPlainHeight = capturePixels ? BubbleCell.height(user, width: width, traits: cell.traitCollection) : nil
+            let assistant = message(state.1, id: "formatted-\(index)", provisional: false)
+            cell.configure(assistant)
+            for _ in 0..<100 where text.text == state.1 {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            XCTAssertNotEqual(text.text, state.1, "The reused cell must first display parsed Markdown.")
+            if !capturePixels { _ = BubbleCell.height(assistant, width: width, traits: cell.traitCollection) }
+            let height = cachedPlainHeight ?? BubbleCell.height(user, width: width, traits: cell.traitCollection)
+            cell.prepareForReuse()
+            cell.configure(user)
+            cell.frame.size.height = height
+            window.layoutIfNeeded()
+            cell.layoutIfNeeded()
+            text.layoutIfNeeded()
+            XCTAssertEqual(text.text, raw)
+
+            let reference = UITextView(usingTextLayoutManager: false)
+            reference.isScrollEnabled = false
+            reference.textContainerInset = text.textContainerInset
+            reference.textContainer.lineFragmentPadding = 0
+            reference.font = UIFont.preferredFont(forTextStyle: .body, compatibleWith: cell.traitCollection)
+            reference.text = raw
+            let expectedHeight = ceil(reference.sizeThatFits(CGSize(width: width * 0.91, height: .greatestFiniteMagnitude)).height) + 10
+            XCTAssertEqual(height, expectedHeight, accuracy: 0.5,
+                           "Literal row height must not inherit the preceding Markdown's spacing or font.")
+
+            if capturePixels {
+                cell.frame.size.height = expectedHeight
+                cell.layoutIfNeeded()
+                text.layoutIfNeeded()
+            }
+            text.layoutManager.ensureLayout(for: text.textContainer)
+            let laidOut = text.layoutManager.characterRange(
+                forGlyphRange: text.layoutManager.glyphRange(for: text.textContainer), actualGlyphRange: nil)
+            XCTAssertEqual(laidOut, NSRange(location: 0, length: (raw as NSString).length),
+                           "All literal characters must receive glyphs inside the visible text container.")
+            var lastBottom: CGFloat = 0
+            for line in lines {
+                let range = (raw as NSString).range(of: line)
+                let glyphs = text.layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+                let rect = text.layoutManager.boundingRect(forGlyphRange: glyphs, in: text.textContainer)
+                    .offsetBy(dx: text.textContainerInset.left, dy: text.textContainerInset.top)
+                XCTAssertGreaterThan(rect.width, 0, "\(line) must have visible glyphs.")
+                XCTAssertGreaterThanOrEqual(rect.minY, lastBottom - 0.5)
+                XCTAssertLessThanOrEqual(rect.maxY, text.bounds.height - text.textContainerInset.bottom + 0.5,
+                                         "\(line) must fit entirely in the bubble after reuse.")
+                lastBottom = rect.maxY
+            }
+            if capturePixels {
+                CATransaction.flush()
+                let screenshot = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+                    window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+                }
+                let attachment = XCTAttachment(image: screenshot)
+                attachment.name = "literal-lines-after-markdown-reuse"
+                attachment.lifetime = .keepAlways
+                add(attachment)
+                let request = VNRecognizeTextRequest()
+                request.recognitionLevel = .accurate
+                request.usesLanguageCorrection = false
+                try VNImageRequestHandler(cgImage: XCTUnwrap(screenshot.cgImage)).perform([request])
+                let visible = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
+                for line in lines { XCTAssertTrue(visible.contains(line), "Missing rendered line \(line). OCR read \(visible)") }
+            }
+        }
+    }
+
     func testTallCanonicalReplyRendersFinalLineAtLatestInAttachedWindow() async throws {
         let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
         let previousKeyWindow = scene?.windows.first(where: \.isKeyWindow)

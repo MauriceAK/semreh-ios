@@ -11,6 +11,7 @@ final class ChatPerformance: NSObject {
     enum Work: String, Codable, Sendable {
         case draftPersistence, socketDecode, deltaFlush, transcriptUpdate, markdownLayout
         case sendReceipt, historyFetch, latestFetch, latestJump, scroll, draftChangeToNextDisplayCallback, deltaQueuedToLayout, latestRequestToLayout
+        case latestWindowReadyToLayout, transcriptPublication, markdownApply, markdownBatchWait
 
         fileprivate var signpostName: StaticString {
             switch self {
@@ -27,6 +28,10 @@ final class ChatPerformance: NSObject {
             case .draftChangeToNextDisplayCallback: "Draft to callback"
             case .deltaQueuedToLayout: "Delta to layout"
             case .latestRequestToLayout: "Latest to layout"
+            case .latestWindowReadyToLayout: "Latest ready to layout"
+            case .transcriptPublication: "Transcript publication"
+            case .markdownApply: "Markdown apply"
+            case .markdownBatchWait: "Markdown batch wait"
             }
         }
     }
@@ -34,9 +39,48 @@ final class ChatPerformance: NSObject {
     enum Milestone: String, Codable, Sendable {
         case draftChanged, deltaQueued, transcriptLaidOut, latestRequested
         case latestWindowReady, latestViewportMoved, latestJumpCompleted, latestCancelled, latestJumpCancelled
+        case sendAction, sendProjected, sendRowLaidOut, sendEntranceCompleted
+        case workingFooterLaidOut, workingFooterAlreadyLaidOut
+        case conversationSelected, conversationCacheReady, conversationSnapshotReady, conversationLaidOut
     }
 
     enum Outcome: String, Codable, Sendable { case completed, failed, cancelled }
+
+    enum Stage: String, Codable, Sendable {
+        case projection, diffPreparation, heightMeasurement, cellConfiguration, textPreparation, textAssignment
+        case tableReload, tableReloadRows, tableBatch, updateLayout, chromeLayout, sizingLayout, anchorLayout, initialLayout
+        case chrome, viewportCorrection
+    }
+
+    enum Counter: String, Codable, Sendable {
+        case projectionCanonicalRows, projectionOutboundRows, projectionResultRows, changedRows
+        case heightCacheHits, heightCacheMisses, renderedCacheHits, renderedCacheMisses
+        case textAssignedUTF8Bytes, textAppendedUTF8Bytes, chromeChanges
+        case deltaQueuedItems, deltaAppliedItems, deltaAppliedUTF8Bytes
+        case deltaIgnoredItems, deltaIgnoredUTF8Bytes
+    }
+
+    struct StageToken {
+        fileprivate let stage: Stage
+        fileprivate let publication: Int
+        fileprivate let start: Double
+        fileprivate let count: Int
+    }
+
+    struct StageSample: Codable, Sendable {
+        let publication: Int
+        let stage: Stage
+        var invocations: Int
+        var count: Int
+        var totalSeconds: Double
+        var maximumSeconds: Double
+    }
+
+    struct CounterSample: Codable, Sendable {
+        let publication: Int
+        let counter: Counter
+        var count: Int
+    }
 
     struct Token: Sendable {
         fileprivate let id: Int
@@ -55,6 +99,7 @@ final class ChatPerformance: NSObject {
         let milestone: Milestone
         let time: Double
         let count: Int
+        let attempt: Int?
     }
 
     struct Frame: Codable, Sendable {
@@ -86,6 +131,9 @@ final class ChatPerformance: NSObject {
         let spans: [Span]
         let events: [Event]
         let frames: [Frame]
+        let stagesEnabled: Bool
+        let stageSamples: [StageSample]
+        let counterSamples: [CounterSample]
         let unfinishedSpans: Int
         let droppedRecords: Int
         let invalidOperations: Int
@@ -111,6 +159,7 @@ final class ChatPerformance: NSObject {
     private let controlID: String?
     private var enabled: Bool
     private var link: CADisplayLink?
+    private var backgroundSuspended = false
     private var frameSegment = 0
     private var nextID = 0
     private var pending: [Int: Pending] = [:]
@@ -120,13 +169,28 @@ final class ChatPerformance: NSObject {
     private var draftTokens: [Token] = []
     private var deltaToken: Token?
     private var latestToken: Token?
+    private var latestLocalToken: Token?
     private var latestAwaitingWindow = false
     private var droppedRecords = 0
     private var invalidOperations = 0
+    private let stagesEnabled: Bool
+    private var publication = 0
+    private struct StageKey: Hashable { let publication: Int; let stage: Stage }
+    private struct CounterKey: Hashable { let publication: Int; let counter: Counter }
+    private var stageTotals: [StageKey: StageSample] = [:]
+    private var counterTotals: [CounterKey: CounterSample] = [:]
+    private var nextAttempt = 0
+    private struct SendAttempt { let ordinal: Int; let sessionID: String; var milestones: Set<Milestone> = [] }
+    private var sendAttempts: [String: SendAttempt] = [:]
+    private var workingFooterInViewport = false
+    private var presentedSessionID: String?
+    private var conversation: (sessionID: String, ordinal: Int, milestones: Set<Milestone>)?
+    var isRecording: Bool { enabled }
 
     private override init() {
         let arguments = ProcessInfo.processInfo.arguments
         enabled = arguments.contains("--chat-performance")
+        stagesEnabled = arguments.contains("--chat-performance-stages")
         let suppliedLabel = Self.argument("--chat-performance-label", in: arguments) ?? "unlabeled"
         label = String(suppliedLabel.filter { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") }.prefix(64))
         controlID = Self.argument("--chat-performance-control", in: arguments).flatMap(UUID.init(uuidString:))?.uuidString
@@ -136,6 +200,7 @@ final class ChatPerformance: NSObject {
         events.reserveCapacity(2_000)
         frames.reserveCapacity(12_000)
         NotificationCenter.default.addObserver(self, selector: #selector(backgrounded), name: UIApplication.didEnterBackgroundNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(foregrounded), name: UIApplication.didBecomeActiveNotification, object: nil)
         if let controlID {
             let name = "org.hermescompanion.performance.finish." + controlID
             CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), nil, { _, _, _, _, _ in
@@ -164,6 +229,7 @@ final class ChatPerformance: NSObject {
             ? signposter.beginAnimationInterval(work.signpostName, id: signposter.makeSignpostID())
             : signposter.beginInterval(work.signpostName, id: signposter.makeSignpostID())
         pending[nextID] = Pending(work: work, start: CACurrentMediaTime() - origin, count: count, signpost: state)
+        if work == .transcriptPublication { publication = nextID }
         if observesFrames(work) { ensureDisplayLink() }
         return Token(id: nextID)
     }
@@ -176,13 +242,14 @@ final class ChatPerformance: NSObject {
         let workCount = count ?? value.count
         guard workCount >= 0 else { invalidOperations += 1; return }
         spans.append(Span(id: token.id, work: value.work, start: value.start, end: end, count: workCount, outcome: outcome))
+        if value.work == .transcriptPublication { publication = 0 }
         if !pending.values.contains(where: { observesFrames($0.work) }) { link?.isPaused = true }
     }
 
-    func mark(_ milestone: Milestone, count: Int = 1) {
+    func mark(_ milestone: Milestone, count: Int = 1, attempt: Int? = nil) {
         guard enabled else { return }
         guard count >= 0, reserveRecord() else { invalidOperations += 1; return }
-        events.append(Event(milestone: milestone, time: CACurrentMediaTime() - origin, count: count))
+        events.append(Event(milestone: milestone, time: CACurrentMediaTime() - origin, count: count, attempt: attempt))
         switch milestone {
         case .draftChanged:
             if let token = begin(.draftChangeToNextDisplayCallback, count: count) { draftTokens.append(token) }
@@ -193,15 +260,24 @@ final class ChatPerformance: NSObject {
             } else { deltaToken = begin(.deltaQueuedToLayout, count: count) }
         case .latestRequested:
             end(latestToken, outcome: .cancelled)
+            end(latestLocalToken, outcome: .cancelled)
+            latestLocalToken = nil
             latestToken = begin(.latestRequestToLayout, count: count)
             latestAwaitingWindow = true
         case .latestWindowReady:
             latestAwaitingWindow = false
+            end(latestLocalToken, outcome: .cancelled)
+            latestLocalToken = begin(.latestWindowReadyToLayout, count: count)
         case .latestCancelled:
             end(latestToken, outcome: .cancelled)
+            end(latestLocalToken, outcome: .cancelled)
+            latestLocalToken = nil
             latestToken = nil
             latestAwaitingWindow = false
-        case .latestViewportMoved, .latestJumpCompleted, .latestJumpCancelled:
+        case .latestViewportMoved, .latestJumpCompleted, .latestJumpCancelled,
+             .sendAction, .sendProjected, .sendRowLaidOut, .sendEntranceCompleted,
+             .workingFooterLaidOut, .workingFooterAlreadyLaidOut,
+             .conversationSelected, .conversationCacheReady, .conversationSnapshotReady, .conversationLaidOut:
             break
         case .transcriptLaidOut:
             end(deltaToken)
@@ -209,13 +285,113 @@ final class ChatPerformance: NSObject {
             if !latestAwaitingWindow {
                 end(latestToken)
                 latestToken = nil
+                end(latestLocalToken)
+                latestLocalToken = nil
+            }
+        }
+    }
+
+    func beginStage(_ stage: Stage, count: @autoclosure () -> Int = 1) -> StageToken? {
+        guard enabled, stagesEnabled else { return nil }
+        return StageToken(stage: stage, publication: publication, start: CACurrentMediaTime(), count: count())
+    }
+
+    func endStage(_ token: StageToken?) {
+        guard enabled, let token else { return }
+        let duration = CACurrentMediaTime() - token.start
+        guard token.count >= 0 else { invalidOperations += 1; return }
+        let key = StageKey(publication: token.publication, stage: token.stage)
+        if var sample = stageTotals[key] {
+            sample.invocations += 1
+            sample.count += token.count
+            sample.totalSeconds += duration
+            sample.maximumSeconds = max(sample.maximumSeconds, duration)
+            stageTotals[key] = sample
+        } else if reserveRecord() {
+            stageTotals[key] = StageSample(publication: token.publication, stage: token.stage, invocations: 1,
+                                          count: token.count, totalSeconds: duration, maximumSeconds: duration)
+        }
+    }
+
+    func measure<T>(_ stage: Stage, count: @autoclosure () -> Int = 1, _ body: () throws -> T) rethrows -> T {
+        let token = beginStage(stage, count: count())
+        defer { endStage(token) }
+        return try body()
+    }
+
+    func add(_ counter: Counter, count: @autoclosure () -> Int = 1) {
+        guard enabled else { return }
+        let value = count()
+        guard value >= 0 else { invalidOperations += 1; return }
+        let key = CounterKey(publication: publication, counter: counter)
+        if var sample = counterTotals[key] { sample.count += value; counterTotals[key] = sample }
+        else if reserveRecord() { counterTotals[key] = CounterSample(publication: publication, counter: counter, count: value) }
+    }
+
+    func beginSend(operationID: String, sessionID: String) {
+        guard enabled else { return }
+        guard sendAttempts.count < 128 else { droppedRecords += 1; return }
+        nextAttempt += 1
+        sendAttempts[operationID.lowercased()] = SendAttempt(ordinal: nextAttempt, sessionID: sessionID)
+        markSend(.sendAction, operationID: operationID)
+        if workingFooterInViewport && presentedSessionID == sessionID { markSend(.workingFooterAlreadyLaidOut, operationID: operationID) }
+    }
+
+    func markSend(_ milestone: Milestone, operationID: String, count: Int = 1) {
+        guard enabled, var attempt = sendAttempts[operationID.lowercased()], attempt.milestones.insert(milestone).inserted else { return }
+        sendAttempts[operationID.lowercased()] = attempt
+        mark(milestone, count: count, attempt: attempt.ordinal)
+    }
+
+    func projected(_ messages: [ChatMessage]) {
+        guard enabled else { return }
+        for message in messages {
+            if let operationID = message.operationId { markSend(.sendProjected, operationID: operationID) }
+        }
+    }
+
+    func selectConversation(_ sessionID: String) {
+        guard enabled else { return }
+        nextAttempt += 1
+        conversation = (sessionID, nextAttempt, [])
+        markConversation(.conversationSelected, sessionID: sessionID)
+    }
+
+    func markConversation(_ milestone: Milestone, sessionID: String, count: Int = 1) {
+        guard enabled, var conversation, conversation.sessionID == sessionID,
+              conversation.milestones.insert(milestone).inserted else { return }
+        self.conversation = conversation
+        mark(milestone, count: count, attempt: conversation.ordinal)
+    }
+
+    func laidOut(_ messages: [ChatMessage], visibleRows: [Int], sessionID: String?, workingFooterVisible: Bool) {
+        guard enabled else { return }
+        for row in visibleRows where messages.indices.contains(row) {
+            if let operationID = messages[row].operationId { markSend(.sendRowLaidOut, operationID: operationID) }
+        }
+        if let sessionID, !visibleRows.isEmpty { markConversation(.conversationLaidOut, sessionID: sessionID, count: visibleRows.count) }
+        workingFooterInViewport = workingFooterVisible
+        presentedSessionID = sessionID
+        if workingFooterVisible {
+            for (operationID, attempt) in sendAttempts where attempt.sessionID == sessionID && !attempt.milestones.contains(.workingFooterAlreadyLaidOut) {
+                markSend(.workingFooterLaidOut, operationID: operationID)
             }
         }
     }
 
     func finish() { finish(reason: "explicit") }
 
-    @objc private func backgrounded() { finish(reason: "backgrounded") }
+    @objc private func backgrounded() {
+        guard controlID != nil else { finish(reason: "backgrounded"); return }
+        backgroundSuspended = true
+        link?.isPaused = true
+    }
+
+    @objc private func foregrounded() {
+        guard enabled, backgroundSuspended else { return }
+        backgroundSuspended = false
+        if pending.values.contains(where: { observesFrames($0.work) }) { ensureDisplayLink() }
+    }
 
     private func finish(reason: String) {
         guard enabled else { return }
@@ -238,7 +414,7 @@ final class ChatPerformance: NSObject {
         let simulator = false
         #endif
         let snapshot = Snapshot(
-            schema: 1, runID: runID, label: label, configuration: configuration,
+            schema: 2, runID: runID, label: label, configuration: configuration,
             bundleVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown",
             bundleShortVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown",
             os: UIDevice.current.systemVersion, model: UIDevice.current.model, simulator: simulator,
@@ -247,7 +423,10 @@ final class ChatPerformance: NSObject {
             startedAt: startedAt, duration: CACurrentMediaTime() - origin,
             thermalStateAtStart: initialThermal, thermalStateAtEnd: ProcessInfo.processInfo.thermalState.rawValue,
             lowPowerModeAtStart: initialLowPower, lowPowerModeAtEnd: ProcessInfo.processInfo.isLowPowerModeEnabled,
-            spans: spans, events: events, frames: frames, unfinishedSpans: pending.count,
+            spans: spans, events: events, frames: frames, stagesEnabled: stagesEnabled,
+            stageSamples: stageTotals.values.sorted { ($0.publication, $0.stage.rawValue) < ($1.publication, $1.stage.rawValue) },
+            counterSamples: counterTotals.values.sorted { ($0.publication, $0.counter.rawValue) < ($1.publication, $1.counter.rawValue) },
+            unfinishedSpans: pending.count,
             droppedRecords: droppedRecords, invalidOperations: invalidOperations, finishReason: reason
         )
         let logger = logger
@@ -269,11 +448,12 @@ final class ChatPerformance: NSObject {
     }
 
     private func reserveRecord() -> Bool {
-        guard spans.count + events.count + frames.count + pending.count < limit else { droppedRecords += 1; return false }
+        guard spans.count + events.count + frames.count + pending.count + stageTotals.count + counterTotals.count < limit else { droppedRecords += 1; return false }
         return true
     }
 
     private func ensureDisplayLink() {
+        guard !backgroundSuspended else { return }
         if link == nil {
             let link = CADisplayLink(target: self, selector: #selector(tick(_:)))
             link.add(to: .main, forMode: .common)

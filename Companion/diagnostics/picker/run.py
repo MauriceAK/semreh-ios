@@ -26,10 +26,16 @@ PREDICATE = (
     'process == "launchd" OR process == "SpringBoard" OR '
     'subsystem CONTAINS[c] "DocumentManager" OR subsystem CONTAINS[c] "FileProvider" OR '
     'subsystem CONTAINS[c] "RunningBoard" OR subsystem CONTAINS[c] "FrontBoard" OR '
-    'eventMessage CONTAINS[c] "DOCRemote" OR eventMessage CONTAINS[c] "documentpicker"'
+    'eventMessage CONTAINS[c] "DOCRemote" OR eventMessage CONTAINS[c] "documentpicker" OR '
+    'subsystem CONTAINS[c] "Accessibility" OR process CONTAINS[c] "AXUI" OR '
+    'process CONTAINS[c] "accessibility"'
+)
+HOST_PREDICATE = (
+    'subsystem CONTAINS[c] "CoreSimulator" OR process CONTAINS[c] "Simulator" OR '
+    'subsystem CONTAINS[c] "Accessibility" OR process CONTAINS[c] "AXUI"'
 )
 CASES = (
-    ("A-real-app", 115, (
+    ("A-real-app", len(json.loads((HERE / "expected-tests.json").read_text())["A-real-app"]), (
         "-only-testing:HermesCompanionTests",
         "-skip-testing:HermesCompanionTests/AppleVoiceEngineTests",
         "-only-testing:HermesCompanionUITests/ChatPolishUITests/testAccessibilityLongDraftAndAttachmentStayInsideKeyboardViewport",
@@ -81,18 +87,22 @@ def required(args, output, timeout=60):
 
 
 def device_state(inventory, udid):
-    return next((device["state"] for group in inventory["devices"].values()
-                 for device in group if device["udid"] == udid), "Missing")
+    if not isinstance(inventory, dict) or not isinstance(inventory.get("devices"), dict):
+        raise ValueError("Device inventory must contain a devices dictionary")
+    for group in inventory["devices"].values():
+        if not isinstance(group, list):
+            raise ValueError("Device inventory runtime must contain a list")
+        for device in group:
+            if not isinstance(device, dict) or not isinstance(device.get("udid"), str) or not isinstance(device.get("state"), str):
+                raise ValueError("Device inventory entry requires a UDID and state")
+            if device["udid"] == udid:
+                return device["state"]
+    return "Missing"
 
 
 def read_device_state(udid, output):
     return device_state(json.loads(required(
         ["xcrun", "simctl", "list", "devices", "--json"], output, timeout=30)), udid)
-
-
-def stream_complete(receipt):
-    return bool(receipt.get("stopped_by_observer") or
-                receipt.get("device_state") in ("Shutdown", "Shutting Down", "ShuttingDown"))
 
 
 def verify_screenshot(folder, name, udid):
@@ -135,94 +145,263 @@ def cleanup_device(udid, folder):
     return receipt
 
 
-def observe(udid, folder, stop, files_id):
-    previous = None
-    boot_process = None
-    boot_log = None
-    boot_finished = False
-    stream_process = None
-    stream_log = None
-    stream_exit = None
-    installed = False
-    sample = 0
+def stamp():
+    return {"at": now(), "monotonic": time.monotonic()}
+
+
+def append_receipt(path, value):
+    with path.open("a") as out:
+        out.write(json.dumps(value) + "\n")
+
+
+def stop_process(process):
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(process.pid, sig)
+        except ProcessLookupError:
+            process.wait(timeout=2)
+            return process.returncode
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            process.poll()
+            try:
+                os.killpg(process.pid, 0)
+            except ProcessLookupError:
+                process.wait(timeout=2)
+                return process.returncode
+            time.sleep(0.02)
+    raise RuntimeError(f"Owned process group {process.pid} remains after SIGTERM and SIGKILL")
+
+
+def observe_command(args, output, stop, timeout):
+    receipt = {"command": args, "started": stamp()}
+    process = None
+    try:
+        with output.open("wb") as log:
+            process = subprocess.Popen(args, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+            deadline = time.monotonic() + timeout
+            while process.poll() is None:
+                if stop.is_set() or time.monotonic() >= deadline:
+                    receipt["cancelled" if stop.is_set() else "timed_out"] = True
+                    break
+                try:
+                    process.wait(timeout=0.2)
+                except subprocess.TimeoutExpired:
+                    pass
+            receipt["exit"] = process.returncode
+    except Exception as error:
+        receipt["error"] = repr(error)
+    finally:
+        if process is not None:
+            try:
+                receipt["exit"] = stop_process(process)
+            except Exception as error:
+                receipt["cleanup_error"] = repr(error)
+        receipt["finished"] = stamp()
+        save(output.with_suffix(output.suffix + ".command.json"), receipt)
+    return receipt.get("exit") == 0 and not any(receipt.get(key) for key in ("error", "timed_out", "cancelled", "cleanup_error"))
+
+
+def observe_streams(udid, folder, stop):
+    streams = {
+        "host": ["/usr/bin/log", "stream", "--level", "debug", "--style", "ndjson", "--predicate", HOST_PREDICATE],
+        "simulator": ["xcrun", "simctl", "spawn", udid, "log", "stream", "--level", "debug", "--style", "ndjson", "--predicate", PREDICATE],
+    }
+    active = {}
+    next_attempt = dict.fromkeys(streams, 0)
+    segments = []
+
+    def finish(kind, stopped):
+        process, output, errors, receipt = active.pop(kind)
+        receipt.update(stopped_by_observer=stopped, exit=process.poll())
+        try:
+            receipt["exit"] = stop_process(process)
+        except Exception as error:
+            receipt["cleanup_error"] = repr(error)
+        receipt["finished"] = stamp()
+        output.close()
+        errors.close()
+        save(folder / "stream-segments.json", segments)
+        next_attempt[kind] = time.monotonic() + 10
+
     try:
         while not stop.is_set():
-            inventory = subprocess.run(
-                ["xcrun", "simctl", "list", "devices", "--json"],
-                capture_output=True, text=True, timeout=30, check=True,
-            )
-            state = device_state(json.loads(inventory.stdout), udid)
+            for kind, args in streams.items():
+                if kind in active and active[kind][0].poll() is not None:
+                    finish(kind, False)
+                if kind in active or time.monotonic() < next_attempt[kind] or stop.is_set():
+                    continue
+                number = sum(item["kind"] == kind for item in segments)
+                filename = f"{kind}-stream-{number:03d}.ndjson"
+                receipt = {"kind": kind, "udid": udid if kind == "simulator" else None,
+                           "command": args, "file": filename, "started": stamp()}
+                segments.append(receipt)
+                output = (folder / filename).open("wb")
+                errors = (folder / (filename + ".stderr")).open("wb")
+                try:
+                    process = subprocess.Popen(args, stdout=output, stderr=errors, start_new_session=True)
+                    receipt["pid"] = process.pid
+                    active[kind] = (process, output, errors, receipt)
+                except Exception as error:
+                    receipt.update(error=repr(error), finished=stamp())
+                    output.close()
+                    errors.close()
+                    next_attempt[kind] = time.monotonic() + 10
+                save(folder / "stream-segments.json", segments)
+            stop.wait(0.2)
+    except Exception as error:
+        save(folder / "stream-observer-error.json", {**stamp(), "error": repr(error)})
+    finally:
+        for kind in list(active):
+            finish(kind, active[kind][0].poll() is None)
+        save(folder / "stream-observer-stopped.json", stamp())
+
+
+def observe(udid, folder, stop, files_id):
+    streams = threading.Thread(target=observe_streams, args=(udid, folder, stop), daemon=True)
+    streams.start()
+    previous = None
+    installed = False
+    sample = 0
+    boot_process = None
+    boot_log = None
+    boot_receipt = None
+    try:
+        while not stop.is_set():
+            state = "Unknown"
+            inventory_path = folder / f"devices-sample-{sample:03d}.json"
+            if observe_command(["xcrun", "simctl", "list", "devices", "--json"], inventory_path, stop, 30):
+                try:
+                    state = device_state(json.loads(inventory_path.read_text()), udid)
+                except (ValueError, KeyError, TypeError) as error:
+                    append_receipt(folder / "observation-errors.jsonl", {**stamp(), "collector": "inventory", "file": inventory_path.name, "error": repr(error)})
             if state != previous:
-                with (folder / "boot-milestones.jsonl").open("a") as out:
-                    out.write(json.dumps({"at": now(), "udid": udid, "state": state}) + "\n")
+                append_receipt(folder / "boot-milestones.jsonl", {**stamp(), "udid": udid, "state": state})
                 previous = state
-            if state == "Booted" and boot_process is None:
+            if state == "Booted" and boot_receipt is None and not stop.is_set():
                 boot_log = (folder / "bootstatus-observation.txt").open("wb")
-                boot_process = subprocess.Popen(["xcrun", "simctl", "bootstatus", udid], stdout=boot_log, stderr=subprocess.STDOUT)
-                save(folder / "bootstatus-start.json", {"at": now(), "policy": "Observation only, after Booted; no -b and no launch gate"})
-                stream_log = (folder / "system-stream.ndjson").open("wb")
-                stream_args = ["xcrun", "simctl", "spawn", udid, "log", "stream", "--level", "debug", "--style", "ndjson", "--predicate", PREDICATE]
-                stream_process = subprocess.Popen(stream_args, stdout=stream_log, stderr=subprocess.STDOUT)
-                save(folder / "system-stream-start.json", {"at": now(), "command": stream_args})
-            if stream_process is not None and stream_exit is None and stream_process.poll() is not None:
-                stream_exit = {"observed_at": now(), "exit": stream_process.returncode,
-                               "stopped_by_observer": False, "device_state": state}
-                save(folder / "system-stream-exit.json", stream_exit)
-            if boot_process is not None and not boot_finished and boot_process.poll() is not None:
-                save(folder / "bootstatus-exit.json", {"observed_at": now(), "exit": boot_process.returncode, "poll_target_seconds": 2, "note": "Observed completion; inventory and resource sampling can delay this timestamp."})
-                boot_finished = True
-            if state == "Booted" and not installed:
-                apps_path = folder / "installed-apps.plist"
-                if command(["xcrun", "simctl", "listapps", udid], apps_path, timeout=15) == 0:
-                    required(["plutil", "-convert", "json", "-o", str(folder / "installed-apps.json"), str(apps_path)], folder / "convert-app-inventory.txt", timeout=15)
-                    apps = json.loads((folder / "installed-apps.json").read_text())
-                    save(folder / "files-installed-identity.json", {"at": now(), "bundle_id": files_id, "present": files_id in apps, "metadata": apps.get(files_id)})
-                    installed = True
-            if sample % 5 == 0 and not stop.is_set():
-                with (folder / "resources.txt").open("ab") as out:
-                    out.write(("\n" + now() + "\n").encode())
-                    for args in (["ps", "-axo", "pid,ppid,pcpu,pmem,rss,comm"], ["vm_stat"], ["sysctl", "vm.loadavg"]):
-                        subprocess.run(args, stdout=out, stderr=subprocess.STDOUT, timeout=10)
-                if state == "Booted" and not stop.is_set():
-                    with (folder / "simulator-processes.txt").open("ab") as out:
-                        out.write(("\n" + now() + "\n").encode())
-                        subprocess.run(["xcrun", "simctl", "spawn", udid, "launchctl", "list"], stdout=out, stderr=subprocess.STDOUT, timeout=10)
+                boot_receipt = {"started": stamp(), "policy": "Observation only after Booted; no -b or test launch gate"}
+                try:
+                    boot_process = subprocess.Popen(["xcrun", "simctl", "bootstatus", udid], stdout=boot_log, stderr=subprocess.STDOUT, start_new_session=True)
+                except Exception as error:
+                    boot_receipt.update(error=repr(error), finished=stamp())
+                save(folder / "bootstatus-observation.json", boot_receipt)
+            if boot_process is not None and "finished" not in boot_receipt and boot_process.poll() is not None:
+                boot_receipt.update(exit=boot_process.returncode, finished=stamp())
+                save(folder / "bootstatus-observation.json", boot_receipt)
+            if state == "Booted" and not installed and not stop.is_set():
+                apps_path = folder / f"installed-apps-{sample:03d}.plist"
+                if observe_command(["xcrun", "simctl", "listapps", udid], apps_path, stop, 15):
+                    try:
+                        apps = plistlib.loads(apps_path.read_bytes())
+                        if not isinstance(apps, dict):
+                            raise ValueError("Installed application inventory is not a dictionary")
+                        save(folder / "files-installed-identity.json", {**stamp(), "bundle_id": files_id, "present": files_id in apps, "metadata": apps.get(files_id)})
+                        installed = files_id in apps
+                    except (ValueError, plistlib.InvalidFileException, TypeError) as error:
+                        append_receipt(folder / "observation-errors.jsonl", {**stamp(), "collector": "listapps", "file": apps_path.name, "error": repr(error)})
+            if sample % 5 == 0:
+                for kind, args in (("processes", ["ps", "-axo", "pid,ppid,pcpu,pmem,rss,comm"]),
+                                   ("memory", ["vm_stat"]), ("load", ["sysctl", "vm.loadavg"]),
+                                   ("simulator-processes", ["xcrun", "simctl", "spawn", udid, "launchctl", "list"])):
+                    if stop.is_set():
+                        break
+                    if kind != "simulator-processes" or state == "Booted":
+                        observe_command(args, folder / f"{kind}-{sample:03d}.txt", stop, 10)
             sample += 1
             stop.wait(2)
     except Exception as error:
-        save(folder / "observer-error.json", {"at": now(), "error": str(error)})
+        save(folder / "observer-error.json", {**stamp(), "error": repr(error)})
     finally:
+        stop.set()
         if boot_process is not None:
-            if boot_process.poll() is None:
-                boot_process.terminate()
             try:
-                boot_process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                boot_process.kill()
-                boot_process.wait()
-            if not boot_finished:
-                save(folder / "bootstatus-exit.json", {"observed_at": now(), "exit": boot_process.returncode, "ended_with_observer": True})
+                boot_receipt.update(exit=stop_process(boot_process), reaped=stamp())
+            except Exception as error:
+                boot_receipt["cleanup_error"] = repr(error)
+            save(folder / "bootstatus-observation.json", boot_receipt)
+        if boot_log is not None:
             boot_log.close()
-        if stream_process is not None:
-            stopped_by_observer = stream_process.poll() is None
-            if stream_exit is None:
-                stream_exit = {"observed_at": now(), "exit": stream_process.returncode,
-                               "stopped_by_observer": stopped_by_observer}
-                if not stopped_by_observer:
-                    try:
-                        stream_exit["device_state"] = read_device_state(udid, folder / "devices-at-stream-exit.json")
-                    except Exception as error:
-                        stream_exit["state_error"] = str(error)
-            if stopped_by_observer:
-                stream_process.terminate()
-            try:
-                stream_process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                stream_process.kill()
-                stream_process.wait()
-            stream_exit.update(exit=stream_process.returncode, reaped_at=now())
-            save(folder / "system-stream-exit.json", stream_exit)
-            stream_log.close()
+        streams.join(timeout=10)
+        cleanup_failures = []
+        for path in folder.glob("*.command.json"):
+            receipt = json.loads(path.read_text())
+            if receipt.get("cleanup_error"):
+                cleanup_failures.append({"receipt": path.name, "error": receipt["cleanup_error"]})
+        save(folder / "observer-stopped.json", {**stamp(), "stream_observer_stopped": not streams.is_alive(),
+                                              "boot_cleanup_complete": boot_receipt is None or "cleanup_error" not in boot_receipt,
+                                              "command_cleanup_complete": not cleanup_failures,
+                                              "command_cleanup_failures": cleanup_failures})
+
+
+def verify_stream_coverage(folder, name, udid):
+    selector = next(case[2][-1] for case in CASES if case[0] == name)
+    test_id = "/".join(selector.split(":", 1)[1].split("/")[-2:]) + "()"
+    manifest = json.loads((folder / "attachments/manifest.json").read_text())
+    attachments = [item for test in manifest if test.get("testIdentifier") == test_id
+                   for item in test.get("attachments", []) if item.get("deviceId") == udid]
+    recordings = [item["timestamp"] for item in attachments if str(item.get("exportedFileName", "")).endswith(".mp4")]
+    observations = [item["timestamp"] for item in attachments if isinstance(item.get("timestamp"), (int, float))]
+    interval = [min(recordings), max(observations)] if recordings and observations else None
+    remote_pids = set()
+    for attachment in attachments:
+        filename = attachment.get("exportedFileName", "")
+        if Path(filename).name != filename or not filename.endswith(".txt"):
+            continue
+        text = (folder / "attachments" / filename).read_text(errors="replace")
+        roots = set(re.findall(r"Application,[^\n]+?pid: (\d+)", text))
+        remote_pids.update(set(re.findall(r"<AX element pid: (\d+)", text)) - roots)
+    segments_path = folder / "stream-segments.json"
+    segments = json.loads(segments_path.read_text()) if segments_path.exists() else []
+    summaries = []
+    for segment in segments:
+        event_count = 0
+        first = None
+        last = None
+        identities = {}
+        malformed = 0
+        with (folder / segment["file"]).open(errors="replace") as event_log:
+            for line in event_log:
+                try:
+                    event = json.loads(line)
+                    timestamp = datetime.fromisoformat(event["timestamp"]).timestamp()
+                    message = event["eventMessage"]
+                    if not isinstance(message, str):
+                        raise ValueError("Non-string event message")
+                except (ValueError, KeyError, TypeError):
+                    malformed += 1
+                    continue
+                event_count += 1
+                first = timestamp if first is None else min(first, timestamp)
+                last = timestamp if last is None else max(last, timestamp)
+                image = event.get("processImagePath", event.get("process", ""))
+                pid = str(event.get("processID", event.get("processIdentifier", "")))
+                target = re.search(r"Files|Documents|DocumentManager|fileprovider", str(image), re.I)
+                correlated = [value for value in remote_pids if pid == value or re.search(
+                    r"(?:\bpid\s*[:=]?\s*|\bprocessID\s*[:=]\s*|[:<])" + value + r"(?=[\s>\]])", message, re.I)]
+                if interval and interval[0] <= timestamp <= interval[1] and (target or correlated) and pid.isdigit():
+                    identity = identities.setdefault(pid, {"image": image, "remote_ax_pids": [], "correlations": {}})
+                    identity["remote_ax_pids"] = sorted(set(correlated) | set(identity["remote_ax_pids"]))
+                    for value in correlated:
+                        method = "process_id" if pid == value else "message_pid"
+                        identity["correlations"][value] = sorted(set(identity["correlations"].get(value, [])) | {method})
+        uninterrupted = bool(interval and segment.get("finished") and not segment.get("error") and not segment.get("cleanup_error")
+                             and datetime.fromisoformat(segment["started"]["at"]).timestamp() <= interval[0]
+                             and datetime.fromisoformat(segment["finished"]["at"]).timestamp() >= interval[1]
+                             and first is not None and first <= interval[0] and last >= interval[1])
+        target_covered = bool(identities) and (not remote_pids or any(value["remote_ax_pids"] for value in identities.values()))
+        summaries.append({"file": segment["file"], "kind": segment["kind"], "events": event_count, "malformed_lines": malformed,
+                          "first_event": first, "last_event": last, "uninterrupted_interval": uninterrupted,
+                          "target_identities": identities, "target_covered": target_covered})
+    host_covered = any(item["kind"] == "host" and item["uninterrupted_interval"] for item in summaries)
+    simulator_covered = any(item["kind"] == "simulator" and item["uninterrupted_interval"] and item["target_covered"] for item in summaries)
+    result = {"testIdentifier": test_id, "interval": interval, "interval_source": "recording start through final target attachment",
+              "remote_ax_pids": sorted(remote_pids), "segments": summaries, "host_covered": host_covered,
+              "simulator_covered": simulator_covered,
+              "cleanup_complete": all("cleanup_error" not in segment for segment in segments),
+              "complete": host_covered and simulator_covered and all("cleanup_error" not in segment for segment in segments)}
+    save(folder / "stream-coverage.json", result)
+    return result
 
 
 def discover_files(runtime):
@@ -271,8 +450,8 @@ def verify_test_tree(folder, name, udid):
     expected_ui_order = [selector.rsplit("/", 1)[-1] for selector in CASES[0][2] if "/ChatPolishUITests/" in selector]
     started_ids = [class_name.replace(".", "/") + "/" + method for class_name, method in starts]
     expected_units = [test for test in expected if test.startswith("HermesCompanionTests/")]
-    unit_prefix_matches = len(starts) == 115 and sorted(started_ids[:112]) == sorted(expected_units)
-    baseline_context_matches = unit_prefix_matches and ui_order == expected_ui_order if name.startswith("A-") else True
+    unit_prefix_matches = started_ids[:len(expected_units)] == expected_units
+    baseline_context_matches = unit_prefix_matches and started_ids == expected and ui_order == expected_ui_order if name.startswith("A-") else True
     receipt = {"expected": expected, "observed": observed, "exact_ids_match": sorted(observed) == sorted(expected), "actual_devices": devices, "actual_device_matches_request": device_matches, "observed_start_order": started_ids, "observed_ui_start_order": ui_order, "expected_historical_ui_order": expected_ui_order if name.startswith("A-") else [], "historical_ui_order_matches": ui_order == expected_ui_order if name.startswith("A-") else None, "baseline_context_matches": baseline_context_matches}
     save(folder / "selection-readback.json", receipt)
     return receipt
@@ -337,11 +516,15 @@ def run_case(case, runtime_id, device_type, control_project, files_id):
                 verdict["tests_passed"] = verdict["test_exit"] == 0 and summary.get("result") == "Passed" and summary.get("passedTests") == expected_count and summary.get("failedTests") == 0 and summary.get("skippedTests") == 0
         identity_path = folder / "files-installed-identity.json"
         verdict["files_identity_confirmed"] = identity_path.exists() and json.loads(identity_path.read_text())["present"]
-        stream_exit = folder / "system-stream-exit.json"
-        stream_valid = stream_exit.exists() and stream_complete(json.loads(stream_exit.read_text())) and (folder / "system-stream.ndjson").stat().st_size > 0
+        coverage = verify_stream_coverage(folder, name, udid)
+        verdict["stream_coverage_complete"] = coverage["complete"]
+        observer_receipt = folder / "observer-stopped.json"
+        collectors_stopped = observer_receipt.exists() and all(json.loads(observer_receipt.read_text()).get(key) for key in ("stream_observer_stopped", "boot_cleanup_complete", "command_cleanup_complete"))
         verdict["evidence_complete"] = all((
             state == "Shutdown" or (state == "Booted" and verdict["system_log_exit"] == 0 and verdict["screenshot_exit"] == 0),
-            stream_valid,
+            verdict["stream_coverage_complete"],
+            collectors_stopped,
+            not (folder / "stream-observer-error.json").exists(),
             verdict["observer_stopped"],
             verdict["files_identity_confirmed"],
             not (folder / "observer-error.json").exists(),

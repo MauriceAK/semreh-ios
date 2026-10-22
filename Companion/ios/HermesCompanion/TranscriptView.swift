@@ -9,18 +9,56 @@ struct TranscriptView: UIViewControllerRepresentable {
     var viewportInsets = UIEdgeInsets(top: 36, left: 0, bottom: 18, right: 0)
     var activity: TranscriptActivity = .idle
     var sessionID: String?
+    var conversationContext: ConversationContext?
+    var sends: [SendPresentationIntent] = []
+    var readerRestoration: ReaderRestoration?
+    var dockGeometry: TranscriptDockGeometry?
+    var onReaderPosition: ((ReaderPosition, ConversationContext) -> Void)?
+    var onSendPresentation: ((SendPresentationIntent, SendPresentationOutcome) -> Void)?
     var onUserScrollBegan: (() -> Void)?
     let onOlder: () -> Void
     let onReadingHistory: (Bool) -> Void
 
     func makeUIViewController(context: Context) -> TranscriptController { TranscriptController() }
     func updateUIViewController(_ controller: TranscriptController, context: Context) {
+        controller.onReaderPosition = onReaderPosition
+        controller.onSendPresentation = onSendPresentation
         controller.onOlder = onOlder
         controller.onReadingHistory = onReadingHistory
         controller.onUserScrollBegan = onUserScrollBegan
-        controller.render(messages: messages, hasMore: hasMore, loading: loading, latestRevision: latestRevision, sessionID: sessionID, viewportInsets: viewportInsets, activity: activity)
+        controller.render(messages: messages, hasMore: hasMore, loading: loading, latestRevision: latestRevision, sessionID: sessionID, viewportInsets: viewportInsets, activity: activity, conversationContext: conversationContext, sends: sends, readerRestoration: readerRestoration, dockGeometry: dockGeometry)
     }
 }
+
+@MainActor
+final class TranscriptDockGeometry {
+    weak var view: UIView?
+    func frame(in window: UIWindow) -> CGRect? {
+        guard let view, view.window === window else { return nil }
+        let layer = view.layer.presentation() ?? view.layer
+        return layer.convert(layer.bounds, to: window.layer.presentation() ?? window.layer)
+    }
+}
+
+struct TranscriptDockProbe: UIViewRepresentable {
+    let geometry: TranscriptDockGeometry
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView()
+        view.isUserInteractionEnabled = false
+        view.isAccessibilityElement = false
+        geometry.view = view
+        return view
+    }
+    func updateUIView(_ uiView: UIView, context: Context) {}
+}
+
+struct SendPresentationIntent: Equatable {
+    let context: ConversationContext
+    let operationID: String
+    var renderID: String { "outbound:" + operationID.lowercased() }
+}
+
+enum SendPresentationOutcome: Equatable { case completed, cancelled }
 
 enum TranscriptActivity: Equatable {
     case idle, working, waiting, stopping
@@ -41,6 +79,32 @@ final class TranscriptController: UIViewController, UITableViewDataSource, UITab
     private let older = UIButton(type: .system)
     private let activityBubble = TranscriptActivityBubble()
     private var activity: TranscriptActivity = .idle
+    private var requestedActivity: TranscriptActivity = .idle
+    private var conversationContext: ConversationContext?
+    private var readerRestorationID: UUID?
+    private var dockGeometry: TranscriptDockGeometry?
+    private enum SendFooterReservation: Equatable {
+        case none, pending, presented(String)
+    }
+    private var sendFooterReservation = SendFooterReservation.none
+    private struct PresentationGeometry: Equatable {
+        let row: CGRect
+        let viewport: CGRect
+        let dock: CGRect?
+    }
+    private enum PresentationPhase {
+        case pending
+        case sampled(PresentationGeometry)
+        case settled(PresentationGeometry)
+    }
+    private struct SendPresentation {
+        let intent: SendPresentationIntent
+        var phase = PresentationPhase.pending
+    }
+    private var sendPresentations: [SendPresentation] = []
+    private var consumedSends = Set<String>()
+    private var presentationLink: CADisplayLink?
+    private lazy var presentationTicker = TranscriptPresentationTicker(controller: self)
     private var messages: [ChatMessage] = []
     private var firstLayout = true
     private var applying = false
@@ -60,6 +124,8 @@ final class TranscriptController: UIViewController, UITableViewDataSource, UITab
     var isJumpingToLatest: Bool { latestJump != nil }
     private var scrollSpan: ChatPerformance.Token?
     private var sizingTask: Task<Void, Never>?
+    var onReaderPosition: ((ReaderPosition, ConversationContext) -> Void)?
+    var onSendPresentation: ((SendPresentationIntent, SendPresentationOutcome) -> Void)?
     var onOlder: (() -> Void)?
     var onReadingHistory: ((Bool) -> Void)?
     var onUserScrollBegan: (() -> Void)?
@@ -85,33 +151,183 @@ final class TranscriptController: UIViewController, UITableViewDataSource, UITab
         older.titleLabel?.font = .preferredFont(forTextStyle: .footnote)
         older.accessibilityIdentifier = "loadOlder"
         older.addTarget(self, action: #selector(loadEarlier), for: .touchUpInside)
+        NotificationCenter.default.addObserver(self, selector: #selector(suspendPresentation), name: UIApplication.willResignActiveNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(reduceMotionChanged), name: UIAccessibility.reduceMotionStatusDidChangeNotification, object: nil)
     }
     func render(messages: [ChatMessage], hasMore: Bool, loading: Bool, latestRevision: UUID,
-                sessionID: String?, viewportInsets: UIEdgeInsets, activity: TranscriptActivity) {
-        UIView.performWithoutAnimation {
-            update(messages: messages, hasMore: hasMore, loading: loading, latestRevision: latestRevision, sessionID: sessionID)
-            updateChrome(viewportInsets: viewportInsets, activity: activity)
+                sessionID: String?, viewportInsets: UIEdgeInsets, activity: TranscriptActivity,
+                conversationContext: ConversationContext? = nil, sends: [SendPresentationIntent] = [],
+                readerRestoration: ReaderRestoration? = nil, dockGeometry: TranscriptDockGeometry? = nil) {
+        let publication = ChatPerformance.shared.begin(.transcriptPublication, count: messages.count)
+        defer { ChatPerformance.shared.end(publication) }
+        self.dockGeometry = dockGeometry
+        loadViewIfNeeded()
+        if self.conversationContext != conversationContext {
+            suspendPresentation()
+            consumedSends.removeAll()
+            sendFooterReservation = .none
+            readerRestorationID = nil
+            cancelLatestJump()
+            firstLayout = true
+            followingLatest = true
+            self.conversationContext = conversationContext
         }
+        let current = sends.filter { $0.context == conversationContext }
+        consumedSends.formIntersection(current.map(\.operationID))
+        sendPresentations.removeAll { pending in !current.contains(pending.intent) }
+        if activity == .idle {
+            switch sendFooterReservation {
+            case .pending where sendPresentations.isEmpty:
+                sendFooterReservation = .none
+            case .presented(let renderID) where !messages.contains(where: { $0.renderID == renderID }):
+                sendFooterReservation = .none
+            default: break
+            }
+        }
+        for intent in current where !consumedSends.contains(intent.operationID) && !sendPresentations.contains(where: { $0.intent == intent }) {
+            sendPresentations.append(.init(intent: intent))
+            if sendFooterReservation == .none { sendFooterReservation = .pending }
+            followingLatest = true
+            viewportIntent = UUID()
+        }
+        if requestedActivity != .idle && activity == .idle { sendFooterReservation = .none }
+        requestedActivity = activity
+        UIView.performWithoutAnimation {
+            updateChrome(viewportInsets: viewportInsets, activity: presentedActivity)
+            update(messages: messages, hasMore: hasMore, loading: loading, latestRevision: latestRevision, sessionID: sessionID)
+            if let readerRestoration, readerRestorationID != readerRestoration.id {
+                readerRestorationID = readerRestoration.id
+                if sendPresentations.isEmpty { restoreReader(readerRestoration.position) }
+            }
+        }
+        resumePresentation()
+        recordPresentation()
+    }
+    private var presentedActivity: TranscriptActivity {
+        if requestedActivity == .working && activity != .working && !sendPresentations.isEmpty { return .idle }
+        return requestedActivity
     }
     func updateChrome(viewportInsets: UIEdgeInsets, activity: TranscriptActivity) {
+        let chrome = ChatPerformance.shared.beginStage(.chrome, count: messages.count)
+        defer { ChatPerformance.shared.endStage(chrome) }
         loadViewIfNeeded()
-        guard table.contentInset != viewportInsets || self.activity != activity else { return }
+        let needsFooter = activity != .idle || sendFooterReservation != .none || !sendPresentations.isEmpty
+        guard table.contentInset != viewportInsets || self.activity != activity || (table.tableFooterView != nil) != needsFooter else { return }
+        ChatPerformance.shared.add(.chromeChanges)
         let anchor = visibleAnchor()
         applying = true
         table.contentInset = viewportInsets
         table.verticalScrollIndicatorInsets = viewportInsets
-        if self.activity != activity {
-            self.activity = activity
-            activityBubble.configure(activity)
-            activityBubble.frame = CGRect(x: 0, y: 0, width: table.bounds.width, height: 52)
-            table.tableFooterView = activity == .idle ? nil : activityBubble
-        }
-        table.layoutIfNeeded()
+        self.activity = activity
+        activityBubble.configure(activity)
+        activityBubble.frame = CGRect(x: 0, y: 0, width: table.bounds.width, height: 52)
+        if (table.tableFooterView != nil) != needsFooter { table.tableFooterView = needsFooter ? activityBubble : nil }
+        ChatPerformance.shared.measure(.chromeLayout, count: messages.count) { table.layoutIfNeeded() }
         if followingLatest { scrollToBottom() }
-        else if let anchor, let index = messages.firstIndex(where: { $0.id == anchor.id }) { restoreAnchor(anchor, at: index) }
+        else if let anchor, let index = messages.firstIndex(where: { $0.renderID == anchor.renderID }) { restoreAnchor(anchor, at: index) }
         applying = false
         logGeometry("chrome")
+    }
+    private func resumePresentation() {
+        guard !sendPresentations.isEmpty, presentationLink == nil, followingLatest, view.window != nil else { return }
+        let link = CADisplayLink(target: presentationTicker, selector: #selector(TranscriptPresentationTicker.tick(_:)))
+        presentationLink = link
+        link.add(to: .main, forMode: .common)
+    }
+    fileprivate func advancePresentation() {
+        guard followingLatest, !table.isDragging, !table.isDecelerating, view.window != nil else {
+            pausePresentation()
+            return
+        }
+        guard latestJump == nil, sizingTask == nil, let window = view.window else { return }
+        table.layoutIfNeeded()
+        var viewport = table.convert(table.bounds, to: window).inset(by: table.adjustedContentInset)
+        let dock = dockGeometry?.frame(in: window)
+        if let dock {
+            viewport.size.height = max(0, min(viewport.maxY, dock.minY) - viewport.minY)
+        }
+        var completed: [SendPresentationIntent] = []
+        for index in sendPresentations.indices {
+            let intent = sendPresentations[index].intent
+            guard let row = messages.firstIndex(where: { $0.renderID == intent.renderID }),
+                  let cell = table.cellForRow(at: IndexPath(row: row, section: 0)) as? BubbleCell else { continue }
+            let layer = cell.layer.presentation() ?? cell.layer
+            let frame = layer.convert(layer.bounds, to: window.layer.presentation() ?? window.layer)
+            let visible = frame.intersection(viewport)
+            guard visible.width >= 44, visible.height >= min(32, frame.height), frame.maxY <= viewport.maxY + 1 else {
+                sendPresentations[index].phase = .pending
+                continue
+            }
+            let geometry = PresentationGeometry(row: frame, viewport: viewport, dock: dock)
+            switch sendPresentations[index].phase {
+            case .settled(let previous) where previous == geometry:
+                completed.append(intent)
+            case .sampled(let previous) where previous == geometry:
+                sendPresentations[index].phase = .settled(geometry)
+            default:
+                sendPresentations[index].phase = .sampled(geometry)
+            }
+        }
+        let newestCompleted = sendPresentations.last.map { completed.contains($0.intent) } == true
+        for intent in completed {
+            if sendFooterReservation != .none { sendFooterReservation = .presented(intent.renderID) }
+            ChatPerformance.shared.markSend(.sendEntranceCompleted, operationID: intent.operationID)
+            consumedSends.insert(intent.operationID)
+            sendPresentations.removeAll { $0.intent == intent }
+            onSendPresentation?(intent, .completed)
+        }
+        if newestCompleted {
+            let superseded = sendPresentations.map(\.intent)
+            sendPresentations.removeAll()
+            for intent in superseded {
+                consumedSends.insert(intent.operationID)
+                onSendPresentation?(intent, .cancelled)
+            }
+        }
+        if sendPresentations.isEmpty {
+            pausePresentation()
+            activity = requestedActivity
+            activityBubble.configure(activity)
+            recordPresentation()
+        }
+    }
+    private func pausePresentation() {
+        presentationLink?.invalidate()
+        presentationLink = nil
+        for index in sendPresentations.indices {
+            sendPresentations[index].phase = .pending
+        }
+    }
+    @objc private func suspendPresentation() {
+        viewportIntent = UUID()
+        pausePresentation()
+        let cancelled = sendPresentations.map(\.intent)
+        sendPresentations.removeAll()
+        for intent in cancelled {
+            consumedSends.insert(intent.operationID)
+            onSendPresentation?(intent, .cancelled)
+        }
+    }
+    private func restoreReader(_ position: ReaderPosition) {
+        cancelLatestJump()
+        viewportIntent = UUID()
+        switch position {
+        case .latest:
+            followingLatest = true
+            scrollToBottom()
+        case .anchored(let id, let offset):
+            guard let row = messages.firstIndex(where: { $0.renderID == id || $0.id == id }) else { return }
+            followingLatest = false
+            firstLayout = false
+            restoreAnchor((id, CGFloat(offset) + table.adjustedContentInset.top), at: row)
+        }
+    }
+    private func recordReaderPosition() {
+        guard let conversationContext else { return }
+        if followingLatest { onReaderPosition?(.latest, conversationContext) }
+        else if let anchor = visibleAnchor() {
+            onReaderPosition?(.anchored(messageID: anchor.renderID, offsetFromUsableTop: Double(anchor.offset - table.adjustedContentInset.top)), conversationContext)
+        }
     }
     @objc private func loadEarlier() {
         cancelLatestJump()
@@ -122,7 +338,7 @@ final class TranscriptController: UIViewController, UITableViewDataSource, UITab
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         if firstLayout && !messages.isEmpty && table.bounds.height > 0 {
-            table.layoutIfNeeded()
+            ChatPerformance.shared.measure(.initialLayout, count: messages.count) { table.layoutIfNeeded() }
             #if DEBUG
             if ProcessInfo.processInfo.arguments.contains("--fixture-top") { followingLatest = false; table.setContentOffset(CGPoint(x: 0, y: -table.adjustedContentInset.top), animated: false) }
             else { scrollToBottom() }
@@ -131,7 +347,16 @@ final class TranscriptController: UIViewController, UITableViewDataSource, UITab
             #endif
             firstLayout = false
         } else if followingLatest && (!messages.isEmpty || activity != .idle) { scrollToBottom() }
+        resumePresentation()
         logGeometry("layout")
+        recordPresentation()
+    }
+    private func recordPresentation() {
+        guard ChatPerformance.shared.isRecording, table.window != nil, table.bounds.width > 0, table.bounds.height > 0 else { return }
+        let viewport = table.bounds.inset(by: table.adjustedContentInset)
+        let visibleRows = (table.indexPathsForVisibleRows ?? []).filter { table.rectForRow(at: $0).intersects(viewport) }.map(\.row)
+        let footerVisible = activity == .working && table.tableFooterView != nil && activityBubble.frame.intersects(viewport)
+        ChatPerformance.shared.laidOut(messages, visibleRows: visibleRows, sessionID: sessionID, workingFooterVisible: footerVisible)
     }
     private func logGeometry(_ phase: String) {
         #if DEBUG
@@ -141,6 +366,8 @@ final class TranscriptController: UIViewController, UITableViewDataSource, UITab
         #endif
     }
     func update(messages newMessages: [ChatMessage], hasMore: Bool, loading: Bool, latestRevision: UUID, sessionID: String? = nil) {
+        var preparation = ChatPerformance.shared.beginStage(.diffPreparation, count: newMessages.count)
+        defer { ChatPerformance.shared.endStage(preparation) }
         loadViewIfNeeded()
         let changedSession = self.sessionID != sessionID
         if changedSession {
@@ -163,8 +390,10 @@ final class TranscriptController: UIViewController, UITableViewDataSource, UITab
             latestJump = LatestJump(startOffset: table.contentOffset.y, span: ChatPerformance.shared.begin(.latestJump))
         }
         guard messages != newMessages else {
+            ChatPerformance.shared.endStage(preparation)
+            preparation = nil
             if requestedLatest {
-                table.layoutIfNeeded()
+                ChatPerformance.shared.measure(.updateLayout, count: messages.count) { table.layoutIfNeeded() }
                 beginLatestJump()
                 ChatPerformance.shared.mark(.transcriptLaidOut, count: messages.count)
             }
@@ -181,26 +410,44 @@ final class TranscriptController: UIViewController, UITableViewDataSource, UITab
         let anchor = visibleAnchor()
         let oldMessages = messages
         messages = newMessages
-        if oldMessages.map(\.renderID) == messages.map(\.renderID) {
+        let oldRenderIDs = oldMessages.map(\.renderID)
+        let renderIDs = messages.map(\.renderID)
+        if oldRenderIDs == renderIDs {
             let changed = messages.indices.filter { oldMessages[$0] != messages[$0] }.map { IndexPath(row: $0, section: 0) }
+            ChatPerformance.shared.add(.changedRows, count: changed.count)
             if !changed.isEmpty {
-                let appending = changed.allSatisfy { BubbleCell.provisionalSuffix(from: oldMessages[$0.row], to: messages[$0.row]) != nil }
+                let deliveryOnly = Set(changed.filter { BubbleCell.canUpdateDelivery(from: oldMessages[$0.row], to: messages[$0.row]) })
+                let contentChanges = changed.filter { !deliveryOnly.contains($0) }
+                let appending = contentChanges.allSatisfy { BubbleCell.provisionalSuffix(from: oldMessages[$0.row], to: messages[$0.row]) != nil }
+                ChatPerformance.shared.endStage(preparation)
+                preparation = nil
                 UIView.performWithoutAnimation {
-                    if appending {
-                        for path in changed {
+                    for path in deliveryOnly {
+                        (table.cellForRow(at: path) as? BubbleCell)?.updateDelivery(messages[path.row])
+                    }
+                    if !contentChanges.isEmpty && appending {
+                        for path in contentChanges {
                             (table.cellForRow(at: path) as? BubbleCell)?.appendProvisional(messages[path.row])
                         }
-                        table.performBatchUpdates(nil)
-                    } else {
-                        table.reloadRows(at: changed, with: .none)
+                        ChatPerformance.shared.measure(.tableBatch, count: contentChanges.count) { table.performBatchUpdates(nil) }
+                    } else if !contentChanges.isEmpty {
+                        ChatPerformance.shared.measure(.tableReloadRows, count: contentChanges.count) { table.reloadRows(at: contentChanges, with: .none) }
                     }
-                    table.layoutIfNeeded()
+                    ChatPerformance.shared.measure(.updateLayout, count: messages.count) { table.layoutIfNeeded() }
                 }
             }
         } else {
-            UIView.performWithoutAnimation { table.reloadData(); table.layoutIfNeeded() }
+            ChatPerformance.shared.add(.changedRows, count: messages.count)
+            ChatPerformance.shared.endStage(preparation)
+            preparation = nil
+            UIView.performWithoutAnimation {
+                ChatPerformance.shared.measure(.tableReload, count: messages.count) { table.reloadData() }
+                ChatPerformance.shared.measure(.updateLayout, count: messages.count) { table.layoutIfNeeded() }
+            }
         }
-        let prepended = messages.first?.id != oldMessages.first?.id && messages.last?.id == oldMessages.last?.id
+        ChatPerformance.shared.endStage(preparation)
+        preparation = nil
+        let prepended = !oldRenderIDs.isEmpty && renderIDs.count > oldRenderIDs.count && renderIDs.suffix(oldRenderIDs.count).elementsEqual(oldRenderIDs)
         if prepended && !oldMessages.isEmpty && !requestedLatest {
             cancelLatestJump()
             followingLatest = false
@@ -211,30 +458,40 @@ final class TranscriptController: UIViewController, UITableViewDataSource, UITab
             beginLatestJump()
         } else if wasAtBottom && !prepended {
             scrollToBottom()
-        } else if let anchor, let index = messages.firstIndex(where: { $0.id == anchor.id }) {
+        } else if let anchor, let index = messages.firstIndex(where: { $0.renderID == anchor.renderID }) {
             restoreAnchor(anchor, at: index)
         }
         if oldMessages.isEmpty { firstLayout = true; view.setNeedsLayout() }
     }
-    private func restoreAnchor(_ anchor: (id: String, offset: CGFloat), at index: Int) {
+    private func restoreAnchor(_ anchor: (renderID: String, offset: CGFloat), at index: Int) {
+        let correction = ChatPerformance.shared.beginStage(.viewportCorrection)
+        defer { ChatPerformance.shared.endStage(correction) }
         let path = IndexPath(row: index, section: 0)
         table.scrollToRow(at: path, at: .top, animated: false)
-        table.layoutIfNeeded()
+        ChatPerformance.shared.measure(.anchorLayout, count: messages.count) { table.layoutIfNeeded() }
         table.contentOffset.y = table.rectForRow(at: path).minY - anchor.offset
-        table.layoutIfNeeded()
+        ChatPerformance.shared.measure(.anchorLayout, count: messages.count) { table.layoutIfNeeded() }
     }
     private var isAtBottom: Bool { table.contentSize.height - table.contentOffset.y - table.bounds.height + table.adjustedContentInset.bottom < 100 }
-    private func visibleAnchor() -> (id: String, offset: CGFloat)? {
+    private func visibleAnchor() -> (renderID: String, offset: CGFloat)? {
         guard let index = table.indexPathsForVisibleRows?.first, messages.indices.contains(index.row) else { return nil }
-        return (messages[index.row].id, table.rectForRow(at: index).minY - table.contentOffset.y)
+        return (messages[index.row].renderID, table.rectForRow(at: index).minY - table.contentOffset.y)
     }
     private var bottomOffset: CGFloat {
         max(-table.adjustedContentInset.top, table.contentSize.height - table.bounds.height + table.adjustedContentInset.bottom)
     }
     private func scrollToBottom() {
         guard latestJump == nil else { return }
+        let correction = ChatPerformance.shared.beginStage(.viewportCorrection)
+        defer { ChatPerformance.shared.endStage(correction) }
         followingLatest = true
-        table.setContentOffset(CGPoint(x: 0, y: bottomOffset), animated: false)
+        var offset = bottomOffset
+        if let target = sendPresentations.last?.intent,
+           let row = messages.firstIndex(where: { $0.renderID == target.renderID }) {
+            let bottom = table.rectForRow(at: IndexPath(row: row, section: 0)).maxY + 52
+            offset = min(offset, max(-table.adjustedContentInset.top, bottom - table.bounds.height + table.adjustedContentInset.bottom))
+        }
+        table.setContentOffset(CGPoint(x: 0, y: offset), animated: false)
     }
     private func beginLatestJump() {
         guard var jump = latestJump else { return }
@@ -271,7 +528,14 @@ final class TranscriptController: UIViewController, UITableViewDataSource, UITab
         scrollToBottom()
         ChatPerformance.shared.end(jump.span)
         ChatPerformance.shared.mark(.latestJumpCompleted)
-        onReadingHistory?(false)
+        let context = conversationContext
+        let intent = viewportIntent
+        Task { @MainActor [weak self] in
+            guard let self, self.conversationContext == context, self.viewportIntent == intent, self.followingLatest else { return }
+            self.onReadingHistory?(false)
+            self.recordReaderPosition()
+        }
+        resumePresentation()
     }
     private func cancelLatestJump() {
         jumpLink?.invalidate()
@@ -287,10 +551,12 @@ final class TranscriptController: UIViewController, UITableViewDataSource, UITab
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         cancelLatestJump()
+        suspendPresentation()
     }
-    isolated deinit { jumpLink?.invalidate() }
+    isolated deinit { jumpLink?.invalidate(); presentationLink?.invalidate() }
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
         cancelLatestJump()
+        pausePresentation()
         followingLatest = false
         viewportIntent = UUID()
         onUserScrollBegan?()
@@ -298,10 +564,12 @@ final class TranscriptController: UIViewController, UITableViewDataSource, UITab
         scrollSpan = ChatPerformance.shared.begin(.scroll)
     }
     func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
-        if !decelerate { ChatPerformance.shared.end(scrollSpan); scrollSpan = nil }
+        if !decelerate { ChatPerformance.shared.end(scrollSpan); scrollSpan = nil; recordReaderPosition(); resumePresentation() }
     }
     func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
         ChatPerformance.shared.end(scrollSpan); scrollSpan = nil
+        recordReaderPosition()
+        resumePresentation()
     }
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
         guard !applying, !firstLayout, table.isDragging || table.isDecelerating else { return }
@@ -318,20 +586,29 @@ final class TranscriptController: UIViewController, UITableViewDataSource, UITab
             try? await Task.sleep(for: .milliseconds(30))
             guard let self else { return }
             let layoutSpan = ChatPerformance.shared.begin(.markdownLayout, count: self.messages.count)
+            let batchWait = ChatPerformance.shared.begin(.markdownBatchWait, count: self.messages.count)
             self.applying = true
             UIView.performWithoutAnimation {
-                self.table.performBatchUpdates(nil) { [weak self] _ in
-                    guard let self else { return }
-                    self.table.layoutIfNeeded()
-                    if !self.table.isDragging && !self.table.isDecelerating {
-                        if self.followingLatest { self.scrollToBottom() }
-                        else if intent == self.viewportIntent, let anchor, let index = self.messages.firstIndex(where: { $0.id == anchor.id }) {
-                            self.restoreAnchor(anchor, at: index)
+                ChatPerformance.shared.measure(.tableBatch, count: self.messages.count) {
+                    self.table.performBatchUpdates(nil) { [weak self] _ in
+                        guard let self else {
+                            ChatPerformance.shared.end(layoutSpan, outcome: .cancelled)
+                            ChatPerformance.shared.end(batchWait, outcome: .cancelled)
+                            return
                         }
+                        ChatPerformance.shared.end(batchWait)
+                        ChatPerformance.shared.measure(.sizingLayout, count: self.messages.count) { self.table.layoutIfNeeded() }
+                        if !self.table.isDragging && !self.table.isDecelerating {
+                            if self.followingLatest { self.scrollToBottom() }
+                            else if intent == self.viewportIntent, let anchor, let index = self.messages.firstIndex(where: { $0.renderID == anchor.renderID }) {
+                                self.restoreAnchor(anchor, at: index)
+                            }
+                        }
+                        self.applying = false
+                        self.sizingTask = nil
+                        ChatPerformance.shared.end(layoutSpan)
+                        self.recordPresentation()
                     }
-                    self.applying = false
-                    self.sizingTask = nil
-                    ChatPerformance.shared.end(layoutSpan)
                 }
             }
         }
@@ -348,6 +625,16 @@ final class TranscriptController: UIViewController, UITableViewDataSource, UITab
         cell.onFormattingWillChange = { [weak self] in self?.scheduleSizing() }
         cell.configure(messages[indexPath.row])
         return cell
+    }
+}
+
+@MainActor
+private final class TranscriptPresentationTicker: NSObject {
+    weak var controller: TranscriptController?
+    init(controller: TranscriptController) { self.controller = controller }
+    @objc func tick(_ link: CADisplayLink) {
+        guard let controller else { link.invalidate(); return }
+        controller.advancePresentation()
     }
 }
 
@@ -392,6 +679,8 @@ private final class TranscriptActivityBubble: UIView {
     override func didMoveToWindow() { super.didMoveToWindow(); updateAnimation() }
     func configure(_ activity: TranscriptActivity) {
         self.activity = activity
+        bubble.isHidden = activity == .idle
+        bubble.accessibilityElementsHidden = activity == .idle
         bubble.accessibilityLabel = activity.label
         updateAnimation()
     }
@@ -460,9 +749,14 @@ final class BubbleCell: UITableViewCell {
     private static var measuringFont: UIFont?
     private static var measuringWasFormatted = false
 
+    static func canUpdateDelivery(from old: ChatMessage, to new: ChatMessage) -> Bool {
+        old.renderID == new.renderID && old.role == "user" && new.role == "user"
+            && old.displayText == new.displayText && old.deliveryLabel != nil && new.deliveryLabel != nil
+    }
+
     static func provisionalSuffix(from old: ChatMessage, to new: ChatMessage) -> String? {
         guard old.provisional, new.provisional, old.id == new.id, old.role == new.role,
-              old.attachments == new.attachments else { return nil }
+              old.attachments == new.attachments, old.deliveryLabel == new.deliveryLabel else { return nil }
         let previous = old.displayText
         let next = new.displayText
         // Use exact UTF-16 units rather than grapheme counts: an incoming chunk
@@ -472,6 +766,9 @@ final class BubbleCell: UITableViewCell {
     }
     private static func append(_ suffix: String, to view: UITextView, font: UIFont) {
         guard !suffix.isEmpty else { return }
+        let assignment = ChatPerformance.shared.beginStage(.textAssignment, count: suffix.utf8.count)
+        defer { ChatPerformance.shared.endStage(assignment) }
+        ChatPerformance.shared.add(.textAppendedUTF8Bytes, count: suffix.utf8.count)
         view.textStorage.append(NSAttributedString(string: suffix, attributes: [
             .font: font, .foregroundColor: view.textColor ?? UIColor.label
         ]))
@@ -482,10 +779,16 @@ final class BubbleCell: UITableViewCell {
     static func height(_ message: ChatMessage, width: CGFloat, traits: UITraitCollection) -> CGFloat {
         let font = UIFont.preferredFont(forTextStyle: message.role == "tool" ? .footnote : .body, compatibleWith: traits)
         let key = cacheKey(message, font: font)
-        let formatted = renderedCache.object(forKey: key)
+        let formatted = message.role == "user" ? nil : renderedCache.object(forKey: key)
         let sizeComponents = [message.delivery?.rawValue ?? "", String(describing: width), formatted?.revision.uuidString ?? "plain", key as String]
         let sizeKey = sizeComponents.joined(separator: "|") as NSString
-        if let height = heightCache.object(forKey: sizeKey) { return CGFloat(height.doubleValue) }
+        if let height = heightCache.object(forKey: sizeKey) {
+            ChatPerformance.shared.add(.heightCacheHits)
+            return CGFloat(height.doubleValue)
+        }
+        ChatPerformance.shared.add(.heightCacheMisses)
+        let measurement = ChatPerformance.shared.beginStage(.heightMeasurement, count: message.displayText.utf8.count)
+        defer { ChatPerformance.shared.endStage(measurement) }
         measuringText.isScrollEnabled = false
         measuringText.textContainerInset = UIEdgeInsets(top: 11, left: 16, bottom: 11, right: 16)
         measuringText.textContainer.lineFragmentPadding = 0
@@ -494,9 +797,11 @@ final class BubbleCell: UITableViewCell {
         if let suffix {
             append(suffix, to: measuringText, font: font)
         } else {
-            measuringText.font = font
-            if let formatted { measuringText.attributedText = formatted.text }
-            else { measuringText.text = message.displayText }
+            ChatPerformance.shared.add(.textAssignedUTF8Bytes, count: message.displayText.utf8.count)
+            ChatPerformance.shared.measure(.textAssignment, count: message.displayText.utf8.count) {
+                measuringText.attributedText = formatted?.text ?? NSAttributedString(
+                    string: message.displayText, attributes: [.font: font, .foregroundColor: UIColor.white])
+            }
         }
         measuringWasFormatted = formatted != nil
         measuringMessage = message
@@ -554,6 +859,12 @@ final class BubbleCell: UITableViewCell {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override func prepareForReuse() { super.prepareForReuse(); formatTask?.cancel(); formatTask = nil; messageID = nil; configuredMessage = nil; configuredFont = nil }
+    func updateDelivery(_ message: ChatMessage) {
+        configuredMessage = message
+        messageID = message.id
+        deliveryLabel.text = message.deliveryLabel
+        textView.accessibilityIdentifier = "message-" + message.id
+    }
     func appendProvisional(_ message: ChatMessage) {
         guard let configuredMessage, let suffix = Self.provisionalSuffix(from: configuredMessage, to: message),
               let font = configuredFont else { configure(message); return }
@@ -567,6 +878,8 @@ final class BubbleCell: UITableViewCell {
         textView.accessibilityLabel = (message.role == "user" ? "You. " : "Hermes. ") + message.displayText
     }
     func configure(_ message: ChatMessage) {
+        let configuration = ChatPerformance.shared.beginStage(.cellConfiguration)
+        defer { ChatPerformance.shared.endStage(configuration) }
         configuredMessage = message
         formatTask?.cancel()
         formatTask = nil
@@ -580,21 +893,24 @@ final class BubbleCell: UITableViewCell {
         bubble.backgroundColor = user ? UIColor(red: 0.04, green: 0.36, blue: 0.82, alpha: 1) : UIColor(white: 0.13, alpha: 1)
         let font = UIFont.preferredFont(forTextStyle: message.role == "tool" ? .footnote : .body, compatibleWith: traitCollection)
         configuredFont = font
-        textView.font = font
-        textView.textColor = .white
-        textView.text = message.displayText
+        let cached = user ? nil : Self.renderedCache.object(forKey: Self.cacheKey(message, font: font))
+        ChatPerformance.shared.add(.textAssignedUTF8Bytes, count: message.displayText.utf8.count)
+        ChatPerformance.shared.measure(.textAssignment, count: message.displayText.utf8.count) {
+            textView.attributedText = cached?.text ?? NSAttributedString(
+                string: message.displayText, attributes: [.font: font, .foregroundColor: UIColor.white])
+        }
         textView.accessibilityLabel = (user ? "You. " : "Hermes. ") + message.displayText
         textView.accessibilityIdentifier = "message-" + message.id
-        let cacheKey = Self.cacheKey(message, font: font)
-        if let cached = Self.renderedCache.object(forKey: cacheKey) {
-            textView.attributedText = cached.text
+        guard !user else { return }
+        if let cached {
+            ChatPerformance.shared.add(.renderedCacheHits)
             if cached.fullyParsed { return }
-        }
+        } else { ChatPerformance.shared.add(.renderedCacheMisses) }
         scheduleFormatting(font: font)
     }
 
     private func scheduleFormatting(font: UIFont) {
-        guard formatTask == nil, let configuredMessage else { return }
+        guard formatTask == nil, let configuredMessage, configuredMessage.role != "user" else { return }
         let generation = UUID()
         formattingGeneration = generation
         let provisional = configuredMessage.provisional
@@ -610,17 +926,21 @@ final class BubbleCell: UITableViewCell {
                 return
             }
             let layoutSpan = ChatPerformance.shared.begin(.markdownLayout, count: message.displayText.utf8.count)
-            defer { ChatPerformance.shared.end(layoutSpan) }
+            let applySpan = ChatPerformance.shared.begin(.markdownApply, count: message.displayText.utf8.count)
+            defer { ChatPerformance.shared.end(applySpan); ChatPerformance.shared.end(layoutSpan) }
             let attributed = Self.render(formatted, font: font)
             guard self.textView.attributedText != attributed else { return }
             self.onFormattingWillChange?()
             Self.renderedCache.setObject(RenderedMarkdown(attributed), forKey: Self.cacheKey(message, font: font), cost: message.displayText.utf8.count)
-            self.textView.attributedText = attributed
+            ChatPerformance.shared.add(.textAssignedUTF8Bytes, count: message.displayText.utf8.count)
+            ChatPerformance.shared.measure(.textAssignment, count: message.displayText.utf8.count) { self.textView.attributedText = attributed }
         }
     }
     private var formattingGeneration = UUID()
 
     private static func render(_ formatted: AttributedString, font: UIFont) -> NSAttributedString {
+        let preparation = ChatPerformance.shared.beginStage(.textPreparation)
+        defer { ChatPerformance.shared.endStage(preparation) }
         let attributed = NSMutableAttributedString(formatted)
         attributed.addAttributes([.font: font, .foregroundColor: UIColor.white], range: NSRange(location: 0, length: attributed.length))
         var listIndents: [Int: CGFloat] = [:]

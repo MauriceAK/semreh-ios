@@ -91,6 +91,8 @@ struct AppAlerts: ViewModifier {
 
 struct PairingView: View {
     @Bindable var store: AppStore
+    var replacingHost = false
+    @Environment(\.dismiss) private var dismiss
     @State private var invitation = ""
     var body: some View {
         NavigationStack {
@@ -115,6 +117,8 @@ struct PairingView: View {
                         .font(.footnote).foregroundStyle(.secondary)
                 }.padding(24)
             }.background(Color(white: 0.055)).navigationTitle("Hermes Companion").navigationBarTitleDisplayMode(.inline)
+                .toolbar { if replacingHost { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } } }
+                .onChange(of: store.grant?.deviceID) { old, new in if replacingHost, new != nil, new != old { dismiss() } }
         }
     }
 }
@@ -128,6 +132,7 @@ struct ChatView: View {
     @State private var transcriptFrame = CGRect.zero
     @State private var headerFrame = CGRect.zero
     @State private var dockFrame = CGRect.zero
+    @State private var dockGeometry = TranscriptDockGeometry()
     private var dockHeight: CGFloat { dockFrame.isEmpty ? 80 : dockFrame.height }
     private var viewportInsets: UIEdgeInsets {
         guard !transcriptFrame.isEmpty, !headerFrame.isEmpty, !dockFrame.isEmpty else {
@@ -136,7 +141,7 @@ struct ChatView: View {
         return UIEdgeInsets(top: max(0, headerFrame.maxY - transcriptFrame.minY) + 8, left: 0,
             bottom: max(0, transcriptFrame.maxY - dockFrame.minY), right: 0)
     }
-    enum ChatSheet: String, Identifiable { case controls, activity, settings; var id: String { rawValue } }
+    enum ChatSheet: String, Identifiable { case controls, activity, settings, connect; var id: String { rawValue } }
 
     var body: some View {
         NavigationStack {
@@ -152,7 +157,7 @@ struct ChatView: View {
                         .transition(.opacity)
                     }
                     ZStack {
-                        TranscriptContainer(store: store, viewportInsets: viewportInsets)
+                        TranscriptContainer(store: store, viewportInsets: viewportInsets, dockGeometry: dockGeometry)
                             .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { transcriptFrame = $0 }
                             .ignoresSafeArea(.container)
                         VStack {
@@ -166,6 +171,7 @@ struct ChatView: View {
                                 .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { headerFrame = $0 }
                             Spacer(minLength: 0)
                             dock
+                                .background(TranscriptDockProbe(geometry: dockGeometry))
                                 .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { dockFrame = $0 }
                         }
                         if store.newActivity || store.transcript.hasNewer || store.isReadingHistory || store.isFetchingLatest {
@@ -217,6 +223,7 @@ struct ChatView: View {
                     case .controls: ControlsView(store: store)
                     case .activity: ActivityView(store: store)
                     case .settings: SettingsView(store: store)
+                    case .connect: PairingView(store: store, replacingHost: true)
                     }
                 }.modifier(AppAlerts(store: store))
             }
@@ -275,10 +282,12 @@ struct ChatView: View {
             if let connectionError = store.connectionError {
                 HStack(spacing: 8) {
                     Image(systemName: "exclamationmark.circle").foregroundStyle(.orange)
-                    Text(connectionError).font(.caption)
+                    Text(connectionError).font(.caption).accessibilityIdentifier("connectionError")
                     Spacer()
-                    Button("Reconnect") { store.connect() }.frame(minHeight: 44)
-                }.padding(.horizontal, 12).modifier(ChatGlass(cornerRadius: 16)).accessibilityIdentifier("connectionError")
+                    if store.requiresPairing {
+                        Button("Connect host") { sheet = .connect }.frame(minHeight: 44).accessibilityIdentifier("repairHostConnection")
+                    } else { Button("Reconnect") { store.reconnect() }.frame(minHeight: 44) }
+                }.padding(.horizontal, 12).modifier(ChatGlass(cornerRadius: 16))
             }
         }.padding(.horizontal, 16).padding(.top, 6).padding(.bottom, 8)
     }
@@ -313,8 +322,18 @@ struct ChatView: View {
 struct TranscriptContainer: View {
     var store: AppStore
     var viewportInsets: UIEdgeInsets = .zero
+    var dockGeometry: TranscriptDockGeometry?
     var body: some View {
         ZStack {
+            TranscriptView(messages: store.displayMessages, hasMore: store.transcript.hasMore,
+                loading: store.isLoadingHistory, latestRevision: store.latestRevision,
+                viewportInsets: viewportInsets, activity: store.transcriptActivity, sessionID: store.selectedSession?.id,
+                conversationContext: store.readerContext, sends: store.sendPresentations,
+                readerRestoration: store.readerRestoration, dockGeometry: dockGeometry,
+                onReaderPosition: { store.readerPositionChanged($0, context: $1) },
+                onSendPresentation: { store.sendPresentationFinished($0, outcome: $1) },
+                onUserScrollBegan: { store.userScrollBegan() },
+                onOlder: { Task { await store.loadOlder() } }, onReadingHistory: { store.isReadingHistory = $0 })
             if store.displayMessages.isEmpty && store.transcriptActivity == .idle && !store.transcript.hasMore {
                 GeometryReader { geometry in
                     let availableHeight = max(0, geometry.size.height - viewportInsets.top - viewportInsets.bottom)
@@ -330,12 +349,6 @@ struct TranscriptContainer: View {
                         .padding(.top, viewportInsets.top).padding(.bottom, viewportInsets.bottom)
                         .accessibilityIdentifier("emptyConversation")
                 }
-            } else {
-                TranscriptView(messages: store.displayMessages, hasMore: store.transcript.hasMore,
-                    loading: store.isLoadingHistory, latestRevision: store.latestRevision,
-                    viewportInsets: viewportInsets, activity: store.transcriptActivity, sessionID: store.selectedSession?.id,
-                    onUserScrollBegan: { store.userScrollBegan() },
-                    onOlder: { Task { await store.loadOlder() } }, onReadingHistory: { store.isReadingHistory = $0 })
             }
         }.accessibilityValue("\(store.displayMessages.count) loaded messages")
     }
@@ -344,22 +357,78 @@ struct TranscriptContainer: View {
 struct RequestTray: View {
     var store: AppStore
     @State private var selectedID: String?
+    @State private var details: HostRequestDetails?
     private var selected: AgentRequest? { store.requests.first(where: { $0.id == selectedID }) ?? store.requests.first }
     var body: some View {
-        if let request = selected {
-            VStack(spacing: 4) {
-                if store.requests.count > 1 {
-                    Menu {
-                        ForEach(store.requests) { item in Button(item.title) { selectedID = item.id } }
-                    } label: {
-                        Label("\(store.requests.count) requests · Choose a request", systemImage: "list.bullet").font(.caption).frame(minHeight: 44)
+        VStack(spacing: 0) {
+            if let request = selected {
+                VStack(spacing: 4) {
+                    if store.requests.count > 1 {
+                        Menu {
+                            ForEach(store.requests) { item in Button(item.title) { selectedID = item.id } }
+                        } label: {
+                            Label("\(store.requests.count) requests · Choose a request", systemImage: "list.bullet").font(.caption).frame(minHeight: 44)
+                        }
                     }
+                    if request.kind == "host_action" {
+                        HStack(spacing: 10) {
+                            Image(systemName: "hand.raised").foregroundStyle(.orange)
+                            Text(request.title).font(.subheadline).fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: 4)
+                            Button("Details") { details = HostRequestDetails(request: request, store: store) }
+                                .frame(minHeight: 44).accessibilityIdentifier("hostRequestDetails")
+                        }.padding(.horizontal, 14).padding(.vertical, 4)
+                            .modifier(ChatGlass(cornerRadius: 18))
+                            .overlay(RoundedRectangle(cornerRadius: 18).stroke(.orange.opacity(0.25)))
+                            .padding(.horizontal, 12).padding(.vertical, 6)
+                            .accessibilityElement(children: .contain).accessibilityIdentifier("hostRequestSummary")
+                    } else { RequestCard(store: store, request: request).id(request.id) }
                 }
-                RequestCard(store: store, request: request).id(request.id)
             }
+        }.sheet(item: $details) { details in
+            HostRequestDetailView(store: store, details: details)
         }
     }
 }
+
+private struct HostRequestDetails: Identifiable {
+    let request: AgentRequest
+    let scope: [String]
+    var id: String { request.generation + ":" + request.id }
+    @MainActor init(request: AgentRequest, store: AppStore) {
+        self.request = request
+        scope = Self.scope(store)
+    }
+    @MainActor static func scope(_ store: AppStore) -> [String] {
+        [store.grant?.baseURL ?? "", store.grant?.deviceID ?? "", store.grant?.host.profile ?? "", store.selectedSession?.id ?? ""]
+    }
+}
+
+private struct HostRequestDetailView: View {
+    var store: AppStore
+    let details: HostRequestDetails
+    @Environment(\.dismiss) private var dismiss
+    private var pending: Bool {
+        HostRequestDetails.scope(store) == details.scope && store.requests.contains {
+            $0.id == details.request.id && $0.generation == details.request.generation && $0.kind == "host_action"
+        }
+    }
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    Label(details.request.title, systemImage: "hand.raised").font(.headline)
+                    Text(pending
+                        ? "This request is not supported in Companion yet. Open Hermes on your host to continue. It remains pending until answered or canceled there."
+                        : "This request is no longer pending.")
+                        .foregroundStyle(.secondary).textSelection(.enabled)
+                }.frame(maxWidth: .infinity, alignment: .leading).padding(20)
+            }.navigationTitle("Pending request").navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+        }.presentationDetents([.medium, .large])
+    }
+}
+
 struct RequestCard: View {
     var store: AppStore
     let request: AgentRequest

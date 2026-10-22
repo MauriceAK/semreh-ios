@@ -11,6 +11,25 @@ class TranscriptProjectionTests(unittest.IsolatedAsyncioTestCase):
     asyncTearDown = test_service.HostContractTests.asyncTearDown
     request = test_service.HostContractTests.request
 
+    async def test_tool_progress_never_becomes_a_phone_notice_even_after_failure(self):
+        await self.request("GET", "/v1/sessions/long-session/snapshot")
+        ws = await self.client.ws_connect(self.server.make_url("/v1/events"), headers=self.headers)
+        await ws.receive_json()
+        try:
+            for kind in ("tool.start", "tool.complete", "status.update"):
+                self.gateway.live["long-session"].state = "failed"
+                await self.upstream.event(kind, {"name": "mcp__gbrain__entity", "text": "Private tool progress"})
+                event = await ws.receive_json(timeout=3)
+                self.assertEqual(event["type"], "connection")
+                self.assertNotIn("message", event["payload"])
+                self.assertNotIn("Private tool progress", json.dumps(event))
+                self.assertNotIn("mcp__gbrain__entity", json.dumps(event))
+            await self.upstream.event("error", {"message": "The provider could not complete the request."})
+            event = await ws.receive_json(timeout=3)
+            self.assertEqual(event["payload"], {"state": "failed", "message": "The provider could not complete the request."})
+        finally:
+            await ws.close()
+
     async def history(self, cursor=None):
         path = "/v1/sessions/long-session/history"
         return await self.request("GET", path + ("?before=" + cursor if cursor else ""))

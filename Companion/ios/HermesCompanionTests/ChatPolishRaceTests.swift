@@ -20,9 +20,8 @@ final class ChatPolishRaceTests: XCTestCase {
         store = AppStore(api: .init(baseURL: URL(string: "http://127.0.0.1/\(suite!)")!, token: nil, session: session), journal: OperationJournal(defaults: defaults), memory: ConversationMemory(hostID: suite, defaults: defaults))
         attachments = AttachmentDrafts(hostID: suite)
         store.attachmentDrafts = attachments
-        store.connection = "Connected"
         store.selectedSession = .init(id: "first", title: "First", updatedAt: "", profile: "test")
-        store.runState = .idle
+        try store.receiveFreshSnapshotForTesting()
     }
     override func tearDown() async throws {
         if let store {
@@ -217,6 +216,10 @@ final class ChatPolishRaceTests: XCTestCase {
         addTeardownBlock { send.cancel(); await send.value }
         let creation = try await request("/sessions")
         creation.respond(["id": "new-session", "title": "New", "updated_at": "", "profile": "test"])
+        var initial = snapshotBody(text: "")
+        initial["session"] = ["id": "new-session", "title": "New", "updated_at": "", "profile": "test"]
+        initial["page"] = ["messages": [], "before": NSNull(), "has_more": false]
+        try await request("/snapshot").respond(initial)
         let command = try await request("/commands")
         command.respond(["operation_id": command.json["operation_id"]!, "status": "accepted", "user_row_id": "new-user"])
         await send.value
@@ -373,6 +376,9 @@ final class ChatPolishRaceTests: XCTestCase {
         try store.receive(hostConnectionEvent(state: "synchronizing", message: "Refreshing Hermes state."))
         XCTAssertEqual(store.connectionError, "Hermes is unavailable.")
         try store.receive(hostConnectionEvent(state: "connected", message: nil))
+        XCTAssertNotNil(store.connectionError)
+        XCTAssertFalse(store.canCommand)
+        try store.receiveFreshSnapshotForTesting()
         XCTAssertNil(store.connectionError)
         XCTAssertEqual(store.connection, "Connected")
     }
@@ -566,7 +572,11 @@ final class ChatPolishRaceTests: XCTestCase {
         for _ in 0..<100 where !snapshot.wasStopped { try await Task.sleep(for: .milliseconds(10)) }
         if !snapshot.wasStopped { await logRefreshTasks("after-background", selected: snapshot) }
         XCTAssertTrue(snapshot.wasStopped)
-        XCTAssertEqual(store.connection, "Paused")
+        XCTAssertEqual(store.connection, "")
+        XCTAssertFalse(store.canCommand)
+        XCTAssertNil(store.connectionError)
+        XCTAssertNil(store.error)
+        XCTAssertEqual(store.displayMessages.map(\.text), ["Accepted message"])
         XCTAssertTrue(store.transcript.messages.isEmpty)
     }
     func testBackgroundDrainsSupersededAndCurrentRefreshesBeforeSessionInvalidation() async throws {
@@ -597,7 +607,11 @@ final class ChatPolishRaceTests: XCTestCase {
         if !current.wasStopped { await logRefreshTasks("after-drain-current", selected: current) }
         XCTAssertTrue(superseded.wasStopped)
         XCTAssertTrue(current.wasStopped)
-        XCTAssertEqual(store.connection, "Paused")
+        XCTAssertEqual(store.connection, "")
+        XCTAssertFalse(store.canCommand)
+        XCTAssertNil(store.connectionError)
+        XCTAssertNil(store.error)
+        XCTAssertEqual(store.displayMessages.map(\.text), ["Accepted message"])
         XCTAssertTrue(store.transcript.messages.isEmpty)
         session.invalidateAndCancel()
     }
@@ -632,7 +646,11 @@ final class ChatPolishRaceTests: XCTestCase {
         if !snapshot.wasStopped { await logRefreshTasks("isolated-background", selected: snapshot) }
         XCTAssertTrue(snapshot.wasStopped)
         XCTAssertFalse(previousSnapshot.wasStopped)
-        XCTAssertEqual(store.connection, "Paused")
+        XCTAssertEqual(store.connection, "")
+        XCTAssertFalse(store.canCommand)
+        XCTAssertNil(store.connectionError)
+        XCTAssertNil(store.error)
+        XCTAssertEqual(store.displayMessages.map(\.text), ["Accepted message"])
         XCTAssertTrue(store.transcript.messages.isEmpty)
         previousRead.cancel()
         _ = await previousRead.value

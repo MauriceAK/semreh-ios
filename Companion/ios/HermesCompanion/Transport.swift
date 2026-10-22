@@ -68,7 +68,7 @@ struct CompanionAPI: Sendable {
         var components = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!
         components.scheme = components.scheme == "https" ? "wss" : "ws"
         request.url = components.url
-        let task = URLSession.shared.webSocketTask(with: request)
+        let task = session.webSocketTask(with: request)
         task.maximumMessageSize = TranscriptWindow.maxBytes
         return task
     }
@@ -100,7 +100,12 @@ enum GrantVault {
     }
 }
 
-struct PendingOperation: Codable, Sendable { let operationID: String; let sessionID: String; let kind: String }
+struct PendingOperation: Codable, Sendable {
+    let operationID: String
+    let sessionID: String
+    let kind: String
+    var scope: HostScope? = nil
+}
 @MainActor
 final class OperationJournal {
     private let defaults: UserDefaults
@@ -110,8 +115,8 @@ final class OperationJournal {
         self.defaults = defaults
         pending = defaults.data(forKey: key).flatMap { try? JSONDecoder().decode([PendingOperation].self, from: $0) } ?? []
     }
-    func begin(_ command: AgentCommand, sessionID: String) {
-        pending.append(.init(operationID: command.operationId, sessionID: sessionID, kind: command.kind))
+    func begin(_ command: AgentCommand, sessionID: String, scope: HostScope? = nil) {
+        pending.append(.init(operationID: command.operationId, sessionID: sessionID, kind: command.kind, scope: scope))
         persist()
     }
     func resolve(_ operationID: String) {

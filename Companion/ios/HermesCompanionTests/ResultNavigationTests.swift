@@ -120,7 +120,6 @@ private final class NavigationFixture {
         NavigationProtocol.register(exchange, for: baseURL)
         NavigationProtocol.register(exchange, for: otherURL)
         store = AppStore(api: .init(baseURL: baseURL, token: nil, session: session), journal: OperationJournal(defaults: defaults), memory: memory)
-        store.connection = "Connected"
     }
 
     func selectCurrent() async {

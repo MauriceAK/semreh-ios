@@ -54,6 +54,7 @@ struct ChatMessage: Codable, Identifiable, Equatable, Sendable {
     var attachments: [AttachmentTicket]? = nil
     var operationId: String? = nil
     var delivery: OutgoingDelivery? = nil
+    var displayAttachments: [DisplayAttachment]? = nil
     var renderID: String { operationId.map { "outbound:" + $0.lowercased() } ?? id }
     var deliveryLabel: String? {
         switch delivery {
@@ -64,7 +65,8 @@ struct ChatMessage: Codable, Identifiable, Equatable, Sendable {
         }
     }
     var displayText: String {
-        let files = (attachments ?? []).map { "📎 " + $0.name }.joined(separator: "\n")
+        let names = attachments?.map(\.name) ?? displayAttachments?.map(\.name) ?? []
+        let files = names.map { "📎 " + $0 }.joined(separator: "\n")
         return files.isEmpty ? text : text.isEmpty ? files : text + "\n\n" + files
     }
     var byteCount: Int { id.utf8.count + role.utf8.count + displayText.utf8.count + 128 }
@@ -106,12 +108,28 @@ struct AgentControls: Codable, Equatable, Sendable {
     let models: [ModelOption]
     let commands: [SlashCommand]
 }
+struct StreamPosition: Codable, Equatable, Sendable {
+    let epoch: String
+    let sequence: Int
+    enum CodingKeys: String, CodingKey { case epoch, sequence }
+    init(epoch: String, sequence: Int) {
+        self.epoch = epoch
+        self.sequence = sequence
+    }
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        epoch = try container.decode(String.self, forKey: .epoch)
+        sequence = try container.decode(Int.self, forKey: .sequence)
+        guard !epoch.isEmpty, epoch.utf8.count <= 256, sequence >= 0 else { throw ClientError.invalidResponse }
+    }
+}
 struct SessionSnapshot: Codable, Sendable {
     let session: ChatSession
     let page: HistoryPage
     let state: RunState
     let requests: [AgentRequest]
     let controls: AgentControls
+    var streamPosition: StreamPosition? = nil
 }
 struct AgentCommand: Codable, Sendable {
     var operationId = UUID().uuidString.lowercased()
@@ -178,6 +196,7 @@ struct HostStatus: Decodable, Sendable {
     struct Capabilities: Decodable, Sendable { let notifications: Bool? }
     let version: Int
     let capabilities: Capabilities
+    var profile: String? = nil
 }
 struct SessionList: Decodable, Sendable { let sessions: [ChatSession] }
 struct JobList: Decodable, Sendable { let jobs: [FollowUpJob] }
@@ -193,11 +212,13 @@ struct WireEvent: Decodable, Sendable {
         case receipt(CommandReceipt), update(AgentUpdate), connection(ConnectionPayload), ignored
     }
     let sessionId: String?
+    let streamPosition: StreamPosition?
     let payload: Payload
-    enum CodingKeys: String, CodingKey { case type, sessionId, payload }
+    enum CodingKeys: String, CodingKey { case type, sessionId, streamPosition, payload }
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         sessionId = try container.decodeIfPresent(String.self, forKey: .sessionId)
+        streamPosition = try container.decodeIfPresent(StreamPosition.self, forKey: .streamPosition)
         switch try container.decode(String.self, forKey: .type) {
         case "snapshot": payload = .snapshot(try container.decode(SessionSnapshot.self, forKey: .payload))
         case "delta": payload = .delta(try container.decode(Delta.self, forKey: .payload))
@@ -239,6 +260,13 @@ struct TranscriptWindow: Sendable {
     private(set) var hasNewer = false
     var byteCount: Int { messages.reduce(0) { $0 + $1.byteCount } }
 
+    mutating func restore(_ window: DisplayWindow) throws {
+        try window.validate()
+        messages = window.rows.map(\.message)
+        before = window.before
+        hasMore = window.hasMore
+        hasNewer = window.hasNewer
+    }
     mutating func replace(_ page: HistoryPage) throws {
         try validate(page.messages)
         messages = deduplicated(page.messages)
@@ -260,6 +288,7 @@ struct TranscriptWindow: Sendable {
             let text = delta.replace ? delta.text : messages[index].text + delta.text
             guard text.utf8.count < Self.maxBytes else { throw ClientError.payloadTooLarge }
             messages[index].text = text
+            messages[index].provisional = true
         } else {
             guard delta.text.utf8.count < Self.maxBytes else { throw ClientError.payloadTooLarge }
             messages.append(.init(id: delta.id, role: "assistant", text: delta.text, provisional: true))

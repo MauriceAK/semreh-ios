@@ -225,6 +225,12 @@ struct SettingsView: View {
                     LabeledContent("Profile", value: store.grant?.host.profile ?? "")
                     Text("Your conversations, models, tools, and routines stay with Hermes. Your host must be online to work.").font(.footnote).foregroundStyle(.secondary)
                 }
+                if !store.unassignedUncertain.isEmpty {
+                    Section("Earlier actions") {
+                        Text("\(store.unassignedUncertain.count) actions have an unconfirmed outcome from an earlier app version.")
+                        Text("Their host was not recorded. Check your Hermes conversations before repeating them. They have not been retried.").font(.footnote).foregroundStyle(.secondary)
+                    }.accessibilityIdentifier("unassignedUncertainActions")
+                }
                 Section("Notifications") {
                     Toggle("Notify me about updates", isOn: $notifications).accessibilityIdentifier("notificationToggle")
                     Text(store.notificationStatus).font(.caption).foregroundStyle(.secondary)

@@ -30,15 +30,16 @@ final class DraftRaceTests: XCTestCase {
             DraftHeldProtocol.held = nil
             defaults.removePersistentDomain(forName: suite)
         }
-        store.connection = "Connected"
         let first = ChatSession(id: "first", title: "First", updatedAt: "", profile: "test")
         let second = ChatSession(id: "second", title: "Second", updatedAt: "", profile: "test")
         await store.select(first)
+        try store.receiveFreshSnapshotForTesting()
         DraftHeldProtocol.held = nil
         let late = Task { await store.execute(.init(kind: "model", value: "expensive")) }
         addTeardownBlock { late.cancel(); _ = await late.value }
         let lateRequest = try await heldRequest()
         await store.select(second)
+        try store.receiveFreshSnapshotForTesting()
         lateRequest.completeConfirmation()
         let lateAccepted = await late.value
         XCTAssertFalse(lateAccepted)
@@ -49,6 +50,7 @@ final class DraftRaceTests: XCTestCase {
         _ = await selected.value
         let stale = try XCTUnwrap(store.confirmation)
         await store.select(first)
+        try store.receiveFreshSnapshotForTesting()
         XCTAssertNil(store.confirmation)
         let staleAccepted = await store.confirmModelChange(stale)
         XCTAssertFalse(staleAccepted)
@@ -88,12 +90,13 @@ final class DraftRaceTests: XCTestCase {
             DraftHeldProtocol.held = nil
             defaults.removePersistentDomain(forName: suite)
         }
-        store.connection = "Connected"
         let first = ChatSession(id: "first", title: "First", updatedAt: "", profile: "test")
         let second = ChatSession(id: "second", title: "Second", updatedAt: "", profile: "test")
         await store.select(second)
+        try store.receiveFreshSnapshotForTesting()
         store.draft = "Unsent second conversation draft"
         await store.select(first)
+        try store.receiveFreshSnapshotForTesting()
         store.draft = "The submitted first conversation draft"
         DraftHeldProtocol.held = nil
         let send = Task { await store.send() }
@@ -106,6 +109,7 @@ final class DraftRaceTests: XCTestCase {
             let grant = DeviceGrant(baseURL: "http://127.0.0.1:19298", deviceID: "controlled-other", token: "not-a-credential", host: .init(name: "Other", profile: "test"))
             store.usePairedHost(grant, api: .init(baseURL: URL(string: "http://127.0.0.1:19298")!, token: nil, session: session), memory: other)
             await store.select(first)
+            try store.receiveFreshSnapshotForTesting()
             store.draft = "The submitted first conversation draft"
         } else if switchConversation { await store.select(second) }
         else { store.draft = "New text typed while waiting" }
