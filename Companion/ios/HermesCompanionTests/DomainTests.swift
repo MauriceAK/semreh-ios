@@ -93,7 +93,7 @@ final class DomainTests: XCTestCase {
     @MainActor func testSessionStatusDoesNotDisconnectOrDisableControls() throws {
         let store = AppStore(api: CompanionAPI(baseURL: URL(string: "http://127.0.0.1")!, token: nil))
         store.selectedSession = AppStore.fixtureSession
-        store.connection = "Connected"
+        try store.receiveFreshSnapshotForTesting()
         func event(_ session: String?, _ state: String) throws -> WireEvent {
             var object: [String: Any] = ["type": "connection", "payload": ["state": state]]
             if let session { object["session_id"] = session }
@@ -101,7 +101,7 @@ final class DomainTests: XCTestCase {
         }
         try store.receive(event("another-session", "working"))
         XCTAssertTrue(store.canCommand)
-        XCTAssertEqual(store.runState, .synchronizing)
+        XCTAssertEqual(store.runState, .idle)
         try store.receive(event(AppStore.fixtureSession.id, "working"))
         XCTAssertEqual(store.runState, .working)
         XCTAssertTrue(store.canCommand)
@@ -134,8 +134,8 @@ final class DomainTests: XCTestCase {
             session.invalidateAndCancel()
             defaults.removePersistentDomain(forName: suite)
         }
-        store.connection = "Connected"
         store.selectedSession = AppStore.fixtureSession
+        try store.receiveFreshSnapshotForTesting()
         CommandResponseProtocol.posts = 0
         CommandResponseProtocol.decodedCommands = 0
         CommandResponseProtocol.status = 409

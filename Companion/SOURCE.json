@@ -1,5 +1,5 @@
 {
-  "source_revision": "646da9a9debddea281248b76a9421682c89997cb",
+  "source_revision": "e5e760bda47d1c0074e6d7c6e2ee10434e7d7a45",
   "files": [
     {
       "path": "ci/CompanionInternalExport.plist",
@@ -19,7 +19,7 @@
     },
     {
       "path": "ci/test_native.sh",
-      "sha256": "a0ecf46d9dfb3eec96034895cb2d33afc5cfad70148df48413834e3990a05a4e"
+      "sha256": "b88b9e92c775fc5a7525eb772d8a90ccee7c0bd8bc7de47c9cf13743920eddcb"
     },
     {
       "path": "ci/test_testflight_contract.rb",
@@ -59,7 +59,7 @@
     },
     {
       "path": "host/companion/gateway.py",
-      "sha256": "de8ff6b227d76de4a50f8f948661a35086af26af58dcbc70413138f7dfe4a8cf"
+      "sha256": "52623bad7f38f653c2c4d7e3f8c5b2dab37d87b2a79a49e352e223743d505378"
     },
     {
       "path": "host/companion/service.py",
@@ -87,7 +87,7 @@
     },
     {
       "path": "host/tests/test_projection.py",
-      "sha256": "4f8f7307d7cc10a44dbcbbcd9909cd8fbca55a1434ae9cbc4152de66ad5cc64c"
+      "sha256": "3ce6f29e462ab540b18f9a26cc4ee8204b5061b6e5f8bee6acb16d59d56c1fa6"
     },
     {
       "path": "host/tests/test_service.py",
@@ -98,12 +98,16 @@
       "sha256": "c683780e069c192cfc409ea2e95e09bcd00c53330fd460765053d8367fe15d51"
     },
     {
+      "path": "host/tests/test_stream_position.py",
+      "sha256": "fee4cc925cfa8ba4fa4bf45821361a4dba2c653f46d7c1094d8f1eeb75ff3c45"
+    },
+    {
       "path": "host/tests/upstream_fixture.py",
       "sha256": "0b2af08aba552d2a0cd1dc8d71e8ca75e2a2c87eda8417d6bed80465412dfcd1"
     },
     {
       "path": "ios/HermesCompanion.xcodeproj/project.pbxproj",
-      "sha256": "a4f9ceca6ba3fbcca5be11419241e24982f7e5c3877054c232b3b1cea5d10c99"
+      "sha256": "d412c6d4edb4a3affa6fb6b8f5e817b787ed34bab1cc5337b93a5365347b8d24"
     },
     {
       "path": "ios/HermesCompanion.xcodeproj/xcshareddata/xcschemes/HermesCompanion.xcscheme",
@@ -115,7 +119,7 @@
     },
     {
       "path": "ios/HermesCompanion/AppStore.swift",
-      "sha256": "47aeefb542c3bddd702fda260cee0a4fc87fda593d993fe96c69790a5537e6af"
+      "sha256": "20a2f8a3ae560291b038175a72d29240ec5b82b127ac09aba0ea3c0ad8e72f57"
     },
     {
       "path": "ios/HermesCompanion/AppleVoiceEngine.swift",
@@ -139,11 +143,15 @@
     },
     {
       "path": "ios/HermesCompanion/ChatPerformance.swift",
-      "sha256": "2aa45e129a51d02106765de73e1e146986f9d9ce8f1d4c405ed7bf4913d999ef"
+      "sha256": "81bfcdbf364fcf50c5e8391f180136e03eed27a9b48fd528a518a52e86e4e81e"
     },
     {
       "path": "ios/HermesCompanion/ComposerView.swift",
       "sha256": "8e622ca63dcd9e7eea30b6a7b910b44ae4748838e5e2fa7192972a82fd48aa26"
+    },
+    {
+      "path": "ios/HermesCompanion/ConversationDisplayCache.swift",
+      "sha256": "9f230b5d67270a7175fd06951b433fc32b7746628375df9783e663c72a053e31"
     },
     {
       "path": "ios/HermesCompanion/ConversationDrawer.swift",
@@ -155,15 +163,15 @@
     },
     {
       "path": "ios/HermesCompanion/DetailViews.swift",
-      "sha256": "590e726f6216c3d305eef0f530ae2fa88f93756150f96d3be4e468b97e373e63"
+      "sha256": "4bc248cd5f32ac2e003c820944d8d4a4c49cf748b6ea1143fdaff1bfebc71157"
     },
     {
       "path": "ios/HermesCompanion/Domain.swift",
-      "sha256": "3742a2e387f4e301b3893c1ba3c435273f32449fb8462105abec21ff71cf4043"
+      "sha256": "b55d167b7d13cf9605192c056518b627611a18166d4c3946a77adaca728d6e31"
     },
     {
       "path": "ios/HermesCompanion/FixtureControl.swift",
-      "sha256": "0892515275886ec794ec8d24ed8c187413d9ef6a1f347efcff7a0bc0da52167c"
+      "sha256": "1c3ea14cb49872973a3a23469708f679d60d7a9441befb13189f06c4d664707b"
     },
     {
       "path": "ios/HermesCompanion/HermesCompanion.entitlements",
@@ -171,7 +179,7 @@
     },
     {
       "path": "ios/HermesCompanion/HermesCompanionApp.swift",
-      "sha256": "145c2deff87a649c1c0405281d8c026203af6eabab42a5000f364fbaf36e2c24"
+      "sha256": "ba5d1e9b77d6d4c5540b8ce4771ddf705734dd8a959bab76013116b77b95bffd"
     },
     {
       "path": "ios/HermesCompanion/Info.plist",
@@ -183,11 +191,11 @@
     },
     {
       "path": "ios/HermesCompanion/TranscriptView.swift",
-      "sha256": "e7b8e9f1141063d249b94b5c6da1f8a7dd2f16b78c65d895db2fdd6f0919b6a3"
+      "sha256": "0db709e9d3432f1058a77b29234a6f3b2066bb0b64d290fe93cacaa39f3ce273"
     },
     {
       "path": "ios/HermesCompanion/Transport.swift",
-      "sha256": "51e42491b7ec9c430ea97b135a3b9d253c51d07795f1c9584cdbe0316c41fc16"
+      "sha256": "47e371ea271effab0a9445c78852210c0121bca7d1258f0cb62a067def92d9ae"
     },
     {
       "path": "ios/HermesCompanion/VoiceControls.swift",
@@ -206,20 +214,48 @@
       "sha256": "f7c4398353942a3343d4e4c012fc004378a366363c035f472efaba3e7ce4ad92"
     },
     {
+      "path": "ios/HermesCompanionTests/CacheLifecycleTests.swift",
+      "sha256": "041ec0f90d1863e20672ad04c40dddae0c7614cbcab375a196b437ece9ff223b"
+    },
+    {
       "path": "ios/HermesCompanionTests/ChatPolishRaceTests.swift",
-      "sha256": "38a71ff6b0bc34c090b9abc87ddbed072deebf092f3797564c1d125965f1b995"
+      "sha256": "6998ee545628cf8ee9424251f7ad2b30ea3395da7470077913941c7707ffed68"
+    },
+    {
+      "path": "ios/HermesCompanionTests/ConversationDisplayCacheTests.swift",
+      "sha256": "3dea9d76dc3be8989fe7fba77c565ef3f4c70ce00fb33990c450a974844d8fd0"
+    },
+    {
+      "path": "ios/HermesCompanionTests/DeliveryCaptionTests.swift",
+      "sha256": "74e2c7a6aa4945e5d1f8d6653e189fd595c9a9b544db1e25f8047205a4360114"
     },
     {
       "path": "ios/HermesCompanionTests/DomainTests.swift",
-      "sha256": "86133e2b45caf1e78c36ae3827988078a73e1ff83096db9af22ec64e8f16dde8"
+      "sha256": "24e65e058fd22fa94807f40d399a528cf19e5e0bf9087189585ad54bbc5fe581"
     },
     {
       "path": "ios/HermesCompanionTests/DraftRaceTests.swift",
-      "sha256": "fd91deeab169ccd396e483c072268ca71e1f20206cbe2b5490ef4f0729d2f6ed"
+      "sha256": "3b54b14eceac03fcd9fb7343a2263fad3e9741a1d97a61acf5add5f8513c0cdc"
+    },
+    {
+      "path": "ios/HermesCompanionTests/FreshSnapshotFixture.swift",
+      "sha256": "92c6184b6e7f52d8ec6a15bad9d27a53ee0f6d7a8f1d8450d2cecdea3e95690f"
+    },
+    {
+      "path": "ios/HermesCompanionTests/HostOperationIsolationTests.swift",
+      "sha256": "a32364ea5cfd0c2ca94deda518ae546cd8fb7884cf1c485c9eb2ef1247864a0c"
     },
     {
       "path": "ios/HermesCompanionTests/ResultNavigationTests.swift",
-      "sha256": "c0a5f11e7a84984b50a0c62c113f4edbc3639c434bf8be680906d8dc92693494"
+      "sha256": "046261a329f5041b8049e658e94181a27e144ad7e05f149f2e1492db67b24eb5"
+    },
+    {
+      "path": "ios/HermesCompanionTests/SendBarrierTests.swift",
+      "sha256": "d37dbaf50205abe7315fc681b131ddadb34dc076dd66f2cfb6065838a94a38df"
+    },
+    {
+      "path": "ios/HermesCompanionTests/SendPresentationTests.swift",
+      "sha256": "3b01e9f0aeef1ec29f79be07ba827aff1b45e8439179166d331f97b6a1dde893"
     },
     {
       "path": "ios/HermesCompanionTests/TranscriptAnchorTests.swift",
@@ -227,7 +263,7 @@
     },
     {
       "path": "ios/HermesCompanionTests/TranscriptStreamingTests.swift",
-      "sha256": "e8490ef99e0d48dd9cebec22d8d3f31f207f7a64b96bdefc306cd563b741ea6f"
+      "sha256": "649017aa5d82620c4191a15dd44b930069c296713ea63f4e1b3c353da031f6db"
     },
     {
       "path": "ios/HermesCompanionTests/VoiceDictationTests.swift",
@@ -246,6 +282,10 @@
       "sha256": "c14d557dfe4a7e00a0a6b45e119201c83e7f70e658d9045eae7b877433ab1455"
     },
     {
+      "path": "ios/HermesCompanionUITests/HostRequestUITests.swift",
+      "sha256": "cb774255fadc552c025e32c5ce8127d156040b45fe1de89587780d1479e908aa"
+    },
+    {
       "path": "ios/HermesCompanionUITests/LiveFlowUITests.swift",
       "sha256": "881a83360ef13c94bb84607b4ceb9464a097968ba0feff86bc94fa0b578d7d20"
     },
@@ -256,6 +296,10 @@
     {
       "path": "ios/HermesCompanionUITests/PublicProgressFlowUITests.swift",
       "sha256": "7ebeabdb11be2302eea80ec452ef38810c5b1f1761a5db1a9085b8741860428b"
+    },
+    {
+      "path": "ios/HermesCompanionUITests/ResponsivenessFlowUITests.swift",
+      "sha256": "46facbe340b52b2dc61875b6ef67c8124b30b076fee7c7685d769d5b38ca4929"
     },
     {
       "path": "ios/HermesCompanionUITests/VoiceDictationUITests.swift",
